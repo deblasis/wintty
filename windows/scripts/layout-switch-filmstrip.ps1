@@ -10,15 +10,22 @@ were HOLDING mid-flight. That is the `layout-frame` seam op: both hosts'
 rendered inventories, with each row's effective alpha and its rect in the
 window's coordinates.
 
-So this harness films twice over, on two clocks. The PICTURE filmstrip is
-a desktop blit and owes the app nothing, so it keeps sampling at full
-speed through the very stalls that make the motion worth looking at. The
-STATE filmstrip is a seam round trip and therefore waits on the app's UI
-thread -- the same thread the switch blocks -- so it is thinned to every
-$StateEvery-th pass and is the oracle rather than the picture. Sampling
-both on the seam's cadence yielded three frames for an entire flight, the
-first a third of a second in, which is a filmstrip that cannot see the
-motion it exists to judge.
+So this harness films twice over, on two clocks that do not share a
+thread.
+
+The PICTURE track is lib/window-capture.ps1: a separate process taking
+frames from the compositor. It owes the app nothing and keeps running at
+the window's full present rate straight through the stalls that make the
+motion worth looking at. It replaced a Graphics.CopyFromScreen loop that
+cost ~175ms per grab whatever the region size, and which got three
+pictures out of an entire flight, the first a third of a second in -- a
+filmstrip that could not see the motion it exists to judge.
+
+The STATE track is a seam round trip and therefore does wait on the app's
+UI thread. That is fine, because it is the oracle rather than the picture:
+it reports what each host is RENDERING, which no pixel comparison can
+tell you, and a few dozen reads per flight is plenty for the sequence
+properties asserted below.
 
 There is also one pixel cross-check per settled frame: that the selected
 row's chrome is really on screen where the seam says it is. The seam is a
@@ -54,22 +61,9 @@ param(
     # because its cause sits under this layer.
     [int]$BudgetMs = 900,
 
-    # Passes per state read. Pictures are taken every pass; this thins
-    # only the seam round trips, which are the ones that have to wait for
-    # the app's UI thread. Raising it buys a denser picture filmstrip at
-    # the cost of a coarser oracle.
-    [int]$StateEvery = 2,
-
-    # Drop the pictures and sample state as fast as the pipe answers.
-    #
-    # A screen grab costs about 175ms on this machine whatever its size --
-    # a fixed cost of reading a composited desktop through GDI, measured
-    # identically at 1280x820 and 400x400 and unchanged by CAPTUREBLT --
-    # so a picture-bearing run gets three to five state reads out of a
-    # whole flight. That is enough to judge the shape of the motion and
-    # thin for an oracle. This mode trades every picture for roughly an
-    # order of magnitude more state reads, and is how the assertions are
-    # meant to be run in anger.
+    # Skip the camera. The state track is the oracle and does not need
+    # pictures; a run that only has to answer "did it regress" is faster
+    # without them.
     [switch]$NoPictures,
 
     [int]$WinW = 1280,
@@ -81,6 +75,7 @@ $lib = Join-Path $PSScriptRoot 'lib'
 . (Join-Path $lib 'wintty-process.ps1')
 . (Join-Path $lib 'seam-client.ps1')
 . (Join-Path $lib 'contrast.ps1')
+. (Join-Path $lib 'window-capture.ps1')
 Add-Type -AssemblyName System.Drawing
 
 if (-not (Test-Path $ExePath)) {
@@ -104,46 +99,28 @@ $PinIndex = 0
 
 # ---- capture ----------------------------------------------------------
 
-# One grab, into a buffer that is allocated once and blitted into on every
-# pass. Allocating a fresh 1280x820 bitmap and its Graphics per frame cost
-# about 150ms a pass -- four pictures for a whole flight, which is not a
-# filmstrip. Reusing the surface leaves only the blit, and the frames are
-# copied out for keeping after the flight rather than during it.
-$script:ShotBuffer = $null
-$script:ShotGraphics = $null
-
-function Get-WindowShot([int64]$Hwnd) {
-    $r = [SeamWin]::RectOf($Hwnd)
-    if ($null -eq $r) { throw 'HARNESS: the window rect went unreadable mid-run' }
-    if ($null -eq $script:ShotBuffer -or
-        $script:ShotBuffer.Width -ne $r.W -or $script:ShotBuffer.Height -ne $r.Hh) {
-        if ($script:ShotGraphics) { $script:ShotGraphics.Dispose() }
-        if ($script:ShotBuffer) { $script:ShotBuffer.Dispose() }
-        $script:ShotBuffer = New-Object System.Drawing.Bitmap $r.W, $r.Hh
-        $script:ShotGraphics = [System.Drawing.Graphics]::FromImage($script:ShotBuffer)
+# The pixel cross-check, run once per leg against a settled frame the
+# camera caught. The seam says where the active row is, in window
+# coordinates; this asks the picture whether anything is actually painted
+# there. A model that agrees with itself while the compositor draws
+# something else is the one failure a model-only oracle cannot see.
+function Get-RowInk([string]$PngPath, $Row) {
+    if (-not (Test-Path $PngPath)) { return $null }
+    $bmp = [System.Drawing.Image]::FromFile($PngPath)
+    try {
+        $x = [int][Math]::Round($Row.x); $y = [int][Math]::Round($Row.y)
+        $w = [int][Math]::Round($Row.w); $h = [int][Math]::Round($Row.h)
+        # Bite the middle of the row: the edges carry rounding, the seam
+        # cover and the neighbour's border, and none of those are the fill.
+        $x += [int]($w * 0.25); $w = [Math]::Max(2, [int]($w * 0.5))
+        $y += [int]($h * 0.25); $h = [Math]::Max(2, [int]($h * 0.5))
+        if ($x -lt 0 -or $y -lt 0 -or ($x + $w) -gt $bmp.Width -or ($y + $h) -gt $bmp.Height) {
+            return $null
+        }
+        return [ContrastSampler]::Flat($bmp, $x, $y, $w, $h)
     }
-    $script:ShotGraphics.CopyFromScreen($r.L, $r.T, 0, 0, $script:ShotBuffer.Size)
-    # Cloned because the buffer is about to be overwritten by the next
-    # pass. A clone is a memory copy; the blit above is the expensive half
-    # and it is not repeated.
-    return @{ Bmp = $script:ShotBuffer.Clone(); L = $r.L; T = $r.T }
-}
-
-# The pixel cross-check. The seam says where the active row is, in window
-# coordinates; this asks the screen whether anything is actually painted
-# there. A flat region matching the terminal ground means the seam is
-# describing a row the compositor is not drawing.
-function Get-RowInk($Shot, $Row) {
-    $x = [int][Math]::Round($Row.x); $y = [int][Math]::Round($Row.y)
-    $w = [int][Math]::Round($Row.w); $h = [int][Math]::Round($Row.h)
-    # Bite the middle of the row: the edges carry rounding, the seam cover
-    # and the neighbour's border, and none of those are the fill.
-    $x += [int]($w * 0.25); $w = [Math]::Max(2, [int]($w * 0.5))
-    $y += [int]($h * 0.25); $h = [Math]::Max(2, [int]($h * 0.5))
-    if ($x -lt 0 -or $y -lt 0 -or ($x + $w) -gt $Shot.Bmp.Width -or ($y + $h) -gt $Shot.Bmp.Height) {
-        return $null
-    }
-    try { return [ContrastSampler]::Flat($Shot.Bmp, $x, $y, $w, $h) } catch { return $null }
+    catch { return $null }
+    finally { $bmp.Dispose() }
 }
 
 # ---- one filmed switch ------------------------------------------------
@@ -171,57 +148,45 @@ function Invoke-FilmedSwitch($Session, [int64]$Hwnd, [int]$Ordinal) {
     $Tag = if ($before.state.vertical) { "{0:d2}-vertical-to-horizontal" -f $Ordinal }
            else { "{0:d2}-horizontal-to-vertical" -f $Ordinal }
 
+    # Roll the camera BEFORE firing the toggle. Start-WindowCapture returns
+    # only once the capture session has actually started, so the opening
+    # frames -- the ones a switch is judged on -- are in the film rather
+    # than missed while the tool warms up.
+    $capture = $null
+    if (-not $NoPictures) {
+        $capture = Start-WindowCapture -Hwnd $Hwnd -OutDir $OutDir -Tag $Tag `
+            -DurationMs $BudgetMs -MaxFrames 200
+    }
+
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     # Fire and return: a blocking toggle would hold the only channel a
     # sampler could use for the whole flight.
     Send-SeamCommand $Session @{ op = 'toggle-layout'; await = $false }
     $null = Receive-SeamResponse $Session 'toggle-layout'
 
-    # The two oracles run on different clocks ON PURPOSE.
+    # State only. The camera is already rolling in its own process on its
+    # own clock, so this loop no longer has to interleave pictures with
+    # seam round trips -- which is what used to make both tracks as slow
+    # as the slower one.
     #
-    # A state read is a seam round trip, so it needs the app's UI thread --
-    # the same thread the switch's own work blocks for a few hundred
-    # milliseconds at a time. Sampling pictures on that cadence produced
-    # three frames for a whole flight, the first of them a third of a
-    # second in: a filmstrip that cannot see the motion it exists to
-    # judge, which is the failure a filmstrip is supposed to fix.
-    #
-    # A screen grab needs nothing from the app. It is a desktop blit, and
-    # it keeps running at full speed exactly while the UI thread is
-    # wedged -- which is the interesting part. So pictures are taken every
-    # pass and state every $StateEvery-th, and each sample records which
-    # of the two it actually carries.
+    # It still stalls, and the stalls are the app's: a layout-frame round
+    # trip costs about 4ms at rest and a few hundred mid-switch, because
+    # the terminal's own resize owns the UI thread this has to marshal on.
+    # Those gaps are reported as a metric below rather than smoothed over.
     $samples = [System.Collections.Generic.List[object]]::new()
     $settledSeen = 0
     $i = 0
     while ($clock.ElapsedMilliseconds -lt $BudgetMs) {
-        $shotMs = $clock.ElapsedMilliseconds
-        $shot = if ($NoPictures) { $null } else { Get-WindowShot $Hwnd }
-        if ($null -eq $shot) { $shotMs = -1 }
-
-        # The last stretch of the budget always reads state, whatever
-        # $StateEvery says. Without this a thinned state track simply ran
-        # out of reads before the switch landed and reported "never
-        # settled" against a switch that had -- a harness saying the
-        # product is broken because the harness stopped looking.
-        $endgame = $clock.ElapsedMilliseconds -gt ($BudgetMs - 250)
-        $before = -1; $after = -1; $fresh = $null
-        if ($NoPictures -or $endgame -or ($i % $StateEvery) -eq 0) {
-            $before = $clock.ElapsedMilliseconds
-            Send-SeamCommand $Session @{ op = 'layout-frame' }
-            $fresh = Receive-SeamResponse $Session 'layout-frame'
-            $after = $clock.ElapsedMilliseconds
-        }
+        $before = $clock.ElapsedMilliseconds
+        Send-SeamCommand $Session @{ op = 'layout-frame' }
+        $fresh = Receive-SeamResponse $Session 'layout-frame'
+        $after = $clock.ElapsedMilliseconds
 
         $samples.Add([pscustomobject]@{
             I        = $i
-            ShotMs   = $shotMs
-            # -1 on a picture-only pass. Downstream must never read a
-            # carried-over frame as though it were sampled here.
             StateMs  = $before
             StateEnd = $after
             Frame    = $fresh
-            Shot     = $shot
         })
         $i++
 
@@ -241,19 +206,15 @@ function Invoke-FilmedSwitch($Session, [int64]$Hwnd, [int]$Ordinal) {
     }
     $clock.Stop()
 
+    # The camera runs its own clock and stops on its own. Collected after
+    # the state loop so the film covers the landing too, not just the part
+    # the oracle stayed awake for.
+    $film = if ($capture) { Stop-WindowCapture $capture } else { $null }
+
     $settleMs = -1
     foreach ($s in $samples) {
         if ($null -eq $s.Frame) { continue }
         if (-not $s.Frame.state.switching) { $settleMs = $s.StateEnd; break }
-    }
-
-    # PNG encoding is deferred out of the loop on purpose: it costs more
-    # than the sampling interval and would smear the timeline it is meant
-    # to record.
-    foreach ($s in $samples) {
-        if ($null -eq $s.Shot) { continue }
-        $name = '{0}-{1:d3}-t{2:d4}ms.png' -f $Tag, $s.I, $s.ShotMs
-        $s.Shot.Bmp.Save((Join-Path $OutDir $name))
     }
 
     return [pscustomobject]@{
@@ -261,19 +222,39 @@ function Invoke-FilmedSwitch($Session, [int64]$Hwnd, [int]$Ordinal) {
         Samples  = $samples
         SettleMs = $settleMs
         TotalMs  = $clock.ElapsedMilliseconds
+        Film     = $film
     }
 }
 
-function Write-ContactSheet($Leg) {
-    $shots = @($Leg.Samples | Where-Object { $null -ne $_.Shot })
-    if ($shots.Count -eq 0) { return }
-    $w = $shots[0].Shot.Bmp.Width; $h = $shots[0].Shot.Bmp.Height
-    $cols = 3
-    $rows = [Math]::Ceiling($shots.Count / $cols)
+# A strip of the frames that actually cover the motion, side by side and
+# scaled down, so one look answers "what shape is this". Deliberately only
+# the flight: the settled tail is a dozen identical pictures and it is the
+# middle that is ever in question.
+function Write-ContactSheet($Leg, [int]$UntilMs) {
+    if ($null -eq $Leg.Film) { return }
+    # sinceStartMs, not atMs: the camera's clock starts before the toggle
+    # is fired and the offset is around a hundred milliseconds, which on a
+    # 340ms animation picks the wrong frames while still looking plausible.
+    $frames = @($Leg.Film.Frames |
+        Where-Object { $_.sinceStartMs -ge 0 -and $_.sinceStartMs -le $UntilMs })
+    if ($frames.Count -eq 0) { return }
+    # At most twelve, evenly spaced: a sheet wider than that stops being
+    # readable at the size anyone will look at it.
+    if ($frames.Count -gt 12) {
+        $step = $frames.Count / 12.0
+        $frames = @(0..11 | ForEach-Object { $frames[[int]($_ * $step)] })
+    }
+    $scale = 0.5
+    $w = [int]($frames[0].w * $scale); $h = [int]($frames[0].h * $scale)
+    $cols = 4
+    $rows = [Math]::Ceiling($frames.Count / $cols)
     $sheet = New-Object System.Drawing.Bitmap ($w * $cols), ($h * $rows)
     $g = [System.Drawing.Graphics]::FromImage($sheet)
-    for ($k = 0; $k -lt $shots.Count; $k++) {
-        $g.DrawImage($shots[$k].Shot.Bmp, ($k % $cols) * $w, [int]($k / $cols) * $h, $w, $h)
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    for ($k = 0; $k -lt $frames.Count; $k++) {
+        $img = [System.Drawing.Image]::FromFile((Join-Path $Leg.Film.OutDir $frames[$k].file))
+        $g.DrawImage($img, ($k % $cols) * $w, [int]($k / $cols) * $h, $w, $h)
+        $img.Dispose()
     }
     $g.Dispose()
     $sheet.Save((Join-Path $OutDir ("{0}-sheet.png" -f $Leg.Tag)))
@@ -389,6 +370,28 @@ function Test-Leg($Leg, [string[]]$CollapsedGroups) {
         }
     }
 
+    # There is no caption-seam assertion here, and that is deliberate
+    # rather than an omission (#892).
+    #
+    # The defect was real and was caught: a geometric check comparing the
+    # seam cover against the caption fill it continued reported 136
+    # findings across four legs -- up to 10 DIP out of position, opacity
+    # 1.0 over a row at 0.74, and absent for entire flights. The fix was to
+    # DELETE the cover, after measuring that it masks nothing (identical to
+    # the pixel with and without it, on two window themes), so that check
+    # now has nothing to compare and would pass by vacuity.
+    #
+    # A pixel replacement was attempted and abandoned rather than shipped.
+    # On the default dark palette the largest step across the band in any
+    # frame of a switch was 2.7 of 255 -- the misplacement was real and
+    # invisible -- so the check passed against the pre-fix build, which is
+    # the definition of a test that does not work. On a light palette the
+    # stroke locator it depends on latched onto strip edges instead of the
+    # stroke. A check that cannot be shown red is not coverage, and one
+    # that looks like coverage is worse than none.
+    #
+    # What guards this now is that the two rectangles are one rectangle.
+
     # --- the budget.
     if ($Leg.SettleMs -lt 0) {
         $findings.Add(("{0}: the switch never settled inside {1}ms (sampled {2} frames over {3}ms)" -f
@@ -420,18 +423,20 @@ function Test-Leg($Leg, [string[]]$CollapsedGroups) {
     # --- the pixel cross-check: where the seam says the selected row is,
     # something is painted. Reported, not asserted, on frames where the
     # morph ghost owns the selection: the ghost is not the row.
-    $inkMisses = 0
-    foreach ($s in $Leg.Samples) {
-        if ($null -eq $s.Shot -or $null -eq $s.Frame) { continue }
-        if ($s.Frame.state.switching) { continue }
-        $row = @($s.Frame.render.horizontal.rows + $s.Frame.render.vertical.rows |
-            Where-Object { $_.active -and $_.shown -and $_.alpha -gt 0.9 }) | Select-Object -First 1
-        if ($null -eq $row) { continue }
-        $ink = Get-RowInk $s.Shot $row
-        if ($null -eq $ink) { $inkMisses++ }
-    }
-    if ($inkMisses -gt 0) {
-        Write-Host ("  note: {0} settled frame(s) could not be sampled for row ink (off-screen or occluded)" -f $inkMisses)
+    if ($null -ne $Leg.Film -and $Leg.Film.Frames.Count -gt 0) {
+        $settled = @($Leg.Samples | Where-Object {
+            $null -ne $_.Frame -and -not $_.Frame.state.switching }) | Select-Object -First 1
+        $last = $Leg.Film.Frames[-1]
+        if ($null -ne $settled -and $null -ne $last) {
+            $row = @($settled.Frame.render.horizontal.rows + $settled.Frame.render.vertical.rows |
+                Where-Object { $_.active -and $_.shown -and $_.alpha -gt 0.9 }) | Select-Object -First 1
+            if ($null -ne $row) {
+                $ink = Get-RowInk (Join-Path $Leg.Film.OutDir $last.file) $row
+                if ($null -eq $ink) {
+                    Write-Host '  note: the selected row could not be sampled for ink in the last frame'
+                }
+            }
+        }
     }
 }
 
@@ -512,13 +517,20 @@ vertical-tabs = false
     $legs = @(1..4 | ForEach-Object { Invoke-FilmedSwitch $session $hwnd $_ })
 
     foreach ($leg in $legs) {
-        $stateCount = @($leg.Samples | Where-Object { $null -ne $_.Frame }).Count
-        Write-Host ("{0}: {1} pictures / {2} state reads, settled at {3}ms (budget {4}ms)" -f
-            $leg.Tag, $leg.Samples.Count, $stateCount, $leg.SettleMs, $BudgetMs)
-        Write-ContactSheet $leg
+        $film = if ($leg.Film) {
+            "{0} frames at {1:F1} fps, {2} dropped, camera lead {3:F0}ms" -f
+                $leg.Film.Frames.Count, $leg.Film.Fps, $leg.Film.Dropped, $leg.Film.ReadyMs
+        } else { 'no camera' }
+        Write-Host ("{0}: {1} state reads, settled at {2}ms (budget {3}ms); film: {4}" -f
+            $leg.Tag, $leg.Samples.Count, $leg.SettleMs, $BudgetMs, $film)
+        Write-ContactSheet $leg ([Math]::Max($leg.SettleMs, 400))
         Test-Leg $leg $collapsed
+        if ($leg.Film) {
+            $leg.Film.Frames | ConvertTo-Json -Depth 4 -Compress |
+                Set-Content (Join-Path $OutDir ("{0}-film.json" -f $leg.Tag)) -Encoding utf8
+        }
         $leg.Samples | Where-Object { $null -ne $_.Frame } | ForEach-Object {
-            [pscustomobject]@{ i = $_.I; stateMs = $_.StateMs; stateEndMs = $_.StateEnd; shotMs = $_.ShotMs; frame = $_.Frame }
+            [pscustomobject]@{ i = $_.I; stateMs = $_.StateMs; stateEndMs = $_.StateEnd; frame = $_.Frame }
         } | ConvertTo-Json -Depth 8 -Compress |
             Set-Content (Join-Path $OutDir ("{0}-frames.json" -f $leg.Tag)) -Encoding utf8
     }

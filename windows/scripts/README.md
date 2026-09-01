@@ -147,6 +147,43 @@ meets.
 | `gen-bell.ps1` | generates a test asset |
 | `aot-fuzz.ps1`, `vtabs-visual-qa.ps1`, `release-smoke.ps1` | runners in their own right. `aot-fuzz` targets the NativeAOT publish, which the suite can also do with `-ExePath` |
 
+## Filming motion
+
+`lib/window-capture.ps1` plus `lib/WindowCapture/` is the shared camera. Use
+it for anything where the question is how a change LOOKS over time rather
+than what it ends up as.
+
+- `Assert-WindowCaptureReady` builds the tool on first use. It is deliberately
+  not in `Ghostty.sln`: a product build should not pay for test tooling.
+- `Start-WindowCapture` returns once the camera is rolling, so the thing being
+  filmed can be fired straight afterwards without racing it.
+- `Stop-WindowCapture` waits out the duration and hands back the frame index.
+- `Measure-WindowCapture` reports the rate actually achieved. Run it when a
+  film looks thin, before concluding anything from it.
+
+Do not reach for `Graphics.CopyFromScreen`. Measured on the machine this was
+written for it costs **about 175ms per grab regardless of region size** (the
+same at 1280x820, 640x820, 1280x200 and 400x400, and unchanged by
+`CAPTUREBLT`), which is under six frames a second. That cannot judge a 340ms
+animation; `layout-switch-filmstrip.ps1` got three frames for a whole
+transition that way, the first of them a third of a second in.
+
+`WindowCapture.exe` uses Windows.Graphics.Capture instead: frames from the
+compositor, delivered on a pool thread, **in a separate process**. The
+separation is load-bearing rather than tidy - these harnesses film apps that
+block their own UI thread for hundreds of milliseconds at a time, so an
+in-process camera would be looking through the stall it is trying to observe.
+
+Two things to know when reading its `SUMMARY` line:
+
+- The frame rate is the window's own PRESENT rate, not a capture setting. An
+  idle terminal reports 2-3 fps because it presents 2-3 times a second, and
+  the same window under a layout switch reports 30. A low number is a finding
+  about the app, not about the camera.
+- `dropped` above zero means the encoder fell behind the compositor and the
+  film has holes in it. It is reported rather than smoothed over, because a
+  filmstrip with gaps that does not say so is worse than one that does.
+
 ## Process policy
 
 `lib/wintty-process.ps1` holds the rule:

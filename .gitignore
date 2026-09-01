@@ -71,3 +71,7 @@ tools/gallery/previews/
 .agents/worktrees/
 .agents/nightly-logs/
 .agents/scripts/__pycache__/
+
+# Harness camera build output (see scripts/README.md, "Filming motion").
+windows/scripts/lib/WindowCapture/bin/
+windows/scripts/lib/WindowCapture/obj/
