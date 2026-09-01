@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -397,9 +398,19 @@ public class VerticalTabGroupCommandsWiringTests
         // TabGroup.Color coerces a value with no preset, so a group already
         // wearing the default that is offered one would otherwise pass this
         // guard, set nothing, raise no INPC, and still announce a change.
-        var sameColor = color.DescendantNodes().OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString()
-                == "group.Color == TabColorPalette.EnsureGroupColor(color)");
+        // Read as nodes, not as spelling: `EnsureGroupColor(color) == group.Color`
+        // is the same rule and string equality would fail it.
+        var sameColor = Assert.Single(
+            color.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Condition is BinaryExpressionSyntax cmp
+                 && cmp.IsKind(SyntaxKind.EqualsExpression)
+                 && new[] { cmp.Left.ToString(), cmp.Right.ToString() }
+                        .Order(System.StringComparer.Ordinal)
+                        .SequenceEqual(new[]
+                        {
+                            "TabColorPalette.EnsureGroupColor(color)",
+                            "group.Color",
+                        }.Order(System.StringComparer.Ordinal)));
         var colorSet = color.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left.ToString() == "group.Color");
         var colorRaise = color.Calls("GroupChangedFromCommand?.Invoke").Single();

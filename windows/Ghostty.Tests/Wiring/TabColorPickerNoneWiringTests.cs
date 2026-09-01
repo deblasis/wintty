@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -105,9 +106,16 @@ public class TabColorPickerNoneWiringTests
             .Where(c => c.Identifier.ValueText == "TabColorPalettePicker")
             .ToList();
         var ctor = Assert.Single(ctors);
+
+        // `p.Default is null` is the half that matters. Without it,
+        // `bool allowNone = true` passes: one-argument construction is back
+        // and defaulting to the permissive answer, which is exactly the
+        // failure mode the deleted overload was.
         Assert.Contains(
             ctor.ParameterList.Parameters,
-            p => p.Identifier.ValueText == "allowNone" && p.Type?.ToString() == "bool");
+            p => p.Identifier.ValueText == "allowNone"
+                 && p.Type?.ToString() == "bool"
+                 && p.Default is null);
     }
 
     [Fact]
@@ -123,6 +131,18 @@ public class TabColorPickerNoneWiringTests
         // Asserting the rendered string would also fail the equivalent
         // `!allowNone && color == TabColor.None`, which is the same rule.
         var and = Assert.IsType<BinaryExpressionSyntax>(skip.Condition);
+
+        // The OPERATOR, not just the shape. && and || are both a
+        // BinaryExpressionSyntax and differ only by Kind, so without this the
+        // operand checks below pass for `||` -- which drops the None swatch
+        // from the TAB picker too and takes away the only way to clear a
+        // tint. Moving this assertion off string equality is what opened
+        // that hole; string equality had pinned the operator for free.
+        Assert.True(
+            and.IsKind(SyntaxKind.LogicalAndExpression),
+            "the None skip must be an AND -- an OR drops the swatch for tabs "
+            + "as well, and clearing a tab's tint becomes impossible: " + skip.Condition);
+
         var operands = new[] { and.Left.ToString(), and.Right.ToString() };
         Assert.Contains("color == TabColor.None", operands);
         Assert.Contains("!allowNone", operands);

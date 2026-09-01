@@ -115,8 +115,9 @@ public class TabGroupColorTests
             () => TabColorPalette.Border((TabColor)42));
 
         Assert.Equal((TabColor)42, thrown.ActualValue);
-        Assert.DoesNotContain("TabColor.None", thrown.Message);
         Assert.Contains("not a declared TabColor", thrown.Message);
+        // The None branch's wording must not reach a value that is not None.
+        Assert.DoesNotContain("no tint", thrown.Message);
     }
 
     [Fact]

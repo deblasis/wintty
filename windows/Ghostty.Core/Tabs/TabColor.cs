@@ -121,6 +121,17 @@ internal static class TabColorPalette
     /// a defined member, so a hand-edited or forward-version session can hand
     /// <c>RestoreGroup</c> a <c>(TabColor)42</c>. Guarding None alone let that
     /// through to the same mid-paint crash under a different integer.
+    ///
+    /// Coercing here means the value is also PERSISTED coerced:
+    /// <c>SessionCapture</c> reads the resolved property, so a session written
+    /// by a future build carrying an extra swatch comes back as the default
+    /// and is written back that way on the next save. That is a repair for a
+    /// corrupt value and a downgrade loss for a forward one, and it is the
+    /// deliberate choice: keeping the raw value and coercing at the paint
+    /// boundary would preserve the colour, but it would give up the property
+    /// every group paint site depends on -- that the colour in hand can
+    /// always be looked up. wintty ships one lineage and has no downgrade
+    /// story, so the invariant is worth more than the swatch.
     /// </summary>
     public static TabColor EnsureGroupColor(TabColor color)
         => Colors.ContainsKey(color) ? color : DefaultGroupColor;
@@ -146,9 +157,11 @@ internal static class TabColorPalette
                     ? "TabColor.None has no preset: it means \"no tint\", so the caller "
                       + "chooses what to paint instead. A group cannot be None -- use "
                       + nameof(EnsureGroupColor) + "."
-                    : "no preset for this value: it is not a declared TabColor. A group "
-                      + "colour restored from a session is not validated by the JSON "
-                      + "reader -- pass it through " + nameof(EnsureGroupColor) + " first.");
+                    // States the rule, not a diagnosis: Preset serves the tab
+                    // path too, and a message naming sessions and groups would
+                    // send a reader the wrong way for a tab. The type and
+                    // ActualValue already carry the argument.
+                    : "not a declared TabColor: only declared members have presets.");
 
     /// <summary>Selected tab/header fill uses the full preset color.</summary>
     public const byte SelectedBackgroundAlpha = 255;

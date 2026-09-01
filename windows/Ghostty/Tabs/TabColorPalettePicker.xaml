@@ -134,6 +134,11 @@
             point below folds that flat sequence back into 2x5, and a test ties
             it to the row width rather than to this literal.
 
+            2x5 is the TAB picker. A group picker skips the None swatch, so its
+            flat sequence is nine long, still wraps at five, and reads 5 + 4
+            with Orange moved up a row. The grid is a claim about the full
+            palette, not about every picker built from it.
+
             A GridView rather than the Buttons SnapZonePicker uses, or a
             RadioButtons group: the applied colour has to reach a client as a
             selected item and not only as a drawn ring, and a radio group checks

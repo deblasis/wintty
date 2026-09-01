@@ -110,6 +110,13 @@ public class TabColorSwatchAutomationTests
     /// Flattening PaletteRows only stays faithful to the macOS layout if
     /// the grid wraps where the rows ended AND fills row-major. Vertical
     /// orientation would reinterpret the same wrap count as five rows.
+    ///
+    /// That faithfulness is the TAB picker's. A group picker is built with
+    /// allowNone: false, so it renders nine swatches into the same wrap of
+    /// five and reads 5 + 4; the wrap point no longer coincides with a
+    /// PaletteRows boundary there. This still guards the thing it always
+    /// guarded -- that the literal below tracks the palette's row width --
+    /// but it is not a statement about every picker.
     /// </summary>
     [Fact]
     public void WrapPoint_MatchesPaletteRowWidth()
