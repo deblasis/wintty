@@ -5,58 +5,102 @@ using Xunit;
 namespace Ghostty.Tests.Demo;
 
 /// <summary>
-/// The demo gate, asserted from inside the gate.
+/// The demo gate.
 ///
-/// `DemoEnabled` is computed in windows/Directory.Build.props, where
-/// Configuration is still empty because Microsoft.Common.props imports that
-/// file before it defaults Configuration to Debug. For a long time the
-/// condition read only `'$(Configuration)' == 'Debug'`, so DEMO was defined
-/// from Visual Studio and from anything passing `-c`, and NOT from a bare
-/// `dotnet build` -- which is what every `just` recipe issues, `test-win`
-/// included, and therefore what the signoff ladder ran. Three test classes
-/// compiled to nothing and the ladder called that green.
+/// It used to live in <c>windows/Directory.Build.props</c>, where
+/// <c>Configuration</c> is still empty: <c>Microsoft.Common.props</c> imports
+/// that file before it defaults <c>Configuration</c> to <c>Debug</c>. The
+/// condition therefore matched only when the value arrived as a global
+/// property. Visual Studio and anything passing <c>-c</c> supplied one;
+/// <c>just build-win</c> and <c>just test-win</c> pass only
+/// <c>/p:Platform=x64</c>, so DEMO went undefined for every just recipe and
+/// so for the signoff ladder's windows-tests leg. Three test classes compiled
+/// to nothing and the ladder reported green.
 ///
-/// This file is deliberately NOT wrapped in `#if DEMO`. A self-gated test
-/// vanishes with the thing it is testing, which is exactly the failure being
-/// guarded against: the whole point is to fail loudly when the constant is
-/// absent, not to disappear alongside it.
+/// The primary guard reads the BUILD FILE, not this assembly's constants, and
+/// that is deliberate. A guard asserting `#if DEMO` here can only speak about
+/// the configuration it was itself compiled in, so it would fail every
+/// Release test run -- and the tiered build runs <c>dotnet test -c Release</c>
+/// across five cells, which the OSS ladder never exercises. A gate whose
+/// guard breaks a configuration the ladder cannot see is the same blind spot
+/// this whole change exists to close, one level up.
+///
+/// Same shape, and the same reasoning, as <c>TestSeamWiringTests</c>'s check
+/// on the seam gate three lines above it in that file.
 /// </summary>
 public class DemoGateTests
 {
+    private static System.Xml.Linq.XDocument BuildTargets()
+    {
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        using var stream = asm.GetManifestResourceStream(
+            "Ghostty.Tests.Build.Directory.Build.targets")!;
+        return System.Xml.Linq.XDocument.Load(stream);
+    }
+
     [Fact]
-    public void The_DEMO_constant_reaches_this_assembly()
+    public void The_demo_gate_reads_a_settled_Configuration()
+    {
+        var doc = BuildTargets();
+
+        // In Directory.Build.targets at all: that is the fix. In
+        // Directory.Build.props the condition below is evaluated against an
+        // empty Configuration and silently never matches.
+        var enabled = Assert.Single(
+            doc.Descendants(), e => e.Name.LocalName == "DemoEnabled");
+
+        var condition = enabled.Attribute("Condition")?.Value;
+        Assert.False(
+            string.IsNullOrWhiteSpace(condition),
+            "DemoEnabled has no Condition, so every build defines DEMO and a "
+            + "public Release ships demo code.");
+
+        // Debug, or an explicit opt-in, and nothing else. A condition that
+        // also admits Release is the gate gone the other way.
+        Assert.Contains("'$(Configuration)' == 'Debug'", condition!, StringComparison.Ordinal);
+        Assert.Contains("'$(Demo)' == 'true'", condition!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Release", condition!, StringComparison.Ordinal);
+
+        // And the symbol is defined only when that property says so.
+        var define = Assert.Single(
+            doc.Descendants(),
+            e => e.Name.LocalName == "DefineConstants"
+                 && (e.Attribute("Condition")?.Value.Contains("DemoEnabled", StringComparison.Ordinal) ?? false));
+        Assert.Contains("DEMO", define.Value, StringComparison.Ordinal);
+    }
+
+#if DEBUG
+    /// <summary>
+    /// The build-file check proves the gate is written correctly; this proves
+    /// it arrived. Scoped to DEBUG because that is the configuration whose
+    /// invariant it states -- in Release both of these SHOULD be absent, and
+    /// asserting them there is what broke the tiered Release test leg.
+    /// </summary>
+    [Fact]
+    public void A_Debug_build_actually_carries_the_constant()
     {
 #if DEMO
+        // Reached only if DEMO survived to this assembly's compile.
         Assert.True(true);
 #else
         Assert.Fail(
-            "DEMO is not defined for this build, so the demo tests compiled to "
-            + "nothing and every other assertion about demo behaviour is vacuous. "
-            + "Check DemoEnabled in windows/Directory.Build.props: Configuration is "
-            + "empty there for a bare `dotnet build`, so the condition has to admit "
-            + "the empty case as well as 'Debug'.");
+            "This is a DEBUG build and DEMO is not defined, so the demo tests "
+            + "compiled to nothing and every assertion about demo behaviour is "
+            + "vacuous. Check DemoEnabled in windows/Directory.Build.targets.");
 #endif
-    }
 
-    [Fact]
-    public void The_gate_reaches_Ghostty_Core_too()
-    {
         // A constant defined only for the test assembly would leave the code
         // under test compiled out while these tests still ran -- green, and
-        // measuring nothing. Directory.Build.props sits above every project
-        // under windows/, so the Core demo types are the check that it did.
+        // measuring nothing. Directory.Build.targets sits above every project
+        // under windows/, so a Core demo type is the check that it did.
+        // GetType rather than GetTypes(): one type loaded, and no
+        // ReflectionTypeLoadException to misreport as a missing gate.
         var core = typeof(Ghostty.Core.Tabs.TabModel).Assembly;
-        var demoTypes = core.GetTypes()
-            .Where(t => t.Namespace == "Ghostty.Core.Demo")
-            .Select(t => t.Name)
-            .ToList();
-
         Assert.True(
-            demoTypes.Count > 0,
-            "Ghostty.Core carries no Ghostty.Core.Demo types, so DEMO was not "
-            + "defined when Core was compiled. If the constant test above passed, "
-            + "the gate reaches the test assembly but not Core, and something has "
-            + "scoped DemoEnabled below windows/. If it failed too, the gate is "
-            + "off everywhere and its message is the one to read.");
+            core.GetType("Ghostty.Core.Demo.DemoScriptParser", throwOnError: false) is not null,
+            "Ghostty.Core carries no Ghostty.Core.Demo.DemoScriptParser, so DEMO "
+            + "reached this assembly but not Core: something has scoped DemoEnabled "
+            + "below windows/.");
     }
+#endif
 }

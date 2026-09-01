@@ -4,38 +4,21 @@
     the Core demo logic) and for Release only when explicitly opted in with
     `-p:Demo=true`. Public Release builds define no DEMO symbol, so every file
     wrapped in `#if DEMO` compiles to nothing and ships zero demo bytes.
+
+    The gate itself is NOT here. It lives in Directory.Build.targets, beside
+    the test seam's identically shaped one, because Configuration is still
+    empty in this file: Microsoft.Common.props imports it before defaulting
+    Configuration to Debug, so a condition on '$(Configuration)' here matched
+    only when the value arrived as a global property. Visual Studio and
+    anything passing `-c` supplied one; `just build-win` and `just test-win`
+    do not, so DEMO went undefined for every just recipe and for the signoff
+    ladder, and three test classes compiled to nothing while the ladder
+    reported green.
+
+    Ghostty.csproj reads DemoEnabled from ItemGroup conditions and still sees
+    it from there: MSBuild evaluates every property, trailing imports
+    included, before it evaluates any item.
   -->
-  <PropertyGroup>
-    <!-- One source of truth for "is demo mode on?" so the DEMO constant and the
-         csproj Page/Compile/None conditions can't drift, and so a future
-         constant that merely contains the substring "DEMO" can't false-match. -->
-    <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug' or '$(Configuration)' == ''">true</DemoEnabled>
-    <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
-
-    <!--
-      The empty test is the whole fix, and it is not a belt-and-braces extra.
-      Microsoft.Common.props imports this file BEFORE it defaults Configuration
-      to Debug, so Configuration is empty here unless it arrived as a global
-      property (`-c Debug`, or Visual Studio). Without the empty case a bare
-      `dotnet build` left DemoEnabled unset and defined no DEMO, so whether
-      demo code was compiled at all depended on how a developer happened to
-      invoke the build, and it could rot behind a gate nothing was opening.
-      Empty here means Debug: it is the value Microsoft.Common.props is about
-      to assign, so this reads the configuration the build will actually use.
-
-      Deliberately NOT moved to Directory.Build.targets, which is where the
-      test seam's identically shaped gate lives. TESTSEAM is only a compiler
-      constant, and property evaluation still precedes CoreCompile, so a
-      .targets file is early enough for it. DemoEnabled is read by ItemGroup
-      conditions in Ghostty.csproj (they strip Demo\**\*.cs and
-      DemoOverlay.xaml from a non-demo build), and those evaluate with the
-      csproj body, long before Microsoft.Common.targets imports
-      Directory.Build.targets at the end. Setting it there would leave those
-      conditions reading an empty value: the constant would be defined while
-      the files it guards were excluded, which is a build error rather than a
-      silent gate, but a confusing one.
-    -->
-  </PropertyGroup>
   <!--
     'dotnet build' resolves AppxMSBuildToolsPath to the SDK directory which
     lacks the PRI/Appx task DLLs. These ship with Visual Studio Build Tools.
