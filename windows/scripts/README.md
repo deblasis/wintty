@@ -184,6 +184,16 @@ Two things to know when reading its `SUMMARY` line:
   film has holes in it. It is reported rather than smoothed over, because a
   filmstrip with gaps that does not say so is worse than one that does.
 
+`layout-motion-profile.ps1` reads a film after the fact: per consecutive
+frame pair it prints the time, the gap to the previous frame (presentation
+holes show here), the mean pixel delta, and the bounding box of what
+changed, in window coordinates. The box is the column that finds
+misdirected motion - it is how the impact nudge was caught translating the
+entire window (change boxes of `(4,4)-(1264,808)` at four to six times the
+switch's own amplitude) and how the retargeted version was verified: after
+the fix, no post-switch box is wider than the struck strip's own band.
+Point it at a `layout-switch-filmstrip.ps1` out dir and a leg tag.
+
 ## Process policy
 
 `lib/wintty-process.ps1` holds the rule:
