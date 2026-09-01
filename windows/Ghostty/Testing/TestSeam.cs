@@ -583,6 +583,40 @@ internal static class TestSeam
                 return OkWithFocus(window, manager, op, focus, dispatched);
             }
 
+            case "tab-color":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var name = ArgString(args, "color") ?? "None";
+                if (ParseTabColor(name) is not { } color)
+                    return Error(op, $"unknown colour '{name}'");
+                // The context menu's own assignment (TabContextMenuBuilder's
+                // colour picker is `tab.Color = color`), so the seam drives
+                // the INPC chain the product drives and cannot repaint
+                // anything the menu would leave alone.
+                tab.Color = color;
+                return OkWithState(window, manager, op);
+            }
+
+            case "header-rect":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var host = window.TestSeamTabHost;
+                if (host is null)
+                    return Error(op, "the horizontal strip is not the active host");
+                var part = ArgString(args, "part") ?? "row";
+                var local = host.TestSeamHeaderPartRect(tab, part);
+                if (local is not { } dip)
+                    return Error(op, $"no '{part}' rect for tab {index}");
+                var screen = window.TestSeamToScreenPixels(dip, host);
+                if (screen is not { } px)
+                    return Error(op, $"could not place the '{part}' rect on screen");
+                return RectJson(op, part, px, host.TestSeamTagForegroundRgb(tab));
+            }
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
@@ -632,6 +666,29 @@ internal static class TestSeam
             WriteState(json, window, manager);
             json.WriteEndObject();
         });
+
+    /// <summary>
+    /// Where one header part sits, in the physical screen pixels a capture
+    /// is taken in, plus the foreground the ink pass assigned that tab --
+    /// the claim, next to the coordinates that let a harness check it was
+    /// honoured. No tag, no "fg": an absent expectation is not #000000.
+    /// </summary>
+    private static string RectJson(
+        string op, string part, (int X, int Y, int W, int H) rect, uint? fg)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            json.WriteString("part", part);
+            json.WriteNumber("x", rect.X);
+            json.WriteNumber("y", rect.Y);
+            json.WriteNumber("w", rect.W);
+            json.WriteNumber("h", rect.H);
+            if (fg is { } rgb) json.WriteString("fg", $"#{rgb:X6}");
+            json.WriteEndObject();
+        });
+
 
     private static string OkWithState(MainWindow window, TabManager manager, string op)
         => Json(json =>
@@ -693,6 +750,8 @@ internal static class TestSeam
                 json.WriteNumber("leaves", host.TestSeamLeafCount);
                 json.WriteNumber("activeLeaf", host.TestSeamActiveLeafIndex);
             }
+            if (tab.Color != TabColor.None)
+                json.WriteString("color", TabColorPalette.LocalizedName(tab.Color));
             if (tab.Group is { } group)
             {
                 json.WriteString("group", group.Title);
@@ -815,6 +874,21 @@ internal static class TestSeam
                     result.Add(item.GetInt32());
         }
         return result;
+    }
+
+    /// <summary>
+    /// The palette's own name table rather than Enum.TryParse: the seam
+    /// speaks the vocabulary the colour menu shows a user, and it stays
+    /// reflection-free for the AOT build.
+    /// </summary>
+    private static TabColor? ParseTabColor(string name)
+    {
+        foreach (var row in TabColorPalette.PaletteRows)
+            foreach (var candidate in row)
+                if (string.Equals(TabColorPalette.LocalizedName(candidate), name,
+                        StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+        return null;
     }
 
     private static TabModel? TabAt(TabManager manager, int index)
