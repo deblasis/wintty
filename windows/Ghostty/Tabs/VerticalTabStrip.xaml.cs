@@ -892,8 +892,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (tab.Color != TabColor.None)
             return TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: true));
 
-        // Mirror horizontal TabHost: shell theme paints accent on the selected
-        // handle; default path uses terminal background so the row meets the pane.
+        // Mirror horizontal TabHost: both paths now fill the selected handle
+        // with the TERMINAL background, so the row meets the pane with no line
+        // between whatever window-theme says. The accent's job here is the
+        // stroke on the row's three closed sides, not the fill.
         if (_shellThemeActive && _selectedTabFillBrush is not null)
             return _selectedTabFillBrush;
         if (_defaultSelectedTabBgBrush is not null)

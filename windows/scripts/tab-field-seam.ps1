@@ -71,6 +71,10 @@ $RowEdgeStroke = 1.0
 $RowToCover = $RowInsetVertical + $RowEdgeStroke
 
 $Widths = @(760, 900, 1024, 1103, 1280, 1441)
+# A subset of the above: the vertical leg costs three window states per width
+# (compact, wide, and back), so it takes the three that already differ most in
+# how they land the strip's right edge rather than repeating all six.
+$VerticalWidths = @(900, 1103, 1280)
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $script:Rows = [System.Collections.Generic.List[object]]::new()
@@ -203,6 +207,35 @@ function Measure-Vertical {
     Add-Measure $Leg 'reach' ($row.x + $row.w + $SurfaceInset) ($seam.x + $seam.w) $scale 'the far side of the pane gutter and the cover''s right edge'
 }
 
+# Every width this harness actually achieved, as read back off the window.
+# The whole point of the sweep is that six widths put the tab edges on six
+# different fractions of a DIP; if the window did not really resize, all 126
+# comparisons are of ONE geometry measured six times, and they agree for the
+# most boring possible reason while the summary claims a sweep.
+$script:AchievedWidths = [System.Collections.Generic.List[int]]::new()
+
+# MoveWindow reports failure only through its return, and leaves the window
+# where it was. Refused or clamped -- a maximized or snapped window, a width
+# under the window's own minimum -- is indistinguishable from success unless
+# the geometry is read back, so it is.
+function Set-WindowWidth([IntPtr]$Hwnd, [int64]$Hwnd64, [int]$Width) {
+    if (-not [SeamWin]::MoveWindow($Hwnd, 60, 60, $Width, 820, $true)) {
+        throw "HARNESS: MoveWindow refused a resize to ${Width}x820"
+    }
+    # MoveWindow does not go through the seam, so nothing acked the new size;
+    # the next command's own settle pass is what does.
+    Start-Sleep -Milliseconds 350
+
+    $rc = [SeamWin]::RectOf($Hwnd64)
+    if ($null -eq $rc) { throw "HARNESS: the window's rect could not be read back after a resize to $Width" }
+    # A couple of pixels of slack for the frame the shell owns; a clamp is
+    # tens of pixels or more, never this.
+    if ([Math]::Abs($rc.W - $Width) -gt 4) {
+        throw "HARNESS: asked for width $Width and the window came back $($rc.W); a clamped window measures one geometry repeatedly"
+    }
+    $script:AchievedWidths.Add($rc.W)
+}
+
 if (-not (Test-Path $ExePath)) {
     Write-Host "HARVEST_MISS: missing exe: $ExePath"
     exit 1
@@ -221,10 +254,7 @@ try {
     $hwnd = [SeamWin]::P([int64]$session.Hwnd64)
 
     foreach ($w in $Widths) {
-        [void][SeamWin]::MoveWindow($hwnd, 60, 60, $w, 820, $true)
-        # MoveWindow does not go through the seam, so nothing acked the new
-        # size; the next command's own settle pass is what does.
-        Start-Sleep -Milliseconds 350
+        Set-WindowWidth $hwnd $session.Hwnd64 $w
 
         # First, middle and last, because an equal-width strip puts every tab
         # edge on its own fraction of a DIP and the ends are where a cover
@@ -241,9 +271,8 @@ try {
     [void](Invoke-SeamCommand $session @{ op = 'toggle-layout' })
     Start-Sleep -Milliseconds 500
 
-    foreach ($w in @(900, 1103, 1280)) {
-        [void][SeamWin]::MoveWindow($hwnd, 60, 60, $w, 820, $true)
-        Start-Sleep -Milliseconds 350
+    foreach ($w in $VerticalWidths) {
+        Set-WindowWidth $hwnd $session.Hwnd64 $w
         foreach ($pane in @('compact', 'wide')) {
             foreach ($i in @(0, 2, 4)) {
                 [void](Invoke-SeamCommand $session @{ op = 'select'; index = $i })
@@ -281,21 +310,36 @@ if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $cra
     $script:Findings.Add('crash.log grew during the run')
 }
 
+$distinctWidths = @($script:AchievedWidths | Sort-Object -Unique)
+
 @{
     measures = $script:Rows
     findings = $script:Findings
     rule = 'both edges must round to the same device pixel'
     widths = $Widths
+    achievedWidths = $distinctWidths
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutDir 'result.json')
 
 $worst = 0.0
 foreach ($r in $script:Rows) { if ($r.subPixel -gt $worst) { $worst = $r.subPixel } }
-Write-Host ("$($script:Rows.Count) span comparisons; every pair must land on one device pixel, worst sub-pixel drift $worst")
+Write-Host ("$($script:Rows.Count) span comparisons over $($distinctWidths.Count) distinct window widths; " +
+            "every pair must land on one device pixel, worst sub-pixel drift $worst")
 
 # Nothing measured is not a pass. A run whose every leg bailed before it
 # compared anything would otherwise print green.
 if ($script:Rows.Count -eq 0 -and $script:Findings.Count -eq 0) {
     Write-Host 'HARVEST_MISS: no span was compared, so nothing here rules anything out'
+    exit 1
+}
+
+# Neither is measuring one geometry many times. The claim this harness makes is
+# about tab edges landing on DIFFERENT fractions of a device pixel, and that
+# claim is only worth the widths it actually got: a window that ignored every
+# resize would produce a full set of agreeing comparisons and a drift of zero.
+$wantWidths = @($Widths + $VerticalWidths | Sort-Object -Unique).Count
+if ($distinctWidths.Count -lt $wantWidths) {
+    Write-Host ("HARVEST_MISS: asked for $wantWidths distinct widths and the window held " +
+                "$($distinctWidths.Count) ($($distinctWidths -join ', ')); the sweep did not sweep")
     exit 1
 }
 

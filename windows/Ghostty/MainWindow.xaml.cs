@@ -231,6 +231,16 @@ public sealed partial class MainWindow : Window
     internal void TestSeamSettleLayout() => (Content as UIElement)?.UpdateLayout();
 
     /// <summary>
+    /// Whether the cycle popup is up, as the WINDOW knows it rather than as
+    /// the UIA tree suggests. The tree cannot answer: TabSwitcherPopupUI is
+    /// declared in MainWindow.xaml, so the element is present whether or not
+    /// the popup is open, and a lookup after the 1.2s self-dismissal still
+    /// hands back a plausible rect. A harness that samples that rect measures
+    /// uniform terminal background and reports it as an illegible tile.
+    /// </summary>
+    internal bool TestSeamSwitcherOpen => TabSwitcherPopupHost.IsOpen;
+
+    /// <summary>
     /// The first switcher tile's pane-preview rect in screen pixels, or null
     /// when the cycle popup is not up, when the preview has no XamlRoot, or
     /// when the client-to-screen conversion failed -- the last of which is a

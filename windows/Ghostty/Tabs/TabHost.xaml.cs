@@ -2951,7 +2951,23 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // a window chrome truth composed from the same inputs the
         // separators read, and the strip must not re-derive it.
         _highContrast = highContrast;
-        if (groundChanged) RefreshShellInactiveInk();
+        if (!groundChanged) return;
+
+        if (_shellActiveTextBrush is not null)
+        {
+            RefreshShellInactiveInk();
+            return;
+        }
+
+        // The palette path gets the same answer by hand, because
+        // RefreshShellInactiveInk returns before reaching the assignment
+        // there. Without this the strip's ground stays at whatever
+        // SetSelectedTabColors last guessed, and the two consumers that read
+        // it -- the preset tints and the field's flight -- are both scored
+        // against the terminal instead of the strip. The vertical strip has
+        // taken its ground from here since the same bug was fixed there.
+        _stripBackdropPacked = groundRgb;
+        RefreshTabColors();
     }
 
     private uint _chromeGroundPacked = 0x0C0C0C;
@@ -3137,10 +3153,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
             ThemeResolution.EnsureReadableForeground(
                 PackColor(background), PackColor(foreground)));
 
-        // Preset tint foregrounds blend against the tab-bar backdrop, which
-        // ApplyShellTheme sets from TabBarBackground -- not terminal bg.
-        if (_shellActiveTextBrush is null)
-            _stripBackdropPacked = PackColor(background);
+        // Deliberately does NOT touch _stripBackdropPacked. That value is the
+        // surface the tabs sit on, and this is the terminal background, which
+        // is what the selected tab is filled with -- a different thing. While
+        // both wrote it, the winner was whichever ran last, and the order
+        // differs between construction and a config reload. SetChromeGround
+        // owns it now, on both paths.
+        //
+        // The vertical strip fixed this first, where the symptom was inactive
+        // titles calibrated against the terminal. Here the second consumer is
+        // the field: leaving the terminal background in there makes the
+        // flight's start equal its target, and Settle answers a no-op move
+        // with a cut.
 
         // When a shell theme is active it owns the selected-tab background
         // and the active title (ApplyShellTheme). Don't fight it here; keep

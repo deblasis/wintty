@@ -20,7 +20,9 @@ namespace Ghostty.Tabs;
 /// chrome sitting under a tab that had already reached the field, which is
 /// exactly the join this whole treatment exists to close.
 ///
-/// Shared by both layouts. The horizontal strip installs it as the selected
+/// The CLASS is shared by both layouts; the instances are not. Each strip
+/// constructs its own, because each has its own seam cover to keep in step and
+/// only one of the two strips is ever mounted. The horizontal strip installs it as the selected
 /// item's header background and hands it to MainWindow's seam cover; the
 /// vertical strip paints the selection row with it, and MainWindow's vertical
 /// cover reads it straight back off that row.
@@ -80,8 +82,13 @@ internal sealed class ActiveFieldFill
 
         // Any other re-entry does abandon the flight: Stop puts the base value
         // back, and both branches below write it again.
-        _running?.Stop();
+        //
+        // Disowned BEFORE it is stopped, so that if Stop raises Completed
+        // synchronously the handler finds itself no longer current and returns
+        // without stopping the board a second time.
+        var abandoned = _running;
         _running = null;
+        abandoned?.Stop();
         _target = target;
 
         // Nothing became active on the first paint -- the window opened -- so
@@ -110,6 +117,17 @@ internal sealed class ActiveFieldFill
         board.Children.Add(anim);
         board.Completed += (_, _) =>
         {
+            // Only the flight that is still the current one may land. Whether
+            // Stop() at the top of this method raises Completed on the board it
+            // abandoned is a WinUI detail this class should not have to know:
+            // if it does, an abandoned board would otherwise write ITS target
+            // over the live one and null _running out from under a storyboard
+            // that is still going -- and the next non-activation pass, seeing
+            // no flight in progress, would stop the live board and cut. That is
+            // the bug the guard above exists to prevent, reached by the other
+            // door.
+            if (!ReferenceEquals(_running, board)) return;
+
             // Stop before the write, not after. A finished Storyboard holds
             // its last value over the brush's own, so a plain assignment here
             // would be shadowed and the next reader -- a chrome pass, the

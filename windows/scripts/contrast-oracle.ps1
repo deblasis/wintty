@@ -54,6 +54,10 @@
       glyph  >= 3.0:1  WCAG 2.1 SC 1.4.11 non-text contrast
       fill    > 1.2:1  the palette test's distinguishability rule for fill
                        slots, strictly greater the way it is written there
+      field  <= 1.05:1 the one class judged from ABOVE. The active tab is
+                       the field: it is painted the terminal's own ground
+                       and must not separate from it, so a low ratio is the
+                       pass and a high one is the defect
 
     Anti-vacuity. -Mutate terminal launches with a deliberately illegible
     pair (background #808080, foreground #858585) and the run must go RED
@@ -414,8 +418,10 @@ function Measure-Surface($Cap, [string]$Leg, [string]$Surface, [string]$Class,
     Add-Row $Leg $Surface $Class $s.Ratio $s.FgHex $s.BgHex $Note
 }
 
-# Two flat regions against each other, for a fill that carries no ink of
-# its own: the selected-row fill against the strip it sits in.
+# Two flat regions against each other, for a fill that carries no ink of its
+# own. The class decides which way the answer is read: its only caller today is
+# the selected-row fill against the TERMINAL, under the 'field' rule, where a
+# low ratio is the pass.
 function Measure-Pair($Cap, [string]$Leg, [string]$Surface, [string]$Class,
                       $FgRect, $BgRect, [int]$Inset = 1, [string]$Note = '') {
     $a = ConvertTo-Local $Cap $FgRect $Inset
@@ -646,18 +652,28 @@ function Measure-VerticalLeg($Cap, [string]$Leg, [bool]$Compact, [string]$GroupT
     } else {
         $sr = $selRect
         # Past the strip's trailing edge, the same anchor the terminal band
-        # itself is derived from below, and level with the selected row so
-        # both samples sit in one horizontal band of the window.
+        # itself is derived from below.
         $tRight = ($rows | ForEach-Object { $_.Rect.X + $_.Rect.Width } | Measure-Object -Maximum).Maximum
+        $tTop = ($rows | ForEach-Object { $_.Rect.Y } | Measure-Object -Minimum).Minimum
         if ([double]::IsNaN($sr.X) -or $sr.Width -le 6) {
             Add-Unmeasured $Leg 'vtab-selection-field' 'no usable fill slice on the selected row'
         } else {
             # A slice inside the fill, clear of the title ink.
             $sliceW = [Math]::Max(6.0, $sr.Width * 0.12)
             $fillRect = New-Rect ($sr.X + $sr.Width - $sliceW - 2) ($sr.Y + 3) $sliceW ([Math]::Max(6.0, $sr.Height - 6))
-            # Well right of the prompt, so the sample is terminal ground and
-            # not the shell's own first line.
-            $groundRect = New-Rect ($tRight + 40) ($sr.Y + 3) 24 ([Math]::Max(6.0, $sr.Height - 6))
+            # Right of the strip AND below the shell's opening lines.
+            #
+            # An earlier version took the ground level with the selected row,
+            # so that both samples sat in one horizontal band. That reads the
+            # prompt whenever the active tab is the TOP row, which it is on
+            # several legs -- the sample lands a few characters into the
+            # shell's first line. It fails safe (a band of text is not flat, so
+            # the surface goes UNMEASURED rather than passing wrongly), but it
+            # makes the check depend on the machine's prompt. The terminal's
+            # ground is flat, so there is nothing to be gained by staying level
+            # with the row and a whole class of flake to be lost.
+            $groundY = [Math]::Max($sr.Y + 3, $tTop + 140)
+            $groundRect = New-Rect ($tRight + 40) $groundY 24 ([Math]::Max(6.0, $sr.Height - 6))
             Measure-Pair $Cap $Leg 'vtab-selection-field' 'field' $fillRect $groundRect 0 'selected-row fill against the terminal it must match'
         }
     }
@@ -832,12 +848,23 @@ function Measure-Switcher($Cap, [string]$Leg, $TileRect) {
 # after a dismissal still hands back a plausible tile rect. The seam answers
 # from the window's own state, and refuses the op outright when the popup is
 # down -- which arrives here as a throw, not as a false.
+#
+# ONLY that one refusal means "we were too slow". Invoke-SeamCommand throws for
+# a product exit and for a broken pipe as well, and the op has a second refusal
+# of its own for a rect it could not place on screen -- a coordinate failure in
+# the product, which is exactly the bug the seam splits its two refusals to keep
+# visible. Swallowing those as a lost race would file a real defect as a missed
+# photograph and retry it twice for good measure, so anything that is not the
+# popup's own absence is re-thrown to the leg's handler.
 function Test-SwitcherUp($Session) {
     try {
         $r = Invoke-SeamCommand $Session @{ op = 'switcher-preview-rect' }
         return $null -ne $r
     } catch {
-        return $false
+        # Matched on the seam's own sentence for a closed popup. Kept in step
+        # with TestSeam.cs's "switcher-preview-rect" arm.
+        if ("$_" -like '*the cycle popup is not up*') { return $false }
+        throw
     }
 }
 
@@ -859,7 +886,12 @@ function Measure-SwitcherLeg($Session, [string]$ShotName, [string]$Leg) {
     foreach ($attempt in 1, 2, 3) {
         [void](Invoke-SeamCommand $Session @{ op = 'cycle'; forward = $true })
         $tileRect = Get-SwitcherTileRect
-        $cap = New-Capture $ShotName
+        # One capture per attempt, not one per leg. A retry that reused the
+        # name overwrote the shot of the run that LOST the race -- the single
+        # artefact that identified this bug in the first place, deleted by the
+        # code written to handle it.
+        $shot = if ($attempt -eq 1) { $ShotName } else { "$ShotName-retry$attempt" }
+        $cap = New-Capture $shot
         $stillUp = Test-SwitcherUp $Session
         Start-Sleep -Milliseconds 1400
         if ($stillUp) {
@@ -1113,10 +1145,16 @@ $result = [ordered]@{
     actuation = 'seam (WINTTY_TEST_SEAM=<session token>); zero synthesized OS input'
     instrument = 'rendered pixels, sampled out of a screen capture of the app window'
     mutate = $Mutate
+    # 'sense' because the classes are not all judged in the same direction, and
+    # a machine reading this file cannot tell that from a bare minimum. 'field'
+    # in particular passes at or BELOW its bound: its claim is that two surfaces
+    # are the same, so a reader that assumed >= would report every passing field
+    # as a failure and every failure as a pass.
     thresholds = [ordered]@{
-        text = @{ min = $script:CONTRAST_TEXT_AA; source = 'WCAG 2.1 SC 1.4.3 (and src/config/wintty_theme_test.zig)' }
-        glyph = @{ min = $script:CONTRAST_NONTEXT; source = 'WCAG 2.1 SC 1.4.11 non-text contrast' }
-        fill = @{ min = $script:CONTRAST_FILL_VISIBLE; source = 'src/config/wintty_theme_test.zig fill rule, strictly greater' }
+        text = @{ min = $script:CONTRAST_TEXT_AA; sense = '>='; source = 'WCAG 2.1 SC 1.4.3 (and src/config/wintty_theme_test.zig)' }
+        glyph = @{ min = $script:CONTRAST_NONTEXT; sense = '>='; source = 'WCAG 2.1 SC 1.4.11 non-text contrast' }
+        fill = @{ min = $script:CONTRAST_FILL_VISIBLE; sense = '>'; source = 'src/config/wintty_theme_test.zig fill rule, strictly greater' }
+        field = @{ min = $script:CONTRAST_FIELD_SAME; sense = '<='; source = 'the active tab is the field: it must BE the terminal ground' }
     }
     blindSpots = @(
         'the floating group run label (TabRunLabel.cs:20-22) carries no AutomationProperties on purpose and cannot be located over UIA; the same ink is measured on the group chip and the vertical group header'

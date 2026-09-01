@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -156,6 +158,53 @@ public sealed class ActiveTabFieldWiringTests
     }
 
     /// <summary>
+    /// The strip's ground is the CHROME's, on both paths and in both strips.
+    ///
+    /// Naming StripGround() at the call site pins a spelling, not a value, and
+    /// the two are very far apart here. _stripBackdropPacked had two writers:
+    /// SetChromeGround, which knows what is behind the strip, and
+    /// SetSelectedTabColors, which knows the terminal background -- a different
+    /// surface entirely. Whichever ran last won, and which ran last differed
+    /// between construction and a config reload.
+    ///
+    /// The vertical strip found that first, where the symptom was inactive
+    /// titles calibrated against the terminal at about 2:1 until the config was
+    /// touched. The horizontal strip kept the second writer, and the field
+    /// inherited the bug in a form nobody would read as the same one: the
+    /// flight's start colour came back equal to its target, and Settle answers
+    /// a no-op move with a cut. So on the shipping default the field simply did
+    /// not animate, in one strip only, while a guard asserting the argument's
+    /// text stayed green.
+    /// </summary>
+    /// <param name="groundPush">
+    /// The window's ground push, which the two strips spell differently: the
+    /// horizontal strip takes it on its own call, the vertical one takes it
+    /// alongside the row separator it is composed with.
+    /// </param>
+    [Theory]
+    [InlineData(HorizontalStrip, "SetChromeGround")]
+    [InlineData(VerticalStrip, "SetRowSeparator")]
+    public void TheStripGroundHasOneWriter_AndItIsTheChromePush(string file, string groundPush)
+    {
+        var source = ShellSource.Load(file);
+
+        var fromChrome = source.Method(groundPush).AssignsTo("_stripBackdropPacked").ToList();
+        Assert.True(
+            fromChrome.Count > 0,
+            $"{groundPush} does not set the strip's ground, so on the palette path "
+            + "the ground is whatever another method last guessed");
+
+        var fromTerminal = source.Method("SetSelectedTabColors")
+            .AssignsTo("_stripBackdropPacked").ToList();
+        Assert.True(
+            fromTerminal.Count == 0,
+            "SetSelectedTabColors writes the strip's ground, but its argument is the "
+            + "TERMINAL background. Two writers means the answer depends on call order, "
+            + "and the field's flight then starts where it ends and cuts: "
+            + string.Join("; ", fromTerminal.Select(a => a.ToString())));
+    }
+
+    /// <summary>
     /// A settle in flight survives the passes that are not activations.
     ///
     /// Without this the transition exists in the source and never on the
@@ -173,21 +222,70 @@ public sealed class ActiveTabFieldWiringTests
         var settle = ShellSource.Load("Tabs.ActiveFieldFill.cs").Method("Settle");
 
         // The guard has to stand before the Stop, or it guards nothing.
+        //
+        // A braced early return is the same guard, so the shape is "an if whose
+        // body is a return, or a block containing only one" -- pinning the
+        // unbraced form would make a formatting choice fail the build.
         var guard = settle.DescendantNodes().OfType<IfStatementSyntax>()
-            .FirstOrDefault(i => i.Statement is ReturnStatementSyntax
-                && i.Condition.ToString().Contains("_running is not null", StringComparison.Ordinal));
+            .FirstOrDefault(i => IsEarlyReturn(i.Statement)
+                && i.Condition.ToString().Contains("_running", StringComparison.Ordinal));
         Assert.True(guard is not null,
             "Settle has no early return protecting a settle already in flight");
 
-        var stop = settle.DescendantNodes().OfType<ExpressionStatementSyntax>()
-            .First(e => e.ToString().Contains("_running?.Stop()", StringComparison.Ordinal));
+        // Any stop of a storyboard, not one spelled a particular way: the local
+        // that holds the abandoned board is an implementation detail, and a
+        // guard keyed to its name breaks on a rename that changes nothing.
+        var stop = settle.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .First(e => e.CalleeText().EndsWith("Stop", StringComparison.Ordinal));
         Assert.True(
             guard!.SpanStart < stop.SpanStart,
             "the in-flight guard runs after the clock is stopped, so it protects nothing");
 
-        // And it is the non-activation case it protects: a guard that also
-        // swallowed a real activation would freeze the field on one colour.
-        Assert.Contains("!moved", guard.Condition.ToString());
+        // Every conjunct named, and named as a SET rather than as a substring
+        // of the whole condition. "!moved" is satisfied by "!movedRecently",
+        // and by "!moved" appearing anywhere in a condition however it is
+        // combined -- including an OR, which would swallow real activations
+        // and freeze the field on one colour.
+        Assert.DoesNotContain(
+            guard.Condition.DescendantNodesAndSelf().OfType<BinaryExpressionSyntax>(),
+            b => b.IsKind(SyntaxKind.LogicalOrExpression));
+
+        var operands = Conjuncts(guard.Condition).Select(o => o.ToString()).ToList();
+        Assert.Equal(
+            new[] { "!moved", "_running is not null", "_target == target" }.OrderBy(s => s),
+            operands.OrderBy(s => s));
+    }
+
+    /// <summary>An if-body that is a return, braced or not.</summary>
+    private static bool IsEarlyReturn(StatementSyntax body)
+        => body is ReturnStatementSyntax
+            || (body is BlockSyntax block
+                && block.Statements.Count == 1
+                && block.Statements[0] is ReturnStatementSyntax);
+
+    /// <summary>
+    /// The operands of an &amp;&amp; chain, flattened.
+    ///
+    /// Only &amp;&amp; is walked through. Every other expression -- including
+    /// `_target == target`, which is itself a BinaryExpressionSyntax -- is a
+    /// leaf. Recursing into any binary node instead would have flagged that
+    /// equality as a non-AND and failed the correct code, which is exactly what
+    /// the first draft of this helper did.
+    ///
+    /// The || case is caught by the caller rather than here: with an OR at the
+    /// top this returns the whole condition as ONE operand, so the set
+    /// comparison fails anyway, but it fails with a confusing message.
+    /// </summary>
+    private static IEnumerable<ExpressionSyntax> Conjuncts(ExpressionSyntax condition)
+    {
+        if (condition is BinaryExpressionSyntax binary
+            && binary.IsKind(SyntaxKind.LogicalAndExpression))
+        {
+            foreach (var left in Conjuncts(binary.Left)) yield return left;
+            foreach (var right in Conjuncts(binary.Right)) yield return right;
+            yield break;
+        }
+        yield return condition;
     }
 
     /// <summary>
