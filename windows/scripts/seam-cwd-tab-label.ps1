@@ -305,7 +305,7 @@ default-profile = pwsh-7
         # polling for the local probe alone would sample between the two
         # writes and call an adopted UNC path a pass.
         [void](Wait-Label $s { param($l) $l.cwd -ne $first.cwd } `
-            "$name: neither injected report reached the app (the raw OSC 9;9 arm is dead)")
+            "${name}: neither injected report reached the app (the raw OSC 9;9 arm is dead)")
         Start-Sleep -Seconds 2
         $settled = (Invoke-SeamCommandQuiet $s @{ op = 'tab-labels' }).labels[0]
         $entry.cwd = $settled.cwd
