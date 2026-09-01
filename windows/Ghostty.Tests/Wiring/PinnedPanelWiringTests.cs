@@ -97,11 +97,11 @@ public class PinnedPanelWiringTests
     /// <summary>
     /// The boundary line is the zone's one anchor, so its placement and
     /// presence are pinned at the parsed call sites: twice an ordinary row
-    /// line, aligned to the rows' left inset with a breath below the
-    /// cluster and a small right inset so it reads as drawn between the
-    /// zones, visible exactly while both zones exist, and painted by the
-    /// brush that carries the drag's aiming feedback and the High
-    /// Contrast opaque override.
+    /// line, a breath below the cluster, and stopping the SAME distance
+    /// short of the row band at both ends so it reads as drawn between the
+    /// zones without drifting off the band's center; visible exactly while
+    /// both zones exist, and painted by the brush that carries the drag's
+    /// aiming feedback and the High Contrast opaque override.
     /// </summary>
     [Fact]
     public void TheBoundary_IsTheZoneAnchor()
@@ -110,9 +110,15 @@ public class PinnedPanelWiringTests
 
         Assert.Equal("BoundaryStrokeHeight",
             Assignments(build, "_boundaryStroke.Height").Single().Right.ToString());
+        // Argument by argument, because the band starts at the rows' own
+        // left inset: an equal inset on both ends of the band spells as
+        // RowInsetLeft + the inset on the left and the inset alone on the
+        // right. Dropping either term is what puts the rule off center.
+        var margin = Assert.IsType<ObjectCreationExpressionSyntax>(
+            Assignments(build, "_boundaryStroke.Margin").Single().Right);
         Assert.Equal(
-            "new Thickness(RowInsetLeft, 3, 4, 0)",
-            Assignments(build, "_boundaryStroke.Margin").Single().Right.ToString());
+            new[] { "RowInsetLeft + BoundaryStrokeInset", "3", "BoundaryStrokeInset", "0" },
+            margin.ArgumentList!.Arguments.Select(a => a.ToString()).ToArray());
 
         var shelf = Strip().Method("UpdatePinnedShelfChrome");
         var visible = Assignments(shelf, "_boundaryStroke.Visibility").Single();
@@ -158,22 +164,27 @@ public class PinnedPanelWiringTests
     {
         var shelf = Strip().Method("UpdatePinnedShelfChrome");
         var flip = Assignments(shelf, "row.ShowTitle").Single();
-        Assert.Equal("showTitles", flip.Right.ToString());
-        var threshold = shelf.DescendantNodes().OfType<VariableDeclaratorSyntax>()
-            .Single(v => v.Identifier.ValueText == "showTitles");
+        // The shared threshold, not a local copy: the shelf, the body rows
+        // and the group headers must degrade at one width or the rail
+        // degrades in pieces.
+        Assert.Equal("ShowsTitles", flip.Right.ToString());
+        var threshold = Strip().Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
+            .Single(p => p.Identifier.ValueText == "ShowsTitles");
         Assert.Equal("_paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold",
-            threshold.Initializer!.Value.ToString());
+            threshold.ExpressionBody!.Expression.ToString());
 
         // ApplyPaneLayout is the choke point: the width lands there, the
-        // chrome refresh runs on the change, and the pane stays honest.
+        // anatomy pass runs on the change, and the pane stays honest.
         var layout = Strip().Method("ApplyPaneLayout");
         var stored = layout.AssignsTo("_paneWidth").Single();
         Assert.Equal("width", stored.Right.ToString());
-        var refresh = layout.Calls("UpdatePinnedShelfChrome").Single();
+        var refresh = layout.Calls("ApplyPaneWidthAnatomy").Single();
         var gate = layout.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "_paneWidth != width");
         Assert.True(gate.Span.Contains(refresh.Span),
-            "the shelf refresh must ride the width-changed gate");
+            "the anatomy pass must ride the width-changed gate");
+        Assert.Single(Strip().Method("ApplyPaneWidthAnatomy")
+            .Calls("UpdatePinnedShelfChrome"));
 
         // The row degrades structurally: the title column collapses, and
         // the bell re-parents between the icon slot's corner and the

@@ -56,7 +56,9 @@ internal sealed partial class VerticalTabPinnedRow : Grid
         // full-bleed through their template; this is that parity.
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         Height = RowHeight;
-        // Same inset the body rows get through NavigationViewItemContentMargin.
+        // Same inset the body rows get from MUXC's own item template
+        // (NavigationViewItemButtonMargin, 4,2), so the shelf's rows and
+        // the pane's rows sit on one grid.
         Margin = new Thickness(4, 2, 0, 2);
         // Keyboard parity with the body rows: MUXC's containers are tab
         // stops with their own arrow traversal, and this row is outside
@@ -151,6 +153,9 @@ internal sealed partial class VerticalTabPinnedRow : Grid
             }
         }
     }
+
+    /// <summary>The icon square, for the seam's geometry readout.</summary>
+    internal FrameworkElement TestSeamIconSlot => _iconSlot;
 
     /// <summary>Swap the row's icon for a freshly built one.</summary>
     public void SetIcon(IconElement? icon)

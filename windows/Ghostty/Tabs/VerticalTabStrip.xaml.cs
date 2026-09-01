@@ -31,6 +31,20 @@ internal sealed partial class VerticalTabStrip : UserControl
 {
     private const double RowInsetLeft = 4;
     private const double RowInsetVertical = 2;
+    // Where a row's trailing glyph stops. The selected row's fill runs to
+    // the pane edge, so this reads as padding inside the fill rather than
+    // as a second inset.
+    private const double RowInsetRight = 8;
+    // What MUXC's NavigationViewItemPresenter reserves to the RIGHT of the
+    // content it hosts, and no theme resource reaches all of: 4px from
+    // LayoutRoot's NavigationViewItemButtonMargin, the ContentGrid's
+    // hardcoded 14, and 8 from NavigationViewItemContentPresenterMargin
+    // (generic.xaml, WindowsAppSDK 2.2). The chevron column adds nothing --
+    // it is x:Load="False" and never realized. A row's content reclaims the
+    // difference with a negative margin; vtab-strip-geometry.ps1 measures
+    // the landed inset, so an SDK that moves this number fails there rather
+    // than drifting silently.
+    private const double NavItemTemplateRightGutter = 26;
     // Grouped members indent under their header: collapse hides members,
     // so this margin is the whole membership cue.
     private const double GroupInsetLeft = 14;
@@ -97,14 +111,14 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     internal void ApplyPaneLayout(bool expanded, double width)
     {
-        // The pinned shelf's anatomy follows the pane's width (full
-        // body-row titles past the title threshold, icon-only below it),
-        // and this is the one pass every width change rides -- cold start,
-        // toggle, and the drag handle's live resize.
+        // Every row's anatomy follows the pane's width (full body-row
+        // titles past the title threshold, icon-only below it), and this is
+        // the one pass every width change rides -- cold start, toggle, and
+        // the drag handle's live resize.
         if (_paneWidth != width)
         {
             _paneWidth = width;
-            UpdatePinnedShelfChrome();
+            ApplyPaneWidthAnatomy();
         }
         NavView.Width = width;
         NavView.MaxWidth = width;
@@ -136,7 +150,6 @@ internal sealed partial class VerticalTabStrip : UserControl
         RebuildAllItems();
         SyncSelectionFromManager();
 
-        ApplyNavItemSpacing();
         Canvas.SetZIndex(SelectionRowHost, 0);
         Canvas.SetZIndex(NavView, 1);
         // Deliberately not LayoutUpdated: it fires for every layout pass
@@ -408,15 +421,6 @@ internal sealed partial class VerticalTabStrip : UserControl
         SetNavResource("NavigationViewItemForegroundPointerOver", inactiveFg);
     }
 
-    private void ApplyNavItemSpacing()
-    {
-        var margin = new Thickness(RowInsetLeft, RowInsetVertical, 0, RowInsetVertical);
-        NavView.Resources["NavigationViewItemContentMargin"] = margin;
-        NavView.Resources["TopNavigationViewItemContentMargin"] = margin;
-        NavView.Resources["NavigationViewCompactPanelMargin"] = new Thickness(0);
-        NavView.Resources["NavigationViewItemCornerRadius"] = new CornerRadius(0);
-    }
-
     /// <summary>
     /// Paint one straight selected row from the strip inset to the pane edge.
     /// MUXC's rounded pill is hidden; this overlay is the sole selection fill.
@@ -593,6 +597,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// ordinary row line and never skippers.
     /// </summary>
     private const double BoundaryStrokeHeight = 2;
+
+    /// <summary>
+    /// How far the boundary stroke stops short of the row band it splits,
+    /// on BOTH sides. Shortening one side only is what made the rule read
+    /// crooked: the band runs from the rows' left inset to the pane edge,
+    /// so an inset applied at the right alone moved the rule's center half
+    /// that distance off the band's at every pane width.
+    /// </summary>
+    private const double BoundaryStrokeInset = 4;
 
     /// <summary>
     /// The pin boundary's stroke. Dimmed while idle; brightened while a
@@ -1352,10 +1365,12 @@ internal sealed partial class VerticalTabStrip : UserControl
         // tree; the label's heading role went with it.)
         _boundaryStroke.Height = BoundaryStrokeHeight;
         _boundaryStroke.IsHitTestVisible = false;
-        // Aligned to the rows' left inset, a breath below the cluster's
-        // own 2px row insets, and off the right edge so the rule reads as
-        // drawn between the zones rather than painted edge to edge.
-        _boundaryStroke.Margin = new Thickness(RowInsetLeft, 3, 4, 0);
+        // A breath below the cluster's own 2px row insets, and off both
+        // ends of the row band so the rule reads as drawn between the zones
+        // rather than painted edge to edge -- equally off both, or it is
+        // the band's center it drifts away from.
+        _boundaryStroke.Margin = new Thickness(
+            RowInsetLeft + BoundaryStrokeInset, 3, BoundaryStrokeInset, 0);
         _boundaryStroke.Visibility = Visibility.Collapsed;
 
         _pinnedShelf.Children.Add(_pinnedPanel);
@@ -1529,7 +1544,7 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         _items[tab] = item;
         _hooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler, groupBinding);
-        ApplyGroupInset(item, tab);
+        ApplyRowInsets(item, tab);
 
         // One seam into the shelf: Up from the first body row walks into
         // it. Every other arrow reaches MUXC's own traversal untouched.
@@ -1679,6 +1694,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         item.GroupToggleRequested += (_, e) =>
             GroupToggleFromCommandRequested?.Invoke(this, e);
         ApplyGroupChrome(item, group);
+        ApplyHeaderAnatomy(item);
 
         var binding = AotBinding.Create(group, _ => ScheduleReconcile(),
             nameof(TabGroup.IsCollapsed), nameof(TabGroup.Title), nameof(TabGroup.Color));
@@ -1719,16 +1735,53 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// Grouped members indent, ungrouped rows do not. Collapse re-parents
-    /// nothing: a member leaving a group un-indents through this same pass.
+    /// A body row's two insets. Left: grouped members indent, ungrouped
+    /// rows do not -- collapse re-parents nothing, so a member leaving a
+    /// group un-indents through this same pass. Right: the template gutter
+    /// the row reclaims, so its close glyph lands where the pinned rows'
+    /// and the headers' trailing edges do.
     /// </summary>
-    private void ApplyGroupInset(NavigationViewItem item, TabModel tab)
+    private void ApplyRowInsets(NavigationViewItem item, TabModel tab)
     {
         if (item.Content is not VerticalTabNavRow row) return;
-        row.Margin = tab.Group is null
-            ? default(Thickness)
-            : new Thickness(GroupInsetLeft, 0, 0, 0);
+        row.ShowClose = ShowsTitles;
+        row.Margin = new Thickness(
+            tab.Group is null ? 0 : GroupInsetLeft, 0, ContentInsetRight, 0);
     }
+
+    /// <summary>
+    /// A group header's anatomy: past the title threshold it is the swatch,
+    /// the group's name, its member count and the chevron; below it the
+    /// name and the count go, because the 48px rail's content slot is
+    /// narrower than they are and a header that keeps them spills its
+    /// chevron past the pane edge. What survives is what the rail can say:
+    /// the group's colour, and whether it is folded.
+    /// </summary>
+    private void ApplyHeaderAnatomy(NavigationViewItem item)
+    {
+        if (item.Content is not VerticalTabGroupHeaderRow row) return;
+        row.ShowTitle = ShowsTitles;
+        row.Margin = new Thickness(0, 0, ContentInsetRight, 0);
+    }
+
+    /// <summary>
+    /// Whether the pane is wide enough to read a title. One threshold for
+    /// the whole strip: the pinned shelf, the body rows and the group
+    /// headers all change anatomy at the same width, or the rail degrades
+    /// in pieces.
+    /// </summary>
+    private bool ShowsTitles
+        => _paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold;
+
+    /// <summary>
+    /// The right margin a row's content wears to reclaim MUXC's reserved
+    /// gutter, so its trailing glyph stops <see cref="RowInsetRight"/> from
+    /// the pane edge. Only past the title threshold: the compact rail's
+    /// content is already arranged outside the pane by that same template,
+    /// and widening it there would push it further out.
+    /// </summary>
+    private double ContentInsetRight
+        => ShowsTitles ? RowInsetRight - NavItemTemplateRightGutter : 0;
 
     private void OnTabGroupStateChanged(TabModel tab)
     {
@@ -1737,7 +1790,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_items.TryGetValue(tab, out var item))
         {
             ApplyItemTitleChrome(item, tab);
-            ApplyGroupInset(item, tab);
+            ApplyRowInsets(item, tab);
         }
         ScheduleReconcile();
     }
@@ -1994,7 +2047,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             var want = shown.Contains(tab) ? Visibility.Visible : Visibility.Collapsed;
             if (item.Visibility != want) item.Visibility = want;
-            ApplyGroupInset(item, tab);
+            ApplyRowInsets(item, tab);
         }
 
         foreach (var (group, header) in _headers)
@@ -2002,6 +2055,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             if (header.Content is VerticalTabGroupHeaderRow row)
                 row.Refresh(group, _manager.MembersOf(group).Count);
             ApplyGroupChrome(header, group);
+            ApplyHeaderAnatomy(header);
         }
 
         UpdatePinnedShelfChrome();
@@ -2027,9 +2081,24 @@ internal sealed partial class VerticalTabStrip : UserControl
         // The pinned rows wear full body-row anatomy when the pane is wide
         // enough to read a title, and degrade to the icon-only slot the
         // 48px compact pane fits when it is not.
-        var showTitles = _paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold;
         foreach (var (_, row) in _pinnedRows)
-            row.ShowTitle = showTitles;
+            row.ShowTitle = ShowsTitles;
+    }
+
+    /// <summary>
+    /// Re-answer every width-dependent question in the strip. The pinned
+    /// shelf, the body rows and the group headers each degrade at the same
+    /// threshold, and a width change is the only event that moves all
+    /// three at once -- the per-row passes that follow a pin, a group or a
+    /// reorder each carry their own row.
+    /// </summary>
+    private void ApplyPaneWidthAnatomy()
+    {
+        UpdatePinnedShelfChrome();
+        foreach (var (tab, item) in _items)
+            ApplyRowInsets(item, tab);
+        foreach (var (_, header) in _headers)
+            ApplyHeaderAnatomy(header);
     }
 
     private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -4216,6 +4285,103 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     /// <summary>The pane width the last ApplyPaneLayout named, for the seam.</summary>
     internal double TestSeamPaneWidth => _paneWidth;
+
+    /// <summary>
+    /// The strip's arranged geometry, in this control's own coordinate
+    /// space. Every chrome question the strip's layout answers -- where the
+    /// zone boundary sits, how far the close glyph is from the pane edge,
+    /// whether a header's content fits -- is a rect comparison, and reading
+    /// the rects beats sampling pixels: Mica puts the desktop behind the
+    /// strip, so what a screen grab shows depends on the wallpaper.
+    ///
+    /// Read-only by construction: nothing here measures, arranges, or
+    /// mutates, so a driver can ask at any settled moment.
+    /// </summary>
+    internal void TestSeamWriteElementRects(System.Text.Json.Utf8JsonWriter json)
+    {
+        json.WriteStartObject("rects");
+        WriteSeamRect(json, "strip", this);
+        WriteSeamRect(json, "pane", NavView);
+        WriteSeamRect(json, "boundary", _boundaryStroke);
+
+        // Manager order, not dictionary order: a driver indexes these
+        // against the state block in the same response.
+        json.WriteStartArray("pinned");
+        foreach (var tab in _manager.Tabs)
+        {
+            if (!_pinnedRows.TryGetValue(tab, out var row)) continue;
+            json.WriteStartObject();
+            json.WriteString("title", tab.EffectiveTitle);
+            WriteSeamRect(json, "row", row);
+            WriteSeamRect(json, "icon", row.TestSeamIconSlot);
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+
+        json.WriteStartArray("rows");
+        foreach (var tab in _manager.Tabs)
+        {
+            if (!_items.TryGetValue(tab, out var item)) continue;
+            json.WriteStartObject();
+            json.WriteString("title", tab.EffectiveTitle);
+            WriteSeamRect(json, "row", item);
+            WriteSeamRect(json, "content", item.Content as FrameworkElement);
+            WriteSeamRect(json, "close",
+                (item.Content as VerticalTabNavRow)?.TestSeamCloseButton);
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+
+        json.WriteStartArray("headers");
+        foreach (var group in _manager.Groups)
+        {
+            if (!_headers.TryGetValue(group, out var item)) continue;
+            var row = item.Content as VerticalTabGroupHeaderRow;
+            json.WriteStartObject();
+            json.WriteString("title", group.Title);
+            WriteSeamRect(json, "row", item);
+            WriteSeamRect(json, "content", row);
+            WriteSeamRect(json, "swatch", row?.TestSeamSwatch);
+            WriteSeamRect(json, "chevron", row?.TestSeamChevron);
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+        json.WriteEndObject();
+    }
+
+    /// <summary>
+    /// One element's arranged box. An element with no box -- collapsed,
+    /// unrealized, or mid-teardown -- reports visible=false and no numbers,
+    /// which is an answer rather than an error: "the compact pane hides the
+    /// close glyph" is exactly what a driver needs to hear.
+    /// </summary>
+    private void WriteSeamRect(
+        System.Text.Json.Utf8JsonWriter json, string name, FrameworkElement? element)
+    {
+        Point? origin = null;
+        if (element is { Visibility: Visibility.Visible, ActualWidth: > 0, ActualHeight: > 0 })
+        {
+            try
+            {
+                origin = element.TransformToVisual(this).TransformPoint(new Point(0, 0));
+            }
+            catch (Exception ex) when (IsLayoutReadFailure(ex))
+            {
+                origin = null;
+            }
+        }
+
+        json.WriteStartObject(name);
+        json.WriteBoolean("visible", origin is not null);
+        if (origin is { } at && element is not null)
+        {
+            json.WriteNumber("x", at.X);
+            json.WriteNumber("y", at.Y);
+            json.WriteNumber("w", element.ActualWidth);
+            json.WriteNumber("h", element.ActualHeight);
+        }
+        json.WriteEndObject();
+    }
 
     /// <summary>
     /// One seam drag: press the row of manager index <paramref name="from"/>,
