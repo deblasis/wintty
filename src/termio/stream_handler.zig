@@ -1583,6 +1583,33 @@ pub const StreamHandler = struct {
             return;
         }
 
+        // A Windows-native shell reports a raw path, not a URL: cmd has no way
+        // to build one (its `PROMPT $p` token expands to `C:\dir` and nothing
+        // else), and the PowerShell integration follows suit on OSC 9;9. There
+        // is no scheme to check and no POSIX translation applies -- but a raw
+        // path can still name a host, in the `\\server\` prefix, and that host
+        // gets the same locality check the URL arm gives its own. A reported
+        // cwd is spawned into, and Windows authenticates to whatever server a
+        // UNC directory names, so adopting a remote one on the strength of
+        // bytes alone would let anything writing to the pty pick who receives
+        // the user's credentials.
+        if (comptime builtin.os.tag == .windows) {
+            if (internal_os.posix_path.isWindowsAbsolute(url)) {
+                const host = internal_os.posix_path.pathHost(url) catch {
+                    log.warn("OSC 7/9;9 path names no directory we can use", .{});
+                    return;
+                };
+                switch (host) {
+                    .local => {},
+                    .server => |name| if (!uncHostIsLocal(name)) {
+                        log.warn("OSC 7/9;9 UNC host ({s}) must be local", .{name});
+                        return;
+                    },
+                }
+                return self.setPwdReported(url);
+            }
+        }
+
         // Attempt to parse this file-style URI using options appropriate
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
         // unencoded path).
@@ -1601,17 +1628,11 @@ pub const StreamHandler = struct {
             return;
         }
 
-        if (comptime builtin.os.tag == .windows) {
-            // POSIX-emulation surfaces only (WSL / MSYS2 / Git-Bash / Cygwin);
-            // other Windows surfaces keep the historical no-op. Such a surface
-            // means we spawned the shell ourselves, so the host is as local as
-            // it gets — skip the isLocal check (same trust basis ghostty
-            // applies to its own ssh sessions).
-            if (self.osc7 == null) {
-                log.warn("OSC 7 ignored: non-POSIX windows surface", .{});
-                return;
-            }
-        } else {
+        // Every Windows surface is one we spawned ourselves, so the host is as
+        // local as it gets -- skip the check (the same trust basis ghostty
+        // applies to its own ssh sessions). What the surface kind decides on
+        // Windows is the translation below, not whether we listen at all.
+        if (comptime builtin.os.tag != .windows) {
             var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
             const host = uri.getHost(&host_buffer) catch |err| switch (err) {
                 error.UriMissingHost => {
@@ -1642,25 +1663,57 @@ pub const StreamHandler = struct {
         var arena_alloc: std.heap.ArenaAllocator = .init(self.alloc);
         var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
         defer arena_alloc.deinit();
-        const path = try uri.path.toRawMaybeAlloc(stack_alloc.get());
+        // One `get()` for the whole function: it resets the stack buffer and
+        // asserts on a second call, so asking twice both invalidates `path`
+        // and aborts a safety-enabled build.
+        const salloc = stack_alloc.get();
+        const path = try uri.path.toRawMaybeAlloc(salloc);
 
-        // On Windows the path comes from a POSIX-emulation shell; translate it
-        // to its Windows form so the title and inherited cwd are usable. Which
-        // translator depends on the surface kind (WSL UNC vs MSYS2/Cygwin
-        // install root). `reported` shares `path`'s stack-fallback arena, and
-        // setPwd/WriteReq copy synchronously, so the lifetime matches the
-        // untranslated path.
+        // On Windows the URL path is in the reporting shell's own vocabulary;
+        // translate it to its Windows form so the title and inherited cwd are
+        // usable. Which translator depends on the surface kind: a POSIX
+        // emulation reports a POSIX path (WSL UNC vs MSYS2/Cygwin install
+        // root), while a native shell reports `/c:/dir`, already Windows-shaped
+        // once the URI's own path root is dropped. `reported` shares `path`'s
+        // stack-fallback arena, and setPwd/WriteReq copy synchronously, so the
+        // lifetime matches the untranslated path.
         const reported = if (comptime builtin.os.tag == .windows)
-            (switch (self.osc7.?) {
-                .wsl => |w| internal_os.posix_path.wslToWindows(stack_alloc.get(), path, w.distro),
-                .rooted => |r| internal_os.posix_path.rootedToWindows(stack_alloc.get(), path, r.install_root),
-            }) catch |err| {
+            (if (self.osc7) |ctx| switch (ctx) {
+                .wsl => |w| internal_os.posix_path.wslToWindows(salloc, path, w.distro),
+                .rooted => |r| internal_os.posix_path.rootedToWindows(salloc, path, r.install_root),
+            } else internal_os.posix_path.uriPathToWindows(salloc, path)) catch |err| {
                 log.warn("OSC 7 path translation failed: {}", .{err});
                 return;
             }
         else
             path;
 
+        return self.setPwdReported(reported);
+    }
+
+    /// Whether a UNC path's server is this machine. The share pseudo-hosts
+    /// (`wsl.localhost`, loopback) are decided by name alone; the real
+    /// computer name needs the OS, and gets the same `hostname.isLocal` the
+    /// URL arm uses.
+    ///
+    /// `isLocal` compares the computer name exactly, so a share written in a
+    /// case the OS does not report it in -- `\\mypc\x` against a `MYPC` --
+    /// reads as remote and the cwd is simply not adopted. That is the safe
+    /// direction to be wrong in; a spawn at the profile's directory is a
+    /// nuisance, and one at an attacker's is a credential.
+    fn uncHostIsLocal(host: []const u8) bool {
+        if (internal_os.posix_path.isLocalShareHost(host)) return true;
+        return internal_os.hostname.isLocal(host) catch |err| {
+            log.warn("failed to get hostname for UNC validation: {}", .{err});
+            return false;
+        };
+    }
+
+    /// Commit a fully-resolved pwd: the terminal's own state, the surface
+    /// notification, and the title when no shell has claimed one. Shared by
+    /// every arm of `reportPwd` so a raw Windows path and a translated URL
+    /// land identically.
+    fn setPwdReported(self: *StreamHandler, reported: []const u8) !void {
         log.debug("terminal pwd: {s}", .{reported});
         try self.terminal.setPwd(reported);
 

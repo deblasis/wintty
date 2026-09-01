@@ -181,4 +181,62 @@ public class SessionProfileResolverTests
         Assert.Equal("C:\\moved-on", snap!.WorkingDirectory);
         Assert.Equal("cmd.exe /k echo hi", snap.ResolvedCommand);
     }
+
+    // A reported cwd is bytes off the pty, and spawning at one makes Windows
+    // authenticate to whatever server it names. Restore reads cwds persisted
+    // by builds that predate the check in the terminal core, so this funnel
+    // has to refuse them on its own.
+    [Theory]
+    [InlineData("\\\\evil.example.com\\share")]
+    [InlineData("\\\\evil.example.com\\share\\deep")]
+    [InlineData("\\\\?\\UNC\\evil.example.com\\share")]
+    [InlineData("\\\\?\\unc\\evil.example.com\\share")]
+    [InlineData("\\\\.\\COM1")]
+    [InlineData("\\\\")]
+    // Win32 normalization folds '/' into '\' before it resolves a path, so
+    // every separator spelling of a UNC path reaches the same server.
+    [InlineData("//evil.example.com/share")]
+    [InlineData("\\/evil.example.com/share")]
+    [InlineData("/\\evil.example.com/share")]
+    // Not an extended-length prefix -- Windows does not normalize inside one --
+    // so this is a plain UNC path naming the host "?", which is not local.
+    [InlineData("//?/UNC/evil.example.com/share")]
+    public void ResolveLeaf_ReportedCwdOnARemoteHost_KeepsTheProfileSDirectory(string cwd)
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Add(ProfileWithDirectory("pwsh"));
+
+        Assert.Equal(
+            "C:\\profile-wd",
+            SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", cwd))!.WorkingDirectory);
+    }
+
+    // ...and the shares that never reach the wire still inherit, so the
+    // refusal above is a rule about hosts and not about UNC.
+    [Theory]
+    [InlineData("\\\\wsl.localhost\\Ubuntu\\home\\alex")]
+    [InlineData("\\\\WSL$\\Ubuntu\\home\\alex")]
+    [InlineData("\\\\localhost\\c$\\src")]
+    [InlineData("\\\\?\\C:\\src")]
+    public void ResolveLeaf_ReportedCwdOnALocalShare_StillOverrides(string cwd)
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Add(ProfileWithDirectory("pwsh"));
+
+        Assert.Equal(
+            cwd,
+            SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", cwd))!.WorkingDirectory);
+    }
+
+    [Fact]
+    public void ResolveLeaf_ReportedCwdOnThisMachineSOwnShare_StillOverrides()
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Add(ProfileWithDirectory("pwsh"));
+        var cwd = $"\\\\{Environment.MachineName}\\c$\\src";
+
+        Assert.Equal(
+            cwd,
+            SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", cwd))!.WorkingDirectory);
+    }
 }

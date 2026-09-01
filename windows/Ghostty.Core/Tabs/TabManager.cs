@@ -773,6 +773,9 @@ internal sealed class TabManager
         // without needing a shared dictionary.
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         host.ProgressChanged += progressHandler;
+        // The directory the tab names, from whichever pane is focused.
+        EventHandler<string?> cwdHandler = (_, cwd) => tab.ShellReportedCwd = cwd;
+        host.CwdChanged += cwdHandler;
         // Forward the active-leaf bell to the window level (taskbar badge)
         // and, when bell-features includes `title`, mark the tab indicator.
         // Captured as locals so CloseTab can unsubscribe alongside progress.
@@ -797,6 +800,7 @@ internal sealed class TabManager
         tab.OnClose = () =>
         {
             host.ProgressChanged -= progressHandler;
+            host.CwdChanged -= cwdHandler;
             host.BellRang -= bellRangHandler;
             host.BellAcknowledged -= bellAckHandler;
             host.LastLeafClosed -= lastLeafHandler;
@@ -824,6 +828,7 @@ internal sealed class TabManager
     {
         if (sender is TabModel t && ReferenceEquals(t, _activeTab) &&
             (e.PropertyName == nameof(TabModel.ShellReportedTitle) ||
+             e.PropertyName == nameof(TabModel.ShellReportedCwd) ||
              e.PropertyName == nameof(TabModel.UserOverrideTitle)))
         {
             WindowTitleChanged?.Invoke(this, EventArgs.Empty);
@@ -919,6 +924,8 @@ internal sealed class TabManager
         tab.PaneHost.LeafFocused += OnLeafFocused;
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         tab.PaneHost.ProgressChanged += progressHandler;
+        EventHandler<string?> cwdHandler = (_, cwd) => tab.ShellReportedCwd = cwd;
+        tab.PaneHost.CwdChanged += cwdHandler;
         EventHandler<Ghostty.Core.Bell.BellFeatures> bellRangHandler = (_, features) =>
         {
             BellRang?.Invoke(this, features);
@@ -941,6 +948,7 @@ internal sealed class TabManager
         tab.OnClose = () =>
         {
             tab.PaneHost.ProgressChanged -= progressHandler;
+            tab.PaneHost.CwdChanged -= cwdHandler;
             tab.PaneHost.BellRang -= bellRangHandler;
             tab.PaneHost.BellAcknowledged -= bellAckHandler;
             tab.PaneHost.LastLeafClosed -= lastLeafHandler;
