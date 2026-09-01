@@ -36,6 +36,13 @@ internal sealed partial class TabSwitcherPopup : UserControl
     // theme switch between openings is honored.
     private SwitcherTheme _theme;
 
+    // The first tile's preview body, kept for the test seam's rect reporter.
+    // The fill it paints is what a pixel oracle measures, and a bare Canvas
+    // has no automation peer for a UIA-locating harness to find.
+    private FrameworkElement? _firstPreviewBody;
+
+    internal FrameworkElement? TestSeamFirstPreviewBody => _firstPreviewBody;
+
     private readonly record struct SwitcherTheme(
         double CaptionFontSize,
         Brush CardBackground,
@@ -76,6 +83,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
         CandidateRow.Children.Clear();
         _cellByTab.Clear();
         _idleBorderByTab.Clear();
+        _firstPreviewBody = null;
         _theme = ResolveTheme();
         // MainWindow assigns Width/Height immediately before calling Show, so
         // ActualWidth still holds the previous open's value (zero the first
@@ -140,7 +148,8 @@ internal sealed partial class TabSwitcherPopup : UserControl
         header.Children.Add(title);
 
         // Shared slate fill so the 1px per-pane inset reads as dividers
-        // between splits (matches the overview); panes paint near-black over it.
+        // between splits (matches the overview); panes paint the terminal
+        // background over it.
         var body = new Canvas
         {
             Width = PreviewWidth,
@@ -148,6 +157,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
             Background = PanePreviewRenderer.DividerFill,
         };
         renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
+        _firstPreviewBody ??= body;
 
         var content = new StackPanel { Orientation = Orientation.Vertical };
         content.Children.Add(header);
