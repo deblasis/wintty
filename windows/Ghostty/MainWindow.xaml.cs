@@ -2530,44 +2530,64 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Brief, subtle shake of the window's CONTENT when the layout-switch
+    /// Brief, subtle shake of the STRUCK STRIP when the layout-switch
     /// ghost lands: a damped nudge along its travel direction, as if the
     /// strip absorbed the impact.
     ///
-    /// It used to shake the window itself, with AppWindow.Move. Filmed by
-    /// polling the window rect, that produced three discrete positions
-    /// (-4, +2, -1 pixels) over about 140ms at intervals of 22 to 73ms
-    /// against the 26ms it asked for, because every step was an await
-    /// resuming on the UI thread at the exact moment the switch has that
-    /// thread busiest. Three irregular jumps is not a shake.
+    /// It used to shake the window itself, with AppWindow.Move -- three
+    /// discrete positions is not a shake -- and then the whole content
+    /// tree, via RootGrid's Offset. Filmed, that was the single largest
+    /// motion of the entire transition: every pixel of a 1280px window,
+    /// terminal text included, at four to six times the amplitude of the
+    /// switch it was punctuating. The same few pixels of travel on the
+    /// strip the ghost actually lands on reads as the impact it is meant
+    /// to be; on everything at once it reads as a glitch. So the
+    /// coordinator now says WHICH element was hit and only that moves.
     ///
-    /// A compositor Offset animation runs on the compositor at its own
-    /// rate, and the delay is what puts it in the right place: the caller
-    /// hands over how long is left of the flight, so the nudge starts at
-    /// the landing rather than whenever a queued callback is finally
-    /// pumped (measured at ~560ms for motion that ended at 340ms).
+    /// The morph overlay moves with it. The ghost sits on the incoming
+    /// strip's tab slot when the shake runs (the real row under it is
+    /// still hidden until the landing turn), and it lives on a canvas
+    /// outside the strip, so a strip-only nudge would shear the ghost
+    /// against the row it is standing in for by the full amplitude. Both
+    /// visuals start the same animation in the same commit, so the
+    /// compositor moves them as one.
     ///
-    /// Most of what the old version guarded against is gone with the
-    /// AppWindow.Move it was guarding. Content cannot fight the presenter,
-    /// so the maximized / fullscreen / quake checks go; content cannot be
-    /// dragged out from under itself, so the "did the window move under
-    /// us" read-back goes; and there is no awaited loop left to re-enter,
-    /// so the busy flag goes. The teardown guard STAYS, and gains a
-    /// partner: a compositor animation outlives the managed object that
-    /// started it, so a nudge scheduled against a closing window has to be
-    /// stopped rather than merely not started (the same hazard
-    /// LayoutCoordinator.CancelSwitch exists for).
+    /// Translation rather than Offset, and that is load-bearing: the
+    /// landing turn re-arranges the strip (Snap collapses the lane), XAML
+    /// writes Visual.Offset during arrange, and an Offset animation racing
+    /// an arrange would be stomped mid-shake. XAML never touches the
+    /// hand-in Translation property.
+    ///
+    /// A compositor animation runs at the compositor's own rate, and the
+    /// delay is what puts it in the right place: the caller hands over how
+    /// long is left of the flight, so the nudge starts at the landing
+    /// rather than whenever a queued callback is finally pumped (measured
+    /// at ~560ms for motion that ended at 340ms).
+    ///
+    /// The teardown guard STAYS, and has a partner: a compositor animation
+    /// outlives the managed object that started it, so a nudge scheduled
+    /// against a closing window has to be stopped rather than merely not
+    /// started (the same hazard LayoutCoordinator.CancelSwitch exists
+    /// for).
     /// </summary>
+    /// <param name="target">The incoming strip the ghost lands on.</param>
     /// <param name="dx">Unit direction the ghost travelled, X.</param>
     /// <param name="dy">Unit direction the ghost travelled, Y.</param>
     /// <param name="delay">How long until the ghost lands.</param>
-    private void NudgeContentForImpact(double dx, double dy, TimeSpan delay)
+    private void NudgeContentForImpact(
+        FrameworkElement target, double dx, double dy, TimeSpan delay)
     {
         if (_isClosed) return;
         try
         {
+            Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .SetIsTranslationEnabled(target, true);
+            Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .SetIsTranslationEnabled(TabMorphLayer, true);
             var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
-                .GetElementVisual(RootGrid);
+                .GetElementVisual(target);
+            var layerVisual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .GetElementVisual(TabMorphLayer);
             var compositor = visual.Compositor;
 
             // One out-and-back, and both halves of that matter.
@@ -2629,20 +2649,24 @@ public sealed partial class MainWindow : Window
                 if (_isClosed) return;
                 StopImpactNudge();
             };
-            visual.StartAnimation("Offset", shake);
+            visual.StartAnimation("Translation", shake);
+            layerVisual.StartAnimation("Translation", shake);
             batch.End();
             _impactVisual = visual;
+            _impactLayerVisual = layerVisual;
         }
         catch (Exception)
         {
             // Composition refused. The switch is unaffected: this is the
             // flourish after it, not part of it.
             _impactVisual = null;
+            _impactLayerVisual = null;
         }
     }
 
     /// <summary>
-    /// Release the impact nudge and put the content back at rest.
+    /// Release the impact nudge and put the strip and the morph overlay
+    /// back at rest.
     ///
     /// Called from the scoped batch when it finishes normally, and from
     /// the closing path, where it is the half that matters: the animation
@@ -2653,10 +2677,22 @@ public sealed partial class MainWindow : Window
     {
         if (_impactVisual is not { } visual) return;
         _impactVisual = null;
+        var layer = _impactLayerVisual;
+        _impactLayerVisual = null;
         try
         {
-            visual.StopAnimation("Offset");
-            visual.Offset = System.Numerics.Vector3.Zero;
+            // The rest value is written through the same property set the
+            // hand-in Translation lives in; writing Visual.Offset would
+            // reset a property this animation never moved.
+            visual.StopAnimation("Translation");
+            visual.Properties.InsertVector3(
+                "Translation", System.Numerics.Vector3.Zero);
+            if (layer is not null)
+            {
+                layer.StopAnimation("Translation");
+                layer.Properties.InsertVector3(
+                    "Translation", System.Numerics.Vector3.Zero);
+            }
         }
         catch (Exception)
         {
@@ -2665,7 +2701,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>How far the content is pushed, at the peak.</summary>
+    /// <summary>How far the struck strip is pushed, at the peak.</summary>
     private const float ImpactPeakPixels = 4f;
 
     /// <summary>
@@ -2684,8 +2720,15 @@ public sealed partial class MainWindow : Window
     private static readonly TimeSpan ImpactShakeDuration =
         TimeSpan.FromMilliseconds(140);
 
-    /// <summary>The visual a nudge is running against, or null.</summary>
+    /// <summary>The struck strip's visual a nudge is running against, or null.</summary>
     private Microsoft.UI.Composition.Visual? _impactVisual;
+
+    /// <summary>
+    /// The morph overlay's visual, nudged in lockstep with the strip so
+    /// the ghost standing on it does not shear against the row it covers.
+    /// Non-null exactly when <see cref="_impactVisual"/> is.
+    /// </summary>
+    private Microsoft.UI.Composition.Visual? _impactLayerVisual;
 
     /// <summary>
     /// True while the High Contrast override is layered onto the config,
