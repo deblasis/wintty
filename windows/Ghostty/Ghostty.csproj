@@ -514,7 +514,9 @@
 
   <!--
     Demo mode files compile only when the DEMO constant is set (see
-    windows/Directory.Build.props). The *.cs are self-gated with #if DEMO, but
+    windows/Directory.Build.targets, NOT the props file beside it: the gate
+    reads $(Configuration), which is still empty while props is being
+    evaluated). The *.cs are self-gated with #if DEMO, but
     the XAML toolchain would still generate a g.cs for DemoOverlay.xaml in a
     non-demo build, leaking the type. Exclude both from non-demo builds so
     public Release binaries carry zero demo bytes.
