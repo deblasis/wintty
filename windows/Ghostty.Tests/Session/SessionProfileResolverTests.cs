@@ -193,6 +193,14 @@ public class SessionProfileResolverTests
     [InlineData("\\\\?\\unc\\evil.example.com\\share")]
     [InlineData("\\\\.\\COM1")]
     [InlineData("\\\\")]
+    // Win32 normalization folds '/' into '\' before it resolves a path, so
+    // every separator spelling of a UNC path reaches the same server.
+    [InlineData("//evil.example.com/share")]
+    [InlineData("\\/evil.example.com/share")]
+    [InlineData("/\\evil.example.com/share")]
+    // Not an extended-length prefix -- Windows does not normalize inside one --
+    // so this is a plain UNC path naming the host "?", which is not local.
+    [InlineData("//?/UNC/evil.example.com/share")]
     public void ResolveLeaf_ReportedCwdOnARemoteHost_KeepsTheProfileSDirectory(string cwd)
     {
         var reg = new FakeProfileRegistry();

@@ -1,3 +1,5 @@
+using System;
+
 namespace Ghostty.Core.Session;
 
 /// <summary>
@@ -25,6 +27,13 @@ namespace Ghostty.Core.Session;
 /// A directory the USER configured is not subject to this: a profile's
 /// working-directory is theirs to set. Only the reported value passes here.
 /// </para>
+/// <para>
+/// What this does not see: a drive letter mapped to a network share. <c>Z:\</c>
+/// passes, and can still resolve to another machine. That is a weaker vector --
+/// the mapping is one the user made, to a server they already authenticated to,
+/// and a reported <c>Z:\</c> reaches nothing unless the mapping exists. The rule
+/// here is about paths that NAME a host, not every path that can reach one.
+/// </para>
 /// </remarks>
 internal static class SpawnCwdPolicy
 {
@@ -41,18 +50,29 @@ internal static class SpawnCwdPolicy
     public static bool MaySpawnAt(string? cwd)
     {
         if (string.IsNullOrEmpty(cwd)) return false;
-        if (!cwd.StartsWith(@"\\", System.StringComparison.Ordinal)) return true;
+
+        // Two leading separators of EITHER kind is UNC, because Win32
+        // normalization folds '/' into '\' before it resolves the path. A
+        // check that only knew the backslash spelling would let `//host/share`
+        // through to CreateProcess and reach exactly the server it exists to
+        // refuse.
+        if (cwd.Length < 2 || !IsSeparator(cwd[0]) || !IsSeparator(cwd[1])) return true;
 
         var rest = cwd.AsSpan(2);
 
         // `\\?\` (extended-length) and `\\.\` (device) share a shape and a
-        // meaning: what follows is not a server name. `\\?\UNC\server\share`
-        // is a second spelling of the same reach, so it is parsed rather
-        // than waved through.
-        if (rest.Length >= 2 && (rest[0] == '?' || rest[0] == '.') && rest[1] == '\\')
+        // meaning: what follows is not a server name. Both prefixes are
+        // matched with literal backslashes because Windows does NOT normalize
+        // separators inside them -- `//?/UNC/host/share` is not an extended
+        // path at all, it is a plain UNC one naming the host `?`, which falls
+        // through below and is refused. Strict here is what makes that true.
+        if (rest.Length >= 2 && (rest[0] == '?' || rest[0] == '.')
+            && cwd[0] == '\\' && cwd[1] == '\\' && rest[1] == '\\')
         {
             var tail = rest[2..];
-            if (tail.StartsWith("UNC\\", System.StringComparison.OrdinalIgnoreCase))
+            // `\\?\UNC\server\share` is a second spelling of the same reach,
+            // so it is parsed rather than waved through.
+            if (tail.StartsWith("UNC\\", StringComparison.OrdinalIgnoreCase))
                 return HostIsLocal(tail[4..]);
             // `\\?\C:\dir` is the long-path spelling of a drive root.
             if (tail.Length >= 2 && char.IsAsciiLetter(tail[0]) && tail[1] == ':') return true;
@@ -63,19 +83,21 @@ internal static class SpawnCwdPolicy
         return HostIsLocal(rest);
     }
 
+    private static bool IsSeparator(char c) => c is '\\' or '/';
+
     /// <summary>
     /// Whether the server at the head of a UNC path (its <c>\\</c> or
     /// <c>\\?\UNC\</c> prefix already removed) is this machine.
     /// </summary>
-    private static bool HostIsLocal(System.ReadOnlySpan<char> unc)
+    private static bool HostIsLocal(ReadOnlySpan<char> unc)
     {
         var end = unc.IndexOfAny('\\', '/');
         var host = end < 0 ? unc : unc[..end];
         if (host.IsEmpty) return false;
 
         foreach (var local in LocalShareHosts)
-            if (host.Equals(local, System.StringComparison.OrdinalIgnoreCase)) return true;
+            if (host.Equals(local, StringComparison.OrdinalIgnoreCase)) return true;
 
-        return host.Equals(System.Environment.MachineName, System.StringComparison.OrdinalIgnoreCase);
+        return host.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
     }
 }

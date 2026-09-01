@@ -1,5 +1,7 @@
 //! Translate POSIX paths reported by Windows POSIX-emulation shells (WSL,
-//! MSYS2/MinGW/Git-Bash, Cygwin) via OSC 7 into the equivalent Windows paths.
+//! MSYS2/MinGW/Git-Bash, Cygwin) via OSC 7 into the equivalent Windows paths,
+//! and answer the shape questions a reported path raises before it is adopted:
+//! whether it is a raw path or a URL, and which machine it names.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -154,6 +156,14 @@ pub const PathHost = union(enum) {
 /// parsed rather than waved through precisely because `\\?\UNC\server\share`
 /// is a second spelling of the same reach, and a check that missed it would
 /// name the hole it was closing.
+///
+/// What this does NOT see: a drive letter mapped to a network share. `Z:\` is
+/// `.local` here and can still resolve to another machine. That is a weaker
+/// vector -- the mapping is one the user made, to a server they already
+/// authenticated to, and a reported `Z:\` reaches nothing unless such a
+/// mapping exists -- and finding out would mean a per-drive query on a path
+/// that arrives on every prompt. The rule enforced here is about paths that
+/// NAME a host, not about every path that can reach one.
 pub fn pathHost(path: []const u8) error{InvalidPath}!PathHost {
     if (!std.mem.startsWith(u8, path, "\\\\")) return .local;
     const rest = path[2..];
