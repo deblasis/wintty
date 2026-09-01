@@ -50,4 +50,53 @@
     <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
     <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
   </PropertyGroup>
+
+  <!--
+    Both gates above were guarded in one direction only: every check asserted
+    the property is WRITTEN correctly here, and nothing asserted that a
+    shipping build does not carry what the gate excludes. Measured on #926's
+    branch, `dotnet build -c Release /p:DemoEnabled=true` produced a Release
+    binary carrying the demo overlay with the gate's own guard green, and
+    TESTSEAM has the identical exposure (issue #927).
+
+    A test cannot close that. Neither test project references the app, so
+    nothing in a test run can see whether Wintty.dll carries the seam. This
+    can: it is evaluated in every project under windows/, the app included,
+    against the RESOLVED property rather than the file that usually sets it.
+
+    The documented opt-ins stay open, and they are the only way through:
+    `-p:TestSeam=true` and `-p:Demo=true` set $(TestSeam)/$(Demo) as globals,
+    which is what separates "a human asked for this build" from "something set
+    the internal property". A build that takes either is one nobody should
+    install, which is what the seam's own comment already says.
+  -->
+  <!--
+    BeforeBuild, not CoreCompile. CoreCompile is skipped when the project is
+    up to date, so hooking it produced a guard that silently did not run on
+    every incremental build, and an incremental build still emits a binary
+    from a compile that may have happened under the leak. BeforeBuild carries
+    no Inputs/Outputs and runs on every invocation.
+  -->
+  <Target Name="RefuseAGateLeakIntoARelease"
+          BeforeTargets="BeforeBuild"
+          Condition="'$(Configuration)' == 'Release'">
+    <Error Condition="'$(TestSeamEnabled)' == 'true' and '$(TestSeam)' != 'true'"
+           Code="WINTTY0001"
+           Text="TestSeamEnabled is true in a Release build of $(MSBuildProjectName) without the -p:TestSeam=true opt-in, so this build would ship the in-process test seam: a named pipe whose send-text op hands arbitrary bytes to a live shell. Something set TestSeamEnabled outside windows/Directory.Build.targets. Pass -p:TestSeam=true if a driveable Release build is genuinely wanted (and do not install it)." />
+    <Error Condition="'$(DemoEnabled)' == 'true' and '$(Demo)' != 'true'"
+           Code="WINTTY0002"
+           Text="DemoEnabled is true in a Release build of $(MSBuildProjectName) without the -p:Demo=true opt-in, so this build would ship demo mode. Something set DemoEnabled outside windows/Directory.Build.targets. Pass -p:Demo=true if that is intended." />
+  </Target>
+
+  <!--
+    Companion constants for the runtime half of the same rule. A test asserting
+    "a Release build carries no demo types" is correct until someone takes the
+    documented opt-in, at which point it would fail a legitimate build. These
+    say which builds asked for it, so the assertion can exempt itself rather
+    than being deleted the first time it is inconvenient.
+  -->
+  <PropertyGroup>
+    <DefineConstants Condition="'$(TestSeam)' == 'true'">$(DefineConstants);TESTSEAM_OPTIN</DefineConstants>
+    <DefineConstants Condition="'$(Demo)' == 'true'">$(DefineConstants);DEMO_OPTIN</DefineConstants>
+  </PropertyGroup>
 </Project>
