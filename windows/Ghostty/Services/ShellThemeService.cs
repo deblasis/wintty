@@ -18,7 +18,33 @@ internal sealed class ShellThemeService
     public Windows.UI.Color TitleBarForeground { get; private set; }
     public Windows.UI.Color TabBarBackground { get; private set; }
     public Windows.UI.Color AccentColor { get; private set; }
-    public Windows.UI.Color ActiveTabText { get; private set; }
+
+    /// <summary>
+    /// The ground the ACTIVE tab is painted with: the terminal's own
+    /// background.
+    /// </summary>
+    /// <remarks>
+    /// The active tab is the field -- the terminal surface carried up into
+    /// the strip -- so it takes the terminal's ground and runs into the pane
+    /// below it with no line between. Inactive tabs stay chrome.
+    /// <see cref="AccentColor"/> is the stroke around that field, never the
+    /// field itself: filling with it made the active tab a second, brighter
+    /// chrome surface, and the seam cover then drew that accent straight
+    /// across the pane's top border.
+    ///
+    /// Named for the role rather than read off <see cref="TitleBarBackground"/>,
+    /// which resolves to the same pair today but answers a different question
+    /// (what the title row is painted). A strip reading the wrong one of those
+    /// is a bug nobody can see in the diff.
+    /// </remarks>
+    public Windows.UI.Color ActiveTabFill { get; private set; }
+
+    /// <summary>
+    /// Ink for the active tab: the terminal's own foreground, because that is
+    /// the pair <see cref="ActiveTabFill"/> was chosen to be read against.
+    /// </summary>
+    public Windows.UI.Color ActiveTabInk { get; private set; }
+
     public Windows.UI.Color InactiveTabText { get; private set; }
     public Windows.UI.Color ScrollbarTrack { get; private set; }
     public Windows.UI.Color ScrollbarThumb { get; private set; }
@@ -70,9 +96,11 @@ internal sealed class ShellThemeService
             _configService.AccentColor
             ?? _configService.CursorColor
             ?? _configService.ForegroundColor);
-        var newActiveTabText = _configService.CursorTextColor.HasValue
-            ? UnpackColor(_configService.CursorTextColor.Value)
-            : bg; // fallback: background color on cursor-color bg
+        // The active tab is the field, so its ground and its ink are the
+        // terminal's own pair -- not cursor-text on a cursor-coloured tab,
+        // which is what this used to be while the fill was the accent.
+        var newActiveTabFill = bg;
+        var newActiveTabInk = fg;
         var newInactiveTabText = UnpackColor(palette[8]); // bright black
         var newScrollbarTrack = ShiftBrightness(bg, fg, 0.08f);
         var newScrollbarThumb = Windows.UI.Color.FromArgb(
@@ -82,7 +110,8 @@ internal sealed class ShellThemeService
             || TitleBarForeground != newTitleBarFg
             || TabBarBackground != newTabBarBg
             || AccentColor != newAccent
-            || ActiveTabText != newActiveTabText
+            || ActiveTabFill != newActiveTabFill
+            || ActiveTabInk != newActiveTabInk
             || InactiveTabText != newInactiveTabText
             || ScrollbarTrack != newScrollbarTrack
             || ScrollbarThumb != newScrollbarThumb;
@@ -91,7 +120,8 @@ internal sealed class ShellThemeService
         TitleBarForeground = newTitleBarFg;
         TabBarBackground = newTabBarBg;
         AccentColor = newAccent;
-        ActiveTabText = newActiveTabText;
+        ActiveTabFill = newActiveTabFill;
+        ActiveTabInk = newActiveTabInk;
         InactiveTabText = newInactiveTabText;
         ScrollbarTrack = newScrollbarTrack;
         ScrollbarThumb = newScrollbarThumb;
