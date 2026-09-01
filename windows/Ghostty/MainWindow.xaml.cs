@@ -170,7 +170,12 @@ public sealed partial class MainWindow : Window
         var scale = source.XamlRoot.RasterizationScale;
         var client = new System.Drawing.Point(
             (int)(origin.X * scale), (int)(origin.Y * scale));
-        PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref client);
+        // On failure ClientToScreen leaves the point untouched, so the
+        // client coordinates would be returned labelled as screen ones and
+        // nothing downstream could tell. For a seam rect that is not a
+        // missed measurement, it is a verdict about the wrong region.
+        if (!PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref client))
+            return null;
         return (client.X, client.Y,
             (int)(rect.Width * scale), (int)(rect.Height * scale));
     }
@@ -228,7 +233,8 @@ public sealed partial class MainWindow : Window
             .TransformPoint(new Windows.Foundation.Point(0, 0));
         var origin = new System.Drawing.Point(
             (int)(topLeft.X * scale), (int)(topLeft.Y * scale));
-        PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref origin);
+        if (!PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref origin))
+            return null;
         return (origin.X, origin.Y,
             (int)(body.ActualWidth * scale), (int)(body.ActualHeight * scale));
     }
