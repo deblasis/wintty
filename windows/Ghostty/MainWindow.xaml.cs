@@ -170,7 +170,12 @@ public sealed partial class MainWindow : Window
         var scale = source.XamlRoot.RasterizationScale;
         var client = new System.Drawing.Point(
             (int)(origin.X * scale), (int)(origin.Y * scale));
-        PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref client);
+        // On failure ClientToScreen leaves the point untouched, so the
+        // client coordinates would be returned labelled as screen ones and
+        // nothing downstream could tell. For a seam rect that is not a
+        // missed measurement, it is a verdict about the wrong region.
+        if (!PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref client))
+            return null;
         return (client.X, client.Y,
             (int)(rect.Width * scale), (int)(rect.Height * scale));
     }
@@ -209,7 +214,10 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// The first switcher tile's pane-preview rect in screen pixels, or null
-    /// when the cycle popup is not up. A pixel oracle cannot locate this
+    /// when the cycle popup is not up, when the preview has no XamlRoot, or
+    /// when the client-to-screen conversion failed -- the last of which is a
+    /// harness miss and not a measurement, which is why it is a null here and
+    /// not a rect. A pixel oracle cannot locate this
     /// surface the way it locates the tile's title: the preview body is a
     /// bare Canvas, which gets no automation peer and so never appears in
     /// the UIA tree. Screen pixels because that is the space a window
@@ -228,7 +236,8 @@ public sealed partial class MainWindow : Window
             .TransformPoint(new Windows.Foundation.Point(0, 0));
         var origin = new System.Drawing.Point(
             (int)(topLeft.X * scale), (int)(topLeft.Y * scale));
-        PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref origin);
+        if (!PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref origin))
+            return null;
         return (origin.X, origin.Y,
             (int)(body.ActualWidth * scale), (int)(body.ActualHeight * scale));
     }
@@ -1805,11 +1814,24 @@ public sealed partial class MainWindow : Window
     ///
     /// DPI contract: <c>GetCursorPos</c> returns physical pixel
     /// coordinates in virtual desktop space. <c>DisplayArea.GetFromPoint</c>
-    /// consumes physical pixels. The two line up without scaling.
+    /// consumes physical pixels. The two line up without scaling. The
+    /// fallback below shares that contract: <c>AppWindow.Position</c> is a
+    /// <c>PointInt32</c> in the same raw physical screen space, which is what
+    /// makes it substitutable for the cursor here.
     /// </summary>
     private Ghostty.Core.Windows.PlacementRect ComputeCursorAnchoredPlacement(MainWindow target)
     {
-        PInvoke.GetCursorPos(out var pt);
+        // A discarded failure leaves pt at (0,0), which is a real coordinate:
+        // the new window would anchor to the corner of the primary monitor
+        // and nothing would say why. The source window's own position is the
+        // fallback -- Compute offsets by 32 and clamps, so the new window
+        // lands essentially on top of the one that spawned it, on the right
+        // monitor, rather than at a place the cursor never was.
+        if (!PInvoke.GetCursorPos(out var pt))
+        {
+            var origin = AppWindow.Position;
+            pt = new System.Drawing.Point(origin.X, origin.Y);
+        }
 
         var cursorPoint = new Windows.Graphics.PointInt32(pt.X, pt.Y);
         var display = Microsoft.UI.Windowing.DisplayArea.GetFromPoint(
@@ -4356,21 +4378,30 @@ public sealed partial class MainWindow : Window
         var g = new Ghostty.Core.Session.WindowGeometry { Maximized = isMaximized };
         if (isMaximized)
         {
+            // A discarded failure leaves rcNormalPosition all zeros, and this
+            // window's restore geometry is then persisted as 0,0,0,0 -- the
+            // next launch un-maximizes into a degenerate window. Falling
+            // through to the AppWindow bounds is the wrong answer in the
+            // small way (it saves the maximized rect as the restored size,
+            // which is exactly what rcNormalPosition exists to avoid) and the
+            // right one in the large: a monitor-sized window rather than a
+            // broken one.
             var placement = new WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>() };
-            PInvoke.GetWindowPlacement(hwnd, ref placement);
-            var rc = placement.rcNormalPosition;
-            g.X = rc.left;
-            g.Y = rc.top;
-            g.Width = rc.right - rc.left;
-            g.Height = rc.bottom - rc.top;
+            if (PInvoke.GetWindowPlacement(hwnd, ref placement))
+            {
+                var rc = placement.rcNormalPosition;
+                g.X = rc.left;
+                g.Y = rc.top;
+                g.Width = rc.right - rc.left;
+                g.Height = rc.bottom - rc.top;
+                return g;
+            }
         }
-        else
-        {
-            g.X = AppWindow.Position.X;
-            g.Y = AppWindow.Position.Y;
-            g.Width = AppWindow.Size.Width;
-            g.Height = AppWindow.Size.Height;
-        }
+
+        g.X = AppWindow.Position.X;
+        g.Y = AppWindow.Position.Y;
+        g.Width = AppWindow.Size.Width;
+        g.Height = AppWindow.Size.Height;
         return g;
     }
 
