@@ -67,7 +67,18 @@ internal sealed partial class TabColorPalettePicker : UserControl
     /// </summary>
     private bool _openedFocus;
 
-    public TabColorPalettePicker(TabColor initial)
+    /// <summary>
+    /// A tab admits <see cref="TabColor.None"/> -- it is how a tint is
+    /// cleared -- so that is the default.
+    /// </summary>
+    public TabColorPalettePicker(TabColor initial) : this(initial, allowNone: true) { }
+
+    /// <param name="allowNone">
+    /// Whether the None swatch is offered. False for a group: a group has no
+    /// "no color" state, and offering None let the UI ask for a value the
+    /// model refuses, which read to the user as a swatch that does nothing.
+    /// </param>
+    public TabColorPalettePicker(TabColor initial, bool allowNone)
     {
         InitializeComponent();
 
@@ -77,7 +88,7 @@ internal sealed partial class TabColorPalettePicker : UserControl
         // tree (see the XAML), and LabeledBy would point into nothing.
         AutomationProperties.SetName(Swatches, PaletteLabel.Text);
 
-        BuildSwatches(initial);
+        BuildSwatches(initial, allowNone);
 
         Loaded += (_, _) =>
         {
@@ -91,7 +102,7 @@ internal sealed partial class TabColorPalettePicker : UserControl
         };
     }
 
-    private void BuildSwatches(TabColor initial)
+    private void BuildSwatches(TabColor initial, bool allowNone)
     {
         // TabColorPalette.PaletteRows is the macOS-derived layout, kept in
         // Ghostty.Core so platform divergence stays in one file. Flattening
@@ -100,6 +111,11 @@ internal sealed partial class TabColorPalettePicker : UserControl
         {
             foreach (var color in row)
             {
+                // Skipped rather than disabled: a disabled first swatch is
+                // still a tab stop the keyboard lands on, and the row would
+                // open with a hole where the palette's first entry belongs.
+                if (color == TabColor.None && !allowNone) continue;
+
                 var swatch = BuildSwatch(color);
                 _colors[swatch] = color;
                 Swatches.Items.Add(swatch);
