@@ -51,6 +51,32 @@ exact test, so the arms alone do not settle it. The reason to believe the
 toggle anyway is mechanical rather than statistical -- the crashing frame
 IS the buffer-growth branch, and only a size change reaches it.
 
+PROVOCATION ATTEMPTS, 2026-09-01 afternoon, same unmodified baseline
+libghostty (sha256 AB8EBC04...) that gave 3 of 36 that morning:
+
+    plain toggle                                 0 of 41
+    plain toggle + concurrent real builds        0 of 12
+    storm (geometry staircase, font-size 6)      0 of 12
+    toggle + -Film (GPU contention)              0 of 12
+    storm + Film + 2 switches + font 6 + load    0 of 15
+                                                 -------
+                                                 0 of 92
+
+None of the four levers restored the rate. Use the DEBUG LAYER, not the
+crash, as the oracle when tuning this: D3D12 message #1002
+(DATA_STATIC_DESCRIPTOR_INVALID_DATA_CHANGE, "still in execution ... but
+there is a state transition here") is the same in-flight overlap the
+crash needs, and it fires orders of magnitude more often. Counted by
+running under cdb and grepping the log:
+
+    morning, plain toggle, 3 runs:   2, 0, 3   (5 messages)
+    afternoon, plain toggle, 3 runs: 0, 0, 0
+    afternoon, storm, 3 runs:        0, 0, 0
+
+So the precondition itself stopped occurring, on an unchanged binary.
+Tune any future provocation against the #1002 count first; a crash-rate
+experiment is only worth running once that is firing again.
+
 The rate is also not stable, and that instability is the headline rather
 than a footnote. The first 8 attempts gave 2 and the next 28 gave 1; and
 later the same day, on the same machine and the SAME baseline binary,
@@ -78,7 +104,7 @@ Exit codes: 0 no crash in -Attempts tries, 1 reproduced (a finding),
 2 the harness could not run.
 #>
 param(
-    [ValidateSet('toggle', 'idle', 'bare', 'resize')][string]$Arm = 'toggle',
+    [ValidateSet('toggle', 'idle', 'bare', 'resize', 'storm')][string]$Arm = 'toggle',
     [int]$Attempts = 20,
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
 
@@ -92,6 +118,51 @@ param(
     # Stop at the first crash. Off by default: a hit rate over a stated
     # number of attempts is the finding, and one hit is not a rate.
     [switch]$StopOnFirst,
+
+    # --- provocation knobs -------------------------------------------
+    # The crashing frame is syncFromArrayLists' `total > self.len` grow
+    # branch, and `total` is the number of GLYPHS ON SCREEN (the sum of
+    # fg_rows[i].items.len), not a function of window size. The grow path
+    # allocates `total * 2`, so it only re-enters when the glyph count
+    # passes a doubling. An idle terminal showing a 20-character prompt
+    # crosses its last doubling in the first second and then never grows
+    # again -- which is why the plain scenario's rate decays to nothing.
+    #
+    # Driving glyph count from the shell was tried and abandoned: a
+    # `command = ...` line in the config is accepted by the parser but
+    # libghostty still spawns cmd.exe (io_exec logs
+    # "started subcommand path=C:\WINDOWS\system32\cmd.exe"), with both
+    # the bare and `direct:` forms. A knob that silently does nothing is
+    # worse than no knob, so there isn't one.
+    #
+    # The grid-sized buffer is the lever that does work. `cells_bg.sync`
+    # one line above the crashing call takes the SAME release-and-realloc
+    # path, and its length is rows*columns -- geometry, not content. So a
+    # window that climbs past successive doublings re-enters the grow
+    # branch once per step, which is what the `storm` arm does.
+
+    # Toggles per attempt. Each one is another chance for a grow to land
+    # inside a resize burst.
+    [int]$Switches = 1,
+    [int]$SwitchGapMs = 900,
+
+    # Gap between staircase steps in the `storm` arm.
+    [int]$StormStepMs = 140,
+
+    # Film the window while the arm acts. This is not for the pictures.
+    # Both original sightings came from the filmstrip harness, which runs a
+    # Windows.Graphics.Capture camera in a second process throughout the
+    # switch; this harness never did, and that is the clearest difference
+    # between the run that saw the crash and the run that could not. The
+    # defect is the CPU freeing a resource the GPU may still be reading, so
+    # GPU contention is the side of the race worth widening -- the camera
+    # makes the compositor copy every frame off the same adapter.
+    [switch]$Film,
+
+    # 0 leaves the default. A smaller font means more rows and columns,
+    # so a full screen holds more glyphs and the climb crosses more
+    # doublings before it tops out.
+    [double]$FontSize = 0,
 
     # libghostty to test. Copied over the deployed native\ghostty.dll
     # before every attempt, so a caller can alternate two builds inside
@@ -115,11 +186,13 @@ if (-not (Test-Path $ExePath)) {
 try { Assert-NoWintty -Context 'first-toggle-crash-repro' }
 catch { Write-Host "HARNESS: $($_.Exception.Message)"; exit 2 }
 
-$config = @'
-windows-single-instance = true
-window-save-state = never
-vertical-tabs = true
-'@
+$configLines = @(
+    'windows-single-instance = true'
+    'window-save-state = never'
+    'vertical-tabs = true'
+)
+if ($FontSize -gt 0) { $configLines += "font-size = $FontSize" }
+$config = ($configLines -join "`n")
 
 function Get-CrashNames {
     if (-not (Test-Path $crashDir)) { return @() }
@@ -164,6 +237,11 @@ function Show-CrashEnvelope([string]$Path, [string]$Obj) {
     }
 }
 
+if ($Film) {
+    . (Join-Path $PSScriptRoot 'lib/window-capture.ps1')
+    Assert-WindowCaptureReady | Out-Null
+}
+$filmDir = Join-Path $env:TEMP 'wintty-first-toggle-film'
 $deployedDll = Join-Path (Split-Path -Parent (Resolve-Path $ExePath).Path) 'native\ghostty.dll'
 $tabs = @('tab-1', 'tab-2', 'tab-3', 'tab-4', 'tab-5')
 $hits = @()
@@ -207,8 +285,41 @@ for ($n = 1; $n -le $Attempts; $n++) {
             Invoke-SeamCommand $session @{ op = 'collapse'; index = 2; collapsed = $true; via = 'router' } | Out-Null
         }
         if ($Arm -eq 'toggle') {
-            $where = 'toggle'
-            Invoke-SeamCommand $session @{ op = 'toggle-layout' } | Out-Null
+            for ($t = 1; $t -le $Switches; $t++) {
+                $where = "toggle$t"
+                Invoke-SeamCommand $session @{ op = 'toggle-layout' } | Out-Null
+                if ($t -lt $Switches) { Start-Sleep -Milliseconds $SwitchGapMs }
+            }
+        }
+        $cam = $null
+        if ($Film) {
+            # Frames are discarded; only the GPU load matters, so the
+            # directory is reused and never grows without bound.
+            Remove-Item $filmDir -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $filmDir | Out-Null
+            $cam = Start-WindowCapture -Hwnd $session.Hwnd64 -OutDir $filmDir -Tag "a$n" -DurationMs ($DwellMs + 6000)
+        }
+        if ($Arm -eq 'storm') {
+            # Every step more than doubles the cell count, so cells_bg
+            # re-enters the grow branch at each one instead of topping out
+            # after a single climb. The toggle is fired WITHOUT awaiting so
+            # the staircase runs while the switch is still bursting resizes
+            # through drawFrame -- that overlap is the whole point, because
+            # the destroy only matters while the GPU is behind.
+            $where = 'storm-start'
+            [void][SeamWin]::MoveWindow([SeamWin]::P($session.Hwnd64), 40, 40, 420, 320, $true)
+            Start-Sleep -Milliseconds 900
+            Send-SeamCommand $session @{ op = 'toggle-layout'; await = $false }
+            foreach ($step in @(@(700, 520), @(1100, 780), @(1700, 1060))) {
+                $where = "storm-$($step[0])x$($step[1])"
+                [void][SeamWin]::MoveWindow([SeamWin]::P($session.Hwnd64), 40, 40, $step[0], $step[1], $true)
+                Start-Sleep -Milliseconds $StormStepMs
+            }
+            $null = Receive-SeamResponse $session 'toggle-layout'
+            $big = [SeamWin]::RectOf($session.Hwnd64)
+            if ($null -eq $big -or $big.W -lt 1600) {
+                Write-Host '    HARNESS: the staircase did not reach full size; this attempt proves nothing'
+            }
         }
         if ($Arm -eq 'resize') {
             # Shrink first so the grow that follows really is a grow: the
@@ -248,6 +359,7 @@ for ($n = 1; $n -le $Attempts; $n++) {
             $verdict = 'crash'
             $exitCode = $session.Proc.ExitCode
         }
+        if ($cam) { try { $null = Stop-WindowCapture $cam } catch { } }
     }
     catch {
         $msg = $_.Exception.Message
