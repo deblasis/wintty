@@ -16,6 +16,27 @@ public class ProfileRegistryTests
     // so tests can run everything synchronously on the calling thread.
     private static readonly Action<Action> SynchronousDispatcher = a => a();
 
+    /// <summary>
+    /// Wait until the registry reaches <paramref name="version"/>.
+    /// </summary>
+    /// <remarks>
+    /// Discovery completes on a thread-pool continuation, so what these tests
+    /// are waiting for is a SCHEDULING event, not a duration. A fixed budget
+    /// therefore measures how busy the machine is: at 20 x 5ms this failed in
+    /// full-suite runs and passed in isolation, because the rest of the suite
+    /// had the pool. A deadline that is generous when loaded and returns
+    /// immediately when not removes the machine from the assertion.
+    /// </remarks>
+    private static async Task WaitForVersion(ProfileRegistry registry, long version)
+    {
+        var deadline = Environment.TickCount64 + 10_000;
+        while (registry.Version < version && Environment.TickCount64 < deadline)
+            await Task.Delay(5);
+        Assert.True(
+            registry.Version >= version,
+            $"the registry never reached version {version} (stuck at {registry.Version})");
+    }
+
     // Discovery delegate returning an empty list synchronously. Later
     // tests use a TaskCompletionSource to control completion timing.
     private static Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> EmptyDiscovery()
@@ -96,7 +117,7 @@ public class ProfileRegistryTests
 
         // Give the continuation a chance to run.
         await Task.Yield();
-        for (int i = 0; i < 20 && registry.Version < 2; i++) await Task.Delay(5);
+        await WaitForVersion(registry, 2);
 
         Assert.Equal(2L, registry.Version);
         Assert.Equal(2, registry.Profiles.Count);
@@ -127,7 +148,7 @@ public class ProfileRegistryTests
         using var registry = new ProfileRegistry(
             src, discovery, SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
         await firstCallDone.Task;
-        for (int i = 0; i < 20 && registry.Version < 2; i++) await Task.Delay(5);
+        await WaitForVersion(registry, 2);
 
         // Replace user profiles + raise the event; registry should
         // recompose with the same discovered list (Version bumps to 3).
@@ -224,7 +245,7 @@ public class ProfileRegistryTests
 
         using var registry = new ProfileRegistry(
             src, discovery, SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
-        for (int i = 0; i < 20 && registry.Version < 2; i++) await Task.Delay(5);
+        await WaitForVersion(registry, 2);
 
         var eventsBefore = 0;
         registry.ProfilesChanged += _ => eventsBefore++;
@@ -258,7 +279,9 @@ public class ProfileRegistryTests
         registry.ProfilesChanged += _ => eventsFiredAfterSubscribe++;
 
         throwOnBootstrap.SetException(new InvalidOperationException("boom"));
-        // Give the continuation time to run.
+        // A fixed wait on purpose: this asserts nothing happened, so a
+        // longer one is only ever stronger and a shorter one is what would
+        // make it lie. It is not the deadline shape used above.
         for (int i = 0; i < 20; i++) await Task.Delay(5);
 
         Assert.Equal(versionBefore, registry.Version);        // unchanged
