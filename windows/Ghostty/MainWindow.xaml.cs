@@ -2667,27 +2667,43 @@ public sealed partial class MainWindow : Window
                 .GetElementVisual(RootGrid);
             var compositor = visual.Compositor;
 
+            // One out-and-back, and both halves of that matter.
+            //
+            // It was three key frames (a push, a rebound, a smaller
+            // rebound) with each segment eased, which means each segment
+            // starts and ends at zero velocity: a shape meant to read as
+            // one damped motion came to rest four times in 160ms, and 4px
+            // motions with four stops in them are what "it stutters a bit
+            // towards the end" describes.
+            //
+            // It was then a spring, which is continuous and was worse.
+            // A SpringVector3NaturalMotionAnimation has no finite duration,
+            // so the scoped batch below never completed, StopImpactNudge
+            // never ran, and every switch left a live animation on
+            // RootGrid's Offset. Measured against the same build with the
+            // nudge disabled: settle times went 601/573/580/555ms without
+            // it and 589/585/990/never with it, degrading across legs
+            // within one session because the animations accumulated.
+            //
+            // So: bounded, and one interior turning point instead of four.
+            // Out to the peak decelerating, back with a small overshoot
+            // past rest inside the same segment. The stop at the peak is a
+            // direction reversal, which is what a bounce IS; the other
+            // three were not.
             var shake = compositor.CreateVector3KeyFrameAnimation();
-            var ease = compositor.CreateCubicBezierEasingFunction(
-                new System.Numerics.Vector2(0.33f, 0f),
-                new System.Numerics.Vector2(0.15f, 1f));
-            // The same damped shape the old amplitudes described (a push,
-            // a smaller rebound, a smaller one back), but as a curve the
-            // compositor interpolates rather than three positions it is
-            // teleported between.
+            var outward = compositor.CreateCubicBezierEasingFunction(
+                new System.Numerics.Vector2(0.16f, 0.84f),
+                new System.Numerics.Vector2(0.44f, 1f));
+            // easeOutBack: past rest, then settles back onto it, with no
+            // stop in between.
+            var settle = compositor.CreateCubicBezierEasingFunction(
+                new System.Numerics.Vector2(0.175f, 0.885f),
+                new System.Numerics.Vector2(0.32f, 1.14f));
+            var impulse = new System.Numerics.Vector3(
+                (float)(dx * ImpactPeakPixels), (float)(dy * ImpactPeakPixels), 0f);
             shake.InsertKeyFrame(0f, System.Numerics.Vector3.Zero);
-            for (int i = 0; i < ImpactAmplitudes.Length; i++)
-            {
-                var progress = (i + 1) / (float)(ImpactAmplitudes.Length + 1);
-                shake.InsertKeyFrame(
-                    progress,
-                    new System.Numerics.Vector3(
-                        (float)(dx * ImpactAmplitudes[i]),
-                        (float)(dy * ImpactAmplitudes[i]),
-                        0f),
-                    ease);
-            }
-            shake.InsertKeyFrame(1f, System.Numerics.Vector3.Zero, ease);
+            shake.InsertKeyFrame(ImpactPeakFraction, impulse, outward);
+            shake.InsertKeyFrame(1f, System.Numerics.Vector3.Zero, settle);
             shake.Duration = ImpactShakeDuration;
             shake.DelayTime = delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
             // Hold the resting offset through the delay rather than jumping
@@ -2746,17 +2762,24 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // Damped: one push in the travel direction, a smaller rebound, done.
-    private static readonly int[] ImpactAmplitudes = [4, -2, 1];
+    /// <summary>How far the content is pushed, at the peak.</summary>
+    private const float ImpactPeakPixels = 4f;
 
     /// <summary>
-    /// How long the shake takes. Close to what the old three-step version
-    /// actually measured (~140ms) rather than the ~104ms it asked for, so
-    /// the feel is the one that shipped; the difference is that these are
-    /// interpolated frames instead of three jumps.
+    /// Where in the shake the peak falls. Early, so the push is quick and
+    /// the settle is the longer half: an impact that takes as long to
+    /// arrive as it does to recover reads as a sway.
+    /// </summary>
+    private const float ImpactPeakFraction = 0.3f;
+
+    /// <summary>
+    /// How long the shake takes. Close to what the original three-step
+    /// version actually measured (~140ms), so the feel is the one that
+    /// shipped; what changed is that it is now one motion rather than
+    /// four.
     /// </summary>
     private static readonly TimeSpan ImpactShakeDuration =
-        TimeSpan.FromMilliseconds(160);
+        TimeSpan.FromMilliseconds(140);
 
     /// <summary>The visual a nudge is running against, or null.</summary>
     private Microsoft.UI.Composition.Visual? _impactVisual;
