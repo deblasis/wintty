@@ -264,6 +264,7 @@ $NotInSuite = [ordered]@{
     'seam-bisect.ps1'               = 'an operator drives it: mandatory -Scenario and -Ops name the compound to narrow, and it prints SURVIVED or CRASHED(op) so a minimal repro can be found. It answers a question about one hypothesis, not about the build'
     'seam-cdb.ps1'                  = 'needs cdb on PATH and takes a full dump at a fail-fast. Exits 0 with a dump path, 1 when the dump never appeared - so a crash that IS reproduced and a debugger that never fired look alike to an aggregator'
     'seam-crash-dump.ps1'           = 'writes WER LocalDumps registry state (snapshot, set, restore) and needs to be the only thing holding the process, since WER does not run under a debugger. Its exits are inverted for this suite''s purpose: 2 means the app SURVIVED and there was no crash to dump, which the runner would file as a product finding'
+    'layout-motion-profile.ps1'     = 'an analysis tool, not a harness: it reads a layout-switch-filmstrip run that has already happened (-RunDir and -Tag, no -ExePath) and prints what moved, when and where. It launches nothing and returns no verdict; the change-box column is for a human reading a filmstrip that already failed'
 }
 
 # The one form every check compares a script path in: the path relative to this

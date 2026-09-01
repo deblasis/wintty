@@ -941,7 +941,6 @@ public sealed partial class MainWindow : Window
             RootGrid,
             PaneHostContainer,
             activeTab: () => _tabManager.Tabs.Count > 0 ? _tabManager.ActiveTab : null,
-            impact: NudgeContentForImpact,
             // The same gate the run label and both drag engines read, asked
             // at the switch rather than cached: UISettings can throw in
             // packaged contexts and the answer can change under the user
@@ -1845,9 +1844,6 @@ public sealed partial class MainWindow : Window
         // cheap and safe.
         _layout.CancelStripPriming();
         _layout.CancelSwitch();
-        // The nudge is scheduled on the compositor against RootGrid and is
-        // not the coordinator's to cancel; see StopImpactNudge.
-        StopImpactNudge();
         _themeManager.Dispose();
 
         // Stop the dispatcher-driven timers this window started. None of them
@@ -2625,164 +2621,6 @@ public sealed partial class MainWindow : Window
         ApplyVerticalTitleBarChrome();
         ApplyCaptionButtonChrome();
     }
-
-    /// <summary>
-    /// Brief, subtle shake of the window's CONTENT when the layout-switch
-    /// ghost lands: a damped nudge along its travel direction, as if the
-    /// strip absorbed the impact.
-    ///
-    /// It used to shake the window itself, with AppWindow.Move. Filmed by
-    /// polling the window rect, that produced three discrete positions
-    /// (-4, +2, -1 pixels) over about 140ms at intervals of 22 to 73ms
-    /// against the 26ms it asked for, because every step was an await
-    /// resuming on the UI thread at the exact moment the switch has that
-    /// thread busiest. Three irregular jumps is not a shake.
-    ///
-    /// A compositor Offset animation runs on the compositor at its own
-    /// rate, and the delay is what puts it in the right place: the caller
-    /// hands over how long is left of the flight, so the nudge starts at
-    /// the landing rather than whenever a queued callback is finally
-    /// pumped (measured at ~560ms for motion that ended at 340ms).
-    ///
-    /// Most of what the old version guarded against is gone with the
-    /// AppWindow.Move it was guarding. Content cannot fight the presenter,
-    /// so the maximized / fullscreen / quake checks go; content cannot be
-    /// dragged out from under itself, so the "did the window move under
-    /// us" read-back goes; and there is no awaited loop left to re-enter,
-    /// so the busy flag goes. The teardown guard STAYS, and gains a
-    /// partner: a compositor animation outlives the managed object that
-    /// started it, so a nudge scheduled against a closing window has to be
-    /// stopped rather than merely not started (the same hazard
-    /// LayoutCoordinator.CancelSwitch exists for).
-    /// </summary>
-    /// <param name="dx">Unit direction the ghost travelled, X.</param>
-    /// <param name="dy">Unit direction the ghost travelled, Y.</param>
-    /// <param name="delay">How long until the ghost lands.</param>
-    private void NudgeContentForImpact(double dx, double dy, TimeSpan delay)
-    {
-        if (_isClosed) return;
-        try
-        {
-            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
-                .GetElementVisual(RootGrid);
-            var compositor = visual.Compositor;
-
-            // One out-and-back, and both halves of that matter.
-            //
-            // It was three key frames (a push, a rebound, a smaller
-            // rebound) with each segment eased, which means each segment
-            // starts and ends at zero velocity: a shape meant to read as
-            // one damped motion came to rest four times in 160ms, and 4px
-            // motions with four stops in them are what "it stutters a bit
-            // towards the end" describes.
-            //
-            // It was then a spring, which is continuous and was worse.
-            // A SpringVector3NaturalMotionAnimation has no finite duration,
-            // so the scoped batch below never completed, StopImpactNudge
-            // never ran, and every switch left a live animation on
-            // RootGrid's Offset. Measured against the same build with the
-            // nudge disabled: settle times went 601/573/580/555ms without
-            // it and 589/585/990/never with it, degrading across legs
-            // within one session because the animations accumulated.
-            //
-            // So: bounded, and one interior turning point instead of four.
-            // Out to the peak decelerating, back with a small overshoot
-            // past rest inside the same segment. The stop at the peak is a
-            // direction reversal, which is what a bounce IS; the other
-            // three were not.
-            var shake = compositor.CreateVector3KeyFrameAnimation();
-            var outward = compositor.CreateCubicBezierEasingFunction(
-                new System.Numerics.Vector2(0.16f, 0.84f),
-                new System.Numerics.Vector2(0.44f, 1f));
-            // easeOutBack: past rest, then settles back onto it, with no
-            // stop in between.
-            var settle = compositor.CreateCubicBezierEasingFunction(
-                new System.Numerics.Vector2(0.175f, 0.885f),
-                new System.Numerics.Vector2(0.32f, 1.14f));
-            var impulse = new System.Numerics.Vector3(
-                (float)(dx * ImpactPeakPixels), (float)(dy * ImpactPeakPixels), 0f);
-            shake.InsertKeyFrame(0f, System.Numerics.Vector3.Zero);
-            shake.InsertKeyFrame(ImpactPeakFraction, impulse, outward);
-            shake.InsertKeyFrame(1f, System.Numerics.Vector3.Zero, settle);
-            shake.Duration = ImpactShakeDuration;
-            shake.DelayTime = delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
-            // Hold the resting offset through the delay rather than jumping
-            // to the first key frame the moment the animation is handed
-            // over.
-            shake.DelayBehavior =
-                Microsoft.UI.Composition.AnimationDelayBehavior.SetInitialValueBeforeDelay;
-
-            var batch = compositor.CreateScopedBatch(
-                Microsoft.UI.Composition.CompositionBatchTypes.Animation);
-            batch.Completed += (_, _) =>
-            {
-                // The batch completes on a later turn, and the window can
-                // close in between. Gated rather than unsubscribed because
-                // the scoped batch is the compositor's object, not this
-                // window's, and it outlives the close: the teardown census
-                // is right to insist one or the other. By the time a close
-                // has happened the close path has already run
-                // StopImpactNudge, so there is nothing left here to do.
-                if (_isClosed) return;
-                StopImpactNudge();
-            };
-            visual.StartAnimation("Offset", shake);
-            batch.End();
-            _impactVisual = visual;
-        }
-        catch (Exception)
-        {
-            // Composition refused. The switch is unaffected: this is the
-            // flourish after it, not part of it.
-            _impactVisual = null;
-        }
-    }
-
-    /// <summary>
-    /// Release the impact nudge and put the content back at rest.
-    ///
-    /// Called from the scoped batch when it finishes normally, and from
-    /// the closing path, where it is the half that matters: the animation
-    /// is driven by the compositor against a visual whose tree is about to
-    /// be disposed, and nothing in XAML stops it on the way out.
-    /// </summary>
-    private void StopImpactNudge()
-    {
-        if (_impactVisual is not { } visual) return;
-        _impactVisual = null;
-        try
-        {
-            visual.StopAnimation("Offset");
-            visual.Offset = System.Numerics.Vector3.Zero;
-        }
-        catch (Exception)
-        {
-            // The visual is already gone, which is the outcome this was
-            // trying to reach.
-        }
-    }
-
-    /// <summary>How far the content is pushed, at the peak.</summary>
-    private const float ImpactPeakPixels = 4f;
-
-    /// <summary>
-    /// Where in the shake the peak falls. Early, so the push is quick and
-    /// the settle is the longer half: an impact that takes as long to
-    /// arrive as it does to recover reads as a sway.
-    /// </summary>
-    private const float ImpactPeakFraction = 0.3f;
-
-    /// <summary>
-    /// How long the shake takes. Close to what the original three-step
-    /// version actually measured (~140ms), so the feel is the one that
-    /// shipped; what changed is that it is now one motion rather than
-    /// four.
-    /// </summary>
-    private static readonly TimeSpan ImpactShakeDuration =
-        TimeSpan.FromMilliseconds(140);
-
-    /// <summary>The visual a nudge is running against, or null.</summary>
-    private Microsoft.UI.Composition.Visual? _impactVisual;
 
     /// <summary>
     /// True while the High Contrast override is layered onto the config,
