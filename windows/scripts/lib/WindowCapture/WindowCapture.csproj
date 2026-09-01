@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The harness's eye. Deliberately NOT in Ghostty.sln: it is test tooling,
+    it ships with nothing, and a product solution build should not pay for
+    it. window-capture.ps1 builds it on demand and caches the result.
+
+    The TFM is what keeps this small. A net10.0-windows TFM brings the
+    Windows SDK projections in by itself, so Windows.Graphics.Capture and
+    Windows.Graphics.Imaging are just types: no NuGet dependency, nothing to
+    add to a lockfile, and no hand-declared D3D11 vtables.
+
+    22621 rather than the product's 19041 because that is where
+    GraphicsCaptureSession.IsBorderRequired and GraphicsCaptureAccess
+    arrived. Without them every captured frame carries the system's yellow
+    capture border, drawn over the chrome these films are taken to judge.
+    Nothing here is referenced by the product, so the two TFMs are free to
+    differ.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>
