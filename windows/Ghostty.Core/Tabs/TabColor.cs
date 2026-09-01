@@ -97,6 +97,72 @@ internal static class TabColorPalette
         _                 => "None",
     };
 
+    /// <summary>
+    /// The swatch a group falls back to. A group has no "no color" state, so
+    /// its paint sites index <see cref="Colors"/> with no guard -- swatch,
+    /// chip ink, run label, vertical header row, and the switcher's card,
+    /// ring and dot. <see cref="TabGroup"/> coerces to this rather than
+    /// leaving the invariant to whoever happens to write the property.
+    /// </summary>
+    public const TabColor DefaultGroupColor = TabColor.Blue;
+
+    /// <summary>
+    /// A color a group can actually be painted in. <see cref="TabColor.None"/>
+    /// is a tab state, not a group state: on a tab it means "no tint" and the
+    /// tab's paint sites each choose a different brush, but a group's swatch
+    /// has nothing to fall back to.
+    ///
+    /// The test is "has a preset", not "is not None", and the difference is
+    /// the whole point. The invariant the paint sites rely on is that the
+    /// colour can be looked up, and every value outside the enum's declared
+    /// members fails that too. A group colour is persisted as a NUMBER (see
+    /// <c>GroupSession.Color</c>; the session context defines no string
+    /// converter) and System.Text.Json does not check that a numeric enum is
+    /// a defined member, so a hand-edited or forward-version session can hand
+    /// <c>RestoreGroup</c> a <c>(TabColor)42</c>. Guarding None alone let that
+    /// through to the same mid-paint crash under a different integer.
+    ///
+    /// Coercing here means the value is also PERSISTED coerced:
+    /// <c>SessionCapture</c> reads the resolved property, so a session written
+    /// by a future build carrying an extra swatch comes back as the default
+    /// and is written back that way on the next save. That is a repair for a
+    /// corrupt value and a downgrade loss for a forward one, and it is the
+    /// deliberate choice: keeping the raw value and coercing at the paint
+    /// boundary would preserve the colour, but it would give up the property
+    /// every group paint site depends on -- that the colour in hand can
+    /// always be looked up. wintty ships one lineage and has no downgrade
+    /// story, so the invariant is worth more than the swatch.
+    /// </summary>
+    public static TabColor EnsureGroupColor(TabColor color)
+        => Colors.ContainsKey(color) ? color : DefaultGroupColor;
+
+    /// <summary>
+    /// The preset behind a color. <see cref="TabColor.None"/> has no entry by
+    /// design -- it means "no tint", and only the caller knows what to paint
+    /// in its place -- and neither has any value outside the enum's declared
+    /// members. Indexing <see cref="Colors"/> directly raised a bare
+    /// <c>KeyNotFoundException</c> from inside a paint pass, naming neither
+    /// the value nor the rule.
+    /// </summary>
+    private static Color Preset(TabColor color)
+        => Colors.TryGetValue(color, out var rgb)
+            ? rgb
+            : throw new ArgumentOutOfRangeException(
+                nameof(color), color,
+                // The message must not name None: this fires for any value
+                // with no preset, and an out-of-range integer arriving from a
+                // persisted session is the case most in need of being read
+                // literally.
+                color == TabColor.None
+                    ? "TabColor.None has no preset: it means \"no tint\", so the caller "
+                      + "chooses what to paint instead. A group cannot be None -- use "
+                      + nameof(EnsureGroupColor) + "."
+                    // States the rule, not a diagnosis: Preset serves the tab
+                    // path too, and a message naming sessions and groups would
+                    // send a reader the wrong way for a tab. The type and
+                    // ActualValue already carry the argument.
+                    : "not a declared TabColor: only declared members have presets.");
+
     /// <summary>Selected tab/header fill uses the full preset color.</summary>
     public const byte SelectedBackgroundAlpha = 255;
 
@@ -108,13 +174,13 @@ internal static class TabColorPalette
     /// </summary>
     public static Color Background(TabColor color, bool selected)
     {
-        var rgb = Colors[color];
+        var rgb = Preset(color);
         var alpha = selected ? SelectedBackgroundAlpha : UnselectedBackgroundAlpha;
         return Color.FromArgb(alpha, rgb.R, rgb.G, rgb.B);
     }
 
     /// <summary>Opaque preset color for the active pane border.</summary>
-    public static Color Border(TabColor color) => Colors[color];
+    public static Color Border(TabColor color) => Preset(color);
 
     /// <summary>
     /// sRGB backdrop after compositing a preset tint over the strip fill.
@@ -124,7 +190,7 @@ internal static class TabColorPalette
     public static uint EffectiveBackgroundRgb(
         TabColor color, bool selected, uint stripBackdropRgb)
     {
-        var preset = Colors[color];
+        var preset = Preset(color);
         if (selected)
             return PackRgb(preset.R, preset.G, preset.B);
 

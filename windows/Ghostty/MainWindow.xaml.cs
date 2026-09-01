@@ -1140,7 +1140,10 @@ public sealed partial class MainWindow : Window
         {
             var anchor = _tabManager.ActiveTab is { } tab ? _tabHost.TabElement(tab) : null;
             if (anchor is null) return;
-            var picker = new TabColorPalettePicker(group.Color);
+            // The strip's group-colour route, the twin of the context menu's.
+            // Both open the picker for a group, so both refuse None: a group
+            // has no "no color" state (see TabGroup.Color).
+            var picker = new TabColorPalettePicker(group.Color, allowNone: false);
             var pickerFlyout = new Flyout
             {
                 Content = picker,
