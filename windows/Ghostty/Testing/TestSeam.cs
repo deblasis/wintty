@@ -383,6 +383,10 @@ internal static class TestSeam
                 // The manager's own activation: the same op every click and
                 // jump chord funnels into, so the selection sync runs.
                 manager.Activate(tab);
+                // The window's focus restore rides the dispatcher, so the
+                // ack waits that turn out -- otherwise the state below
+                // reports the active leaf from before the switch settled.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
                 return OkWithState(window, manager, op);
             }
 
@@ -412,6 +416,33 @@ internal static class TestSeam
                         ArgInt(args, "from", -1), ArgInt(args, "to", -1)),
                 };
                 return DragJson(op, outcome);
+            }
+
+            case "split":
+            {
+                // The chord's own dispatch, so a seam split cannot drift
+                // from the real action. The new leaf becomes the active
+                // one, exactly as it does for a user.
+                var horizontal = ArgString(args, "orientation") == "horizontal";
+                window.TestSeamRouter.Invoke(horizontal
+                    ? Ghostty.Core.Input.PaneAction.SplitHorizontal
+                    : Ghostty.Core.Input.PaneAction.SplitVertical);
+                // Split defers its focus and the border reposition by a
+                // dispatcher turn (the new leaf has no measured size yet),
+                // so the ack owes the driver that turn.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return OkWithState(window, manager, op);
+            }
+
+            case "focus-pane":
+            {
+                var index = ArgInt(args, "index", -1);
+                if (!window.TestSeamActivePaneHost.TestSeamFocusLeaf(index))
+                    return Error(op, $"the active tab has no leaf at index {index}");
+                // Focus lands through GotFocus, and the border follows on
+                // the next layout pass.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return OkWithState(window, manager, op);
             }
 
             default:
@@ -499,6 +530,12 @@ internal static class TestSeam
             json.WriteNumber("index", i);
             json.WriteString("title", tab.EffectiveTitle);
             json.WriteBoolean("pinned", tab.IsPinned);
+            // Per-tab pane memory: the leaf each tab would come back to.
+            if (tab.PaneHost is Ghostty.Panes.PaneHost host)
+            {
+                json.WriteNumber("leaves", host.TestSeamLeafCount);
+                json.WriteNumber("activeLeaf", host.TestSeamActiveLeafIndex);
+            }
             if (tab.Group is { } group)
             {
                 json.WriteString("group", group.Title);
@@ -520,7 +557,56 @@ internal static class TestSeam
             json.WriteEndObject();
         }
         json.WriteEndArray();
+        WritePanes(json, window);
         json.WriteEndObject();
+    }
+
+    /// <summary>
+    /// The active tab's pane geometry: where the leaves and the active-pane
+    /// stroke are RENDERED, in window-root DIPs, plus the scale and the
+    /// stroke's colour a capture harness needs to find it in a screenshot.
+    /// The rects come off the drawing path, so "the border moved" is an
+    /// assertable claim rather than a restatement of the active-leaf field.
+    /// </summary>
+    private static void WritePanes(Utf8JsonWriter json, MainWindow window)
+    {
+        var host = window.TestSeamActivePaneHost;
+        var focused = window.TestSeamFocusedElement;
+        json.WriteStartObject("panes");
+        json.WriteNumber("activeLeaf", host.TestSeamActiveLeafIndex);
+        // The remembered leaf and the leaf you can type into are two
+        // different facts; the seam reports both so a driver can catch the
+        // window remembering one and focusing neither.
+        json.WriteNumber("focusedLeaf", host.TestSeamFocusedLeafIndex(focused));
+        json.WriteString("focusedElement", focused?.GetType().Name ?? "");
+        json.WriteNumber("scale", window.TestSeamRasterizationScale);
+        json.WriteNumber("borderArgb", host.TestSeamActiveBorderArgb);
+        WriteRect(json, "border", host.TestSeamActiveBorderRect);
+        json.WriteStartArray("leaves");
+        foreach (var rect in host.TestSeamLeafRects)
+        {
+            json.WriteStartObject();
+            WriteRectBody(json, rect);
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+        json.WriteEndObject();
+    }
+
+    private static void WriteRect(
+        Utf8JsonWriter json, string name, Windows.Foundation.Rect rect)
+    {
+        json.WriteStartObject(name);
+        WriteRectBody(json, rect);
+        json.WriteEndObject();
+    }
+
+    private static void WriteRectBody(Utf8JsonWriter json, Windows.Foundation.Rect rect)
+    {
+        json.WriteNumber("x", rect.X);
+        json.WriteNumber("y", rect.Y);
+        json.WriteNumber("w", rect.Width);
+        json.WriteNumber("h", rect.Height);
     }
 
     // ---- argument readers --------------------------------------------
