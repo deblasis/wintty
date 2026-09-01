@@ -202,6 +202,24 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal FrameworkElement TestSeamCaptionFill => VerticalTitleCaptionFill;
 
+    /// <summary>
+    /// The two seam covers: the strip of pane border the active tab's field
+    /// runs over, horizontal and vertical.
+    /// </summary>
+    /// <remarks>
+    /// Reported because the join is the one thing about this treatment that
+    /// cannot be judged from a screenshot. The cover and the tab are the same
+    /// colour on purpose, so a capture shows one continuous surface whether
+    /// they line up or not -- a cover a pixel narrow leaves a pixel of the
+    /// pane's stroke standing at the tab's corner, which reads as broken
+    /// rather than imperfect, and a capture through Mica cannot say which it
+    /// is. The arranged rects can: the cover's span must be the tab's span,
+    /// and both are measured here in the same coordinate space as the strip
+    /// rows they have to agree with.
+    /// </remarks>
+    internal (FrameworkElement Horizontal, FrameworkElement Vertical) TestSeamCovers
+        => (_tabSeamCover, _verticalSeamCover);
+
     /// <summary>What the layout coordinator has parked on the morph layer.</summary>
     internal int TestSeamMorphLayerCount => _layout.TestSeamMorphLayerCount;
 
@@ -211,6 +229,16 @@ public sealed partial class MainWindow : Window
     /// back, so the next command can never run mid-arrange.
     /// </summary>
     internal void TestSeamSettleLayout() => (Content as UIElement)?.UpdateLayout();
+
+    /// <summary>
+    /// Whether the cycle popup is up, as the WINDOW knows it rather than as
+    /// the UIA tree suggests. The tree cannot answer: TabSwitcherPopupUI is
+    /// declared in MainWindow.xaml, so the element is present whether or not
+    /// the popup is open, and a lookup after the 1.2s self-dismissal still
+    /// hands back a plausible rect. A harness that samples that rect measures
+    /// uniform terminal background and reports it as an illegible tile.
+    /// </summary>
+    internal bool TestSeamSwitcherOpen => TabSwitcherPopupHost.IsOpen;
 
     /// <summary>
     /// The first switcher tile's pane-preview rect in screen pixels, or null

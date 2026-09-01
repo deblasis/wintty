@@ -238,6 +238,23 @@ $script:CONTRAST_NONTEXT = 3.0
 # on. Strictly greater, the way the palette test writes it.
 $script:CONTRAST_FILL_VISIBLE = 1.2
 
+# The one class judged from above rather than from below.
+#
+# The active tab is the FIELD: it alone is painted the terminal's own
+# ground, and it runs into the pane it belongs to with no line between. So
+# the requirement on its fill is not that it separate from anything -- it
+# is that it BE the terminal, and a fill that separates from the terminal
+# has failed. Which is the opposite of every other class here, hence its
+# own name rather than a second meaning stapled onto 'fill'.
+#
+# 1.05 rather than 1.0 because the two regions are sampled off a real
+# capture: they are the same colour in the framebuffer, and what separates
+# the measurements is compositor dither and the sampler's own bucketing.
+# The nearest thing that could be mistaken for the terminal is the
+# palette's tab-bar shade, the ground shifted 5% toward the foreground,
+# which scores about 1.15:1 on the built-in pair -- comfortably outside.
+$script:CONTRAST_FIELD_SAME = 1.05
+
 function Get-ContrastRatio([int[]]$A, [int[]]$B) {
     return [ContrastMath]::Ratio($A[0], $A[1], $A[2], $B[0], $B[1], $B[2])
 }
@@ -249,14 +266,19 @@ function Get-ContrastRule([string]$Class) {
         'text'    { return @{ Min = $script:CONTRAST_TEXT_AA;      Source = 'WCAG AA text (1.4.3)' } }
         'glyph'   { return @{ Min = $script:CONTRAST_NONTEXT;      Source = 'WCAG non-text (1.4.11)' } }
         'fill'    { return @{ Min = $script:CONTRAST_FILL_VISIBLE; Source = 'palette fill rule (>1.2)' } }
+        'field'   { return @{ Min = $script:CONTRAST_FIELD_SAME;   Source = 'the active tab is the field (<=1.05)' } }
         default   { throw "contrast: unknown surface class '$Class'" }
     }
 }
 
 # 'fill' is the one strict comparison: the palette test writes it as
 # `> 1.2`, and a fill exactly at the floor is not distinguishable.
+#
+# 'field' is the one judged from above: its whole claim is that two
+# surfaces are the same, so a ratio at or below the bound is the pass.
 function Test-ContrastPasses([double]$Ratio, [string]$Class) {
     $rule = Get-ContrastRule $Class
     if ($Class -eq 'fill') { return $Ratio -gt $rule.Min }
+    if ($Class -eq 'field') { return $Ratio -le $rule.Min }
     return $Ratio -ge $rule.Min
 }

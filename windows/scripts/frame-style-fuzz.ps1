@@ -1428,7 +1428,22 @@ try {
                    -ForegroundColor Yellow
     }
 
-    $controlCase = New-Case 'control' 'wintty' 'solid' 'frosted' $spanTheme
+    # window-theme=system, not wintty, and the difference is load-bearing.
+    # Control 2 below needs a selected row and an unselected one that are
+    # guaranteed far apart. Under window-theme=wintty they no longer are:
+    # the active tab is the FIELD, painted the terminal's own ground, while
+    # an unselected row sits on the palette's tab-bar shade -- and that shade
+    # is the ground shifted 5% toward the foreground, so for the built-in
+    # pair the two are about 10 counts apart on the widest channel, half of
+    # $ChannelDelta. The control would fail on a build that is working.
+    #
+    # Under system the strip takes the DESKTOP's chrome while the selected
+    # row still takes the terminal's ground, and $spanTheme is chosen as the
+    # opposite polarity to the desktop -- so the gap is the whole distance
+    # between a light chrome and a dark terminal, or the reverse. Guaranteed
+    # by this harness's own polarity choice rather than by an incidental
+    # palette shift, which is what a control should rest on.
+    $controlCase = New-Case 'control' 'system' 'solid' 'frosted' $spanTheme
     $control = $null
     try {
         # Two tabs, because the comparator control compares a selected row
@@ -1449,11 +1464,12 @@ try {
                    "(interior $($control.Stability.interiorDiff), border band $($control.Stability.borderBandDiff))")
         }
 
-        # 2. The comparator fires. A selected tab row and an unselected one are
-        #    painted differently by a build that works - the tab-close harness
-        #    is what asserts that, and it is borrowed here as a difference this
-        #    harness knows must be on the screen. If the comparator cannot see
-        #    it, it cannot see solid against frosted either.
+        # 2. The comparator fires. The selected row is the field - the
+        #    terminal's own ground - and an unselected one is chrome, which on
+        #    this control case is the desktop's, in the polarity opposite the
+        #    terminal's. So a build that works puts most of the channel range
+        #    between them, and if the comparator cannot see that it cannot see
+        #    solid against frosted either.
         $rowsAll = @($control.Surfaces.Rows)
         $sel = @($rowsAll | Where-Object { $_.Selected })
         $unsel = @($rowsAll | Where-Object { $_.Selected -eq $false })

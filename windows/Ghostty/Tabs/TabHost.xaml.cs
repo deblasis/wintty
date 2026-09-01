@@ -1216,6 +1216,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private uint _stripBackdropPacked = 0x0C0C0C;
 
     /// <summary>
+    /// The field the active tab is painted with, and the seam cover under it.
+    /// One instance for both, so the tab and the strip of pane border it
+    /// joins to cannot disagree while the fill is settling.
+    /// </summary>
+    private readonly ActiveFieldFill _field = new();
+
+    /// <summary>The strip's own ground, as a colour: what the field grows out of.</summary>
+    private Windows.UI.Color StripGround() => Windows.UI.Color.FromArgb(
+        0xFF,
+        (byte)(_stripBackdropPacked >> 16),
+        (byte)(_stripBackdropPacked >> 8),
+        (byte)_stripBackdropPacked);
+
+    /// <summary>
     /// Re-apply every tab header background after a preset-color or
     /// selected-fill change.
     /// </summary>
@@ -1329,7 +1343,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         var active = _manager.ActiveTab;
         if (active is null
             || !_itemByModel.TryGetValue(active, out var item)
-            || _selectedTabFillBrush is null)
+            || !_field.HasColor)
         {
             SelectedTabSeamChanged?.Invoke(0, 0, null);
             return;
@@ -1405,11 +1419,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
             return;
         }
 
-        var fill = active.Color != TabColor.None
-            ? TabColorBrush.From(TabColorPalette.Background(active.Color, selected: true))
-            : _selectedTabFillBrush;
-
-        SelectedTabSeamChanged?.Invoke(left, width, fill);
+        // The very brush the tab is painted with, not a fresh one mixed to the
+        // same colour. A copy is correct at rest and wrong for the length of
+        // every settle, and the frames it is wrong in are the frames where a
+        // line appears between the tab and the pane.
+        SelectedTabSeamChanged?.Invoke(left, width, _field.Brush);
     }
 
     // The list the tab items scroll inside, looked up once out of the
@@ -1591,6 +1605,21 @@ internal sealed partial class TabHost : UserControl, ITabHost
         else if (selected && _selectedTabFillBrush is not null)
         {
             selectedHandle = _selectedTabFillBrush;
+        }
+
+        // The active tab does not take the colour, it takes the field's own
+        // brush, settled onto that colour. Everything else about this pass is
+        // unchanged; what the swap buys is that the seam cover is handed the
+        // same instance, so the two are one surface at every frame and not
+        // only at rest.
+        if (selected && selectedHandle is not null)
+        {
+            _field.Settle(
+                tab,
+                selectedHandle.Color,
+                StripGround(),
+                TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast));
+            selectedHandle = _field.Brush;
         }
 
         ApplyTabViewItemHeaderBrushes(viewItem, normalHandle, selectedHandle);
@@ -2814,8 +2843,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         if (!theme.IsEnabled) return;
 
-        var accentBrush = new SolidColorBrush(theme.AccentColor);
-        _selectedTabFillBrush = accentBrush;
+        // The active tab is the field: painted the terminal's own ground, so
+        // it and the pane below it are one surface with no line between. The
+        // accent is the stroke around that field (SetAccentColor), never the
+        // field -- filling with it made the active tab a second, brighter
+        // chrome surface and the seam cover then drew that accent across the
+        // pane's top border.
+        //
+        // Which makes this path agree with the default one: both take the
+        // terminal pair, so the active tab looks the same whatever
+        // window-theme says. What the palette still owns here is everything
+        // that is chrome -- the inactive ink below, and the strip's own
+        // surface through SetChromeFill.
+        _selectedTabFillBrush = new SolidColorBrush(theme.ActiveTabFill);
 
         // TabViewBackground is deliberately not written here. The strip's
         // surface has one owner, SetChromeFill, which the window always calls
@@ -2844,15 +2884,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // active brush gives them zero contrast. RefreshShellInactiveInk picks
         // their pole against whatever the strip actually is.
         //
-        // Calibrate the active title against the accent it sits on. The raw
-        // ActiveTabText (cursor-text, or the bg fallback) can land at the
-        // same luminance pole as the accent for some palettes (both light or
-        // both dark), which erases the title. Keep it when it contrasts;
-        // otherwise drop to a readable black/white. (#342)
-        uint accentPacked = PackColor(theme.AccentColor);
-        uint activePacked = PackColor(theme.ActiveTabText);
+        // Calibrate the active title against the field it sits on, which is
+        // the terminal's ground -- so the pair is the terminal's own and
+        // normally passes straight through. EnsureReadableForeground stays
+        // for the pathological fg/bg that does not contrast (#342); it is no
+        // longer rescuing an ink chosen for a different surface.
+        uint fieldPacked = PackColor(theme.ActiveTabFill);
+        uint activePacked = PackColor(theme.ActiveTabInk);
         _shellActiveTextBrush = TabColorBrush.FromPackedRgb(
-            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked));
+            ThemeResolution.EnsureReadableForeground(fieldPacked, activePacked));
 
         RefreshShellInactiveInk();
         RefreshTabColors();
@@ -2911,7 +2951,23 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // a window chrome truth composed from the same inputs the
         // separators read, and the strip must not re-derive it.
         _highContrast = highContrast;
-        if (groundChanged) RefreshShellInactiveInk();
+        if (!groundChanged) return;
+
+        if (_shellActiveTextBrush is not null)
+        {
+            RefreshShellInactiveInk();
+            return;
+        }
+
+        // The palette path gets the same answer by hand, because
+        // RefreshShellInactiveInk returns before reaching the assignment
+        // there. Without this the strip's ground stays at whatever
+        // SetSelectedTabColors last guessed, and the two consumers that read
+        // it -- the preset tints and the field's flight -- are both scored
+        // against the terminal instead of the strip. The vertical strip has
+        // taken its ground from here since the same bug was fixed there.
+        _stripBackdropPacked = groundRgb;
+        RefreshTabColors();
     }
 
     private uint _chromeGroundPacked = 0x0C0C0C;
@@ -3097,10 +3153,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
             ThemeResolution.EnsureReadableForeground(
                 PackColor(background), PackColor(foreground)));
 
-        // Preset tint foregrounds blend against the tab-bar backdrop, which
-        // ApplyShellTheme sets from TabBarBackground -- not terminal bg.
-        if (_shellActiveTextBrush is null)
-            _stripBackdropPacked = PackColor(background);
+        // Deliberately does NOT touch _stripBackdropPacked. That value is the
+        // surface the tabs sit on, and this is the terminal background, which
+        // is what the selected tab is filled with -- a different thing. While
+        // both wrote it, the winner was whichever ran last, and the order
+        // differs between construction and a config reload. SetChromeGround
+        // owns it now, on both paths.
+        //
+        // The vertical strip fixed this first, where the symptom was inactive
+        // titles calibrated against the terminal. Here the second consumer is
+        // the field: leaving the terminal background in there makes the
+        // flight's start equal its target, and Settle answers a no-op move
+        // with a cut.
 
         // When a shell theme is active it owns the selected-tab background
         // and the active title (ApplyShellTheme). Don't fight it here; keep
