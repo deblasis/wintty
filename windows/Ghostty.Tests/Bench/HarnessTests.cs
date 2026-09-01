@@ -137,21 +137,27 @@ public class HarnessTests
         Buffer.BlockCopy(terminator, 0, combined, payload.Length, terminator.Length);
 
         int splitPoint = payload.Length + 15;   // mid-terminator
-        bool firstCall = true;
-        using var t = new FakeTransport(_ =>
-        {
-            if (firstCall)
-            {
-                firstCall = false;
-                byte[] first = new byte[splitPoint];
-                Buffer.BlockCopy(combined, 0, first, 0, splitPoint);
-                return first;
-            }
-            byte[] second = new byte[combined.Length - splitPoint];
-            Buffer.BlockCopy(combined, splitPoint, second, 0, second.Length);
-            return second;
-        });
-        byte[] scratch = new byte[64 * 1024];
+
+        // One response, and the split is forced by the SCRATCH size rather
+        // than by two responder calls.
+        //
+        // The boundary this test is about is the harness's own read boundary,
+        // and the harness reads at most scratch.Length bytes at a time -- so
+        // sizing scratch to splitPoint makes the first read end mid-terminator
+        // as a matter of arithmetic. Scripting it as two responder calls
+        // instead depended on the harness's two Writes arriving as two Reads,
+        // which under load they do not: both coalesce, the second call never
+        // comes, and the test times out. It would also have passed VACUOUSLY
+        // the other way -- two chunks into a 64 KB scratch can be drained by a
+        // single read, exercising no carryover at all.
+        // Answer once and then stay silent. Not a call-count SCRIPT -- the
+        // behaviour is the same however many calls arrive, which is the whole
+        // point; a responder that returns `combined` every time makes emitBytes
+        // depend on how many input reads happened (1055 or 2048).
+        int answered = 0;
+        using var t = new FakeTransport(
+            _ => Interlocked.Exchange(ref answered, 1) == 0 ? combined : Array.Empty<byte>());
+        byte[] scratch = new byte[splitPoint];
 
         var (_, emitBytes) = Runner.RunThroughputIteration(
             t, payload, terminator, TimeSpan.FromSeconds(5), scratch);
@@ -167,13 +173,13 @@ public class HarnessTests
         byte[] payload = new byte[256];
         byte[] terminator = System.Text.Encoding.ASCII.GetBytes(
             "\r\n~ENDOFBURST_" + Guid.NewGuid().ToString("N").Substring(0, 16) + "~");
-        int call = 0;
-        using var t = new FakeTransport(_ =>
-        {
-            call++;
-            if (call == 1) return payload;   // no terminator
-            return null;                     // close output
-        });
+        // Answer once with data that carries no terminator, and close in the
+        // SAME turn. Scripting this as call 1 = data, call 2 = close assumed
+        // the harness's two Writes arrive as two Reads; under load they
+        // coalesce into one, the second call never comes, the output never
+        // closes and the iteration times out instead of surfacing EOF.
+        using var t = new FakeTransport(_ => payload);
+        t.CloseOutputAfterNextResponse();
         byte[] scratch = new byte[64 * 1024];
 
         Assert.Throws<EndOfStreamException>(() =>

@@ -78,6 +78,23 @@ public sealed class FakeTransport : ITransport
     public Stream Input  => _inputClient;   // harness writes here
     public Stream Output => _outputClient;  // harness reads here
 
+    /// <summary>
+    /// Close the output after the next scripted response, in the same turn
+    /// that writes it.
+    /// </summary>
+    /// <remarks>
+    /// The responder is called once per input READ, so a test that wanted
+    /// "some data, then EOF" had to script it across two calls and therefore
+    /// assumed the harness's two Writes arrive as two Reads. They do not
+    /// reliably: a descheduled IO thread lets both Writes accumulate and one
+    /// Read drains them together, the second call never comes, and the test
+    /// times out instead of seeing the EOF it was about. Closing in the same
+    /// turn as the response makes the sequence a fact rather than a race.
+    /// </remarks>
+    public void CloseOutputAfterNextResponse() => Volatile.Write(ref _closeAfterResponse, 1);
+
+    private int _closeAfterResponse;
+
     // No-op: the in-process fake has no preamble. Scripted and echo modes
     // both skip any drain step; the caller is responsible for shaping the
     // pipe's initial state via the scripted responder if needed.
@@ -111,6 +128,12 @@ public sealed class FakeTransport : ITransport
                         break;
                     }
                     _outputServer.Write(response.Value.Span);
+                    if (Volatile.Read(ref _closeAfterResponse) == 1)
+                    {
+                        _outputServer.Flush();
+                        try { _outputServer.Dispose(); } catch { }
+                        break;
+                    }
                 }
             }
         }
