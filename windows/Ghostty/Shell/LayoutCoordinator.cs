@@ -130,11 +130,20 @@ internal sealed class LayoutCoordinator
     private readonly FrameworkElement _paneHost;
 
     /// <summary>
-    /// Fired when the active-tab ghost lands at the end of an uninterrupted
-    /// switch, with the unit direction it was travelling. The window uses
+    /// Staged when the active-tab ghost's flight is staged, with the unit
+    /// direction it travels and how long until it lands. The window uses
     /// it for a small inertia nudge.
+    ///
+    /// The DELAY is the point. This used to fire from the switch
+    /// Storyboard's Completed handler, which is raised on the UI thread and
+    /// therefore queues behind whatever the terminal's own resize is doing:
+    /// measured, the nudge started at about 560ms on a switch whose visual
+    /// motion ended at 340ms. A punctuation mark that lands after the
+    /// sentence ends is not punctuation. Handing the delay over instead
+    /// lets the window schedule the nudge on the compositor, which runs it
+    /// at the landing whatever the UI thread is doing.
     /// </summary>
-    private readonly Action<double, double>? _impact;
+    private readonly Action<double, double, TimeSpan>? _impact;
     private readonly ITabHost _horizontalTabHost;
     private readonly Func<TabModel?> _activeTab;
 
@@ -174,7 +183,7 @@ internal sealed class LayoutCoordinator
         FrameworkElement morphRoot,
         FrameworkElement paneHost,
         Func<TabModel?> activeTab,
-        Action<double, double>? impact = null,
+        Action<double, double, TimeSpan>? impact = null,
         Func<bool>? motionEnabled = null)
     {
         _motionEnabled = motionEnabled;
@@ -397,6 +406,14 @@ internal sealed class LayoutCoordinator
         }
         MorphTrace("SWITCH lane");
 
+        // The direction the ghost will travel, remembered for whichever
+        // path ends up staging the flight: the morph may be staged now or
+        // a frame or two later, and only the staging site knows how much
+        // of the switch is left to delay the landing by.
+        _impactDirection = verticalTabs
+            ? new Point(-1, 0)
+            : new Point(0, -1);
+
         // Staged before any transform is applied below. TransformToVisual
         // reads whatever offset the strip is already carrying, so measuring
         // after the incoming translate would aim the ghost at the strip's
@@ -453,14 +470,11 @@ internal sealed class LayoutCoordinator
             // which is the one thing that method exists to avoid.
             _switchStoryboard = null;
 
-            // Only a staged flight has anything to slam into: a waiting
-            // morph whose destination never realized parks the ghost and
-            // stages no storyboard, and the fallback paths below
-            // fast-forward without motion.
-            var landed = _morphStoryboard is not null;
+            // The impact is not raised here any more. It is scheduled when
+            // the ghost's flight is staged, so the compositor can land it
+            // with the motion instead of whenever this handler is finally
+            // pumped; see the _impact field.
             FinishSwitch(verticalTabs, onCompleted);
-            if (landed)
-                _impact?.Invoke(verticalTabs ? -1 : 0, verticalTabs ? 0 : -1);
         };
 
         // If Begin throws, Completed never fires and _switching stays
@@ -512,6 +526,9 @@ internal sealed class LayoutCoordinator
 
     private ActiveTabMorph? _morph;
     private Storyboard? _morphStoryboard;
+
+    /// <summary>Unit direction of the flight being staged.</summary>
+    private Point _impactDirection;
 
     /// <summary>
     /// Oracle for the morph fuzz harness: every switch must end with zero
@@ -1022,6 +1039,14 @@ internal sealed class LayoutCoordinator
         }
 
         _morphStoryboard = sb;
+
+        // Scheduled from here rather than from the switch's completion, and
+        // from here rather than from Animate, because this is the one place
+        // that knows the flight is really happening AND how long is left of
+        // it: a deferred morph stages with only the remainder of the switch
+        // to run, and the landing has to be delayed by that much and no
+        // more.
+        _impact?.Invoke(_impactDirection.X, _impactDirection.Y, duration);
 
         void Add(
             DependencyObject target, string path,
