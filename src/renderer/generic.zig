@@ -1892,6 +1892,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Update per-frame custom shader uniforms.
             try self.updateCustomShaderUniformsForFrame();
 
+            // Get a frame context from the graphics API.
+            // This must happen before any texture upload because DX12
+            // CopyTextureRegion requires the frame's command list, which is
+            // only available between beginFrame and drawFrameEnd. Metal and
+            // OpenGL use immediate CPU-to-GPU copies so this ordering is
+            // transparent to them.
+            //
+            // It must also happen before the buffer syncs below, and that
+            // half is a correctness requirement rather than a convenience.
+            // A sync that outgrows its buffer frees the old backing store
+            // and allocates a bigger one; on DX12 that free destroys an
+            // ID3D12Resource a command list still in flight may be reading,
+            // and beginFrame is where the fence wait for this slot lives.
+            // Done the other way round the destroy runs ahead of the only
+            // thing that makes it safe. Metal and OpenGL are unaffected
+            // either way: their beginFrame just opens a command buffer, and
+            // it neither reads these buffers nor records any draw.
+            var frame_ctx = try self.api.beginFrame(self, &frame.target);
+            defer frame_ctx.complete(sync);
+
             // Setup our frame data
             try frame.uniforms.sync(&.{self.uniforms});
             try frame.cells_bg.sync(self.cells.bg_cells);
@@ -1903,15 +1923,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 frame.bg_image_buffer_modified = self.bg_image_buffer_modified;
             }
-
-            // Get a frame context from the graphics API.
-            // This must happen before any texture upload because DX12
-            // CopyTextureRegion requires the frame's command list, which is
-            // only available between beginFrame and drawFrameEnd. Metal and
-            // OpenGL use immediate CPU-to-GPU copies so this ordering is
-            // transparent to them.
-            var frame_ctx = try self.api.beginFrame(self, &frame.target);
-            defer frame_ctx.complete(sync);
 
             // Upload kitty graphics images to the GPU as necessary.
             _ = self.images.upload(self.alloc, &self.api);

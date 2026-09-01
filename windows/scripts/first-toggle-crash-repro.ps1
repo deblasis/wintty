@@ -51,9 +51,14 @@ exact test, so the arms alone do not settle it. The reason to believe the
 toggle anyway is mechanical rather than statistical -- the crashing frame
 IS the buffer-growth branch, and only a size change reaches it.
 
-The rate is also not stable: the first 8 attempts gave 2 and the next 28
-gave 1. Budget for that when using this as a bisect oracle -- a clean run
-of 8 means very little.
+The rate is also not stable, and that instability is the headline rather
+than a footnote. The first 8 attempts gave 2 and the next 28 gave 1; and
+later the same day, on the same machine and the SAME baseline binary,
+41 further attempts gave 0. So a clean run proves nothing at any length
+tried so far. Whenever this is used to judge a fix, run the unfixed
+baseline INTERLEAVED with the candidate (-NativeDll, one attempt each,
+alternating) and treat the whole experiment as void unless the baseline
+arm actually crashed.
 
 Every attempt is a cold process. Crashes are detected two ways -- the
 process exiting under us, and a new envelope appearing in the crash
@@ -86,7 +91,14 @@ param(
 
     # Stop at the first crash. Off by default: a hit rate over a stated
     # number of attempts is the finding, and one hit is not a rate.
-    [switch]$StopOnFirst
+    [switch]$StopOnFirst,
+
+    # libghostty to test. Copied over the deployed native\ghostty.dll
+    # before every attempt, so a caller can alternate two builds inside
+    # one session and one machine load. That interleaving is the point:
+    # this crash's rate drifts enough that a fixed build measured on
+    # Monday against a baseline measured on Tuesday proves nothing.
+    [string]$NativeDll = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -118,7 +130,7 @@ function Get-CrashNames {
 # ghostty.dll frames when a pdb sits beside the deployed dll. Without this
 # the report is 29 bare addresses, which is what made the original sighting
 # unactionable.
-function Show-CrashEnvelope([string]$Path, [string]$NativeDll) {
+function Show-CrashEnvelope([string]$Path, [string]$Obj) {
     $payload = (([System.IO.File]::ReadAllText($Path)) -split "`n") |
         Where-Object { $_ -like '*"exception"*' } | Select-Object -First 1
     if (-not $payload) { Write-Host "    (envelope has no exception payload)"; return }
@@ -139,11 +151,11 @@ function Show-CrashEnvelope([string]$Path, [string]$NativeDll) {
         if (-not $hit) { Write-Host ("    {0,2}  {1}  ???" -f $i, $fr.instruction_addr); $i++; continue }
         $rva = $addr - $hit.Base
         $line = "    {0,2}  {1}+0x{2:x}" -f $i, $hit.Name, $rva
-        if ($hit.Name -eq 'ghostty.dll' -and (Test-Path $symbolizer) -and (Test-Path $NativeDll)) {
+        if ($hit.Name -eq 'ghostty.dll' -and (Test-Path $symbolizer) -and (Test-Path $Obj)) {
             # -1: the frame holds a RETURN address, so the call site is the
             # byte before it. Symbolizing the raw value lands on the next
             # statement and blames the wrong line.
-            $sym = & $symbolizer --obj=$NativeDll --relative-address ("0x{0:x}" -f ($rva - 1)) 2>$null
+            $sym = & $symbolizer --obj=$Obj --relative-address ("0x{0:x}" -f ($rva - 1)) 2>$null
             $named = @($sym | Where-Object { $_ -ne '' })
             if ($named.Count -ge 2) { $line += "  {0}  {1}" -f $named[0], $named[1] }
         }
@@ -152,14 +164,32 @@ function Show-CrashEnvelope([string]$Path, [string]$NativeDll) {
     }
 }
 
-$nativeDll = Join-Path (Split-Path -Parent (Resolve-Path $ExePath).Path) 'native\ghostty.dll'
+$deployedDll = Join-Path (Split-Path -Parent (Resolve-Path $ExePath).Path) 'native\ghostty.dll'
 $tabs = @('tab-1', 'tab-2', 'tab-3', 'tab-4', 'tab-5')
 $hits = @()
 $ran = 0
 
 Write-Host ("arm={0} attempts={1} dwell={2}ms exe={3}" -f $Arm, $Attempts, $DwellMs, $ExePath)
 
+if ($NativeDll -and -not (Test-Path $NativeDll)) {
+    Write-Host "HARNESS: no libghostty at $NativeDll"
+    exit 2
+}
+
 for ($n = 1; $n -le $Attempts; $n++) {
+    if ($NativeDll) {
+        # Swap between attempts, never during one: the app has the dll
+        # mapped for its whole life, so this is only safe with no Wintty
+        # running, which is exactly where each attempt begins.
+        Copy-Item $NativeDll $deployedDll -Force
+        # Carry the matching pdb across too. Symbolizing a fixed build
+        # against the baseline's pdb would silently blame the wrong lines,
+        # which is worse than not symbolizing at all.
+        $srcPdb = Join-Path (Split-Path -Parent $NativeDll) 'ghostty.pdb'
+        if (Test-Path $srcPdb) {
+            Copy-Item $srcPdb (Join-Path (Split-Path -Parent $deployedDll) 'ghostty.pdb') -Force
+        }
+    }
     $before = Get-CrashNames
     $session = $null
     $verdict = 'clean'
@@ -237,8 +267,15 @@ for ($n = 1; $n -le $Attempts; $n++) {
     }
     $ran++
 
-    # The envelope lands after the process is gone; give the sentry backend
-    # a moment before deciding nothing was written.
+    # Envelope detection LAGS BY ONE ATTEMPT and cannot be relied on for
+    # the count. sentry writes a crash envelope on the NEXT launch, not at
+    # crash time -- gpu.log shows "processing and pruning old runs" then
+    # "sending envelope" during startup -- so the file for attempt N
+    # usually appears while attempt N+1 is booting. The process-exit check
+    # above is the trustworthy detector; this poll only enriches a crash
+    # that was already caught, and may attribute a stack to its successor.
+    # Reconcile totals against the envelope COUNT for the whole run, never
+    # per attempt.
     $new = @()
     $envDeadline = [datetime]::UtcNow.AddSeconds(6)
     while ([datetime]::UtcNow -lt $envDeadline) {
@@ -252,7 +289,7 @@ for ($n = 1; $n -le $Attempts; $n++) {
     if ($verdict -eq 'crash') {
         $hits += [pscustomobject]@{ Attempt = $n; ExitCode = $exitCode; Where = $where; Envelope = ($new -join ',') }
         Write-Host ("  attempt {0}: CRASH at '{1}' exit={2} envelope={3}" -f $n, $where, $exitCode, ($new -join ','))
-        foreach ($e in $new) { Show-CrashEnvelope (Join-Path $crashDir $e) $nativeDll }
+        foreach ($e in $new) { Show-CrashEnvelope (Join-Path $crashDir $e) $deployedDll }
         if ($StopOnFirst) { break }
     }
     else {
