@@ -51,7 +51,12 @@ internal static class SystemMenuPopup
         var clientPoint = new System.Drawing.Point(
             (int)(bottomLeftDip.X * scale),
             (int)(bottomLeftDip.Y * scale));
-        PInvoke.ClientToScreen(hwnd, ref clientPoint);
+        // Checked, the way ShowForWindow already checks GetWindowRect below:
+        // a discarded failure leaves clientPoint in CLIENT coordinates and
+        // the menu opens somewhere else on screen. The realistic failure is
+        // a window that has gone away, where TrackPopupMenu has nothing to
+        // anchor to either.
+        if (!PInvoke.ClientToScreen(hwnd, ref clientPoint)) return;
 
         Track(hwnd, clientPoint.X, clientPoint.Y);
     }
