@@ -247,7 +247,7 @@ internal static class SyntaxQueries
     /// null-conditional call parses with the receiver hoisted out, so the
     /// callee on its own reads as ".TryEnqueue"; put the receiver back so a
     /// test can name the call as written. Keeping the receiver is what lets a
-    /// test tell `_switchStoryboard.Stop` from a Stop on anything else.
+    /// test tell `_timeline.Release` from a Release on anything else.
     /// </summary>
     public static string CalleeText(this InvocationExpressionSyntax call)
     {
@@ -322,3 +322,4 @@ internal static class SyntaxQueries
         return invocation;
     }
 }
+

@@ -53,9 +53,10 @@ namespace Ghostty.Shell;
 ///   with the fill. Text stays at its natural size and is cut off by the
 ///   shrinking box rather than squashed into it.
 ///
-/// If the compositor refuses any of that, <see cref="TryComposeBox"/>
-/// answers false and the caller falls back to the old dependent tween.
-/// Juddering is worse than smooth and better than nothing.
+/// If the compositor refuses any of that, <see cref="ComposeBox"/> throws
+/// and the caller drops the ghost: the cross-fade underneath carries the
+/// switch, which reads better than a ghost juddering at single-digit
+/// frame rates ever did.
 /// </summary>
 internal sealed partial class TabMorphGhost : Grid
 {
@@ -124,20 +125,29 @@ internal sealed partial class TabMorphGhost : Grid
 
     /// <summary>
     /// Lay the ghost out once, at the larger of the two boxes on each
-    /// axis, and drive the visible box from the source rect to the
-    /// destination rect on the compositor.
+    /// axis, and hand the visible box to the switch's timeline: the fill
+    /// scaled between the two rects, the content clipped to the same box,
+    /// all expressions of the clock the travel already rides, so box and
+    /// travel cannot disagree about where the flight is. The caller must
+    /// call this BEFORE the element is measured for the first time -- the
+    /// layout size it sets is the size the label wraps against.
     ///
-    /// Returns false when composition is unavailable, leaving the element
-    /// sized to the source box for the caller's fallback tween. The
-    /// caller must call this BEFORE the element is measured for the first
-    /// time -- the layout size it sets is the size the label wraps
-    /// against.
+    /// Throws when composition refuses; the caller drops the ghost and
+    /// the cross-fade carries the switch. The dependent Width/Height
+    /// tween this used to fall back on is gone with the storyboards -- it
+    /// was a relayout per frame on a thread that was measured delivering
+    /// single-digit frames per flight, which is not a fallback so much as
+    /// a slower way to look broken.
     /// </summary>
+    /// <param name="timeline">The switch's clock.</param>
     /// <param name="from">The rect the ghost departs.</param>
     /// <param name="to">The rect it lands on.</param>
-    /// <param name="duration">How long the box takes to settle.</param>
-    internal bool TryComposeBox(
-        Windows.Foundation.Size from, Windows.Foundation.Size to, TimeSpan duration)
+    /// <param name="startT">How far the switch already is at staging.</param>
+    /// <param name="shapeFraction">Share of the flight the box settles in.</param>
+    internal void ComposeBox(
+        LayoutSwitchTimeline timeline,
+        Windows.Foundation.Size from, Windows.Foundation.Size to,
+        double startT, double shapeFraction)
     {
         var box = new Windows.Foundation.Size(
             Math.Max(from.Width, to.Width), Math.Max(from.Height, to.Height));
@@ -148,84 +158,37 @@ internal sealed partial class TabMorphGhost : Grid
         _content.Width = box.Width;
         _content.Height = box.Height;
 
-        if (box.Width <= 0 || box.Height <= 0) return false;
+        if (box.Width <= 0 || box.Height <= 0)
+            throw new InvalidOperationException("morph box has no area");
 
-        try
-        {
-            var bodyVisual = ElementCompositionPreview.GetElementVisual(_body);
-            var contentVisual = ElementCompositionPreview.GetElementVisual(_content);
-            var compositor = bodyVisual.Compositor;
+        var bodyVisual = ElementCompositionPreview.GetElementVisual(_body);
+        var contentVisual = ElementCompositionPreview.GetElementVisual(_content);
 
-            // The same curve the pane reveal sweeps on, so the ghost's box
-            // and the terminal's edge are visibly one motion rather than
-            // two that happen to overlap.
-            var ease = compositor.CreateCubicBezierEasingFunction(
-                new Vector2(0.65f, 0f), new Vector2(0.35f, 1f));
+        // Scaled about the top-left: the ghost's Translate already
+        // carries its position, so the box must grow and shrink from
+        // the origin that position names, not from its middle.
+        bodyVisual.CenterPoint = Vector3.Zero;
+        var fromScale = new Vector2(
+            (float)(from.Width / box.Width), (float)(from.Height / box.Height));
+        var toScale = new Vector2(
+            (float)(to.Width / box.Width), (float)(to.Height / box.Height));
+        bodyVisual.Scale = new Vector3(fromScale, 1f);
 
-            // Scaled about the top-left: the ghost's Translate already
-            // carries its position, so the box must grow and shrink from
-            // the origin that position names, not from its middle.
-            bodyVisual.CenterPoint = Vector3.Zero;
-            var fromScale = new Vector2(
-                (float)(from.Width / box.Width), (float)(from.Height / box.Height));
-            var toScale = new Vector2(
-                (float)(to.Width / box.Width), (float)(to.Height / box.Height));
-            bodyVisual.Scale = new Vector3(fromScale, 1f);
+        // The content is cut down to the same box rather than scaled
+        // into it. Insets are measured from the layout box, so they
+        // run from "hide nothing beyond the source rect" to "hide
+        // nothing beyond the destination rect".
+        var clip = contentVisual.Compositor.CreateInsetClip();
+        contentVisual.Clip = clip;
 
-            var scaleAnim = compositor.CreateVector3KeyFrameAnimation();
-            scaleAnim.InsertKeyFrame(0f, new Vector3(fromScale, 1f));
-            scaleAnim.InsertKeyFrame(1f, new Vector3(toScale, 1f), ease);
-            scaleAnim.Duration = duration;
-            bodyVisual.StartAnimation(nameof(Visual.Scale), scaleAnim);
-
-            // The content is cut down to the same box rather than scaled
-            // into it. Insets are measured from the layout box, so they
-            // run from "hide nothing beyond the source rect" to "hide
-            // nothing beyond the destination rect".
-            var clip = compositor.CreateInsetClip();
-            contentVisual.Clip = clip;
-
-            var rightFrom = (float)(box.Width - from.Width);
-            var rightTo = (float)(box.Width - to.Width);
-            if (Steady(rightFrom, rightTo)) clip.RightInset = rightTo;
-            else clip.StartAnimation(nameof(InsetClip.RightInset),
-                Sweep(rightFrom, rightTo));
-
-            var bottomFrom = (float)(box.Height - from.Height);
-            var bottomTo = (float)(box.Height - to.Height);
-            if (Steady(bottomFrom, bottomTo)) clip.BottomInset = bottomTo;
-            else clip.StartAnimation(nameof(InsetClip.BottomInset),
-                Sweep(bottomFrom, bottomTo));
-            return true;
-
-            // An inset that never moves is set, not animated: a keyframe
-            // pair from a value to itself is a batch the compositor
-            // carries for the whole flight to no effect. Both axes go
-            // through here because the rail and the header agree on
-            // height far more often than on width.
-            static bool Steady(float a, float b) => Math.Abs(a - b) < 0.5f;
-
-            ScalarKeyFrameAnimation Sweep(float a, float b)
-            {
-                var anim = compositor.CreateScalarKeyFrameAnimation();
-                anim.InsertKeyFrame(0f, a);
-                anim.InsertKeyFrame(1f, b, ease);
-                anim.Duration = duration;
-                return anim;
-            }
-        }
-        catch (Exception)
-        {
-            // Composition refused. Put the element back to the source box
-            // so the caller's dependent tween starts where it expects.
-            Width = from.Width;
-            Height = from.Height;
-            _body.Width = double.NaN;
-            _body.Height = double.NaN;
-            _content.Width = double.NaN;
-            _content.Height = double.NaN;
-            return false;
-        }
+        timeline.GhostBox(
+            bodyVisual, clip,
+            fromScale, toScale,
+            rightFrom: (float)(box.Width - from.Width),
+            rightTo: (float)(box.Width - to.Width),
+            bottomFrom: (float)(box.Height - from.Height),
+            bottomTo: (float)(box.Height - to.Height),
+            startT, shapeFraction);
     }
 
     /// <summary>
@@ -262,9 +225,10 @@ internal sealed partial class TabMorphGhost : Grid
     }
 
     /// <summary>
-    /// The fallback path's resize target. Only reached when
-    /// <see cref="TryComposeBox"/> refused, where the whole element is
-    /// tweened the old way and the two layers just follow it.
+    /// Hold the source box while the destination is still unknown: a
+    /// ghost staged before its landing container realized has nowhere to
+    /// aim, so it sits on the departure rect until one arrives and
+    /// <see cref="ComposeBox"/> lays it out properly.
     /// </summary>
     internal void ResizeForFallback(double width, double height)
     {
