@@ -665,8 +665,14 @@ internal static class TestSeam
                 // is a bare Canvas and gets no automation peer, so the tile's
                 // title is the only thing in the tree. Read while the popup is
                 // up -- it dismisses itself on a 1.2s timer.
+                // Two reasons for null and the message says so, because they
+                // send an investigation in opposite directions: the popup was
+                // never up, or it was up and the client-to-screen conversion
+                // failed. Naming only the first sent a bisect after the popup
+                // lifetime for a coordinate failure.
                 if (window.TestSeamSwitcherPreviewRect() is not { } rect)
-                    return Error(op, "no switcher preview: the cycle popup is not up");
+                    return Error(op, "no switcher preview: either the cycle popup is "
+                        + "not up, or its rect could not be placed on screen");
                 return Json(json =>
                 {
                     json.WriteStartObject();

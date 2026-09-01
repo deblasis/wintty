@@ -334,8 +334,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             // The panel's offset is in DIPs relative to the window content; the
             // window's client origin is already in physical screen pixels, so
             // only the former is scaled.
+            // A discarded failure here leaves the point at (0,0), and the
+            // geometry then claims the terminal viewport sits at the screen
+            // origin -- a plausible rectangle, so IsUsable accepts it and a
+            // screen reader is told where the text is with confidence.
             var client = new System.Drawing.Point(0, 0);
-            PInvoke.ClientToScreen(new Windows.Win32.Foundation.HWND(hwnd), ref client);
+            if (!PInvoke.ClientToScreen(new Windows.Win32.Foundation.HWND(hwnd), ref client))
+                return null;
             var scale = xamlRoot.RasterizationScale;
             var offset = Panel.TransformToVisual(root)
                 .TransformPoint(new Windows.Foundation.Point(0, 0));

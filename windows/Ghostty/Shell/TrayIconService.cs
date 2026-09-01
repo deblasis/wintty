@@ -205,7 +205,12 @@ internal sealed unsafe partial class TrayIconService : IDisposable
             AppendMenuW(menu, MF_STRING, IDM_SHOW, "Show Wintty");
             AppendMenuW(menu, MF_SEPARATOR, 0, null);
             AppendMenuW(menu, MF_STRING, IDM_EXIT, "Exit");
-            GetCursorPos(out var pt);
+            // A discarded failure leaves pt at (0,0) and the menu opens in the
+            // corner of the primary monitor instead of at the cursor. The
+            // documented failure is "the input desktop is not the current
+            // desktop" (a lock or secure-desktop transition), where popping a
+            // menu at all is wrong, so this bails the way SystemMenuPopup does.
+            if (!GetCursorPos(out var pt)) return;
             // TrackPopupMenu requires the owning window to be foreground
             // (see SystemMenuPopup.Track / user32 docs).
             SetForegroundWindow(_messageHwnd);
