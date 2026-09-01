@@ -777,10 +777,36 @@ internal static class TestSeam
             var (horizontal, vertical) = window.TestSeamHosts;
             WriteHost(json, "horizontal", root, horizontal);
             WriteHost(json, "vertical", root, vertical);
+
+            WriteChrome(json, "captionFill", root, window.TestSeamCaptionFill);
             json.WriteEndObject();
 
             json.WriteEndObject();
         });
+
+    /// <summary>
+    /// One chrome rectangle, measured exactly the way a strip row is, so
+    /// what a film shows can be lined up against where the chrome
+    /// actually was without either being described in its own private
+    /// units.
+    /// </summary>
+    private static void WriteChrome(
+        Utf8JsonWriter json, string name,
+        Microsoft.UI.Xaml.FrameworkElement? root, Microsoft.UI.Xaml.FrameworkElement element)
+    {
+        var measured = root is null
+            ? default
+            : Ghostty.Testing.TestSeamStripRowMeasure.Row(
+                root, element, "chrome", name, null, false);
+        json.WriteStartObject(name);
+        json.WriteBoolean("shown", measured.Shown);
+        json.WriteNumber("alpha", Math.Round(measured.Alpha, 4));
+        json.WriteNumber("x", Math.Round(measured.Bounds.X, 1));
+        json.WriteNumber("y", Math.Round(measured.Bounds.Y, 1));
+        json.WriteNumber("w", Math.Round(measured.Bounds.Width, 1));
+        json.WriteNumber("h", Math.Round(measured.Bounds.Height, 1));
+        json.WriteEndObject();
+    }
 
     private static void WriteHost(
         Utf8JsonWriter json, string name,
