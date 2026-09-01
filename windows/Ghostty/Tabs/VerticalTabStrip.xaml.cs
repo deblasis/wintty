@@ -787,7 +787,22 @@ internal sealed partial class VerticalTabStrip : UserControl
     // ---------------------------------------------------------------
 
     private readonly Dictionary<TabGroup, Border> _groupFields = new();
-    private readonly Dictionary<TabGroup, Anim.Storyboard> _fieldMotion = new();
+    /// <summary>
+    /// One field clock per group, with the values it was flying to.
+    ///
+    /// The values are held because a Storyboard that is STOPPED puts the
+    /// animated property back to its base, and for the fade that base is the
+    /// zero the fade set on its way in. So a fade interrupted inside its 83ms
+    /// -- a tab added above the run it had just created -- left an invisible
+    /// Border that the following glide then animated the geometry of, and the
+    /// field stayed gone until the group was dissolved and remade. Relying on
+    /// Completed to put the value back is relying on Stop raising it, which is
+    /// a framework detail this control should not be betting on either way.
+    /// Landing is idempotent and both doors call it.
+    /// </summary>
+    private readonly Dictionary<TabGroup, FieldFlight> _fieldMotion = new();
+
+    private readonly record struct FieldFlight(Anim.Storyboard Board, Action Land);
 
     private void UpdateGroupFields()
     {
@@ -813,6 +828,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         var motion = TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
         var width = Math.Max(0, ActualWidth - RowInsetLeft);
         var placed = new HashSet<TabGroup>();
+        // Once, not per run: the answer is the same for all of them and it
+        // walks the template to find the scroller.
+        var viewport = RowsViewport();
 
         foreach (var run in runs)
         {
@@ -834,17 +852,52 @@ internal sealed partial class VerticalTabStrip : UserControl
                 continue;
             }
 
+            // Clipped to the band the rows are actually visible in, the way the
+            // horizontal placement clips to its strip's viewport. A row that
+            // has scrolled out of the list keeps reporting the offset it would
+            // have had, so an unclipped field walks up behind the pinned shelf
+            // and the strip's header -- and every pane surface up there is
+            // forced transparent, so there is nothing to hide it. A run
+            // entirely off-screen collapses to nothing and is skipped, which
+            // hides its field rather than drawing it somewhere untrue.
+            if (viewport is { } band)
+            {
+                top = Math.Max(top, band.Top);
+                bottom = Math.Min(bottom, band.Bottom);
+            }
+
             if (bottom - top <= 0) continue;
             placed.Add(run.Group);
             PlaceGroupField(run.Group, top, width, bottom - top, motion);
         }
 
+        // A field the manager still holds is only HIDDEN when it could not be
+        // placed this pass -- its rows are mid-rebuild, or it scrolled out --
+        // because the Border is what carries the glide, and destroying it makes
+        // the next placement an appearance instead of a move.
+        //
+        // That distinction is the whole of it. Retiring the field alongside the
+        // header row read as tidy and was not: a collapse changes how many rows
+        // the strip shows, ReconcileRowOrder answers a changed count with
+        // RebuildAllItems, and that removes and re-adds every group's row. So
+        // every field on the strip was destroyed and re-faded on any collapse,
+        // any expand, and any group being created or dissolved -- the four
+        // events the glide exists for, and the only ones where a field changes
+        // size. It cut and faded instead, and the guard that pinned the field
+        // to the header row's lifetime pinned that in place.
+        var retired = new List<TabGroup>();
         foreach (var (group, field) in _groupFields)
         {
             if (placed.Contains(group)) continue;
             StopFieldMotion(group);
-            field.Visibility = Visibility.Collapsed;
+            if (_manager.Groups.Contains(group))
+            {
+                field.Visibility = Visibility.Collapsed;
+                continue;
+            }
+            retired.Add(group);
         }
+        foreach (var group in retired) RemoveGroupField(group);
     }
 
     /// <summary>
@@ -946,13 +999,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         // Storyboard that is stopped (teardown, a second change mid-glide)
         // leaves the property where it was, and the field would keep the
         // old geometry while the rows moved on.
-        board.Completed += (_, _) =>
+        void Land()
         {
-            _fieldMotion.Remove(group);
             Canvas.SetTop(field, top);
             field.Height = height;
-        };
-        _fieldMotion[group] = board;
+        }
+        board.Completed += (_, _) => { _fieldMotion.Remove(group); Land(); };
+        _fieldMotion[group] = new FieldFlight(board, Land);
         board.Begin();
     }
 
@@ -997,6 +1050,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         field.Opacity = 0;
         var fade = new Anim.DoubleAnimation
         {
+            // From stated rather than inferred. Without it the animation's base
+            // is whatever the property held when it began -- the zero on the
+            // line above -- and that is the value a Stop restores.
+            From = 0,
             To = 1,
             Duration = new Duration(TimeSpan.FromMilliseconds(TabGroupField.FadeMs)),
         };
@@ -1004,8 +1061,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         Anim.Storyboard.SetTargetProperty(fade, "Opacity");
         var board = new Anim.Storyboard();
         board.Children.Add(fade);
-        board.Completed += (_, _) => { _fieldMotion.Remove(group); field.Opacity = 1; };
-        _fieldMotion[group] = board;
+        void Land() => field.Opacity = 1;
+        board.Completed += (_, _) => { _fieldMotion.Remove(group); Land(); };
+        _fieldMotion[group] = new FieldFlight(board, Land);
         board.Begin();
     }
 
@@ -1016,20 +1074,30 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private void StopAllFieldMotion()
     {
-        foreach (var (_, board) in _fieldMotion) board.Stop();
+        // Teardown does not land: the element is going away, and writing a
+        // final geometry onto an unloaded Border is work for nobody.
+        foreach (var (_, flight) in _fieldMotion) flight.Board.Stop();
         _fieldMotion.Clear();
     }
 
     private void StopFieldMotion(TabGroup group)
     {
-        if (!_fieldMotion.Remove(group, out var board)) return;
-        board.Stop();
+        if (!_fieldMotion.Remove(group, out var flight)) return;
+        flight.Board.Stop();
+        // Landed here rather than left to Completed, which a Stop may never
+        // raise. An interrupted fade's base value is zero, so the alternative
+        // is a field that is still placed, still measured, and invisible.
+        flight.Land();
     }
 
     /// <summary>
-    /// Retire a dissolved group's field. Called from the same place the
-    /// header row is retired, so a field can never outlive the run it was
-    /// drawn around.
+    /// Retire a dissolved group's field.
+    ///
+    /// Driven by whether the MANAGER still holds the group, not by the header
+    /// row's lifetime: the row is removed and re-added by any rebuild, and a
+    /// field that came and went with it could never glide across the changes
+    /// that resize it. A field outliving its run is prevented by the same
+    /// check, one pass later.
     /// </summary>
     private void RemoveGroupField(TabGroup group)
     {
@@ -1501,6 +1569,32 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// contains the row, so the clamp does nothing and a cover gets drawn
     /// across the pane at a height with no tab beside it.
     /// </remarks>
+    /// <summary>
+    /// The band the scrolling rows are visible in, in this control's own
+    /// coordinates.
+    ///
+    /// Not <see cref="SelectionViewport"/>: that one answers for whichever
+    /// container the ACTIVE row lives in, and returns the pinned shelf when the
+    /// active tab is pinned. A group's rows are never pinned, so a field
+    /// clamped to the shelf would collapse to nothing every time the user
+    /// happened to be on a pinned tab.
+    /// </summary>
+    private (double Top, double Bottom)? RowsViewport()
+    {
+        _menuItemsScroller ??= FindDescendantByName(NavView, "MenuItemsScrollViewer");
+        if (_menuItemsScroller is not { ActualHeight: > 0 } scroller) return null;
+        try
+        {
+            var top = scroller.TransformToVisual(this)
+                .TransformPoint(new Point(0, 0)).Y;
+            return (top, top + scroller.ActualHeight);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return null;
+        }
+    }
+
     internal (double Top, double Bottom)? SelectionViewport(UIElement reference)
     {
         _menuItemsScroller ??= FindDescendantByName(NavView, "MenuItemsScrollViewer");
@@ -2031,7 +2125,10 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void RemoveGroupRow(TabGroup group)
     {
-        RemoveGroupField(group);
+        // The field is NOT retired here. This runs on every rebuild, including
+        // the one a collapse triggers, and the field has to survive that to
+        // glide across it. UpdateGroupFields retires it when the manager stops
+        // holding the group.
         if (!_headers.Remove(group, out var item)) return;
         // One fence rule for every MenuItems mutation.
         _syncing = true;

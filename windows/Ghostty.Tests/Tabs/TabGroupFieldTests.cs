@@ -361,11 +361,7 @@ public sealed class TabGroupFieldTests
         Assert.All(runs, r => Assert.Equal(1, r.SlotCount));
     }
 
-    /// <summary>
-    /// The field's clocks are the strip's clocks. A field animating on
-    /// numbers of its own separates from the rows it is drawn around,
-    /// which looks worse than no field at all.
-    /// </summary>
+
     /// <summary>
     /// The wash is painted as ink at an alpha, not as the composite it
     /// lands as. Handing a painter the composite is how an opaque patch
@@ -383,6 +379,11 @@ public sealed class TabGroupFieldTests
         }
     }
 
+    /// <summary>
+    /// The field's clocks are the strip's clocks. A field animating on
+    /// numbers of its own separates from the rows it is drawn around,
+    /// which looks worse than no field at all.
+    /// </summary>
     [Fact]
     public void TheFieldMotion_BorrowsTheStripsOwnTokens()
     {

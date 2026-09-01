@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Ghostty.Core.Tabs;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -61,10 +62,17 @@ public sealed class TabGroupFieldWiringTests
     /// empty list passes for exactly the reason it would pass on a branch
     /// that paints nothing at all.
     /// </summary>
+    /// <remarks>
+    /// Four horizontally: the member's rest state, and the three states one
+    /// item on a field wears (rest, pointer-over, pressed). The last three are
+    /// one ink at three strengths -- MUXC owns those brushes for an unstyled
+    /// tab, and writing the rest value into all of them left every member of a
+    /// group unable to answer the pointer.
+    /// </remarks>
     public static TheoryData<string, int> WashSites => new()
     {
         { VerticalStrip, 1 },
-        { HorizontalStrip, 2 },
+        { HorizontalStrip, 4 },
     };
 
     private static List<InvocationExpressionSyntax> Washes(string file, int expected)
@@ -154,9 +162,48 @@ public sealed class TabGroupFieldWiringTests
     {
         foreach (var wash in Washes(file, sites))
         {
-            var argb = wash.ArgExpression(0).AssertCallTo("TabGroupField.WashArgb");
+            // WashArgb or WashArgbAt: the deepened hover and pressed states are
+            // the same ink at another alpha, and both must still be scored
+            // against the strip's ground rather than against the composite.
+            var argb = Assert.IsType<InvocationExpressionSyntax>(wash.ArgExpression(0));
+            var callee = argb.CalleeText();
+            Assert.True(
+                callee is "TabGroupField.WashArgb" or "TabGroupField.WashArgbAt",
+                $"a wash paint is built from '{callee}', which is neither of the two "
+                + "helpers that keep the alpha on: " + wash);
             Assert.Equal("_stripBackdropPacked", argb.Arg(0));
         }
+    }
+
+    /// <summary>
+    /// A member on a field still answers the pointer: its three unselected
+    /// states are three different strengths of the wash, deepening.
+    ///
+    /// MUXC gives an unstyled tab its own pointer-over and pressed brushes, and
+    /// the field's first draft wrote one value into all three -- so a run of
+    /// members, and the chip that stands for a folded one, stopped responding
+    /// to the pointer entirely. The chip is a click target: it expands the run.
+    /// Equal alphas compile and look deliberate.
+    /// </summary>
+    [Fact]
+    public void Horizontal_AWashedItemStillAnswersThePointer()
+    {
+        var states = ShellSource.Load(HorizontalStrip).Method("ApplyFieldWashStates");
+        var keys = states.Calls("SetItemHeaderBrush").Select(c => c.Arg(1)).ToList();
+        Assert.Equal(
+            new[]
+            {
+                "\"TabViewItemHeaderBackground\"",
+                "\"TabViewItemHeaderBackgroundPointerOver\"",
+                "\"TabViewItemHeaderBackgroundPressed\"",
+            },
+            keys);
+
+        Assert.True(
+            TabGroupField.WashAlpha < TabGroupField.WashHoverAlpha
+                && TabGroupField.WashHoverAlpha < TabGroupField.WashPressedAlpha,
+            "the three states must deepen: equal or inverted alphas are a member "
+            + "that reads as unresponsive, or one that lightens under the finger");
     }
 
     /// <summary>
@@ -169,7 +216,24 @@ public sealed class TabGroupFieldWiringTests
     public void NoStrip_PaintsTheFieldAsItsCompositedGround(string file, int sites)
     {
         Washes(file, sites);
-        Assert.Empty(ShellSource.Load(file).Root.Calls("TabGroupField.FieldGroundRgb"));
+
+        // Calling the helper is allowed and now necessary: it is the ground
+        // contrast is scored against, and the horizontal terminals ask it per
+        // slot. What stays forbidden is PAINTING it. Banning the call outright
+        // was the cheaper rule and it stopped being true the moment anything
+        // needed to score against the field, so the rule names the actual
+        // defect instead: a brush built out of the composite.
+        foreach (var call in ShellSource.Load(file).Root.Calls("TabGroupField.FieldGroundRgb"))
+        {
+            var brush = call.Ancestors().OfType<InvocationExpressionSyntax>()
+                .FirstOrDefault(i => i.CalleeText()
+                    .StartsWith("TabColorBrush.", StringComparison.Ordinal));
+            Assert.True(
+                brush is null,
+                "the composited field ground is being made into a brush, which paints "
+                + "an opaque patch over Mica -- the colour this design rejected, "
+                + "arriving through the scoring door: " + brush);
+        }
     }
 
     /// <summary>
@@ -201,14 +265,46 @@ public sealed class TabGroupFieldWiringTests
     /// strip's ground. A terminal painted straight from the palette is the
     /// 1.57:1 chip #882 measured, and it compiles.
     /// </summary>
-    [Theory]
-    [InlineData(VerticalStrip)]
-    [InlineData(HorizontalStrip)]
-    public void TheTerminals_TakeTheGroupColourAgainstTheStripGround(string file)
+    [Fact]
+    public void Vertical_TheTerminalsTakeTheGroupColourAgainstTheStripGround()
     {
-        var call = ShellSource.Load(file).Root.Call("TabGroupField.TerminalRgb");
+        var call = ShellSource.Load(VerticalStrip).Root.Call("TabGroupField.TerminalRgb");
         Assert.Equal("_stripBackdropPacked", call.Arg(0));
-        Assert.Contains("Color", call.Arg(1), StringComparison.Ordinal);
+        // Exact, not a substring: "Color" is satisfied by TabColor.Red, by
+        // _selectedBorderColor, and by any identifier with the word in it, so
+        // a bar hard-coded to one preset would have passed the rule written to
+        // pin it to the group's.
+        Assert.Equal("group.Color", call.Arg(1));
+    }
+
+    /// <summary>
+    /// Horizontal: each end is scored against the slot it is PAINTED on.
+    ///
+    /// There is no Border here -- the cap is drawn on the run's first slot and
+    /// the end bar on its last -- and those two slots need not be wearing the
+    /// field. The selected tab keeps the terminal background, a member with a
+    /// preset keeps that preset. One ink for both ends, scored against the
+    /// field, answered for a surface neither bar sits on: a Blue cap on a
+    /// selected tab over a blue-ish terminal is about 2.2:1, and a Red end bar
+    /// on a Red member is very nearly invisible, while the rule reports both as
+    /// clearing the floor.
+    /// </summary>
+    [Fact]
+    public void Horizontal_EachTerminalIsScoredAgainstTheSlotItIsPaintedOn()
+    {
+        var terminals = ShellSource.Load(HorizontalStrip)
+            .Method("UpdateGroupFieldTerminals");
+        var calls = terminals.Calls("TabGroupField.TerminalRgbOn");
+        Assert.True(
+            calls.Count == 2,
+            $"expected the two ends to be inked separately, found {calls.Count}");
+
+        // Two DIFFERENT slots, or the split bought nothing.
+        var grounds = calls
+            .Select(c => c.ArgExpression(0).AssertCallTo("SlotGroundRgb").Arg(0))
+            .ToList();
+        Assert.Equal(new[] { "rows[run.First]", "rows[run.Last]" }, grounds);
+        Assert.All(calls, c => Assert.Equal("run.Group.Color", c.Arg(1)));
     }
 
     /// <summary>
@@ -292,6 +388,28 @@ public sealed class TabGroupFieldWiringTests
             .Method("RefreshShellInactiveInk").Calls(rederive));
 
     /// <summary>
+    /// Horizontal: the ground push reaches the TERMINALS too, not only the
+    /// surfaces the wash lands on.
+    ///
+    /// The guard above proves the call exists; it cannot see that the callee
+    /// does the whole job. RefreshGroupFieldWash repainted header brushes --
+    /// members and chip -- and nothing else, while a bar's Fill is only ever
+    /// set by UpdateGroupFieldTerminals, which rides a pass neither
+    /// SetChromeFill nor SetChromeGround reaches. So a frame-style flip moved
+    /// the ground, the members repainted around the new pole, and the cap and
+    /// end bar kept a colour lifted against the field they used to sit on: a
+    /// Graphite bar lifted for a light field is a dark grey, and lands near
+    /// 1.5:1 once that field goes dark. The method's own comment claimed it
+    /// re-derived the terminals while it did not.
+    /// </summary>
+    [Fact]
+    public void Horizontal_TheGroundPushAlsoReInksTheTerminals()
+    {
+        var wash = ShellSource.Load(HorizontalStrip).Method("RefreshGroupFieldWash");
+        Assert.NotEmpty(wash.Calls("QueueBridgeUpdate"));
+    }
+
+    /// <summary>
     /// Vertical: the field is suppressed while a drag is live, the same
     /// rule and for the same reason as the horizontal terminals below --
     /// mid-drag the rows' arranged slots run ahead of their visuals, so a
@@ -313,11 +431,17 @@ public sealed class TabGroupFieldWiringTests
     }
 
     /// <summary>
-    /// Horizontal: the terminals are suppressed while a drag is live. The
-    /// strip's slots are TabView's reorder preview then, not the manager's
-    /// order, so a run's ends are not where the projection says -- an
-    /// unsuppressed end bar sits over a stranger for the length of the
-    /// gesture.
+    /// Horizontal: the terminals are suppressed while a drag is live, and
+    /// suppressed the way the vertical field is -- by LEAVING them, not by
+    /// hiding them.
+    ///
+    /// The strip's slots are TabView's reorder preview mid-drag, not the
+    /// manager's order, so a run's ends are not where the projection says and
+    /// an unsuppressed end bar sits over a stranger for the length of the
+    /// gesture. But falling through to the collapse loop instead of returning
+    /// hid every bar while the wash on the members stayed, so a run read as a
+    /// tint with no beginning and no end -- and the vertical field, which
+    /// returns, did not do that. Two strips, one gesture, one answer.
     /// </summary>
     [Fact]
     public void Horizontal_TheTerminalsAreSuppressedWhileADragIsLive()
@@ -327,11 +451,18 @@ public sealed class TabGroupFieldWiringTests
             pass.DescendantNodes().OfType<IfStatementSyntax>(),
             i => i.Condition.ToString().Contains("_stripDragActive", StringComparison.Ordinal));
 
-        // Negated: the placement happens when a drag is NOT live. Dropping
-        // the "!" inverts the rule into placing ONLY during a drag, which
-        // is a strip with no fields at rest.
-        var negation = Assert.IsType<PrefixUnaryExpressionSyntax>(guard.Condition);
-        Assert.True(negation.IsKind(SyntaxKind.LogicalNotExpression));
+        // Un-negated and an early return, which is the vertical rule exactly.
+        // A "!" here would mean placing ONLY during a drag; falling through
+        // instead of returning is the vanishing bar.
+        Assert.Equal("_stripDragActive", guard.Condition.ToString());
+        Assert.IsType<ReturnStatementSyntax>(guard.Statement);
+
+        // And it stands before anything is measured, so a drag costs no
+        // projection walk and no TransformToVisual sweep either.
+        var firstWalk = pass.Calls("TabStripProjection.HorizontalRows").FirstOrDefault();
+        Assert.True(
+            firstWalk is not null && guard.SpanStart < firstWalk.SpanStart,
+            "the drag guard runs after the strip has already been measured");
     }
 
     /// <summary>
@@ -352,14 +483,38 @@ public sealed class TabGroupFieldWiringTests
     }
 
     /// <summary>
-    /// Vertical: a dissolved group's field goes out the same door its
-    /// header row does. A field that outlives its run is a container drawn
-    /// around tabs that are no longer in it.
+    /// Vertical: a field is retired when the MANAGER stops holding the group,
+    /// and never merely because the header row was rebuilt.
+    ///
+    /// A field that outlives its run is a container drawn around tabs that are
+    /// no longer in it, so the retirement has to happen -- but tying it to the
+    /// header row's lifetime made it happen constantly. A collapse changes how
+    /// many rows the strip shows; ReconcileRowOrder answers a changed count
+    /// with RebuildAllItems; that removes and re-adds every group's row. So
+    /// every field on the strip was destroyed and re-created on any collapse,
+    /// expand, group creation or dissolution -- precisely the four events that
+    /// change a field's size, and the only ones the 250ms glide exists for. It
+    /// cut and faded instead, and the earlier form of this guard held that in
+    /// place while reading like a safety rule.
     /// </summary>
     [Fact]
-    public void Vertical_TheFieldIsRetiredWithItsHeaderRow()
-        => Assert.Single(ShellSource.Load(VerticalStrip)
-            .Method("RemoveGroupRow").Calls("RemoveGroupField"));
+    public void Vertical_TheFieldIsRetiredWhenTheManagerDropsTheGroup()
+    {
+        var strip = ShellSource.Load(VerticalStrip);
+
+        Assert.Empty(strip.Method("RemoveGroupRow").Calls("RemoveGroupField"));
+
+        // Retired from the placement pass, and only for a group the manager
+        // no longer holds -- the same pass that merely HIDES a field it could
+        // not place this time round.
+        var pass = strip.Method("UpdateGroupFields");
+        Assert.NotEmpty(pass.Calls("RemoveGroupField"));
+
+        var stillHeld = Assert.Single(
+            pass.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Condition.ToString().Contains("_manager.Groups", StringComparison.Ordinal));
+        Assert.Equal("_manager.Groups.Contains(group)", stillHeld.Condition.ToString());
+    }
 
     /// <summary>
     /// Vertical: the generic divider is dropped at a run's two boundaries,

@@ -843,13 +843,30 @@ internal sealed partial class TabHost : UserControl, ITabHost
             ApplyLabelPhase(_labelRules.Collapsed());
             ReconcileChips();
             ReconcileStripOrder();
-            return;
         }
-        RefreshChip(group);
-        // The run's members carry the group's name and color on their own
-        // chrome now; the same single-door pass the chip's swatch rides
-        // repaints them, so a recolor never leaves a two-tone run.
-        RefreshRunRails(group);
+        else
+        {
+            RefreshChip(group);
+            // The run's members carry the group's name and color on their own
+            // chrome now; the same single-door pass the chip's swatch rides
+            // repaints them, so a recolor never leaves a two-tone run.
+            RefreshRunRails(group);
+        }
+
+        // Both arms move the field, and neither reaches it on its own.
+        //
+        // The cap and the end bar are placed and inked from
+        // UpdateSelectedTabBridge, which rides add, remove, move, activation,
+        // resize and the drag's end. A group change is none of those: the
+        // active-visible rule keeps the active tab out of the hidden set, so a
+        // collapse raises no ActiveTabChanged, and TabViewControl's own size
+        // does not move. So a collapse left both bars at the coordinates of the
+        // run they used to span -- in the middle of unrelated tabs, since equal
+        // width re-lays every remaining tab -- and a recolour left them the old
+        // colour, in both cases until something unrelated happened to run the
+        // pass. The vertical strip has no equivalent hole because its field
+        // rides the reconcile every group change already schedules.
+        QueueBridgeUpdate();
     }
 
     /// <summary>
@@ -890,11 +907,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // around it, that is what makes it read as a container rather than
         // as a tab with a dot on it. Never the selected brushes: a chip is
         // never the selected item.
-        foreach (var key in TabViewItemHeaderNormalKeys)
-        {
-            SetItemHeaderBrush(chip.Item, key, TabColorBrush.FromPackedArgb(
-                TabGroupField.WashArgb(_stripBackdropPacked)));
-        }
+        ApplyFieldWashStates(chip.Item);
         // A panel header gives a TabViewItem no name, so the chip is named
         // and statused the way tabs are -- else a screen reader hears how
         // many rows the strip holds and nothing about any of them.
@@ -1474,12 +1487,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     private void UpdateGroupFieldTerminals()
     {
-        var used = 0;
         // Mid-drag the strip's slots are TabView's reorder preview rather
         // than the manager's order, so a run's ends are not where the
         // projection says they are. The drop re-places them -- the same
         // rule the seam cover above follows, for the same reason.
-        if (!_stripDragActive)
+        //
+        // Left where they were, rather than collapsed. Falling through to the
+        // tail loop below hid every bar for the length of the gesture while
+        // the wash on the members stayed, so a run read as a tint with no
+        // beginning and no end -- and the vertical field, which returns here,
+        // did not do that. The suppression is the same rule in both strips
+        // now, which is the only way one gesture means one thing.
+        if (_stripDragActive) return;
+
+        var used = 0;
         {
             var rows = TabStripProjection.HorizontalRows(_manager);
             var viewport = TabStripViewport();
@@ -1507,15 +1528,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
                 if (height <= 0) continue;
 
-                // Clipped to the list the tabs scroll inside, for the
-                // reason the seam cover is: a run scrolled out of view
-                // keeps reporting the offset it WOULD have, and an
-                // unclipped end bar walks off into the footer.
-                var ink = TabColorBrush.FromPackedRgb(
-                    TabGroupField.TerminalRgb(_stripBackdropPacked, run.Group.Color));
-                used = PlaceFieldTerminal(used, left, top, height, ink, viewport);
+                // One ink per END, not one per run: the two bars sit on two
+                // different slots and those slots need not be wearing the same
+                // thing. Only the vertical field can score both against one
+                // ground, because there the bars are edges of a Border that IS
+                // the field.
+                var headInk = TabColorBrush.FromPackedRgb(TabGroupField.TerminalRgbOn(
+                    SlotGroundRgb(rows[run.First]), run.Group.Color));
+                var tailInk = TabColorBrush.FromPackedRgb(TabGroupField.TerminalRgbOn(
+                    SlotGroundRgb(rows[run.Last]), run.Group.Color));
+                used = PlaceFieldTerminal(used, left, top, height, headInk, viewport);
                 used = PlaceFieldTerminal(
-                    used, right - TabGroupField.TerminalThicknessPx, top, height, ink, viewport);
+                    used, right - TabGroupField.TerminalThicknessPx, top, height, tailInk, viewport);
             }
         }
 
@@ -1528,6 +1552,30 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// has not built it. A chip counts: it is the folded run's only slot,
     /// so its own ends are the run's ends.
     /// </summary>
+    /// <summary>
+    /// What is actually painted where a terminal drawn on <paramref name="row"/>
+    /// lands, so the bar can be scored against it.
+    ///
+    /// The field's wash is the usual answer and the only one the vertical strip
+    /// has, but two slots opt out of it: the selected tab, which keeps the
+    /// terminal background so it reads as continuous with its pane, and a
+    /// member carrying a preset of its own, which keeps that preset. A chip
+    /// falls through to the wash, which is correct -- a folded run's one slot
+    /// wears the field.
+    /// </summary>
+    private uint SlotGroundRgb(TabStripProjection.HorizontalRow row)
+    {
+        if (row is TabStripProjection.HorizontalRow.Item { Tab: { } tab })
+        {
+            if (ReferenceEquals(tab, _manager.ActiveTab) && _selectedTabFillBrush is not null)
+                return PackColor(_selectedTabFillBrush.Color);
+            if (tab.Color != TabColor.None)
+                return TabColorPalette.EffectiveBackgroundRgb(
+                    tab.Color, selected: false, _stripBackdropPacked);
+        }
+        return TabGroupField.FieldGroundRgb(_stripBackdropPacked);
+    }
+
     private FrameworkElement? SlotElement(TabStripProjection.HorizontalRow row)
         => row switch
         {
@@ -1538,6 +1586,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
             _ => null,
         };
 
+    /// <summary>
+    /// One bar, placed and clipped to the list the tabs scroll inside -- for
+    /// the reason the seam cover is clipped: a run scrolled out of view keeps
+    /// reporting the offset it WOULD have, and an unclipped end bar walks off
+    /// into the footer.
+    /// </summary>
     private int PlaceFieldTerminal(
         int index, double left, double top, double height, Brush ink, Rect? viewport)
     {
@@ -1753,6 +1807,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         SolidColorBrush? normalHandle = null;
         SolidColorBrush? selectedHandle = null;
+        var washedByField = false;
 
         if (tab.Color != TabColor.None)
         {
@@ -1778,6 +1833,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             {
                 normalHandle = TabColorBrush.FromPackedArgb(
                     TabGroupField.WashArgb(_stripBackdropPacked));
+                washedByField = true;
             }
             if (selected && _selectedTabFillBrush is not null)
             {
@@ -1801,6 +1857,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
 
         ApplyTabViewItemHeaderBrushes(viewItem, normalHandle, selectedHandle);
+
+        // That writes ONE brush into all three unselected states, which is what
+        // a preset tint wants and not what the field wants: a washed member
+        // whose pointer-over and pressed are identical to its rest state stops
+        // answering the pointer, and a run of them reads as disabled. The wash
+        // gets its own ramp instead, so hover and press still say something
+        // without introducing a colour the field did not choose.
+        if (washedByField) ApplyFieldWashStates(viewItem);
 
         // A tab carrying a preset colour takes that colour's border, the same
         // way its pane does, so the stroke keeps identifying which pane the
@@ -1891,6 +1955,26 @@ internal sealed partial class TabHost : UserControl, ITabHost
             && v is Windows.UI.Color accent)
             return new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, accent.R, accent.G, accent.B));
         return new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, 0x60, 0xCD, 0xFF));
+    }
+
+    /// <summary>
+    /// The three unselected header states of one item that sits on a field,
+    /// painted from one ink at three strengths.
+    ///
+    /// One place, because the chip and an expanded member are the same surface
+    /// wearing the same wash: two sites deriving it separately is how the
+    /// folded and unfolded readings of a run drift apart.
+    /// </summary>
+    private void ApplyFieldWashStates(TabViewItem item)
+    {
+        SetItemHeaderBrush(item, "TabViewItemHeaderBackground",
+            TabColorBrush.FromPackedArgb(TabGroupField.WashArgb(_stripBackdropPacked)));
+        SetItemHeaderBrush(item, "TabViewItemHeaderBackgroundPointerOver",
+            TabColorBrush.FromPackedArgb(TabGroupField.WashArgbAt(
+                _stripBackdropPacked, TabGroupField.WashHoverAlpha)));
+        SetItemHeaderBrush(item, "TabViewItemHeaderBackgroundPressed",
+            TabColorBrush.FromPackedArgb(TabGroupField.WashArgbAt(
+                _stripBackdropPacked, TabGroupField.WashPressedAlpha)));
     }
 
     private static void ApplyTabViewItemHeaderBrushes(
@@ -3122,6 +3206,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// own it: the run's members and, when it is folded, its chip. No
     /// second wash site -- a painter of its own here could disagree with
     /// the one every other pass goes through.
+    ///
+    /// The terminals need the same push and do not get it from those two.
+    /// <see cref="RefreshRunRails"/> and <see cref="RefreshChip"/> repaint
+    /// header brushes; only <see cref="UpdateGroupFieldTerminals"/> sets a
+    /// bar's Fill, and it rides <see cref="UpdateSelectedTabBridge"/>, which
+    /// neither SetChromeFill nor SetChromeGround reaches. So a frame-style
+    /// flip moved the ground, the members repainted around the new pole, and
+    /// the cap and end bar kept a colour lifted against the field they were
+    /// scored on a moment ago -- a Graphite bar lifted for a light field is a
+    /// dark grey, which lands near 1.5:1 once the field goes dark. That is the
+    /// defect this method exists to prevent, arriving through the one painter
+    /// it was not calling.
     /// </summary>
     private void RefreshGroupFieldWash()
     {
@@ -3130,6 +3226,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             RefreshRunRails(group);
             RefreshChip(group);
         }
+        QueueBridgeUpdate();
     }
 
     /// <summary>

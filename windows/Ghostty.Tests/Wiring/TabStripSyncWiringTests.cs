@@ -1020,12 +1020,39 @@ public sealed class TabStripSyncWiringTests
             "A collapse must run the presence pass BEFORE the order pass: the chip "
             + "the fold mints (or retires) has to exist before the order pass reads it.");
 
-        var fallThrough = handler.Call("RefreshChip");
+        // The two arms are exclusive, expressed as CONTAINMENT rather than as
+        // source order. They are an if/else now, so the collapse branch's span
+        // ends after the in-place arm's body and an ordering test reads the
+        // structure backwards -- it would fail on correct code and pass on a
+        // rewrite that put the refresh back inside the collapse.
+        var collapseArm = collapsedBranch.Statement;
+        var refreshArm = collapsedBranch.Else?.Statement;
+        Assert.True(refreshArm is not null,
+            "the in-place refresh has no arm of its own, so a collapse and a rename "
+            + "cannot be doing different work");
+
+        Assert.Empty(collapseArm.Calls("RefreshChip"));
+        Assert.NotEmpty(refreshArm!.Calls("RefreshChip"));
         Assert.True(
-            collapsedBranch.Span.End < fallThrough.SpanStart,
-            "Title and Color changes must fall through to RefreshChip alone: re-running "
-            + "the presence and order passes for an in-place refresh churns the strip "
-            + "for nothing.");
+            refreshArm.Calls("ReconcileChips").Count == 0
+                && refreshArm.Calls("ReconcileStripOrder").Count == 0,
+            "Title and Color changes must not re-run the presence and order passes: "
+            + "re-running them for an in-place refresh churns the strip for nothing.");
+
+        // Both arms end at the bridge pass, which is the only thing that places
+        // and inks the field's cap and end bar. Outside the arms rather than in
+        // each, because both need it and neither raises a manager event the
+        // pass already rides: the active-visible rule keeps the active tab out
+        // of the hidden set, so a collapse raises no ActiveTabChanged, and the
+        // control's own size does not move. Without it a collapse left both
+        // bars spanning the run they used to cover -- in the middle of
+        // unrelated tabs, since equal width re-lays every remaining one -- and
+        // a recolour left them the old colour.
+        var bridge = Assert.Single(handler.Calls("QueueBridgeUpdate"));
+        Assert.True(
+            bridge.SpanStart > collapsedBranch.Span.End,
+            "the bridge update sits inside one arm, so the other group change "
+            + "leaves the field's terminals where and how they were");
 
         // The ride site is only as live as its wiring, and the wiring's
         // LIFETIME is the whole point.

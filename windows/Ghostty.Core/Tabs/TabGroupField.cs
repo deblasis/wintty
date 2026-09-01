@@ -147,7 +147,29 @@ internal static class TabGroupField
     /// really back there.
     /// </summary>
     public static uint WashArgb(uint groundRgb)
-        => ((uint)WashAlpha << 24) | WashInkRgb(groundRgb);
+        => WashArgbAt(groundRgb, WashAlpha);
+
+    /// <summary>
+    /// The same wash at a different strength, for the two states a member
+    /// still owes the pointer.
+    ///
+    /// MUXC gives an unstyled tab its own pointer-over and pressed brushes,
+    /// and washing a run wrote ONE value into all three states -- so every
+    /// member of a group, and the chip that stands for a folded one, stopped
+    /// answering the pointer at all. The chip is a click target: it expands
+    /// the run. Deepening the ink the field already chose keeps that feedback
+    /// inside the field's grammar, where a second hue on top of the wash
+    /// would be one more colour in a strip whose whole argument is that runs
+    /// are grounds rather than colours.
+    /// </summary>
+    public static uint WashArgbAt(uint groundRgb, byte alpha)
+        => ((uint)alpha << 24) | WashInkRgb(groundRgb);
+
+    /// <summary>The wash under a pointer. Same ink, enough deeper to read.</summary>
+    public const byte WashHoverAlpha = 34;
+
+    /// <summary>The wash under a press: one more step along the same ramp.</summary>
+    public const byte WashPressedAlpha = 46;
 
     /// <summary>
     /// The cap and end bar colour for a group coloured
@@ -162,11 +184,27 @@ internal static class TabGroupField
     /// 2px line -- there is no thickness here to spend on being faint.
     /// </summary>
     public static uint TerminalRgb(uint groundRgb, TabColor color)
+        => TerminalRgbOn(FieldGroundRgb(groundRgb), color);
+
+    /// <summary>
+    /// The same bar, scored against the surface it is actually PAINTED on.
+    ///
+    /// The vertical field is a Border the bars are edges of, so its ground is
+    /// the field's and <see cref="TerminalRgb"/> answers. Horizontally there is
+    /// no Border: the cap is drawn on the run's first slot and the end bar on
+    /// its last, and neither slot is guaranteed to be wearing the wash. The
+    /// selected tab keeps the terminal background, and a member with a preset
+    /// of its own keeps that preset -- so a Blue cap on a selected tab over a
+    /// blue-ish terminal lands near 2.2:1, and a Red end bar on a Red member is
+    /// very nearly invisible, while a rule scored against the field reports
+    /// both as clearing the floor.
+    /// </summary>
+    public static uint TerminalRgbOn(uint paintedOnRgb, TabColor color)
     {
         var preset = TabColorPalette.Border(color);
         var groupRgb = ((uint)preset.R << 16) | ((uint)preset.G << 8) | preset.B;
         return ChromeSeparator.EnsureVisible(
-            FieldGroundRgb(groundRgb), groupRgb, TerminalMinContrast);
+            paintedOnRgb, groupRgb, TerminalMinContrast);
     }
 
     /// <summary>
