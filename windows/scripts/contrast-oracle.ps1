@@ -335,8 +335,11 @@ function Add-Row([string]$Leg, [string]$Surface, [string]$Class,
     $script:Rows.Add([pscustomobject]$row)
     if (-not $pass) { $script:Findings.Add([pscustomobject]$row) }
     $mark = if ($pass) { 'ok  ' } else { 'FAIL' }
-    Write-Host ("  {0} {1,-24} {2,6:N2} : 1  (>= {3}) {4} on {5}" -f
-        $mark, $Surface, $Ratio, $rule.Min, $Fg, $Bg)
+    # 'field' is judged from above, so printing it with the same '>=' every
+    # other class carries would report the rule backwards.
+    $sense = if ($Class -eq 'field') { '<=' } else { '>=' }
+    Write-Host ("  {0} {1,-24} {2,6:N2} : 1  ({3} {4}) {5} on {6}" -f
+        $mark, $Surface, $Ratio, $sense, $rule.Min, $Fg, $Bg)
 }
 
 # A surface that could not be located or could not be sampled is NOT a
@@ -615,32 +618,47 @@ function Measure-VerticalLeg($Cap, [string]$Leg, [bool]$Compact, [string]$GroupT
         }
     }
 
-    # The selection fill against the strip it sits in. The fill is read
-    # from a text-free slice of the selected row (its trailing edge, past
-    # the title and before the close button's own box) and the ground from
-    # the strip below the last row, which has nothing painted on it.
+    # The selection fill against the TERMINAL, and the pass is that they
+    # match.
+    #
+    # This used to score the fill against the empty strip below the last
+    # row, under the >1.2 fill rule -- the selected row had to be visible
+    # as a differently coloured surface. That is no longer the design and
+    # scoring it that way asserts a decision that was reversed: the active
+    # tab is the FIELD, painted the terminal's own ground, running into the
+    # pane beside it with no line between. Its separation from the chrome
+    # is carried by the accent stroke on its three closed sides, not by its
+    # fill, and a fill that DID separate from the terminal would be the
+    # defect. So the same two regions are still read, one of them is now
+    # the terminal instead of the strip, and the comparison is inverted.
+    #
+    # Which is a stricter bar than the one it replaces, not a relaxed one:
+    # >1.2 admitted any of a hundred colours, and this admits one.
+    #
     # SelectionRow is a Border behind the NavView; a Border does not always
     # get an automation peer, so the selected row's own rect stands in. Both
     # name the same band -- UpdateSelectionRow places the fill on the
-    # selected row (VerticalTabStrip.xaml.cs:737-789).
+    # selected row.
     $sel = Find-ById (Get-UiaRoot) 'SelectionRow'
     $selRect = if ($null -ne $sel) { $sel.Current.BoundingRectangle } elseif ($null -ne $active) { $active.Rect } else { $null }
     if ($null -eq $selRect -or $null -eq $nav) {
-        Add-Unmeasured $Leg 'vtab-selection-fill' 'neither SelectionRow nor a selected row could be located'
+        Add-Unmeasured $Leg 'vtab-selection-field' 'neither SelectionRow nor a selected row could be located'
     } else {
         $sr = $selRect
-        $nr = $nav.Current.BoundingRectangle
-        $lastRow = @($rows | Sort-Object { $_.Rect.Y })[-1]
-        $emptyTop = $lastRow.Rect.Y + $lastRow.Rect.Height + 6
-        $emptyH = ($nr.Y + $nr.Height) - $emptyTop - 6
-        if ([double]::IsNaN($sr.X) -or $sr.Width -le 6 -or $emptyH -lt 8) {
-            Add-Unmeasured $Leg 'vtab-selection-fill' 'no usable fill slice or empty strip band to compare against'
+        # Past the strip's trailing edge, the same anchor the terminal band
+        # itself is derived from below, and level with the selected row so
+        # both samples sit in one horizontal band of the window.
+        $tRight = ($rows | ForEach-Object { $_.Rect.X + $_.Rect.Width } | Measure-Object -Maximum).Maximum
+        if ([double]::IsNaN($sr.X) -or $sr.Width -le 6) {
+            Add-Unmeasured $Leg 'vtab-selection-field' 'no usable fill slice on the selected row'
         } else {
             # A slice inside the fill, clear of the title ink.
             $sliceW = [Math]::Max(6.0, $sr.Width * 0.12)
             $fillRect = New-Rect ($sr.X + $sr.Width - $sliceW - 2) ($sr.Y + 3) $sliceW ([Math]::Max(6.0, $sr.Height - 6))
-            $groundRect = New-Rect ($nr.X + 4) $emptyTop ([Math]::Max(8.0, $nr.Width - 8)) $emptyH
-            Measure-Pair $Cap $Leg 'vtab-selection-fill' 'fill' $fillRect $groundRect 0 'selected-row fill against the empty strip'
+            # Well right of the prompt, so the sample is terminal ground and
+            # not the shell's own first line.
+            $groundRect = New-Rect ($tRight + 40) ($sr.Y + 3) 24 ([Math]::Max(6.0, $sr.Height - 6))
+            Measure-Pair $Cap $Leg 'vtab-selection-field' 'field' $fillRect $groundRect 0 'selected-row fill against the terminal it must match'
         }
     }
 
@@ -914,7 +932,7 @@ $VerticalSurfaces = @(
     'vtab-title-active', 'vtab-close-glyph', 'vtab-title-inactive',
     'vtab-close-glyph-inactive', 'vtab-pinned-title', 'vtab-pinned-icon',
     'vtab-boundary-stroke', 'vtab-group-title', 'vtab-group-count',
-    'vtab-group-chevron', 'vtab-selection-fill', 'terminal-fg-on-bg'
+    'vtab-group-chevron', 'vtab-selection-field', 'terminal-fg-on-bg'
 )
 $HorizontalSurfaces = @(
     'htab-title-active', 'htab-close-glyph', 'htab-title-inactive',

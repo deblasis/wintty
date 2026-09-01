@@ -202,6 +202,24 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal FrameworkElement TestSeamCaptionFill => VerticalTitleCaptionFill;
 
+    /// <summary>
+    /// The two seam covers: the strip of pane border the active tab's field
+    /// runs over, horizontal and vertical.
+    /// </summary>
+    /// <remarks>
+    /// Reported because the join is the one thing about this treatment that
+    /// cannot be judged from a screenshot. The cover and the tab are the same
+    /// colour on purpose, so a capture shows one continuous surface whether
+    /// they line up or not -- a cover a pixel narrow leaves a pixel of the
+    /// pane's stroke standing at the tab's corner, which reads as broken
+    /// rather than imperfect, and a capture through Mica cannot say which it
+    /// is. The arranged rects can: the cover's span must be the tab's span,
+    /// and both are measured here in the same coordinate space as the strip
+    /// rows they have to agree with.
+    /// </remarks>
+    internal (FrameworkElement Horizontal, FrameworkElement Vertical) TestSeamCovers
+        => (_tabSeamCover, _verticalSeamCover);
+
     /// <summary>What the layout coordinator has parked on the morph layer.</summary>
     internal int TestSeamMorphLayerCount => _layout.TestSeamMorphLayerCount;
 

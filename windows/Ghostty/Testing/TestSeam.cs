@@ -952,6 +952,15 @@ internal static class TestSeam
             WriteHost(json, "vertical", root, vertical);
 
             WriteChrome(json, "captionFill", root, window.TestSeamCaptionFill);
+
+            // The join. Measured in the same space as the rows above, which is
+            // the whole point: the active row's span and its cover's span are
+            // two numbers that must be one, and a driver comparing them has to
+            // get both without converting between coordinate systems of its
+            // own invention.
+            var (hSeam, vSeam) = window.TestSeamCovers;
+            WriteChrome(json, "seamHorizontal", root, hSeam);
+            WriteChrome(json, "seamVertical", root, vSeam);
             json.WriteEndObject();
 
             json.WriteEndObject();

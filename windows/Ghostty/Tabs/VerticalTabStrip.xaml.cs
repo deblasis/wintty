@@ -64,6 +64,13 @@ internal sealed partial class VerticalTabStrip : UserControl
     private ElementTheme _elementTheme = ElementTheme.Default;
     private SolidColorBrush? _defaultSelectedTabBgBrush;
     private SolidColorBrush? _selectedTabFillBrush;
+
+    /// <summary>
+    /// The field the active row is painted with. Rotated twin of the
+    /// horizontal strip's: one brush for the row and for the seam cover over
+    /// the pane border beside it.
+    /// </summary>
+    private readonly ActiveFieldFill _field = new();
     private SolidColorBrush? _shellActiveTextBrush;
     private SolidColorBrush? _shellInactiveTextBrush;
     private SolidColorBrush? _defaultActiveTextBrush;
@@ -209,17 +216,19 @@ internal sealed partial class VerticalTabStrip : UserControl
         _shellThemeActive = true;
         ApplyTransparentNavPaneSurface();
 
-        // Match horizontal TabHost: accent fill on the selected row.
-        var accent = new SolidColorBrush(theme.AccentColor);
-        _selectedTabFillBrush = accent;
+        // Match horizontal TabHost: the active row is the field, painted the
+        // terminal's own ground so it and the pane beside it are one surface
+        // with no line between. The accent is the stroke around it
+        // (UpdateSelectionRow's BorderBrush), never the fill.
+        _selectedTabFillBrush = new SolidColorBrush(theme.ActiveTabFill);
         HideMuxcSelectedBackground();
 
         SetNavResource("NavigationViewSelectionIndicatorForeground", TransparentBrush);
 
-        uint accentPacked = PackColor(theme.AccentColor);
-        uint activePacked = PackColor(theme.ActiveTabText);
+        uint fieldPacked = PackColor(theme.ActiveTabFill);
+        uint activePacked = PackColor(theme.ActiveTabInk);
         _shellActiveTextBrush = TabColorBrush.FromPackedRgb(
-            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked));
+            ThemeResolution.EnsureReadableForeground(fieldPacked, activePacked));
 
         RefreshShellInactiveInk();
 
@@ -786,7 +795,16 @@ internal sealed partial class VerticalTabStrip : UserControl
         Canvas.SetLeft(SelectionRow, RowInsetLeft);
         Canvas.SetTop(SelectionRow, topLeft.Y + RowInsetVertical);
         SelectionRow.CornerRadius = new CornerRadius(0);
-        SelectionRow.Background = ResolveSelectionRowFill(_manager.ActiveTab);
+        // The row wears the field's own brush, settled onto the colour this
+        // tab rests at. MainWindow's vertical seam cover reads its fill
+        // straight back off this Background, so handing over the instance is
+        // what keeps the cover and the row on one clock through the settle.
+        _field.Settle(
+            _manager.ActiveTab,
+            ResolveSelectionRowFill(_manager.ActiveTab).Color,
+            StripGround(),
+            TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast));
+        SelectionRow.Background = _field.Brush;
 
         // The same folder stroke the horizontal strip gets, rotated: the row
         // meets the pane along its right edge, so that is the side left open
@@ -861,6 +879,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         return (fill, TabColorBrush.FromPackedRgb(
             ThemeResolution.EnsureReadableForeground(rowPacked, preferred)));
     }
+
+    /// <summary>The strip's own ground, as a colour: what the field grows out of.</summary>
+    private Color StripGround() => Color.FromArgb(
+        0xFF,
+        (byte)(_stripBackdropPacked >> 16),
+        (byte)(_stripBackdropPacked >> 8),
+        (byte)_stripBackdropPacked);
 
     private SolidColorBrush ResolveSelectionRowFill(TabModel tab)
     {

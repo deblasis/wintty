@@ -75,6 +75,17 @@ internal static class TabStripMotion
     public const double FadeMs = 83;
 
     /// <summary>
+    /// The active tab settling into the field: its fill eases from the
+    /// chrome it was wearing to the terminal's own ground, and the seam
+    /// cover rides the same brush instance, so the join cannot split for a
+    /// single frame of the flight.
+    ///
+    /// The table's 167ms rung -- one above Fade, because this is a surface
+    /// changing what it is rather than an element appearing or leaving.
+    /// </summary>
+    public const double FieldSettleMs = 167;
+
+    /// <summary>
     /// The horizontal drag's handback: the lifted tab's shadow fades out
     /// on this clock while its scale springs down. The spring is the
     /// landing; the fade is what keeps the shadow from popping off a tab
