@@ -57,6 +57,7 @@ windows/scripts/fuzz-out/
 windows/scripts/search-fuzz/
 windows/scripts/shader-notice-fuzz/
 windows/scripts/frame-style-fuzz/
+windows/scripts/layout-switch/
 windows/scripts/vtabs-layout-switch/
 windows/scripts/vtabs-morph/
 windows/scripts/vtabs-switcher/
@@ -70,3 +71,7 @@ tools/gallery/previews/
 .agents/worktrees/
 .agents/nightly-logs/
 .agents/scripts/__pycache__/
+
+# Harness camera build output (see scripts/README.md, "Filming motion").
+windows/scripts/lib/WindowCapture/bin/
+windows/scripts/lib/WindowCapture/obj/
