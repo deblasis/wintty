@@ -176,6 +176,31 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Both hosts, whichever is live. A layout switch is the one moment
+    /// they are BOTH on screen, so a frame that reported only the active
+    /// one would be blind to exactly the overlap the transition is made
+    /// of.
+    /// </summary>
+    internal (Tabs.ITabHost Horizontal, Tabs.ITabHost Vertical) TestSeamHosts
+        => (_horizontalTabHost, _verticalTabHost);
+
+    /// <summary>The element every filmstrip rect is measured against.</summary>
+    internal FrameworkElement? TestSeamRoot => Content as FrameworkElement;
+
+    /// <summary>
+    /// The caption lane's fill, for the filmstrip.
+    ///
+    /// There used to be a second rectangle beside it that had to agree
+    /// with it, and the filmstrip asserted they did. The pair is gone
+    /// (#892); what is left is reported so a film can still be lined up
+    /// against where the lane actually was in each frame.
+    /// </summary>
+    internal FrameworkElement TestSeamCaptionFill => VerticalTitleCaptionFill;
+
+    /// <summary>What the layout coordinator has parked on the morph layer.</summary>
+    internal int TestSeamMorphLayerCount => _layout.TestSeamMorphLayerCount;
+
+    /// <summary>
     /// A synchronous layout pass before a seam ack: the command's C# state
     /// AND the XAML layout it caused are both settled when the driver hears
     /// back, so the next command can never run mid-arrange.
@@ -906,17 +931,6 @@ public sealed partial class MainWindow : Window
         // match the constant is exactly how the two drift apart.
         VerticalTitleBar.Height = Shell.TabChromeMetrics.TitleRowHeight;
 
-        // Same for the caption seam cover. Placed in the grid's own space
-        // rather than in a cell, it has to be told both where the pane row
-        // starts and how deep the stroke it hides runs. Deriving those from
-        // the values that place the stroke is what keeps the cover from
-        // ending short of it, which a hand-tuned top-and-height pair did by
-        // half a DIP.
-        VerticalCaptionSeamCover.Margin = new Thickness(
-            0, Shell.TabChromeMetrics.TitleRowHeight - CaptionSeamOverlap, 0, 0);
-        VerticalCaptionSeamCover.Height = CaptionSeamOverlap
-            + Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1;
-
         _layout = new LayoutCoordinator(
             StripColumn,
             TitleBarStripMirror,
@@ -927,7 +941,13 @@ public sealed partial class MainWindow : Window
             RootGrid,
             PaneHostContainer,
             activeTab: () => _tabManager.Tabs.Count > 0 ? _tabManager.ActiveTab : null,
-            impact: NudgeWindowForImpact);
+            impact: NudgeContentForImpact,
+            // The same gate the run label and both drag engines read, asked
+            // at the switch rather than cached: UISettings can throw in
+            // packaged contexts and the answer can change under the user
+            // mid-session.
+            motionEnabled: () => TabStripMotion.Enabled(
+                SystemAnimationsEnabled(), HighContrastChromeActive));
         _layout.Snap(_verticalTabsVisible);
 
         // The horizontal strip's group run label lives here, on the morph
@@ -990,7 +1010,6 @@ public sealed partial class MainWindow : Window
             VerticalTitleDragRegion,
             VerticalTitleText,
             VerticalCaptionInset,
-            VerticalCaptionSeamCover,
             isVerticalMode: () => _tabHost is VerticalTabHost);
         _titleBar.ApplyForCurrentMode();
         _titleBar.SyncCaptionInset();
@@ -1332,6 +1351,19 @@ public sealed partial class MainWindow : Window
 
         var vertical = cfg.VerticalTabs;
         if (_verticalTabsVisible == vertical) return;
+
+        // The file's opinion only counts when the file has one. Under
+        // --no-config the parsed-line cache is empty by design, so
+        // cfg.VerticalTabs answers the default on every reload -- and
+        // ToggleTabLayout schedules a write plus a reload, so the reload
+        // it triggers lands 150ms later, inside the 340ms switch, and
+        // walks the layout straight back. The toggle then acks (the seam
+        // waits out both flights) while the window never leaves
+        // horizontal. The same shape bites any config that never wrote
+        // the key: an unrelated edit must not reset a runtime switch to
+        // the default.
+        if (!_configService.IsConfiguredInFile("vertical-tabs")) return;
+
         AnimateTabLayoutTo(vertical);
     }
 
@@ -1361,6 +1393,11 @@ public sealed partial class MainWindow : Window
         ApplyVerticalTitleBarChrome();
         ApplyCaptionButtonChrome();
         _titleBar.ApplyForCurrentMode();
+        // The switch is about to resize every surface in the window. That
+        // is not a resize anyone asked for, so the cols-by-rows pill stays
+        // down for it; see TerminalControl's guard for why both ends of the
+        // switch are notified.
+        NoteLayoutSwitchToSurfaces();
         _layout.Animate(vertical, onCompleted: () =>
         {
             // Belt to CancelSwitch's braces. OnClosedAsync cancels the
@@ -1383,6 +1420,11 @@ public sealed partial class MainWindow : Window
             // DisposeAllLeaves may already have freed. AppWindow going null is
             // only the loudest symptom, not the earliest.
             if (_isClosed) return;
+
+            // The landing collapses the strip column, which is the switch's
+            // second resize and the one that would otherwise pulse the pill
+            // just as the motion finishes.
+            NoteLayoutSwitchToSurfaces();
 
             RefreshTabHostChrome();
 
@@ -1413,6 +1455,25 @@ public sealed partial class MainWindow : Window
     }
 
     private bool? _pendingLayoutTarget;
+
+    /// <summary>
+    /// Tell every surface in this window that a layout switch is happening,
+    /// so none of them flashes the resize pill for it.
+    ///
+    /// Every tab, not just the active one: the strip column spans the whole
+    /// grid, so a switch re-arranges the panes of every tab that is in the
+    /// tree, and a background tab that pulsed would show its pill the next
+    /// time it was selected.
+    /// </summary>
+    private void NoteLayoutSwitchToSurfaces()
+    {
+        foreach (var tab in _tabManager.Tabs)
+        {
+            if (tab.PaneHost is not Panes.PaneHost host) continue;
+            foreach (var leaf in PaneTree.Leaves(host.RootNode))
+                leaf.Terminal().NoteLayoutSwitch();
+        }
+    }
 
     /// <summary>
     /// Build a <see cref="MainWindow"/> that adopts an existing
@@ -1784,6 +1845,9 @@ public sealed partial class MainWindow : Window
         // cheap and safe.
         _layout.CancelStripPriming();
         _layout.CancelSwitch();
+        // The nudge is scheduled on the compositor against RootGrid and is
+        // not the coordinator's to cancel; see StopImpactNudge.
+        StopImpactNudge();
         _themeManager.Dispose();
 
         // Stop the dispatcher-driven timers this window started. None of them
@@ -2139,8 +2203,26 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal void ToggleTabLayout()
     {
-        if (_layout.IsSwitching) return;
-        var toVertical = !_verticalTabsVisible;
+        // A toggle arriving mid-flight is QUEUED, never dropped. Dropping
+        // it is what the early return here used to do, and it is the worst
+        // of the three options a user can tell apart: the second press of
+        // a double-tap did nothing at all, so the chord read as unreliable
+        // rather than as busy.
+        //
+        // Queueing is bounded, which is what makes it the choice over
+        // cutting the running switch short. AnimateTabLayoutTo parks only
+        // the LATEST target and drops it when it already matches, so any
+        // number of presses during one flight resolve to at most one more
+        // switch: five taps cost two flights, not five. Cutting would be
+        // ~200ms quicker on a double-tap and buys a visible discontinuity
+        // mid-morph for it, which is the "broken frame" this is supposed
+        // to avoid.
+        //
+        // The current layout is the pending target when one is parked --
+        // reading _verticalTabsVisible there would compute the direction
+        // from a switch that is already superseded, and a double-tap would
+        // come out as a no-op instead of a return trip.
+        var toVertical = !(_pendingLayoutTarget ?? _verticalTabsVisible);
 
         // The run label is anchored to the outgoing strip's arrangement
         // and reads pointer state the switch invalidates: it hides by
@@ -2545,66 +2627,162 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Brief, subtle window shake when the layout-switch ghost lands: a
-    /// damped nudge along its travel direction, as if the strip absorbed
-    /// the impact. Skipped when the window is not a plain movable window
-    /// (maximized, fullscreen, quake), where moving it would fight the
-    /// presenter. An Aero-snapped window still reports Restored and will
-    /// take the nudge; there is no public API to tell it apart.
+    /// Brief, subtle shake of the window's CONTENT when the layout-switch
+    /// ghost lands: a damped nudge along its travel direction, as if the
+    /// strip absorbed the impact.
     ///
-    /// Every step verifies the window still sits where the previous step
-    /// put it and bails otherwise: the awaited delays give the user ~80ms
-    /// to start dragging (or a snap assist to move the window), and a
-    /// blind restore would teleport the window back over their move.
+    /// It used to shake the window itself, with AppWindow.Move. Filmed by
+    /// polling the window rect, that produced three discrete positions
+    /// (-4, +2, -1 pixels) over about 140ms at intervals of 22 to 73ms
+    /// against the 26ms it asked for, because every step was an await
+    /// resuming on the UI thread at the exact moment the switch has that
+    /// thread busiest. Three irregular jumps is not a shake.
     ///
-    /// The same delays are why _isClosed is re-checked after each one rather
-    /// than only on entry: the shake outlives its own first turn, and the
-    /// window can be closed underneath it while it is suspended.
+    /// A compositor Offset animation runs on the compositor at its own
+    /// rate, and the delay is what puts it in the right place: the caller
+    /// hands over how long is left of the flight, so the nudge starts at
+    /// the landing rather than whenever a queued callback is finally
+    /// pumped (measured at ~560ms for motion that ended at 340ms).
+    ///
+    /// Most of what the old version guarded against is gone with the
+    /// AppWindow.Move it was guarding. Content cannot fight the presenter,
+    /// so the maximized / fullscreen / quake checks go; content cannot be
+    /// dragged out from under itself, so the "did the window move under
+    /// us" read-back goes; and there is no awaited loop left to re-enter,
+    /// so the busy flag goes. The teardown guard STAYS, and gains a
+    /// partner: a compositor animation outlives the managed object that
+    /// started it, so a nudge scheduled against a closing window has to be
+    /// stopped rather than merely not started (the same hazard
+    /// LayoutCoordinator.CancelSwitch exists for).
     /// </summary>
-    private async void NudgeWindowForImpact(double dx, double dy)
+    /// <param name="dx">Unit direction the ghost travelled, X.</param>
+    /// <param name="dy">Unit direction the ghost travelled, Y.</param>
+    /// <param name="delay">How long until the ghost lands.</param>
+    private void NudgeContentForImpact(double dx, double dy, TimeSpan delay)
     {
         if (_isClosed) return;
-        if (IsQuickTerminal) return;
-        if (AppWindow?.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter
-            { State: Microsoft.UI.Windowing.OverlappedPresenterState.Restored }) return;
-        if (_impactNudgeActive) return;
-        _impactNudgeActive = true;
         try
         {
-            var origin = AppWindow.Position;
-            var expected = origin;
-            foreach (var amplitude in ImpactAmplitudes)
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .GetElementVisual(RootGrid);
+            var compositor = visual.Compositor;
+
+            // One out-and-back, and both halves of that matter.
+            //
+            // It was three key frames (a push, a rebound, a smaller
+            // rebound) with each segment eased, which means each segment
+            // starts and ends at zero velocity: a shape meant to read as
+            // one damped motion came to rest four times in 160ms, and 4px
+            // motions with four stops in them are what "it stutters a bit
+            // towards the end" describes.
+            //
+            // It was then a spring, which is continuous and was worse.
+            // A SpringVector3NaturalMotionAnimation has no finite duration,
+            // so the scoped batch below never completed, StopImpactNudge
+            // never ran, and every switch left a live animation on
+            // RootGrid's Offset. Measured against the same build with the
+            // nudge disabled: settle times went 601/573/580/555ms without
+            // it and 589/585/990/never with it, degrading across legs
+            // within one session because the animations accumulated.
+            //
+            // So: bounded, and one interior turning point instead of four.
+            // Out to the peak decelerating, back with a small overshoot
+            // past rest inside the same segment. The stop at the peak is a
+            // direction reversal, which is what a bounce IS; the other
+            // three were not.
+            var shake = compositor.CreateVector3KeyFrameAnimation();
+            var outward = compositor.CreateCubicBezierEasingFunction(
+                new System.Numerics.Vector2(0.16f, 0.84f),
+                new System.Numerics.Vector2(0.44f, 1f));
+            // easeOutBack: past rest, then settles back onto it, with no
+            // stop in between.
+            var settle = compositor.CreateCubicBezierEasingFunction(
+                new System.Numerics.Vector2(0.175f, 0.885f),
+                new System.Numerics.Vector2(0.32f, 1.14f));
+            var impulse = new System.Numerics.Vector3(
+                (float)(dx * ImpactPeakPixels), (float)(dy * ImpactPeakPixels), 0f);
+            shake.InsertKeyFrame(0f, System.Numerics.Vector3.Zero);
+            shake.InsertKeyFrame(ImpactPeakFraction, impulse, outward);
+            shake.InsertKeyFrame(1f, System.Numerics.Vector3.Zero, settle);
+            shake.Duration = ImpactShakeDuration;
+            shake.DelayTime = delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
+            // Hold the resting offset through the delay rather than jumping
+            // to the first key frame the moment the animation is handed
+            // over.
+            shake.DelayBehavior =
+                Microsoft.UI.Composition.AnimationDelayBehavior.SetInitialValueBeforeDelay;
+
+            var batch = compositor.CreateScopedBatch(
+                Microsoft.UI.Composition.CompositionBatchTypes.Animation);
+            batch.Completed += (_, _) =>
             {
-                var current = AppWindow.Position;
-                if (current != expected) return;
-                expected = new Windows.Graphics.PointInt32(
-                    origin.X + (int)(dx * amplitude),
-                    origin.Y + (int)(dy * amplitude));
-                AppWindow.Move(expected);
-                await System.Threading.Tasks.Task.Delay(26);
-                // Placed after the await, not at the top of the loop, so the
-                // final delay is covered too: the restore below is a move
-                // against a window that may have been closed during it.
+                // The batch completes on a later turn, and the window can
+                // close in between. Gated rather than unsubscribed because
+                // the scoped batch is the compositor's object, not this
+                // window's, and it outlives the close: the teardown census
+                // is right to insist one or the other. By the time a close
+                // has happened the close path has already run
+                // StopImpactNudge, so there is nothing left here to do.
                 if (_isClosed) return;
-            }
-            if (AppWindow.Position == expected)
-                AppWindow.Move(origin);
+                StopImpactNudge();
+            };
+            visual.StartAnimation("Offset", shake);
+            batch.End();
+            _impactVisual = visual;
         }
         catch (Exception)
         {
-            // A presenter change mid-shake (user maximizes, monitor sleeps)
-            // can fail the move; the window stays wherever the last
-            // successful step left it, at most a few pixels from home.
-        }
-        finally
-        {
-            _impactNudgeActive = false;
+            // Composition refused. The switch is unaffected: this is the
+            // flourish after it, not part of it.
+            _impactVisual = null;
         }
     }
 
-    // Damped: one push in the travel direction, a smaller rebound, done.
-    private static readonly int[] ImpactAmplitudes = [4, -2, 1];
-    private bool _impactNudgeActive;
+    /// <summary>
+    /// Release the impact nudge and put the content back at rest.
+    ///
+    /// Called from the scoped batch when it finishes normally, and from
+    /// the closing path, where it is the half that matters: the animation
+    /// is driven by the compositor against a visual whose tree is about to
+    /// be disposed, and nothing in XAML stops it on the way out.
+    /// </summary>
+    private void StopImpactNudge()
+    {
+        if (_impactVisual is not { } visual) return;
+        _impactVisual = null;
+        try
+        {
+            visual.StopAnimation("Offset");
+            visual.Offset = System.Numerics.Vector3.Zero;
+        }
+        catch (Exception)
+        {
+            // The visual is already gone, which is the outcome this was
+            // trying to reach.
+        }
+    }
+
+    /// <summary>How far the content is pushed, at the peak.</summary>
+    private const float ImpactPeakPixels = 4f;
+
+    /// <summary>
+    /// Where in the shake the peak falls. Early, so the push is quick and
+    /// the settle is the longer half: an impact that takes as long to
+    /// arrive as it does to recover reads as a sway.
+    /// </summary>
+    private const float ImpactPeakFraction = 0.3f;
+
+    /// <summary>
+    /// How long the shake takes. Close to what the original three-step
+    /// version actually measured (~140ms), so the feel is the one that
+    /// shipped; what changed is that it is now one motion rather than
+    /// four.
+    /// </summary>
+    private static readonly TimeSpan ImpactShakeDuration =
+        TimeSpan.FromMilliseconds(140);
+
+    /// <summary>The visual a nudge is running against, or null.</summary>
+    private Microsoft.UI.Composition.Visual? _impactVisual;
 
     /// <summary>
     /// True while the High Contrast override is layered onto the config,
@@ -2862,23 +3040,11 @@ public sealed partial class MainWindow : Window
             VerticalTitleStripMirrorFill.Background = new SolidColorBrush(stripMirrorBg);
         }
 
-        // The seam cover extends the row down over the caption lane, so it
-        // takes the row's fill. Transparent on the default path is the
-        // right answer and not a lost cover: measured on both builds, the
-        // pane's top stroke shows through it either way, because the pane
-        // host is declared after it and draws over it.
         if (_lastVerticalTitleCaptionBg != dragBg)
         {
             _lastVerticalTitleCaptionBg = dragBg;
-            var captionBrush = new SolidColorBrush(dragBg);
-            VerticalTitleCaptionFill.Background = captionBrush;
-            VerticalCaptionSeamCover.Background = captionBrush;
+            VerticalTitleCaptionFill.Background = new SolidColorBrush(dragBg);
         }
-
-        VerticalCaptionSeamCover.Visibility =
-            VerticalTitleBar.Visibility == Visibility.Visible
-                ? Visibility.Visible
-                : Visibility.Collapsed;
 
         ApplyChromeSeparators();
         // After the separators, not before: that call is what tells the strips
@@ -3232,12 +3398,6 @@ public sealed partial class MainWindow : Window
     /// How far back into the selected row the vertical seam cover starts.
     /// </summary>
     private const double VerticalSeamOverlap = 4.0;
-
-    /// <summary>
-    /// How far up into the title row the caption seam cover starts, so it
-    /// also hides the hairline the strip draws against the pane.
-    /// </summary>
-    private const double CaptionSeamOverlap = 2.0;
 
     /// <summary>
     /// Place the vertical strip's seam cover over the pane's left border,

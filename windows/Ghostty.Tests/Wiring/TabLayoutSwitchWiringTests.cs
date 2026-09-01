@@ -318,6 +318,13 @@ public class TabLayoutSwitchWiringTests
             "_morphStoryboard?.Stop",
             "FinishIconGhost",
             "CancelPaneReveal",
+            // The ghost's box is a Composition Scale on one visual and an
+            // InsetClip sweep on another, so no Storyboard.Stop reaches it:
+            // the same category as CancelPaneReveal, and released for the
+            // same reason. Required below as well as allowed here, because
+            // an allow-list entry on its own only stops the guard
+            // complaining -- it does not make the release happen.
+            "morph.Ghost.StopBoxAnimations",
         };
         var unexpected = cancel.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
@@ -328,6 +335,30 @@ public class TabLayoutSwitchWiringTests
         Assert.True(
             unexpected.Count == 0,
             "CancelSwitch must run no end-state work, found: " + string.Join(", ", unexpected));
+
+        // The ghost's compositor animations, released after the early
+        // return because they belong to the morph the early return is
+        // looking for. Asserted the same way the two releases above are: a
+        // statement of CancelSwitch itself, so `if (something)
+        // morph.Ghost.StopBoxAnimations();` cannot stand in for it.
+        Assert.Single(cancel.Calls("morph.Ghost.StopBoxAnimations"));
+        var stopBoxIndex = statements
+            .TakeWhile(s => !s.Calls("morph.Ghost.StopBoxAnimations").Any())
+            .Count();
+        Assert.True(
+            stopBoxIndex < statements.Count,
+            "CancelSwitch must stop the ghost's box animations; they run on the compositor against a "
+            + "visual whose tree the close is disposing, which is what no Storyboard.Stop can reach");
+        Assert.True(
+            statements[stopBoxIndex] is ExpressionStatementSyntax
+            {
+                Expression: InvocationExpressionSyntax { ArgumentList.Arguments.Count: 0 } stopBoxCall
+            }
+            && stopBoxCall.Expression.ToString() == "morph.Ghost.StopBoxAnimations",
+            "the box release must be a statement of CancelSwitch itself, not nested inside a condition");
+        Assert.True(
+            stopBoxIndex > earlyExit,
+            "the box release reads the morph, so it has to sit after the early return that proves there is one");
 
         // A morph still waiting for its destination holds a LayoutUpdated
         // handler on the morph root and a deadline on
@@ -512,45 +543,92 @@ public class TabLayoutSwitchWiringTests
     }
 
     [Fact]
-    public void NudgeWindowForImpact_StopsOnTeardownAcrossItsAwaits()
+    public void ImpactNudge_IsStoppedOnTeardownRatherThanMerelyNotStarted()
     {
-        var method = Window().Method("NudgeWindowForImpact");
+        // This replaces NudgeWindowForImpact_StopsOnTeardownAcrossItsAwaits.
+        //
+        // The invariant it enforced -- an _isClosed gate after every await --
+        // was about a method that moved the WINDOW in a loop of awaited
+        // steps, and that method no longer exists: the nudge is a single
+        // compositor Offset animation on RootGrid, with no suspensions to gate
+        // between. The old rule is not weakened here, it is inapplicable.
+        //
+        // The hazard it was guarding is not gone, though; it got bigger. The
+        // animation is handed to the compositor with a DELAY equal to what is
+        // left of the switch, so it starts running a few hundred milliseconds
+        // AFTER the call returns, against a visual whose tree the close is
+        // disposing, and nothing in XAML stops it on the way out. Not starting
+        // one on a closing window is no longer enough; a scheduled one has to
+        // be stopped. That is the same hazard, and the same remedy, as
+        // LayoutCoordinator.CancelSwitch's releases.
+        var nudge = Window().Method("NudgeContentForImpact");
 
-        var awaits = method.DescendantNodes().OfType<AwaitExpressionSyntax>().ToList();
+        // No suspensions. Load-bearing rather than incidental: if one is ever
+        // reintroduced then the per-await gate the old test enforced is needed
+        // again, and this assertion is what makes that a decision somebody
+        // takes rather than a property that quietly lapses.
+        Assert.Empty(nudge.DescendantNodes().OfType<AwaitExpressionSyntax>());
 
-        // Load-bearing: with no awaits the per-await loop below proves nothing
-        // and passes. The gate matters precisely because this method resumes
-        // on later dispatcher turns.
-        Assert.NotEmpty(awaits);
-
-        // Control flow, not source order. A gate that merely sits later in the
-        // file -- moved out of the loop to below it, say -- satisfies every
-        // await by position while the window is moved again on the turn after
-        // it closed. The gate has to be the next statement executed.
-        foreach (var suspension in awaits)
-        {
-            var suspending = suspension.FirstAncestorOrSelf<StatementSyntax>();
-            Assert.True(suspending is not null, "every await sits inside a statement");
-            var block = suspending!.Parent as BlockSyntax;
-            Assert.True(
-                block is not null,
-                "the awaiting statement must sit in a block, so the gate can be the statement after it");
-
-            var next = block!.Statements.IndexOf(suspending!) + 1;
-            Assert.True(
-                next < block.Statements.Count && IsClosedGuard(block.Statements[next]),
-                "the statement right after each await must be the _isClosed gate; the window can close "
-                + "while the nudge is suspended and the next step moves it again");
-        }
-
-        // And once before it starts, as a statement of the method itself: an
-        // entry gate nested inside some other branch is not one.
-        var entry = method.Body!.Statements.FirstOrDefault(IsClosedGuard);
+        // Still gated on entry, as a statement of the method itself: an entry
+        // gate nested inside some other branch is not one.
+        var entry = nudge.Body!.Statements.FirstOrDefault(IsClosedGuard);
         Assert.True(
             entry is not null,
-            "the impact nudge keeps moving AppWindow after teardown starts unless it is gated on _isClosed");
+            "the impact nudge must bail before scheduling anything against an already-closing window");
+
+        // The animation has to be started, and the visual it runs against has
+        // to be recorded. Starting one without keeping the visual leaves a
+        // compositor animation nothing can reach: the stop below would have
+        // nothing to stop, and would still read as present.
+        Assert.NotEmpty(nudge.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() == "visual.StartAnimation"));
+        Assert.NotEmpty(nudge.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                        && a.Left.ToString() == "_impactVisual"
+                        && a.Right.ToString() == "visual"));
+
+        // The release itself: stop the animation, and clear the field so a
+        // second call cannot stop a visual that has already gone.
+        var stop = Window().Method("StopImpactNudge");
+        Assert.NotEmpty(stop.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() == "visual.StopAnimation"));
+        Assert.NotEmpty(stop.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                        && a.Left.ToString() == "_impactVisual"
+                        && a.Right.ToString() == "null"));
+
+        // And the close path has to call it. Unconditionally and as a
+        // statement of its own, for the reason WindowTeardown_CancelsTheLayoutSwitch
+        // spells out: a call is found anywhere beneath the statement holding
+        // it, so `if (IsQuickTerminal) StopImpactNudge();` reads as a release
+        // while every regular window closes without one.
+        var statements = Window().Method("OnClosedAsync").Body!.Statements;
+        var stopIndex = statements.TakeWhile(st => !st.Calls("StopImpactNudge").Any()).Count();
         Assert.True(
-            entry!.SpanStart < awaits[0].SpanStart,
-            "the nudge must also bail before it starts moving an already-closing window");
+            stopIndex < statements.Count,
+            "OnClosedAsync must stop the impact nudge; it is scheduled with a delay and outlives the close");
+        Assert.True(
+            statements[stopIndex] is ExpressionStatementSyntax
+            {
+                Expression: InvocationExpressionSyntax { ArgumentList.Arguments.Count: 0 } call
+            }
+            && call.Expression.ToString() == "StopImpactNudge",
+            "the stop must be a statement of OnClosedAsync itself, not nested inside a condition");
+
+        var gateIndex = statements
+            .TakeWhile(st => !st.DescendantNodesAndSelf()
+                .OfType<AssignmentExpressionSyntax>()
+                .Any(a => a.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                          && a.Left.ToString() == "_isClosed"
+                          && a.Right.ToString() == "true"))
+            .Count();
+        Assert.True(gateIndex < statements.Count, "expected OnClosedAsync to set _isClosed");
+        Assert.True(
+            gateIndex < stopIndex,
+            "_isClosed must be set before the stop, so the scoped batch's completion is inert too");
     }
 }

@@ -49,4 +49,15 @@ internal interface ITabHost
     /// confirmation dialog if needed and only then closes.
     /// </summary>
     Task RequestCloseTabAsync(TabModel tab);
+
+    /// <summary>
+    /// What this host is RENDERING right now, row by row, measured against
+    /// <paramref name="root"/>. The layout-switch filmstrip's oracle.
+    ///
+    /// Named TestSeam* for the same reason MainWindow's accessors are: the
+    /// seam's footprint stays greppable as one shape. It is a read: the
+    /// pass allocates a list and measures, and changes nothing.
+    /// </summary>
+    System.Collections.Generic.IReadOnlyList<Testing.TestSeamStripRow>
+        TestSeamRows(FrameworkElement root);
 }
