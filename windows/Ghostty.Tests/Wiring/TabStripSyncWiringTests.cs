@@ -1027,19 +1027,75 @@ public sealed class TabStripSyncWiringTests
             + "the presence and order passes for an in-place refresh churns the strip "
             + "for nothing.");
 
-        // The ride site is only as live as its wiring: the subscription is
-        // minted with the chip and severed with it. Folded into this fact
-        // rather than the manager-event census because this is group INPC,
-        // not a manager event -- the handler and its wire are one story.
+        // The ride site is only as live as its wiring, and the wiring's
+        // LIFETIME is the whole point.
+        //
+        // This used to require the subscription to be minted in AddGroupChip
+        // and severed in RemoveGroupChip. That pairing was the bug (#871), not
+        // the invariant: a chip is only minted once a run is ALREADY
+        // collapsed, so an expanded run had no listener, its collapse was
+        // never heard, and the strip went on rendering the members until some
+        // unrelated manager event or a layout switch's RefreshSeam re-derived
+        // presence. Chip presence is a projection of the collapse bit, so the
+        // listener has to outlive the chip rather than be minted by it.
+        //
+        // What is required now is the opposite pairing, and it is strictly
+        // stronger: the hook follows the MANAGER'S GROUPS, and the chip
+        // methods must not touch it at all.
         var src = ShellSource.Load(TabHostSource);
-        Assert.Single(src.Method("AddGroupChip").DescendantNodes()
+
+        foreach (var chipMethod in new[] { "AddGroupChip", "RemoveGroupChip" })
+        {
+            Assert.Empty(src.Method(chipMethod).DescendantNodes()
+                .OfType<AssignmentExpressionSyntax>()
+                .Where(a => (a.OperatorToken.IsKind(SyntaxKind.PlusEqualsToken)
+                             || a.OperatorToken.IsKind(SyntaxKind.MinusEqualsToken))
+                            && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)));
+        }
+
+        // Both directions, in the one pass that owns the hook. Subscribe only
+        // would leak a handler per dissolved group; unsubscribe only is the
+        // deafness this fixed.
+        var hooks = src.Method("ReconcileGroupHooks");
+        Assert.Single(hooks.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>()
             .Where(a => a.OperatorToken.IsKind(SyntaxKind.PlusEqualsToken)
-                        && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)));
-        Assert.Single(src.Method("RemoveGroupChip").DescendantNodes()
+                        && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)
+                        && a.Right.ToString() == "OnGroupPropertyChanged"));
+        Assert.Single(hooks.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>()
             .Where(a => a.OperatorToken.IsKind(SyntaxKind.MinusEqualsToken)
-                        && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)));
+                        && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)
+                        && a.Right.ToString() == "OnGroupPropertyChanged"));
+
+        // Driven by the manager's groups, not by anything chip-shaped. This is
+        // what makes the hook's lifetime the group's.
+        Assert.Contains(
+            "_manager.Groups",
+            hooks.ToString(),
+            StringComparison.Ordinal);
+
+        // And the presence pass has to arm the listener BEFORE it reads the
+        // bit, so the pass that acts on a collapse is also the pass that can
+        // hear the next one. Ordering, not mere presence: hooking after the
+        // presence work is done still reads as a call.
+        var chips = src.Method("ReconcileChips");
+        var hookCall = chips.Call("ReconcileGroupHooks");
+        var firstDesired = chips.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .First(c => c.CalleeText().EndsWith("HorizontalRows", StringComparison.Ordinal));
+        Assert.True(
+            hookCall.SpanStart < firstDesired.SpanStart,
+            "ReconcileChips must arm the group hooks before it reads the projection: the pass that "
+            + "acts on a collapse is the pass that has to be able to hear the next one");
+
+        // Teardown, so the manager cannot hold the strip alive through a group
+        // that outlives it.
+        Assert.Single(src.Method("UnhookAllGroups").DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.OperatorToken.IsKind(SyntaxKind.MinusEqualsToken)
+                        && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)
+                        && a.Right.ToString() == "OnGroupPropertyChanged"));
     }
 
     [Fact]

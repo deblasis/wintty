@@ -65,6 +65,9 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     public FrameworkElement? TabElement(TabModel tab) => _strip.TabElement(tab);
 
+    public System.Collections.Generic.IReadOnlyList<Testing.TestSeamStripRow>
+        TestSeamRows(FrameworkElement root) => _strip.TestSeamRows(root);
+
     internal void SetSelectionRowSuppressed(bool suppressed)
         => _strip.SetSelectionRowSuppressed(suppressed);
 

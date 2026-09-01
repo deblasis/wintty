@@ -45,7 +45,6 @@ internal sealed class TitleBarCoordinator
     // the same RightInset the caption column does; a fixed width leaves a
     // stroke fragment showing or overhangs into the drag region whenever
     // the OS caption metrics are not the XAML default.
-    private readonly FrameworkElement _captionSeamCover;
     private readonly Func<bool> _isVerticalMode;
 
     private TabModel? _boundTab;
@@ -66,7 +65,6 @@ internal sealed class TitleBarCoordinator
         FrameworkElement verticalDragRegion,
         TextBlock verticalTitleText,
         ColumnDefinition captionInset,
-        FrameworkElement captionSeamCover,
         Func<bool> isVerticalMode)
     {
         _window = window;
@@ -76,7 +74,6 @@ internal sealed class TitleBarCoordinator
         _verticalDragRegion = verticalDragRegion;
         _verticalTitleText = verticalTitleText;
         _captionInset = captionInset;
-        _captionSeamCover = captionSeamCover;
         _isVerticalMode = isVerticalMode;
 
         // Tab/title plumbing.
@@ -113,7 +110,6 @@ internal sealed class TitleBarCoordinator
         if (_captionless)
         {
             _captionInset.Width = new GridLength(0);
-            _captionSeamCover.Width = 0;
             return;
         }
 
@@ -124,8 +120,12 @@ internal sealed class TitleBarCoordinator
             var dip = scale > 0 ? inset / scale : inset;
             if (dip > 0)
             {
+                // The seam cover lives in this column and stretches to
+                // it, so setting the column is setting both. It used to
+                // carry its own copy of this width, which is one more
+                // thing that could disagree with the caption lane it is
+                // supposed to be part of.
                 _captionInset.Width = new GridLength(dip);
-                _captionSeamCover.Width = dip;
                 if (_horizontalTabHost.DragRegion is FrameworkElement drag)
                     drag.MinWidth = dip;
             }
