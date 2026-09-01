@@ -5,6 +5,12 @@
     `-p:Demo=true`. Public Release builds define no DEMO symbol, so every file
     wrapped in `#if DEMO` compiles to nothing and ships zero demo bytes.
 
+    DO NOT EDIT THE FIRST FOUR LINES OF THIS FILE. The tiered build's
+    0011-windows__Directory.Build.props.patch anchors its hunk on `<Project>`
+    plus the three comment lines above, and materialize applies it with no
+    fuzz, so rewording them breaks every tier that carries the patch. This
+    paragraph and everything below it are safe to change.
+
     The gate itself is NOT here. It lives in Directory.Build.targets, beside
     the test seam's identically shaped one, because Configuration is still
     empty in this file: Microsoft.Common.props imports it before defaulting
@@ -51,8 +57,10 @@
     from anywhere, which is why KeybindListWinUiAbiTests scans source instead.
 
     Kept last in the file on purpose: the tiered build patches this props file
-    with a hunk anchored on the opening tag, and materialize applies it with
-    no fuzz, so anything inserted at the top breaks every tier that uses it.
+    with a hunk anchored on the first FOUR lines (the opening tag plus the
+    three comment lines under it, not the tag alone), and materialize applies
+    it with no fuzz, so anything inserted at the top, or any rewording of
+    those lines, breaks every tier that uses it.
   -->
   <PropertyGroup>
     <WarningsAsErrors>$(WarningsAsErrors);CsWinRT1028</WarningsAsErrors>

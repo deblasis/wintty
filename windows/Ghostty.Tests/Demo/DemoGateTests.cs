@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using Xunit;
 
 namespace Ghostty.Tests.Demo;
@@ -61,11 +60,16 @@ public class DemoGateTests
         Assert.Contains("'$(Demo)' == 'true'", condition!, StringComparison.Ordinal);
         Assert.DoesNotContain("Release", condition!, StringComparison.Ordinal);
 
-        // And the symbol is defined only when that property says so.
+        // And the symbol is defined only when that property says so. The
+        // condition is pinned exactly, the way TestSeamWiringTests pins the
+        // seam's: selecting on "contains DemoEnabled" and then asserting only
+        // that the value mentions DEMO accepts an INVERTED gate
+        // (`'$(DemoEnabled)' != 'true'`), which is the rule backwards.
         var define = Assert.Single(
             doc.Descendants(),
             e => e.Name.LocalName == "DefineConstants"
                  && (e.Attribute("Condition")?.Value.Contains("DemoEnabled", StringComparison.Ordinal) ?? false));
+        Assert.Equal("'$(DemoEnabled)' == 'true'", define.Attribute("Condition")?.Value);
         Assert.Contains("DEMO", define.Value, StringComparison.Ordinal);
     }
 
