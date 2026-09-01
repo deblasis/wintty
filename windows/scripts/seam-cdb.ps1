@@ -21,13 +21,17 @@ param(
     [string]$DumpPath = (Join-Path $env:TEMP 'wintty-seam-crash.dmp')
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $exe = $ExePath
 $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
 $log = Join-Path $env:TEMP 'wintty-seam-cdb.log'
 $cmds = Join-Path $env:TEMP 'wintty-seam-cdb-cmds.txt'
 $xdg = Join-Path $env:TEMP ("wintty-seam-cdb-" + [guid]::NewGuid().ToString('N'))
 $env:XDG_CONFIG_HOME = $xdg
-$env:WINTTY_TEST_SEAM = '1'
+# cdb inherits this and the app under it inherits it in turn, so the token
+# reaches the seam the same way a direct launch delivers it.
+$token = New-SeamToken
+$env:WINTTY_TEST_SEAM = $token
 New-Item -ItemType Directory -Force -Path (Join-Path $xdg 'wintty') | Out-Null
 @'
 windows-single-instance = true
@@ -45,17 +49,8 @@ g
 Remove-Item $log, $DumpPath -ErrorAction SilentlyContinue
 $argLine = '-logo "' + $log + '" -c "$<' + $cmds + '" "' + $exe + '"'
 $debugger = Start-Process -FilePath $cdb -ArgumentList $argLine -PassThru
-$deadline = [datetime]::UtcNow.AddSeconds(90)
-while ([datetime]::UtcNow -lt $deadline) {
-    if ($debugger.HasExited) { throw "HARNESS: cdb exited before the pipe appeared" }
-    if ([System.IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\wintty-test-seam') {
-        break
-    }
-    Start-Sleep -Milliseconds 200
-}
-$pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
-    '.', 'wintty-test-seam', [System.IO.Pipes.PipeDirection]::InOut)
-$pipe.Connect(10000)
+[void](Wait-SeamPipe -Token $token -Proc $debugger -TimeoutSeconds 90)
+$pipe = Connect-SeamPipe -Token $token -TimeoutMs 10000
 $reader = [System.IO.StreamReader]::new($pipe)
 $writer = [System.IO.StreamWriter]::new(
     $pipe, [System.Text.UTF8Encoding]::new($false))

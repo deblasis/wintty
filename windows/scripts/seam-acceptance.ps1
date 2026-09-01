@@ -1,8 +1,9 @@
 #requires -Version 7
 <#
-    The in-process test seam's acceptance run: one Wintty with
-    WINTTY_TEST_SEAM=1, driven over the named pipe with zero OS input, zero
-    focus steals, and the driver asserting manager truth after every step.
+    The in-process test seam's acceptance run: one Wintty armed with a
+    per-session seam token, driven over the named pipe with zero OS input,
+    zero focus steals, and the driver asserting manager truth after every
+    step.
 
     The scenario is the crash investigation's repro, made deterministic.
     Per iteration, all over the pipe:
@@ -35,6 +36,7 @@ param(
     [ValidateRange(0, 5000)][int]$GapMs = 0
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
 $titles = @('tab-1', 'tab-2', 'tab-3', 'tab-4', 'tab-5')
@@ -132,31 +134,16 @@ function Assert-SeamGroup {
 
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
-    $env:WINTTY_TEST_SEAM = '1'
+    $token = New-SeamToken
+    $env:WINTTY_TEST_SEAM = $token
     $proc = Start-Process -FilePath $ExePath -PassThru `
         -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
     $script:Proc = $proc
-    Write-Host "pid=$($proc.Id) pipe=wintty-test-seam iterations=$Iterations"
+    Write-Host "pid=$($proc.Id) pipe=$(Get-SeamPipeName $token) iterations=$Iterations"
 
     # The seam pipe appears once OnLaunched has built the window.
-    $deadline = [datetime]::UtcNow.AddSeconds(90)
-    while ($true) {
-        if ($proc.HasExited) {
-            throw ("HARNESS: the app exited (code {0}) before the seam pipe " +
-                "appeared" -f $proc.ExitCode)
-        }
-        if ([datetime]::UtcNow -gt $deadline) {
-            throw 'HARNESS: the seam pipe never appeared (WINTTY_TEST_SEAM=1 not seen by the app?)'
-        }
-        if ([System.IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\wintty-test-seam') {
-            break
-        }
-        Start-Sleep -Milliseconds 150
-    }
-
-    $script:Pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
-        '.', 'wintty-test-seam', [System.IO.Pipes.PipeDirection]::InOut)
-    $script:Pipe.Connect(20000)
+    [void](Wait-SeamPipe -Token $token -Proc $proc)
+    $script:Pipe = Connect-SeamPipe -Token $token
     $script:Reader = [System.IO.StreamReader]::new($script:Pipe)
     $script:Writer = [System.IO.StreamWriter]::new(
         $script:Pipe, [System.Text.UTF8Encoding]::new($false))
