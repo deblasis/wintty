@@ -221,14 +221,25 @@ public class HarnessTests
             "\r\n~ENDOFBURST_" + nonce + "~");
         byte[] wrongTerminator = System.Text.Encoding.ASCII.GetBytes(
             "\r\n~ENDOFBURST_aaaaaaaaaaaaaaaa~");
+        // Both terminators in ONE response, deliberately.
+        //
+        // FakeTransport calls the scripted responder once per input READ, and
+        // the harness writes payload and terminator as two Writes on a byte
+        // pipe. Whether those arrive as one read or two is timing: if the
+        // fake's IO thread is already blocked in Read the first Write wakes it
+        // with the payload, but if it is descheduled -- which is what a loaded
+        // machine does -- both Writes sit in the kernel buffer and one Read
+        // drains them together. The responder is then called ONCE, answers
+        // with the wrong-nonce terminator, and the correct one is never sent:
+        // the iteration times out and reports "terminator not observed",
+        // blaming the code under test for the fake's framing.
+        //
+        // Emitting both in a single response says exactly what this test is
+        // about -- the reader must not match a wrong nonce and must go on to
+        // match the right one -- without depending on how the writes chunked.
+        byte[] both = [.. wrongTerminator, .. terminator];
         int call = 0;
-        using var t = new FakeTransport(_ =>
-        {
-            call++;
-            if (call == 1) return wrongTerminator;
-            if (call == 2) return terminator;
-            return null;
-        });
+        using var t = new FakeTransport(_ => call++ == 0 ? both : null);
         byte[] scratch = new byte[64 * 1024];
 
         var (_, emitBytes) = Runner.RunThroughputIteration(
