@@ -63,11 +63,22 @@ internal sealed class LayoutCoordinator
     //
     // Flipped, the departing strip is under a tenth by a third of the way
     // in and the arriving one does not pass half until well past that.
-    // The gap in the middle where neither strip is solid is deliberate and
-    // is not a hole: the active-tab ghost is at full opacity for the whole
-    // flight and is what the eye actually holds on to. That is the job the
-    // ghost exists for.
-    private const double IncomingFadeDelay = 0.22;
+    //
+    // The delay was 0.22 and is now 0.12, because the first version bought
+    // the leader at too high a price going TO vertical. Filmed at 30fps
+    // and read against the state track: a third of the way in the outgoing
+    // header was down to 0.22 and the incoming rail was still at 0.075, so
+    // the sidebar lane was a dark empty column while the active tab was
+    // visibly flying towards it. The tab had nowhere to be going. At 0.12
+    // the same instant reads about 0.14 against 0.47 -- the departing strip
+    // is still plainly the one leaving, and the lane it is leaving for
+    // exists.
+    //
+    // The margin that keeps the leader is worth stating because it is what
+    // these two numbers are for. Outgoing passes below half at 0.12 of the
+    // flight; incoming passes above half at 0.30. Nothing may close that
+    // gap: the layout-switch filmstrip asserts on it directly.
+    private const double IncomingFadeDelay = 0.12;
     private const double OutgoingFadeEnd = 0.60;
     private const double TitleBarSlideDistance = 10;
 
@@ -938,8 +949,25 @@ internal sealed class LayoutCoordinator
     /// terminal a hundred pixels below it. Settling early, on a curve that
     /// spends its speed at the start, puts the tab in its slot at about
     /// the moment the strip around it becomes readable.
+    ///
+    /// Trimmed from 0.85 when the incoming fade was pulled forward: the
+    /// two have to arrive together, and moving one without the other just
+    /// relocates the mismatch.
     /// </summary>
-    private const double PositionSettleFraction = 0.85;
+    private const double PositionSettleFraction = 0.78;
+
+    /// <summary>
+    /// Share of the flight the ghost's LABEL has to get out of the way in.
+    ///
+    /// Separate from the shape settle, and shorter, because the label is
+    /// the thing that makes a ghost read as a tab rather than as a moving
+    /// shape. Filmed crossing the terminal towards an empty rail, a fully
+    /// legible tab reads as something being dragged; the same rectangle
+    /// with its text gone reads as chrome rearranging itself, which is
+    /// what is actually happening. It leaves on the same curve the
+    /// outgoing strip does, and for the same reason.
+    /// </summary>
+    private const double LabelSettleFraction = 0.45;
 
     /// <summary>
     /// Drive the ghost from one rect to the other.
@@ -962,6 +990,7 @@ internal sealed class LayoutCoordinator
     {
         var settle = duration * ShapeSettleFraction;
         var travel = duration * PositionSettleFraction;
+        var labelSpan = duration * LabelSettleFraction;
         var sb = new Storyboard();
         Add(morph.Ghost.Translate, "X", from.X, to.X, span: travel, arriving: true);
         Add(morph.Ghost.Translate, "Y", from.Y, to.Y, span: travel, arriving: true);
@@ -982,8 +1011,14 @@ internal sealed class LayoutCoordinator
         if (shrinking || growing)
         {
             morph.Ghost.Label.Opacity = shrinking ? 1 : 0;
+            // Leaving is arriving's mirror here: a label on its way out
+            // spends its speed at the start so the ghost stops being a
+            // legible tab early, and one on its way in takes the same
+            // curve so it is readable before the landing rather than at
+            // it.
             Add(morph.Ghost.Label, "Opacity",
-                shrinking ? 1 : 0, shrinking ? 0 : 1, dependent: false, settle);
+                shrinking ? 1 : 0, shrinking ? 0 : 1,
+                dependent: false, labelSpan, arriving: true);
         }
 
         _morphStoryboard = sb;
