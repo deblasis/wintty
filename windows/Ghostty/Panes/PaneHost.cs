@@ -276,6 +276,74 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     public LeafPane? ZoomedLeaf => _zoomedLeaf;
 
+    // ---- test seam accessors (WINTTY_TEST_SEAM=1) --------------------
+    // Named TestSeam* so the seam's footprint on this class is greppable
+    // and removable as one shape. The rects read RENDERED geometry rather
+    // than the model, because a harness asking "is the active border drawn
+    // over the right-hand leaf" must not be answered by the same field it
+    // is trying to corroborate.
+
+    /// <summary>Leaf index in <see cref="PaneTree.Leaves"/> order (Child1 first).</summary>
+    internal int TestSeamActiveLeafIndex
+        => PaneTree.Leaves(_root).ToList().IndexOf(_activeLeaf);
+
+    internal int TestSeamLeafCount => PaneTree.Leaves(_root).Count();
+
+    /// <summary>Each leaf's bounds in window-root DIPs, in leaf order.</summary>
+    internal IReadOnlyList<Rect> TestSeamLeafRects
+        => PaneTree.Leaves(_root).Select(l => TestSeamRectOf(l.Terminal())).ToList();
+
+    /// <summary>
+    /// Where <see cref="PositionActiveBorderOverLeaf"/> actually put the
+    /// stroke, in window-root DIPs; an empty rect while it is hidden.
+    /// </summary>
+    internal Rect TestSeamActiveBorderRect
+        => _activeBorderFrame.Visibility == Visibility.Visible
+            ? TestSeamRectOf(_activeBorderFrame)
+            : default;
+
+    /// <summary>The stroke's colour, so a capture harness knows what to look for.</summary>
+    internal uint TestSeamActiveBorderArgb
+        => _activeBorderFrame.BorderBrush is SolidColorBrush brush
+            ? ((uint)brush.Color.A << 24) | ((uint)brush.Color.R << 16)
+              | ((uint)brush.Color.G << 8) | brush.Color.B
+            : 0u;
+
+    /// <summary>
+    /// Focus the Nth leaf through the same call the split-navigation chords
+    /// make, so <see cref="OnTerminalGotFocus"/> -- not the seam -- is what
+    /// moves <see cref="ActiveLeaf"/>.
+    /// </summary>
+    internal bool TestSeamFocusLeaf(int index)
+    {
+        var leaves = PaneTree.Leaves(_root).ToList();
+        return index >= 0 && index < leaves.Count
+            && leaves[index].Terminal().Focus(FocusState.Keyboard);
+    }
+
+    /// <summary>
+    /// Which leaf actually holds keyboard focus, or -1 when focus is
+    /// outside this host. Walks up from <paramref name="focused"/> because
+    /// focus settles on a child of the leaf's control as often as on the
+    /// control itself.
+    /// </summary>
+    internal int TestSeamFocusedLeafIndex(DependencyObject? focused)
+    {
+        var leaves = PaneTree.Leaves(_root).ToList();
+        for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
+        {
+            for (var i = 0; i < leaves.Count; i++)
+                if (ReferenceEquals(node, leaves[i].Terminal())) return i;
+        }
+        return -1;
+    }
+
+    private static Rect TestSeamRectOf(FrameworkElement element)
+    {
+        var origin = element.TransformToVisual(null).TransformPoint(new Point(0, 0));
+        return new Rect(origin.X, origin.Y, element.ActualWidth, element.ActualHeight);
+    }
+
     /// <summary>
     /// Raised after any structural change to the tree (split, close,
     /// zoom toggle, equalize, resize, undo/redo restore). The session
