@@ -1547,11 +1547,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             _fieldTerminals[i].Visibility = Visibility.Collapsed;
     }
 
-    /// <summary>
-    /// The element one horizontal slot renders as, or null while the strip
-    /// has not built it. A chip counts: it is the folded run's only slot,
-    /// so its own ends are the run's ends.
-    /// </summary>
+
     /// <summary>
     /// What is actually painted where a terminal drawn on <paramref name="row"/>
     /// lands, so the bar can be scored against it.
@@ -1567,16 +1563,29 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         if (row is TabStripProjection.HorizontalRow.Item { Tab: { } tab })
         {
-            if (ReferenceEquals(tab, _manager.ActiveTab) && _selectedTabFillBrush is not null)
-                return PackColor(_selectedTabFillBrush.Color);
+            // The branch ORDER is ApplyTabChrome's, and has to be: a preset
+            // beats being active there, so an active coloured tab wears the
+            // opaque preset and not the terminal background. Asking about
+            // active first answered "terminal ground" for a slot painted its
+            // own colour -- and for a Red end bar on an active Red member that
+            // is a bar scored against near-black, returned unlifted, and
+            // painted onto opaque Red. 1:1, which is the exact defect this
+            // whole helper was added to remove.
+            var selected = ReferenceEquals(tab, _manager.ActiveTab);
             if (tab.Color != TabColor.None)
                 return TabColorPalette.EffectiveBackgroundRgb(
-                    tab.Color, selected: false, _stripBackdropPacked);
+                    tab.Color, selected, _stripBackdropPacked);
+            if (selected && _selectedTabFillBrush is not null)
+                return PackColor(_selectedTabFillBrush.Color);
         }
         return TabGroupField.FieldGroundRgb(_stripBackdropPacked);
     }
 
-    private FrameworkElement? SlotElement(TabStripProjection.HorizontalRow row)
+    /// <summary>
+    /// The element one horizontal slot renders as, or null while the strip
+    /// has not built it. A chip counts: it is the folded run's only slot,
+    /// so its own ends are the run's ends.
+    /// </summary>    private FrameworkElement? SlotElement(TabStripProjection.HorizontalRow row)
         => row switch
         {
             TabStripProjection.HorizontalRow.Chip { Group: { } group }
@@ -3264,6 +3273,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // taken its ground from here since the same bug was fixed there.
         _stripBackdropPacked = groundRgb;
         RefreshTabColors();
+        // RefreshTabColors walks _itemByModel; chips live in _chipByGroup and
+        // are never re-chromed by it. Without this a folded run's chip keeps
+        // the old pole's wash through an OS light/dark flip while the expanded
+        // runs around it repaint and its own cap and end bar are re-inked --
+        // the same defect RefreshGroupFieldWash exists to prevent, on the path
+        // that never reaches RefreshShellInactiveInk.
+        RefreshGroupFieldWash();
     }
 
     private uint _chromeGroundPacked = 0x0C0C0C;

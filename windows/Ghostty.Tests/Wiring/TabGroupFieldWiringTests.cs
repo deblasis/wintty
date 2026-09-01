@@ -217,22 +217,25 @@ public sealed class TabGroupFieldWiringTests
     {
         Washes(file, sites);
 
-        // Calling the helper is allowed and now necessary: it is the ground
-        // contrast is scored against, and the horizontal terminals ask it per
-        // slot. What stays forbidden is PAINTING it. Banning the call outright
-        // was the cheaper rule and it stopped being true the moment anything
-        // needed to score against the field, so the rule names the actual
-        // defect instead: a brush built out of the composite.
+        // Banning the call outright was the rule, and it stopped being true the
+        // moment anything needed to SCORE against the field. Ancestry was the
+        // first replacement and it is a spelling guard, not an API one: one
+        // local in between, or `new SolidColorBrush(...)` instead of the
+        // helper, walks straight past it.
+        //
+        // So the ban stands, with a named door. A method on this allowlist is
+        // one whose job is to answer "what is the ground here"; anywhere else
+        // the composite is unreachable and cannot be painted.
+        var scorers = new[] { "SlotGroundRgb" };
         foreach (var call in ShellSource.Load(file).Root.Calls("TabGroupField.FieldGroundRgb"))
         {
-            var brush = call.Ancestors().OfType<InvocationExpressionSyntax>()
-                .FirstOrDefault(i => i.CalleeText()
-                    .StartsWith("TabColorBrush.", StringComparison.Ordinal));
+            var owner = call.FirstAncestorOrSelf<MethodDeclarationSyntax>();
             Assert.True(
-                brush is null,
-                "the composited field ground is being made into a brush, which paints "
-                + "an opaque patch over Mica -- the colour this design rejected, "
-                + "arriving through the scoring door: " + brush);
+                owner is not null && scorers.Contains(owner.Identifier.ValueText),
+                "the composited field ground is read outside the methods that exist to "
+                + $"score against it (in '{owner?.Identifier.ValueText ?? "<none>"}'). "
+                + "Painting it puts an opaque patch over Mica -- the colour this design "
+                + "rejected, arriving through the scoring door.");
         }
     }
 
@@ -275,6 +278,42 @@ public sealed class TabGroupFieldWiringTests
         // a bar hard-coded to one preset would have passed the rule written to
         // pin it to the group's.
         Assert.Equal("group.Color", call.Arg(1));
+    }
+
+    /// <summary>
+    /// The ground a slot is scored against is resolved in the order the slot is
+    /// PAINTED in: a preset beats being active.
+    ///
+    /// ApplyTabChrome gives a preset-coloured tab the opaque preset as its
+    /// selected handle, and only a tab with no preset gets
+    /// _selectedTabFillBrush. Asking "is this active" first therefore answers
+    /// "the terminal background" for a slot painted its own colour -- and for
+    /// an active Red member of a Red group that is an end bar scored against
+    /// near-black, returned unlifted, and painted onto opaque Red. 1:1, which
+    /// is the defect SlotGroundRgb was added to remove, reintroduced by the
+    /// order of two ifs with every literal correct.
+    /// </summary>
+    [Fact]
+    public void Horizontal_TheSlotGroundResolvesInThePaintOrder()
+    {
+        var ground = ShellSource.Load(HorizontalStrip).Method("SlotGroundRgb");
+        var branches = ground.DescendantNodes().OfType<IfStatementSyntax>()
+            .Select(i => i.Condition.ToString())
+            .ToList();
+
+        Assert.Equal(
+            new[]
+            {
+                "row is TabStripProjection.HorizontalRow.Item { Tab: { } tab }",
+                "tab.Color != TabColor.None",
+                "selected && _selectedTabFillBrush is not null",
+            },
+            branches);
+
+        // And the preset is scored at the alpha the slot actually wears: an
+        // active coloured tab is opaque, an inactive one is the 89-alpha tint.
+        var preset = ground.Call("TabColorPalette.EffectiveBackgroundRgb");
+        Assert.Equal("selected", preset.Arg(1));
     }
 
     /// <summary>
@@ -325,13 +364,20 @@ public sealed class TabGroupFieldWiringTests
             a => a.Left.ToString() == "field.BorderThickness");
 
         var thickness = Assert.IsType<ObjectCreationExpressionSyntax>(assignment.Right);
+        // The sides stay zero and each end is its token or nothing -- an end
+        // the viewport clipped away is DROPPED rather than slid to the edge of
+        // the scroller, where it would claim a run starts or stops at whatever
+        // row happens to be there. The ternaries are the whole of that rule, so
+        // they are pinned as text: replacing either with the bare token brings
+        // back the false terminal, and replacing either with 0 removes an end
+        // the design says every run has.
         Assert.Equal(
             new[]
             {
                 "0",
-                "TabGroupField.TerminalThicknessPx",
+                "capVisible ? TabGroupField.TerminalThicknessPx : 0",
                 "0",
-                "TabGroupField.TerminalThicknessPx",
+                "endVisible ? TabGroupField.TerminalThicknessPx : 0",
             },
             thickness.ArgumentList!.Arguments.Select(a => a.ToString()).ToArray());
     }
@@ -514,6 +560,32 @@ public sealed class TabGroupFieldWiringTests
             pass.DescendantNodes().OfType<IfStatementSyntax>(),
             i => i.Condition.ToString().Contains("_manager.Groups", StringComparison.Ordinal));
         Assert.Equal("_manager.Groups.Contains(group)", stillHeld.Condition.ToString());
+
+        // Which arm does what, not merely that both exist. Swapping the two
+        // bodies satisfies every assertion above while retiring every LIVE
+        // group's field on every pass and keeping a dissolved group's forever
+        // -- the exact inversion of the property this test is named for, with
+        // the condition and the call sites all still present.
+        Assert.Empty(stillHeld.Statement.Calls("RemoveGroupField"));
+        Assert.Contains(
+            "Visibility.Collapsed", stillHeld.Statement.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both washed surfaces actually ask for the three-state ramp.
+    ///
+    /// The ramp's own test loads ApplyFieldWashStates by name, and the wash
+    /// count is taken file-wide, so deleting both CALLS leaves the method as
+    /// dead code, the count unchanged, and every other assertion green -- while
+    /// every member of a group and every chip goes back to not answering the
+    /// pointer.
+    /// </summary>
+    [Fact]
+    public void Horizontal_BothWashedSurfacesTakeTheRamp()
+    {
+        var strip = ShellSource.Load(HorizontalStrip);
+        Assert.NotEmpty(strip.Method("ApplyTabChrome").Calls("ApplyFieldWashStates"));
+        Assert.NotEmpty(strip.Method("RefreshChip").Calls("ApplyFieldWashStates"));
     }
 
     /// <summary>
