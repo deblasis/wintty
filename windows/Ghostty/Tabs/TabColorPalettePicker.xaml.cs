@@ -67,7 +67,17 @@ internal sealed partial class TabColorPalettePicker : UserControl
     /// </summary>
     private bool _openedFocus;
 
-    public TabColorPalettePicker(TabColor initial)
+    /// <param name="allowNone">
+    /// Whether the None swatch is offered. False for a group: a group has no
+    /// "no color" state, and offering None let the UI ask for a value the
+    /// model refuses, which read to the user as a swatch that does nothing.
+    ///
+    /// No single-argument overload defaulting this to true, deliberately.
+    /// Every caller has to decide, because the permissive answer is the one
+    /// that was wrong, and a defaulted parameter is how a fourth entry point
+    /// would get it without anyone thinking about it.
+    /// </param>
+    public TabColorPalettePicker(TabColor initial, bool allowNone)
     {
         InitializeComponent();
 
@@ -75,9 +85,14 @@ internal sealed partial class TabColorPalettePicker : UserControl
         // name from the visible heading rather than repeating the string.
         // Set rather than LabeledBy: the heading is out of the automation
         // tree (see the XAML), and LabeledBy would point into nothing.
+        //
+        // The heading reads "Tab Color", which is wrong for the group picker:
+        // a screen reader would announce a tab while the user recolours a
+        // group. The control knows which it is, so it says so.
+        if (!allowNone) PaletteLabel.Text = "Group Color";
         AutomationProperties.SetName(Swatches, PaletteLabel.Text);
 
-        BuildSwatches(initial);
+        BuildSwatches(initial, allowNone);
 
         Loaded += (_, _) =>
         {
@@ -91,15 +106,26 @@ internal sealed partial class TabColorPalettePicker : UserControl
         };
     }
 
-    private void BuildSwatches(TabColor initial)
+    private void BuildSwatches(TabColor initial, bool allowNone)
     {
         // TabColorPalette.PaletteRows is the macOS-derived layout, kept in
         // Ghostty.Core so platform divergence stays in one file. Flattening
         // it here and letting the panel wrap keeps that ordering authoritative.
+        //
+        // That equivalence holds for the TAB picker only. Dropping None
+        // shortens the flat sequence to nine, and the panel still wraps at
+        // five, so the group picker reads 5 + 4 and Orange moves up a row --
+        // the macOS 2x5 grid is a claim about the full palette, not about
+        // every picker built from it.
         foreach (var row in TabColorPalette.PaletteRows)
         {
             foreach (var color in row)
             {
+                // Skipped rather than disabled: a disabled first swatch is
+                // still a tab stop the keyboard lands on, and the row would
+                // open with a hole where the palette's first entry belongs.
+                if (color == TabColor.None && !allowNone) continue;
+
                 var swatch = BuildSwatch(color);
                 _colors[swatch] = color;
                 Swatches.Items.Add(swatch);
@@ -108,9 +134,12 @@ internal sealed partial class TabColorPalettePicker : UserControl
             }
         }
 
-        // Only reachable if TabColor gains a member PaletteRows does not
-        // list. Opening on None misreports the tab by one swatch; opening
-        // with nothing selected and nothing focused strands the keyboard.
+        // Reachable two ways: a TabColor that PaletteRows does not list, or
+        // None on a picker that skipped it. Opening on the wrong swatch
+        // misreports by one; opening with nothing selected and nothing
+        // focused strands the keyboard, which is worse. Items[0] is the
+        // palette's first offered colour, which for a group is
+        // DefaultGroupColor -- the value the model would have coerced to.
         Swatches.SelectedItem ??= Swatches.Items[0];
     }
 
@@ -161,7 +190,9 @@ internal sealed partial class TabColorPalettePicker : UserControl
         }
         else
         {
-            var drawing = TabColorPalette.Colors[color];
+            // Border, not Colors[...]: same opaque preset, but through the one
+            // door that refuses an unpaintable value by name.
+            var drawing = TabColorPalette.Border(color);
             ellipse.Fill = new SolidColorBrush(
                 Windows.UI.Color.FromArgb(255, drawing.R, drawing.G, drawing.B));
             tile.Children.Add(ellipse);

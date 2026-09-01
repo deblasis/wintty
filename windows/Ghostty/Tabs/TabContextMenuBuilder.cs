@@ -272,7 +272,10 @@ internal static class TabContextMenuBuilder
         {
             var target = flyout.Target as FrameworkElement;
             if (target is null) return;
-            ShowColorPicker(target, group.Color, c => requestColorGroup(group, c));
+            // allowNone: a group has no "no color" state, so None is not
+            // offered here -- see TabGroup.Color.
+            ShowColorPicker(target, group.Color, c => requestColorGroup(group, c),
+                allowNone: false);
         };
         flyout.Items.Add(color);
 
@@ -306,15 +309,15 @@ internal static class TabContextMenuBuilder
     }
 
     private static void ShowColorPicker(FrameworkElement anchor, TabModel tab)
-        => ShowColorPicker(anchor, tab.Color, color => tab.Color = color);
+        => ShowColorPicker(anchor, tab.Color, color => tab.Color = color, allowNone: true);
 
     private static void ShowColorPicker(
-        FrameworkElement anchor, TabColor initial, Action<TabColor> apply)
+        FrameworkElement anchor, TabColor initial, Action<TabColor> apply, bool allowNone)
     {
         // Build the secondary flyout fresh each invocation. Cheap, and
         // avoids any stale selection-ring state from the previous
         // right-click.
-        var picker = new TabColorPalettePicker(initial);
+        var picker = new TabColorPalettePicker(initial, allowNone);
         var subFlyout = new Flyout
         {
             Content = picker,
