@@ -1831,7 +1831,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         SendKey(e, GhosttyInputAction.Release);
     }
 
-    private static Windows.System.VirtualKeyModifiers CurrentChordModifiers()
+    // Internal so the window's frame-chord router reads the modifier state
+    // the same way the pane path does, rather than growing a second copy.
+    internal static Windows.System.VirtualKeyModifiers CurrentChordModifiers()
     {
         var mods = Windows.System.VirtualKeyModifiers.None;
         if ((Microsoft.UI.Input.InputKeyboardSource
@@ -1846,6 +1848,20 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Menu)
                 & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0)
             mods |= Windows.System.VirtualKeyModifiers.Menu;
+        // There is no single VK for the Windows key, so both sides are
+        // read. Without this the flag is never set and every consumer
+        // sees Win+Ctrl+T as plain Ctrl+T: the frame router fired
+        // new_tab on a chord the user aimed somewhere else, and a
+        // `super+...` binding could never match because the modifier it
+        // needs was not in the set. Match compares modifiers exactly, so
+        // reporting the key also stops a Win chord from reaching a
+        // binding that did not ask for it.
+        if (((Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(Windows.System.VirtualKey.LeftWindows)
+                | Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(Windows.System.VirtualKey.RightWindows))
+                & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0)
+            mods |= Windows.System.VirtualKeyModifiers.Windows;
         return mods;
     }
 
