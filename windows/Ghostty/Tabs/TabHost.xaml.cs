@@ -885,6 +885,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // The swatch paints unconditionally: a group has no "no color" state.
         chip.Swatch.Background = TabColorBrush.From(
             TabColorPalette.Background(group.Color, selected: false));
+        // A chip IS the folded run, so it takes the field's ground the same
+        // way an expanded run's members do -- with the cap and end bar
+        // around it, that is what makes it read as a container rather than
+        // as a tab with a dot on it. Never the selected brushes: a chip is
+        // never the selected item.
+        foreach (var key in TabViewItemHeaderNormalKeys)
+        {
+            SetItemHeaderBrush(chip.Item, key, TabColorBrush.FromPackedArgb(
+                TabGroupField.WashArgb(_stripBackdropPacked)));
+        }
         // A panel header gives a TabViewItem no name, so the chip is named
         // and statused the way tabs are -- else a screen reader hears how
         // many rows the strip holds and nothing about any of them.
@@ -1330,6 +1340,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     private void UpdateSelectedTabBridge()
     {
+        // The field's terminals ride this pass: it is already the one every
+        // add, remove, move, activation and resize funnels into, and it
+        // already knows how to wait for bounds. A placement of its own
+        // would be a second thing to remember on every one of those doors.
+        UpdateGroupFieldTerminals();
+
         if (_stripDragActive)
         {
             // Mid-drag the strip's slots are TabView's reorder preview,
@@ -1424,6 +1440,147 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // every settle, and the frames it is wrong in are the frames where a
         // line appears between the tab and the pane.
         SelectedTabSeamChanged?.Invoke(left, width, _field.Brush);
+    }
+
+    // -----------------------------------------------------------------
+    // The group field, horizontal edition.
+    //
+    // Same three parts as the vertical strip's, same grammar, same
+    // arithmetic (TabGroupField): a wash for the ground, a cap where the
+    // run starts and an end bar where it stops. Only the mechanics differ,
+    // because the hosts do. Vertically the field is one Border under the
+    // rows, which is possible because that strip's rows sit on a canvas
+    // this control has no equivalent of; here the wash rides the members'
+    // own header brushes (see ApplyTabChrome) and only the two terminals
+    // are drawn, on a canvas over the strip.
+    //
+    // Pooled by index, hidden rather than removed, for the reason the
+    // vertical strip's separators are: this runs from the pass every strip
+    // mutation already funnels into, and rebuilding N Rectangles per call
+    // would put an allocation on every one of them.
+    // -----------------------------------------------------------------
+
+    private readonly List<Microsoft.UI.Xaml.Shapes.Rectangle> _fieldTerminals = new();
+
+    /// <summary>
+    /// Clearance above the terminals. A tab's top corners are rounded, and
+    /// a bar drawn flush with the top pokes out past the curve on both
+    /// ends of the run. The bars stay flush with the BOTTOM on purpose:
+    /// that edge is where the strip meets the pane, and a terminal rising
+    /// off it reads as a wall around the run rather than as a tick mark
+    /// floating in the strip.
+    /// </summary>
+    private const double FieldTerminalTopInset = 3;
+
+    private void UpdateGroupFieldTerminals()
+    {
+        var used = 0;
+        // Mid-drag the strip's slots are TabView's reorder preview rather
+        // than the manager's order, so a run's ends are not where the
+        // projection says they are. The drop re-places them -- the same
+        // rule the seam cover above follows, for the same reason.
+        if (!_stripDragActive)
+        {
+            var rows = TabStripProjection.HorizontalRows(_manager);
+            var viewport = TabStripViewport();
+            foreach (var run in TabGroupField.Runs(TabGroupField.SlotGroups(rows)))
+            {
+                if (SlotElement(rows[run.First]) is not { ActualWidth: > 0 } head) continue;
+                if (SlotElement(rows[run.Last]) is not { ActualWidth: > 0 } tail) continue;
+
+                double left, right, top, height;
+                try
+                {
+                    var headOrigin = head.TransformToVisual(this).TransformPoint(new Point(0, 0));
+                    var tailOrigin = tail.TransformToVisual(this).TransformPoint(new Point(0, 0));
+                    left = headOrigin.X;
+                    right = tailOrigin.X + tail.ActualWidth;
+                    top = headOrigin.Y + FieldTerminalTopInset;
+                    height = head.ActualHeight - FieldTerminalTopInset;
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+                    or System.Runtime.InteropServices.COMException or NullReferenceException)
+                {
+                    // The item is not in the tree yet, or is leaving it.
+                    continue;
+                }
+
+                if (height <= 0) continue;
+
+                // Clipped to the list the tabs scroll inside, for the
+                // reason the seam cover is: a run scrolled out of view
+                // keeps reporting the offset it WOULD have, and an
+                // unclipped end bar walks off into the footer.
+                var ink = TabColorBrush.FromPackedRgb(
+                    TabGroupField.TerminalRgb(_stripBackdropPacked, run.Group.Color));
+                used = PlaceFieldTerminal(used, left, top, height, ink, viewport);
+                used = PlaceFieldTerminal(
+                    used, right - TabGroupField.TerminalThicknessPx, top, height, ink, viewport);
+            }
+        }
+
+        for (var i = used; i < _fieldTerminals.Count; i++)
+            _fieldTerminals[i].Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The element one horizontal slot renders as, or null while the strip
+    /// has not built it. A chip counts: it is the folded run's only slot,
+    /// so its own ends are the run's ends.
+    /// </summary>
+    private FrameworkElement? SlotElement(TabStripProjection.HorizontalRow row)
+        => row switch
+        {
+            TabStripProjection.HorizontalRow.Chip { Group: { } group }
+                => _chipByGroup.TryGetValue(group, out var chip) ? chip.Item : null,
+            TabStripProjection.HorizontalRow.Item { Tab: { } tab }
+                => _itemByModel.TryGetValue(tab, out var item) ? item : null,
+            _ => null,
+        };
+
+    private int PlaceFieldTerminal(
+        int index, double left, double top, double height, Brush ink, Rect? viewport)
+    {
+        if (viewport is { } clip
+            && (left + TabGroupField.TerminalThicknessPx <= clip.Left || left >= clip.Right))
+        {
+            // Scrolled out of the list entirely: no bar rather than a bar
+            // drawn over the header badge or the new-tab button.
+            return index;
+        }
+
+        Microsoft.UI.Xaml.Shapes.Rectangle bar;
+        if (index < _fieldTerminals.Count)
+        {
+            bar = _fieldTerminals[index];
+        }
+        else
+        {
+            bar = new Microsoft.UI.Xaml.Shapes.Rectangle
+            {
+                Width = TabGroupField.TerminalThicknessPx,
+                IsHitTestVisible = false,
+            };
+            _fieldTerminals.Add(bar);
+            GroupFieldHost.Children.Add(bar);
+        }
+
+        // A terminal arriving -- a group just created, a run just expanded
+        // out of its chip -- comes in on the Fade token, the same hand the
+        // chip/member swap already uses. Its POSITION is never animated:
+        // this strip's tabs cut to their new slots (there is no gap glide
+        // horizontally), and a bar gliding to an end its own tab has
+        // already jumped to would trail behind the run it marks.
+        var appearing = bar.Visibility != Visibility.Visible;
+
+        bar.Width = TabGroupField.TerminalThicknessPx;
+        bar.Height = height;
+        bar.Fill = ink;
+        bar.Visibility = Visibility.Visible;
+        Canvas.SetLeft(bar, left);
+        Canvas.SetTop(bar, top);
+        if (appearing) FadeInAppearing(bar);
+        return index + 1;
     }
 
     // The list the tab items scroll inside, looked up once out of the
@@ -1602,9 +1759,30 @@ internal sealed partial class TabHost : UserControl, ITabHost
             normalHandle = TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: false));
             selectedHandle = TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: true));
         }
-        else if (selected && _selectedTabFillBrush is not null)
+        else
         {
-            selectedHandle = _selectedTabFillBrush;
+            // The group field's ground, horizontal edition: the wash goes
+            // on the members' own header brushes rather than on a rect
+            // behind them, because the strip's surface is owned by
+            // TabViewBackground and an opaque palette fill would paint
+            // straight over anything drawn under the TabView. Ink at 8%,
+            // so a bare frame still shows Mica through the run.
+            //
+            // Only where the tab has no colour of its own: a preset is the
+            // more specific statement about that one tab, and washing over
+            // it would make a coloured member of a group a shade nobody
+            // picked. And only the UNSELECTED brushes: the selected tab
+            // keeps the terminal's background in every combination, which
+            // is what makes it read as continuous with the pane below it.
+            if (tab.Group is not null)
+            {
+                normalHandle = TabColorBrush.FromPackedArgb(
+                    TabGroupField.WashArgb(_stripBackdropPacked));
+            }
+            if (selected && _selectedTabFillBrush is not null)
+            {
+                selectedHandle = _selectedTabFillBrush;
+            }
         }
 
         // The active tab does not take the colour, it takes the field's own
@@ -2931,6 +3109,27 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 ? Windows.UI.Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
                 : Windows.UI.Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
         RecolorTabText();
+        // The field's wash and its terminals are scored against the
+        // same ground this just moved, so they re-ask here rather than
+        // waiting for whatever pass happens next: SetChromeFill reaches
+        // no other painter, and a run left washed for the previous
+        // frame is the ink bug with a different surface.
+        RefreshGroupFieldWash();
+    }
+
+    /// <summary>
+    /// Re-derive every field's ground, through the painters that already
+    /// own it: the run's members and, when it is folded, its chip. No
+    /// second wash site -- a painter of its own here could disagree with
+    /// the one every other pass goes through.
+    /// </summary>
+    private void RefreshGroupFieldWash()
+    {
+        foreach (var group in _manager.Groups)
+        {
+            RefreshRunRails(group);
+            RefreshChip(group);
+        }
     }
 
     /// <summary>
