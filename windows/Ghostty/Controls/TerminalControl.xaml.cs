@@ -446,6 +446,25 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal void RaisePwdChanged(string? pwd) => PwdChanged?.Invoke(this, pwd);
 
     /// <summary>
+    /// Hand <paramref name="text"/> to this surface the way committed IME
+    /// text arrives: one ghostty_surface_text call, no synthesized OS input
+    /// and no focus requirement. The test seam's way to make a shell run
+    /// something; a caller that wants the line submitted terminates it with
+    /// "\r" itself. Returns false when the surface is gone.
+    /// </summary>
+    internal bool TestSeamSendText(string text)
+    {
+        if (_surface.Handle == IntPtr.Zero || string.IsNullOrEmpty(text)) return false;
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        unsafe
+        {
+            fixed (byte* p = bytes)
+                NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)bytes.Length);
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Notify the UIA automation peer that the terminal selection changed so
     /// assistive tech re-queries it. No-op when no automation peer has been
     /// created (i.e. no AT client is attached), so non-AT users pay nothing.
