@@ -825,6 +825,53 @@ function Measure-Switcher($Cap, [string]$Leg, $TileRect) {
     Measure-Surface $Cap $Leg 'switcher-tile-text' 'text' $TileRect 1 'the first tile title'
 }
 
+# Was the popup still up? Asked of the PRODUCT rather than of the tree.
+#
+# UIA cannot answer this. TabSwitcherPopupUI is declared in MainWindow.xaml, so
+# the element is in the tree whether or not the popup is open, and a lookup
+# after a dismissal still hands back a plausible tile rect. The seam answers
+# from the window's own state, and refuses the op outright when the popup is
+# down -- which arrives here as a throw, not as a false.
+function Test-SwitcherUp($Session) {
+    try {
+        $r = Invoke-SeamCommand $Session @{ op = 'switcher-preview-rect' }
+        return $null -ne $r
+    } catch {
+        return $false
+    }
+}
+
+# One switcher leg, with the race it used to lose made visible.
+#
+# The popup dismisses itself on a 1.2s timer, and nothing bounds the UIA lookup
+# and the screen grab that sit between the cycle and the shutter. When they run
+# long the capture is of a window with no popup in it, the stale rect samples
+# uniform terminal background, and ink and ground come back as the SAME colour:
+# the surface scores exactly 1.00:1 and is reported as an illegible tile.
+#
+# That is a missed photograph wearing a product defect's clothes, which is the
+# failure shape this suite's README says to design against. So the popup is
+# asked whether it was still up AFTER the shutter -- if it was, it was up for
+# the capture too -- and a leg that lost the race is retried and then reported
+# UNMEASURED rather than failed. Checked after and not before on purpose: a
+# round trip before the shutter would widen the very gap being guarded.
+function Measure-SwitcherLeg($Session, [string]$ShotName, [string]$Leg) {
+    foreach ($attempt in 1, 2, 3) {
+        [void](Invoke-SeamCommand $Session @{ op = 'cycle'; forward = $true })
+        $tileRect = Get-SwitcherTileRect
+        $cap = New-Capture $ShotName
+        $stillUp = Test-SwitcherUp $Session
+        Start-Sleep -Milliseconds 1400
+        if ($stillUp) {
+            Measure-Switcher $cap $Leg $tileRect
+            return
+        }
+        Write-Host "    the cycle popup was gone by the shutter; retrying ($attempt of 3)"
+    }
+    Add-Unmeasured $Leg 'switcher-tile-text' `
+        'the cycle popup dismissed itself before the capture on all three attempts, so the tile was never photographed'
+}
+
 # ---- configs ---------------------------------------------------------------
 
 # The built-in halves are read out of the zig source at run time rather
@@ -1022,13 +1069,7 @@ foreach ($leg in (New-ConfigLegs)) {
         }
 
         Write-Host "-- switcher"
-        # The popup dismisses itself on a 1.2s timer, so the tile is located
-        # first and the capture follows immediately, with no settle sleep in
-        # between either of them.
-        [void](Invoke-SeamCommand $s @{ op = 'cycle'; forward = $true })
-        $tileRect = Get-SwitcherTileRect
-        Measure-Switcher (New-Capture "$($leg.name)-switcher") "$($leg.name)/switcher" $tileRect
-        Start-Sleep -Milliseconds 1400
+        Measure-SwitcherLeg $s "$($leg.name)-switcher" "$($leg.name)/switcher"
 
         Write-Host "-- horizontal"
         # Folded first: the horizontal strip paints a group as a coloured

@@ -156,6 +156,41 @@ public sealed class ActiveTabFieldWiringTests
     }
 
     /// <summary>
+    /// A settle in flight survives the passes that are not activations.
+    ///
+    /// Without this the transition exists in the source and never on the
+    /// screen, which is how it shipped in the first draft: the chrome pass
+    /// that paints the field runs many times per activation -- a layout pass,
+    /// a theme refresh, a size change, the selection row re-placing itself --
+    /// and every one of them stopped the clock and wrote the target, so the
+    /// fill arrived within a frame or two of leaving. Nothing observable
+    /// distinguishes that from a snap, and no test that only checks the
+    /// animation is CONSTRUCTED would have noticed.
+    /// </summary>
+    [Fact]
+    public void ASettleInFlightIsNotCutShortByAPassThatIsNotAnActivation()
+    {
+        var settle = ShellSource.Load("Tabs.ActiveFieldFill.cs").Method("Settle");
+
+        // The guard has to stand before the Stop, or it guards nothing.
+        var guard = settle.DescendantNodes().OfType<IfStatementSyntax>()
+            .FirstOrDefault(i => i.Statement is ReturnStatementSyntax
+                && i.Condition.ToString().Contains("_running is not null", StringComparison.Ordinal));
+        Assert.True(guard is not null,
+            "Settle has no early return protecting a settle already in flight");
+
+        var stop = settle.DescendantNodes().OfType<ExpressionStatementSyntax>()
+            .First(e => e.ToString().Contains("_running?.Stop()", StringComparison.Ordinal));
+        Assert.True(
+            guard!.SpanStart < stop.SpanStart,
+            "the in-flight guard runs after the clock is stopped, so it protects nothing");
+
+        // And it is the non-activation case it protects: a guard that also
+        // swallowed a real activation would freeze the field on one colour.
+        Assert.Contains("!moved", guard.Condition.ToString());
+    }
+
+    /// <summary>
     /// A local one hop back, so a rule can name the value rather than the
     /// name the method happened to give it.
     /// </summary>

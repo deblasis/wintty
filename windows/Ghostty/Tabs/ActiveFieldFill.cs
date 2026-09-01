@@ -40,6 +40,7 @@ internal sealed class ActiveFieldFill
 
     private Storyboard? _running;
     private object? _tab;
+    private Color _target;
 
     /// <summary>
     /// Point the field at <paramref name="target"/> for <paramref name="tab"/>.
@@ -61,16 +62,31 @@ internal sealed class ActiveFieldFill
     public void Settle(object? tab, Color target, Color from, bool animate)
     {
         var moved = !ReferenceEquals(_tab, tab);
+        var first = !HasColor;
         _tab = tab;
-
-        // A settle in flight is abandoned rather than blended into: Stop puts
-        // the base value back, and the branches below both write it again.
-        _running?.Stop();
-        _running = null;
-
         HasColor = true;
 
-        if (!moved || !animate || target == from)
+        // A pass that is not an activation must not disturb a settle already
+        // in flight toward the same colour.
+        //
+        // This is the whole difference between the transition existing in the
+        // code and existing on the screen. These passes run many times per
+        // activation -- a layout pass, a theme refresh, a size change, the
+        // selection row's own re-placement all re-paint the field -- and an
+        // earlier version stopped the clock on every one of them, so the fill
+        // reached its target within a frame or two of starting and the settle
+        // was never visible.
+        if (!moved && _running is not null && _target == target) return;
+
+        // Any other re-entry does abandon the flight: Stop puts the base value
+        // back, and both branches below write it again.
+        _running?.Stop();
+        _running = null;
+        _target = target;
+
+        // Nothing became active on the first paint -- the window opened -- so
+        // there is no transition to play, only a colour to be.
+        if (!moved || first || !animate || target == from)
         {
             Brush.Color = target;
             return;
