@@ -222,7 +222,7 @@ Every script here that launches Wintty uses the helper except two:
 |---|---|
 | `splash-single-instance-race.ps1` | its gate is deliberately *narrower* than `Assert-NoWintty`: it refuses only over instances running from the exe under test, because the mutex it is measuring is keyed on that path, and it needs to be able to launch a second instance itself |
 | `mouse-smoke-run.ps1` | the operator drives it by hand and quits the app themselves |
-| `contrast-oracle.ps1`, `tab-tag-ink.ps1`, `switcher-preview-theme.ps1` | they are meant to be runnable beside a Wintty somebody else is using: they read crash.log not at all, launch with `windows-single-instance` off against an isolated `XDG_CONFIG_HOME`, move only their own window and reap only what they started. What they cannot share is the seam pipe, whose name belongs to the first opted-in process, so a second `WINTTY_TEST_SEAM=1` instance makes them exit 1 rather than measure the wrong window |
+| `contrast-oracle.ps1`, `tab-tag-ink.ps1`, `switcher-preview-theme.ps1` | they are meant to be runnable beside a Wintty somebody else is using: they read crash.log not at all, launch with `windows-single-instance` off against an isolated `XDG_CONFIG_HOME`, move only their own window and reap only what they started. Each session now names its pipe after its own token, so two runs no longer collide on the name; what still makes them exit 1 rather than measure the wrong window is that each waits for the pipe belonging to the app it launched |
 
 `vtabs-visual-qa.ps1` launches nothing directly - each sub-script gates and
 reaps its own, including `vtabs-layout-switch-capture.ps1`, which it runs
@@ -283,7 +283,48 @@ did not fall over. Whitespace is excluded deliberately: the UIA document
 keeps trailing spaces and the search haystack trims them, so their counts
 legitimately differ.
 
+## Arming the seam
+
+`WINTTY_TEST_SEAM=1` no longer arms anything. The variable now carries a
+per-session token - 32 hex characters - and the pipe is named after it
+(`wintty-test-seam-<token>`), so the name is a secret rather than a well-known
+address that anything on the box can find or take first. An unset, empty, `0`
+or `1` value leaves the seam off.
+
+Harnesses get this for free from `lib/seam-client.ps1`: `Start-SeamSession`
+mints the token, sets the variable and connects. Driving an app by hand:
+
+```powershell
+. windows/scripts/lib/seam-client.ps1
+$token = New-SeamToken
+$env:WINTTY_TEST_SEAM = $token
+# ... launch Wintty ...
+$pipe = Connect-SeamPipe -Token $token
+```
+
+Two more things will stop a seam session that used to work:
+
+- **The build.** The seam is compiled out of Release. A Debug build has it; a
+  Release build needs `-p:TestSeam=true`, and is then a build nobody should
+  install. Against a public build there is no pipe at all.
+- **`send-text`.** It hands arbitrary bytes to a live shell, which is running
+  commands as the user, so it has a second opt-in of its own and is off by
+  default. Pass `-AllowInput` to `Start-SeamSession` (or set
+  `WINTTY_TEST_SEAM_INPUT=1`) only in a harness that genuinely needs the shell
+  to run something. `seam-cwd-tab-label.ps1` is the only one that does.
+
 ## Driving input
+
+**Prefer the seam.** It exists because synthesized input is not targeted:
+`SendInput`, `keybd_event` and `mouse_event` go to whatever window is
+foreground, which on a machine somebody is using is *their* window, not the
+app under test. A harness that types has taken over the human's keyboard for
+as long as it runs, and a `Ctrl`+wheel in one of these has already been
+observed to zoom a bystander's terminal. The seam drives the real handlers
+in-process with nothing focused and nothing synthesized, which is the whole
+reason it can run beside a person. Reach for what follows only for the
+handful of facts the seam genuinely cannot reach - "did the framework deliver
+this key?" - and never on a machine in use.
 
 Posted `WM_CHAR` / `WM_KEYDOWN` messages **do not reach Wintty** - measured at
 zero characters landing across every inter-character delay. Use `SendInput`,

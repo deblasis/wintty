@@ -19,7 +19,7 @@
     result, and that is what a user's eyes get.
 
     Shape. State is driven through the in-process test seam
-    (WINTTY_TEST_SEAM=1, lib/seam-client.ps1): seed-tabs, select, pin,
+    (WINTTY_TEST_SEAM=<session token>, lib/seam-client.ps1): seed-tabs, select, pin,
     group, collapse, cycle, toggle-sidebar, toggle-layout. No OS input is
     synthesized, nothing is focused, the machine stays usable. Surfaces are
     LOCATED read-only over UIA and MEASURED out of one capture per
@@ -1051,7 +1051,7 @@ foreach ($leg in (New-ConfigLegs)) {
 # ---- report ----------------------------------------------------------------
 
 $result = [ordered]@{
-    actuation = 'seam (WINTTY_TEST_SEAM=1); zero synthesized OS input'
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); zero synthesized OS input'
     instrument = 'rendered pixels, sampled out of a screen capture of the app window'
     mutate = $Mutate
     thresholds = [ordered]@{

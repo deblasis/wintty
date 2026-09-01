@@ -1,0 +1,29 @@
+<Project>
+  <!--
+    The in-process test seam's build gate.
+
+    The seam is a named pipe whose commands drive the app's real handlers, and
+    one of them (send-text) hands arbitrary bytes to a live shell: on a machine
+    where the seam is compiled in, whatever can reach the pipe can run commands
+    as the user. A shipping build has no business carrying that, and no user
+    has a harness to run, so Release defines nothing and every seam op compiles
+    to nothing. See windows/Ghostty/Testing/TestSeam.cs.
+
+    Debug has it, so `dotnet test` and the GUI harnesses keep working. A Release
+    build that needs driving (a harness measuring the optimised binary) opts in
+    with `-p:TestSeam=true`, and is then a build nobody should install.
+
+    This is a .targets file, not Directory.Build.props, and that is the whole
+    point. Microsoft.Common.props imports Directory.Build.props BEFORE it
+    defaults Configuration to Debug, so a condition on '$(Configuration)' there
+    is empty for a bare `dotnet build`, and the gate then silently fails shut:
+    every harness would find no pipe, with nothing to say why. Directory.Build.targets
+    is imported once Configuration is settled, so this reads the configuration
+    the build is actually using. Property evaluation still happens long before
+    CoreCompile, so DefineConstants set here reaches the compiler.
+  -->
+  <PropertyGroup>
+    <TestSeamEnabled Condition="'$(TestSeam)' == 'true' or '$(Configuration)' == 'Debug'">true</TestSeamEnabled>
+    <DefineConstants Condition="'$(TestSeamEnabled)' == 'true'">$(DefineConstants);TESTSEAM</DefineConstants>
+  </PropertyGroup>
+</Project>

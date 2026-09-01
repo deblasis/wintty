@@ -1,12 +1,79 @@
 # The seam driver's shared plumbing: launch one Wintty with the in-process
-# test seam armed (WINTTY_TEST_SEAM=1), wait out the splash, connect the
-# named pipe, and speak the newline-delimited JSON protocol. No OS input is
-# ever synthesized here -- the seam drives the real handlers in-process, so
-# the machine stays usable while a harness runs. UIA and pixels remain the
-# harnesses' own read-only oracles.
+# test seam armed, wait out the splash, connect the named pipe, and speak the
+# newline-delimited JSON protocol. No OS input is ever synthesized here -- the
+# seam drives the real handlers in-process, so the machine stays usable while
+# a harness runs. UIA and pixels remain the harnesses' own read-only oracles.
+#
+# Arming the seam takes a per-session token, not WINTTY_TEST_SEAM=1. The token
+# is the credential and the pipe is named after it, which is what stops a
+# process that did not launch this app from either finding the pipe or taking
+# its name first. Every consumer goes through New-SeamToken / Wait-SeamPipe /
+# Connect-SeamPipe below rather than spelling a pipe name, so there is one
+# place that knows how the name is built.
+#
+# The seam is also compiled out of Release (see windows/Directory.Build.props),
+# so a harness pointed at a public build finds no pipe at all. Point them at a
+# Debug build, or a Release built with -p:TestSeam=true.
 #
 # Dot-source after lib/wintty-process.ps1 (Assert-NoWintty and the stamp
 # helpers live there and are the caller's own preamble).
+
+# 128 bits of hex: the shape TestSeam.IsSessionToken accepts, and the reason
+# the pipe name is unguessable. RandomNumberGenerator rather than Get-Random,
+# whose default seeding is not something to hang an access decision on.
+function New-SeamToken {
+    $bytes = [byte[]]::new(16)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    return [System.Convert]::ToHexString($bytes).ToLowerInvariant()
+}
+
+# The one place the pipe name is built. TestSeam.cs builds the same string from
+# PipeNamePrefix; if these two ever disagree the harness fails at the wait
+# below with a clear message rather than connecting to something else.
+function Get-SeamPipeName([Parameter(Mandatory)][string]$Token) {
+    return "wintty-test-seam-$Token"
+}
+
+# Wait for the armed app to publish its pipe. Enumerating \\.\pipe\ rather than
+# just attempting the connect keeps the failure legible: "never appeared" and
+# "appeared but refused us" are different findings.
+function Wait-SeamPipe(
+    [Parameter(Mandatory)][string]$Token,
+    [Parameter(Mandatory)]$Proc,
+    [int]$TimeoutSeconds = 90
+) {
+    $name = Get-SeamPipeName $Token
+    $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        if ($Proc.HasExited) {
+            throw ("HARNESS: the app exited (code {0}) before the seam pipe appeared" -f $Proc.ExitCode)
+        }
+        if ([datetime]::UtcNow -gt $deadline) {
+            throw ("HARNESS: the seam pipe '{0}' never appeared. Either the app was " +
+                   "not launched with WINTTY_TEST_SEAM set to this session's token, " +
+                   'or it is a build with the seam compiled out (Release without ' +
+                   '-p:TestSeam=true).') -f $name
+        }
+        if ([System.IO.Directory]::GetFiles('\\.\pipe\') -contains "\\.\pipe\$name") { return $name }
+        Start-Sleep -Milliseconds 150
+    }
+}
+
+# Connect with CurrentUserOnly, which makes the client refuse a server running
+# as anyone else. It is not the whole answer to squatting -- a squatter running
+# as this same user still satisfies it, which is what the unguessable token is
+# for -- but it is free and it closes the cross-account half.
+function Connect-SeamPipe(
+    [Parameter(Mandatory)][string]$Token,
+    [int]$TimeoutMs = 20000
+) {
+    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
+        '.', (Get-SeamPipeName $Token),
+        [System.IO.Pipes.PipeDirection]::InOut,
+        [System.IO.Pipes.PipeOptions]::CurrentUserOnly)
+    $pipe.Connect($TimeoutMs)
+    return $pipe
+}
 
 Add-Type -TypeDefinition @'
 using System;
@@ -107,7 +174,12 @@ function Start-SeamSession(
     # from $ConfigText because the two are not interchangeable: a leg that
     # measures the unconfigured build has to pass the flag AND still get an
     # isolated XDG dir, so nothing the developer has on disk leaks in.
-    [string[]]$Arguments = @()
+    [string[]]$Arguments = @(),
+    # Arm send-text. Off by default and deliberately opt-in per harness:
+    # send-text hands arbitrary bytes to a live shell, so a harness that only
+    # drags tabs should not be launching an app that can be told to run
+    # commands. Only a harness asserting on shell output needs this.
+    [switch]$AllowInput
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
@@ -117,13 +189,19 @@ function Start-SeamSession(
         TempXdg   = $tempXdg
         ExePath   = (Resolve-Path $ExePath).Path
         Stamp     = Get-WinttyLaunchStamp
+        Token     = New-SeamToken
         OrigXdg   = if (Test-Path Env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $null }
         OrigSeam  = if (Test-Path Env:WINTTY_TEST_SEAM) { $env:WINTTY_TEST_SEAM } else { $null }
+        OrigInput = if (Test-Path Env:WINTTY_TEST_SEAM_INPUT) { $env:WINTTY_TEST_SEAM_INPUT } else { $null }
         OrigTrace = if (Test-Path Env:WINTTY_TABDRAG_TRACE) { $env:WINTTY_TABDRAG_TRACE } else { $null }
         OrigNoColor = if (Test-Path Env:NO_COLOR) { $env:NO_COLOR } else { $null }
     }
     $env:XDG_CONFIG_HOME = $tempXdg
-    $env:WINTTY_TEST_SEAM = '1'
+    # The token travels in the environment block the child inherits, which is
+    # readable only by something that could already open this process anyway.
+    $env:WINTTY_TEST_SEAM = $session.Token
+    if ($AllowInput) { $env:WINTTY_TEST_SEAM_INPUT = '1' }
+    else { Remove-Item Env:WINTTY_TEST_SEAM_INPUT -ErrorAction SilentlyContinue }
     # The child inherits this shell's environment block, and NO_COLOR in it is
     # a harness trap rather than a user setting: Claude Code's PowerShell tool
     # exports NO_COLOR=1, so every agent-launched instance inherits it. Wintty
@@ -148,20 +226,8 @@ function Start-SeamSession(
     $session.Hwnd64 = [int64]$main.Hwnd64
 
     # The seam pipe appears once OnLaunched has built the window.
-    $deadline = [datetime]::UtcNow.AddSeconds(90)
-    while ($true) {
-        if ($proc.HasExited) {
-            throw ("HARNESS: the app exited (code {0}) before the seam pipe appeared" -f $proc.ExitCode)
-        }
-        if ([datetime]::UtcNow -gt $deadline) {
-            throw 'HARNESS: the seam pipe never appeared (WINTTY_TEST_SEAM=1 not seen by the app?)'
-        }
-        if ([System.IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\wintty-test-seam') { break }
-        Start-Sleep -Milliseconds 150
-    }
-    $session.Pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
-        '.', 'wintty-test-seam', [System.IO.Pipes.PipeDirection]::InOut)
-    $session.Pipe.Connect(20000)
+    [void](Wait-SeamPipe -Token $session.Token -Proc $proc)
+    $session.Pipe = Connect-SeamPipe -Token $session.Token
     $session.Reader = [System.IO.StreamReader]::new($session.Pipe)
     $session.Writer = [System.IO.StreamWriter]::new(
         $session.Pipe, [System.Text.UTF8Encoding]::new($false))
@@ -220,6 +286,8 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigSeam) { $env:WINTTY_TEST_SEAM = $Session.OrigSeam }
     else { Remove-Item Env:WINTTY_TEST_SEAM -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigInput) { $env:WINTTY_TEST_SEAM_INPUT = $Session.OrigInput }
+    else { Remove-Item Env:WINTTY_TEST_SEAM_INPUT -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigTrace) { $env:WINTTY_TABDRAG_TRACE = $Session.OrigTrace }
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigNoColor) { $env:NO_COLOR = $Session.OrigNoColor }

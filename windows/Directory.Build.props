@@ -11,6 +11,20 @@
          constant that merely contains the substring "DEMO" can't false-match. -->
     <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
     <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
+
+    <!--
+      NOTE: Configuration is still empty here. Microsoft.Common.props imports
+      this file before it defaults Configuration to Debug, so the condition
+      above only matches when Configuration arrives as a global property
+      (`-c Debug`, or Visual Studio). A bare `dotnet build` leaves DemoEnabled
+      unset and defines no DEMO, which is not what the comment above expects.
+      Left alone here: changing it changes what a Debug build contains, which
+      is a decision of its own rather than part of the seam work.
+
+      The test seam's own gate is the same shape but cannot afford that
+      ambiguity, so it lives in Directory.Build.targets, which is imported
+      after Configuration is settled. See the comment there.
+    -->
   </PropertyGroup>
   <!--
     'dotnet build' resolves AppxMSBuildToolsPath to the SDK directory which

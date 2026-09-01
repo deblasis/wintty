@@ -243,6 +243,16 @@
                       Exclude="..\Ghostty.Core\obj\**\*.cs;..\Ghostty.Core\bin\**\*.cs;..\Ghostty.Core\Version\LibGhosttyBuildInfo.cs"
                       Link="Interop\Sources\Ghostty.Core\%(RecursiveDir)%(Filename)%(Extension)"
                       LogicalName="Ghostty.Tests.Interop.Sources.Ghostty.Core.%(RecursiveDir)%(Filename)%(Extension)" />
+    <!--
+      The shared build targets, for TestSeamWiringTests. The test seam is
+      compiled out of shipping builds by a property in here, and that property
+      is the only reason the `#if TESTSEAM` regions mean anything; no C# scan
+      can see MSBuild, so the file itself is the evidence. Deliberately NOT
+      under the Interop.Sources prefix, which the shell-source sweeps read.
+    -->
+    <EmbeddedResource Include="..\Directory.Build.targets"
+                      Link="Build\Directory.Build.targets"
+                      LogicalName="Ghostty.Tests.Build.Directory.Build.targets" />
   </ItemGroup>
 
   <ItemGroup>

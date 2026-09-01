@@ -19,37 +19,102 @@ namespace Ghostty.Testing;
 /// No OS input is synthesized, nothing is focused, and the user can be using
 /// the machine while a script drives the app.
 ///
-/// The gate is the whole surface: without WINTTY_TEST_SEAM=1 in the app's
-/// environment this class never creates a pipe and costs one env-var read
-/// per window. With it, the pipe is session-local and serves one client at
-/// a time; a second command connection waits for the first to hang up. A
-/// second opted-in process does not spin: the fixed name belongs to
-/// whoever took it first, and the loser goes quiet (one seam per machine).
+/// What the seam grants, stated plainly, because it is no longer only "drive
+/// its UI": send-text hands arbitrary bytes to a live shell, which is
+/// arbitrary command execution as the user, and the read ops report tab
+/// titles and working directories. Whoever can talk to this pipe can do
+/// both. Everything below follows from taking that seriously.
 ///
-/// Trust model, spike-honest: the pipe carries no ACL of its own, so any
-/// process running as the same local user can connect to an opted-in
-/// instance and drive its UI -- the same-user bar every dev tool on the
-/// box already clears. A user-scoped ACL (or a per-start nonce in the
-/// pipe name) is the hardening step for when the seam ships beyond this
-/// opt-in.
+/// Three gates, none of which is the pipe's name:
+///
+/// 1. The build. Nothing in here exists unless TESTSEAM is defined, which
+///    Debug does and a shipping Release does not (windows/Directory.Build.props,
+///    the same shape demo mode uses). A user's install carries zero seam bytes,
+///    so the rest of this only concerns machines that build the seam in.
+/// 2. The environment. WINTTY_TEST_SEAM must hold a 32-character hex session
+///    token -- not "1", not "true". The token is the credential and the pipe
+///    is named after it, so a process that did not launch this app cannot
+///    guess the name, and cannot take the name first either (see below).
+///    Rejecting the weak spellings is deliberate: an operator who sets "1"
+///    gets no seam rather than a seam anybody can reach.
+/// 3. The ACL. PipeOptions.CurrentUserOnly, so the pipe's DACL is one ACE for
+///    the launching user. Without it .NET's default DACL grants Everyone AND
+///    ANONYMOUS LOGON generic read, which is enough for any other account on
+///    the box -- or an authenticated peer over SMB, since named pipes are
+///    reachable as \\host\pipe\name -- to occupy the single server instance
+///    and shut the seam down. Not enough to send commands (the default grants
+///    no write), but a denial of service reachable from off the machine.
+///
+/// send-text carries a fourth gate of its own, WINTTY_TEST_SEAM_INPUT=1,
+/// because "move this tab" and "run this command in my shell" should not be
+/// the same permission.
+///
+/// What none of this defends against: a process already running as this user
+/// at medium integrity. It can read the token out of this process's
+/// environment block, and could equally well inject a thread. That is the
+/// same-user bar every dev tool on the box clears, and it is the honest
+/// boundary. A LOWER integrity process of the same user -- a sandboxed
+/// browser tab -- is outside it: the pipe has no explicit label, so it sits
+/// at medium and the no-write-up policy refuses its commands.
+///
+/// The pipe serves one client at a time; a second command connection waits
+/// for the first to hang up. A second opted-in process with a different token
+/// gets a different name and runs alongside. A name collision now means
+/// something took the token's name first, which cannot happen by accident;
+/// the server goes quiet rather than hot-spinning on a name it can never
+/// take, and the driver's connect times out.
 ///
 /// Protocol: each request is one line of JSON, {"op": "...", ...args}; each
 /// response is one line, {"ok": true, ...} or {"ok": false, "error": "..."}.
-/// Commands marshal to the UI thread and every ack answers after the work
-/// settled, so a driver never races the app.
+/// Requests are length-capped (see MaxRequestBytes). Commands marshal to the
+/// UI thread and every ack answers after the work settled, so a driver never
+/// races the app.
 ///
 /// One window is served (the first): the spike scenario is a single window.
 /// Multi-window routing is hardening, not architecture.
 /// </summary>
 internal static class TestSeam
 {
+#if TESTSEAM
     private const string EnvVar = "WINTTY_TEST_SEAM";
 
-    /// <summary>The pipe the driver connects to, when the seam is on.</summary>
-    internal const string PipeName = "wintty-test-seam";
+    /// <summary>
+    /// The second opt-in, for send-text alone. Everything else the seam does
+    /// moves chrome or reports state; send-text runs commands as the user, so
+    /// a harness that only drags tabs should not be carrying that power.
+    /// </summary>
+    private const string InputEnvVar = "WINTTY_TEST_SEAM_INPUT";
+
+    /// <summary>
+    /// The pipe is named after the session token, so the name is a secret
+    /// rather than a well-known address. A squatter cannot pre-create a name
+    /// it cannot guess, which is the half of squatting that silences the app;
+    /// the client's own CurrentUserOnly and its token cover the other half.
+    /// </summary>
+    private const string PipeNamePrefix = "wintty-test-seam-";
+
+    /// <summary>
+    /// 128 bits, hex. The length is exact and the alphabet is closed, which
+    /// is also what keeps the pipe name well-formed: no separator, no
+    /// traversal, nothing a caller-supplied string could smuggle into it.
+    /// </summary>
+    internal const int TokenLength = 32;
+
+    /// <summary>
+    /// The ceiling on one request line.
+    ///
+    /// StreamReader.ReadLineAsync has no ceiling: it grows until a newline
+    /// arrives, so a client that sends bytes and never a newline walks this
+    /// process out of memory. The largest honest request is a seed-tabs title
+    /// list, three orders of magnitude under this; the cap is far above every
+    /// harness and far below anything that hurts.
+    /// </summary>
+    private const int MaxRequestBytes = 64 * 1024;
 
     private static CancellationTokenSource? _lifetime;
     private static int _started;
+    private static string? _pipeName;
+    private static bool _inputAllowed;
 
     /// <summary>
     /// Called once per window from the MainWindow constructor. The first
@@ -58,8 +123,14 @@ internal static class TestSeam
     /// </summary>
     internal static void Start(MainWindow window)
     {
-        if (Environment.GetEnvironmentVariable(EnvVar) != "1") return;
+        // The gate reads before anything else happens, and it demands a real
+        // session token: an unset, empty, "0", "1" or "true" value is off.
+        var sessionToken = Environment.GetEnvironmentVariable(EnvVar);
+        if (!IsSessionToken(sessionToken)) return;
         if (Interlocked.Exchange(ref _started, 1) == 1) return;
+
+        _pipeName = PipeNamePrefix + sessionToken;
+        _inputAllowed = Environment.GetEnvironmentVariable(InputEnvVar) == "1";
 
         _lifetime = new CancellationTokenSource();
         var token = _lifetime.Token;
@@ -68,6 +139,22 @@ internal static class TestSeam
             try { _lifetime.Cancel(); } catch (ObjectDisposedException) { }
         };
         _ = Task.Run(() => ServeAsync(window, token));
+    }
+
+    /// <summary>
+    /// Exactly 32 hex characters and nothing else. Exact rather than
+    /// "at least", so there is one spelling of an armed seam and no sliding
+    /// scale of weak ones; closed alphabet, so the value can be concatenated
+    /// into a pipe name without any further sanitising.
+    /// </summary>
+    private static bool IsSessionToken(string? value)
+    {
+        if (value is null || value.Length != TokenLength) return false;
+        foreach (var c in value)
+        {
+            if (!char.IsAsciiHexDigit(c)) return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -82,15 +169,27 @@ internal static class TestSeam
             NamedPipeServerStream pipe;
             try
             {
+                // CurrentUserOnly is the ACL. Without it the DACL Windows
+                // hands an unsecured pipe grants Everyone and ANONYMOUS LOGON
+                // generic read -- measured, not assumed:
+                //   D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;<user>)(A;;FR;;;WD)(A;;FR;;;AN)
+                // Read is not enough to send a command, but it IS enough to
+                // take the one server instance and hold it, from another
+                // account on the box or from an authenticated SMB peer over
+                // \\host\pipe\. With the flag the DACL is a single ACE for
+                // this user.
                 pipe = new NamedPipeServerStream(
-                    PipeName, PipeDirection.InOut, maxNumberOfServerInstances: 1,
-                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                    _pipeName!, PipeDirection.InOut, maxNumberOfServerInstances: 1,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                // The name belongs to another opted-in instance. One seam
-                // per machine is the honest semantics, so this process goes
-                // quiet instead of hot-spinning on a name it can never take.
+                // Something already owns a name derived from this session's
+                // token, which is not something that happens by accident.
+                // Going quiet is still the right move -- a retry loop would
+                // hot-spin on a name it can never take -- and the driver
+                // hears about it as a connect that times out.
                 return;
             }
             try
@@ -116,7 +215,7 @@ internal static class TestSeam
     private static async Task ServeConnectionAsync(
         NamedPipeServerStream pipe, MainWindow window, CancellationToken token)
     {
-        var reader = new StreamReader(pipe, Encoding.UTF8);
+        var reader = new BoundedLineReader(pipe, MaxRequestBytes);
         var writer = new StreamWriter(pipe, new UTF8Encoding(false))
         {
             AutoFlush = true,
@@ -124,11 +223,86 @@ internal static class TestSeam
         };
         while (!token.IsCancellationRequested && pipe.IsConnected)
         {
-            var line = await reader.ReadLineAsync(token);
-            if (line is null) return; // client hung up
+            var (status, line) = await reader.ReadLineAsync(token);
+            if (status == LineStatus.Eof) return; // client hung up
+            if (status == LineStatus.TooLong)
+            {
+                // There is no resyncing after this: the rest of the oversized
+                // line is bytes of unknown shape, and treating whatever
+                // follows the cap as the next request is how a length bug
+                // becomes a parsing bug. Say so once and drop the connection;
+                // the accept loop takes the next client.
+                await writer.WriteLineAsync(
+                    Error("parse", $"request exceeds {MaxRequestBytes} bytes"));
+                return;
+            }
             if (string.IsNullOrWhiteSpace(line)) continue;
             var response = await ExecuteAsync(window, line);
             await writer.WriteLineAsync(response);
+        }
+    }
+
+    private enum LineStatus
+    {
+        /// <summary>A complete line, within the cap.</summary>
+        Ok,
+
+        /// <summary>The client hung up.</summary>
+        Eof,
+
+        /// <summary>The cap was reached before a newline was.</summary>
+        TooLong,
+    }
+
+    /// <summary>
+    /// Reads newline-delimited UTF-8 requests off the pipe with a hard
+    /// ceiling on one line.
+    ///
+    /// This exists because StreamReader.ReadLineAsync has no ceiling. It
+    /// buffers until it sees a newline, so a client that opens the pipe and
+    /// streams bytes without one grows the buffer until the app dies -- a
+    /// memory exhaustion of the whole terminal, driven from outside it, with
+    /// no op ever dispatched and nothing in the JSON layer able to see it
+    /// coming. The cap has to sit under the reader, not over it.
+    /// </summary>
+    private sealed class BoundedLineReader(Stream stream, int maxBytes)
+    {
+        private readonly byte[] _chunk = new byte[4096];
+        private readonly MemoryStream _line = new();
+        private int _next;
+        private int _filled;
+
+        public async Task<(LineStatus Status, string Line)> ReadLineAsync(
+            CancellationToken token)
+        {
+            _line.SetLength(0);
+            while (true)
+            {
+                if (_next == _filled)
+                {
+                    _filled = await stream.ReadAsync(_chunk, token);
+                    _next = 0;
+                    // A read of zero is the hang-up. A partial line before it
+                    // is a truncated request, not a request: dropping it is
+                    // what keeps half a command from being executed.
+                    if (_filled == 0) return (LineStatus.Eof, string.Empty);
+                }
+
+                var newline = Array.IndexOf(_chunk, (byte)'\n', _next, _filled - _next);
+                var take = (newline >= 0 ? newline : _filled) - _next;
+                if (_line.Length + take > maxBytes) return (LineStatus.TooLong, string.Empty);
+
+                _line.Write(_chunk, _next, take);
+                _next += take;
+                if (newline < 0) continue;
+
+                _next++; // step over the newline itself
+                var bytes = _line.GetBuffer().AsSpan(0, (int)_line.Length);
+                // Trailing CR, because a driver on Windows may spell the
+                // terminator "\r\n" even though the protocol says "\n".
+                if (bytes.Length > 0 && bytes[^1] == (byte)'\r') bytes = bytes[..^1];
+                return (LineStatus.Ok, Encoding.UTF8.GetString(bytes));
+            }
         }
     }
 
@@ -211,21 +385,6 @@ internal static class TestSeam
         {
             done.SetResult(Error("ui", "dispatcher unavailable"));
         }
-        return done.Task;
-    }
-
-    /// <summary>
-    /// A handoff one priority below the strip's Normal-priority drag tick:
-    /// when the awaited task completes, everything the last synthetic move
-    /// scheduled -- crossings included -- has already run. This is what
-    /// makes a seam drag deterministic without sleeps.
-    /// </summary>
-    internal static Task WaitForLowPriorityAsync(DispatcherQueue queue)
-    {
-        var done = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!queue.TryEnqueue(DispatcherQueuePriority.Low, () => done.SetResult()))
-            done.SetException(new InvalidOperationException("dispatcher unavailable"));
         return done.Task;
     }
 
@@ -526,6 +685,14 @@ internal static class TestSeam
 
             case "send-text":
             {
+                // The one op that is not "drive the UI". Bytes handed to a
+                // live shell are commands run as the user, so this is a
+                // different power from every other op here and carries its
+                // own opt-in. A harness that drags tabs does not set it, and
+                // therefore cannot be turned into a shell by whatever reaches
+                // the pipe.
+                if (!_inputAllowed)
+                    return Error(op, $"send-text is off; set {InputEnvVar}=1 to arm it");
                 var text = ArgString(args, "text");
                 if (string.IsNullOrEmpty(text)) return Error(op, "send-text needs text");
                 var index = ArgInt(args, "index", manager.IndexOf(manager.ActiveTab));
@@ -1087,6 +1254,30 @@ internal static class TestSeam
         null => "none",
         _ => icon.GetType().Name,
     };
+#endif
+
+    // ---- outside the build gate ---------------------------------------
+    //
+    // The strip's own drag walkers call this, and they are ordinary internal
+    // methods on VerticalTabStrip rather than seam code. Guarding it with the
+    // rest would take the strip down with it in a build that has no seam, so
+    // this one handoff stays. It opens nothing: a dispatcher hop no caller
+    // outside this process can reach.
+
+    /// <summary>
+    /// A handoff one priority below the strip's Normal-priority drag tick:
+    /// when the awaited task completes, everything the last synthetic move
+    /// scheduled -- crossings included -- has already run. This is what
+    /// makes a seam drag deterministic without sleeps.
+    /// </summary>
+    internal static Task WaitForLowPriorityAsync(DispatcherQueue queue)
+    {
+        var done = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!queue.TryEnqueue(DispatcherQueuePriority.Low, () => done.SetResult()))
+            done.SetException(new InvalidOperationException("dispatcher unavailable"));
+        return done.Task;
+    }
 }
 
 /// <summary>

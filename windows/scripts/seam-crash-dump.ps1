@@ -20,6 +20,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 
 Assert-NoWintty -Context 'The seam crash-dump capture'
 $stamp = Get-WinttyLaunchStamp
@@ -60,7 +61,8 @@ if ($check.DumpType -ne 2 -or $check.DumpFolder -ne $DumpFolder) {
 
 $xdg = Join-Path $env:TEMP ("wintty-seam-dump-" + [guid]::NewGuid().ToString('N'))
 $env:XDG_CONFIG_HOME = $xdg
-$env:WINTTY_TEST_SEAM = '1'
+$token = New-SeamToken
+$env:WINTTY_TEST_SEAM = $token
 New-Item -ItemType Directory -Force -Path (Join-Path $xdg 'wintty') | Out-Null
 @'
 windows-single-instance = true
@@ -73,17 +75,8 @@ $proc = $null
 try {
     $proc = Start-Process -FilePath $ExePath -PassThru `
         -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
-    $deadline = [datetime]::UtcNow.AddSeconds(90)
-    while ([datetime]::UtcNow -lt $deadline) {
-        if ($proc.HasExited) { throw "HARNESS: app exited before the seam pipe" }
-        if ([System.IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\wintty-test-seam') {
-            break
-        }
-        Start-Sleep -Milliseconds 200
-    }
-    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
-        '.', 'wintty-test-seam', [System.IO.Pipes.PipeDirection]::InOut)
-    $pipe.Connect(20000)
+    [void](Wait-SeamPipe -Token $token -Proc $proc -TimeoutSeconds 90)
+    $pipe = Connect-SeamPipe -Token $token
     $reader = [System.IO.StreamReader]::new($pipe)
     $writer = [System.IO.StreamWriter]::new(
         $pipe, [System.Text.UTF8Encoding]::new($false))
