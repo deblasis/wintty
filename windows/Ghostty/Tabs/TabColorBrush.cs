@@ -21,4 +21,13 @@ internal static class TabColorBrush
     public static SolidColorBrush FromPackedRgb(uint packed)
         => new(Windows.UI.Color.FromArgb(
             0xFF, (byte)(packed >> 16), (byte)(packed >> 8), (byte)packed));
+
+    /// <summary>
+    /// Brush from a 0xAARRGGBB value, for the one thing in the strips that
+    /// is deliberately not opaque: the group field's ink wash, which has to
+    /// let Mica through or it stops being a wash.
+    /// </summary>
+    public static SolidColorBrush FromPackedArgb(uint packed)
+        => new(Windows.UI.Color.FromArgb(
+            (byte)(packed >> 24), (byte)(packed >> 16), (byte)(packed >> 8), (byte)packed));
 }

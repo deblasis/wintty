@@ -31,6 +31,11 @@
          LeftCompact+IsPaneOpen in a fixed-width column allocates pane AND
          content side-by-side and draws over the terminal. -->
     <Grid>
+        <!-- Under everything: the group field is the ground a run sits ON,
+             so the selection fill, the row separators and the rows
+             themselves all have to paint over it. -->
+        <Canvas x:Name="GroupFieldHost" IsHitTestVisible="False"/>
+
         <!-- Behind NavView so row fill does not paint over icons/text. -->
         <Canvas x:Name="SelectionRowHost" IsHitTestVisible="False">
             <Border x:Name="SelectionRow"

@@ -94,5 +94,13 @@
                 </Grid>
             </controls:TabView.TabStripFooter>
         </controls:TabView>
+
+        <!-- The group field's cap and end bar. OVER the strip, because the
+             wash half of the field is painted into the members' own header
+             brushes and the two terminals have nothing to sit behind: a
+             canvas under the TabView is covered outright the moment the
+             palette gives the strip an opaque fill. Hit-test invisible, so
+             the tabs under it keep their own hover, press and drag. -->
+        <Canvas x:Name="GroupFieldHost" IsHitTestVisible="False"/>
     </Grid>
 </UserControl>
