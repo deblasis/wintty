@@ -37,8 +37,12 @@ Seam-driven throughout: no synthesized keystrokes, no focus theft, so the
 machine stays usable while this runs. Takes the machine-wide seam lock
 (C:\temp\seam-lock.ps1) itself if one is not already held.
 
-Exit codes: 0 every assertion passed, 1 an assertion failed (a finding),
-2 the harness could not run (build missing, seam refused, app died).
+Exit codes follow the suite's convention, which is not the intuitive one:
+0 every assertion passed, 2 an assertion failed (a PRODUCT finding), 1 the
+harness could not run and nothing is known about the product (build
+missing, seam refused, app died). Getting these the wrong way round is
+silent -- fuzz-suite.ps1 aggregates on them, so a real finding filed as a
+1 reads as "could not measure" and disappears into the harness column.
 #>
 param(
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
@@ -80,7 +84,7 @@ Add-Type -AssemblyName System.Drawing
 
 if (-not (Test-Path $ExePath)) {
     Write-Host "HARNESS: no build at $ExePath"
-    exit 2
+    exit 1
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
@@ -477,11 +481,11 @@ vertical-tabs = false
     $collapsed = @($st.state.groups | Where-Object { $_.collapsed } | ForEach-Object { $_.title })
     if ($collapsed.Count -eq 0) {
         Write-Host 'HARNESS: nothing ended up collapsed; the scenario did not build'
-        exit 2
+        exit 1
     }
     if ($st.state.vertical) {
         Write-Host 'HARNESS: the run must start horizontal'
-        exit 2
+        exit 1
     }
     Write-Host ("scenario: {0} tabs, collapsed run(s) [{1}], active index {2}, starting horizontal" -f
         $st.state.tabs.Count, ($collapsed -join ','), $st.state.active)
@@ -545,7 +549,7 @@ vertical-tabs = false
         if ($findings.Count -gt 12) {
             Write-Host ("  ... and {0} more (all frames in the JSON sidecars)" -f ($findings.Count - 12))
         }
-        $exit = 1
+        $exit = 2
     }
     else {
         Write-Host ''
@@ -554,7 +558,7 @@ vertical-tabs = false
 }
 catch {
     Write-Host ("HARNESS: {0}" -f $_.Exception.Message)
-    $exit = 2
+    $exit = 1
 }
 finally {
     if ($session) { Stop-SeamSession $session }
