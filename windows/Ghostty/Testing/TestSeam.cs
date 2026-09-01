@@ -363,6 +363,18 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "cycle":
+            {
+                // The Ctrl+Tab chord's own dispatch, so the switcher popup
+                // a driver measures is the one the chord raises. The popup
+                // auto-dismisses on a 1.2s timer the moment it opens, so
+                // the ack deliberately does not wait for anything beyond
+                // the layout settle: a driver that slept here would be
+                // photographing an empty window.
+                window.TestSeamRouter.RequestMruCycle(ArgBool(args, "forward", true));
+                return OkWithState(window, manager, op);
+            }
+
             case "select":
             {
                 var index = ArgInt(args, "index", -1);
