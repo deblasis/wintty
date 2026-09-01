@@ -111,25 +111,44 @@ internal static class TabColorPalette
     /// is a tab state, not a group state: on a tab it means "no tint" and the
     /// tab's paint sites each choose a different brush, but a group's swatch
     /// has nothing to fall back to.
+    ///
+    /// The test is "has a preset", not "is not None", and the difference is
+    /// the whole point. The invariant the paint sites rely on is that the
+    /// colour can be looked up, and every value outside the enum's declared
+    /// members fails that too. A group colour is persisted as a NUMBER (see
+    /// <c>GroupSession.Color</c>; the session context defines no string
+    /// converter) and System.Text.Json does not check that a numeric enum is
+    /// a defined member, so a hand-edited or forward-version session can hand
+    /// <c>RestoreGroup</c> a <c>(TabColor)42</c>. Guarding None alone let that
+    /// through to the same mid-paint crash under a different integer.
     /// </summary>
     public static TabColor EnsureGroupColor(TabColor color)
-        => color == TabColor.None ? DefaultGroupColor : color;
+        => Colors.ContainsKey(color) ? color : DefaultGroupColor;
 
     /// <summary>
     /// The preset behind a color. <see cref="TabColor.None"/> has no entry by
     /// design -- it means "no tint", and only the caller knows what to paint
-    /// in its place -- so it is refused here saying exactly that. Indexing
-    /// <see cref="Colors"/> directly raised a bare <c>KeyNotFoundException</c>
-    /// from inside a paint pass, naming neither the value nor the rule.
+    /// in its place -- and neither has any value outside the enum's declared
+    /// members. Indexing <see cref="Colors"/> directly raised a bare
+    /// <c>KeyNotFoundException</c> from inside a paint pass, naming neither
+    /// the value nor the rule.
     /// </summary>
     private static Color Preset(TabColor color)
         => Colors.TryGetValue(color, out var rgb)
             ? rgb
             : throw new ArgumentOutOfRangeException(
                 nameof(color), color,
-                "TabColor.None has no preset: it means \"no tint\", so the caller "
-                + "chooses what to paint instead. A group cannot be None -- use "
-                + nameof(EnsureGroupColor) + ".");
+                // The message must not name None: this fires for any value
+                // with no preset, and an out-of-range integer arriving from a
+                // persisted session is the case most in need of being read
+                // literally.
+                color == TabColor.None
+                    ? "TabColor.None has no preset: it means \"no tint\", so the caller "
+                      + "chooses what to paint instead. A group cannot be None -- use "
+                      + nameof(EnsureGroupColor) + "."
+                    : "no preset for this value: it is not a declared TabColor. A group "
+                      + "colour restored from a session is not validated by the JSON "
+                      + "reader -- pass it through " + nameof(EnsureGroupColor) + " first.");
 
     /// <summary>Selected tab/header fill uses the full preset color.</summary>
     public const byte SelectedBackgroundAlpha = 255;

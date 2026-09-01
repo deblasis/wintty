@@ -393,8 +393,13 @@ public class VerticalTabGroupCommandsWiringTests
         Assert.Contains("0, old)", raise.ToString());
 
         var color = Router().Method("RequestColorGroup");
+        // The no-op refusal compares the RESOLVED colour, not the offered one:
+        // TabGroup.Color coerces a value with no preset, so a group already
+        // wearing the default that is offered one would otherwise pass this
+        // guard, set nothing, raise no INPC, and still announce a change.
         var sameColor = color.DescendantNodes().OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString() == "group.Color == color");
+            .Single(i => i.Condition.ToString()
+                == "group.Color == TabColorPalette.EnsureGroupColor(color)");
         var colorSet = color.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left.ToString() == "group.Color");
         var colorRaise = color.Calls("GroupChangedFromCommand?.Invoke").Single();

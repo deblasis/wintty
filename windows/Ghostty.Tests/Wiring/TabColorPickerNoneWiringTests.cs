@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -15,7 +16,6 @@ namespace Ghostty.Tests.Wiring;
 public class TabColorPickerNoneWiringTests
 {
     private static ShellSource Builder() => ShellSource.Load("Tabs.TabContextMenuBuilder.cs");
-    private static ShellSource Window() => ShellSource.Load("Ghostty.MainWindow.xaml.cs");
     private static ShellSource Picker() => ShellSource.Load("Tabs.TabColorPalettePicker.xaml.cs");
 
     /// <summary>
@@ -49,8 +49,8 @@ public class TabColorPickerNoneWiringTests
         var overloads = Builder().Root.DescendantNodes().OfType<MethodDeclarationSyntax>()
             .Where(m => m.Identifier.ValueText == "ShowColorPicker")
             .ToList();
-        var tabRoute = Assert.Single(overloads.Where(m => m.ParameterList.Parameters
-            .Any(p => p.Type?.ToString() == "TabModel")));
+        var tabRoute = Assert.Single(
+            overloads, m => m.ParameterList.Parameters.Any(p => p.Type?.ToString() == "TabModel"));
 
         var forwarded = tabRoute.Call("ShowColorPicker");
         AssertAllowNone(forwarded.ArgumentList, "true", "the per-tab ShowColorPicker");
@@ -59,19 +59,55 @@ public class TabColorPickerNoneWiringTests
     [Fact]
     public void EveryPickerBuiltForAGroup_IsBuiltWithoutNone()
     {
-        // A file-wide rule rather than one naming MainWindow's line: the
-        // defect was that a second entry point existed and nobody checked
-        // it, so a third must fail this rather than slip past it.
-        foreach (var source in new[] { Window(), Builder(), Picker() })
-        {
-            var built = source.Root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>()
-                .Where(o => o.Type.ToString() == "TabColorPalettePicker")
-                .Where(o => o.ArgumentList is { Arguments.Count: > 0 }
-                            && o.ArgumentList.Arguments[0].ToString().Contains("group"));
+        // Swept across the WHOLE shell, not three named files. The defect was
+        // that a second entry point existed and nobody checked it; a third in
+        // a file this test did not think to name has to fail here rather than
+        // slip past, and VerticalTabHost already owns a group context-menu
+        // route that could grow one.
+        var groupBuilds = new List<(string Resource, ObjectCreationExpressionSyntax Creation)>();
+        var anyBuild = 0;
 
-            foreach (var creation in built)
-                AssertAllowNone(creation.ArgumentList!, "false", creation.ToString());
+        foreach (var (resource, root) in ShellSource.AllShellSources())
+        {
+            foreach (var creation in root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+            {
+                if (creation.Type.ToString() != "TabColorPalettePicker") continue;
+                if (creation.ArgumentList is not { Arguments.Count: > 0 } args) continue;
+                anyBuild++;
+
+                // "Built for a group" is decided by the argument's text, which
+                // is why the count below is asserted: rename the variable and
+                // this filter stops matching, silently.
+                if (args.Arguments[0].ToString().Contains("group"))
+                    groupBuilds.Add((resource, creation));
+            }
         }
+
+        Assert.True(anyBuild > 0, "found no TabColorPalettePicker construction at all");
+        Assert.True(
+            groupBuilds.Count == 1,
+            "expected exactly one picker built for a group (MainWindow's strip route); "
+                + "found " + groupBuilds.Count + ". A new one must pass allowNone: false, "
+                + "and a disappearing one means the arg[0] text stopped saying 'group' and "
+                + "this rule stopped matching: "
+                + string.Join(", ", groupBuilds.Select(b => b.Resource)));
+
+        foreach (var (_, creation) in groupBuilds)
+            AssertAllowNone(creation.ArgumentList!, "false", creation.ToString());
+    }
+
+    [Fact]
+    public void ThePicker_TakesTheFlagFromItsOnlyConstructor()
+    {
+        // No single-argument overload: every caller decides, because the
+        // permissive answer is the one that was wrong.
+        var ctors = Picker().Root.DescendantNodes().OfType<ConstructorDeclarationSyntax>()
+            .Where(c => c.Identifier.ValueText == "TabColorPalettePicker")
+            .ToList();
+        var ctor = Assert.Single(ctors);
+        Assert.Contains(
+            ctor.ParameterList.Parameters,
+            p => p.Identifier.ValueText == "allowNone" && p.Type?.ToString() == "bool");
     }
 
     [Fact]
@@ -82,10 +118,21 @@ public class TabColorPickerNoneWiringTests
         var skip = build.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString().Contains("TabColor.None"));
 
-        // Polarity, both halves. `color == None` alone would drop the swatch
-        // for tabs too; `!allowNone` alone would drop every swatch.
-        Assert.Equal("color == TabColor.None && !allowNone", skip.Condition.ToString());
-        Assert.Contains("continue", skip.Statement.ToString());
+        // Polarity as NODES, not as spelling. `color == None` alone would drop
+        // the swatch for tabs too; `!allowNone` alone would drop every swatch.
+        // Asserting the rendered string would also fail the equivalent
+        // `!allowNone && color == TabColor.None`, which is the same rule.
+        var and = Assert.IsType<BinaryExpressionSyntax>(skip.Condition);
+        var operands = new[] { and.Left.ToString(), and.Right.ToString() };
+        Assert.Contains("color == TabColor.None", operands);
+        Assert.Contains("!allowNone", operands);
+
+        // A `continue`, not the text "continue" somewhere in the statement:
+        // Log("continue") satisfied the substring form.
+        Assert.True(
+            skip.Statement is ContinueStatementSyntax
+                || skip.Statement.DescendantNodesAndSelf().OfType<ContinueStatementSyntax>().Any(),
+            "the None skip does not continue the loop: " + skip.Statement);
 
         // And the flag reaches it: BuildSwatches taking the parameter while
         // the constructor never forwards it would leave every check above

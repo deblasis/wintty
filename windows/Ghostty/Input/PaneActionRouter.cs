@@ -680,7 +680,13 @@ internal sealed class PaneActionRouter
     public void RequestColorGroup(TabGroup group, TabColor color)
     {
         if (!_tabs.Groups.Contains(group)) return;
-        if (group.Color == color) return;
+        // Compared after resolution, because the setter resolves: a group
+        // already wearing the default that is handed a colour with no preset
+        // is asked for no change at all. Comparing the OFFERED value let that
+        // through, and the announcement below then told a screen reader the
+        // colour had changed while nothing repainted, because the model
+        // correctly raised no INPC.
+        if (group.Color == TabColorPalette.EnsureGroupColor(color)) return;
         group.Color = color;
         GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Colored, group, null, 0));
     }

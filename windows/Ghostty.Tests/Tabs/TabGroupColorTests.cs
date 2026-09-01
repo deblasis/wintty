@@ -8,10 +8,16 @@ namespace Ghostty.Tests.Tabs;
 
 /// <summary>
 /// A group has no "no color" state, and its paint sites index the palette
-/// with no guard. These pin that invariant at the model, because the two
-/// places that open a colour picker for a group and the session restore
-/// path are three writers, and guarding writers is what let None through in
-/// the first place.
+/// with no guard. These pin that invariant at the model, because guarding
+/// writers is what let None through in the first place.
+///
+/// There are two writers, not three: <c>PaneActionRouter.RequestColorGroup</c>
+/// (which both group pickers funnel through) and <c>TabManager.RestoreGroup</c>.
+/// The pickers are two CONSTRUCTION sites sharing one writer, and it was the
+/// shared writer that got overlooked.
+///
+/// The invariant is "the colour has a palette entry", which is stronger than
+/// "the colour is not None" and is the one the paint sites actually need.
 /// </summary>
 public class TabGroupColorTests
 {
@@ -80,12 +86,51 @@ public class TabGroupColorTests
     }
 
     [Fact]
+    public void A_group_colour_with_no_palette_entry_falls_back_too()
+    {
+        // Not hypothetical. GroupSession.Color is a plain TabColor and the
+        // session context defines no string converter, so it round-trips as a
+        // NUMBER -- and System.Text.Json does not check that a numeric enum is
+        // a defined member. A hand-edited session, or one written by a build
+        // with an extra swatch, replays an undefined value through
+        // RestoreGroup on every launch. Guarding None alone let that reach the
+        // same mid-paint crash under a different integer.
+        var mgr = new TabManager((_) => new FakePaneHost());
+        var group = mgr.RestoreGroup(
+            Guid.NewGuid(), "from a newer build", (TabColor)42,
+            collapsed: false, new[] { mgr.ActiveTab });
+
+        Assert.Equal(TabColorPalette.DefaultGroupColor, group.Color);
+        TabColorPalette.Background(group.Color, selected: false);
+    }
+
+    [Fact]
+    public void The_palette_names_the_value_it_refused_not_always_None()
+    {
+        // The message exists so a crash names the argument and the rule. It
+        // said "TabColor.None has no preset" for every miss, which is a lie
+        // for the out-of-range case -- the one most in need of reading
+        // literally, since it arrives from a file rather than from code.
+        var thrown = Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabColorPalette.Border((TabColor)42));
+
+        Assert.Equal((TabColor)42, thrown.ActualValue);
+        Assert.DoesNotContain("TabColor.None", thrown.Message);
+        Assert.Contains("not a declared TabColor", thrown.Message);
+    }
+
+    [Fact]
     public void Every_group_paint_helper_takes_every_colour_a_group_can_hold()
     {
         // The end-to-end claim: whatever anyone writes, the helpers the
         // chip swatch, chip ink, run label, vertical header and switcher
         // card call cannot throw.
-        foreach (var offered in Enum.GetValues<TabColor>())
+        // Declared members plus values that are not members at all, since the
+        // restore path can produce either.
+        var offeredValues = Enum.GetValues<TabColor>()
+            .Concat(new[] { (TabColor)42, (TabColor)(-1), (TabColor)int.MaxValue });
+
+        foreach (var offered in offeredValues)
         {
             var group = new TabGroup { Color = offered };
 
