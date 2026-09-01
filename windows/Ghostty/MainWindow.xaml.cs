@@ -848,7 +848,7 @@ public sealed partial class MainWindow : Window
             RootGrid,
             PaneHostContainer,
             activeTab: () => _tabManager.Tabs.Count > 0 ? _tabManager.ActiveTab : null,
-            impact: NudgeWindowForImpact,
+            impact: NudgeContentForImpact,
             // The same gate the run label and both drag engines read, asked
             // at the switch rather than cached: UISettings can throw in
             // packaged contexts and the answer can change under the user
@@ -1748,6 +1748,9 @@ public sealed partial class MainWindow : Window
         // cheap and safe.
         _layout.CancelStripPriming();
         _layout.CancelSwitch();
+        // The nudge is scheduled on the compositor against RootGrid and is
+        // not the coordinator's to cancel; see StopImpactNudge.
+        StopImpactNudge();
         _themeManager.Dispose();
 
         // Stop the dispatcher-driven timers this window started. None of them
@@ -2527,66 +2530,128 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Brief, subtle window shake when the layout-switch ghost lands: a
-    /// damped nudge along its travel direction, as if the strip absorbed
-    /// the impact. Skipped when the window is not a plain movable window
-    /// (maximized, fullscreen, quake), where moving it would fight the
-    /// presenter. An Aero-snapped window still reports Restored and will
-    /// take the nudge; there is no public API to tell it apart.
+    /// Brief, subtle shake of the window's CONTENT when the layout-switch
+    /// ghost lands: a damped nudge along its travel direction, as if the
+    /// strip absorbed the impact.
     ///
-    /// Every step verifies the window still sits where the previous step
-    /// put it and bails otherwise: the awaited delays give the user ~80ms
-    /// to start dragging (or a snap assist to move the window), and a
-    /// blind restore would teleport the window back over their move.
+    /// It used to shake the window itself, with AppWindow.Move. Filmed by
+    /// polling the window rect, that produced three discrete positions
+    /// (-4, +2, -1 pixels) over about 140ms at intervals of 22 to 73ms
+    /// against the 26ms it asked for, because every step was an await
+    /// resuming on the UI thread at the exact moment the switch has that
+    /// thread busiest. Three irregular jumps is not a shake.
     ///
-    /// The same delays are why _isClosed is re-checked after each one rather
-    /// than only on entry: the shake outlives its own first turn, and the
-    /// window can be closed underneath it while it is suspended.
+    /// A compositor Offset animation runs on the compositor at its own
+    /// rate, and the delay is what puts it in the right place: the caller
+    /// hands over how long is left of the flight, so the nudge starts at
+    /// the landing rather than whenever a queued callback is finally
+    /// pumped (measured at ~560ms for motion that ended at 340ms).
+    ///
+    /// Most of what the old version guarded against is gone with the
+    /// AppWindow.Move it was guarding. Content cannot fight the presenter,
+    /// so the maximized / fullscreen / quake checks go; content cannot be
+    /// dragged out from under itself, so the "did the window move under
+    /// us" read-back goes; and there is no awaited loop left to re-enter,
+    /// so the busy flag goes. The teardown guard STAYS, and gains a
+    /// partner: a compositor animation outlives the managed object that
+    /// started it, so a nudge scheduled against a closing window has to be
+    /// stopped rather than merely not started (the same hazard
+    /// LayoutCoordinator.CancelSwitch exists for).
     /// </summary>
-    private async void NudgeWindowForImpact(double dx, double dy)
+    /// <param name="dx">Unit direction the ghost travelled, X.</param>
+    /// <param name="dy">Unit direction the ghost travelled, Y.</param>
+    /// <param name="delay">How long until the ghost lands.</param>
+    private void NudgeContentForImpact(double dx, double dy, TimeSpan delay)
     {
         if (_isClosed) return;
-        if (IsQuickTerminal) return;
-        if (AppWindow?.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter
-            { State: Microsoft.UI.Windowing.OverlappedPresenterState.Restored }) return;
-        if (_impactNudgeActive) return;
-        _impactNudgeActive = true;
         try
         {
-            var origin = AppWindow.Position;
-            var expected = origin;
-            foreach (var amplitude in ImpactAmplitudes)
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .GetElementVisual(RootGrid);
+            var compositor = visual.Compositor;
+
+            var shake = compositor.CreateVector3KeyFrameAnimation();
+            var ease = compositor.CreateCubicBezierEasingFunction(
+                new System.Numerics.Vector2(0.33f, 0f),
+                new System.Numerics.Vector2(0.15f, 1f));
+            // The same damped shape the old amplitudes described (a push,
+            // a smaller rebound, a smaller one back), but as a curve the
+            // compositor interpolates rather than three positions it is
+            // teleported between.
+            shake.InsertKeyFrame(0f, System.Numerics.Vector3.Zero);
+            for (int i = 0; i < ImpactAmplitudes.Length; i++)
             {
-                var current = AppWindow.Position;
-                if (current != expected) return;
-                expected = new Windows.Graphics.PointInt32(
-                    origin.X + (int)(dx * amplitude),
-                    origin.Y + (int)(dy * amplitude));
-                AppWindow.Move(expected);
-                await System.Threading.Tasks.Task.Delay(26);
-                // Placed after the await, not at the top of the loop, so the
-                // final delay is covered too: the restore below is a move
-                // against a window that may have been closed during it.
-                if (_isClosed) return;
+                var progress = (i + 1) / (float)(ImpactAmplitudes.Length + 1);
+                shake.InsertKeyFrame(
+                    progress,
+                    new System.Numerics.Vector3(
+                        (float)(dx * ImpactAmplitudes[i]),
+                        (float)(dy * ImpactAmplitudes[i]),
+                        0f),
+                    ease);
             }
-            if (AppWindow.Position == expected)
-                AppWindow.Move(origin);
+            shake.InsertKeyFrame(1f, System.Numerics.Vector3.Zero, ease);
+            shake.Duration = ImpactShakeDuration;
+            shake.DelayTime = delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
+            // Hold the resting offset through the delay rather than jumping
+            // to the first key frame the moment the animation is handed
+            // over.
+            shake.DelayBehavior =
+                Microsoft.UI.Composition.AnimationDelayBehavior.SetInitialValueBeforeDelay;
+
+            var batch = compositor.CreateScopedBatch(
+                Microsoft.UI.Composition.CompositionBatchTypes.Animation);
+            batch.Completed += (_, _) => StopImpactNudge();
+            visual.StartAnimation("Offset", shake);
+            batch.End();
+            _impactVisual = visual;
         }
         catch (Exception)
         {
-            // A presenter change mid-shake (user maximizes, monitor sleeps)
-            // can fail the move; the window stays wherever the last
-            // successful step left it, at most a few pixels from home.
+            // Composition refused. The switch is unaffected: this is the
+            // flourish after it, not part of it.
+            _impactVisual = null;
         }
-        finally
+    }
+
+    /// <summary>
+    /// Release the impact nudge and put the content back at rest.
+    ///
+    /// Called from the scoped batch when it finishes normally, and from
+    /// the closing path, where it is the half that matters: the animation
+    /// is driven by the compositor against a visual whose tree is about to
+    /// be disposed, and nothing in XAML stops it on the way out.
+    /// </summary>
+    private void StopImpactNudge()
+    {
+        if (_impactVisual is not { } visual) return;
+        _impactVisual = null;
+        try
         {
-            _impactNudgeActive = false;
+            visual.StopAnimation("Offset");
+            visual.Offset = System.Numerics.Vector3.Zero;
+        }
+        catch (Exception)
+        {
+            // The visual is already gone, which is the outcome this was
+            // trying to reach.
         }
     }
 
     // Damped: one push in the travel direction, a smaller rebound, done.
     private static readonly int[] ImpactAmplitudes = [4, -2, 1];
-    private bool _impactNudgeActive;
+
+    /// <summary>
+    /// How long the shake takes. Close to what the old three-step version
+    /// actually measured (~140ms) rather than the ~104ms it asked for, so
+    /// the feel is the one that shipped; the difference is that these are
+    /// interpolated frames instead of three jumps.
+    /// </summary>
+    private static readonly TimeSpan ImpactShakeDuration =
+        TimeSpan.FromMilliseconds(160);
+
+    /// <summary>The visual a nudge is running against, or null.</summary>
+    private Microsoft.UI.Composition.Visual? _impactVisual;
 
     /// <summary>
     /// True while the High Contrast override is layered onto the config,
