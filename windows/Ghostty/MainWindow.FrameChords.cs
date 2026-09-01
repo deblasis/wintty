@@ -36,6 +36,13 @@ public sealed partial class MainWindow
         /// <summary>An editable control; typing into it is not a chord.</summary>
         TextEntry,
 
+        /// <summary>
+        /// An overlay is up -- the command palette, the tab switcher, the
+        /// overview. Whatever it does with the key, the frame underneath it
+        /// does not act on it.
+        /// </summary>
+        Overlay,
+
         /// <summary>The frame: title bar, tab strip, or chrome.</summary>
         Frame,
     }
@@ -53,7 +60,7 @@ public sealed partial class MainWindow
         // probe asks whether the framework delivered the key here at all,
         // which is a different question from whether we acted on it.
         _frameRoutedKeyDowns++;
-        if (e.Handled) return;
+        if (_isClosed || e.Handled) return;
         if (TryDispatchFrameChord(
                 (int)e.Key, Controls.TerminalControl.CurrentChordModifiers()))
         {
@@ -86,7 +93,12 @@ public sealed partial class MainWindow
         // gate, the pane path and this one both fire and one press makes
         // two tabs -- the double-dispatch that got KeyboardAccelerators
         // removed in issue #165.
-        if (CurrentFrameChordFocus() is FrameChordFocus.Pane or FrameChordFocus.TextEntry)
+        //
+        // Written as an allow-list, so a focus kind added later refuses
+        // until someone decides otherwise. A router that claims keys is the
+        // wrong thing to leave open by default.
+        if (_isClosed) return false;
+        if (CurrentFrameChordFocus() is not (FrameChordFocus.Frame or FrameChordFocus.None))
             return false;
         if (!IsFrameChordShape(virtualKey, mods)) return false;
 
@@ -135,26 +147,52 @@ public sealed partial class MainWindow
         || virtualKey is >= 0x70 and <= 0x87; // F1..F24
 
     /// <summary>
+    /// Whether an overlay is up. Asked as a question about STATE rather
+    /// than about focus, because the two come apart: an overview can be
+    /// open with focus on nothing at all, and reading focus alone would
+    /// then report None -- which the router treats as claimable, and
+    /// Ctrl+W would close a tab whose tile is still on screen.
+    /// </summary>
+    private bool AnyOverlayOpen()
+        => CommandPalettePopup.IsOpen
+        || TabSwitcherPopupHost.IsOpen
+        || TabOverviewHost.IsOpen;
+
+    /// <summary>
     /// Read focus the way the router needs it. A terminal pane is found by
     /// walking up from the focused element, so the pane's own children --
     /// the IME sink and the search bar -- count as pane too. An editable
     /// control is always the focus target itself, so that one is a direct
     /// test.
     /// </summary>
+    /// <remarks>
+    /// An overlay is answered two ways, because either alone leaves a hole.
+    /// The state check catches an open overlay holding no focus. The walk
+    /// catches focus inside one: an overlay lives in a Popup, whose child is
+    /// parented to the XamlRoot's popup root rather than under
+    /// <see cref="Window.Content"/>, so a walk that never reaches Content
+    /// started somewhere that is not the frame. Testing for reachability
+    /// rather than naming the three popups means a fourth is covered the day
+    /// it is added.
+    /// </remarks>
     internal FrameChordFocus CurrentFrameChordFocus()
     {
         if (Content?.XamlRoot is not { } root) return FrameChordFocus.None;
+        if (AnyOverlayOpen()) return FrameChordFocus.Overlay;
         if (FocusManager.GetFocusedElement(root) is not DependencyObject focused)
             return FrameChordFocus.None;
 
+        var inFrame = false;
         for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
         {
             if (node is Controls.TerminalControl) return FrameChordFocus.Pane;
+            if (ReferenceEquals(node, Content)) { inFrame = true; break; }
         }
 
-        return focused is TextBox or RichEditBox or AutoSuggestBox or PasswordBox
-            ? FrameChordFocus.TextEntry
-            : FrameChordFocus.Frame;
+        if (focused is TextBox or RichEditBox or AutoSuggestBox or PasswordBox)
+            return FrameChordFocus.TextEntry;
+
+        return inFrame ? FrameChordFocus.Frame : FrameChordFocus.Overlay;
     }
 
     // ---- test seam accessors (WINTTY_TEST_SEAM=1) --------------------
@@ -170,6 +208,7 @@ public sealed partial class MainWindow
     {
         FrameChordFocus.Pane => "pane",
         FrameChordFocus.TextEntry => "text-entry",
+        FrameChordFocus.Overlay => "overlay",
         FrameChordFocus.Frame => "frame",
         _ => "none",
     };
