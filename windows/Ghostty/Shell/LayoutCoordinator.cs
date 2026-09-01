@@ -130,9 +130,10 @@ internal sealed class LayoutCoordinator
     private readonly FrameworkElement _paneHost;
 
     /// <summary>
-    /// Staged when the active-tab ghost's flight is staged, with the unit
-    /// direction it travels and how long until it lands. The window uses
-    /// it for a small inertia nudge.
+    /// Invoked when the ghost's flight begins, with the element the ghost
+    /// lands ON, the unit direction it travels, and how long until it
+    /// lands. The window uses it for a small inertia nudge of that
+    /// element.
     ///
     /// The DELAY is the point. This used to fire from the switch
     /// Storyboard's Completed handler, which is raised on the UI thread and
@@ -142,8 +143,16 @@ internal sealed class LayoutCoordinator
     /// sentence ends is not punctuation. Handing the delay over instead
     /// lets the window schedule the nudge on the compositor, which runs it
     /// at the landing whatever the UI thread is doing.
+    ///
+    /// The TARGET is the incoming strip, because the accent is the strip
+    /// absorbing the tab's arrival. It used to be the window's whole
+    /// content: filmed, that was the single largest motion of the entire
+    /// transition -- every pixel including the terminal text the user may
+    /// be reading -- four to six times the amplitude of the switch it was
+    /// meant to punctuate. Three pixels of travel on a 48px rail reads as
+    /// impact; the same three pixels on a 1280px window reads as a glitch.
     /// </summary>
-    private readonly Action<double, double, TimeSpan>? _impact;
+    private readonly Action<FrameworkElement, double, double, TimeSpan>? _impact;
     private readonly ITabHost _horizontalTabHost;
     private readonly Func<TabModel?> _activeTab;
 
@@ -183,7 +192,7 @@ internal sealed class LayoutCoordinator
         FrameworkElement morphRoot,
         FrameworkElement paneHost,
         Func<TabModel?> activeTab,
-        Action<double, double, TimeSpan>? impact = null,
+        Action<FrameworkElement, double, double, TimeSpan>? impact = null,
         Func<bool>? motionEnabled = null)
     {
         _motionEnabled = motionEnabled;
@@ -406,13 +415,15 @@ internal sealed class LayoutCoordinator
         }
         MorphTrace("SWITCH lane");
 
-        // The direction the ghost will travel, remembered for whichever
-        // path ends up staging the flight: the morph may be staged now or
-        // a frame or two later, and only the staging site knows how much
-        // of the switch is left to delay the landing by.
+        // The direction the ghost will travel and the strip it will land
+        // on, remembered for whichever path ends up staging the flight:
+        // the morph may be staged now or a frame or two later, and only
+        // the staging site knows how much of the switch is left to delay
+        // the landing by.
         _impactDirection = verticalTabs
             ? new Point(-1, 0)
             : new Point(0, -1);
+        _impactTarget = incoming;
 
         // Staged before any transform is applied below. TransformToVisual
         // reads whatever offset the strip is already carrying, so measuring
@@ -531,6 +542,12 @@ internal sealed class LayoutCoordinator
     private Point _impactDirection;
 
     /// <summary>
+    /// The incoming strip of the flight being staged: the element the
+    /// ghost lands on, and therefore the element the impact nudges.
+    /// </summary>
+    private FrameworkElement? _impactTarget;
+
+    /// <summary>
     /// How long after the flight starts the impact should land, or null
     /// when no flight is staged. Set at staging, spent by BeginFlight.
     /// </summary>
@@ -560,8 +577,9 @@ internal sealed class LayoutCoordinator
         _morphStoryboard?.Begin();
         if (_pendingImpactDelay is not { } delay) return;
         _pendingImpactDelay = null;
+        if (_impactTarget is not { } target) return;
         _impact?.Invoke(
-            _impactDirection.X, _impactDirection.Y, delay + ImpactLeadOut);
+            target, _impactDirection.X, _impactDirection.Y, delay + ImpactLeadOut);
     }
 
     /// <summary>
@@ -1529,8 +1547,13 @@ internal sealed class LayoutCoordinator
             From = from,
             To = to,
             Duration = new Duration(SwitchDuration),
+            // Each branch must be the exact easing of the host slide it
+            // cancels (MakeIncomingSlideAnim / MakeOutgoingSlideAnim): the
+            // counter-slide holds the icon still by mirroring the host's
+            // motion sample for sample, so any curve difference is icon
+            // drift.
             EasingFunction = incoming
-                ? new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.12 }
+                ? new CubicEase { EasingMode = EasingMode.EaseOut }
                 : new CubicEase { EasingMode = EasingMode.EaseIn },
         };
         Storyboard.SetTarget(anim, target);
@@ -1546,7 +1569,13 @@ internal sealed class LayoutCoordinator
             From = from,
             To = to,
             Duration = new Duration(SwitchDuration),
-            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.12 },
+            // A plain arrival, deliberately without overshoot. This was a
+            // BackEase (amplitude 0.12), which is a second settle accent in
+            // the same handful of frames as the impact nudge -- two motions
+            // disagreeing about where rest is, which the eye reads as
+            // jitter rather than as either accent. The switch gets exactly
+            // one settle flourish, and the impact is it.
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
         };
         Storyboard.SetTarget(anim, target.RenderTransform);
         Storyboard.SetTargetProperty(anim, axis);
