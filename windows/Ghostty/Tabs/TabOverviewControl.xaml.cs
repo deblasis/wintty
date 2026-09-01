@@ -200,7 +200,9 @@ internal sealed partial class TabOverviewControl : UserControl
         };
         if (tab.Color != TabColor.None)
         {
-            var c = TabColorPalette.Colors[tab.Color];
+            // Border, not Colors[...]: same opaque preset, but through the one
+            // door that refuses an unpaintable value by name.
+            var c = TabColorPalette.Border(tab.Color);
             dot.Fill = new SolidColorBrush(Color.FromArgb(0xFF, c.R, c.G, c.B));
         }
         Grid.SetColumn(dot, 0);
