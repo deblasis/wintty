@@ -464,6 +464,31 @@ internal static class TestSeam
                 });
             }
 
+            case "switcher-preview-rect":
+            {
+                // Where a pixel oracle should point at the pane preview the
+                // cycle popup is showing. It cannot ask UIA: the preview body
+                // is a bare Canvas and gets no automation peer, so the tile's
+                // title is the only thing in the tree. Read while the popup is
+                // up -- it dismisses itself on a 1.2s timer.
+                if (window.TestSeamSwitcherPreviewRect() is not { } rect)
+                    return Error(op, "no switcher preview: the cycle popup is not up");
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteStartObject("rect");
+                    json.WriteNumber("x", rect.X);
+                    json.WriteNumber("y", rect.Y);
+                    json.WriteNumber("w", rect.W);
+                    json.WriteNumber("h", rect.H);
+                    json.WriteEndObject();
+                    WriteState(json, window, manager);
+                    json.WriteEndObject();
+                });
+            }
+
             case "send-text":
             {
                 var text = ArgString(args, "text");
