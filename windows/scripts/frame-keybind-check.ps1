@@ -5,7 +5,7 @@
     action it is bound to, and a key that belongs to whatever holds focus
     must never be taken from it.
 
-    Actuation is the in-process test seam (WINTTY_TEST_SEAM=1, the named
+    Actuation is the in-process test seam (WINTTY_TEST_SEAM=<session token>, the named
     pipe). Zero OS input is synthesized: the 'focus' op moves real XAML
     focus and the 'chord' op calls the window's own frame-chord router --
     focus gate, residual table, libghostty match, dispatch -- with the
@@ -229,7 +229,7 @@ Invoke-Scenario 'frame-leaves-plain-keys' {
 # ---- verdict ---------------------------------------------------------------
 
 $result = [ordered]@{
-    actuation = 'seam (WINTTY_TEST_SEAM=1); zero synthesized OS input'
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); zero synthesized OS input'
     scenarios = $script:Scenarios
 }
 $result | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8

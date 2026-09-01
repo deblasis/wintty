@@ -1,7 +1,7 @@
 #requires -Version 7
 <#
     Tab drag end to end, seam-actuated: the scenarios drive the REAL drag
-    engine and manager ops over the in-process test seam (WINTTY_TEST_SEAM=1,
+    engine and manager ops over the in-process test seam (WINTTY_TEST_SEAM=<session token>,
     the named pipe), and the oracles stay what they were -- UIA order and
     ItemStatus asserts, visible-row count gates, the product's own drag
     trace read back session by session, and crash.log growth. Zero OS input
@@ -606,7 +606,7 @@ Invoke-Scenario 'layout-toggle' {
 # ---- verdict ---------------------------------------------------------------
 
 $result = [ordered]@{
-    actuation = 'seam (WINTTY_TEST_SEAM=1); zero synthesized OS input'
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); zero synthesized OS input'
     scenarios = $script:Scenarios
 }
 $result | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8

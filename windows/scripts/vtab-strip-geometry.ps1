@@ -2,7 +2,7 @@
 <#
     The vertical strip's chrome geometry, seam-measured. The oracle is the
     strip's own arranged layout, read back over the seam's element-rects op
-    (WINTTY_TEST_SEAM=1) -- not sampled pixels. That is deliberate: the
+    (WINTTY_TEST_SEAM=<session token>) -- not sampled pixels. That is deliberate: the
     strip wears Mica, so what a screen grab shows depends on the desktop
     behind the window, and the questions asked here are about where things
     were laid out, which layout answers exactly.
@@ -249,7 +249,7 @@ if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $cra
 }
 
 $result = [ordered]@{
-    actuation = 'seam (WINTTY_TEST_SEAM=1); geometry read from arranged layout, no pixels'
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); geometry read from arranged layout, no pixels'
     tolerance = $Tolerance
     checks    = $script:Checks
     findings  = $script:Findings

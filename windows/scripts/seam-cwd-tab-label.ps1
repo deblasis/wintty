@@ -163,7 +163,10 @@ default-profile = $Profile
     Write-Host "=== scenario $Name (profile $Profile) ==="
     try {
         Assert-NoWintty -Context "The cwd label scenario '$Name'"
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config
+        # -AllowInput because this harness types a `cd` into the shell and
+        # reads the label that comes back; send-text is off without it. It is
+        # the only harness in the suite that needs the shell to run anything.
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -AllowInput
         $script:MainHwnd64 = $s.Hwnd64
 
         # The right shell has to be the one under test. The profile's icon
@@ -381,7 +384,7 @@ if ($cmdIcon -and $pwshIcon) {
 }
 
 $result = [ordered]@{
-    actuation = 'seam (WINTTY_TEST_SEAM=1); zero synthesized OS input'
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); zero synthesized OS input'
     scenarios = $script:Scenarios
 }
 $result | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8

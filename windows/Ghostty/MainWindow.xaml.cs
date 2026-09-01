@@ -1301,10 +1301,15 @@ public sealed partial class MainWindow : Window
         _beepSuppressor = new SysCharBeepSuppressor();
         Activated += OnActivatedInstallBeepSuppressor;
 
-        // The opt-in test seam: zero surface unless WINTTY_TEST_SEAM=1,
-        // and then one named pipe whose commands drive the real handlers
-        // on this UI thread. See Testing.TestSeam.
+        // The opt-in test seam: not compiled at all unless the build defines
+        // TESTSEAM (Debug does, a shipping Release does not), and then still
+        // silent unless WINTTY_TEST_SEAM carries a session token. Armed, it
+        // is one named pipe whose commands drive the real handlers on this UI
+        // thread -- send-text included, which is why the build gate is here
+        // and not only the env one. See Testing.TestSeam.
+#if TESTSEAM
         Testing.TestSeam.Start(this);
+#endif
 
         Closed += OnClosedAsync;
     }
