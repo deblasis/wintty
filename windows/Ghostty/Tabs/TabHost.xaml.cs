@@ -2274,6 +2274,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // at crossings, and the pointer's travel supplies the intent.
         public required double PressX;
         public required double GrabCenterX;
+
+        // The last pointer X the engine saw, in the same space PressX is
+        // in. The join dwell's timer needs it: the ring advances between
+        // pointer events, and the dwell's jitter rule is about where the
+        // pointer IS, not where it was pressed.
+        public double LastX;
     }
 
     /// <summary>
@@ -2450,6 +2456,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         if (_horizontalDrag is not { } drag) return;
         var x = e.GetCurrentPoint(TabViewControl).Position.X;
+        drag.LastX = x;
         if (drag.Machine.Phase == TabDragPhase.Pressed)
         {
             if (!drag.Machine.Begin(x)) return;
@@ -2470,6 +2477,160 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // next pointer move retries with fresh geometry.
             if (!CommitHorizontalCrossing(drag, crossing)) break;
         }
+        UpdateJoinDwell(drag, draggedCenter, x);
+    }
+
+    // -----------------------------------------------------------------
+    // The join dwell: hold with a ring, the horizontal half. The rules
+    // are the vertical strip's, down to the tokens and the Core mapping
+    // -- a tab held over its neighbour until a ring fills, released into
+    // a group -- because a gesture that meant one thing in a sidebar and
+    // another in a tab strip would be two gestures wearing one name.
+    //
+    // What differs is only what a strip can measure: the axis is X, the
+    // centers are the drag machine's own (equal-width slots, measured
+    // once at the arm), and the ring rides JoinOverlay rather than the
+    // vertical's PreviewHost. The crossing engine is untouched here too:
+    // the dwell restarts on pointer travel, so it only ever completes
+    // over a pointer that has stopped, and a stopped pointer earns no
+    // further crossings.
+    // -----------------------------------------------------------------
+
+    private readonly TabJoinDwell _joinDwell = new();
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _joinTimer;
+    private TabJoinRing? _joinRing;
+
+    /// <summary>
+    /// Re-derive the ring from this move's truth. A chip drag rings
+    /// nothing -- it carries a whole run, and a run landing inside a run
+    /// is a different op -- and neither does a pinned row, since the
+    /// prefix outranks membership.
+    /// </summary>
+    private void UpdateJoinDwell(HorizontalDragSession drag, double draggedCenter, double x)
+    {
+        if (drag.Group is not null || drag.Tab is not { } dragged || dragged.IsPinned)
+        {
+            ClearJoinDwell();
+            return;
+        }
+
+        var (rows, _) = TabStripProjection.DragSlots(_manager);
+        var machine = drag.Machine;
+        // The machine's slots ARE the projection's rows (ArmTabDrag seeds
+        // them together) and stay paired across commits. A count that has
+        // drifted means the strip changed under the gesture -- a tab
+        // closed -- and a ring drawn off the stale pairing would name the
+        // wrong row.
+        if (rows.Count != machine.RowCount) { ClearJoinDwell(); return; }
+        var centers = new double[machine.RowCount];
+        for (var i = 0; i < centers.Length; i++) centers[i] = machine.CenterOf(i);
+
+        var pick = TabJoinDrop.PickTarget(
+            centers, machine.Index, draggedCenter, TabStripMotion.JoinBandFraction);
+        // The ring never promises a join the release would refuse.
+        if (pick < 0 || !TabJoinDrop.CanJoin(_manager, dragged, rows[pick]))
+        {
+            ClearJoinDwell();
+            return;
+        }
+
+        _joinDwell.Hold(rows[pick], x, Environment.TickCount64);
+        StartJoinTimer();
+        UpdateJoinRing();
+    }
+
+    /// <summary>
+    /// The timer's own pass: advance the ring over the target the last
+    /// move picked, without re-measuring. The pointer has not moved --
+    /// that is the premise of a dwell -- so the answer cannot have
+    /// changed.
+    /// </summary>
+    private void TickJoinDwell()
+    {
+        if (_horizontalDrag is not { } drag || _joinDwell.Target is not TabModel target)
+        {
+            ClearJoinDwell();
+            return;
+        }
+        _joinDwell.Hold(target, drag.LastX, Environment.TickCount64);
+        UpdateJoinRing();
+    }
+
+    /// <summary>
+    /// Draw the ring over the target's arranged tab. An unreadable
+    /// measurement withdraws it: a ring on a stale rect promises the
+    /// wrong row, and no ring is the honest picture.
+    /// </summary>
+    private void UpdateJoinRing()
+    {
+        if (_joinDwell.Target is not TabModel target
+            || !_itemByModel.TryGetValue(target, out var item)
+            || item.ActualHeight <= 0)
+        {
+            HideJoinRing();
+            return;
+        }
+        Point origin;
+        try
+        {
+            origin = item.TransformToVisual(HostRoot).TransformPoint(new Point(0, 0));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            HideJoinRing();
+            return;
+        }
+
+        if (_joinRing is null)
+        {
+            _joinRing = new TabJoinRing(PinBoundaryBrush());
+            JoinOverlay.Children.Add(_joinRing);
+        }
+        JoinOverlay.Visibility = Visibility.Visible;
+        _joinRing.Place(
+            new Rect(origin.X, origin.Y, item.ActualWidth, item.ActualHeight),
+            _joinDwell.Progress,
+            _joinDwell.IsArmed,
+            TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast));
+    }
+
+    /// <summary>
+    /// The ring fills on a clock, not on pointer events: a hand held
+    /// perfectly still raises none, and a ring that only advanced on
+    /// motion could never complete.
+    /// </summary>
+    private void StartJoinTimer()
+    {
+        if (_joinTimer is not null) return;
+        var timer = DispatcherQueue.CreateTimer();
+        timer.IsRepeating = true;
+        timer.Interval = TimeSpan.FromMilliseconds(TabStripMotion.JoinRingTickMs);
+        timer.Tick += (_, _) => TickJoinDwell();
+        _joinTimer = timer;
+        timer.Start();
+    }
+
+    /// <summary>
+    /// Take the promise back. Both drag endings funnel here, so an armed
+    /// dwell cannot outlive the drag that armed it and be read by the
+    /// next release.
+    /// </summary>
+    private void ClearJoinDwell()
+    {
+        _joinDwell.Clear();
+        _joinTimer?.Stop();
+        _joinTimer = null;
+        HideJoinRing();
+    }
+
+    private void HideJoinRing()
+    {
+        if (_joinRing is null) return;
+        _joinRing.Reset();
+        JoinOverlay.Children.Remove(_joinRing);
+        _joinRing = null;
+        JoinOverlay.Visibility = Visibility.Collapsed;
     }
 
     private void OnStripPointerReleased(object sender, PointerRoutedEventArgs e)
@@ -2715,11 +2876,31 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // this drag's own and none earlier's.
         _lastDropPosition = e.GetCurrentPoint(TabViewControl).Position;
         _dropPositionValid = true;
+        // HOLD WITH A RING: a release under a COMPLETED ring joins the
+        // dragged tab to the one it was held over, and outranks the chip
+        // fork below -- the ring never targets a chip, so the two cannot
+        // both be earned, and the arm is the more specific claim about
+        // what this release meant. The target is read off the dwell
+        // rather than re-derived from the drop point: the promise was
+        // made to the row the ring was drawn on, whatever the hand did in
+        // the last frame.
+        var joined = false;
+        if (_joinDwell.IsArmed && _joinDwell.Target is TabModel joinTarget
+            && drag.Tab is { } joinDragged)
+        {
+            var group = TabJoinDrop.Join(_manager, joinDragged, joinTarget);
+            TabDragTrace.Line(group is null
+                ? "COMMIT join refused"
+                : $"COMMIT join group={group.Title}");
+            joined = group is not null;
+        }
+        ClearJoinDwell();
         // A release that came down on a chip is the drop-at-a-run fork:
         // ON the chip joins, beside it positions, by the same geometry
         // the old bridge used -- now from a point the engine actually
         // saw.
-        if (VisualTreeHelperEx.FindAncestor<TabViewItem>(e.OriginalSource as DependencyObject)
+        if (!joined
+            && VisualTreeHelperEx.FindAncestor<TabViewItem>(e.OriginalSource as DependencyObject)
             is { } releasedOn && releasedOn.Tag is TabGroup)
         {
             // The fork resolves the run whose CHIP the release landed on:
@@ -2754,6 +2935,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _horizontalDrag = null;
         var wasDragging = drag.Machine.Phase == TabDragPhase.Dragging;
         drag.Machine.Cancel();
+        // Before the phase gate: a press that stayed a click can still
+        // have left a ring up from an earlier gesture the window never
+        // saw the release of, and the dwell must not outlive it.
+        ClearJoinDwell();
         if (!wasDragging) return;
         TabDragTrace.Line($"DRAG cancel reason={reason}");
         _stripDragActive = false;

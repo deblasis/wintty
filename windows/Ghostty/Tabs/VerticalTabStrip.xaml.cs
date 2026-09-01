@@ -3023,8 +3023,38 @@ internal sealed partial class VerticalTabStrip : UserControl
             // the fenced activation the selection handler runs, for the
             // rows it cannot hear. Body clicks keep flowing through MUXC.
             _drag = null;
+            // The one exit that drops the session without EndDrag, so it
+            // owes the dwell the same teardown: the invariant worth having
+            // is "every path that nulls _drag clears the ring", not a
+            // reachability argument that has to be redone whenever the
+            // press path changes.
+            ClearJoinDwell();
             if (drag.PressRow is VerticalTabPinnedRow)
                 ActivateFromShelf(drag.Tab);
+            return;
+        }
+        // HOLD WITH A RING: a release under a COMPLETED ring joins the
+        // dragged row to the one it was held over. The ring is the whole
+        // difference between the two meanings of this release, which is
+        // why it is on screen for the entire wait and why the arm is read
+        // from the dwell rather than re-derived from geometry here -- the
+        // pointer may have drifted a pixel since, and the promise was
+        // made to the row the ring was drawn on.
+        if (_joinDwell.IsArmed && _joinDwell.Target is TabModel joinTarget)
+        {
+            _commitChurn = true;
+            try
+            {
+                var group = TabJoinDrop.Join(_manager, drag.Tab, joinTarget);
+                DragTrace(group is null
+                    ? "DRAG join refused"
+                    : $"DRAG join group={group.Title} landed={_manager.IndexOf(drag.Tab)}");
+            }
+            finally { _commitChurn = false; }
+            // The join's gather churns the dragged row's container, so
+            // there is no live visual left for a settle spring to move:
+            // the row lands as a cut in the slot the run gathered it into.
+            EndDrag(drag, settle: false, velocity: 0);
             return;
         }
         // PIN-OUT (release-classified): a row the drag pinned mid-gesture
@@ -3626,6 +3656,14 @@ internal sealed partial class VerticalTabStrip : UserControl
                 if (drag.Properties is not null) ApplyAnchor(drag, drag.Properties);
             }
         }
+
+        // The run drag's tick answers the join question too, and its
+        // answer is always no -- the guard is in UpdateJoinDwell, which is
+        // where the rule lives for both strips. Reached from here rather
+        // than left unwired: a tick that never asks is a tick that cannot
+        // stand a ring DOWN, and the layout switch, a mid-drag rebuild, or
+        // a later caller could each leave one up over a run.
+        UpdateJoinDwell(drag, draggedCenter);
     }
 
     /// <summary>
@@ -4162,6 +4200,181 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
 
         UpdatePinPreview(drag, draggedCenter);
+        UpdateJoinDwell(drag, draggedCenter);
+    }
+
+    // -----------------------------------------------------------------
+    // The join dwell: hold with a ring. While a body row is dragged and
+    // comes to rest over a neighbour, a ring over that neighbour fills;
+    // once it completes the row haloes and the release JOINS the two into
+    // a group. A release before the ring fills is the ordinary sort the
+    // crossings already committed, unchanged.
+    //
+    // Nothing here touches the crossing engine, and that is the design
+    // rather than an omission. The dwell restarts on pointer travel, so
+    // it can only complete over a pointer that has stopped -- and a
+    // stopped pointer earns no further crossings, because the machine
+    // judges a fixed dragged center. So there is no crossing to suppress
+    // and no state the two gestures fight over: the ring only ever runs
+    // in the gap the reorder has already gone quiet in.
+    //
+    // The clock is the strip's, not the machine's, because a hand held
+    // perfectly still raises no pointer events at all: a repeating timer
+    // is what advances the ring, and the seam swaps a virtual clock in so
+    // the hold is a fact a test states rather than a race it hopes to
+    // win.
+    // -----------------------------------------------------------------
+
+    private readonly TabJoinDwell _joinDwell = new();
+    private DispatcherQueueTimer? _joinTimer;
+    private TabJoinRing? _joinRing;
+
+    /// <summary>
+    /// The dwell's clock, in milliseconds. The wall clock in the product;
+    /// the seam pins a virtual one for the length of one gesture, because
+    /// a 450ms hold asserted against a loaded thread pool measures the
+    /// scheduler rather than the ring.
+    /// </summary>
+    private long? _seamJoinClockMs;
+
+    private long JoinClockMs => _seamJoinClockMs ?? Environment.TickCount64;
+
+    /// <summary>
+    /// Re-derive the ring from this tick's truth: which neighbour the
+    /// dragged row is sitting on, whether joining it would actually do
+    /// anything, and how full the ring is by now.
+    ///
+    /// Three states never ring at all. A run drag carries a whole group,
+    /// and a run landing inside a run is a different op with its own
+    /// grammar. A pinned row cannot be in a group, so the prefix outranks
+    /// the promise. And a live pin preview already owns what the release
+    /// means -- two promises over one release is how a gesture starts
+    /// lying.
+    /// </summary>
+    private void UpdateJoinDwell(DragSession drag, double draggedCenter)
+    {
+        if (drag.Group is not null || drag.Tab.IsPinned || _pinPreview is not null)
+        {
+            ClearJoinDwell();
+            return;
+        }
+
+        var (rows, _) = DragSlots();
+        int slot = rows.IndexOf(drag.Tab);
+        if (slot < 0) { ClearJoinDwell(); return; }
+        var centers = new double[rows.Count];
+        for (int i = 0; i < rows.Count; i++) centers[i] = RowCenterY(rows[i]);
+
+        int pick = TabJoinDrop.PickTarget(
+            centers, slot, draggedCenter, TabStripMotion.JoinBandFraction);
+        // The ring never promises a join the release would refuse: the
+        // same no-false-promise rule the pin ghost obeys.
+        if (pick < 0 || !TabJoinDrop.CanJoin(_manager, drag.Tab, rows[pick]))
+        {
+            ClearJoinDwell();
+            return;
+        }
+
+        _joinDwell.Hold(rows[pick], drag.LastPointerY, JoinClockMs);
+        StartJoinTimer();
+        UpdateJoinRing();
+    }
+
+    /// <summary>
+    /// The timer's own pass: advance the ring over the target the last
+    /// pointer tick picked, WITHOUT re-measuring. The pointer has not
+    /// moved -- that is the premise of a dwell -- so re-deriving the
+    /// target sixty times a second would answer the same question at the
+    /// cost of a full row sweep per frame.
+    /// </summary>
+    private void TickJoinDwell()
+    {
+        if (_drag is not { } drag || _joinDwell.Target is not TabModel target)
+        {
+            ClearJoinDwell();
+            return;
+        }
+        _joinDwell.Hold(target, drag.LastPointerY, JoinClockMs);
+        UpdateJoinRing();
+    }
+
+    /// <summary>
+    /// Draw the ring over the target's arranged row. An unreadable
+    /// measurement withdraws it: a ring on a stale rect is a promise
+    /// about the wrong row, and no ring is the honest picture.
+    /// </summary>
+    private void UpdateJoinRing()
+    {
+        if (_joinDwell.Target is not TabModel target
+            || RowElementOf(target) is not { } element
+            || element.ActualHeight <= 0)
+        {
+            HideJoinRing();
+            return;
+        }
+        Windows.Foundation.Point origin;
+        try
+        {
+            origin = element.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0));
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            HideJoinRing();
+            return;
+        }
+
+        if (_joinRing is null)
+        {
+            _joinRing = new TabJoinRing(AccentBrush);
+            PreviewHost.Children.Add(_joinRing);
+        }
+        PreviewHost.Visibility = Visibility.Visible;
+        _joinRing.Place(
+            new Windows.Foundation.Rect(
+                origin.X, origin.Y, element.ActualWidth, element.ActualHeight),
+            _joinDwell.Progress,
+            _joinDwell.IsArmed,
+            _drag is { MotionOn: true });
+    }
+
+    /// <summary>
+    /// The ring fills on a clock, not on pointer events: a hand held
+    /// perfectly still raises none, and a ring that only advanced on
+    /// motion could never complete.
+    /// </summary>
+    private void StartJoinTimer()
+    {
+        if (_joinTimer is not null) return;
+        var timer = DispatcherQueue.CreateTimer();
+        timer.IsRepeating = true;
+        timer.Interval = TimeSpan.FromMilliseconds(TabStripMotion.JoinRingTickMs);
+        timer.Tick += (_, _) => TickJoinDwell();
+        _joinTimer = timer;
+        timer.Start();
+    }
+
+    /// <summary>
+    /// Take the promise back. EndDrag is the one place every gesture exit
+    /// funnels through, so an armed dwell cannot outlive the drag that
+    /// armed it and be read by the next release.
+    /// </summary>
+    private void ClearJoinDwell()
+    {
+        _joinDwell.Clear();
+        _joinTimer?.Stop();
+        _joinTimer = null;
+        HideJoinRing();
+    }
+
+    private void HideJoinRing()
+    {
+        if (_joinRing is null) return;
+        _joinRing.Reset();
+        PreviewHost.Children.Remove(_joinRing);
+        _joinRing = null;
+        if (PreviewHost.Children.Count == 0)
+            PreviewHost.Visibility = Visibility.Collapsed;
     }
 
     // -----------------------------------------------------------------
@@ -4591,6 +4804,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         StopAutoscroll(drag);
         DetachGapMotion();
         HidePinPreview();
+        ClearJoinDwell();
         var settled = false;
         try
         {
@@ -5289,6 +5503,112 @@ internal sealed partial class VerticalTabStrip : UserControl
         DragRelease(TestSeamPointerId, y);
         outcome.Landed = _manager.IndexOf(tab);
         outcome.Pinned = tab.IsPinned;
+        outcome.Order = TabStripProjection.Rows(_manager)
+            .Select(t => t.EffectiveTitle).ToList();
+        return outcome;
+    }
+
+    /// <summary>
+    /// The join gesture, both outcomes of the hold-with-a-ring contract:
+    /// press a row, walk it onto its NEIGHBOUR and stop there, then
+    /// either hold until the ring completes (the release joins the two
+    /// into a group) or let go at once (the release is the ordinary sort,
+    /// and nothing is grouped).
+    ///
+    /// The walk stops on the neighbour's arranged center rather than past
+    /// it, and that is what makes it a join gesture instead of a reorder:
+    /// a crossing wants that center PLUS the machine's own hysteresis
+    /// token, so a row resting exactly on it has earned no crossing and
+    /// is sitting squarely over the row the ring is a promise about.
+    /// Neighbours only, because that is the only thing the ring ever
+    /// targets.
+    ///
+    /// The dwell's clock is pinned for the length of the gesture and the
+    /// hold is one assignment to it. Sleeping 450ms here instead would
+    /// measure the thread pool: this repo has paid for three tests that
+    /// timed a gesture against a wall clock, and the ring is the thing
+    /// under test, not the scheduler.
+    /// </summary>
+    internal async Task<Testing.TestSeamDragOutcome> TestSeamDragJoinAsync(
+        int from, int to, bool hold)
+    {
+        var outcome = new Testing.TestSeamDragOutcome();
+        var tabs = _manager.Tabs;
+        if (from < 0 || from >= tabs.Count || to < 0 || to >= tabs.Count)
+            return outcome.Fail($"drag-join {from}->{to} out of range (tabs={tabs.Count})");
+        if (from == to)
+            return outcome.Fail("drag-join from == to; a row cannot join itself");
+        if (_drag is not null)
+            return outcome.Fail("another drag is live");
+
+        var tab = tabs[from];
+        var target = tabs[to];
+        if (!TabJoinDrop.CanJoin(_manager, tab, target))
+            return outcome.Fail(
+                $"drag-join {from}->{to} is not a joinable pair (pinned, or already one group)");
+
+        // Adjacency is judged in SLOT space, not manager space: a
+        // collapsed run's hidden members hold manager indices and no
+        // slots, so two rows that look adjacent in the strip can be
+        // several manager indices apart and the other way round.
+        var (rows, _) = DragSlots();
+        int fromSlot = rows.IndexOf(tab);
+        int toSlot = rows.IndexOf(target);
+        if (fromSlot < 0 || toSlot < 0)
+            return outcome.Fail("drag-join needs both rows visible in the strip");
+        if (Math.Abs(fromSlot - toSlot) != 1)
+            return outcome.Fail(
+                "drag-join needs adjacent rows: the ring only ever targets a neighbour");
+        if (RowElementOf(tab) is not { } row)
+            return outcome.Fail("drag row has no element; the strip is not realized");
+
+        double y = await SeamArrangedCenterAsync(tab);
+        if (double.IsNaN(y))
+            return outcome.Fail("layout has not arranged the dragged row");
+
+        _seamJoinClockMs = 0;
+        try
+        {
+            DragPress(row, TestSeamPointerId, y);
+            y = await SeamWalkAsync(y, () => RowCenterY(target));
+            if (_drag is null || double.IsNaN(y))
+            {
+                DragCancel(TestSeamPointerId);
+                return outcome.Fail("the walk onto the neighbour never completed");
+            }
+            // The last move's evaluate is what picks the target and
+            // anchors the dwell; the ring cannot be advanced before it has
+            // run, and the pointer must be still when it does -- travel
+            // restarts the dwell.
+            await SeamDwellAsync(2);
+            if (hold)
+            {
+                _seamJoinClockMs = (long)TabStripMotion.JoinDwellMs + 1;
+                TickJoinDwell();
+                await Testing.TestSeam.WaitForLowPriorityAsync(DispatcherQueue);
+            }
+            var armed = _joinDwell.IsArmed;
+            outcome.Armed = armed;
+            if (hold && !armed)
+            {
+                DragCancel(TestSeamPointerId);
+                return outcome.Fail("the ring never completed over the neighbour");
+            }
+            if (_drag is null)
+                return outcome.Fail("the gesture ended before the release");
+            DragRelease(TestSeamPointerId, y);
+        }
+        finally
+        {
+            // Restored on every path, refusals included: a virtual clock
+            // left behind would freeze the ring for every later gesture
+            // in this process, and the dwell would arm on the first frame
+            // or never.
+            _seamJoinClockMs = null;
+        }
+        outcome.Landed = _manager.IndexOf(tab);
+        outcome.Pinned = tab.IsPinned;
+        outcome.Group = tab.Group?.Title;
         outcome.Order = TabStripProjection.Rows(_manager)
             .Select(t => t.EffectiveTitle).ToList();
         return outcome;

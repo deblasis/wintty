@@ -102,5 +102,16 @@
              palette gives the strip an opaque fill. Hit-test invisible, so
              the tabs under it keep their own hover, press and drag. -->
         <Canvas x:Name="GroupFieldHost" IsHitTestVisible="False"/>
+        <!-- The join gesture's ring, over the strip: while a dragged tab
+             rests on a neighbour a ring fills over that neighbour, and a
+             completed ring haloes it. Over the TabView because the ring
+             is drawn ON a tab and a host behind the strip would vanish
+             under every painted slot; hit-test invisible so the strip's
+             own hover, press and drag never notice it. The vertical
+             strip's PreviewHost is the same thing on the other layout. -->
+        <Canvas x:Name="JoinOverlay"
+                Canvas.ZIndex="2"
+                IsHitTestVisible="False"
+                Visibility="Collapsed"/>
     </Grid>
 </UserControl>
