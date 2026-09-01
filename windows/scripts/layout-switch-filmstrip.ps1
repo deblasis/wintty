@@ -127,6 +127,66 @@ function Get-RowInk([string]$PngPath, $Row) {
     finally { $bmp.Dispose() }
 }
 
+# The film half of the leader evidence: whether the incoming strip's lane
+# CHANGES progressively through the fade window, which is what a rendered
+# fade does and a dead channel (strip popping in at the landing) does not.
+# The active tab's own band is excluded, because the ghost lands there and
+# would register change with the fades stone dead. Returns the number of
+# consecutive frame pairs inside the window whose lane slice differed, and
+# how many frames the window held -- a camera that only delivered one
+# frame there measured nothing, and says so.
+function Measure-FadeProgress($Leg, [string]$IncomingLane) {
+    if ($null -eq $Leg.Film -or $Leg.Film.Frames.Count -lt 2) { return $null }
+    $settled = @($Leg.Samples | Where-Object {
+        $null -ne $_.Frame -and -not $_.Frame.state.switching }) | Select-Object -Last 1
+    if ($null -eq $settled) { return $null }
+    $lane = $settled.Frame.render.$IncomingLane
+    if ($lane.hw -le 0 -or $lane.hh -le 0) { return $null }
+    $active = @($lane.rows | Where-Object { $_.active }) | Select-Object -First 1
+
+    $frames = @($Leg.Film.Frames |
+        Where-Object { $_.sinceStartMs -ge 80 -and $_.sinceStartMs -le 340 })
+    if ($frames.Count -lt 2) {
+        return [pscustomobject]@{ Pairs = 0; Changed = 0; Frames = $frames.Count }
+    }
+
+    function LaneSlice([string]$path) {
+        $bmp = [System.Drawing.Bitmap]::new($path)
+        try {
+            $x0 = [int][Math]::Max(0, $lane.hx); $y0 = [int][Math]::Max(0, $lane.hy)
+            $x1 = [int][Math]::Min($bmp.Width, $lane.hx + $lane.hw)
+            $y1 = [int][Math]::Min($bmp.Height, $lane.hy + $lane.hh)
+            $vals = [System.Collections.Generic.List[int]]::new()
+            for ($y = $y0; $y -lt $y1; $y += 4) {
+                for ($x = $x0; $x -lt $x1; $x += 4) {
+                    if ($null -ne $active -and
+                        $x -ge $active.x -and $x -lt ($active.x + $active.w) -and
+                        $y -ge $active.y -and $y -lt ($active.y + $active.h)) { continue }
+                    $c = $bmp.GetPixel($x, $y)
+                    $vals.Add([int]$c.R + [int]$c.G + [int]$c.B)
+                }
+            }
+            return ,$vals
+        } finally { $bmp.Dispose() }
+    }
+
+    $changed = 0; $pairs = 0
+    $prev = $null
+    foreach ($f in $frames) {
+        $slice = LaneSlice (Join-Path $Leg.Film.OutDir $f.file)
+        if ($null -ne $prev -and $slice.Count -gt 0 -and $slice.Count -eq $prev.Count) {
+            $pairs++
+            [long]$sum = 0
+            for ($i = 0; $i -lt $slice.Count; $i++) {
+                $sum += [Math]::Abs($slice[$i] - $prev[$i])
+            }
+            if (($sum / $slice.Count) -gt 2.0) { $changed++ }
+        }
+        $prev = $slice
+    }
+    return [pscustomobject]@{ Pairs = $pairs; Changed = $changed; Frames = $frames.Count }
+}
+
 # ---- one filmed switch ------------------------------------------------
 
 # Block until nothing is in flight. Between legs, because a toggle that
@@ -274,9 +334,10 @@ $VisibleAlpha = 0.02
 # enough to allow the handover frames, firm enough that a selection which
 # has dissolved to nothing fails.
 $SelectionAlpha = 0.15
-# Half. Above it a strip reads as present rather than as arriving or
-# leaving, so two hosts above it at once is two tab strips at once.
-$CrossfadeLeadAlpha = 0.5
+# There is no $CrossfadeLeadAlpha any more, and that is deliberate: the
+# live leader assertion it parameterized went blind when the fades moved
+# onto compositor expressions (stale reads; see the leader comment in
+# Test-Leg for where the property is asserted now).
 
 $findings = [System.Collections.Generic.List[string]]::new()
 
@@ -331,7 +392,12 @@ function Test-Leg($Leg, [string[]]$CollapsedGroups) {
                 # One row-height of slack: the lane is the settled rect and
                 # the strips deliberately travel EmergeTravel (40px) into
                 # and out of it. A row further out than its own height has
-                # left the lane, not entered it.
+                # left the lane, not entered it. (The slides ride the
+                # compositor's Translation now, which TransformToVisual
+                # never sees, so these rects are resting rects and the
+                # slack is generous rather than load-bearing -- kept, so a
+                # future XAML-side motion cannot silently reintroduce the
+                # failure this catches.)
                 $slack = [Math]::Max(48, $row.h)
                 $out = ($row.x + $row.w) -lt ($lane.hx - $slack) -or
                        $row.x -gt ($lane.hx + $lane.hw + $slack) -or
@@ -346,31 +412,36 @@ function Test-Leg($Leg, [string[]]$CollapsedGroups) {
         }
     }
 
-    # --- the cross-fade needs a leader.
+    # --- the cross-fade needs a leader, and this oracle can no longer
+    # watch it live.
     #
-    # A switch is not two strips politely sharing the frame; it is one
-    # leaving and one arriving, and the eye can only follow that if the
-    # departing one is visibly on its way out before the arriving one is
-    # established. Sampled mid-flight, the pre-fix build showed the two
-    # hosts at 0.89/0.59 and 0.68/0.84 -- both strips most of the way
-    # opaque at the same instant, in two different lanes, with the pane
-    # reveal already slicing the departing one into fragments. That is
-    # what "looks ok" looks like when you stop it and measure it.
+    # The fades ride compositor ExpressionAnimations now, and animated
+    # composition values read from the UI thread are STALE -- measured on
+    # this SDK by the T-model spike: the driving scalar read 0.000 for an
+    # entire flight while the screen animated, and a visual's Opacity
+    # reflected neither the running expression nor the writes that
+    # followed it. The element opacities this track reads sit at their
+    # end-state constants for the whole flight, so the old per-sample
+    # assertion here would pass vacuously forever -- which is not
+    # coverage, it is a test that cannot go red wearing one's clothes.
     #
-    # Timeline-free on purpose: correlating a driver's clock with the
-    # storyboard's would need a correlation the seam does not offer, and
-    # the property worth holding does not need one. At no instant may
-    # both hosts be more than half present.
-    foreach ($s in $Leg.Samples) {
-        if ($null -eq $s.Frame) { continue }
-        $h = $s.Frame.render.horizontal
-        $v = $s.Frame.render.vertical
-        $hOn = $h.visible -and $h.opacity -gt $CrossfadeLeadAlpha
-        $vOn = $v.visible -and $v.opacity -gt $CrossfadeLeadAlpha
-        if ($hOn -and $vOn) {
-            $findings.Add(("{0} frame {1} (t={2}ms): the cross-fade has no leader -- horizontal at {3} and vertical at {4}, both above {5}" -f
-                $tag, $s.I, $s.StateMs,
-                [Math]::Round($h.opacity, 3), [Math]::Round($v.opacity, 3), $CrossfadeLeadAlpha))
+    # The decision, made deliberately: the leader margin is asserted over
+    # the AUTHORED curves from elapsed time -- the weaker option, and
+    # named as such on purpose -- in
+    # Ghostty.Tests TabLayoutSwitchWiringTests.LeaderMargin_HoldsOverTheAuthoredCurves,
+    # against the same constants the expressions are built from. What the
+    # curves cannot prove is that the fades RENDER at all; the film is the
+    # witness for that half, reported below as the fade-progress metric
+    # (reported, not asserted, because the camera's delivery rate varies
+    # 7-28fps run to run and a gate that flakes with the camera stops
+    # gating the product).
+    $incomingLane = if ($tag -match 'to-vertical$') { 'vertical' } else { 'horizontal' }
+    $fade = Measure-FadeProgress $Leg $incomingLane
+    if ($null -ne $fade) {
+        Write-Host ("  fade-progress ({0} lane): {1}/{2} changed pairs over {3} frames in the 80-340ms window" -f
+            $incomingLane, $fade.Changed, $fade.Pairs, $fade.Frames)
+        if ($fade.Pairs -ge 2 -and $fade.Changed -eq 0) {
+            Write-Host '  note: the incoming lane never changed during the fade window -- if this repeats across legs, the fades are not rendering'
         }
     }
 

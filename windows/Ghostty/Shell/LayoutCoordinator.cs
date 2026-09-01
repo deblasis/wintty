@@ -129,21 +129,6 @@ internal sealed class LayoutCoordinator
     private readonly FrameworkElement _morphRoot;
     private readonly FrameworkElement _paneHost;
 
-    /// <summary>
-    /// Staged when the active-tab ghost's flight is staged, with the unit
-    /// direction it travels and how long until it lands. The window uses
-    /// it for a small inertia nudge.
-    ///
-    /// The DELAY is the point. This used to fire from the switch
-    /// Storyboard's Completed handler, which is raised on the UI thread and
-    /// therefore queues behind whatever the terminal's own resize is doing:
-    /// measured, the nudge started at about 560ms on a switch whose visual
-    /// motion ended at 340ms. A punctuation mark that lands after the
-    /// sentence ends is not punctuation. Handing the delay over instead
-    /// lets the window schedule the nudge on the compositor, which runs it
-    /// at the landing whatever the UI thread is doing.
-    /// </summary>
-    private readonly Action<double, double, TimeSpan>? _impact;
     private readonly ITabHost _horizontalTabHost;
     private readonly Func<TabModel?> _activeTab;
 
@@ -156,12 +141,19 @@ internal sealed class LayoutCoordinator
     private readonly Func<bool>? _motionEnabled;
 
     private bool _switching;
-    // The Storyboard staged by the most recent switch, non-null exactly while
-    // that switch is in flight: Animate stages it, and the Completed handler
+    // The timeline staged by the most recent switch, non-null exactly while
+    // that switch is in flight: Animate stages it, and the landing callback
     // and the Begin failure path both clear it. Teardown has to be able to
-    // stop it, and its own Completed handler checks it to find out whether it
+    // release it, and the landing callback checks it to find out whether it
     // is still the switch the coordinator cares about. See CancelSwitch.
-    private Storyboard? _switchStoryboard;
+    private LayoutSwitchTimeline? _timeline;
+    // The timeline whose accent tail is still playing after its switch
+    // landed: the impact deliberately outlives the landing by a lead-out
+    // plus its own span. Cleared by the timeline's own tail batch, or by
+    // whatever preempts it (a new switch, a cancel). Never carries a
+    // running SWITCH -- the trace's begin/end pairing hangs off _timeline
+    // alone.
+    private LayoutSwitchTimeline? _tail;
     // When true (quake window with a single tab), the strip + vertical
     // title bar are forced hidden regardless of layout mode, leaving only
     // the pane host. Snap and Animate both honor it so the layout toggle
@@ -183,11 +175,9 @@ internal sealed class LayoutCoordinator
         FrameworkElement morphRoot,
         FrameworkElement paneHost,
         Func<TabModel?> activeTab,
-        Action<double, double, TimeSpan>? impact = null,
         Func<bool>? motionEnabled = null)
     {
         _motionEnabled = motionEnabled;
-        _impact = impact;
         _horizontalTabHost = horizontalTabHost;
         _morphLayer = morphLayer;
         _morphRoot = morphRoot;
@@ -261,24 +251,25 @@ internal sealed class LayoutCoordinator
             _verticalTitleBar.Opacity = verticalTabs ? 1 : 0;
         }
 
-        // Reset any dangling transform offsets so future switches start
-        // from origin. Snap is the single end-state authority, so it
-        // also returns the spun icons to identity -- without this, a
-        // switch interrupted by SetStripHidden / SuppressVerticalTitleBar
-        // (which call Snap directly) could leave an icon rotated or
-        // scaled once the strip is shown again.
-        GetOrCreateTranslate(_verticalHost).X = 0;
-        GetOrCreateTranslate(_verticalHost).Y = 0;
-        GetOrCreateTranslate(_horizontalHost).X = 0;
-        GetOrCreateTranslate(_horizontalHost).Y = 0;
-        ResetIconTransform(_horizontalIcon);
-        ResetIconTransform(_verticalIcon);
-
-        if (!_verticalTitleBarSuppressed)
-        {
-            GetOrCreateTranslate(_verticalTitleBar).X = 0;
-            GetOrCreateTranslate(_verticalTitleBar).Y = 0;
-        }
+        // Snap is the end-state authority at the visual level too. The
+        // switch animates client-invisible composition properties, and the
+        // landing writes their end values through -- but a switch
+        // interrupted by SetStripHidden / SuppressVerticalTitleBar (which
+        // call Snap directly) has live expressions that will only be
+        // stopped when its landing finally arrives, and a reduced-motion
+        // switch after an animated one starts from whatever the last
+        // write-through left. Writing the element-level values above is
+        // not enough: the spike measured that a visual's client-side value
+        // and the value XAML renders tell nothing about each other, so the
+        // visuals are written here explicitly. A write under a live
+        // expression is overridden until that expression stops, which is
+        // the order the landing runs anyway.
+        SnapVisual(_verticalHost, verticalTabs ? 1f : 0f);
+        SnapVisual(_horizontalHost, verticalTabs ? 0f : 1f);
+        SnapVisual(_verticalTitleBar,
+            !_verticalTitleBarSuppressed && verticalTabs ? 1f : 0f);
+        SnapIconVisual(_horizontalIcon);
+        SnapIconVisual(_verticalIcon);
 
         if (verticalTabs)
             _verticalTabHost.ConfigureTitleBarIconMode(_verticalTitleBarSuppressed);
@@ -319,12 +310,20 @@ internal sealed class LayoutCoordinator
 
     /// <summary>
     /// Cross-fade + slide animation between horizontal and vertical
-    /// layouts. Chrome transforms run in a compositor <see cref="Storyboard"/>;
-    /// strip column width tweens in parallel because WinUI 3 has no native
-    /// GridLengthAnimation.
+    /// layouts, driven by one <see cref="LayoutSwitchTimeline"/>: every
+    /// visible property is an expression of the same clock, so nothing
+    /// has to be kept in sync with anything. The strip column still moves
+    /// once, up front, because WinUI 3 has no GridLengthAnimation and a
+    /// per-frame width tween starves the UI thread anyway.
     /// </summary>
     public void Animate(bool verticalTabs, Action? onCompleted = null)
     {
+        // A previous switch's accent tail may still be playing (the impact
+        // runs past the landing by design). A new switch owns every
+        // property the tail touches, so the tail is truncated and its
+        // visuals put to rest before anything here is measured.
+        ReleaseTail();
+
         // Two reasons to land without moving, and they share an exit
         // because the answer is the same: the end state, now, correct.
         //
@@ -378,6 +377,27 @@ internal sealed class LayoutCoordinator
             ? new Windows.Foundation.Point(0, EmergeTravel)
             : new Windows.Foundation.Point(EmergeTravel, 0);
 
+        // One clock for everything this switch will move, created before the
+        // lane work because the pane reveal's sweep rides it. If composition
+        // refuses there is no half-speed fallback to run instead: the end
+        // state, now, correct -- the same exit the reduced-motion path takes,
+        // reached through FinishSwitch so the trace pairs and the
+        // pending-target replay still happen.
+        LayoutSwitchTimeline timeline;
+        try
+        {
+            timeline = new LayoutSwitchTimeline(
+                Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                    .GetElementVisual(_morphRoot).Compositor,
+                SwitchDuration);
+        }
+        catch (Exception)
+        {
+            FinishSwitch(verticalTabs, onCompleted);
+            return;
+        }
+        _timeline = timeline;
+
         // The strip column is moved once per switch, never tweened. Changing
         // it resizes the terminal surface, which re-renders synchronously on
         // the UI thread, so any per-frame tween starves the thread it runs
@@ -406,84 +426,85 @@ internal sealed class LayoutCoordinator
         }
         MorphTrace("SWITCH lane");
 
-        // The direction the ghost will travel, remembered for whichever
-        // path ends up staging the flight: the morph may be staged now or
-        // a frame or two later, and only the staging site knows how much
-        // of the switch is left to delay the landing by.
-        _impactDirection = verticalTabs
-            ? new Point(-1, 0)
-            : new Point(0, -1);
+        // The direction the ghost will travel. The impact term is authored
+        // into the incoming strip's slide below with this direction, but
+        // contributes nothing until the ghost's flight actually stages and
+        // arms it -- a switch with no flight keeps no accent.
+        var impactDx = verticalTabs ? -1.0 : 0.0;
+        var impactDy = verticalTabs ? 0.0 : -1.0;
 
-        // Staged before any transform is applied below. TransformToVisual
-        // reads whatever offset the strip is already carrying, so measuring
-        // after the incoming translate would aim the ghost at the strip's
-        // pre-animation position and leave it EmergeTravel short of home.
-        PrepareActiveTabMorph(verticalTabs, incomingOffset);
+        // Staged before the slides are installed. The slides ride the
+        // compositor's Translation, which TransformToVisual never sees, so
+        // every rect measured here and later is a resting rect -- the
+        // deferred staging path relies on that.
+        PrepareActiveTabMorph(verticalTabs);
         MorphTrace("SWITCH staged");
 
         incoming.IsHitTestVisible = true;
         outgoing.IsHitTestVisible = false;
-        var incomingTx = GetOrCreateTranslate(incoming);
-        incomingTx.X = incomingOffset.X;
-        incomingTx.Y = incomingOffset.Y;
-        incoming.Opacity = 0;
 
-        var sb = new Storyboard();
-        sb.Children.Add(MakeStaggeredFadeIn(incoming));
-        sb.Children.Add(MakeStaggeredFadeOut(outgoing, outgoing.Opacity));
-
-        if (!_verticalTitleBarSuppressed)
-            AddTitleBarAnimations(sb, verticalTabs);
-
-        sb.Children.Add(MakeIncomingSlideAnim(incoming, "X", incomingTx.X, 0));
-        sb.Children.Add(MakeIncomingSlideAnim(incoming, "Y", incomingTx.Y, 0));
-        var outgoingTx = GetOrCreateTranslate(outgoing);
-        sb.Children.Add(MakeOutgoingSlideAnim(outgoing, "X", outgoingTx.X, outgoingOffset.X));
-        sb.Children.Add(MakeOutgoingSlideAnim(outgoing, "Y", outgoingTx.Y, outgoingOffset.Y));
-
-        var spin = verticalTabs ? -360.0 : 360.0;
-        var incomingIcon = verticalTabs ? _verticalIcon : _horizontalIcon;
-        var outgoingIcon = verticalTabs ? _horizontalIcon : _verticalIcon;
-        if (!PrepareIconGhost(sb, outgoingIcon, incomingIcon, spin))
-        {
-            SpinIconInPlace(sb, incomingIcon, spin,
-                -incomingOffset.X, -incomingOffset.Y, 0, 0, incoming: true);
-            SpinIconInPlace(sb, outgoingIcon, spin,
-                0, 0, -outgoingOffset.X, -outgoingOffset.Y, incoming: false);
-        }
-
-        _switchStoryboard = sb;
-        sb.Completed += (_, _) =>
-        {
-            // A cancelled switch must not land; see CancelSwitch for why the
-            // landing is the hazard, and why stopping the storyboard alone
-            // does not settle it.
-            if (!ReferenceEquals(_switchStoryboard, sb)) return;
-
-            // Cleared here rather than in FinishSwitch: FinishSwitch invokes
-            // onCompleted, which legitimately stages the next switch when a
-            // layout change arrived mid-flight, and clearing after that would
-            // null the storyboard that switch just registered. Left set, the
-            // field outlives the switch by the life of the window, and
-            // CancelSwitch would Stop a long-finished storyboard -- releasing
-            // its hold values across the whole chrome tree during teardown,
-            // which is the one thing that method exists to avoid.
-            _switchStoryboard = null;
-
-            // The impact is not raised here any more. It is scheduled when
-            // the ghost's flight is staged, so the compositor can land it
-            // with the motion instead of whenever this handler is finally
-            // pumped; see the _impact field.
-            FinishSwitch(verticalTabs, onCompleted);
-        };
-
-        // If Begin throws, Completed never fires and _switching stays
-        // latched -- every later layout toggle (keybind, palette, settings)
-        // would silently no-op for the life of the window. Land the switch
-        // without the animation instead.
+        // Everything visible, installed before Begin: an expression is
+        // live from the commit the drivers start in, so there is no frame
+        // where half the switch has begun. A throw anywhere here lands
+        // the switch without animating it -- the timeline releases what it
+        // managed to start, and Snap is the end-state authority as ever.
         try
         {
-            sb.Begin();
+            timeline.FadeIn(incoming, IncomingFadeDelay);
+            timeline.FadeOut(outgoing, outgoing.Opacity, OutgoingFadeEnd);
+            timeline.SlideInWithImpact(incoming, incomingOffset, impactDx, impactDy);
+            timeline.SlideOut(outgoing, outgoingOffset);
+            // The ghost stands on the incoming strip's tab slot when the
+            // accent runs, and it lives on a canvas outside the strip: the
+            // overlay rides the same shove or the ghost shears against the
+            // row it covers by the full amplitude.
+            timeline.ImpactOnly(_morphLayer, impactDx, impactDy);
+
+            if (!_verticalTitleBarSuppressed)
+                AddTitleBarAnimations(timeline, verticalTabs);
+
+            var spin = verticalTabs ? -360.0 : 360.0;
+            var incomingIcon = verticalTabs ? _verticalIcon : _horizontalIcon;
+            var outgoingIcon = verticalTabs ? _horizontalIcon : _verticalIcon;
+            if (!PrepareIconGhost(timeline, outgoingIcon, incomingIcon, spin))
+            {
+                SpinIconInPlace(timeline, incomingIcon, spin);
+                SpinIconInPlace(timeline, outgoingIcon, spin);
+                // Cancel the host slides so the badges hold their pixel
+                // while their strips travel; see CounterSlideIn for why
+                // this is the slide's own algebra rather than a reference.
+                timeline.CounterSlideIn(incomingIcon, incomingOffset);
+                timeline.CounterSlideOut(outgoingIcon, outgoingOffset);
+            }
+
+            timeline.Begin(landed: () =>
+            {
+                // A cancelled switch must not land; see CancelSwitch for
+                // why the landing is the hazard, and why stopping the
+                // drivers alone does not settle it: this completion can
+                // already be queued in the same frame as the stop.
+                if (!ReferenceEquals(_timeline, timeline)) return;
+
+                // Cleared before FinishSwitch, which invokes onCompleted
+                // and can stage the next switch -- clearing after that
+                // would null the timeline that switch just registered.
+                _timeline = null;
+
+                // The landing invariant, spelled out: stop each expression
+                // and write its end value through to the client-side
+                // property, BEFORE Snap writes the element-level end state
+                // over it. Written explicitly rather than trusted to
+                // coincide -- client-side values tell nothing about what a
+                // stopped expression held, so correctness must not depend
+                // on the two agreeing by accident.
+                timeline.CompleteSwitchPhase();
+
+                // The accent outlives the landing by design; the tail
+                // batch releases it, or the next switch preempts it.
+                _tail = timeline;
+
+                FinishSwitch(verticalTabs, onCompleted);
+            });
             MorphTrace("SWITCH running");
             StartFrameCount();
         }
@@ -491,21 +512,25 @@ internal sealed class LayoutCoordinator
         {
             // Nothing is in flight after a Begin that threw, and FinishSwitch
             // below can stage the next switch through onCompleted.
-            _switchStoryboard = null;
+            _timeline = null;
+            timeline.Release(writeEndValues: false);
             FinishSwitch(verticalTabs, onCompleted);
             return;
         }
+    }
 
-        // Kept separate: a morph that will not start should cost the ghost,
-        // not the whole switch. Dropping it here leaves the plain cross-fade.
-        try
-        {
-            BeginFlight();
-        }
-        catch (Exception)
-        {
-            FinishActiveTabMorph();
-        }
+    /// <summary>
+    /// Truncate a finished switch's accent tail and put its visuals to
+    /// rest. The write-through matters here where the closing-window
+    /// release skips it: the caller is about to measure or re-animate the
+    /// same elements, and a strip frozen mid-shove is a rect nobody meant
+    /// to measure.
+    /// </summary>
+    private void ReleaseTail()
+    {
+        if (_tail is null) return;
+        _tail.Release(writeEndValues: true);
+        _tail = null;
     }
 
 
@@ -525,44 +550,6 @@ internal sealed class LayoutCoordinator
     }
 
     private ActiveTabMorph? _morph;
-    private Storyboard? _morphStoryboard;
-
-    /// <summary>Unit direction of the flight being staged.</summary>
-    private Point _impactDirection;
-
-    /// <summary>
-    /// How long after the flight starts the impact should land, or null
-    /// when no flight is staged. Set at staging, spent by BeginFlight.
-    /// </summary>
-    private TimeSpan? _pendingImpactDelay;
-
-    /// <summary>
-    /// A beat between the motion ending and the accent landing.
-    ///
-    /// Scheduling the impact to coincide exactly with the last frame of the
-    /// cross-fade was too early rather than too late: the strip is still
-    /// resolving its final opacity while a translate starts on the whole
-    /// tree above it, and the two compose into something the eye reads as a
-    /// stutter rather than as a landing. About three frames at 60Hz, which
-    /// is enough for the switch to visibly finish and short enough that the
-    /// accent still belongs to it.
-    /// </summary>
-    private static readonly TimeSpan ImpactLeadOut = TimeSpan.FromMilliseconds(60);
-
-    /// <summary>
-    /// Start the ghost's flight and schedule the impact against the same
-    /// instant, which is the whole point of doing both here: the compositor
-    /// gets one clock for the motion and the accent that punctuates it,
-    /// rather than one clock for the motion and a prediction for the accent.
-    /// </summary>
-    private void BeginFlight()
-    {
-        _morphStoryboard?.Begin();
-        if (_pendingImpactDelay is not { } delay) return;
-        _pendingImpactDelay = null;
-        _impact?.Invoke(
-            _impactDirection.X, _impactDirection.Y, delay + ImpactLeadOut);
-    }
 
     /// <summary>
     /// Oracle for the morph fuzz harness: every switch must end with zero
@@ -708,19 +695,26 @@ internal sealed class LayoutCoordinator
     /// and the wiring tests point here rather than repeat it.
     ///
     /// Two defences against the landing, because they cover different things.
-    /// Stopping the storyboard means Completed is never raised at all;
-    /// clearing the field the handler checks its identity against covers a
-    /// Completed that was already queued in the same frame as the Stop, which
-    /// the Stop cannot recall.
+    /// Releasing the timeline stops its drivers, so their scoped batches
+    /// complete early rather than never -- the landing callback can still be
+    /// raised; clearing the field the callback checks its identity against is
+    /// what turns it away, including one already queued in the same frame as
+    /// the stop.
     ///
-    /// Then release the rest of what a switch has in the air, none of which
-    /// the switch Storyboard drives:
+    /// The timeline's expressions are the centre of this method now, and the
+    /// release is deliberately without end-value writes: expressions are not
+    /// self-terminating -- they run until stopped, however finite the drivers
+    /// are -- and the compositor would keep driving them against a tree the
+    /// close is disposing. Writing rest values on the way out would be work
+    /// for nobody. The accent tail's timeline is released the same way,
+    /// without a trace line: its switch already emitted its end, and the fuzz
+    /// oracle would read a cancel after an end as a switch that never ran.
+    ///
+    /// Then release the rest of what a switch has in the air:
     ///
     /// - The pane reveal is a Composition InsetClip on the pane host's visual
-    ///   with a key-frame animation sweeping its left inset, plus a shifted
-    ///   margin. The compositor keeps driving that against the pane host while
-    ///   the window goes on to dispose its leaves and its host: the same leak,
-    ///   reached through the composition tree instead of a XAML event.
+    ///   plus a shifted margin; the clip's sweep is a timeline expression, but
+    ///   the clip itself has to come off the visual here.
     /// - The icon ghost is an Image parked on the morph layer, with both real
     ///   badges left at Opacity 0 behind it.
     /// - A morph still waiting for its destination holds a LayoutUpdated
@@ -752,7 +746,7 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void CancelSwitch()
     {
-        if (_switchStoryboard is not null)
+        if (_timeline is not null)
         {
             // Pairs with the SWITCH begin line this switch emitted: the fuzz
             // harness counts begins against ends, and a cancelled switch never
@@ -761,15 +755,17 @@ internal sealed class LayoutCoordinator
             // cancel deliberately leaves the morph ghost on a tree that is
             // about to be destroyed.
             MorphTrace("SWITCH cancel");
-            _switchStoryboard.Stop();
-            _switchStoryboard = null;
+            _timeline.Release(writeEndValues: false);
+            _timeline = null;
         }
+        // The accent tail, if one is playing: stopped without a trace line,
+        // because its switch already ended (see the summary).
+        _tail?.Release(writeEndValues: false);
+        _tail = null;
 
         FinishIconGhost();
         CancelPaneReveal();
 
-        _morphStoryboard?.Stop();
-        _morphStoryboard = null;
         if (_morph is not { } morph) return;
         // The ghost's box rides the compositor, which no Storyboard.Stop
         // reaches -- the same shape as the pane reveal's sweep, and
@@ -828,8 +824,7 @@ internal sealed class LayoutCoordinator
     /// <see cref="_morph"/>, and leaves it null when there is nothing to
     /// morph, in which case the switch is just the cross-fade.
     /// </summary>
-    private void PrepareActiveTabMorph(
-        bool verticalTabs, Point incomingOffset)
+    private void PrepareActiveTabMorph(bool verticalTabs)
     {
         // A ghost left over from an aborted switch would never be collected
         // otherwise: the field is about to be overwritten.
@@ -877,7 +872,7 @@ internal sealed class LayoutCoordinator
         if (toRect.Width > 0)
         {
             MorphTrace("MORPH immediate");
-            StageMorphAnimations(morph, fromRect, toRect, SwitchDuration);
+            StageMorphAnimations(morph, fromRect, toRect, startT: 0);
             return;
         }
 
@@ -913,37 +908,30 @@ internal sealed class LayoutCoordinator
                 return;
             }
 
-            // The strip is already carrying its travel offset by now, so the
-            // rect measured through it is short of where the tab comes to
-            // rest.
-            rect.X -= incomingOffset.X;
-            rect.Y -= incomingOffset.Y;
+            // The rect is the resting one even mid-flight: the strip's
+            // travel rides the compositor's Translation, which
+            // TransformToVisual never sees, so no compensation for the
+            // slide is needed here.
 
             morph.To = late;
             late!.Opacity = 0;
 
             // Spend only what is left of the switch, so the ghost still
-            // lands with the cross-fade rather than after it.
+            // lands with the cross-fade rather than after it. The timeline
+            // knows where its clock already is; the expressions installed
+            // by the staging start from there.
             MorphTrace($"MORPH deferred@{clock.ElapsedMilliseconds}ms");
             StageMorphAnimations(
-                morph, fromRect, rect, SwitchDuration - clock.Elapsed);
-            try
-            {
-                BeginFlight();
-            }
-            catch (Exception)
-            {
-                FinishActiveTabMorph();
-            }
+                morph, fromRect, rect, startT: _timeline?.Progress ?? 1);
         };
         morph.Waiting = waiting;
         _morphRoot.LayoutUpdated += waiting;
         MorphTrace("MORPH waiting");
 
-        // LayoutUpdated alone cannot enforce the grace deadline: the switch
-        // storyboard animates only opacity and transforms, which dirty no
-        // layout, so once the visibility-change layout storm settles no
-        // further LayoutUpdated is guaranteed. A container that never
+        // LayoutUpdated alone cannot enforce the grace deadline: the
+        // timeline's expressions drive only composition properties, which
+        // dirty no layout, so once the visibility-change layout storm
+        // settles no further LayoutUpdated is guaranteed. A container that never
         // realizes would park the ghost for the whole switch with both real
         // tabs hidden under it. Rendered frames keep coming regardless, so
         // they carry the deadline.
@@ -1021,90 +1009,60 @@ internal sealed class LayoutCoordinator
     private const double LabelSettleFraction = 0.45;
 
     /// <summary>
-    /// Drive the ghost from one rect to the other.
+    /// Give the ghost's flight to the switch's timeline: travel, box and
+    /// label all become expressions of the same scalar the cross-fade and
+    /// the pane reveal already ride, so they agree with each other at
+    /// every frame by arithmetic. <paramref name="startT"/> is how far the
+    /// switch already is -- zero when staged up front, later when staging
+    /// waited out container realization -- and every expression spends
+    /// only the window that is left, so a deferred ghost still lands with
+    /// the cross-fade rather than after it.
     ///
-    /// Position is a Storyboard on the ghost's TranslateTransform, which
-    /// XAML runs independently -- the compositor carries it whatever the
-    /// UI thread is doing, and it is the half of the motion the eye reads
-    /// as travel.
+    /// This is also where the impact arms. The accent punctuates the
+    /// ghost's arrival, so the one place that knows a flight is really
+    /// happening is the one place allowed to arm it; a switch whose morph
+    /// never stages keeps no accent. Arming is a property write the
+    /// already-running expressions read server-side, so a deferred arm
+    /// takes effect without restarting anything.
     ///
-    /// The BOX is handed to the compositor outright (see
-    /// <see cref="TabMorphGhost.TryComposeBox"/>). It used to be a pair of
-    /// dependent Width/Height animations, which is to say a relayout per
-    /// frame on the UI thread -- the one thread a terminal's own render
-    /// owns, and which was measured producing three to thirteen frames
-    /// across a whole switch. Only when composition refuses does the old
-    /// tween run, at whatever frame rate the thread can spare.
+    /// A ghost piece that refuses costs the ghost, not the switch: the
+    /// cross-fade underneath is already running and carries the rest.
     /// </summary>
     private void StageMorphAnimations(
-        ActiveTabMorph morph, Rect from, Rect to, TimeSpan duration)
+        ActiveTabMorph morph, Rect from, Rect to, double startT)
     {
-        var settle = duration * ShapeSettleFraction;
-        var travel = duration * PositionSettleFraction;
-        var labelSpan = duration * LabelSettleFraction;
-        var sb = new Storyboard();
-        Add(morph.Ghost.Translate, "X", from.X, to.X, span: travel, arriving: true);
-        Add(morph.Ghost.Translate, "Y", from.Y, to.Y, span: travel, arriving: true);
-        if (!morph.Ghost.TryComposeBox(
+        if (_timeline is not { } timeline)
+        {
+            FinishActiveTabMorph();
+            return;
+        }
+        try
+        {
+            timeline.GhostTravel(
+                morph.Ghost, to.X - from.X, to.Y - from.Y, startT, PositionSettleFraction);
+            morph.Ghost.ComposeBox(
+                timeline,
                 new Windows.Foundation.Size(from.Width, from.Height),
                 new Windows.Foundation.Size(to.Width, to.Height),
-                settle))
-        {
-            Add(morph.Ghost, "Width", from.Width, to.Width, dependent: true, settle);
-            Add(morph.Ghost, "Height", from.Height, to.Height, dependent: true, settle);
-        }
+                startT, ShapeSettleFraction);
 
-        // The label survives a modest width change but not the collapse to
-        // a 48px rail, so it fades on the leg that loses most of its room
-        // and fades back in on the return leg.
-        var shrinking = to.Width < from.Width * LabelFadeRatio;
-        var growing = from.Width < to.Width * LabelFadeRatio;
-        if (shrinking || growing)
-        {
-            morph.Ghost.Label.Opacity = shrinking ? 1 : 0;
-            // Leaving is arriving's mirror here: a label on its way out
-            // spends its speed at the start so the ghost stops being a
-            // legible tab early, and one on its way in takes the same
-            // curve so it is readable before the landing rather than at
-            // it.
-            Add(morph.Ghost.Label, "Opacity",
-                shrinking ? 1 : 0, shrinking ? 0 : 1,
-                dependent: false, labelSpan, arriving: true);
-        }
-
-        _morphStoryboard = sb;
-
-        // Remembered, not fired. Staging happens during the pre-roll, and
-        // the storyboards do not start until Begin a few statements later
-        // -- measured 9 to 26ms further on. A delay counted from here
-        // therefore expires that much BEFORE the motion ends, which put the
-        // impact inside the cross-fade's last frames instead of after them.
-        // BeginFlight fires it, from the turn the clocks actually start.
-        _pendingImpactDelay = duration;
-
-        void Add(
-            DependencyObject target, string path,
-            double f, double t, bool dependent = false, TimeSpan? span = null,
-            bool arriving = false)
-        {
-            var anim = new DoubleAnimation
+            // The label survives a modest width change but not the collapse
+            // to a 48px rail, so it fades on the leg that loses most of its
+            // room and fades back in on the return leg.
+            var shrinking = to.Width < from.Width * LabelFadeRatio;
+            var growing = from.Width < to.Width * LabelFadeRatio;
+            if (shrinking || growing)
             {
-                From = f,
-                To = t,
-                Duration = new Duration(span ?? duration),
-                EnableDependentAnimation = dependent,
-                // Travel eases OUT: the ghost is arriving somewhere, and
-                // arrivals spend their speed at the start and settle. The
-                // rest (size, label) keeps the symmetric curve, which is
-                // right for a property that is only changing shape rather
-                // than going anywhere.
-                EasingFunction = arriving
-                    ? new CubicEase { EasingMode = EasingMode.EaseOut }
-                    : new CubicEase { EasingMode = EasingMode.EaseInOut },
-            };
-            Storyboard.SetTarget(anim, target);
-            Storyboard.SetTargetProperty(anim, path);
-            sb.Children.Add(anim);
+                morph.Ghost.Label.Opacity = shrinking ? 1 : 0;
+                timeline.GhostLabelFade(
+                    morph.Ghost.Label, shrinking, startT, LabelSettleFraction);
+            }
+
+            timeline.ArmImpact();
+        }
+        catch (Exception)
+        {
+            FinishActiveTabMorph();
         }
     }
 
@@ -1114,8 +1072,6 @@ internal sealed class LayoutCoordinator
     /// </summary>
     private void FinishActiveTabMorph()
     {
-        _morphStoryboard?.Stop();
-        _morphStoryboard = null;
         if (_morph is null) return;
         if (_morph.Waiting is not null)
         {
@@ -1139,7 +1095,11 @@ internal sealed class LayoutCoordinator
     {
         if (!_switching) return;
         // Snap tears down the in-flight morph, icon ghost, and pane reveal
-        // itself, so the direct-interrupt callers get the same cleanup.
+        // itself, so the direct-interrupt callers get the same cleanup. On
+        // the landed path the timeline's switch-phase expressions were
+        // stopped and written through before this runs (see the landing
+        // callback in Animate), so Snap writes element state over visual
+        // ground that already agrees with it.
         Snap(verticalTabs);
         MorphTrace(
             $"SWITCH end ghosts={_morphLayer.Children.Count} morph={(_morph is null ? "null" : "LEAKED")} uiFrames={StopFrameCount()}");
@@ -1166,18 +1126,48 @@ internal sealed class LayoutCoordinator
     }
 
 
-    private static TranslateTransform GetOrCreateTranslate(FrameworkElement fe)
+    /// <summary>
+    /// Snap-level authority for one element's composition state: opacity
+    /// to its end value, translation to rest. Guarded because Snap also
+    /// runs at construction and during shutdown shapes where composition
+    /// may refuse, and a refusal must not take the element-level snap
+    /// above down with it.
+    /// </summary>
+    private static void SnapVisual(FrameworkElement element, float opacity)
     {
-        if (fe.RenderTransform is TranslateTransform t) return t;
-        var nt = new TranslateTransform();
-        fe.RenderTransform = nt;
-        return nt;
+        try
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .GetElementVisual(element);
+            visual.Opacity = opacity;
+            visual.Properties.InsertVector3(
+                "Translation", System.Numerics.Vector3.Zero);
+        }
+        catch (Exception)
+        {
+            // Composition refused; the element-level writes carry the day.
+        }
     }
 
-    // Spin + pop one icon while holding it at a fixed anchor. The
-    // translate runs from/to the negative of the host's slide so it
-    // exactly cancels it (same easing + duration as the host slide),
-    // leaving only the in-place rotate and scale visible.
+    /// <summary>Return a spun icon's visual to identity.</summary>
+    private static void SnapIconVisual(FrameworkElement icon)
+    {
+        try
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .GetElementVisual(icon);
+            visual.StopAnimation(nameof(Microsoft.UI.Composition.Visual.CenterPoint));
+            visual.RotationAngleInDegrees = 0f;
+            visual.Scale = System.Numerics.Vector3.One;
+            visual.Properties.InsertVector3(
+                "Translation", System.Numerics.Vector3.Zero);
+        }
+        catch (Exception)
+        {
+            // Composition refused; there is nothing spun to put back.
+        }
+    }
+
     /// <summary>
     /// Hold one app icon on screen for the whole switch.
     ///
@@ -1186,13 +1176,16 @@ internal sealed class LayoutCoordinator
     /// fully opaque and the mark visibly dips out. Both hosts place the
     /// badge on the same pixel, so a single stand-in can hold that spot at
     /// full opacity while the real ones are hidden -- and being outside the
-    /// sliding hosts it needs no counter-slide to stay put.
+    /// sliding hosts it needs no counter-slide to stay put. It does ride
+    /// the impact with the rest of the morph layer, which is the point:
+    /// the strip it visually belongs to is the one being shoved.
     ///
     /// Returns false when the badge cannot be measured, in which case the
     /// caller falls back to spinning the hosts' own icons.
     /// </summary>
     private bool PrepareIconGhost(
-        Storyboard sb, FrameworkElement outgoing, FrameworkElement incoming, double spin)
+        LayoutSwitchTimeline timeline,
+        FrameworkElement outgoing, FrameworkElement incoming, double spin)
     {
         FinishIconGhost();
 
@@ -1207,19 +1200,12 @@ internal sealed class LayoutCoordinator
             IsHitTestVisible = false,
             HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Top,
-            RenderTransformOrigin = new Point(0.5, 0.5),
-        };
-
-        var scale = new ScaleTransform();
-        var rotate = new RotateTransform();
-        var translate = new TranslateTransform
-        {
-            X = rect.X + ((rect.Width - AppIconSize) / 2),
-            Y = rect.Y + ((rect.Height - AppIconSize) / 2),
-        };
-        ghost.RenderTransform = new TransformGroup
-        {
-            Children = { scale, rotate, translate },
+            // Static parking spot; the spin and pop ride the compositor.
+            RenderTransform = new TranslateTransform
+            {
+                X = rect.X + ((rect.Width - AppIconSize) / 2),
+                Y = rect.Y + ((rect.Height - AppIconSize) / 2),
+            },
         };
 
         _morphLayer.Children.Add(ghost);
@@ -1227,10 +1213,20 @@ internal sealed class LayoutCoordinator
         outgoing.Opacity = 0;
         incoming.Opacity = 0;
 
-        sb.Children.Add(MakeRotateAnim(rotate, 0, spin));
-        sb.Children.Add(MakePopAnim(scale, "ScaleX"));
-        sb.Children.Add(MakePopAnim(scale, "ScaleY"));
+        SpinIconInPlace(timeline, ghost, spin);
         return true;
+    }
+
+    /// <summary>
+    /// Spin + pop one icon about its own centre, as expressions of the
+    /// switch's clock. Feel constants at the top of the file.
+    /// </summary>
+    private static void SpinIconInPlace(
+        LayoutSwitchTimeline timeline, FrameworkElement icon, double spin)
+    {
+        timeline.SpinIcon(
+            icon, spin,
+            IconSpinOvershoot, IconPopMidpoint, IconPopDipScale, IconPopOvershoot);
     }
 
     private void FinishIconGhost()
@@ -1282,12 +1278,15 @@ internal sealed class LayoutCoordinator
             var clip = compositor.CreateInsetClip((float)laneWidth, 0f, 0f, 0f);
             visual.Clip = clip;
 
-            var sweep = compositor.CreateScalarKeyFrameAnimation();
-            sweep.InsertKeyFrame(1f, 0f, compositor.CreateCubicBezierEasingFunction(
-                new System.Numerics.Vector2(0.65f, 0f),
-                new System.Numerics.Vector2(0.35f, 1f)));
-            sweep.Duration = SwitchDuration;
-            clip.StartAnimation(nameof(Microsoft.UI.Composition.InsetClip.LeftInset), sweep);
+            // The sweep is an expression of the switch's own clock, on the
+            // same ease the ghost's box settles with, so the terminal's
+            // edge and the ghost are one motion rather than two that
+            // happen to overlap. StartPaneReveal runs before the timeline
+            // exists only on paths that are about to fail the whole
+            // switch, so a missing timeline leaves the clip static and the
+            // margin restore below still cleans up.
+            if (_timeline is { } timeline)
+                timeline.PaneRevealSweep(clip, laneWidth);
         }
         catch (Exception)
         {
@@ -1350,221 +1349,30 @@ internal sealed class LayoutCoordinator
     /// <summary>Matches the ImageIcon inside AppIconBadge.</summary>
     private const double AppIconSize = 16;
 
-    private static void SpinIconInPlace(
-        Storyboard sb, FrameworkElement? icon, double spin,
-        double fromX, double fromY, double toX, double toY,
-        bool incoming)
-    {
-        if (icon is null) return;
-        var (scale, rotate, translate) = EnsureIconTransform(icon);
-        rotate.Angle = 0;
-        scale.ScaleX = 1;
-        scale.ScaleY = 1;
-        translate.X = fromX;
-        translate.Y = fromY;
-        sb.Children.Add(MakeRotateAnim(rotate, 0, spin));
-        sb.Children.Add(MakePopAnim(scale, "ScaleX"));
-        sb.Children.Add(MakePopAnim(scale, "ScaleY"));
-        sb.Children.Add(MakeIconCounterSlideAnim(translate, "X", fromX, toX, incoming));
-        sb.Children.Add(MakeIconCounterSlideAnim(translate, "Y", fromY, toY, incoming));
-    }
 
-    // Give the icon a Scale+Rotate+Translate group: scale and rotate
-    // pivot on its centre (RenderTransformOrigin), the translate (applied
-    // last, so it stays axis-aligned) cancels the host slide.
-    private static (ScaleTransform Scale, RotateTransform Rotate, TranslateTransform Translate) EnsureIconTransform(FrameworkElement fe)
+    /// <summary>
+    /// The vertical title bar joins the cross-fade: it arrives with the
+    /// rail and leaves with it, on the same leader curves and a short
+    /// vertical slide so the swap reads as the strip lifting away.
+    /// </summary>
+    private void AddTitleBarAnimations(LayoutSwitchTimeline timeline, bool verticalTabs)
     {
-        if (fe.RenderTransform is TransformGroup g
-            && g.Children.Count == 3
-            && g.Children[0] is ScaleTransform existingScale
-            && g.Children[1] is RotateTransform existingRotate
-            && g.Children[2] is TranslateTransform existingTranslate)
-            return (existingScale, existingRotate, existingTranslate);
-
-        var scale = new ScaleTransform();
-        var rotate = new RotateTransform();
-        var translate = new TranslateTransform();
-        var group = new TransformGroup();
-        group.Children.Add(scale);
-        group.Children.Add(rotate);
-        group.Children.Add(translate);
-        fe.RenderTransform = group;
-        fe.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
-        return (scale, rotate, translate);
-    }
-
-    private static void ResetIconTransform(FrameworkElement? fe)
-    {
-        if (fe is null) return;
-        var (scale, rotate, translate) = EnsureIconTransform(fe);
-        rotate.Angle = 0;
-        scale.ScaleX = 1;
-        scale.ScaleY = 1;
-        translate.X = 0;
-        translate.Y = 0;
-    }
-
-    private void AddTitleBarAnimations(Storyboard sb, bool verticalTabs)
-    {
-        var titleTx = GetOrCreateTranslate(_verticalTitleBar);
         if (verticalTabs)
         {
-            _verticalTitleBar.Opacity = 0;
-            titleTx.Y = -TitleBarSlideDistance;
-            sb.Children.Add(MakeStaggeredFadeIn(_verticalTitleBar));
-            sb.Children.Add(MakeIncomingSlideAnim(_verticalTitleBar, "Y", titleTx.Y, 0));
+            timeline.FadeIn(_verticalTitleBar, IncomingFadeDelay);
+            timeline.CounterSlideIn(
+                _verticalTitleBar, new Point(0, TitleBarSlideDistance));
         }
         else
         {
-            sb.Children.Add(MakeStaggeredFadeOut(_verticalTitleBar, _verticalTitleBar.Opacity));
-            sb.Children.Add(MakeOutgoingSlideAnim(
-                _verticalTitleBar, "Y", titleTx.Y, -TitleBarSlideDistance));
+            timeline.FadeOut(
+                _verticalTitleBar, _verticalTitleBar.Opacity, OutgoingFadeEnd);
+            timeline.CounterSlideOut(
+                _verticalTitleBar, new Point(0, TitleBarSlideDistance));
         }
     }
-
-    private static DoubleAnimationUsingKeyFrames MakeStaggeredFadeIn(FrameworkElement target)
-    {
-        var anim = new DoubleAnimationUsingKeyFrames();
-        anim.KeyFrames.Add(new LinearDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(TimeSpan.Zero),
-            Value = 0,
-        });
-        anim.KeyFrames.Add(new LinearDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(
-                TimeSpan.FromMilliseconds(SwitchDurationMs * IncomingFadeDelay)),
-            Value = 0,
-        });
-        anim.KeyFrames.Add(new EasingDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(SwitchDuration),
-            Value = 1,
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-        });
-        Storyboard.SetTarget(anim, target);
-        Storyboard.SetTargetProperty(anim, "Opacity");
-        return anim;
-    }
-
-    private static DoubleAnimationUsingKeyFrames MakeStaggeredFadeOut(
-        FrameworkElement target, double fromOpacity)
-    {
-        var anim = new DoubleAnimationUsingKeyFrames();
-        anim.KeyFrames.Add(new LinearDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(TimeSpan.Zero),
-            Value = fromOpacity,
-        });
-        anim.KeyFrames.Add(new EasingDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(
-                TimeSpan.FromMilliseconds(SwitchDurationMs * OutgoingFadeEnd)),
-            Value = 0,
-            // EaseOut on a value falling to zero means it drops hardest
-            // first and tails off -- the strip commits to leaving in the
-            // opening frames instead of loitering. See the fade constants
-            // above for the measurements that made this the wrong way
-            // round before.
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-        });
-        anim.KeyFrames.Add(new LinearDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(SwitchDuration),
-            Value = 0,
-        });
-        Storyboard.SetTarget(anim, target);
-        Storyboard.SetTargetProperty(anim, "Opacity");
-        return anim;
-    }
-
-    private static DoubleAnimation MakeRotateAnim(RotateTransform target, double from, double to)
-    {
-        // A touch of back-ease overshoot at the end sells the "shoved
-        // and settling" feel rather than a mechanical stop.
-        var anim = new DoubleAnimation
-        {
-            From = from,
-            To = to,
-            Duration = new Duration(SwitchDuration),
-            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconSpinOvershoot },
-        };
-        Storyboard.SetTarget(anim, target);
-        Storyboard.SetTargetProperty(anim, "Angle");
-        return anim;
-    }
-
-    // Dip the icon's scale mid-spin then spring back past 1.0, so it
-    // pops as it lands.
-    private static DoubleAnimationUsingKeyFrames MakePopAnim(ScaleTransform target, string axis)
-    {
-        var anim = new DoubleAnimationUsingKeyFrames();
-        anim.KeyFrames.Add(new EasingDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(TimeSpan.Zero),
-            Value = 1.0,
-        });
-        anim.KeyFrames.Add(new EasingDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(SwitchDurationMs * IconPopMidpoint)),
-            Value = IconPopDipScale,
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
-        });
-        anim.KeyFrames.Add(new EasingDoubleKeyFrame
-        {
-            KeyTime = KeyTime.FromTimeSpan(SwitchDuration),
-            Value = 1.0,
-            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconPopOvershoot },
-        });
-        Storyboard.SetTarget(anim, target);
-        Storyboard.SetTargetProperty(anim, axis);
-        return anim;
-    }
-
-    private static DoubleAnimation MakeIconCounterSlideAnim(
-        TranslateTransform target, string axis, double from, double to, bool incoming)
-    {
-        var anim = new DoubleAnimation
-        {
-            From = from,
-            To = to,
-            Duration = new Duration(SwitchDuration),
-            EasingFunction = incoming
-                ? new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.12 }
-                : new CubicEase { EasingMode = EasingMode.EaseIn },
-        };
-        Storyboard.SetTarget(anim, target);
-        Storyboard.SetTargetProperty(anim, axis);
-        return anim;
-    }
-
-    private static DoubleAnimation MakeIncomingSlideAnim(
-        FrameworkElement target, string axis, double from, double to)
-    {
-        var anim = new DoubleAnimation
-        {
-            From = from,
-            To = to,
-            Duration = new Duration(SwitchDuration),
-            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.12 },
-        };
-        Storyboard.SetTarget(anim, target.RenderTransform);
-        Storyboard.SetTargetProperty(anim, axis);
-        return anim;
-    }
-
-    private static DoubleAnimation MakeOutgoingSlideAnim(
-        FrameworkElement target, string axis, double from, double to)
-    {
-        var anim = new DoubleAnimation
-        {
-            From = from,
-            To = to,
-            Duration = new Duration(SwitchDuration),
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn },
-        };
-        Storyboard.SetTarget(anim, target.RenderTransform);
-        Storyboard.SetTargetProperty(anim, axis);
-        return anim;
-    }
 }
+
+
+
+
