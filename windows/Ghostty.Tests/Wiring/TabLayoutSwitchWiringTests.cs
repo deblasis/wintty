@@ -10,8 +10,8 @@ namespace Ghostty.Tests.Wiring;
 /// <summary>
 /// The horizontal/vertical tab switch lands on a completion callback about
 /// 340ms after it starts, and nothing cancelled it when the window went away
-/// in between. Closing the last tab closes the window, and a storyboard that
-/// has already begun still raises Completed, so the callback ran against a
+/// in between. Closing the last tab closes the window, and an animation that
+/// has already begun still raises its completion, so the callback ran against a
 /// window that was tearing down. crash.log recorded four NullReferenceExceptions
 /// with this stack before the gate was added:
 ///
@@ -68,32 +68,32 @@ public class TabLayoutSwitchWiringTests
         && ReturnsEarly(guard);
 
     /// <summary>
-    /// <c>_switchStoryboard = null;</c> as a statement in its own right. The
-    /// field means "a switch is in flight", so every path that ends one has to
-    /// clear it -- the landing, and the Begin that threw before there was ever
-    /// anything to land.
+    /// <c>_timeline = null;</c> as a statement in its own right. The field
+    /// means "a switch is in flight", so every path that ends one has to
+    /// clear it -- the landing, and the Begin that threw before there was
+    /// ever anything to land.
     /// </summary>
-    private static bool ClearsTheStoryboard(StatementSyntax statement) =>
+    private static bool ClearsTheTimeline(StatementSyntax statement) =>
         statement is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax assignment }
         && assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
-        && assignment.Left.ToString() == "_switchStoryboard"
+        && assignment.Left.ToString() == "_timeline"
         && assignment.Right.ToString() == "null";
 
-    /// <summary><c>if (_switchStoryboard is not null)</c> and nothing looser:
+    /// <summary><c>if (_timeline is not null)</c> and nothing looser:
     /// an inverted test, or a condition that merely mentions the field, is a
     /// different syntax shape and does not match.</summary>
     private static bool IsSwitchInFlightGuard(StatementSyntax statement)
     {
         if (statement is not IfStatementSyntax guard) return false;
         if (guard.Condition is not IsPatternExpressionSyntax test) return false;
-        if (test.Expression is not IdentifierNameSyntax { Identifier.Text: "_switchStoryboard" }) return false;
+        if (test.Expression is not IdentifierNameSyntax { Identifier.Text: "_timeline" }) return false;
         if (test.Pattern is not UnaryPatternSyntax negated || !negated.IsKind(SyntaxKind.NotPattern)) return false;
         return negated.Pattern is ConstantPatternSyntax constant
             && constant.Expression.IsKind(SyntaxKind.NullLiteralExpression);
     }
 
     /// <summary>
-    /// CancelSwitch's one <c>if (_switchStoryboard is not null)</c> statement.
+    /// CancelSwitch's one <c>if (_timeline is not null)</c> statement.
     /// Everything that reads the field lives inside it, and so does the trace
     /// line, whose at-most-once property is that block and nothing else.
     /// </summary>
@@ -102,8 +102,8 @@ public class TabLayoutSwitchWiringTests
         var found = cancel.Body!.Statements.Where(IsSwitchInFlightGuard).ToList();
         Assert.True(
             found.Count == 1,
-            "CancelSwitch must reach _switchStoryboard through exactly one "
-            + "`if (_switchStoryboard is not null)` block: a bare _switchStoryboard.Stop() faults on "
+            "CancelSwitch must reach _timeline through exactly one "
+            + "`if (_timeline is not null)` block: a bare _timeline.Release() faults on "
             + "every close with no switch in flight, and a trace line outside the block reports a "
             + "cancel for a switch that already emitted its end");
         return (IfStatementSyntax)found[0];
@@ -230,7 +230,7 @@ public class TabLayoutSwitchWiringTests
     }
 
     [Fact]
-    public void CancelSwitch_StopsTheStoryboardAndRunsNoEndStateWork()
+    public void CancelSwitch_ReleasesTheTimelineAndRunsNoEndStateWork()
     {
         var cancel = Coordinator().Method("CancelSwitch");
         var statements = cancel.Body!.Statements;
@@ -239,27 +239,36 @@ public class TabLayoutSwitchWiringTests
         var guarded = Assert.IsType<BlockSyntax>(guard.Statement).Statements;
         var guardIndex = statements.IndexOf(guard);
 
-        // Stop is one half of the defence: a stopped Storyboard does not raise
-        // Completed at all, so the landing never gets scheduled. Reached only
-        // through the block above -- a switch is in flight on a minority of
-        // closes, and the field is null on all the rest.
-        Assert.Single(cancel.Calls("_switchStoryboard.Stop"));
+        // Release is one half of the defence, and it is the half that
+        // matters most now: the timeline's expressions are not
+        // self-terminating -- they run until stopped, however finite the
+        // drivers are -- and the compositor would keep driving them against
+        // a tree the close is disposing. Reached only through the block
+        // above -- a switch is in flight on a minority of closes, and the
+        // field is null on all the rest. Without end-value writes: rest
+        // values on a closing window are work for nobody.
+        Assert.Single(cancel.Calls("_timeline.Release"));
         Assert.True(
-            guarded.Any(s => s.Calls("_switchStoryboard.Stop").Any()),
-            "the Stop must sit inside the null-checked block, not above it");
+            guarded.Any(s => s.Calls("_timeline.Release").Any()),
+            "the Release must sit inside the null-checked block, not above it");
 
-        // Clearing the field is the other half, and the one Stop cannot
-        // provide: a Completed already queued in the same frame as the Stop
+        // Clearing the field is the other half, and the one Release cannot
+        // provide: a landing already queued in the same frame as the stop
         // still runs, and only the identity check in Animate turns it away.
         // Pinned on its own because deleting this line leaves every other
         // assertion in this test green.
         Assert.True(
-            guarded.Any(ClearsTheStoryboard),
-            "CancelSwitch must clear _switchStoryboard inside the null-checked block");
+            guarded.Any(ClearsTheTimeline),
+            "CancelSwitch must clear _timeline inside the null-checked block");
 
-        // The storyboard block and both releases have to run before the early
+        // The accent tail's timeline is released too, outside the guard: it
+        // outlives its own switch by design, so it can be live when no
+        // switch is. Matched as the null-conditional call the source spells.
+        Assert.Single(cancel.Calls("_tail?.Release"));
+
+        // The timeline block and both releases have to run before the early
         // return: that return is taken when no active-tab morph is in flight,
-        // and a switch can stop a storyboard, reveal the pane or park an icon
+        // and a switch can start a timeline, reveal the pane or park an icon
         // ghost with no morph staged at all.
         var earlyExit = statements
             .TakeWhile(s => !s.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>().Any())
@@ -267,14 +276,12 @@ public class TabLayoutSwitchWiringTests
         Assert.True(earlyExit < statements.Count, "expected CancelSwitch to return early when no morph is staged");
         Assert.True(
             guardIndex < earlyExit,
-            "the storyboard must be stopped and cleared before CancelSwitch's early return");
+            "the timeline must be released and cleared before CancelSwitch's early return");
 
-        // Stopping the switch storyboard releases one of the three things a
-        // switch has in the air. The pane reveal is a Composition InsetClip
-        // animation the compositor keeps driving against the pane host while
-        // the window disposes its leaves, and the icon ghost stays parked on
-        // the morph layer with both real badges left transparent. Neither is a
-        // XAML storyboard, so neither is reachable by Stop.
+        // Releasing the timeline stops what it registered. The pane
+        // reveal's clip still has to come off the pane host's visual, and
+        // the icon ghost stays parked on the morph layer with both real
+        // badges left transparent; neither is the timeline's to remove.
         //
         // CancelPaneReveal, not FinishPaneReveal: only the clip has to come
         // off here. See CancelSwitch's summary for why the margin stays put.
@@ -314,26 +321,23 @@ public class TabLayoutSwitchWiringTests
         var allowed = new[]
         {
             "MorphTrace",
-            "_switchStoryboard.Stop",
-            "_morphStoryboard?.Stop",
+            // The switch's expressions and the accent tail's, stopped
+            // without end-value writes: the compositor keeps driving an
+            // unstopped expression against a tree the close is disposing,
+            // and rest values on that tree are work for nobody. Release
+            // walks no tab host and writes no element.
+            "_timeline.Release",
+            "_tail?.Release",
             "FinishIconGhost",
             "CancelPaneReveal",
             // The ghost's box is a Composition Scale on one visual and an
-            // InsetClip sweep on another, so no Storyboard.Stop reaches it:
-            // the same category as CancelPaneReveal, and released for the
-            // same reason. Required below as well as allowed here, because
-            // an allow-list entry on its own only stops the guard
-            // complaining -- it does not make the release happen.
+            // InsetClip sweep on another, released twice on purpose: the
+            // timeline stops what it registered, and this stops the same
+            // animations by property name for the interrupt paths that
+            // never had a timeline. Required below as well as allowed
+            // here, because an allow-list entry on its own only stops the
+            // guard complaining -- it does not make the release happen.
             "morph.Ghost.StopBoxAnimations",
-            // SPIKE (see LayoutTransitionSpike): expression animations the
-            // env-gated spike started, stopped on the same reasoning as the
-            // pane reveal's sweep -- the compositor keeps driving them
-            // against a tree the close is disposing, and nothing else
-            // reaches them. Release stops what the spike started and drops
-            // its state; it walks no tab host and writes no element. Null
-            // in every shipped configuration. Goes with the spike when the
-            // spike goes.
-            "_spike?.Release",
         };
         var unexpected = cancel.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
@@ -357,7 +361,7 @@ public class TabLayoutSwitchWiringTests
         Assert.True(
             stopBoxIndex < statements.Count,
             "CancelSwitch must stop the ghost's box animations; they run on the compositor against a "
-            + "visual whose tree the close is disposing, which is what no Storyboard.Stop can reach");
+            + "visual whose tree the close is disposing");
         Assert.True(
             statements[stopBoxIndex] is ExpressionStatementSyntax
             {
@@ -414,88 +418,95 @@ public class TabLayoutSwitchWiringTests
         var guarded = Assert.IsType<BlockSyntax>(SwitchInFlightGuard(cancel).Statement).Statements;
         Assert.True(
             guarded.Any(s => s.Calls("MorphTrace").Any()),
-            "the SWITCH cancel line must sit inside the `_switchStoryboard is not null` block, "
+            "the SWITCH cancel line must sit inside the `_timeline is not null` block, "
             + "which is what keeps a close with no switch in flight from emitting one");
     }
 
     [Fact]
-    public void Animate_ClearsTheStoryboardWhenBeginThrows()
+    public void Animate_ClearsTheTimelineWhenStagingThrows()
     {
         var animate = Coordinator().Method("Animate");
 
-        // Found by what the try attempts rather than by being the first one:
-        // Animate has a second try below for the morph storyboard, and "the
-        // first try in the method" swaps silently the day their order changes.
+        // Found by what the try attempts rather than by position: Animate
+        // has a second try around the timeline's construction, and "the
+        // first try in the method" swaps silently the day their order
+        // changes. This one wraps the staging and Begin -- a throw anywhere
+        // in it means expressions may already be live, so the catch must
+        // release as well as clear.
         var attempts = animate.DescendantNodes()
             .OfType<TryStatementSyntax>()
-            .Where(t => t.Block.Calls("sb.Begin").Any())
+            .Where(t => t.Block.Calls("timeline.Begin").Any())
             .ToList();
-        Assert.True(attempts.Count == 1, "expected one try around sb.Begin in Animate");
+        Assert.True(attempts.Count == 1, "expected one try around timeline.Begin in Animate");
         var catches = attempts[0].Catches;
-        Assert.True(catches.Count == 1, "expected one catch on the try around sb.Begin");
+        Assert.True(catches.Count == 1, "expected one catch on the try around timeline.Begin");
         var handler = catches[0].Block.Statements;
 
-        var clearIndex = handler.TakeWhile(s => !ClearsTheStoryboard(s)).Count();
+        var clearIndex = handler.TakeWhile(s => !ClearsTheTimeline(s)).Count();
+        var releaseIndex = handler.TakeWhile(s => !s.Calls("timeline.Release").Any()).Count();
         var finishIndex = handler.TakeWhile(s => !s.Calls("FinishSwitch").Any()).Count();
 
-        // Nothing is in flight after a Begin that threw, and the field claims
-        // otherwise until this line runs. Left set, it holds a storyboard that
-        // never began for the life of the window: the close then stops it and
-        // emits a SWITCH cancel for a switch the fallback below already
-        // finished and counted, so a healthy run fails the fuzz oracle.
+        // Nothing is in flight after a staging that threw, and the field
+        // claims otherwise until this line runs. Left set, it holds a
+        // timeline that never began for the life of the window: the close
+        // then releases it and emits a SWITCH cancel for a switch the
+        // fallback below already finished and counted, so a healthy run
+        // fails the fuzz oracle.
         Assert.True(
             clearIndex < handler.Count,
-            "the catch around sb.Begin must clear _switchStoryboard; a storyboard that never began "
+            "the catch around timeline.Begin must clear _timeline; a timeline that never began "
             + "is not a switch in flight, and the close would emit a cancel for one already ended");
+        Assert.True(
+            releaseIndex < handler.Count,
+            "the catch must release the timeline: expressions started before the throw are live "
+            + "on the compositor and are not self-terminating");
         Assert.True(finishIndex < handler.Count, "expected the catch to land the switch without animating it");
         Assert.True(
             clearIndex < finishIndex,
             "the field must be cleared before FinishSwitch, which invokes onCompleted and can stage the "
-            + "next switch; clearing after that would null the storyboard that switch just registered");
+            + "next switch; clearing after that would null the timeline that switch just registered");
     }
 
     [Fact]
-    public void SwitchCompleted_CannotLandAfterACancel()
+    public void SwitchLanding_CannotLandAfterACancel()
     {
         var coordinator = Coordinator();
-        coordinator.Field("_switchStoryboard");
+        coordinator.Field("_timeline");
+        coordinator.Field("_tail");
 
         var animate = coordinator.Method("Animate");
         var body = animate.Body!.Statements;
 
-        // Position, not just presence. Moved into the Completed lambda or into
-        // the catch below sb.Begin, the assignment is still a descendant of
-        // Animate -- and from the catch no live switch ever registers, so every
-        // completion trips the identity check below, FinishSwitch never runs
-        // and _switching latches for the life of the window.
-        static bool StagesTheStoryboard(StatementSyntax statement) =>
+        // Position, not just presence. Moved into the landing lambda or into
+        // a catch, the assignment is still a descendant of Animate -- and
+        // from a catch no live switch ever registers, so every landing trips
+        // the identity check below, FinishSwitch never runs and _switching
+        // latches for the life of the window.
+        static bool StagesTheTimeline(StatementSyntax statement) =>
             statement is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax assignment }
             && assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
-            && assignment.Left.ToString() == "_switchStoryboard"
-            && assignment.Right.ToString() == "sb";
+            && assignment.Left.ToString() == "_timeline"
+            && assignment.Right.ToString() == "timeline";
 
-        var stageIndex = body.TakeWhile(s => !StagesTheStoryboard(s)).Count();
-        var wiringIndex = body
-            .TakeWhile(s => !s.DescendantNodesAndSelf()
-                .OfType<AssignmentExpressionSyntax>()
-                .Any(a => a.IsKind(SyntaxKind.AddAssignmentExpression)
-                          && a.Left.ToString() == "sb.Completed"))
+        var stageIndex = body.TakeWhile(s => !StagesTheTimeline(s)).Count();
+        var beginIndex = body
+            .TakeWhile(s => !s.Calls("timeline.Begin").Any())
             .Count();
 
         Assert.True(
             stageIndex < body.Count,
-            "Animate must stage `_switchStoryboard = sb` as a statement of its own body");
-        Assert.True(wiringIndex < body.Count, "expected Animate to attach a Completed handler to sb");
+            "Animate must stage `_timeline = timeline` as a statement of its own body");
+        Assert.True(beginIndex < body.Count, "expected Animate to call timeline.Begin");
         Assert.True(
-            stageIndex < wiringIndex,
-            "the storyboard must be staged before the handler that reads it is attached");
+            stageIndex < beginIndex,
+            "the timeline must be staged before the landing callback that reads it is attached");
 
-        var completed = animate.DescendantNodes()
-            .OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.IsKind(SyntaxKind.AddAssignmentExpression)
-                         && a.Left.ToString() == "sb.Completed");
+        // The landing callback, found by the argument name Begin spells.
+        var begin = animate.Call("timeline.Begin");
+        var landed = begin.ArgumentList.Arguments
+            .Single(a => a.NameColon?.Name.Identifier.Text == "landed");
         var statements = Assert
-            .IsType<ParenthesizedLambdaExpressionSyntax>(completed.Right)
+            .IsType<ParenthesizedLambdaExpressionSyntax>(landed.Expression)
             .Block!.Statements;
 
         // Identity against the field CancelSwitch clears, matched as syntax
@@ -503,11 +514,11 @@ public class TabLayoutSwitchWiringTests
         // logs instead of returning, is a different shape and does not match.
         //
         // Exactly two operands, and exactly these two. Without that,
-        // ReferenceEquals(_switchStoryboard, _switchStoryboard) reads as a
-        // guard and never returns, so a cancelled switch lands anyway; and
-        // ReferenceEquals(_switchStoryboard, null) reads as a guard and always
+        // ReferenceEquals(_timeline, _timeline) reads as a guard and never
+        // returns, so a cancelled switch lands anyway; and
+        // ReferenceEquals(_timeline, null) reads as a guard and always
         // returns, so the layout toggle is dead for the window's life.
-        static bool IsStaleStoryboardGuard(StatementSyntax statement)
+        static bool IsStaleTimelineGuard(StatementSyntax statement)
         {
             if (statement is not IfStatementSyntax guard) return false;
             if (guard.Condition is not PrefixUnaryExpressionSyntax negation
@@ -516,128 +527,169 @@ public class TabLayoutSwitchWiringTests
                 || call.Expression.ToString() != "ReferenceEquals") return false;
             var operands = call.ArgumentList.Arguments.Select(a => a.ToString()).ToList();
             return operands.Count == 2
-                && operands.Contains("_switchStoryboard")
-                && operands.Contains("sb")
+                && operands.Contains("_timeline")
+                && operands.Contains("timeline")
                 && ReturnsEarly(guard);
         }
 
-        // The field is non-null exactly while a switch is in flight, so the
-        // landing has to clear it (ClearsTheStoryboard, shared with the
-        // Begin-threw path above). Left set, a close an hour later would Stop
-        // a long-finished storyboard and release its hold values across both
-        // tab hosts, the title bar and the icon transforms, mid-teardown -- by
-        // the one method whose premise is that touching that tree is the
-        // hazard.
-        var guardIndex = statements.TakeWhile(s => !IsStaleStoryboardGuard(s)).Count();
-        var clearIndex = statements.TakeWhile(s => !ClearsTheStoryboard(s)).Count();
+        var guardIndex = statements.TakeWhile(s => !IsStaleTimelineGuard(s)).Count();
+        var clearIndex = statements.TakeWhile(s => !ClearsTheTimeline(s)).Count();
+        var completeIndex = statements
+            .TakeWhile(s => !s.Calls("timeline.CompleteSwitchPhase").Any())
+            .Count();
         var finishIndex = statements
             .TakeWhile(s => !s.Calls("FinishSwitch").Any())
             .Count();
 
-        // All three have to exist, or TakeWhile silently returns the full count
+        // All four have to exist, or TakeWhile silently returns the full count
         // and the comparisons pass while pinning nothing.
         Assert.True(
             guardIndex < statements.Count,
-            "the Completed handler must bail unless its storyboard is still the current one; "
-            + "Stop does not recall a completion already queued this frame");
+            "the landing must bail unless its timeline is still the current one; "
+            + "stopping the drivers does not recall a completion already queued this frame");
         Assert.True(
             clearIndex < statements.Count,
-            "the landing must clear _switchStoryboard; nothing else does on the normal path");
-        Assert.True(finishIndex < statements.Count, "expected the Completed handler to call FinishSwitch");
+            "the landing must clear _timeline; nothing else does on the normal path");
+        Assert.True(
+            completeIndex < statements.Count,
+            "the landing must run CompleteSwitchPhase: stop each switch-phase expression and write its "
+            + "end value through to the client-side property. This is the landing invariant made "
+            + "explicit -- client-side values tell nothing about what a stopped expression held, so "
+            + "correctness must not depend on the two agreeing by accident");
+        Assert.True(finishIndex < statements.Count, "expected the landing to call FinishSwitch");
         Assert.True(guardIndex < clearIndex, "the identity check must run before the field is cleared");
+        Assert.True(
+            completeIndex < finishIndex,
+            "the write-through must run before FinishSwitch, whose Snap writes element state over "
+            + "visual ground that has to already agree with it");
         Assert.True(
             clearIndex < finishIndex,
             "the field must be cleared before FinishSwitch, which invokes onCompleted and can stage the "
-            + "next switch; clearing after that would null the storyboard that switch just registered");
+            + "next switch; clearing after that would null the timeline that switch just registered");
     }
 
+    private static ShellSource Timeline() => ShellSource.Load("Shell.LayoutSwitchTimeline.cs");
+
+    /// <summary>
+    /// This replaces ImpactNudge_IsStoppedOnTeardownRatherThanMerelyNotStarted.
+    ///
+    /// The impact is no longer a separately scheduled animation the window
+    /// owns; it is a term of the incoming strip's Translation expression on
+    /// the switch timeline, armed where the ghost's flight stages. The
+    /// hazard the old test guarded did not go away, it got a single owner:
+    /// every animation the timeline starts must be registered so Release
+    /// can stop it, because expressions are not self-terminating and a
+    /// finite driver only guarantees the cleanup TURN arrives, not the
+    /// cleanup itself. These assertions pin that discipline in the source.
+    /// </summary>
     [Fact]
-    public void ImpactNudge_IsStoppedOnTeardownRatherThanMerelyNotStarted()
+    public void Timeline_EveryAnimationIsRegisteredAndBatchesScopeOnlyDrivers()
     {
-        // This replaces NudgeWindowForImpact_StopsOnTeardownAcrossItsAwaits.
-        //
-        // The invariant it enforced -- an _isClosed gate after every await --
-        // was about a method that moved the WINDOW in a loop of awaited
-        // steps, and that method no longer exists: the nudge is a single
-        // compositor Offset animation on RootGrid, with no suspensions to gate
-        // between. The old rule is not weakened here, it is inapplicable.
-        //
-        // The hazard it was guarding is not gone, though; it got bigger. The
-        // animation is handed to the compositor with a DELAY equal to what is
-        // left of the switch, so it starts running a few hundred milliseconds
-        // AFTER the call returns, against a visual whose tree the close is
-        // disposing, and nothing in XAML stops it on the way out. Not starting
-        // one on a closing window is no longer enough; a scheduled one has to
-        // be stopped. That is the same hazard, and the same remedy, as
-        // LayoutCoordinator.CancelSwitch's releases.
-        var nudge = Window().Method("NudgeContentForImpact");
+        var timeline = Timeline();
 
-        // No suspensions. Load-bearing rather than incidental: if one is ever
-        // reintroduced then the per-await gate the old test enforced is needed
-        // again, and this assertion is what makes that a decision somebody
-        // takes rather than a property that quietly lapses.
-        Assert.Empty(nudge.DescendantNodes().OfType<AwaitExpressionSyntax>());
-
-        // Still gated on entry, as a statement of the method itself: an entry
-        // gate nested inside some other branch is not one.
-        var entry = nudge.Body!.Statements.FirstOrDefault(IsClosedGuard);
-        Assert.True(
-            entry is not null,
-            "the impact nudge must bail before scheduling anything against an already-closing window");
-
-        // The animation has to be started, and the visual it runs against has
-        // to be recorded. Starting one without keeping the visual leaves a
-        // compositor animation nothing can reach: the stop below would have
-        // nothing to stop, and would still read as present.
-        Assert.NotEmpty(nudge.DescendantNodes()
+        // Every StartAnimation lives in Register, Begin, or SpinIcon (whose
+        // extra start is the pivot definition its own WriteEnd stops --
+        // that exception is asserted below rather than waved through). A
+        // start anywhere else is an animation Release cannot reach: the
+        // leak the spring experiment measured, reachable again.
+        foreach (var call in timeline.Root.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText() == "visual.StartAnimation"));
-        Assert.NotEmpty(nudge.DescendantNodes()
-            .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.IsKind(SyntaxKind.SimpleAssignmentExpression)
-                        && a.Left.ToString() == "_impactVisual"
-                        && a.Right.ToString() == "visual"));
+            .Where(c => c.CalleeText().EndsWith(".StartAnimation", StringComparison.Ordinal)))
+        {
+            var method = call.Ancestors().OfType<MethodDeclarationSyntax>().First();
+            Assert.True(
+                method.Identifier.ValueText is "Register" or "Begin" or "SpinIcon",
+                $"StartAnimation outside Register/Begin/SpinIcon, in {method.Identifier.ValueText}: "
+                + "unregistered animations outlive the switch");
+        }
 
-        // The release itself: stop the animation, and clear the field so a
-        // second call cannot stop a visual that has already gone.
-        var stop = Window().Method("StopImpactNudge");
-        Assert.NotEmpty(stop.DescendantNodes()
+        // SpinIcon's pivot expression is stopped by the entry it rides on.
+        var spin = timeline.Method("SpinIcon");
+        Assert.NotEmpty(spin.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
             .Where(c => c.CalleeText() == "visual.StopAnimation"));
-        Assert.NotEmpty(stop.DescendantNodes()
-            .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.IsKind(SyntaxKind.SimpleAssignmentExpression)
-                        && a.Left.ToString() == "_impactVisual"
-                        && a.Right.ToString() == "null"));
 
-        // And the close path has to call it. Unconditionally and as a
-        // statement of its own, for the reason WindowTeardown_CancelsTheLayoutSwitch
-        // spells out: a call is found anywhere beneath the statement holding
-        // it, so `if (IsQuickTerminal) StopImpactNudge();` reads as a release
-        // while every regular window closes without one.
-        var statements = Window().Method("OnClosedAsync").Body!.Statements;
-        var stopIndex = statements.TakeWhile(st => !st.Calls("StopImpactNudge").Any()).Count();
-        Assert.True(
-            stopIndex < statements.Count,
-            "OnClosedAsync must stop the impact nudge; it is scheduled with a delay and outlives the close");
-        Assert.True(
-            statements[stopIndex] is ExpressionStatementSyntax
-            {
-                Expression: InvocationExpressionSyntax { ArgumentList.Arguments.Count: 0 } call
-            }
-            && call.Expression.ToString() == "StopImpactNudge",
-            "the stop must be a statement of OnClosedAsync itself, not nested inside a condition");
+        // Begin scopes exactly its two drivers, T and S, one per batch.
+        // An expression started between CreateScopedBatch and End never
+        // completes, so its batch never fires and neither the landing nor
+        // the tail cleanup ever runs -- the exact shape of the spring
+        // failure. Two batches, two starts, and both starts are on the
+        // property set rather than on any visual.
+        var begin = timeline.Method("Begin");
+        Assert.Equal(2, begin.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Count(c => c.CalleeText() == "_compositor.CreateScopedBatch"));
+        var starts = begin.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith(".StartAnimation", StringComparison.Ordinal))
+            .ToList();
+        Assert.Equal(2, starts.Count);
+        Assert.All(starts, s => Assert.Equal("_props.StartAnimation", s.CalleeText()));
 
-        var gateIndex = statements
-            .TakeWhile(st => !st.DescendantNodesAndSelf()
-                .OfType<AssignmentExpressionSyntax>()
-                .Any(a => a.IsKind(SyntaxKind.SimpleAssignmentExpression)
-                          && a.Left.ToString() == "_isClosed"
-                          && a.Right.ToString() == "true"))
-            .Count();
-        Assert.True(gateIndex < statements.Count, "expected OnClosedAsync to set _isClosed");
+        // The releases drain through one shape: stop, then optionally write
+        // the end value. Release covers both phase lists.
+        var releaseEntries = timeline.Method("ReleaseEntries");
+        Assert.NotEmpty(releaseEntries.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() == "entry.Target.StopAnimation"));
+        var release = timeline.Method("Release");
+        Assert.Equal(2, release.Calls("ReleaseEntries").Count);
+    }
+
+    /// <summary>
+    /// The leader margin, asserted where it now lives.
+    ///
+    /// The filmstrip's state oracle used to watch the two hosts' element
+    /// opacities live and assert that at no instant both were more than
+    /// half present. The fades ride compositor expressions now, and the
+    /// spike measured that animated composition values read from the UI
+    /// thread are stale -- the oracle cannot see them. So the property is
+    /// asserted here over the authored curves instead, against the same
+    /// constants the expressions are built from, extracted from the source
+    /// rather than copied so this test drifts with the product or not at
+    /// all. The film remains the witness that the fades render; see the
+    /// filmstrip harness for that half.
+    /// </summary>
+    [Fact]
+    public void LeaderMargin_HoldsOverTheAuthoredCurves()
+    {
+        static double Const(ShellSource source, string name)
+        {
+            var field = source.Field(name);
+            var text = field.Variable.Initializer!.Value.ToString();
+            return double.Parse(text, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        var coordinator = Coordinator();
+        var delay = Const(coordinator, "IncomingFadeDelay");
+        var outEnd = Const(coordinator, "OutgoingFadeEnd");
+
+        // The authored curves: FadeIn is ease-out cubic over the delayed
+        // ramp, FadeOut drops as (1-u)^3 and is gone by outEnd. The same
+        // algebra LayoutSwitchTimeline builds its expression strings from.
+        static double EaseOutCubic(double u) => 1 - Math.Pow(1 - u, 3);
+        double In(double t) => EaseOutCubic(Math.Clamp((t - delay) / (1 - delay), 0, 1));
+        double Out(double t) => Math.Pow(1 - Math.Clamp(t / outEnd, 0, 1), 3);
+
+        for (var t = 0.0; t <= 1.0; t += 0.001)
+        {
+            Assert.False(
+                In(t) > 0.5 && Out(t) > 0.5,
+                $"at T={t:F3} both strips are more than half present (in={In(t):F3}, out={Out(t):F3}): "
+                + "the cross-fade has no leader");
+        }
+
+        // The margin, not just the property: outgoing passes below half
+        // strictly before incoming passes above it. Erosion of the gap is
+        // a choreography change someone should be making on purpose.
+        var outBelow = 0.0;
+        while (Out(outBelow) > 0.5) outBelow += 0.001;
+        var inAbove = 0.0;
+        while (In(inAbove) < 0.5 && inAbove < 1) inAbove += 0.001;
         Assert.True(
-            gateIndex < stopIndex,
-            "_isClosed must be set before the stop, so the scoped batch's completion is inert too");
+            inAbove - outBelow > 0.1,
+            $"the leader margin narrowed to {inAbove - outBelow:F3} of the switch "
+            + $"(outgoing below half at {outBelow:F3}, incoming above at {inAbove:F3})");
     }
 }
+
