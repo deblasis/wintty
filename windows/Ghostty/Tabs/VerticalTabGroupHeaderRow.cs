@@ -87,6 +87,34 @@ internal sealed partial class VerticalTabGroupHeaderRow : Grid
         ToolTipService.SetToolTip(this, group.Title);
     }
 
+    /// <summary>
+    /// Whether the name and the member count show. The strip drives this
+    /// from the pane width, the same threshold the pinned rows degrade at:
+    /// the 48px rail's content slot is narrower than swatch plus count
+    /// plus chevron, so a header that keeps them there spills its chevron
+    /// past the pane edge. What the rail can still say is the group's
+    /// colour and whether it is folded, and the name rides the tooltip.
+    /// </summary>
+    internal bool ShowTitle
+    {
+        get => _title.Visibility == Visibility.Visible;
+        set
+        {
+            var visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            _title.Visibility = visibility;
+            _count.Visibility = visibility;
+        }
+    }
+
+    /// <summary>
+    /// The header's first and last painted parts, for the seam's geometry
+    /// readout: between them they bracket everything this row draws, so a
+    /// driver can tell whether the content fits the pane it sits in.
+    /// </summary>
+    internal FrameworkElement TestSeamSwatch => _swatch;
+
+    internal FrameworkElement TestSeamChevron => _chevron;
+
     /// <summary>Collapsed points right, expanded points down.</summary>
     private void SetChevron(bool collapsed) =>
         _chevron.Glyph = collapsed ? "\uE76C" : "\uE70D";

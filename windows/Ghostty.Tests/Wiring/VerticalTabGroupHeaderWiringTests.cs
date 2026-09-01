@@ -24,6 +24,10 @@ public class VerticalTabGroupHeaderWiringTests
         node.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left.ToString() == left);
 
+    private static PropertyDeclarationSyntax Property(ShellSource source, string name) =>
+        source.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
+            .Single(p => p.Identifier.ValueText == name);
+
     /// <summary>The switch arms are the routing: one row kind per projection kind.</summary>
     [Fact]
     public void Headers_AreFlatTopLevelItems_InProjectionOrder()
@@ -270,14 +274,63 @@ public class VerticalTabGroupHeaderWiringTests
     public void GroupedRows_Indent_AndUngroupedRowsDoNot()
     {
         var strip = Strip();
-        var ternary = Assert.IsType<ConditionalExpressionSyntax>(
-            Assign(strip.Method("ApplyGroupInset"), "row.Margin").Right);
-        Assert.Equal("tab.Group is null", ternary.Condition.ToString());
-        Assert.Equal("default(Thickness)", ternary.WhenTrue.ToString());
-        Assert.Contains("GroupInsetLeft", ternary.WhenFalse.ToString());
+        var margin = Assert.IsType<ObjectCreationExpressionSyntax>(
+            Assign(strip.Method("ApplyRowInsets"), "row.Margin").Right);
+        var left = Assert.IsType<ConditionalExpressionSyntax>(
+            margin.ArgumentList!.Arguments[0].Expression);
+        Assert.Equal("tab.Group is null", left.Condition.ToString());
+        Assert.Equal("0", left.WhenTrue.ToString());
+        Assert.Contains("GroupInsetLeft", left.WhenFalse.ToString());
+        // The indent is a LEFT-side cue: a grouped row must not also give up
+        // room on the right, so both kinds of row take the same right inset.
+        Assert.Equal("ContentInsetRight", margin.ArgumentList.Arguments[2].ToString());
 
-        Assert.Single(strip.Method("AddBodyRow").Calls("ApplyGroupInset"));
-        Assert.Single(strip.Method("ReconcileRowOrder").Calls("ApplyGroupInset"));
+        Assert.Single(strip.Method("AddBodyRow").Calls("ApplyRowInsets"));
+        Assert.Single(strip.Method("ReconcileRowOrder").Calls("ApplyRowInsets"));
+    }
+
+    /// <summary>
+    /// One threshold degrades the whole strip. The pinned shelf, the body
+    /// rows and the group headers each drop their titles at the same pane
+    /// width, and the width change is the pass that moves all three: a
+    /// header left on the wide anatomy in the 48px rail spills its chevron
+    /// past the pane edge, which is what vtab-strip-geometry.ps1 measures.
+    /// </summary>
+    [Fact]
+    public void EveryRowKind_DegradesAtTheSameWidth()
+    {
+        var strip = Strip();
+        Assert.Equal(
+            "_paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold",
+            Property(strip, "ShowsTitles").ExpressionBody!.Expression.ToString());
+
+        // The right inset only past the threshold: MUXC already arranges a
+        // row's content outside the compact rail, and widening it there
+        // pushes it further out instead of pulling it in.
+        var inset = Assert.IsType<ConditionalExpressionSyntax>(
+            Property(strip, "ContentInsetRight").ExpressionBody!.Expression);
+        Assert.Equal("ShowsTitles", inset.Condition.ToString());
+        Assert.Equal("RowInsetRight - NavItemTemplateRightGutter", inset.WhenTrue.ToString());
+        Assert.Equal("0", inset.WhenFalse.ToString());
+
+        var anatomy = strip.Method("ApplyPaneWidthAnatomy");
+        Assert.Single(anatomy.Calls("UpdatePinnedShelfChrome"));
+        Assert.Single(anatomy.Calls("ApplyRowInsets"));
+        Assert.Single(anatomy.Calls("ApplyHeaderAnatomy"));
+        Assert.Single(strip.Method("ApplyPaneLayout").Calls("ApplyPaneWidthAnatomy"));
+
+        Assert.Equal("ShowsTitles",
+            Assign(strip.Method("ApplyRowInsets"), "row.ShowClose").Right.ToString());
+        Assert.Equal("ShowsTitles",
+            Assign(strip.Method("ApplyHeaderAnatomy"), "row.ShowTitle").Right.ToString());
+        // The count goes with the name: the swatch and the chevron alone are
+        // what the rail's content slot fits.
+        var compact = Property(Header(), "ShowTitle").AccessorList!.Accessors
+            .Single(a => a.Keyword.ValueText == "set");
+        Assert.Equal(
+            new[] { "_title.Visibility", "_count.Visibility" },
+            compact.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                .Select(a => a.Left.ToString()).ToList());
     }
 
     /// <summary>
