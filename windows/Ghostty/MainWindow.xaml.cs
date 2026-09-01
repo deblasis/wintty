@@ -1815,7 +1815,17 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private Ghostty.Core.Windows.PlacementRect ComputeCursorAnchoredPlacement(MainWindow target)
     {
-        PInvoke.GetCursorPos(out var pt);
+        // A discarded failure leaves pt at (0,0), which is a real coordinate:
+        // the new window would anchor to the corner of the primary monitor
+        // and nothing would say why. Falling back to the source window's own
+        // position keeps the rest of this method honest, since it opens the
+        // new window beside the one that spawned it rather than at a place
+        // the cursor never was.
+        if (!PInvoke.GetCursorPos(out var pt))
+        {
+            var origin = AppWindow.Position;
+            pt = new System.Drawing.Point(origin.X, origin.Y);
+        }
 
         var cursorPoint = new Windows.Graphics.PointInt32(pt.X, pt.Y);
         var display = Microsoft.UI.Windowing.DisplayArea.GetFromPoint(
@@ -4360,10 +4370,16 @@ public sealed partial class MainWindow : Window
         var style = (WINDOW_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
         var isMaximized = (style & WINDOW_STYLE.WS_MAXIMIZE) != 0;
         var g = new Ghostty.Core.Session.WindowGeometry { Maximized = isMaximized };
-        if (isMaximized)
+        var placement = new WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>() };
+        // A discarded failure leaves rcNormalPosition all zeros, and this
+        // window's restore geometry is then persisted as 0,0,0,0 -- the next
+        // launch un-maximizes into a degenerate window. The AppWindow branch
+        // below is the wrong answer for a maximized window (it saves the
+        // maximized rect as the restored size, which is what rcNormalPosition
+        // exists to avoid), but it is a usable window rather than a broken
+        // one, so a failure falls through to it.
+        if (isMaximized && PInvoke.GetWindowPlacement(hwnd, ref placement))
         {
-            var placement = new WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>() };
-            PInvoke.GetWindowPlacement(hwnd, ref placement);
             var rc = placement.rcNormalPosition;
             g.X = rc.left;
             g.Y = rc.top;
