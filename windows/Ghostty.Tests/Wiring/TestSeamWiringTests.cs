@@ -406,13 +406,21 @@ public class TestSeamWiringTests
         Assert.DoesNotContain("Release", condition!, StringComparison.Ordinal);
 
         // And the symbol is defined only when that property says so.
+        //
+        // Selected by CONDITION, not by value. Selecting on "the value
+        // mentions TESTSEAM" matched a second element the moment
+        // TESTSEAM_OPTIN arrived, and the file legitimately has more than one
+        // constant in that family; the gate this test is about is the one
+        // keyed off TestSeamEnabled.
         var define = Assert.Single(
             doc.Descendants(),
             e => e.Name.LocalName == "DefineConstants"
-                 && e.Value.Contains("TESTSEAM", StringComparison.Ordinal));
+                 && (e.Attribute("Condition")?.Value
+                        .Contains("TestSeamEnabled", StringComparison.Ordinal) ?? false));
         Assert.Equal(
             "'$(TestSeamEnabled)' == 'true'",
             define.Attribute("Condition")?.Value);
+        Assert.Contains("TESTSEAM", define.Value, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -50,4 +50,88 @@
     <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
     <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
   </PropertyGroup>
+
+  <!--
+    Both gates above were guarded in one direction only: every check asserted
+    the property is WRITTEN correctly here, and nothing asserted that a
+    shipping build does not carry what the gate excludes. Measured on #926's
+    branch, `dotnet build -c Release /p:DemoEnabled=true` produced a Release
+    binary carrying the demo overlay with the gate's own guard green, and
+    TESTSEAM has the identical exposure (issue #927).
+
+    A test cannot close that. Neither test project references the app, so
+    nothing in a test run can see whether Wintty.dll carries the seam. This
+    can: it is evaluated in every project under windows/, the app included,
+    against the RESOLVED property rather than the file that usually sets it.
+
+    The documented opt-ins stay open and are the only way through, but the
+    test has to be that the opt-in arrived as a GLOBAL property, not merely
+    that $(TestSeam)/$(Demo) reads true. MSBuild lifts environment variables
+    into the property namespace, and this file is imported after the project
+    body, so a bare `$env:Demo='true'` or a `<Demo>true</Demo>` in any csproj,
+    in Directory.Build.props, or in a tier patch would otherwise open the gate
+    AND silence the guard in one stroke: the same class of accident the guard
+    exists to catch, one step removed.
+
+    _DemoOptInIsGlobal below is how that is told apart, and the trick is worth
+    explaining because it reads like a typo. A global property cannot be
+    reassigned from a project file: MSBuild accepts the assignment and ignores
+    it. A local or environment-derived one can. So the probe assigns a
+    sentinel and then asks whether the value survived. If it did, only a
+    command line could have set it.
+
+    That is stricter than the docs promised: the environment-variable route is
+    refused for a legitimate opt-in too. Deliberate. An opt-in that ships the
+    seam should be explicit per invocation, not inherited from a shell.
+  -->
+  <!--
+    Companion constants for the runtime half of the same rule. A test asserting
+    "a Release build carries no demo types" is correct until someone takes the
+    documented opt-in, at which point it would fail a legitimate build. These
+    say which builds asked for it, so the assertion can exempt itself rather
+    than being deleted the first time it is inconvenient.
+
+    Before the probe below, because the probe spends $(TestSeam)/$(Demo).
+  -->
+  <PropertyGroup>
+    <DefineConstants Condition="'$(TestSeam)' == 'true'">$(DefineConstants);TESTSEAM_OPTIN</DefineConstants>
+    <DefineConstants Condition="'$(Demo)' == 'true'">$(DefineConstants);DEMO_OPTIN</DefineConstants>
+  </PropertyGroup>
+
+  <!--
+    Was the opt-in a command line, or something the build inherited? See the
+    long note above. Order inside each pair is load-bearing: the sentinel is
+    written first, and the flag then reads whether it stuck. This is the last
+    thing in the file that reads $(TestSeam) or $(Demo), because after it they
+    no longer say what they said.
+  -->
+  <PropertyGroup>
+    <TestSeam Condition="'$(TestSeam)' == 'true'">not-a-global</TestSeam>
+    <_TestSeamOptInIsGlobal Condition="'$(TestSeam)' == 'true'">true</_TestSeamOptInIsGlobal>
+    <Demo Condition="'$(Demo)' == 'true'">not-a-global</Demo>
+    <_DemoOptInIsGlobal Condition="'$(Demo)' == 'true'">true</_DemoOptInIsGlobal>
+  </PropertyGroup>
+
+  <!--
+    BeforeBuild AND CoreCompile. CoreCompile alone is skipped when the project
+    is up to date, so hooking only it produced a guard that silently did not
+    run on any incremental build, while that build still emits a binary from a
+    compile that may have happened under the leak. BeforeBuild alone is
+    bypassed by an explicit `-t:Compile`. Both costs nothing: whichever runs
+    first fails the build.
+
+    The configuration test is "not Debug" rather than "is Release" so a
+    configuration nobody has added yet inherits the guarded side, and so it
+    matches the #if !DEBUG the runtime half uses.
+  -->
+  <Target Name="RefuseAGateLeakIntoARelease"
+          BeforeTargets="BeforeBuild;CoreCompile"
+          Condition="'$(Configuration)' != 'Debug'">
+    <Error Condition="'$(TestSeamEnabled)' == 'true' and '$(_TestSeamOptInIsGlobal)' != 'true'"
+           Code="WINTTY0001"
+           Text="TestSeamEnabled is true in a $(Configuration) build of $(MSBuildProjectName) without a command-line -p:TestSeam=true, so this build would ship the in-process test seam: a named pipe whose send-text op hands arbitrary bytes to a live shell. Something set TestSeamEnabled, or set TestSeam somewhere other than the command line (a csproj, Directory.Build.props, or the environment). Pass -p:TestSeam=true if a driveable non-Debug build is genuinely wanted, and do not install it." />
+    <Error Condition="'$(DemoEnabled)' == 'true' and '$(_DemoOptInIsGlobal)' != 'true'"
+           Code="WINTTY0002"
+           Text="DemoEnabled is true in a $(Configuration) build of $(MSBuildProjectName) without a command-line -p:Demo=true, so this build would ship demo mode. Something set DemoEnabled, or set Demo somewhere other than the command line (a csproj, Directory.Build.props, or the environment). Pass -p:Demo=true if that is intended." />
+  </Target>
 </Project>
