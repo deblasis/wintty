@@ -70,3 +70,10 @@ tools/gallery/previews/
 .agents/worktrees/
 .agents/nightly-logs/
 .agents/scripts/__pycache__/
+
+# Harness output. Several harnesses default -OutDir under here (tab-tag-ink,
+# and anything pointed at it by hand during an investigation), so leaving it
+# untracked-but-not-ignored makes every run dirty the tree -- which blocks
+# `just signoff`, and puts megabytes of PNGs and dumps one `git add -A` away
+# from a commit.
+/artifacts/
