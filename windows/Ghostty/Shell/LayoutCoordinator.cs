@@ -500,7 +500,7 @@ internal sealed class LayoutCoordinator
         // not the whole switch. Dropping it here leaves the plain cross-fade.
         try
         {
-            _morphStoryboard?.Begin();
+            BeginFlight();
         }
         catch (Exception)
         {
@@ -529,6 +529,40 @@ internal sealed class LayoutCoordinator
 
     /// <summary>Unit direction of the flight being staged.</summary>
     private Point _impactDirection;
+
+    /// <summary>
+    /// How long after the flight starts the impact should land, or null
+    /// when no flight is staged. Set at staging, spent by BeginFlight.
+    /// </summary>
+    private TimeSpan? _pendingImpactDelay;
+
+    /// <summary>
+    /// A beat between the motion ending and the accent landing.
+    ///
+    /// Scheduling the impact to coincide exactly with the last frame of the
+    /// cross-fade was too early rather than too late: the strip is still
+    /// resolving its final opacity while a translate starts on the whole
+    /// tree above it, and the two compose into something the eye reads as a
+    /// stutter rather than as a landing. About three frames at 60Hz, which
+    /// is enough for the switch to visibly finish and short enough that the
+    /// accent still belongs to it.
+    /// </summary>
+    private static readonly TimeSpan ImpactLeadOut = TimeSpan.FromMilliseconds(60);
+
+    /// <summary>
+    /// Start the ghost's flight and schedule the impact against the same
+    /// instant, which is the whole point of doing both here: the compositor
+    /// gets one clock for the motion and the accent that punctuates it,
+    /// rather than one clock for the motion and a prediction for the accent.
+    /// </summary>
+    private void BeginFlight()
+    {
+        _morphStoryboard?.Begin();
+        if (_pendingImpactDelay is not { } delay) return;
+        _pendingImpactDelay = null;
+        _impact?.Invoke(
+            _impactDirection.X, _impactDirection.Y, delay + ImpactLeadOut);
+    }
 
     /// <summary>
     /// Oracle for the morph fuzz harness: every switch must end with zero
@@ -895,7 +929,7 @@ internal sealed class LayoutCoordinator
                 morph, fromRect, rect, SwitchDuration - clock.Elapsed);
             try
             {
-                _morphStoryboard?.Begin();
+                BeginFlight();
             }
             catch (Exception)
             {
@@ -1040,13 +1074,13 @@ internal sealed class LayoutCoordinator
 
         _morphStoryboard = sb;
 
-        // Scheduled from here rather than from the switch's completion, and
-        // from here rather than from Animate, because this is the one place
-        // that knows the flight is really happening AND how long is left of
-        // it: a deferred morph stages with only the remainder of the switch
-        // to run, and the landing has to be delayed by that much and no
-        // more.
-        _impact?.Invoke(_impactDirection.X, _impactDirection.Y, duration);
+        // Remembered, not fired. Staging happens during the pre-roll, and
+        // the storyboards do not start until Begin a few statements later
+        // -- measured 9 to 26ms further on. A delay counted from here
+        // therefore expires that much BEFORE the motion ends, which put the
+        // impact inside the cross-fade's last frames instead of after them.
+        // BeginFlight fires it, from the turn the clocks actually start.
+        _pendingImpactDelay = duration;
 
         void Add(
             DependencyObject target, string path,
