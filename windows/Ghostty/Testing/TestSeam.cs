@@ -445,6 +445,24 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "element-rects":
+            {
+                // The strip's arranged geometry, so a chrome oracle asserts
+                // rects instead of sampling pixels through Mica.
+                var strip = window.TestSeamVerticalStrip;
+                if (strip is null)
+                    return Error(op, "the vertical strip is not the active host");
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    strip.TestSeamWriteElementRects(json);
+                    WriteState(json, window, manager);
+                    json.WriteEndObject();
+                });
+            }
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
