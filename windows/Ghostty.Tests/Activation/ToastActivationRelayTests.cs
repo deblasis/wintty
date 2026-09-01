@@ -336,20 +336,20 @@ public sealed class ToastActivationRelayTests
             release.Wait(Generous);
         });
 
-        var noting = Task.Run(() => relay.Note(new ToastActivation("abc")));
+        var noting = RunOnItsOwnThread(() => relay.Note(new ToastActivation("abc")));
         Assert.True(inHandler.Wait(Generous), "handler never ran");
 
         try
         {
-            var probe = Task.Run(() => relay.Pending);
+            var probe = RunOnItsOwnThread(() => _ = relay.Pending);
             Assert.True(
-                probe.Wait(ShortEnoughToFailFast),
+                probe.Join(ShortEnoughToFailFast),
                 "Pending blocked while a handler was running: the gate is held across invocation");
         }
         finally
         {
             release.Set();
-            noting.Wait(Generous);
+            Assert.True(noting.Join(Generous), "Note never returned");
         }
     }
 
@@ -362,7 +362,7 @@ public sealed class ToastActivationRelayTests
         using var inHandler = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
 
-        var subscribing = Task.Run(() => relay.Subscribe(_ =>
+        var subscribing = RunOnItsOwnThread(() => relay.Subscribe(_ =>
         {
             inHandler.Set();
             release.Wait(Generous);
@@ -371,15 +371,40 @@ public sealed class ToastActivationRelayTests
 
         try
         {
-            var probe = Task.Run(() => relay.Pending);
+            var probe = RunOnItsOwnThread(() => _ = relay.Pending);
             Assert.True(
-                probe.Wait(ShortEnoughToFailFast),
+                probe.Join(ShortEnoughToFailFast),
                 "Pending blocked while a replay was running: the gate is held across invocation");
         }
         finally
         {
             release.Set();
-            subscribing.Wait(Generous);
+            Assert.True(subscribing.Join(Generous), "Subscribe never returned");
         }
+    }
+
+    /// <summary>
+    /// Run <paramref name="body"/> on a thread of its own, never the pool.
+    /// </summary>
+    /// <remarks>
+    /// These two tests assert that a lock is NOT held across a handler
+    /// invocation, and they do it by blocking inside a handler and timing a
+    /// second caller. On the thread pool that measures the wrong thing: the
+    /// blocked handler occupies a pool thread for as long as the test holds
+    /// it, and the pool grows by roughly one thread per second once it is at
+    /// its floor -- so when the rest of the suite is running in parallel, the
+    /// probe can simply fail to be SCHEDULED inside its two seconds. "No
+    /// thread was available" and "the gate is held across invocation" then
+    /// look identical, and the second is what gets reported.
+    ///
+    /// A dedicated thread takes scheduling out of the assertion, so the
+    /// timeout can only be answering the question the test is asking. Both
+    /// threads are foreground-free and joined by the test.
+    /// </remarks>
+    private static Thread RunOnItsOwnThread(Action body)
+    {
+        var t = new Thread(() => body()) { IsBackground = true };
+        t.Start();
+        return t;
     }
 }
