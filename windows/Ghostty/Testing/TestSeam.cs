@@ -585,6 +585,32 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "close":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                if (manager.Tabs.Count <= 1)
+                    return Error(op, "the last tab's close is a window close, which is a "
+                        + "different teardown and is not staged here");
+                // A multi-pane tab's close asks the user first, through a dialog
+                // this assembly can raise but a harness cannot answer. Refused
+                // rather than forced, so the op never means something a click
+                // does not.
+                if (tab.PaneHost.PaneCount > 1)
+                    return Error(op, "close refuses a multi-pane tab: a click there "
+                        + "raises the confirmation dialog, and answering it is not "
+                        + "something this seam stages");
+                // The manager's own close -- what the close button reaches once
+                // TabCloseConfirmation's single-pane path has skipped the prompt.
+                manager.CloseTab(tab);
+                // Both strips re-place the selection on the dispatcher, so the
+                // ack waits that turn out. Read before it, the state still
+                // describes the slot the fill was painted on.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return OkWithState(window, manager, op);
+            }
+
             case "drag":
             case "drag-paced":
             case "drag-zone":
@@ -665,14 +691,20 @@ internal static class TestSeam
                 // is a bare Canvas and gets no automation peer, so the tile's
                 // title is the only thing in the tree. Read while the popup is
                 // up -- it dismisses itself on a 1.2s timer.
-                // Two reasons for null and the message says so, because they
-                // send an investigation in opposite directions: the popup was
-                // never up, or it was up and the client-to-screen conversion
-                // failed. Naming only the first sent a bisect after the popup
-                // lifetime for a coordinate failure.
+                // Two reasons for null, and they get two REFUSALS rather than
+                // one message naming both, because they send an investigation
+                // in opposite directions: the popup was never up, or it was up
+                // and the client-to-screen conversion failed. Naming only the
+                // first sent a bisect after the popup lifetime for a coordinate
+                // failure -- and one message naming both is no better to a
+                // caller, which can only match on text. A harness racing the
+                // popup's 1.2s dismissal has to tell "I was too slow" from "the
+                // product cannot place its own rect", and retry only the first.
+                if (!window.TestSeamSwitcherOpen)
+                    return Error(op, "no switcher: the cycle popup is not up");
                 if (window.TestSeamSwitcherPreviewRect() is not { } rect)
-                    return Error(op, "no switcher preview: either the cycle popup is "
-                        + "not up, or its rect could not be placed on screen");
+                    return Error(op, "the cycle popup is up but its rect could "
+                        + "not be placed on screen");
                 return Json(json =>
                 {
                     json.WriteStartObject();
@@ -952,6 +984,15 @@ internal static class TestSeam
             WriteHost(json, "vertical", root, vertical);
 
             WriteChrome(json, "captionFill", root, window.TestSeamCaptionFill);
+
+            // The join. Measured in the same space as the rows above, which is
+            // the whole point: the active row's span and its cover's span are
+            // two numbers that must be one, and a driver comparing them has to
+            // get both without converting between coordinate systems of its
+            // own invention.
+            var (hSeam, vSeam) = window.TestSeamCovers;
+            WriteChrome(json, "seamHorizontal", root, hSeam);
+            WriteChrome(json, "seamVertical", root, vSeam);
             json.WriteEndObject();
 
             json.WriteEndObject();
