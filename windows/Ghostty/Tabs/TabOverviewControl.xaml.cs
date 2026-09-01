@@ -112,7 +112,7 @@ internal sealed partial class TabOverviewControl : UserControl
             TilesView.Focus(FocusState.Programmatic);
     }
 
-    // A thumbnail: header (color dot + icon + title + pane chip) over the dark
+    // A thumbnail: header (color dot + icon + title + pane chip) over the
     // colored preview body. The GridViewItem container owns the rounded surface
     // and the hover/selected visuals, so the tile itself carries no border state.
     private FrameworkElement BuildTile(TabModel tab)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Ghostty.Controls;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Tabs;
 using Ghostty.Hosting;
@@ -28,6 +29,11 @@ internal sealed class PanePreviewRenderer
 
     private readonly FontFamily _font;
 
+    // The fill behind one pane's mini-layout. Resolved once per renderer:
+    // both callers build a fresh renderer on each open, so a theme change
+    // between openings is honored the same way their Fluent tokens are.
+    private readonly Brush _paneFill = ResolvePaneFill();
+
     // Per-leaf snapshot cache. A renderer is created fresh each time the overview
     // opens, so this freezes one snapshot per pane for the overview's lifetime:
     // the thumbnail pass populates it, and every rail rebuild on hover/selection
@@ -37,7 +43,18 @@ internal sealed class PanePreviewRenderer
 
     public PanePreviewRenderer(FontFamily font) => _font = font;
 
-    // Place one dark mini-pane per leaf on the body Canvas, positioned by the
+    // The terminal's own resolved background -- the same colour
+    // TerminalControl.ApplyGutterBrush gives the chrome abutting each live
+    // surface -- so a preview on a light theme reads light. Before the config
+    // service exists there is no terminal colour to take, so the Fluent page
+    // ground stands in: also theme-aware, where a second literal here would
+    // only move the bug that a hardcoded near-black was.
+    private static Brush ResolvePaneFill()
+        => App.ConfigService is { } config
+            ? new SolidColorBrush(FromRgb(config.BackgroundColor))
+            : ThemeResources.Get<Brush>("ApplicationPageBackgroundThemeBrush", DividerFill);
+
+    // Place one mini-pane per leaf on the body Canvas, positioned by the
     // normalized rect from PanePreviewLayout. A 1px inset on each pane lets the
     // body fill (a neutral slate, set by the caller) read through as the thin
     // divider between splits.
@@ -57,10 +74,10 @@ internal sealed class PanePreviewRenderer
             {
                 Width = w,
                 Height = h,
-                Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0B, 0x0B, 0x0E)),
+                Background = _paneFill,
             };
             // A null child means "draw nothing" (blank/too-small/dead pane): the
-            // Border's dark fill is the whole preview, so we skip allocating a
+            // Border's fill is the whole preview, so we skip allocating a
             // throwaway placeholder element for it.
             if (BuildPaneContent(leaf, w, h, fontSize) is { } content)
                 pane.Child = content;
@@ -71,12 +88,12 @@ internal sealed class PanePreviewRenderer
     }
 
     // The colored preview for one leaf, or null when blank/too-small/dead. Null
-    // lets the caller leave the Border childless (its dark fill is the preview)
+    // lets the caller leave the Border childless (its fill is the preview)
     // rather than allocating a throwaway placeholder element per such pane.
     private UIElement? BuildPaneContent(LeafPane leaf, double w, double h, double fontSize)
     {
         if (w < MinPaneSideForText || h < MinPaneSideForText)
-            return null; // geometry-only: just the dark fill
+            return null; // geometry-only: just the fill
 
         var lineHeight = fontSize * 1.36;
         var charWidth = fontSize * 0.6;
@@ -89,7 +106,7 @@ internal sealed class PanePreviewRenderer
             ? CellGridFormatter.Format(g, rows, cols)
             : (IReadOnlyList<PreviewLine>)Array.Empty<PreviewLine>();
 
-        if (lines.Count == 0) return null; // blank pane: just the dark fill
+        if (lines.Count == 0) return null; // blank pane: just the fill
 
         return BuildLinesView(lines, fontSize);
     }
