@@ -12,6 +12,7 @@ const std = @import("std");
 
 const d3d12 = @import("d3d12.zig");
 const com = @import("com.zig");
+const Retirement = @import("retire.zig").Retirement;
 
 const log = std.log.scoped(.directx12);
 
@@ -19,6 +20,19 @@ const log = std.log.scoped(.directx12);
 /// bufferOptions() / uniformBufferOptions() / bgBufferOptions().
 pub const Options = struct {
     device: ?*d3d12.ID3D12Device = null,
+
+    /// Where the underlying resource goes when this buffer grows or is
+    /// destroyed. Null means release immediately, which is only safe when
+    /// no command list has ever referenced the buffer -- true for the
+    /// standalone buffers in the GPU unit tests, never true for a buffer
+    /// the renderer draws from. DirectX12.bufferOptions() always supplies
+    /// the device's queue.
+    ///
+    /// Deliberately without a default. Null is a real answer, but it must
+    /// be a said one: a builder that simply omitted the field would get a
+    /// bare Release back, which is the use-after-free this type exists to
+    /// prevent, and it would compile and test green while doing it.
+    retire: ?*Retirement,
 };
 
 /// Type-erased buffer handle for passing to RenderPass.Step.
@@ -179,7 +193,7 @@ pub fn Buffer(comptime T: type) type {
             const map_hr = res.Map(0, &read_range, &mapped);
             if (com.FAILED(map_hr) or mapped == null) {
                 log.err("Map for upload buffer failed: 0x{x}", .{@as(u32, @bitCast(map_hr))});
-                _ = res.Release();
+                if (self.opts.retire) |q| q.retire(res) else _ = res.Release();
                 return error.BufferMapFailed;
             }
 
@@ -193,9 +207,26 @@ pub fn Buffer(comptime T: type) type {
             };
         }
 
+        /// Give up this buffer's resource.
+        ///
+        /// The resource goes to the device's retirement queue rather than
+        /// being released here, because both callers -- a grow in `sync` /
+        /// `syncFromArrayLists`, and `deinit` -- can run while a command
+        /// list that binds this buffer as a vertex buffer is still
+        /// executing. D3D12 does not retain what a submitted command list
+        /// references, so releasing the last reference here is a GPU
+        /// use-after-free (issue #944: `ID3D12Resource::<final-release>:
+        /// CORRUPTION`, raised from inside `syncFromArrayLists` growing
+        /// the cell buffer mid-`drawFrame`).
+        ///
+        /// The mapped pointer is dropped immediately even though the
+        /// resource lives on: the upload heap stays mapped until the
+        /// resource is actually destroyed, so the pages the GPU is reading
+        /// remain valid, and nothing may write through the old pointer
+        /// once the buffer has moved on.
         fn release(self: *Self) void {
             if (self.resource) |res| {
-                _ = res.Release();
+                if (self.opts.retire) |q| q.retire(res) else _ = res.Release();
             }
             self.resource = null;
             self.mapped = null;

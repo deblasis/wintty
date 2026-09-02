@@ -855,7 +855,7 @@ pub const ID3D12CommandQueue = extern struct {
         BeginEvent: Reserved,
         EndEvent: Reserved,
         Signal: *const fn (*ID3D12CommandQueue, pFence: *ID3D12Fence, Value: u64) callconv(.winapi) HRESULT,
-        Wait: Reserved,
+        Wait: *const fn (*ID3D12CommandQueue, pFence: *ID3D12Fence, Value: u64) callconv(.winapi) HRESULT,
         GetTimestampFrequency: Reserved,
         GetClockCalibration: Reserved,
         GetDesc: Reserved,
@@ -867,6 +867,14 @@ pub const ID3D12CommandQueue = extern struct {
 
     pub inline fn Signal(self: *ID3D12CommandQueue, fence: *ID3D12Fence, value: u64) HRESULT {
         return self.vtable.Signal(self, fence, value);
+    }
+
+    /// Make the queue stall until `fence` reaches `value`. Nothing
+    /// submitted afterwards executes before then, which is how the
+    /// deferred-release test holds a frame provably in flight without
+    /// depending on how fast the GPU happens to be.
+    pub inline fn Wait(self: *ID3D12CommandQueue, fence: *ID3D12Fence, value: u64) HRESULT {
+        return self.vtable.Wait(self, fence, value);
     }
 
     pub inline fn Release(self: *ID3D12CommandQueue) u32 {
@@ -938,8 +946,15 @@ pub const ID3D12Fence = extern struct {
         // ID3D12Fence
         GetCompletedValue: *const fn (*ID3D12Fence) callconv(.winapi) u64,
         SetEventOnCompletion: *const fn (*ID3D12Fence, Value: u64, hEvent: HANDLE) callconv(.winapi) HRESULT,
-        Signal: Reserved,
+        Signal: *const fn (*ID3D12Fence, Value: u64) callconv(.winapi) HRESULT,
     };
+
+    /// CPU-side signal, as opposed to ID3D12CommandQueue::Signal which the
+    /// GPU reaches in queue order. Used to release a queue stalled on
+    /// `ID3D12CommandQueue::Wait`.
+    pub inline fn Signal(self: *ID3D12Fence, value: u64) HRESULT {
+        return self.vtable.Signal(self, value);
+    }
 
     pub inline fn GetCompletedValue(self: *ID3D12Fence) u64 {
         return self.vtable.GetCompletedValue(self);
@@ -1052,6 +1067,14 @@ pub const ID3D12Resource = extern struct {
 
     pub inline fn Release(self: *ID3D12Resource) u32 {
         return self.vtable.Release(self);
+    }
+
+    /// Take a reference. The returned count is documented by COM as being
+    /// for diagnostics only; the deferred-release test uses it that way --
+    /// comparing two readings of the same object rather than trusting an
+    /// absolute value.
+    pub inline fn AddRef(self: *ID3D12Resource) u32 {
+        return self.vtable.AddRef(self);
     }
 };
 

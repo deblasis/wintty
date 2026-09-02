@@ -18,6 +18,7 @@ const global = @import("../../global.zig");
 const d3d12 = @import("d3d12.zig");
 const dcomp = @import("dcomp.zig");
 const dxgi = @import("dxgi.zig");
+const Retirement = @import("retire.zig").Retirement;
 
 const GUID = com.GUID;
 const HRESULT = com.HRESULT;
@@ -36,6 +37,21 @@ command_queue: *d3d12.ID3D12CommandQueue,
 fence: *d3d12.ID3D12Fence,
 fence_value: std.atomic.Value(u64),
 fence_event: std.os.windows.HANDLE,
+
+/// Resources whose owners are done with them but which the GPU may still
+/// be reading. D3D12 does not retain what a submitted command list
+/// references, so a buffer or texture cannot be released the moment its
+/// owner drops it -- only once `fence` has reached the value its last
+/// referencing submission was signaled with. Everything that would
+/// otherwise call `Release` on a resource the renderer draws from goes
+/// through here instead.
+///
+/// Heap-allocated because `Device` is copied by value into `DirectX12`,
+/// which the generic renderer in turn passes around by value: buffers and
+/// textures capture this pointer in their options at creation time and
+/// must all reach the same queue. Same reason the descriptor heaps in
+/// DirectX12.zig are pointers.
+retirement: *Retirement,
 
 swap_chain: ?*dxgi.IDXGISwapChain1,
 
@@ -391,10 +407,18 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         _ = st.resource.Release();
     };
 
+    // Deferred-release queue. Backed by the C allocator because Device.init
+    // takes no allocator and the buffers/textures that retire into it also
+    // reach it from value-receiver deinits.
+    const retirement = try std.heap.c_allocator.create(Retirement);
+    errdefer std.heap.c_allocator.destroy(retirement);
+    retirement.* = .init(std.heap.c_allocator);
+
     return .{
         .device = dev,
         .command_queue = command_queue.?,
         .fence = fence.?,
+        .retirement = retirement,
         .fence_value = std.atomic.Value(u64).init(0),
         .fence_event = fence_event,
         .swap_chain = swap_chain,
@@ -408,7 +432,38 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
 
 pub fn deinit(self: *Device) void {
     // Wait for GPU to finish before releasing anything.
-    self.waitForGpu() catch {};
+    //
+    // A failure here is not ignorable the way a swallowed `catch {}`
+    // implied: everything below this line final-releases resources the GPU
+    // may still be reading, which is the same corruption the retirement
+    // queue exists to prevent. The releases below have no alternative --
+    // they are owned here and nothing else will free them -- but the
+    // reason has to reach the log, and the device-removed reason
+    // distinguishes the benign case (the GPU is gone, so nothing is
+    // reading anything) from a live device whose fence we failed to
+    // signal. What the retirement queue holds DOES have an alternative;
+    // see below.
+    var drained = true;
+    self.waitForGpu() catch |err| {
+        drained = false;
+        const reason = self.device.GetDeviceRemovedReason();
+        log.err(
+            "waitForGpu before device teardown failed: {}, device removed reason 0x{x}; releasing GPU resources without a drain, and leaking {d} retired resource(s) rather than freeing them under a live GPU",
+            .{ err, @as(u32, @bitCast(reason)), self.retirement.count() },
+        );
+    };
+
+    // Free anything the retirement queue is still holding -- but only when
+    // the drain above actually succeeded. Device.deinit runs per surface,
+    // on every tab and split close, in a process that keeps running, so
+    // "the process is going away" is not available as a justification. On
+    // a failed wait the GPU may still be reading these, and leaking them
+    // is strictly safer than releasing them; the back-buffer and frame
+    // releases below have no such option, which is why the asymmetry is
+    // worth taking here.
+    if (drained) self.retirement.drainAll();
+    self.retirement.deinit();
+    std.heap.c_allocator.destroy(self.retirement);
 
     _ = d3d12.CloseHandle(self.fence_event);
     _ = self.fence.Release();
@@ -435,17 +490,24 @@ pub fn deinit(self: *Device) void {
 }
 
 /// Signal the fence from the command queue and block until the GPU catches up.
+///
+/// On success this is also a full drain of the retirement queue: the signal
+/// seals every resource retired since the last submission, and reaching it
+/// proves the GPU is done with all of them.
 pub fn waitForGpu(self: *Device) !void {
     const signal_value = self.fence_value.fetchAdd(1, .release) + 1;
 
     var hr = self.command_queue.Signal(self.fence, signal_value);
     if (FAILED(hr)) return error.FenceSignalFailed;
+    self.retirement.seal(signal_value);
 
     if (self.fence.GetCompletedValue() < signal_value) {
         hr = self.fence.SetEventOnCompletion(signal_value, self.fence_event);
         if (FAILED(hr)) return error.FenceSetEventFailed;
         _ = d3d12.WaitForSingleObject(self.fence_event, d3d12.INFINITE);
     }
+
+    self.retirement.collect(self.fence.GetCompletedValue());
 }
 
 /// Recreate the shared texture resource and its NT handle at a new
