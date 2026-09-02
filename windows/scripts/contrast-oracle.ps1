@@ -244,10 +244,16 @@ function Get-HorizontalItems {
     $items = @(Get-Kids $tv $CTRL::TabItem)
     $out = [System.Collections.Generic.List[object]]::new()
     foreach ($el in $items) {
-        # A group chip and a tab are both TabItems. The chip is the one
-        # carrying a group status and no close Button of its own.
+        # A group chip and a tab are both TabItems, and "no close Button"
+        # no longer tells them apart: a PINNED tab has none either, because
+        # there is no room for one in a 40px square. So Kind is unreliable
+        # here and nothing reads it -- Measure-HorizontalLeg splits the
+        # chip off by NAME, which the driver knows for certain, and splits
+        # the pinned tabs off by their ItemStatus. It is left on the record
+        # because the vertical edition's Kind is real and the two would
+        # otherwise read as the same field.
         $closes = @(Get-Kids $el $CTRL::Button)
-        $kind = if ($closes.Count -eq 0) { 'chip' } else { 'tab' }
+        $kind = if ($closes.Count -eq 0) { 'chip-or-pinned' } else { 'tab' }
         $selected = $false
         try {
             $p = $el.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
@@ -538,52 +544,18 @@ function Measure-VerticalLeg($Cap, [string]$Leg, [bool]$Compact, [string]$GroupT
         else { Measure-Surface $Cap $Leg 'vtab-close-glyph-inactive' 'glyph' $idleClose.Current.BoundingRectangle 2 "the close X on '$($idle.Name)'" }
     }
 
-    # The pinned shelf. Below a 96px pane the title column is deliberately
-    # collapsed (VerticalTabPinnedRow.cs:40), so the collapsed-sidebar leg
-    # has an icon and no title, and saying so is the honest reading.
+    # The pinned band. A pinned tab is an icon square at every pane width
+    # now, so there is one surface here rather than two: no title to read,
+    # at either width, and no boundary rule under the band either -- the
+    # zone is divided by the change of shape.
     if ($pins.Count -eq 0) {
-        Add-Unmeasured $Leg 'vtab-pinned-title' 'no pinned row in the strip'
-        Add-Unmeasured $Leg 'vtab-pinned-icon' 'no pinned row in the strip'
+        Add-Unmeasured $Leg 'vtab-pinned-icon' 'no pinned square in the strip'
     } else {
-        $pin = $pins[0]
-        $t = Select-RunSaying (Get-SamplableRuns $pin.El $pin.El) $pin.Name
-        if ($null -eq $t) {
-            if ($Compact) { Add-NotApplicable $Leg 'vtab-pinned-title' $compactWhy }
-            else { Add-Unmeasured $Leg 'vtab-pinned-title' 'the pinned row exposes no visible, unclipped Text run' }
-        } else {
-            Measure-Surface $Cap $Leg 'vtab-pinned-title' 'text' $t.Current.BoundingRectangle 1 "pinned '$($pin.Name)'"
-        }
-        # The icon has no automation identity of its own: it is the square
-        # at the row's leading edge, which is where the row's own rect puts
-        # it whatever the pane width is.
-        $r = $pin.Rect
+        # The icon has no automation identity of its own: it is the square,
+        # which is the whole of the pinned tab's rect at every pane width.
+        $r = $pins[0].Rect
         $side = [Math]::Min($r.Height, $r.Width)
-        Measure-Surface $Cap $Leg 'vtab-pinned-icon' 'glyph' (New-Rect $r.X $r.Y $side $r.Height) 3 'the leading square of the pinned row' $true
-    }
-
-    # The pin boundary stroke: a 2px accent rule under the shelf
-    # (VerticalTabStrip.xaml.cs:595, 1353). It carries no automation
-    # identity, so it is read as the band between the last pinned row and
-    # the first body row -- and it is judged by the palette test's fill
-    # rule, because a rule has to be VISIBLE, not readable.
-    if ($pins.Count -gt 0 -and $tabs.Count -gt 0) {
-        $lastPin = $pins[-1]
-        $firstBody = @($tabs | Where-Object { $_.Rect.Y -gt $lastPin.Rect.Y }) | Select-Object -First 1
-        if ($null -eq $firstBody) {
-            Add-Unmeasured $Leg 'vtab-boundary-stroke' 'no body row below the pinned shelf'
-        } else {
-            $top = $lastPin.Rect.Y + $lastPin.Rect.Height
-            $bot = $firstBody.Rect.Y
-            if ($bot - $top -lt 4) {
-                Add-Unmeasured $Leg 'vtab-boundary-stroke' ("the gap under the shelf is {0:N0}px, too thin to sample" -f ($bot - $top))
-            } else {
-                Measure-Surface $Cap $Leg 'vtab-boundary-stroke' 'fill' `
-                    (New-Rect $lastPin.Rect.X $top $lastPin.Rect.Width ($bot - $top)) 0 `
-                    'the 2px rule between the pinned shelf and the body'
-            }
-        }
-    } else {
-        Add-Unmeasured $Leg 'vtab-boundary-stroke' 'the boundary only exists with both a pinned shelf and a body'
+        Measure-Surface $Cap $Leg 'vtab-pinned-icon' 'glyph' (New-Rect $r.X $r.Y $side $r.Height) 3 'the pinned icon square' $true
     }
 
     # The group header row: title, count and chevron, left to right.
@@ -699,8 +671,16 @@ function Measure-HorizontalLeg($Cap, [string]$Leg, [string]$GroupTitle) {
     # inferring it from the absence of a close Button proved unreliable.
     $chips = @($items | Where-Object { $_.Name -eq $GroupTitle })
     $tabs = @($items | Where-Object { $_.Name -ne $GroupTitle })
-    $active = @($tabs | Where-Object { $_.Selected }) | Select-Object -First 1
-    $idle = @($tabs | Where-Object { -not $_.Selected }) | Select-Object -First 1
+    # Pinned tabs are excluded from BOTH samples, and it is the shape change
+    # that makes it necessary: a pinned tab is an icon square with its title
+    # collapsed and no close button at all. $tabs is ordered by X and the
+    # pinned prefix comes first, so the plain "first unselected tab" picked
+    # exactly the one tab that can answer neither question -- two unmeasured
+    # surfaces on every horizontal leg, and this harness exits 1 on any
+    # unmeasured surface. The square gets its own measurement below.
+    $body = @($tabs | Where-Object { $_.Status -notmatch 'Pinned' })
+    $active = @($body | Where-Object { $_.Selected }) | Select-Object -First 1
+    $idle = @($body | Where-Object { -not $_.Selected }) | Select-Object -First 1
 
     if ($null -eq $active) {
         Add-Unmeasured $Leg 'htab-title-active' 'no tab reports itself selected'
@@ -727,25 +707,30 @@ function Measure-HorizontalLeg($Cap, [string]$Leg, [string]$GroupTitle) {
         else { Measure-Surface $Cap $Leg 'htab-close-glyph-inactive' 'glyph' $idle.Close.Current.BoundingRectangle 2 "the close X on '$($idle.Name)'" }
     }
 
-    # The pinned tab's pushpin. Its own surface with its own floor: it is a
-    # glyph, not a word, and it was the run an X-ordered lookup mistook for
-    # the title.
+    # The pinned tab's icon square. Its own surface with its own floor: it
+    # is a glyph, not a word. There is no pushpin any more -- the square IS
+    # the pin mark -- and no title beside it, so the tab's whole rect is
+    # the icon's, the way the vertical band's square is.
     $pinned = @($tabs | Where-Object { $_.Status -match 'Pinned' }) | Select-Object -First 1
     if ($null -eq $pinned) {
-        Add-Unmeasured $Leg 'htab-pin-glyph' 'no tab reports itself pinned'
+        Add-Unmeasured $Leg 'htab-pinned-icon' 'no tab reports itself pinned'
     } else {
-        $glyph = Select-OtherRun (Get-SamplableRuns $pinned.El $pinned.El) $pinned.Name
-        if ($null -ne $glyph) {
-            Measure-Surface $Cap $Leg 'htab-pin-glyph' 'glyph' $glyph.Current.BoundingRectangle 1 "the pushpin on '$($pinned.Name)'"
-        } else {
-            # The pushpin and the tab icon are FontIcons with no Text peer
-            # of their own, so the leading strip of the tab -- which is
-            # where both are drawn -- stands in for them.
-            $pr = $pinned.Rect
-            Measure-Surface $Cap $Leg 'htab-pin-glyph' 'glyph' `
-                (New-Rect ($pr.X + 2) ($pr.Y + 3) ([Math]::Min(56.0, $pr.Width * 0.35)) ([Math]::Max(8.0, $pr.Height - 6))) 1 `
-                "the leading glyph strip of the pinned tab '$($pinned.Name)' (the pushpin exposes no Text peer)" $true
-        }
+        # A FontIcon has no Text peer of its own, so the square the tab
+        # collapsed to stands in for it.
+        #
+        # CENTRED in the tab's rect, not anchored to its left edge. The row
+        # inside a pinned TabViewItem is centre-aligned, so a left-anchored
+        # box of the same width sits half a glyph to the left of the ink:
+        # at the stock item height it still catches the glyph's right half
+        # and passes, and any padding or height change slides it off into
+        # "the fallback rect holds no ink" -- unmeasured, and this harness
+        # exits 1 on that. The vertical band has no such gap because the
+        # whole 40px row IS the square.
+        $pr = $pinned.Rect
+        $side = [Math]::Min($pr.Height, $pr.Width)
+        Measure-Surface $Cap $Leg 'htab-pinned-icon' 'glyph' `
+            (New-Rect ($pr.X + ($pr.Width - $side) / 2) $pr.Y $side $pr.Height) 1 `
+            "the icon square of the pinned tab '$($pinned.Name)'" $true
     }
 
     if ($chips.Count -eq 0) {
@@ -1076,13 +1061,16 @@ $titles = @('alpha', 'bravo', 'charlie', 'delta', 'echo')
 # silent hole in the table.
 $VerticalSurfaces = @(
     'vtab-title-active', 'vtab-close-glyph', 'vtab-title-inactive',
-    'vtab-close-glyph-inactive', 'vtab-pinned-title', 'vtab-pinned-icon',
-    'vtab-boundary-stroke', 'vtab-group-title', 'vtab-group-count',
+    # No vtab-pinned-title and no vtab-boundary-stroke: the band shows icons
+    # and nothing else, and the stroke retired with the zone it used to
+    # separate.
+    'vtab-close-glyph-inactive', 'vtab-pinned-icon',
+    'vtab-group-title', 'vtab-group-count',
     'vtab-group-chevron', 'vtab-selection-field', 'terminal-fg-on-bg'
 )
 $HorizontalSurfaces = @(
     'htab-title-active', 'htab-close-glyph', 'htab-title-inactive',
-    'htab-close-glyph-inactive', 'htab-pin-glyph', 'htab-chip-title',
+    'htab-close-glyph-inactive', 'htab-pinned-icon', 'htab-chip-title',
     'htab-chip-count', 'htab-chip-chevron', 'terminal-fg-on-bg'
 )
 $script:LegVerdicts = [System.Collections.Generic.List[object]]::new()
@@ -1147,7 +1135,7 @@ foreach ($leg in (New-ConfigLegs)) {
             foreach ($pass in 1, 2) {
                 $now = Invoke-SeamCommand $s @{ op = 'get-state' }
                 $paneWidth = [double]$now.state.paneWidth
-                # VerticalTabPinnedRow.TitlePaneWidthThreshold: below 96px
+                # VerticalTabStrip.TitlePaneWidthThreshold: below 96px
                 # the title columns are collapsed by design.
                 $compact = $paneWidth -lt 96
                 $tag = if ($compact) { 'vert-compact' } else { 'vert-wide' }

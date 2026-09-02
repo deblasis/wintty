@@ -201,6 +201,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             CancelDrag("teardown");
             FinishPinFlight("teardown");
             StopAllFieldMotion();
+            _pinnedPanel.StopMotion();
         };
     }
 
@@ -485,13 +486,12 @@ internal sealed partial class VerticalTabStrip : UserControl
     private SolidColorBrush? _rowSeparatorBrush;
     private readonly List<Border> _rowSeparators = new();
 
-    // The pinned shelf: header, fixed row panel, and the zone's boundary
-    // stroke, hosted as NavView.PaneCustomContent. Pinned rows are NOT
-    // MenuItems -- they must not scroll and must not take part in MUXC
-    // selection -- so they get their own container and their own registry.
+    // The pinned shelf: the fixed band of icon squares, hosted as
+    // NavView.PaneCustomContent. Pinned rows are NOT MenuItems -- they
+    // must not scroll and must not take part in MUXC selection -- so they
+    // get their own container and their own registry.
     private readonly StackPanel _pinnedShelf = new();
-    private readonly StackPanel _pinnedPanel = new();
-    private readonly Border _boundaryStroke = new();
+    private readonly TabPinBandPanel _pinnedPanel = new();
 
     /// <summary>The pane width the last ApplyPaneLayout named.</summary>
     private double _paneWidth;
@@ -612,42 +612,12 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// Height of the pin-boundary stroke. The zone edge is a statement
-    /// about the list, not a divider between equals, so it is twice an
-    /// ordinary row line and never skippers.
+    /// The band's breathing room below the last row of squares, before
+    /// the scrolling list begins. Not a rule and not a gap wide enough to
+    /// read as one: the zones are already told apart by shape, and this
+    /// is only the seam the two structures need so neither touches.
     /// </summary>
-    private const double BoundaryStrokeHeight = 2;
-
-    /// <summary>
-    /// How far the boundary stroke stops short of the row band it splits,
-    /// on BOTH sides. Shortening one side only is what made the rule read
-    /// crooked: the band runs from the rows' left inset to the pane edge,
-    /// so an inset applied at the right alone moved the rule's center half
-    /// that distance off the band's at every pane width.
-    /// </summary>
-    private const double BoundaryStrokeInset = 4;
-
-    /// <summary>
-    /// The pin boundary's stroke. Dimmed while idle; brightened while a
-    /// drag is live -- the boundary is the thing a drag-to-pin is aiming
-    /// at, and the brightening is the gesture's aiming feedback. Resolved
-    /// from the strip accent (a theme resource) on every placement, so
-    /// High Contrast re-themes it the way every other accent use here
-    /// does; a fresh brush per call because AccentBrush is the shared
-    /// resource instance and mutating its alpha would retint the panel.
-    /// </summary>
-    private Brush BoundaryStrokeBrush()
-    {
-        var accent = AccentBrush.Color;
-        // The zone's one anchor now that the label is gone: present at a
-        // glance while idle, near-full while a drag aims at it. High
-        // Contrast rejects translucency, so there the line is opaque in
-        // both states -- the system's HC accent carries the color.
-        byte idle = _highContrast ? (byte)0xFF : (byte)0x99;
-        byte live = _highContrast ? (byte)0xFF : (byte)0xE6;
-        byte alpha = _drag is null ? idle : live;
-        return new SolidColorBrush(Color.FromArgb(alpha, accent.R, accent.G, accent.B));
-    }
+    private const double BandInsetBottom = 4;
 
     /// <summary>
     /// One line in each gap between the scrolling list's rows, skipping both
@@ -655,11 +625,10 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// in the accent, by the selected row's own top and bottom stroke.
     /// Drawing them again puts two lines a pixel apart.
     ///
-    /// Only the list's gaps. The pinned rows live in the fixed panel above
-    /// the scroller, so the pin zone's edge is not a gap in this pool any
-    /// more: it is the boundary stroke along the shelf's bottom edge
-    /// (UpdatePinnedShelfChrome), which starts where the panel ends and the
-    /// list begins.
+    /// Only the list's gaps. The pinned squares live in the fixed band
+    /// above the scroller, so the pin zone's edge is not a gap in this
+    /// pool any more, and nothing draws it: the band is a different shape
+    /// from the list, and that is the whole division.
     ///
     /// Rebuilt rather than kept in sync per item, because the thing being
     /// mirrored is MUXC's arranged layout, and the only honest read of that
@@ -669,8 +638,8 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         // The shelf rides this refresh on purpose: it is the pass every
         // selection-placement and drag entry/exit path already calls, so
-        // the boundary stroke's brighten/dim never needs a caller of its
-        // own and cannot be forgotten on an exit path.
+        // the band's own chrome never needs a caller of its own and
+        // cannot be forgotten on an exit path.
         UpdatePinnedShelfChrome();
 
         // The group fields ride it for the same reason, and they have to
@@ -1187,6 +1156,24 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     internal FrameworkElement SelectionRowElement => SelectionRow;
 
+    /// <summary>
+    /// Whether the active row REACHES the pane border, which is the premise
+    /// the seam cover rests on: the cover is placed from the row's right
+    /// edge, and that edge is the border it is hiding.
+    ///
+    /// False for a pinned square. A square is 40px wide wherever it sits in
+    /// the band, so its right edge is somewhere in the middle of the strip
+    /// -- and the cover, placed there, is a bar of terminal colour drawn
+    /// across the band's own gutter with the pane border it exists to hide
+    /// still standing untouched beside the square.
+    ///
+    /// This is the same fact <c>UpdateSelectionRow</c> already spends on the
+    /// selection fill's fourth stroke ("a square meets nothing"), asked
+    /// where the cover can hear it.
+    /// </summary>
+    internal bool ActiveRowMeetsThePane
+        => RowElementOf(_manager.ActiveTab) is not VerticalTabPinnedRow;
+
     /// <summary>Raised whenever the selection row moves, resizes, or hides.</summary>
     internal event Action? SelectionRowChanged;
 
@@ -1221,13 +1208,24 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         var topLeft = item.TransformToVisual(this)
             .TransformPoint(new Windows.Foundation.Point(0, 0));
-        var rowHeight = Math.Max(0, item.ActualHeight - RowInsetVertical * 2);
-        var rowWidth = Math.Max(0, ActualWidth - RowInsetLeft);
+        // The fill takes the shape of what it marks. A body row spans the
+        // lane and meets the terminal at the pane's edge; a pinned square
+        // is a square sitting inside a band, and a lane-wide bar behind it
+        // would mark four slots the tab does not occupy. The square also
+        // carries no margin of its own -- the band owns every gutter -- so
+        // its box is its box, with no inset to subtract.
+        var square = item is VerticalTabPinnedRow;
+        var rowHeight = square
+            ? item.ActualHeight
+            : Math.Max(0, item.ActualHeight - RowInsetVertical * 2);
+        var rowWidth = square
+            ? item.ActualWidth
+            : Math.Max(0, ActualWidth - RowInsetLeft);
 
         SelectionRow.Width = rowWidth;
         SelectionRow.Height = rowHeight;
-        Canvas.SetLeft(SelectionRow, RowInsetLeft);
-        Canvas.SetTop(SelectionRow, topLeft.Y + RowInsetVertical);
+        Canvas.SetLeft(SelectionRow, square ? topLeft.X : RowInsetLeft);
+        Canvas.SetTop(SelectionRow, square ? topLeft.Y : topLeft.Y + RowInsetVertical);
         SelectionRow.CornerRadius = new CornerRadius(0);
         // The row wears the field's own brush, settled onto the colour this
         // tab rests at. MainWindow's vertical seam cover reads its fill
@@ -1240,14 +1238,19 @@ internal sealed partial class VerticalTabStrip : UserControl
             TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast));
         SelectionRow.Background = _field.Brush;
 
-        // The same folder stroke the horizontal strip gets, rotated: the row
-        // meets the pane along its right edge, so that is the side left open
-        // and the other three carry the pane's own border colour. A tab with
-        // a preset colour is stroked in that colour, matching its pane.
+        // The same folder stroke the horizontal strip gets, rotated: a body
+        // row meets the pane along its right edge, so that is the side left
+        // open and the other three carry the pane's own border colour. A
+        // square meets nothing -- it sits inside the band with list rows
+        // below and band gutters around it -- so it is closed on all four.
+        // A tab with a preset colour is stroked in that colour, matching
+        // its pane.
         SelectionRow.BorderBrush = _manager.ActiveTab.Color != TabColor.None
             ? TabColorBrush.From(TabColorPalette.Border(_manager.ActiveTab.Color))
             : AccentBrush;
-        SelectionRow.BorderThickness = new Thickness(1, 1, 0, 1);
+        SelectionRow.BorderThickness = square
+            ? new Thickness(1)
+            : new Thickness(1, 1, 0, 1);
 
         SelectionRow.Visibility = Visibility.Visible;
         UpdateRowSeparators(selectionRowVisible: true);
@@ -1827,8 +1830,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         => ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
     /// <summary>
-    /// The pinned section: a small-caps header, the fixed row panel, and
-    /// the zone boundary's stroke along the panel's bottom edge.
+    /// The pinned section: one band of icon squares, and nothing else.
     /// </summary>
     /// <remarks>
     /// The shelf rides <see cref="NavigationView.PaneCustomContent"/>
@@ -1846,23 +1848,22 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </remarks>
     private void BuildPinnedShelf()
     {
-        // No section label: the zone is announced by structure -- the
-        // pinned rows wear full body-row anatomy in the expanded pane, and
-        // the boundary line under the last one is what marks the zone.
-        // (Per-row "Pinned" ItemStatus keeps the zone in the automation
-        // tree; the label's heading role went with it.)
-        _boundaryStroke.Height = BoundaryStrokeHeight;
-        _boundaryStroke.IsHitTestVisible = false;
-        // A breath below the cluster's own 2px row insets, and off both
-        // ends of the row band so the rule reads as drawn between the zones
-        // rather than painted edge to edge -- equally off both, or it is
-        // the band's center it drifts away from.
-        _boundaryStroke.Margin = new Thickness(
-            RowInsetLeft + BoundaryStrokeInset, 3, BoundaryStrokeInset, 0);
-        _boundaryStroke.Visibility = Visibility.Collapsed;
+        // No label and no rule: the zone is announced by structure. A
+        // pinned tab is an icon square and a body row is a row, and two
+        // shapes stacked need nothing drawn between them. (Per-square
+        // "Pinned" ItemStatus keeps the zone in the automation tree.)
+        //
+        // The band takes the rows' own inset on BOTH sides -- its first
+        // column starts on the vertical the list's icons do, and its last
+        // one stops the same distance short of the pane edge, so the
+        // column count is what the pane can hold rather than what it can
+        // hold flush. A breath at top and bottom so neither structure
+        // touches the other.
+        _pinnedPanel.Margin = new Thickness(
+            RowInsetLeft, RowInsetVertical, RowInsetLeft, BandInsetBottom);
+        _pinnedPanel.HorizontalAlignment = HorizontalAlignment.Left;
 
         _pinnedShelf.Children.Add(_pinnedPanel);
-        _pinnedShelf.Children.Add(_boundaryStroke);
         _pinnedShelf.Visibility = Visibility.Collapsed;
 
         NavView.PaneCustomContent = _pinnedShelf;
@@ -2257,13 +2258,21 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
+    /// Pane width at or above which the strip's rows show titles. The
+    /// compact pane is 48px wide; the expanded pane 220. Anything at or
+    /// past this is wide enough to read a trimmed title.
+    /// </summary>
+    private const double TitlePaneWidthThreshold = 96;
+
+    /// <summary>
     /// Whether the pane is wide enough to read a title. One threshold for
-    /// the whole strip: the pinned shelf, the body rows and the group
-    /// headers all change anatomy at the same width, or the rail degrades
-    /// in pieces.
+    /// everything that carries one: the body rows and the group headers
+    /// change anatomy at the same width, or the rail degrades in pieces.
+    /// The pinned band answers to no width -- an icon square is an icon
+    /// square in a 48px rail and in a 220px sidebar alike.
     /// </summary>
     private bool ShowsTitles
-        => _paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold;
+        => _paneWidth >= TitlePaneWidthThreshold;
 
     /// <summary>
     /// The right margin a row's content wears to reclaim MUXC's reserved
@@ -2554,35 +2563,34 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// The shelf's two state-dependent bits: the header exists only while
-    /// pins do, and the boundary stroke marks the edge between the zones,
-    /// so it exists only while both do -- the same "both zones exist" gate
-    /// the in-list boundary stroke always had.
+    /// The band's two state-dependent bits: it exists only while pins do,
+    /// and it glides its squares between slots only while no gesture owns
+    /// their composition Translation.
+    ///
+    /// There is no zone rule to gate any more. The band's own shape is
+    /// what says where the pinned zone ends, at every pane width and
+    /// whether or not a body row exists below it, so the "both zones
+    /// exist" question the stroke had to ask no longer has an answer
+    /// anything draws.
     /// </summary>
     private void UpdatePinnedShelfChrome()
     {
         var anyPins = _manager.PinCount > 0;
         _pinnedShelf.Visibility = anyPins ? Visibility.Visible : Visibility.Collapsed;
 
-        var bothZones = anyPins && _manager.PinCount < _manager.Tabs.Count;
-        _boundaryStroke.Visibility = bothZones ? Visibility.Visible : Visibility.Collapsed;
-        // Brightens while a drag is live, via BoundaryStrokeBrush's drag
-        // gate -- the aiming feedback the drag-to-pin gesture reads.
-        if (bothZones) _boundaryStroke.Background = BoundaryStrokeBrush();
-
-        // The pinned rows wear full body-row anatomy when the pane is wide
-        // enough to read a title, and degrade to the icon-only slot the
-        // 48px compact pane fits when it is not.
-        foreach (var (_, row) in _pinnedRows)
-            row.ShowTitle = ShowsTitles;
+        // One writer on Translation. A live drag glides the rows it moves
+        // -- pinned squares included -- and the band standing down for the
+        // length of the gesture is what keeps the two from fighting.
+        _pinnedPanel.MotionEnabled =
+            _drag is null && TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
     }
 
     /// <summary>
-    /// Re-answer every width-dependent question in the strip. The pinned
-    /// shelf, the body rows and the group headers each degrade at the same
-    /// threshold, and a width change is the only event that moves all
-    /// three at once -- the per-row passes that follow a pin, a group or a
-    /// reorder each carry their own row.
+    /// Re-answer every width-dependent question in the strip. The body
+    /// rows and the group headers degrade at the same threshold, and the
+    /// pinned band re-columns on its own arrange; a width change is the
+    /// only event that moves all three at once -- the per-row passes that
+    /// follow a pin, a group or a reorder each carry their own row.
     /// </summary>
     private void ApplyPaneWidthAnatomy()
     {
@@ -2650,19 +2658,41 @@ internal sealed partial class VerticalTabStrip : UserControl
                 e.Handled = true;
                 ActivateFromShelf(tab);
                 break;
-            case Windows.System.VirtualKey.Down or Windows.System.VirtualKey.Up:
+            // Two axes, because the band has two. A step of one along the
+            // row for Left/Right, a step of one COLUMN for Up/Down -- which
+            // in a one-column compact rail is a step of one, so the rail
+            // behaves exactly as the stack of rows it replaced did.
+            case Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right:
                 e.Handled = FocusShelfNeighbour(
-                    tab, e.Key == Windows.System.VirtualKey.Down ? 1 : -1);
+                    tab, e.Key == Windows.System.VirtualKey.Right ? 1 : -1);
+                break;
+            case Windows.System.VirtualKey.Down or Windows.System.VirtualKey.Up:
+                var stride = Math.Max(1, _pinnedPanel.Columns);
+                e.Handled = FocusShelfNeighbour(
+                    tab, e.Key == Windows.System.VirtualKey.Down ? stride : -stride);
                 break;
         }
     }
 
     /// <summary>
-    /// Walk the shelf, and cross the boundary at its edges. Panel order IS
-    /// projection order (ReconcileRowOrder keeps them equal), so indexes
-    /// here are the row's real neighbours. Down past the last pinned row
-    /// lands on the first body row, where MUXC's own arrow traversal takes
-    /// over; Up past the first stops -- the pane toggle above is MUXC's.
+    /// Walk the band by <paramref name="delta"/> slots, and cross the
+    /// boundary at its edges. Panel order IS projection order
+    /// (ReconcileRowOrder keeps them equal), so an index step is a real
+    /// step through the pinned prefix.
+    ///
+    /// The CALLER decides what a step is worth, because the band wraps: a
+    /// step of one is the square beside this one, and a step of one column
+    /// is the square below it. Walking Down by one was correct while the
+    /// pins were a vertical stack and became a lie the moment they shared a
+    /// row -- Down moved the focus 44px to the RIGHT, and Left and Right
+    /// did nothing at all, since the squares sit outside MUXC's traversal
+    /// and nothing else was listening.
+    ///
+    /// Down past the last square lands on the first body row, where MUXC's
+    /// own arrow traversal takes over. A downward step from the last band
+    /// row lands past the end whatever the column count is, which is what
+    /// makes that crossing survive the stride. Up past the first stops --
+    /// the pane toggle above is MUXC's.
     /// </summary>
     private bool FocusShelfNeighbour(TabModel tab, int delta)
     {
@@ -2671,6 +2701,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (i >= 0 && i < _pinnedPanel.Children.Count)
             return _pinnedPanel.Children[i].Focus(FocusState.Programmatic);
 
+        // A partly-filled last band row: Down from a square with no square
+        // under it should still leave the band rather than stop dead, so an
+        // overshoot crosses the same way a step past the end does. An
+        // undershoot does not -- Up from the first row has nowhere to go.
         if (delta > 0 && FirstBodyItem() is { } firstBody)
             return firstBody.Focus(FocusState.Programmatic);
 
@@ -3193,6 +3227,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         // at a time, and the new drag's churn must not share the shelf
         // with a ghost from the old one.
         FinishPinFlight("superseded");
+        // The band hands its squares' Translation back before the drag
+        // takes it: from here the gesture's own glide pass is the only
+        // writer, and a band glide still easing home would be overwritten
+        // mid-flight and leave the square parked off its slot.
+        _pinnedPanel.StopMotion();
         // Existence is the rep row's answer for both kinds; the anchor --
         // the element the follow rides -- is the header for a run.
         if (RowElementOf(drag.Tab) is not { } row) { CancelDrag("closed"); return; }
@@ -4448,27 +4487,44 @@ internal sealed partial class VerticalTabStrip : UserControl
             return;
         }
 
-        var pins = TabStripProjection.Rows(_manager)
-            .Take(_manager.PinCount).ToList();
-        if (pins.Count == 0) { HidePinPreview(); return; }
-        if (RowElementOf(pins[^1]) is not { } last) { HidePinPreview(); return; }
-        var lastCenter = RowCenterY(pins[^1]);
-        if (double.IsNaN(lastCenter) || last.ActualWidth <= 0)
+        // The slot one past the end of the band, asked of the band itself
+        // rather than derived from the last square's center. A band wraps,
+        // so "the next slot" is sometimes beside the last square and
+        // sometimes at the start of a new row, and only the panel that
+        // arranges the squares knows which -- re-deriving it here would be
+        // a second layout opinion that disagrees at every column boundary.
+        var slot = BandSlotRect(_manager.PinCount);
+        if (double.IsNaN(slot.X) || double.IsNaN(slot.Y))
         {
             HidePinPreview();
             return;
         }
 
-        // The slot after the last pinned row: one row pitch down from its
-        // center (40px row + 2+2 margins), at the rows' own inset. Both
-        // vertical insets: the ghost zeroes its own margin, and the real
-        // row's 2px top margin is half of where its center actually
-        // lands -- shorting one leaves the ghost 2px proud of the slot
-        // and flashes at the handoff.
-        ShowPinPreview(drag,
-            top: lastCenter + VerticalTabPinnedRow.RowHeight / 2 + 2 * RowInsetVertical,
-            left: RowInsetLeft,
-            width: last.ActualWidth);
+        ShowPinPreview(drag, top: slot.Y, left: slot.X, width: slot.Width);
+    }
+
+    /// <summary>
+    /// A band slot's box in THIS control's coordinates, including the
+    /// slot one past the last square. NaN when the band has not been
+    /// arranged into the tree yet: a promise about a slot nobody has
+    /// placed is a wrong promise, and the caller hides the ghost.
+    /// </summary>
+    private Windows.Foundation.Rect BandSlotRect(int index)
+    {
+        var nowhere = new Windows.Foundation.Rect(
+            double.NaN, double.NaN, TabPinBand.ChipSize, TabPinBand.ChipSize);
+        try
+        {
+            var slot = _pinnedPanel.SlotRect(index);
+            var origin = _pinnedPanel.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(slot.X, slot.Y));
+            return new Windows.Foundation.Rect(
+                origin.X, origin.Y, slot.Width, slot.Height);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return nowhere;
+        }
     }
 
     private double ShelfBottomY()
@@ -5045,7 +5101,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// <summary>
     /// The strip's arranged geometry, in this control's own coordinate
     /// space. Every chrome question the strip's layout answers -- where the
-    /// zone boundary sits, how far the close glyph is from the pane edge,
+    /// pinned band ends, how far the close glyph is from the pane edge,
     /// whether a header's content fits -- is a rect comparison, and reading
     /// the rects beats sampling pixels: Mica puts the desktop behind the
     /// strip, so what a screen grab shows depends on the wallpaper.
@@ -5058,7 +5114,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         json.WriteStartObject("rects");
         WriteSeamRect(json, "strip", this);
         WriteSeamRect(json, "pane", NavView);
-        WriteSeamRect(json, "boundary", _boundaryStroke);
+        // The band, not a rule between the zones: the pinned zone's edge
+        // IS this box's bottom, so a chrome oracle measures the structure
+        // rather than a stroke that no longer exists.
+        WriteSeamRect(json, "band", _pinnedPanel);
 
         // Manager order, not dictionary order: a driver indexes these
         // against the state block in the same response.

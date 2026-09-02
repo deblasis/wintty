@@ -192,10 +192,12 @@ internal sealed partial class TabJoinRing : Grid
     /// animations-off WITH High Contrast: two different questions, one asking
     /// whether the arm may spring and the other what the arm may be made of.
     ///
-    /// The ink stays the accent, which is the same call
-    /// <c>BoundaryStrokeBrush</c> makes one file along ("the system's HC accent
-    /// carries the color"), so the two chrome affordances agree. A theme whose
-    /// ground sits near the accent is the residual risk, and it is the strip's
+    /// The ink stays the accent: in High Contrast the system's own accent is
+    /// what carries colour, so an affordance that has to keep its identity
+    /// through the mode keeps it there rather than in a fill. The pin
+    /// boundary's stroke made the same call one file along until it retired
+    /// with the zone it separated; the rule outlived it. A theme whose ground
+    /// sits near the accent is the residual risk, and it is the strip's
     /// standing one rather than this gesture's.
     /// </summary>
     private void SetHaloForm(bool highContrast)

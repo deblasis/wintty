@@ -1,28 +1,35 @@
 <#
 .SYNOPSIS
-    Does a colour-tagged tab's PIN GLYPH actually get the tag's ink?
+    Does a colour-tagged tab's PROFILE ICON actually get the tag's ink?
 
 .DESCRIPTION
     The horizontal strip's ink pass paints a colour-tagged tab's title and
-    then hands the same brush to the rest of the header row -- pin mark,
-    profile icon, bell. The row lookup went through the header panel's
-    first child, and when the group rail took that slot (#833) the whole
-    row assignment became unreachable: titles kept colouring, glyphs
-    silently stopped (#883, and the dead pin ink behind #882).
+    then hands the same brush to the rest of the header row -- profile
+    icon, bell. The row lookup went through the header panel's first
+    child, and when the group rail took that slot (#833) the whole row
+    assignment became unreachable: titles kept colouring, glyphs silently
+    stopped (#883, and the dead glyph ink behind #882).
+
+    The canary used to be the pushpin. Pinned tabs are icon squares now
+    and carry no pushpin, so the profile icon is the glyph that remains --
+    and it is the same claim, because it is the same loop over the row's
+    children that stopped running. The two measured tabs stay pinned: a
+    pinned tab shows its icon and nothing else, so the sample cannot land
+    on a title by accident.
 
     Nothing in the C# said so. The brush was still computed, the call was
     still written, and a test over resolved brushes would have measured
     the correct value of a colour nothing painted with. So this reads
     PIXELS: it drives real state through the seam, asks the seam where the
-    pin glyph landed, and samples the ink out of a screen capture.
+    icon landed, and samples the ink out of a screen capture.
 
     The claim is deliberately RELATIVE. The strip renders light in every
     leg on this machine (Mica shows a light desktop through it even under
     a dark theme), so "the pin is light because the theme is dark" would
     be measuring the wrong thing. What the fix guarantees, and what this
-    asserts, is that the tagged tab's pin ink IS the tag foreground and is
-    NOT the untagged tab's pin ink. Both tabs are pinned and neither is
-    active, so the only difference between them is the tag.
+    asserts, is that the tagged tab's icon ink IS the tag foreground and
+    is NOT the untagged tab's icon ink. Both tabs are pinned and neither
+    is active, so the only difference between them is the tag.
 
     Coexistence. Like contrast-oracle.ps1 this does NOT call
     Assert-NoWintty: other agents and the developer run their own Wintty
@@ -203,8 +210,8 @@ try {
         throw ("HARVEST_MISS: a measured tab is active (index {0})" -f $state.state.active)
     }
 
-    $taggedRect = Invoke-SeamCommand $session @{ op = 'header-rect'; index = 0; part = 'pin' }
-    $plainRect = Invoke-SeamCommand $session @{ op = 'header-rect'; index = 1; part = 'pin' }
+    $taggedRect = Invoke-SeamCommand $session @{ op = 'header-rect'; index = 0; part = 'icon' }
+    $plainRect = Invoke-SeamCommand $session @{ op = 'header-rect'; index = 1; part = 'icon' }
     if (-not $taggedRect.fg) {
         throw "HARVEST_MISS: the seam reported no tag foreground for the tagged tab"
     }
@@ -213,8 +220,8 @@ try {
     Start-Sleep -Milliseconds 400
     $cap = New-WindowCapture $session.Hwnd64 ([uint32]$session.Proc.Id) 'strip'
     try {
-        $taggedInk = Get-InkAt $cap $taggedRect 'tagged pin glyph'
-        $plainInk = Get-InkAt $cap $plainRect 'untagged pin glyph'
+        $taggedInk = Get-InkAt $cap $taggedRect 'tagged profile icon'
+        $plainInk = Get-InkAt $cap $plainRect 'untagged profile icon'
     } finally { $cap.Bmp.Dispose() }
 
     $tagged3 = @($taggedInk.FgR, $taggedInk.FgG, $taggedInk.FgB)
@@ -225,8 +232,8 @@ try {
 
     Write-Host ''
     Write-Host ("tag foreground the product chose : {0}" -f (Format-Rgb $expect))
-    Write-Host ("tagged pin ink   (measured)      : {0} on {1}" -f $taggedInk.FgHex, $taggedInk.BgHex)
-    Write-Host ("untagged pin ink (measured)      : {0} on {1}" -f $plainInk.FgHex, $plainInk.BgHex)
+    Write-Host ("tagged icon ink   (measured)     : {0} on {1}" -f $taggedInk.FgHex, $taggedInk.BgHex)
+    Write-Host ("untagged icon ink (measured)     : {0} on {1}" -f $plainInk.FgHex, $plainInk.BgHex)
     Write-Host ("tagged vs untagged               : {0} (need >= {1})" -f $distinct, $InkDistinct)
     Write-Host ("tagged vs tag foreground         : {0}" -f $toExpect)
     Write-Host ("untagged vs tag foreground       : {0} (tagged must be nearer)" -f $plainToExpect)
@@ -241,24 +248,24 @@ try {
     # would have carried untagged.
     $fail = @()
     if ($distinct -lt $InkDistinct) {
-        $fail += ("the tagged tab's pin glyph is the same ink as the untagged tab's ({0} vs {1}, distance {2}): the tag never reached the glyph" -f
+        $fail += ("the tagged tab's profile icon is the same ink as the untagged tab's ({0} vs {1}, distance {2}): the tag never reached the glyph" -f
             $taggedInk.FgHex, $plainInk.FgHex, $distinct)
     }
     if ($toExpect -ge $plainToExpect) {
-        $fail += ("the tagged pin glyph is no closer to the tag foreground {0} than the untagged one is ({1} vs {2})" -f
+        $fail += ("the tagged profile icon is no closer to the tag foreground {0} than the untagged one is ({1} vs {2})" -f
             (Format-Rgb $expect), $toExpect, $plainToExpect)
     }
     if ($toExpect -ge $distinct) {
-        $fail += ("the tagged pin glyph sits nearer the untagged ink than the tag foreground {0} ({1} vs {2}): it drifted, it did not land on the tag" -f
+        $fail += ("the tagged profile icon sits nearer the untagged ink than the tag foreground {0} ({1} vs {2}): it drifted, it did not land on the tag" -f
             (Format-Rgb $expect), $distinct, $toExpect)
     }
 
     if ($fail.Count -gt 0) {
-        Write-Host 'FAIL: the colour tag did not reach the pin glyph' -ForegroundColor Red
+        Write-Host 'FAIL: the colour tag did not reach the profile icon' -ForegroundColor Red
         foreach ($f in $fail) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
         $verdict = 2
     } else {
-        Write-Host 'PASS: the tagged tab paints its pin glyph in the tag foreground' -ForegroundColor Green
+        Write-Host 'PASS: the tagged tab paints its profile icon in the tag foreground' -ForegroundColor Green
     }
 }
 catch {

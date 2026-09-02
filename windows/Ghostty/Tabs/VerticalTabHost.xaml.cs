@@ -412,6 +412,12 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// </summary>
     internal FrameworkElement SelectionRowElement => _strip.SelectionRowElement;
 
+    /// <summary>
+    /// Whether the active row reaches the pane border, so MainWindow knows
+    /// whether there is a seam to cover at all. See the strip's own member.
+    /// </summary>
+    internal bool ActiveRowMeetsThePane => _strip.ActiveRowMeetsThePane;
+
     /// <summary>Raised whenever the selection row moves, resizes, or hides.</summary>
     internal event Action? SelectionRowChanged
     {

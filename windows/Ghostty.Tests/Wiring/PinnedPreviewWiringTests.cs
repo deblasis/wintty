@@ -72,18 +72,33 @@ public class PinnedPreviewWiringTests
         Assert.True(gate.Span.End < show.Span.Start,
             "the show must be unreachable while the hide-gate holds");
 
-        // The slot promises where the row will actually land: one row pitch
-        // down from the last pinned row's center, with BOTH of the rows'
-        // 2px vertical insets accounted. The ghost zeroes its own margin
-        // and a real row's top margin is half of where its center lands,
-        // so shorting either inset parks the ghost 2px proud of the slot
-        // and flashes at the handoff. The exact expression is the guard --
-        // the omission, not an inversion, is how this regresses.
-        Assert.Contains(
-            update.DescendantNodes().OfType<ArgumentSyntax>(),
-            a => a.Expression.ToString() ==
-                "lastCenter + VerticalTabPinnedRow.RowHeight / 2 "
-                + "+ 2 * RowInsetVertical");
+        // The slot promises where the square will actually land, and it is
+        // ASKED of the band rather than derived here. A band wraps: the
+        // next slot is sometimes beside the last square and sometimes at
+        // the start of a new row, and arithmetic that assumes one pitch
+        // below the last square is wrong at every column boundary -- which
+        // is the regression this replaces, not merely a re-spelling of it.
+        var slot = update.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "slot");
+        var ask = Assert.IsType<InvocationExpressionSyntax>(slot.Initializer!.Value);
+        Assert.Equal("BandSlotRect", ask.CalleeText());
+        // One past the end: the slot the pin about to land will take.
+        Assert.Equal("_manager.PinCount", ask.Arg(0));
+
+        // The three named arguments, each pinned to ITS axis. Looking for
+        // "slot.X" and "slot.Y" anywhere among the method's arguments is
+        // satisfied by `top: slot.X, left: slot.Y` -- both tokens are still
+        // present, and the ghost is drawn transposed. For a slot in band row
+        // 1 column 0 that is top 0 left 44 instead of top 44 left 0, which
+        // is a promise about a different square. The band's second axis is
+        // the whole reason this guard exists: in a one-column stack a
+        // transposition is invisible.
+        var named = show.ArgumentList.Arguments
+            .Where(a => a.NameColon is not null)
+            .ToDictionary(a => a.NameColon!.Name.Identifier.ValueText, a => a.Expression.ToString());
+        Assert.Equal("slot.Y", named["top"]);
+        Assert.Equal("slot.X", named["left"]);
+        Assert.Equal("slot.Width", named["width"]);
     }
 
     /// <summary>

@@ -124,24 +124,23 @@ public class TabPinZoneWiringTests
     }
 
     /// <summary>
-    /// The structural panel moved the pinned rows out of the scrolling
-    /// list, so the zone edge is no longer a gap in the separator pool:
-    /// it is the stroke along the shelf's bottom edge. The #808 semantics
-    /// travel with it unchanged -- the manager's PinCount is the edge's
-    /// truth at paint time, the stroke exists only while both zones do,
-    /// it never depends on which row is active, and the drag gate is what
-    /// brightens it.
+    /// The band moved the pinned rows out of the scrolling list AND out
+    /// of the business of drawing an edge: the zone is neither a gap in
+    /// the separator pool nor a stroke under the shelf, it is a different
+    /// shape stacked above one. The #808 semantics that survive are the
+    /// ones about the pool -- it walks the body rows only, the manager's
+    /// PinCount is where it starts, and the shelf refresh rides it so no
+    /// exit path can forget the zone's chrome.
     /// </summary>
     [Fact]
-    public void TheBoundaryStroke_RidesTheShelf_NotTheRowPool()
+    public void TheZoneEdge_IsTheBandsShape_NotAStroke()
     {
         var strip = Strip();
 
-        // The pool draws only the ordinary row lines now. An accent stroke
-        // left in it would paint a second boundary across a body-row gap,
-        // at a slot where the zone does not end.
+        // The pool draws only the ordinary row lines. An accent stroke
+        // left in it would paint a boundary across a body-row gap, at a
+        // slot where the zone does not end.
         var separators = strip.Method("UpdateRowSeparators");
-        Assert.Empty(separators.Calls("BoundaryStrokeBrush"));
 
         // And it only walks the body rows: the pinned prefix renders above
         // the scroller and has no gaps in this pool to draw.
@@ -151,13 +150,12 @@ public class TabPinZoneWiringTests
 
         // The shelf refresh rides the separator pass: it is the one call
         // every selection-placement and drag entry/exit path already makes,
-        // so the stroke's brighten/dim cannot be forgotten on an exit path.
+        // so the band's chrome cannot be forgotten on an exit path.
         Assert.Single(separators.Calls("UpdatePinnedShelfChrome"));
 
         var shelf = strip.Method("UpdatePinnedShelfChrome");
-        Assert.Single(shelf.Calls("BoundaryStrokeBrush"));
 
-        // The shelf and the header exist only while pins do.
+        // The shelf exists only while pins do.
         var anyPins = shelf.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
             .Single(l => l.Declaration.Variables.Any(v => v.Identifier.ValueText == "anyPins"));
         Assert.Equal(
@@ -169,42 +167,12 @@ public class TabPinZoneWiringTests
             "anyPins ? Visibility.Visible : Visibility.Collapsed",
             shelfVisible.Right.ToString());
 
-        // The stroke itself only while both zones do -- the same gate the
-        // in-list boundary always had, all tabs pinned draws no edge.
-        var bothZones = shelf.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
-            .Single(l => l.Declaration.Variables.Any(v => v.Identifier.ValueText == "bothZones"));
-        Assert.Equal(
-            "anyPins && _manager.PinCount < _manager.Tabs.Count",
-            bothZones.Declaration.Variables.Single().Initializer!.Value.ToString());
-        var strokeVisible = shelf.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left.ToString() == "_boundaryStroke.Visibility");
-        Assert.Equal(
-            "bothZones ? Visibility.Visible : Visibility.Collapsed",
-            strokeVisible.Right.ToString());
-
-        // The brightening is the gesture's aiming feedback, so its
-        // polarity is load-bearing: dim while idle, bright while a drag
-        // is live. Inverting it darkens the boundary exactly when the
-        // gesture needs it.
-        var brush = strip.Method("BoundaryStrokeBrush");
-        var alpha = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>()
-            .Single(v => v.Identifier.ValueText == "alpha");
-        var gate = Assert.IsType<ConditionalExpressionSyntax>(
-            alpha.Initializer!.Value);
-        Assert.Equal("_drag is null", gate.Condition.ToString());
-        // Dim while idle, bright while a drag is live -- and High Contrast
-        // takes opaque in both states, so the line never leans on alpha.
-        Assert.Equal("idle", gate.WhenTrue.ToString());
-        Assert.Equal("live", gate.WhenFalse.ToString());
-        var arms = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>().ToList();
-        byte IdleAlpha() => byte.Parse(arms.Single(v => v.Identifier.ValueText == "idle")
-            .Initializer!.Value.ToString().Split(':').Last().Trim()
-            .Replace("(byte)0x", string.Empty), System.Globalization.NumberStyles.HexNumber);
-        byte LiveAlpha() => byte.Parse(arms.Single(v => v.Identifier.ValueText == "live")
-            .Initializer!.Value.ToString().Split(':').Last().Trim()
-            .Replace("(byte)0x", string.Empty), System.Globalization.NumberStyles.HexNumber);
-        Assert.True(IdleAlpha() < LiveAlpha(),
-            "the boundary must brighten while a drag aims at it, not dim");
+        // No "both zones" question survives: the band says where the zone
+        // ends whether or not a body row exists below it, so a gate that
+        // hid the edge when every tab was pinned has nothing left to hide.
+        // (That the stroke itself is gone is PinnedPanelWiringTests'
+        // TheBand_IsTheZoneAnchor; this is the gate it took with it.)
+        Assert.DoesNotContain("bothZones", shelf.ToString(), StringComparison.Ordinal);
     }
 
     /// <summary>
