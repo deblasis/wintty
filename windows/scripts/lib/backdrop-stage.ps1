@@ -11,8 +11,8 @@
     whatever wallpaper the developer has. So a scene is one PNG applied
     twice: painted on the stage, and set as the wallpaper.
 
-    Scenes are generated, not shipped: each is reproducible from its name
-    and a seed, and "photo" is procedural rather than a file to carry.
+    Scenes are generated, not shipped: each is reproducible from its name,
+    size and seed, and "photo" is procedural rather than a file to carry.
 
     Dot-source it:
 
@@ -22,9 +22,14 @@
         Stop-BackdropStage $stage
 
     The wallpaper is machine state. A caller that passes -Wallpaper owns
-    putting it back: Get-DesktopWallpaper before, Set-DesktopWallpaper in a
-    finally; lib/env-guard.ps1's snapshot covers the registry side for
-    `just env-restore` after a crash.
+    putting it back: `$before = Get-DesktopWallpaper` first and
+    `Set-DesktopWallpaper -Snapshot $before` in a finally, which reads the
+    registry back and throws if it disagrees. lib/env-guard.ps1's snapshot
+    covers the registry side for `just env-restore` after a crash, but a
+    registry restore does not repaint the desktop: after a crashed
+    -Wallpaper run, re-run Set-DesktopWallpaper (or log off) to see the old
+    wallpaper again. Only a single static image is captured; a slideshow,
+    Spotlight or per-monitor wallpaper comes back as its current image.
 #>
 
 Add-Type -AssemblyName System.Drawing
@@ -56,11 +61,19 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class StageWin {
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, string pvParam, uint fWinIni);
+    // Whose pixels are at a point: the proof a caller needs that a pixel it
+    // is about to read belongs to the stage and not to whatever is on top.
+    public static uint PidAt(int x, int y) {
+        uint pid; GetWindowThreadProcessId(WindowFromPoint(new POINT { X = x, Y = y }), out pid); return pid;
+    }
 }
 '@
 }
@@ -84,7 +97,9 @@ function New-BackdropStageToken {
 }
 
 # Launch the stage at a device-pixel rect and connect its pipe. Returns the
-# session every other function here takes.
+# session every other function here takes. A launch that gets as far as a
+# window and no further is killed here, not left for the operator: the
+# stage's window has no taskbar entry and cannot be focused for Alt+F4.
 function Start-BackdropStage {
     param(
         [Parameter(Mandatory)][int]$X,
@@ -95,41 +110,47 @@ function Start-BackdropStage {
     )
     $exe = Assert-BackdropStageReady
     $token = New-BackdropStageToken
-    $orig = if (Test-Path Env:WINTTY_BACKDROP_STAGE) { $env:WINTTY_BACKDROP_STAGE } else { $null }
-    $env:WINTTY_BACKDROP_STAGE = $token
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $exe
-    foreach ($a in @('--x', $X, '--y', $Y, '--w', $W, '--h', $H)) { $psi.ArgumentList.Add([string]$a) }
+    # --parent: the stage closes itself when this shell dies, so a Ctrl+C or
+    # a throw before the caller's own cleanup cannot orphan it.
+    foreach ($a in @('--x', $X, '--y', $Y, '--w', $W, '--h', $H, '--parent', $PID)) { $psi.ArgumentList.Add([string]$a) }
+    # The token goes to the child alone. Setting it on this process would
+    # hand it to every process launched afterwards, the app under test
+    # included.
+    $psi.Environment['WINTTY_BACKDROP_STAGE'] = $token
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $proc = [System.Diagnostics.Process]::Start($psi)
 
-    # READY <hwnd> <pid> is printed after the window is shown; a process that
-    # exits first has printed why on stderr.
-    $ready = $proc.StandardOutput.ReadLine()
-    if ($ready -notlike 'READY *') {
-        $err = $proc.StandardError.ReadToEnd()
-        if ($null -ne $orig) { $env:WINTTY_BACKDROP_STAGE = $orig } else { Remove-Item Env:WINTTY_BACKDROP_STAGE -ErrorAction SilentlyContinue }
-        throw "HARNESS: the backdrop stage did not come up: '$ready' $err"
+    try {
+        # READY <hwnd> <pid> is printed after the window is shown; a process
+        # that exits first has printed why on stderr.
+        $ready = $proc.StandardOutput.ReadLine()
+        if ($ready -notlike 'READY *') {
+            $err = $proc.StandardError.ReadToEnd()
+            throw "HARNESS: the backdrop stage did not come up: '$ready' $err"
+        }
+        $parts = $ready.Split(' ')
+        $session = @{ Proc = $proc; Token = $token; Hwnd64 = [int64]$parts[1] }
+        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
+            '.', "wintty-backdrop-stage-$token",
+            [System.IO.Pipes.PipeDirection]::InOut,
+            [System.IO.Pipes.PipeOptions]::CurrentUserOnly)
+        $pipe.Connect($TimeoutSeconds * 1000)
+        $session.Pipe = $pipe
+        $session.Reader = [System.IO.StreamReader]::new($pipe)
+        $session.Writer = [System.IO.StreamWriter]::new($pipe, [System.Text.UTF8Encoding]::new($false))
+        $session.Writer.AutoFlush = $true
+        $session.Writer.NewLine = "`n"
+        return $session
     }
-    $parts = $ready.Split(' ')
-    $session = @{
-        Proc = $proc; Token = $token; OrigToken = $orig
-        Hwnd64 = [int64]$parts[1]
+    catch {
+        try { if (-not $proc.HasExited) { $proc.Kill($true) } } catch { }
+        throw
     }
-    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
-        '.', "wintty-backdrop-stage-$token",
-        [System.IO.Pipes.PipeDirection]::InOut,
-        [System.IO.Pipes.PipeOptions]::CurrentUserOnly)
-    $pipe.Connect($TimeoutSeconds * 1000)
-    $session.Pipe = $pipe
-    $session.Reader = [System.IO.StreamReader]::new($pipe)
-    $session.Writer = [System.IO.StreamWriter]::new($pipe, [System.Text.UTF8Encoding]::new($false))
-    $session.Writer.AutoFlush = $true
-    $session.Writer.NewLine = "`n"
-    return $session
 }
 
 # One request, one response. A refusal from the stage is a HARNESS failure,
@@ -153,8 +174,6 @@ function Stop-BackdropStage {
     try { if (-not $Stage.Proc.HasExited) { [void](Invoke-BackdropStage $Stage @{ op = 'quit' }) } } catch { }
     foreach ($k in 'Writer', 'Reader', 'Pipe') { if ($Stage[$k]) { try { $Stage[$k].Dispose() } catch { } } }
     if (-not $Stage.Proc.WaitForExit(5000)) { try { $Stage.Proc.Kill($true) } catch { } }
-    if ($null -ne $Stage.OrigToken) { $env:WINTTY_BACKDROP_STAGE = $Stage.OrigToken }
-    else { Remove-Item Env:WINTTY_BACKDROP_STAGE -ErrorAction SilentlyContinue }
 }
 
 # ---- scenes ----------------------------------------------------------------
@@ -167,17 +186,17 @@ function Stop-BackdropStage {
 # acrylic blurs into grey and crystal shows raw.
 function Get-BackdropScenes {
     return [ordered]@{
-        black   = [pscustomobject]@{ Name = 'black';   Kind = 'solid'; Color = '#000000'; What = 'flat black' }
-        white   = [pscustomobject]@{ Name = 'white';   Kind = 'solid'; Color = '#FFFFFF'; What = 'flat white' }
-        grey    = [pscustomobject]@{ Name = 'grey';    Kind = 'solid'; Color = '#808080'; What = 'flat mid grey, the tone chrome most often lands near' }
-        brand   = [pscustomobject]@{ Name = 'brand';   Kind = 'solid'; Color = '#0067C0'; What = 'a saturated accent blue, the default Windows accent' }
+        black   = [pscustomobject]@{ Name = 'black';   Kind = 'solid'; Mode = 'stretch'; Color = '#000000'; What = 'flat black' }
+        white   = [pscustomobject]@{ Name = 'white';   Kind = 'solid'; Mode = 'stretch'; Color = '#FFFFFF'; What = 'flat white' }
+        grey    = [pscustomobject]@{ Name = 'grey';    Kind = 'solid'; Mode = 'stretch'; Color = '#808080'; What = 'flat mid grey, the tone chrome most often lands near' }
+        brand   = [pscustomobject]@{ Name = 'brand';   Kind = 'solid'; Mode = 'stretch'; Color = '#0067C0'; What = 'a saturated accent blue, the default Windows accent' }
         sunrise = [pscustomobject]@{ Name = 'sunrise'; Kind = 'image'; Mode = 'stretch'; Color = $null; What = 'a soft vertical gradient, night navy to pale gold' }
         photo   = [pscustomobject]@{ Name = 'photo';   Kind = 'image'; Mode = 'stretch'; Color = $null; What = 'a procedural busy photograph: overlapping colour, lines, small high-contrast marks' }
         editor  = [pscustomobject]@{ Name = 'editor';  Kind = 'image'; Mode = 'stretch'; Color = $null; What = 'a light code editor: white ground, grey gutter, coloured tokens' }
         # Tiled, not stretched: a stretch resamples the squares and turns the
         # boundaries grey, which is the acrylic blur the scene exists to be
         # measured against, manufactured by the instrument instead.
-        checker = [pscustomobject]@{ Name = 'checker'; Kind = 'image'; Mode = 'tile';    Color = $null; What = 'an 8px black and white checkerboard: acrylic blurs it to grey, crystal shows it raw' }
+        checker = [pscustomobject]@{ Name = 'checker'; Kind = 'image'; Mode = 'tile';    Color = $null; What = 'a black and white checkerboard of 4px squares: acrylic blurs it to grey, crystal shows it raw' }
     }
 }
 
@@ -185,7 +204,7 @@ function ConvertTo-DrawingColor([string]$Hex) {
     return [System.Drawing.ColorTranslator]::FromHtml($Hex)
 }
 
-# Render one scene to a PNG. Deterministic for a (name, seed, size), so a
+# Render one scene to a PNG. Deterministic for a (name, size, seed), so a
 # matrix row can be re-run against the same backdrop it was measured on.
 function New-BackdropSceneImage {
     param(
@@ -283,9 +302,13 @@ function New-BackdropSceneImage {
                 $font.Dispose()
             }
             'checker' {
-                # HatchStyle.LargeCheckerBoard is an 8px checker in the
-                # image's own pixels. The scene is applied tiled so those are
-                # 8 device pixels on screen whatever the stage's size.
+                # HatchStyle.LargeCheckerBoard: 4px squares, 8px period, in the
+                # image's own pixels. Applied tiled so those are device pixels
+                # whatever the stage's size. No anti-aliasing: with it the
+                # image's outer ring is half-alpha, and tiled that becomes a
+                # grey seam at every tile boundary, the very grey the scene
+                # must not contain.
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::None
                 $brush = [System.Drawing.Drawing2D.HatchBrush]::new(
                     [System.Drawing.Drawing2D.HatchStyle]::LargeCheckerBoard,
                     [System.Drawing.Color]::Black, [System.Drawing.Color]::White)
@@ -302,8 +325,9 @@ function New-BackdropSceneImage {
 }
 
 # Apply a scene to the stage, and optionally to the wallpaper. Generates the
-# PNG on first use under $SceneDir. Returns the PNG path either way, so the
-# report can point at what was behind the window.
+# PNG on first use under $SceneDir, keyed by name, size and seed so a run
+# with a different seed never reads the previous run's picture. Returns the
+# PNG path either way, so the report can point at what was behind the window.
 function Set-BackdropScene {
     param(
         [Parameter(Mandatory)]$Stage,
@@ -314,7 +338,10 @@ function Set-BackdropScene {
         [int]$Width = 1920,
         [int]$Height = 1080
     )
-    $png = Join-Path $SceneDir "$($Scene.Name).png"
+    # Absolute, because the path is handed to two other processes (the stage
+    # and Explorer) that resolve relative paths against their own cwd.
+    $SceneDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SceneDir)
+    $png = Join-Path $SceneDir ('{0}-{1}x{2}-{3}.png' -f $Scene.Name, $Width, $Height, $Seed)
     if (-not (Test-Path -LiteralPath $png)) {
         [void](New-BackdropSceneImage -Name $Scene.Name -Path $png -Width $Width -Height $Height -Seed $Seed)
     }
@@ -329,12 +356,12 @@ function Set-BackdropScene {
 
 # ---- wallpaper ---------------------------------------------------------------
 
-$script:DesktopKey = 'HKCU:\Control Panel\Desktop'
+$script:BackdropDesktopKey = 'HKCU:\Control Panel\Desktop'
 $script:SPI_SETDESKWALLPAPER = 0x0014
 $script:SPIF_UPDATEINIFILE_SENDCHANGE = 0x0003
 
 function Get-DesktopWallpaper {
-    $item = Get-ItemProperty -LiteralPath $script:DesktopKey
+    $item = Get-ItemProperty -LiteralPath $script:BackdropDesktopKey
     return @{
         Path  = [string]$item.WallPaper
         Style = [string]$item.WallpaperStyle
@@ -342,21 +369,32 @@ function Get-DesktopWallpaper {
     }
 }
 
-# Style 10 is "Fill". An empty -Path clears the wallpaper to the desktop
-# colour, which is what a restore needs when the snapshot had none.
+# Set a wallpaper, or put one back from a Get-DesktopWallpaper snapshot with
+# -Snapshot, which carries the user's own style and tiling. Style 10 is
+# "Fill". An empty path clears the wallpaper to the desktop colour, which is
+# what a restore needs when the snapshot had none. The registry is read back
+# afterwards and a disagreement throws: a restore that "probably worked" is
+# what the env guard's incidents had.
 function Set-DesktopWallpaper {
     param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
-        [string]$Style = '10',
-        [string]$Tile = '0'
+        [Parameter(ParameterSetName = 'Path', Mandatory)][AllowEmptyString()][string]$Path,
+        [Parameter(ParameterSetName = 'Path')][string]$Style = '10',
+        [Parameter(ParameterSetName = 'Path')][string]$Tile = '0',
+        [Parameter(ParameterSetName = 'Snapshot', Mandatory)][hashtable]$Snapshot
     )
+    if ($PSCmdlet.ParameterSetName -eq 'Snapshot') { $Path = $Snapshot.Path; $Style = $Snapshot.Style; $Tile = $Snapshot.Tile }
     if ($Path -and -not (Test-Path -LiteralPath $Path)) { throw "HARNESS: wallpaper file not found: $Path" }
-    Set-ItemProperty -LiteralPath $script:DesktopKey -Name 'WallpaperStyle' -Value $Style
-    Set-ItemProperty -LiteralPath $script:DesktopKey -Name 'TileWallpaper' -Value $Tile
+    Set-ItemProperty -LiteralPath $script:BackdropDesktopKey -Name 'WallpaperStyle' -Value $Style
+    Set-ItemProperty -LiteralPath $script:BackdropDesktopKey -Name 'TileWallpaper' -Value $Tile
     $ok = [StageWin]::SystemParametersInfo(
         $script:SPI_SETDESKWALLPAPER, 0, $Path, $script:SPIF_UPDATEINIFILE_SENDCHANGE)
     if (-not $ok) {
         throw ("HARNESS: SPI_SETDESKWALLPAPER failed (Win32 {0})" -f [System.Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    $now = Get-DesktopWallpaper
+    if ($now.Path -ne $Path -or $now.Style -ne $Style -or $now.Tile -ne $Tile) {
+        throw ("HARNESS: the wallpaper did not read back: asked '{0}' style {1} tile {2}, registry says '{3}' style {4} tile {5}" -f
+            $Path, $Style, $Tile, $now.Path, $now.Style, $now.Tile)
     }
 }
 
@@ -364,7 +402,8 @@ function Set-DesktopWallpaper {
 
 # Read one screen pixel in device coordinates. The stage's own margin, read
 # through this, is how a caller proves the scene it asked for is the scene
-# on screen before it photographs anything.
+# on screen before it photographs anything; pair it with Get-WindowPidAt so
+# the pixel is known to be the stage's and not a window over it.
 function Get-ScreenPixel {
     param([Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y)
     $bmp = [System.Drawing.Bitmap]::new(1, 1)
@@ -375,6 +414,11 @@ function Get-ScreenPixel {
         return @{ R = [int]$c.R; G = [int]$c.G; B = [int]$c.B; Hex = ('#{0:X2}{1:X2}{2:X2}' -f $c.R, $c.G, $c.B) }
     }
     finally { $g.Dispose(); $bmp.Dispose() }
+}
+
+function Get-WindowPidAt {
+    param([Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y)
+    return [StageWin]::PidAt($X, $Y)
 }
 
 function Test-PixelNear {

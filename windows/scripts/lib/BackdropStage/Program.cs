@@ -16,9 +16,10 @@ namespace BackdropStage;
 /// It follows the test seam's shape on purpose: one named pipe, one JSON
 /// line per request, one line back, the pipe named after a session token in
 /// the environment (WINTTY_BACKDROP_STAGE, 32 hex characters),
-/// CurrentUserOnly, and every ack sent AFTER the paint has landed, so a
-/// driver that photographs on the ack photographs the scene it asked for.
-/// Nothing here can reach the app under test.
+/// CurrentUserOnly, and every ack sent AFTER the paint has landed AND the
+/// compositor has presented it (DwmFlush), so a driver that photographs on
+/// the ack photographs the scene it asked for. Nothing here can reach the
+/// app under test.
 ///
 /// It never activates (WS_EX_NOACTIVATE, ShowWithoutActivation): a harness
 /// measuring an activated window must not have its subject deactivated by
@@ -29,7 +30,8 @@ namespace BackdropStage;
 /// Protocol: {"op":"place","x","y","w","h"} in device pixels,
 /// {"op":"solid","color":"#RRGGBB"}, {"op":"image","path","mode":"stretch|tile"},
 /// {"op":"query"}, {"op":"quit"}. Every response carries ok, op, hwnd, pid,
-/// the window rect and the scene.
+/// the window rect and the scene, all read on the UI thread in the same
+/// turn as the mutation they describe.
 ///
 /// Exit codes: 0 after quit, 2 on an internal failure, 120 when the token is
 /// missing or malformed (incoda's "usage" code, so a wrapper can tell a
@@ -56,11 +58,37 @@ internal static class Program
         try
         {
             ApplicationConfiguration.Initialize();
+            // Without this, an exception thrown on the UI thread outside an
+            // Invoke (a GDI+ decode that only fails at DrawImage time, for
+            // one) goes to WinForms' ThreadException dialog: a modal box
+            // parked topmost on the desktop under test, the ack never sent,
+            // the driver hung until its kill. Thrown, it lands in the catch
+            // below and leaves as STAGE_FAIL with a 2.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             var stage = new StageForm(
                 ArgInt(args, "--x", 0), ArgInt(args, "--y", 0),
                 ArgInt(args, "--w", 800), ArgInt(args, "--h", 600));
             var pipeName = PipeNamePrefix + token;
-            var server = new Thread(() => Serve(stage, pipeName)) { IsBackground = true };
+            var server = new Thread(() => Serve(stage, pipeName))
+            {
+                IsBackground = true, Name = "backdrop-pipe",
+            };
+            // A borderless, non-activating, topmost tool window has no
+            // taskbar entry, no Alt-Tab slot and cannot be focused for
+            // Alt+F4: a driver that dies after READY (a Ctrl+C, a throw
+            // before its own cleanup) would leave it on the desktop until
+            // someone finds it in Task Manager. So the stage follows its
+            // driver down: --parent names the pid to watch.
+            var parent = ArgInt(args, "--parent", 0);
+            if (parent > 0)
+            {
+                new Thread(() =>
+                {
+                    try { System.Diagnostics.Process.GetProcessById(parent).WaitForExit(); }
+                    catch (ArgumentException) { /* already gone */ }
+                    CloseStage(stage);
+                }) { IsBackground = true, Name = "backdrop-parent-watch" }.Start();
+            }
             stage.Shown += (_, _) =>
             {
                 server.Start();
@@ -102,26 +130,32 @@ internal static class Program
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                // Something already owns this token's name. Going quiet is the
-                // seam's answer too: the driver's connect times out and says so.
+                // Something already owns this token's name. The seam goes
+                // quiet here because it is the product; a stage has no
+                // reason to stay on the desktop with nobody able to reach
+                // it, so it says why and takes its window down.
                 Console.Error.WriteLine($"STAGE_FAIL pipe name taken: {ex.Message}");
+                CloseStage(stage);
                 return;
             }
             try
             {
                 pipe.WaitForConnection();
-                using var reader = new StreamReader(pipe, new UTF8Encoding(false));
-                using var writer = new StreamWriter(pipe, new UTF8Encoding(false))
+                var reader = new BoundedLineReader(pipe, MaxRequestBytes);
+                var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true)
                 {
                     AutoFlush = true, NewLine = "\n",
                 };
                 while (pipe.IsConnected && !stage.IsDisposed)
                 {
-                    var line = reader.ReadLine();
-                    if (line is null) break;
-                    if (line.Length > MaxRequestBytes)
+                    var (status, line) = reader.ReadLine();
+                    if (status == LineStatus.Eof) break;
+                    if (status == LineStatus.TooLong)
                     {
-                        writer.WriteLine(Error("parse", "request too long"));
+                        // No resyncing after this: the rest of the oversized
+                        // line is bytes of unknown shape. Say so once and
+                        // drop the connection; the accept loop takes the next.
+                        writer.WriteLine(Error("parse", $"request exceeds {MaxRequestBytes} bytes"));
                         break;
                     }
                     if (string.IsNullOrWhiteSpace(line)) continue;
@@ -129,7 +163,11 @@ internal static class Program
                     writer.WriteLine(response);
                     if (quit)
                     {
-                        stage.BeginInvoke(stage.Close);
+                        // The ack has to reach the client before the handle
+                        // goes: DisconnectNamedPipe discards unread bytes,
+                        // Dispose on a drained pipe does not.
+                        pipe.WaitForPipeDrain();
+                        CloseStage(stage);
                         return;
                     }
                 }
@@ -140,8 +178,57 @@ internal static class Program
             }
             finally
             {
-                try { if (pipe.IsConnected) pipe.Disconnect(); } catch { }
+                // Dispose, not Disconnect: Disconnect throws away anything the
+                // client has not read yet, which on this path is the last
+                // response sent. Closing the handle delivers it.
                 pipe.Dispose();
+            }
+        }
+    }
+
+    private static void CloseStage(StageForm stage)
+    {
+        try { if (!stage.IsDisposed) stage.BeginInvoke(stage.Close); }
+        catch (InvalidOperationException) { /* already gone */ }
+    }
+
+    private enum LineStatus { Ok, Eof, TooLong }
+
+    /// <summary>
+    /// Reads newline-delimited UTF-8 requests off the pipe with a hard
+    /// ceiling on one line, enforced on the bytes as they arrive. The
+    /// seam's reader exists for the same reason: StreamReader.ReadLine has
+    /// no ceiling and buffers until it sees a newline, so a check on the
+    /// finished string is a check after the memory was already spent.
+    /// </summary>
+    private sealed class BoundedLineReader(Stream stream, int maxBytes)
+    {
+        private readonly byte[] _chunk = new byte[4096];
+        private readonly MemoryStream _line = new();
+        private int _next;
+        private int _filled;
+
+        public (LineStatus Status, string Line) ReadLine()
+        {
+            _line.SetLength(0);
+            while (true)
+            {
+                if (_next == _filled)
+                {
+                    _filled = stream.Read(_chunk, 0, _chunk.Length);
+                    _next = 0;
+                    if (_filled == 0) return (LineStatus.Eof, string.Empty);
+                }
+                var newline = Array.IndexOf(_chunk, (byte)'\n', _next, _filled - _next);
+                var take = (newline >= 0 ? newline : _filled) - _next;
+                if (_line.Length + take > maxBytes) return (LineStatus.TooLong, string.Empty);
+                _line.Write(_chunk, _next, take);
+                _next += take;
+                if (newline < 0) continue;
+                _next++;
+                var bytes = _line.GetBuffer().AsSpan(0, (int)_line.Length);
+                if (bytes.Length > 0 && bytes[^1] == (byte)'\r') bytes = bytes[..^1];
+                return (LineStatus.Ok, Encoding.UTF8.GetString(bytes));
             }
         }
     }
@@ -163,11 +250,13 @@ internal static class Program
 
             try
             {
-                // Every mutation runs on the UI thread and Refresh() is
-                // synchronous, so by the time Invoke returns the pixels are on
-                // screen and the ack below is not a promise.
-                string? failure = null;
-                stage.Invoke(() =>
+                // Every mutation AND the response describing it run on the UI
+                // thread in one turn: Refresh() is synchronous and DwmFlush
+                // waits for the present, so by the time Invoke returns the
+                // pixels are on screen and the hwnd, rect and scene in the
+                // reply are the ones that were painted, not a later read
+                // from a thread that must not touch the control anyway.
+                var response = (string)stage.Invoke(() =>
                 {
                     switch (op)
                     {
@@ -186,12 +275,11 @@ internal static class Program
                         case "quit":
                             break;
                         default:
-                            failure = $"unknown op '{op}'";
-                            break;
+                            return Error(op, $"unknown op '{op}'");
                     }
+                    return Ok(stage, op);
                 });
-                if (failure is not null) return (Error(op, failure), false);
-                return (Ok(stage, op), op == "quit");
+                return (response, op == "quit" && response.StartsWith("{\"ok\":true", StringComparison.Ordinal));
             }
             catch (Exception ex)
             {
@@ -200,6 +288,7 @@ internal static class Program
         }
     }
 
+    /// <summary>UI thread only: reads the handle and the rect.</summary>
     private static string Ok(StageForm stage, string op)
     {
         var rect = stage.ScreenRect();
@@ -222,7 +311,18 @@ internal static class Program
     }
 
     private static string Error(string op, string message)
-        => JsonSerializer.Serialize(new { ok = false, op, error = message });
+    {
+        using var stream = new MemoryStream();
+        using (var json = new Utf8JsonWriter(stream))
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", false);
+            json.WriteString("op", op);
+            json.WriteString("error", message);
+            json.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
 
     private static int ArgInt(string[] args, string name, int fallback)
     {
@@ -256,8 +356,10 @@ internal sealed class StageForm : Form
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint flags);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmFlush();
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
@@ -273,7 +375,9 @@ internal sealed class StageForm : Form
     private Color _solid = Color.Black;
     private Image? _image;
     private string _mode = "stretch";
-    private readonly int _x, _y, _w, _h;
+    // The last rect asked for, so a handle recreation lands on it and not
+    // on the launch rect.
+    private int _x, _y, _w, _h;
 
     public string SceneDescription { get; private set; } = "solid #000000";
 
@@ -286,8 +390,11 @@ internal sealed class StageForm : Form
         StartPosition = FormStartPosition.Manual;
         // TopMost via SetWindowPos below rather than the property, so the
         // placement and the z-order land in one call with SWP_NOACTIVATE.
+        // No double buffering: a flat surface that is only ever photographed
+        // has no flicker to hide, and a back buffer the size of a stage that
+        // overhangs every monitor is memory for nothing.
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
-                 | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                 | ControlStyles.ResizeRedraw, true);
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -306,6 +413,17 @@ internal sealed class StageForm : Form
     {
         base.OnHandleCreated(e);
         Place(_x, _y, _w, _h);
+    }
+
+    /// <summary>
+    /// The harness owns the rect, in device pixels. Under PerMonitorV2
+    /// WinForms would otherwise apply the OS's suggested rectangle when the
+    /// window's centre crosses to a monitor of a different DPI, rescaling a
+    /// stage that was deliberately placed to straddle them.
+    /// </summary>
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        e.Cancel = true;
     }
 
     /// <summary>
@@ -338,12 +456,14 @@ internal sealed class StageForm : Form
         if (!SetWindowPos(Handle, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW))
             throw new InvalidOperationException(
                 $"SetWindowPos failed ({Marshal.GetLastWin32Error()})");
-        Refresh();
+        _x = x; _y = y; _w = w; _h = h;
+        Present();
     }
 
     public RECT ScreenRect()
     {
-        GetWindowRect(Handle, out var r);
+        if (!GetWindowRect(Handle, out var r))
+            throw new InvalidOperationException($"GetWindowRect failed ({Marshal.GetLastWin32Error()})");
         return r;
     }
 
@@ -353,22 +473,39 @@ internal sealed class StageForm : Form
         _image?.Dispose();
         _image = null;
         SceneDescription = $"solid {hex}";
-        Refresh();
+        Present();
     }
 
     public void SetImage(string path, string mode)
     {
-        if (!File.Exists(path)) throw new FileNotFoundException("no such image", path);
         if (mode is not ("stretch" or "tile"))
             throw new ArgumentException($"unknown mode '{mode}'");
-        // Copied out of the file so nothing holds it open afterwards.
-        var bytes = File.ReadAllBytes(path);
-        var loaded = Image.FromStream(new MemoryStream(bytes));
+        var full = Path.GetFullPath(path);
+        if (!File.Exists(full)) throw new FileNotFoundException("no such image", full);
+        // Decoded fully and detached from its bytes: GDI+ otherwise decodes
+        // lazily off the stream it was given, and a stream someone later
+        // wraps in a using would break the paint.
+        Image loaded;
+        using (var source = Image.FromStream(new MemoryStream(File.ReadAllBytes(full))))
+            loaded = new Bitmap(source);
         _image?.Dispose();
         _image = loaded;
         _mode = mode;
-        SceneDescription = $"image {mode} {path}";
+        SceneDescription = $"image {mode} {full}";
+        Present();
+    }
+
+    /// <summary>
+    /// Paint now and wait for the compositor to show it. Refresh() returns
+    /// when WM_PAINT has, which puts the pixels in the window's redirection
+    /// surface; a screen grab can still see the previous frame until DWM
+    /// presents. DwmFlush blocks until that next present, which is what
+    /// makes the ack a promise about the screen and not about a buffer.
+    /// </summary>
+    private void Present()
+    {
         Refresh();
+        _ = DwmFlush();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -384,6 +521,12 @@ internal sealed class StageForm : Form
         }
         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
         g.DrawImage(_image, ClientRectangle);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { _image?.Dispose(); _image = null; }
+        base.Dispose(disposing);
     }
 
     private static Color ParseColor(string hex)
