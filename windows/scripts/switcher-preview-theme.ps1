@@ -26,7 +26,15 @@
 
     The preview body is a bare Canvas and so has no automation peer; UIA
     cannot see it the way contrast-oracle.ps1 sees the tile's title. The
-    `switcher-preview-rect` seam op reports its screen rect instead.
+    `switcher-cells` seam op reports every slot's screen rect instead.
+
+    It is the ACTIVE tile that is sampled, not the first one. The switcher
+    dims every card that is not the cycle's target, so an idle tile's preview
+    is the terminal background composited at TabSwitcherShape.IdleTileOpacity
+    -- a real colour, but not the one this harness is asking about, and one
+    that changes as the cycle steps. The active tile is the one card painted
+    at full opacity, and it is where "the preview follows the theme" is a
+    question with a single answer.
 
     Exits 0 on pass, 2 on a product finding (a fill that is not the theme's
     background, or two legs that agree when their themes do not), 1 when the
@@ -158,6 +166,15 @@ function New-WindowCapture([long]$Hwnd64, [uint32]$ProcId, [string]$Label) {
 # own 1px divider inset and the Border's rounded corners, neither of which is
 # the fill being asked about.
 function Measure-PreviewFill($Cap, $Rect, [int]$Inset = 5) {
+    # A null rect is the seam saying it could not place that surface on
+    # screen. Named here rather than left to the size check below: with no
+    # rect every arithmetic line reads $null as 0, and the width lands
+    # negative, so the failure arrived as "the reported preview rect is too
+    # small to sample" -- which sends a reader after the popup's geometry
+    # instead of after the coordinate conversion that actually failed.
+    if ($null -eq $Rect) {
+        throw 'HARNESS: the seam reported no preview rect: the popup was up but the client-to-screen conversion failed'
+    }
     $x = [int]$Rect.x - $Cap.L + $Inset
     $y = [int]$Rect.y - $Cap.T + $Inset
     $w = [int]$Rect.w - 2 * $Inset
@@ -199,12 +216,20 @@ theme = $themePath
         for ($attempt = 1; $attempt -le 4; $attempt++) {
             $reads = @()
             for ($shot = 0; $shot -lt 2; $shot++) {
-                # Raise the popup, then ask where its first tile's preview is
-                # while it is still up: it dismisses itself on a 1.2s timer.
-                # The tile set is the strip's rows, so the first tile is
-                # 'alpha' on every raise and the rect does not move.
+                # Raise the popup, then ask where the ACTIVE tile's preview
+                # is while it is still up: it dismisses itself on a 1.2s
+                # timer. Which tab is active moves with every raise, so the
+                # rect is re-read each shot rather than assumed to stand.
                 [void](Invoke-SeamCommand $s @{ op = 'cycle'; forward = $true })
-                $rect = (Invoke-SeamCommand $s @{ op = 'switcher-preview-rect' }).rect
+                $cells = @((Invoke-SeamCommand $s @{ op = 'switcher-cells' }).cells)
+                $lit = @($cells | Where-Object { $_.active -and $_.kind -eq 'tile' })
+                if ($lit.Count -ne 1) {
+                    throw ("HARNESS: the popup reports {0} active tiles, not one" -f $lit.Count)
+                }
+                $rect = $lit[0].preview
+                # The highlight crosses on a short clock; a capture taken
+                # inside it reads the previous frame's opacity.
+                Start-Sleep -Milliseconds 300
                 $cap = New-WindowCapture $s.Hwnd64 ([uint32]$s.Proc.Id) "switcher-$Name-$attempt-$shot"
                 try { $reads += , (Measure-PreviewFill $cap $rect) } finally { $cap.Bmp.Dispose() }
             }

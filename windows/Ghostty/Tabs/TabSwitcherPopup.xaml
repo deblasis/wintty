@@ -8,7 +8,11 @@
          card; this outer Grid stays transparent (no full-window dim) and only
          the centered Border paints. -->
     <Grid Background="Transparent">
-        <Border Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+        <!-- x:Name'd because the entrance animates it: the card fades and
+             rises on a fresh open, and a repeat press onto a popup that is
+             already up must leave it exactly where it is. -->
+        <Border x:Name="Card"
+                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
                 BorderThickness="1"
                 CornerRadius="8"

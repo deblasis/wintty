@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using Ghostty.Core.Tabs;
@@ -153,4 +154,79 @@ public class TabModelColorTests
             TabColor.Red, selected: false, stripBackdropRgb: 0x1E1E1E);
         Assert.Equal(0xFFFFFFu, fg);
     }
+
+    // The group FIELD's wash. Exact values for the same reason the tab
+    // tint's are exact: a transposed or inverted blend is still "not equal
+    // to either input".
+    [Fact]
+    public void Field_wash_blends_the_preset_lightly_over_the_ground()
+    {
+        // Red (FF3B30) at 46/255 over 0x1E1E1E, channel by channel:
+        //   R 255*.1804 + 30*.8196 = 70.6 -> 0x46
+        //   G  59*.1804 + 30*.8196 = 35.2 -> 0x23
+        //   B  48*.1804 + 30*.8196 = 33.2 -> 0x21
+        Assert.Equal(0x462321u, TabColorPalette.FieldBackgroundRgb(TabColor.Red, 0x1E1E1E));
+    }
+
+    [Fact]
+    public void Field_wash_is_lighter_than_the_tint_a_tab_takes()
+    {
+        // A field is a GROUND: it sits behind whole tiles, several of which
+        // carry preset tints of their own. At the tab alpha the run turns
+        // into one block of colour with the tiles lost inside it, so the
+        // field must stay nearer the ground than an inactive tab does.
+        Assert.True(TabColorPalette.FieldWashAlpha < TabColorPalette.UnselectedBackgroundAlpha);
+
+        const uint Ground = 0x1E1E1E;
+        foreach (var color in new[]
+                 { TabColor.Blue, TabColor.Red, TabColor.Green, TabColor.Yellow })
+        {
+            var field = TabColorPalette.FieldBackgroundRgb(color, Ground);
+            var tint = TabColorPalette.EffectiveBackgroundRgb(color, selected: false, Ground);
+            Assert.NotEqual(tint, field);
+            Assert.True(Distance(field, Ground) < Distance(tint, Ground),
+                $"{color}: the field wash must sit nearer the ground than the tab tint");
+        }
+    }
+
+    [Fact]
+    public void Field_wash_over_its_own_colour_returns_that_colour()
+    {
+        // Blending a colour over itself must give it back; a channel-order
+        // slip shows up here as a channel that moved by tens.
+        //
+        // One level of slack per channel, and only one: the blend truncates
+        // rather than rounds -- the tab tint's pinned values depend on that
+        // -- and at the field's alpha 59*a + 59*(1-a) lands a hair under 59
+        // in binary floating point. Widening this to a tolerance would let a
+        // real slip through; tightening it would mean rounding, which moves
+        // numbers this file already pins.
+        var washed = TabColorPalette.FieldBackgroundRgb(TabColor.Red, 0xFF3B30);
+        Assert.InRange((washed >> 16) & 0xFF, 0xFEu, 0xFFu);
+        Assert.InRange((washed >> 8) & 0xFF, 0x3Au, 0x3Bu);
+        Assert.InRange(washed & 0xFF, 0x2Fu, 0x30u);
+    }
+
+    [Fact]
+    public void Field_wash_follows_the_ground_it_is_composited_against()
+    {
+        // The whole reason the popup composites here instead of handing
+        // XAML a translucent brush: one wash per ground, committed, rather
+        // than whatever Mica makes of it over the user's wallpaper.
+        Assert.NotEqual(
+            TabColorPalette.FieldBackgroundRgb(TabColor.Blue, 0x1E1E1E),
+            TabColorPalette.FieldBackgroundRgb(TabColor.Blue, 0xF0F0F0));
+    }
+
+    [Fact]
+    public void Field_ink_is_readable_on_the_wash_in_both_polarities()
+    {
+        Assert.Equal(0xFFFFFFu, TabColorPalette.FieldForegroundRgb(TabColor.Blue, 0x1E1E1E));
+        Assert.Equal(0x000000u, TabColorPalette.FieldForegroundRgb(TabColor.Yellow, 0xF0F0F0));
+    }
+
+    private static int Distance(uint a, uint b)
+        => Math.Abs((int)((a >> 16) & 0xFF) - (int)((b >> 16) & 0xFF))
+         + Math.Abs((int)((a >> 8) & 0xFF) - (int)((b >> 8) & 0xFF))
+         + Math.Abs((int)(a & 0xFF) - (int)(b & 0xFF));
 }
