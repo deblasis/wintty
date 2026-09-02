@@ -7,9 +7,12 @@
     behind the window, and the questions asked here are about where things
     were laid out, which layout answers exactly.
 
-    One process, one seeded state (two pins, one group, two loose tabs),
-    measured at both pane widths: compact (the 48px rail the strip starts
-    in) and expanded (the pinned sidebar, reached with toggle-sidebar).
+    Two processes. The geometry legs run in one, over a single seeded
+    state (two pins, one group, two loose tabs) measured at both pane
+    widths: compact (the 48px rail the strip starts in) and expanded (the
+    pinned sidebar, reached with toggle-sidebar). The band drag runs in a
+    second, because it needs four pins and an expanded pane -- a column
+    boundary inside the staged state rather than beyond it.
 
     Checks, each at both widths unless stated:
 
@@ -37,6 +40,25 @@
       header-fits           a group header's painted span -- swatch through
                             chevron -- stays inside the pane at both
                             widths.
+
+    And in the second process, expanded only, with four pins staged:
+
+      band-reorder          dragging a pin left over its neighbour swaps
+                            them. Impossible on the crossing engine
+                            outright: squares sharing a band row share the
+                            Y it compares, so no crossing between them can
+                            ever be produced.
+      band-drop-slot        a body tab dragged into the band lands at the
+                            slot it was aimed at, and comes back PINNED.
+                            Aimed at the last slot rather than the first,
+                            because slot 0 is what the old engine produced
+                            for every arrival and could not tell a working
+                            drop from a broken one.
+      band-drop-rect        ...and the square is arranged where the manager
+                            says it is: on the last occupied band row,
+                            right of every pin sharing it. The column count
+                            is derived from the arranged rects, so the
+                            check does not assume a four-column band.
 
     Findings are collected rather than thrown one at a time: a geometry run
     that reports the first bad number and stops hides the rest of the
@@ -119,6 +141,115 @@ function Save-StripShot([int64]$Hwnd64, [string]$Name) {
 }
 
 # ---- the checks ------------------------------------------------------------
+
+# The band's own drag, which the linear crossing engine cannot do.
+#
+# Five pins in the expanded pane, so the band is two rows of four and one:
+# a column boundary is inside the staged state rather than beyond it, and a
+# reorder that only works while every pin shares one row would show here.
+#
+# Three claims, each read back off the MANAGER (the seam's state block)
+# rather than off the gesture's own report:
+#
+#   band-reorder     dragging a pin left over its neighbour swaps them. On
+#                    the crossing engine this was impossible outright:
+#                    squares sharing a band row share the Y it compares, so
+#                    no crossing between them can ever be produced.
+#   band-drop-slot   dragging a body tab into the band lands it at the slot
+#                    it was walked to, NOT at slot 0. The drain-the-crossings
+#                    loop committed 2->1, re-evaluated against the identical
+#                    centre, committed 1->0, and put every arriving tab at
+#                    the front of the band whatever the pointer said.
+#   band-drop-rect   ...and the square is ARRANGED there, asked of
+#                    element-rects rather than trusted from the model. A
+#                    model that moved while the panel drew the old order is
+#                    the failure this file exists to catch.
+function Test-BandDrag($Session) {
+    # Its OWN session, staged from launch rather than re-seeded into the
+    # one the geometry checks used. Re-seeding a live session -- tearing
+    # five tabs down and rebuilding them with pins already in an expanded
+    # vertical pane -- took the app down twice with exit 2173 and no
+    # crash.log entry, which is the layout-switch crash family
+    # seam-acceptance.ps1 exists to stage. Not this harness's question, and
+    # not a shape it should be provoking on the way to asking its own.
+    foreach ($i in 0, 1, 2, 3) {
+        [void](Invoke-SeamCommand $Session @{ op = 'pin'; index = $i; via = 'router' })
+    }
+    # Four pinned, one loose. Selection off the band so the selection
+    # chrome is not sitting on a square being dragged.
+    [void](Invoke-SeamCommand $Session @{ op = 'select'; index = 4 })
+    [void](Invoke-SeamCommand $Session @{ op = 'toggle-sidebar' })
+
+    $before = Invoke-SeamCommand $Session @{ op = 'get-state' }
+    $order = @($before.state.tabs | ForEach-Object { $_.title })
+    if ($order.Count -lt 5) { throw "HARVEST_MISS: the drag leg seeded $($order.Count) tabs" }
+    if ($before.state.paneWidth -le 96) {
+        throw "HARVEST_MISS: the drag leg's pane is $($before.state.paneWidth)px, wanted the expanded sidebar"
+    }
+
+    # Reorder INSIDE a band row: the third pin onto the second's slot.
+    # The drag op answers with `order` and `landed`, not a state block.
+    $moved = Invoke-SeamCommand $Session @{ op = 'drag'; from = 2; to = 1 }
+    $after = @($moved.order)
+    $want = @($order[0], $order[2], $order[1], $order[3], $order[4])
+    Add-Check 'band-reorder' (
+        'dragged pin 2 onto slot 1: [{0}], wanted [{1}]' -f
+            ($after -join ','), ($want -join ',')) (($after -join ',') -eq ($want -join ','))
+
+    # A body tab into the band, aimed at the LAST slot rather than the
+    # first. Slot 0 is what the old engine produced for every arrival, so
+    # a target of 0 here could not tell a working drop from a broken one.
+    $arrived = Invoke-SeamCommand $Session @{ op = 'drag'; from = 4; to = 3 }
+    $landed = @($arrived.order)
+    $ok = $landed.Count -ge 4 -and $landed[3] -eq $order[4] `
+        -and [int]$arrived.landed -eq 3 -and [bool]$arrived.pinned
+    Add-Check 'band-drop-slot' (
+        "'{0}' landed at {1} pinned={2}; order [{3}]" -f
+            $order[4], $arrived.landed, [bool]$arrived.pinned, ($landed -join ',')) $ok
+
+    # ...and the square is arranged where the manager says it is.
+    $rects = Invoke-SeamCommand $Session @{ op = 'element-rects' }
+    $pins = @($rects.rects.pinned)
+    $target = @($pins | Where-Object { $_.title -eq $order[4] })
+    if ($target.Count -ne 1) {
+        Add-Check 'band-drop-rect' (
+            "the band arranges {0} squares titled '{1}'" -f $target.Count, $order[4]) $false
+    } elseif (-not $target[0].row.visible) {
+        # A FINDING, not a harness miss. Assert-Rect throws HARVEST_MISS
+        # here, which the catch below turns into exit 1 -- "nothing is known
+        # about the product" -- but a newly pinned square with no arranged
+        # box is precisely the defect this check exists to name: a model
+        # that moved while the panel drew the old order. Exit 1 would let a
+        # gate keyed on findings read the headline bug as infrastructure
+        # noise.
+        Add-Check 'band-drop-rect' (
+            "the newly pinned square '{0}' is not arranged at all" -f $order[4]) $false
+    } else {
+        # READING ORDER is the claim, and it needs no column count at all.
+        # The band lays its slots out left to right, wrapping, so sorting
+        # the arranged squares by row then column must reproduce the
+        # manager's pinned prefix exactly -- and the dropped tab landed at
+        # manager index 3, so it must be the fourth square read that way.
+        #
+        # Deriving a column count and predicting a row/column was the
+        # obvious alternative and it is a trap twice over: assuming four
+        # columns is a false finding as soon as the pane fits five, and
+        # "the last occupied row" is simply wrong here, because slot 3 of
+        # five in a four-column band is row 0, not the row holding the
+        # fifth pin. Reading order sidesteps the arithmetic and asserts the
+        # thing the check is actually named for.
+        $r = $target[0].row
+        $reading = @($pins | Sort-Object `
+            @{ Expression = { [Math]::Round($_.row.y) } }, `
+            @{ Expression = { $_.row.x } })
+        $at = [Array]::IndexOf(@($reading | ForEach-Object { $_.title }), $order[4])
+        $ok = $at -eq 3
+        Add-Check 'band-drop-rect' (
+            "'{0}' is square {1} in reading order (want 3); at ({2:F1},{3:F1}); band reads [{4}]" -f
+                $order[4], $at, $r.x, $r.y,
+                (($reading | ForEach-Object { $_.title }) -join ',')) $ok
+    }
+}
 
 # A pinned tab is an icon square, and that change of shape is what marks
 # the zone now that nothing is drawn between the zones. So the square is
@@ -303,6 +434,19 @@ try {
 
     if ($session.Proc.HasExited) {
         throw "APP_EXIT: the app exited during the run (code $($session.Proc.ExitCode))"
+    }
+
+    # The band's own drag, in its own process. See Test-BandDrag.
+    Stop-SeamSession $session
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    [void](Invoke-SeamCommand $session @{ op = 'seed-tabs'; count = 5; titles = $names })
+    Write-Host ''
+    Write-Host '=== band drag (four pins, expanded) ==='
+    Test-BandDrag $session
+    Save-StripShot $session.Hwnd64 'band-drag'
+
+    if ($session.Proc.HasExited) {
+        throw "APP_EXIT: the app exited during the drag leg (code $($session.Proc.ExitCode))"
     }
 }
 catch {
