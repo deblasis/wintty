@@ -55,3 +55,47 @@ work no PR reviewed may ride along unnamed or unacknowledged.
 
 Always pass `--repo deblasis/wintty`. Never open anything against
 `ghostty-org/ghostty`.
+
+## Heavy job lane (mandatory on the development machine)
+
+The machine this fork is developed on cannot run two heavy jobs at once:
+concurrent memory-heavy builds have taken it down with no warning, and two
+GUI harness runs corrupt each other by fighting over focus, the foreground
+window and the desktop. Every session, in every worktree, routes heavy jobs
+through one named lane with [incoda](https://github.com/deblasis/incoda),
+queue key `wintty` (shared with `wintty-release`, which builds the same
+thing):
+
+```
+incoda run --queue wintty --reason "what this is" -- <cmd...>
+incoda status --queue wintty     # who holds it, from which folder, who waits
+incoda watch  --queue wintty     # live view
+```
+
+Run under the lane, always:
+
+- `zig build` in any form that links libghostty (`just build-dll`,
+  `just build-dll-release`, `zig build test`), and `just test-win`
+- every GUI harness: `just fuzz`, `just search-fuzz`, `just frame-style-fuzz`,
+  `just shader-notice-fuzz`, `just splash-race`, anything under
+  `windows/scripts/` that launches a window, and `just run-win` when it is
+  part of a test. `just theme-matrix` takes the lane itself.
+- any test that is timing-sensitive enough to fail on a loaded machine
+
+The rules that matter:
+
+- Never bypass the lane: no "just this once" outside it, no second heavy job
+  in another terminal while one is queued. The lane binds only what is routed
+  through it, so a single bypass reintroduces exactly the collision it exists
+  to stop.
+- If the lane makes you wait longer than about ten minutes, say so to the
+  user: `incoda status` names the pid, the command and the directory holding
+  it. Do not wait half an hour in silence and do not go around it.
+- `incoda force-release` is a human decision, never an agent's. It refuses
+  while a live holder exists for a reason.
+- `--reason` every time. With several sessions sharing a lane, "which
+  worktree is that and why" is the first question anyone asks, and `status`
+  can only answer if you said.
+- `run` releases on exit, including a crash: the lock is an OS file lock, so
+  a killed holder frees the lane on its own.
+
