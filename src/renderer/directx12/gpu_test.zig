@@ -472,7 +472,7 @@ test "Buffer: create, sync, deinit" {
     defer dev.deinit();
 
     const TestFloat = Buffer(f32);
-    var buf = try TestFloat.init(.{ .device = dev.device }, 64);
+    var buf = try TestFloat.init(.{ .device = dev.device, .retire = null }, 64);
     defer buf.deinit();
 
     try std.testing.expect(buf.resource != null);
@@ -491,7 +491,7 @@ test "Buffer: sync triggers realloc when data exceeds capacity" {
     defer dev.deinit();
 
     const TestU32 = Buffer(u32);
-    var buf = try TestU32.init(.{ .device = dev.device }, 4);
+    var buf = try TestU32.init(.{ .device = dev.device, .retire = null }, 4);
     defer buf.deinit();
 
     // Sync data that exceeds capacity -- should realloc at 2x.
@@ -508,7 +508,7 @@ test "Buffer: syncFromArrayLists concatenates correctly" {
     defer dev.deinit();
 
     const TestU32 = Buffer(u32);
-    var buf = try TestU32.init(.{ .device = dev.device }, 64);
+    var buf = try TestU32.init(.{ .device = dev.device, .retire = null }, 64);
     defer buf.deinit();
 
     var list1 = std.ArrayListUnmanaged(u32).empty;
@@ -528,7 +528,7 @@ test "Buffer: persistent mapping allows direct writes" {
     defer dev.deinit();
 
     const TestF32 = Buffer(f32);
-    var buf = try TestF32.init(.{ .device = dev.device }, 16);
+    var buf = try TestF32.init(.{ .device = dev.device, .retire = null }, 16);
     defer buf.deinit();
 
     // DX12 buffers are persistently mapped -- write directly.
@@ -550,11 +550,205 @@ test "Buffer: constant buffer (Uniforms)" {
 
     const Uniforms = extern struct { x: f32, y: f32, z: f32, w: f32 };
     const TestCB = Buffer(Uniforms);
-    var buf = try TestCB.init(.{ .device = dev.device }, 1);
+    var buf = try TestCB.init(.{ .device = dev.device, .retire = null }, 1);
     defer buf.deinit();
 
     try buf.sync(&.{Uniforms{ .x = 1.0, .y = 2.0, .z = 3.0, .w = 4.0 }});
     try std.testing.expectEqual(@as(u32, @sizeOf(Uniforms)), buf.buffer.stride);
+}
+
+// ---- Deferred release regression (issue #944) ----
+
+// Growing a cell buffer must not final-release the old resource while a
+// submission that reads it is still in flight.
+//
+// This is the crash in issue #944: `drawFrame` syncs the cell buffers at
+// a point where the only DX12 GPU drain -- the per-slot fence wait in
+// `beginFrame` -- has not happened yet, so `syncFromArrayLists` grew the
+// buffer and released a resource the previous frame's command list was
+// still reading. The debug layer answers that with
+// `ID3D12Resource::<final-release>: CORRUPTION`, raised as a native SEH
+// that kills the process with exit code 2173 and writes no crash.log.
+//
+// Determinism comes from `ID3D12CommandQueue::Wait`: the queue is parked
+// on a gate fence this test alone signals, so the submission that reads
+// the buffer provably cannot retire while the grow happens -- no
+// dependence on how fast the GPU is.
+//
+// The buffer is built from `DirectX12.bufferOptions()` rather than a
+// hand-written Options literal on purpose. That is the seam the fix
+// changes; a literal here would keep passing whether or not production
+// buffers are wired to the retirement queue.
+test "Buffer: a grow does not final-release a resource the GPU still reads" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    const DirectX12 = @import("../DirectX12.zig");
+
+    // Shared-texture mode: a real device and command queue with no window
+    // or swap chain, so this runs headless.
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    // Skip loudly, never silently. This is the one test standing between
+    // the tree and a silent memory-corruption regression, so a box with no
+    // D3D12 adapter must show up in the run's skip count rather than
+    // reporting a pass it never earned.
+    api.dev = Device.init(.{ .shared_texture = .{
+        .width = 64,
+        .height = 64,
+    } }, .{}) catch return error.SkipZigTest;
+    defer api.dev.?.deinit();
+    const dev = &api.dev.?;
+
+    // A cell buffer through the production options path.
+    const CellBuffer = buffer_mod.Buffer(u32);
+    var buf = try CellBuffer.init(api.bufferOptions(), 4);
+    defer buf.deinit();
+    const old_resource = buf.resource orelse return error.BufferResourceMissing;
+
+    // Somewhere for the in-flight submission to copy the buffer into, so
+    // the command list genuinely references it.
+    var sink: ?*d3d12.ID3D12Resource = null;
+    {
+        const heap_props = d3d12.D3D12_HEAP_PROPERTIES{
+            .Type = .READBACK,
+            .CPUPageProperty = 0,
+            .MemoryPoolPreference = 0,
+            .CreationNodeMask = 0,
+            .VisibleNodeMask = 0,
+        };
+        const desc = d3d12.D3D12_RESOURCE_DESC{
+            .Dimension = .BUFFER,
+            .Alignment = 0,
+            .Width = 4 * @sizeOf(u32),
+            .Height = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = .UNKNOWN,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Layout = .ROW_MAJOR,
+            .Flags = .NONE,
+        };
+        const hr = dev.device.CreateCommittedResource(
+            &heap_props,
+            0,
+            &desc,
+            d3d12.D3D12_RESOURCE_STATES.COPY_DEST,
+            null,
+            &d3d12.ID3D12Resource.IID,
+            @ptrCast(&sink),
+        );
+        if (com.FAILED(hr) or sink == null) return error.SinkCreationFailed;
+    }
+    defer _ = sink.?.Release();
+
+    var cmd_allocator: ?*d3d12.ID3D12CommandAllocator = null;
+    {
+        const hr = dev.device.CreateCommandAllocator(
+            .DIRECT,
+            &d3d12.ID3D12CommandAllocator.IID,
+            @ptrCast(&cmd_allocator),
+        );
+        if (com.FAILED(hr) or cmd_allocator == null) return error.CommandAllocatorCreationFailed;
+    }
+    defer _ = cmd_allocator.?.Release();
+
+    var command_list: ?*d3d12.ID3D12GraphicsCommandList = null;
+    {
+        const hr = dev.device.CreateCommandList(
+            0,
+            .DIRECT,
+            cmd_allocator.?,
+            null,
+            &d3d12.ID3D12GraphicsCommandList.IID,
+            @ptrCast(&command_list),
+        );
+        if (com.FAILED(hr) or command_list == null) return error.CommandListCreationFailed;
+    }
+    defer _ = command_list.?.Release();
+
+    // The gate. The queue blocks on it until this test signals it from the
+    // CPU, which is what makes "still in flight" a fact rather than a race.
+    var gate: ?*d3d12.ID3D12Fence = null;
+    {
+        const hr = dev.device.CreateFence(0, .NONE, &d3d12.ID3D12Fence.IID, @ptrCast(&gate));
+        if (com.FAILED(hr) or gate == null) return error.FenceCreationFailed;
+    }
+    defer _ = gate.?.Release();
+
+    // Record a read of the buffer. UPLOAD-heap buffers live in
+    // GENERIC_READ, which already includes COPY_SOURCE, so no barrier.
+    command_list.?.CopyBufferRegion(sink.?, 0, old_resource, 0, 4 * @sizeOf(u32));
+    if (com.FAILED(command_list.?.Close())) return error.CommandListCloseFailed;
+
+    // Park the queue, then submit. Nothing executes until the gate opens.
+    if (com.FAILED(dev.command_queue.Wait(gate.?, 1))) return error.QueueWaitFailed;
+    // Every exit from here on must open the gate AND drain before the
+    // defers unwind. Opening alone fixes the hang and buys a worse
+    // failure: the defers below release the command allocator, the command
+    // list and the sink LIFO, and the copy they belong to has just been
+    // let go, so a failing assertion would final-release resources the GPU
+    // is executing -- the exact CORRUPTION break this test is about, which
+    // kills the process with 2173 and reports nothing. Draining first
+    // means a red assertion stays a red assertion.
+    errdefer {
+        _ = gate.?.Signal(1);
+        dev.waitForGpu() catch {};
+    }
+    const lists = [_]*d3d12.ID3D12GraphicsCommandList{command_list.?};
+    dev.command_queue.ExecuteCommandLists(1, &lists);
+
+    // Signal the device fence the way drawFrameEnd does. Nothing is staged
+    // yet, so this seal is a no-op on the queue -- what it establishes is
+    // the fence value the grow below will be sealed against, and that the
+    // ordering matches production rather than being contrived here.
+    const work_value = dev.fence_value.fetchAdd(1, .release) + 1;
+    if (com.FAILED(dev.command_queue.Signal(dev.fence, work_value))) return error.FenceSignalFailed;
+    dev.retirement.seal(work_value);
+
+    // The submission is provably unretired.
+    try std.testing.expect(dev.fence.GetCompletedValue() < work_value);
+
+    // Hold our own reference so the resource survives for measurement even
+    // if the grow drops the buffer's. Reference counts are diagnostics
+    // only per COM, so the assertion compares two readings of the same
+    // object rather than trusting an absolute number.
+    _ = old_resource.AddRef();
+    const before = old_resource.AddRef();
+    _ = old_resource.Release();
+
+    // The bug: grow the buffer while that submission is in flight. This is
+    // exactly generic.zig's `frame.cells.syncFromArrayLists(...)` at the
+    // point where DX12 has not drained anything yet.
+    var big: [64]u32 = undefined;
+    for (&big, 0..) |*v, i| v.* = @intCast(i);
+    try buf.sync(&big);
+    try std.testing.expect(buf.resource != old_resource);
+
+    const after = old_resource.AddRef();
+    _ = old_resource.Release();
+
+    // Unfixed, `after` is one lower, and the reason matters: it is the
+    // BUFFER'S OWN reference that release() dropped. D3D12 holds no
+    // reference on a resource a command list merely references -- that is
+    // the whole premise of this bug, so "the reference D3D12 held" would
+    // be exactly backwards. Fixed, release() hands the resource to the
+    // retirement queue instead, which keeps that reference until the
+    // fence proves the copy done, so the two readings match.
+    //
+    // What the gate above buys is the PRECONDITION, not this count: it is
+    // what makes the assertion at the fence check true every run, so the
+    // grow provably happens while the copy is in flight rather than
+    // whenever the GPU is slow enough.
+    try std.testing.expectEqual(before, after);
+
+    // Open the gate and let everything retire, then verify the queue
+    // actually hands the resource back once the fence proves it safe.
+    if (com.FAILED(gate.?.Signal(1))) return error.GateSignalFailed;
+    dev.waitForGpu() catch return error.WaitForGpuFailed;
+    try std.testing.expectEqual(@as(usize, 0), dev.retirement.count());
+
+    // Drop the reference we took; the retirement queue already dropped
+    // the buffer's, so this is the last one.
+    _ = old_resource.Release();
 }
 
 test "Buffer: initFill creates buffer with data" {
@@ -563,7 +757,7 @@ test "Buffer: initFill creates buffer with data" {
 
     const TestU8 = Buffer(u8);
     const data = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
-    var buf = try TestU8.initFill(.{ .device = dev.device }, &data);
+    var buf = try TestU8.initFill(.{ .device = dev.device, .retire = null }, &data);
     defer buf.deinit();
 
     try std.testing.expectEqual(@as(usize, 4), buf.len);
@@ -592,6 +786,9 @@ test "Texture: create R8_UNORM with initial data" {
         .device = dev.device,
         .command_list = dev.command_list,
         .srv_heap = &srv_heap,
+        // Every submitted copy is drained by executeAndWait before this
+        // texture is destroyed, so an immediate release is safe here.
+        .retire = null,
         .pixel_format = .R8_UNORM,
     }, 4, 4, &data) catch return;
     defer tex.deinit();
@@ -623,6 +820,9 @@ test "Texture: create B8G8R8A8_UNORM without initial data" {
         .device = dev.device,
         .command_list = dev.command_list,
         .srv_heap = &srv_heap,
+        // Every submitted copy is drained by executeAndWait before this
+        // texture is destroyed, so an immediate release is safe here.
+        .retire = null,
         .pixel_format = .B8G8R8A8_UNORM,
     }, 8, 8, null) catch return;
     defer tex.deinit();
@@ -648,6 +848,9 @@ test "Texture: replaceRegion updates sub-region" {
         .device = dev.device,
         .command_list = dev.command_list,
         .srv_heap = &srv_heap,
+        // Every submitted copy is drained by executeAndWait before this
+        // texture is destroyed, so an immediate release is safe here.
+        .retire = null,
         .pixel_format = .B8G8R8A8_UNORM,
     }, 8, 8, null) catch return;
     defer tex.deinit();
@@ -1194,6 +1397,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
         .device = dev,
         .command_list = command_list,
         .srv_heap = &srv_heap,
+        // Drained by the explicit fence waits this test already makes
+        // before teardown.
+        .retire = null,
         .rtv_heap = &rtv_heap,
         .pixel_format = .B8G8R8A8_UNORM,
         .render_target = true,
@@ -1214,7 +1420,10 @@ test "post pipeline: scanline shader leaves row periodicity" {
     var uniforms = std.mem.zeroes(shadertoy.Uniforms);
     uniforms.resolution = .{ @floatFromInt(W), @floatFromInt(H), 1.0 };
     uniforms.time = 0.25;
-    var ubuf = try buffer_mod.Buffer(shadertoy.Uniforms).init(.{ .device = dev }, 1);
+    // No retirement queue: this buffer is synced and read on the CPU side
+    // only, so nothing the GPU has in flight can reference it.
+    var ubuf = try buffer_mod.Buffer(shadertoy.Uniforms)
+        .init(.{ .device = dev, .retire = null }, 1);
     defer ubuf.deinit();
     try ubuf.sync(&.{uniforms});
 
@@ -1431,4 +1640,22 @@ test "post pipeline: scanline shader leaves row periodicity" {
     // row-to-row differences and roughly a third of rows dark.
     try std.testing.expect(max_diff > 10.0);
     try std.testing.expect(dark_rows > H / 8);
+}
+
+test "buffer.Options.retire has no default" {
+    // The buffer half of the same rule Texture.zig pins. A builder that
+    // omitted `retire` would get a bare Release on grow, which is the
+    // crash this fix is for, and nothing would fail. Having no default is
+    // what turns that into a compile error at every construction site.
+    //
+    // The found flag keeps the loop from passing vacuously if the field is
+    // ever renamed.
+    var found = false;
+    inline for (@typeInfo(buffer_mod.Options).@"struct".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "retire")) {
+            found = true;
+            try std.testing.expect(field.default_value_ptr == null);
+        }
+    }
+    try std.testing.expect(found);
 }
