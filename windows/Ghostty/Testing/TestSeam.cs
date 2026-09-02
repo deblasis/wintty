@@ -1118,12 +1118,13 @@ internal static class TestSeam
     {
         var text = new StringBuilder(ex.GetType().Name);
         if (!string.IsNullOrWhiteSpace(ex.Message)) text.Append(": ").Append(ex.Message);
-        if (ex.InnerException is { } inner)
+        var fault = Innermost(ex);
+        if (!ReferenceEquals(fault, ex))
         {
-            text.Append(" <- ").Append(inner.GetType().Name);
-            if (!string.IsNullOrWhiteSpace(inner.Message))
+            text.Append(" <- ").Append(fault.GetType().Name);
+            if (!string.IsNullOrWhiteSpace(fault.Message))
             {
-                text.Append(": ").Append(inner.Message);
+                text.Append(": ").Append(fault.Message);
             }
         }
         if (TopFrame(ex) is { } frame) text.Append(" at ").Append(frame);
@@ -1131,14 +1132,34 @@ internal static class TestSeam
     }
 
     /// <summary>
-    /// The first frame of the stack, preferring the inner exception's --
+    /// The bottom of the wrapper chain: the exception that actually failed.
+    ///
+    /// One level of unwrapping is not enough. TargetInvocationException
+    /// wrapping AggregateException wrapping the real fault is ordinary here,
+    /// and stopping at depth one names a second wrapping site while the
+    /// fault stays anonymous -- the thing this reporting exists to avoid.
+    /// Bounded, because a cycle is pathological but a hang inside error
+    /// reporting is the worst possible place for one.
+    /// </summary>
+    private static Exception Innermost(Exception ex)
+    {
+        var current = ex;
+        for (var depth = 0; depth < 16 && current.InnerException is { } inner; depth++)
+        {
+            current = inner;
+        }
+        return current;
+    }
+
+    /// <summary>
+    /// The first frame of the stack, preferring the innermost exception's --
     /// a wrapper's top frame is the wrapping site, not the fault. The whole
     /// trace does not survive the response's one-line framing, and the
     /// frame that threw is the one worth the bytes.
     /// </summary>
     private static string? TopFrame(Exception ex)
     {
-        var trace = (ex.InnerException ?? ex).StackTrace ?? ex.StackTrace;
+        var trace = Innermost(ex).StackTrace ?? ex.StackTrace;
         if (string.IsNullOrEmpty(trace)) return null;
         foreach (var line in trace.Split('\n'))
         {

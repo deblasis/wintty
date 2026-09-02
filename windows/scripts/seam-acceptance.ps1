@@ -38,10 +38,13 @@
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
-    # This count does not currently decide whether the run passes. The app
-    # dies with 0xC0000005 on the THIRD seed-tabs of a process, whatever
-    # this is set to: at 5 that is iteration 3, and at 2 it is the drag
-    # leg's own seed. Measured 3/3, 2026-09-02.
+    # 1 is the only value that currently completes. The app dies with
+    # 0xC0000005 on the THIRD seed-tabs of a process (measured 3/3,
+    # 2026-09-02), and this count spends N seeds in the loop plus one more
+    # in the drag leg -- so at 2 and above the run dies before the drag leg
+    # it exists to exercise. The default is left at 5 so a green run means
+    # the crash is fixed rather than merely stepped around; use -Iterations 1
+    # to exercise the drag leg today.
     #
     # Start-SeamSession's note says "around the seventh cumulative seed"
     # and cites a separately-filed issue. The threshold is three, and no
@@ -88,17 +91,24 @@ function Invoke-Seam {
     return Invoke-SeamCommand $script:Session $Command
 }
 
-function Assert-Order {
-    param($State, [string[]]$Want, [string]$What)
-    # A missing state block is a harness fault, not a product one. Without
-    # this the property walk yields $null, @() turns it into an empty list,
-    # and the comparison below reports "order is []" -- a PRODUCT_FAIL that
-    # names the app for a response this script was reading wrong. Which is
-    # exactly what the drag leg did; see Assert-DragOrder.
-    if ($null -eq $State.state -or $null -eq $State.state.tabs) {
+# A missing state block is a harness fault, not a product one. Without this
+# a property walk yields $null, @() turns it into an empty list, and the
+# comparison reports "order is []" -- a PRODUCT_FAIL naming the app for a
+# response this script read wrong. Which is exactly what the drag leg did;
+# see Assert-DragOrder. Every reader of .state goes through here, because
+# guarding one of them and leaving three bare is how the first one was missed.
+function Assert-SeamState {
+    param($Response, [string]$What)
+    if ($null -eq $Response.state -or $null -eq $Response.state.tabs) {
         throw ("HARNESS: {0}: the response carries no state.tabs to assert on" -f
             $What)
     }
+    return $Response
+}
+
+function Assert-Order {
+    param($State, [string[]]$Want, [string]$What)
+    [void](Assert-SeamState $State $What)
     $got = @($State.state.tabs | ForEach-Object { $_.title })
     if (($got -join ',') -ne ($Want -join ',')) {
         throw ("PRODUCT_FAIL: {0}: order is [{1}], wanted [{2}]" -f
@@ -126,6 +136,7 @@ function Assert-DragOrder {
 
 function Assert-SeamGroup {
     param($State, [string]$Title, [string[]]$Members, [bool]$Collapsed)
+    [void](Assert-SeamState $State 'group assertion')
     $groups = @($State.state.groups)
     if ($groups.Count -ne 1) {
         throw ("PRODUCT_FAIL: expected one group, saw {0}" -f $groups.Count)
@@ -169,6 +180,7 @@ try {
 
         $collapsed = Invoke-Seam @{
             op = 'collapse'; index = 2; collapsed = $true }
+        [void](Assert-SeamState $collapsed "iteration $i collapse")
         if (-not $collapsed.state.tabs[2].collapsedGroup) {
             throw "PRODUCT_FAIL: iteration ${i}: group did not collapse"
         }
@@ -179,6 +191,7 @@ try {
         [void](Invoke-Seam @{ op = 'toggle-layout' })
 
         $state = Invoke-Seam @{ op = 'get-state' }
+        [void](Assert-SeamState $state "iteration $i final")
         if (-not $state.state.vertical) {
             throw "PRODUCT_FAIL: iteration ${i}: window did not come back vertical"
         }
@@ -225,8 +238,13 @@ try {
 catch {
     $message = $_.Exception.Message
     Write-Host $message
-    if ($message -like 'HARNESS:*') { exit 1 }
-    exit 2
+    # Positive test on the product prefixes, the way frame-keybind-check and
+    # the other harnesses classify. Testing for HARNESS:* instead would file
+    # Wait-SeamReady's HARVEST_MISS throws -- no WinUI hwnd, splash never
+    # dropped, both of which mean the harness could not observe -- as product
+    # findings against Wintty.
+    if ($message -like 'PRODUCT_*') { exit 2 }
+    exit 1
 }
 finally {
     if ($script:Session) { Stop-SeamSession $script:Session }

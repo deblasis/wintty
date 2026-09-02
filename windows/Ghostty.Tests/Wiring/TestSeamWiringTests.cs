@@ -626,9 +626,14 @@ public class TestSeamWiringTests
         // Nothing hands Error a bare message. The parse arm's interpolated
         // "request is not JSON: {ex.Message}" is deliberately still allowed:
         // JsonException always carries one, and it arrives with its context.
+        // Matched as a tree, not as the text "ex.Message": a new site spelled
+        // `catch (COMException e) { Error(op, e.Message); }` is a different
+        // identifier and would walk straight through a substring rule.
         Assert.DoesNotContain(
             seam.Root.Calls("Error"),
-            c => c.ArgumentList.Arguments.Count > 1 && c.Arg(1) == "ex.Message");
+            c => c.ArgumentList.Arguments.Count > 1
+                 && c.ArgumentList.Arguments[1].Expression is MemberAccessExpressionSyntax m
+                 && m.Name.Identifier.ValueText == "Message");
 
         // The two unfiltered general handlers -- the dispatch's and the
         // marshal's -- are the reporting sites, and both describe.
@@ -636,15 +641,34 @@ public class TestSeamWiringTests
             .Where(c => c.Filter is null && c.Declaration?.Type.ToString() == "Exception")
             .ToList();
         Assert.Equal(2, general.Count);
-        foreach (var handler in general) Assert.Single(handler.Calls("Describe"));
+        // The RESPONSE must carry Describe's result. "Describe is called
+        // somewhere in the handler" is satisfied by
+        //     Debug.WriteLine(Describe(ex));
+        //     done.SetResult(Error(op, "command failed"));
+        // which restores #942's symptom exactly, so the argument is pinned.
+        foreach (var handler in general)
+        {
+            Assert.Equal("Describe(ex)", handler.Call("Error").Arg(1));
+        }
 
         // Describe leads with the type, whatever the message turns out to
         // be, and reaches for the frame that threw.
         var describe = seam.Method("Describe");
-        Assert.Single(
-            describe.DescendantNodes().OfType<MemberAccessExpressionSyntax>().ToList(),
-            m => m.ToString() == "ex.GetType().Name");
+        // The type SEEDS the builder, so it is unconditional. Merely finding
+        // `ex.GetType().Name` somewhere in the method also passes for
+        //     if (!string.IsNullOrWhiteSpace(ex.Message)) text.Append(ex.GetType().Name)...
+        // which answers an empty-message exception with no type at all.
+        var seeded = Assert.Single(
+            describe.DescendantNodes().OfType<ObjectCreationExpressionSyntax>().ToList(),
+            o => o.Type.ToString() == "StringBuilder");
+        Assert.Equal("ex.GetType().Name", seeded.ArgumentList!.Arguments[0].ToString());
+
+        // And the frame is appended, not merely computed.
         Assert.Single(describe.Calls("TopFrame"));
+        Assert.Contains(
+            describe.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.ArgumentList.Arguments.Count == 1
+                 && i.ArgumentList.Arguments[0].ToString() == "frame");
 
         // The marshal reports under the caller's op, never a fixed literal.
         var marshal = seam.Method("RunOnUiThreadAsync");
