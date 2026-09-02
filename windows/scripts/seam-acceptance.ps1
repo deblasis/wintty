@@ -21,14 +21,32 @@
     drag(1 -> 3) through the strip's real press/threshold/crossing/release
     sequence, asserting the landed order.
 
+    The launch goes through Start-SeamSession rather than being staged
+    here. That is not tidiness: the shared launcher waits for the window to
+    be READY -- a WinUI hwnd, then the splash gone -- where this script used
+    to send its first command as soon as the pipe existed, which is earlier;
+    and it strips NO_COLOR out of the child's environment, which a shell
+    that sets it (Claude Code's PowerShell tool does) otherwise turns into a
+    focus-stealing infobar across a third of the window. Both were #942.
+
     Exits 0 on pass, 2 on a product finding (the app died, refused a
-    command, or landed in a state the assertions reject), 1 when the harness
-    could not run and nothing is known about the product (the exe is
-    missing, a Wintty is already running, the seam pipe never appeared).
+    command, never showed a window or never dropped its splash, or landed in
+    a state the assertions reject), 1 when the harness could not run and
+    nothing is known about the product (the exe is missing, a Wintty is
+    already running, the seam pipe never appeared).
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
+    # This count does not currently decide whether the run passes. The app
+    # dies with 0xC0000005 on the THIRD seed-tabs of a process, whatever
+    # this is set to: at 5 that is iteration 3, and at 2 it is the drag
+    # leg's own seed. Measured 3/3, 2026-09-02.
+    #
+    # Start-SeamSession's note says "around the seventh cumulative seed"
+    # and cites a separately-filed issue. The threshold is three, and no
+    # such issue exists in this repo -- both halves of that note are
+    # repeated here only to say they were checked and are wrong.
     [ValidateRange(1, 100)][int]$Iterations = 5,
     # Milliseconds between commands. 0 is the tight train; 400 is the
     # pacing that let ordinary layout frames pass through freshly churned
@@ -56,57 +74,50 @@ $crashStamp = if (Test-Path $crashPath) {
     [datetime]::MinValue
 }
 
-$tempXdg = Join-Path $env:TEMP "wintty-seam-accept-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-@'
+$config = @'
 windows-single-instance = true
 window-save-state = never
 vertical-tabs = true
-'@ | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
+'@
 
-$origXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$origXdg = if ($origXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
-$origSeamSet = Test-Path Env:WINTTY_TEST_SEAM
-$origSeam = if ($origSeamSet) { $env:WINTTY_TEST_SEAM } else { $null }
-
-$script:Proc = $null
-$script:Reader = $null
-$script:Writer = $null
-$script:Pipe = $null
-$stamp = Get-WinttyLaunchStamp
+$script:Session = $null
 
 function Invoke-Seam {
     param([Parameter(Mandatory)][hashtable]$Command)
     if ($GapMs -gt 0) { Start-Sleep -Milliseconds $GapMs }
-    if ($script:Proc.HasExited) {
-        throw ("PRODUCT_EXIT: the app exited (code {0}) before '{1}'" -f
-            $script:Proc.ExitCode, $Command['op'])
-    }
-    $script:Writer.WriteLine(($Command | ConvertTo-Json -Compress -Depth 6))
-    $line = $script:Reader.ReadLine()
-    if ($null -eq $line) {
-        if ($script:Proc.HasExited) {
-            throw ("PRODUCT_EXIT: the seam pipe closed and the app exited " +
-                "(code {0}) during '{1}'" -f $script:Proc.ExitCode, $Command['op'])
-        }
-        throw ("HARNESS: the seam closed the connection without a " +
-            "response to '{0}'" -f $Command['op'])
-    }
-    $response = $line | ConvertFrom-Json
-    if ($null -eq $response) {
-        throw ("HARNESS: the seam answered '{0}' with a non-JSON line" -f
-            $Command['op'])
-    }
-    if (-not $response.ok) {
-        throw ("PRODUCT_FAIL: {0} -> {1}" -f $Command['op'], $response.error)
-    }
-    Write-Host ("OK {0}" -f $Command['op'])
-    return $response
+    return Invoke-SeamCommand $script:Session $Command
 }
 
 function Assert-Order {
     param($State, [string[]]$Want, [string]$What)
+    # A missing state block is a harness fault, not a product one. Without
+    # this the property walk yields $null, @() turns it into an empty list,
+    # and the comparison below reports "order is []" -- a PRODUCT_FAIL that
+    # names the app for a response this script was reading wrong. Which is
+    # exactly what the drag leg did; see Assert-DragOrder.
+    if ($null -eq $State.state -or $null -eq $State.state.tabs) {
+        throw ("HARNESS: {0}: the response carries no state.tabs to assert on" -f
+            $What)
+    }
     $got = @($State.state.tabs | ForEach-Object { $_.title })
+    if (($got -join ',') -ne ($Want -join ',')) {
+        throw ("PRODUCT_FAIL: {0}: order is [{1}], wanted [{2}]" -f
+            $What, ($got -join ','), ($Want -join ','))
+    }
+}
+
+# The drag ops answer with DragJson, which carries a flat `order` array and
+# NO state block. Asserting them with Assert-Order read $State.state.tabs as
+# $null on every drag, so the drag leg could only ever report "order is []"
+# -- it has never been capable of passing. Nobody saw it, because the run
+# died at its first op long before reaching this leg (#942).
+function Assert-DragOrder {
+    param($Response, [string[]]$Want, [string]$What)
+    if ($null -eq $Response.order) {
+        throw ("HARNESS: {0}: the drag response carries no order to assert on" -f
+            $What)
+    }
+    $got = @($Response.order)
     if (($got -join ',') -ne ($Want -join ',')) {
         throw ("PRODUCT_FAIL: {0}: order is [{1}], wanted [{2}]" -f
             $What, ($got -join ','), ($Want -join ','))
@@ -123,8 +134,8 @@ function Assert-SeamGroup {
     $got = @($group.members)
     if ($group.title -ne $Title -or ($got -join ',') -ne ($Members -join ',') `
         -or [bool]$group.collapsed -ne $Collapsed) {
-        throw ("PRODUCT_FAIL: group is title={0} members=[{1}] collapsed={2}, " +
-            "wanted title={3} members=[{4}] collapsed={5}" -f
+        throw (("PRODUCT_FAIL: group is title={0} members=[{1}] collapsed={2}, " +
+            "wanted title={3} members=[{4}] collapsed={5}") -f
             $group.title, ($got -join ','), $group.collapsed,
             $Title, ($Members -join ','), $Collapsed)
     }
@@ -133,22 +144,10 @@ function Assert-SeamGroup {
 # ---- run -----------------------------------------------------------------
 
 try {
-    $env:XDG_CONFIG_HOME = $tempXdg
-    $token = New-SeamToken
-    $env:WINTTY_TEST_SEAM = $token
-    $proc = Start-Process -FilePath $ExePath -PassThru `
-        -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
-    $script:Proc = $proc
-    Write-Host "pid=$($proc.Id) pipe=$(Get-SeamPipeName $token) iterations=$Iterations"
-
-    # The seam pipe appears once OnLaunched has built the window.
-    [void](Wait-SeamPipe -Token $token -Proc $proc)
-    $script:Pipe = Connect-SeamPipe -Token $token
-    $script:Reader = [System.IO.StreamReader]::new($script:Pipe)
-    $script:Writer = [System.IO.StreamWriter]::new(
-        $script:Pipe, [System.Text.UTF8Encoding]::new($false))
-    $script:Writer.AutoFlush = $true
-    $script:Writer.NewLine = "`n"
+    $script:Session = Start-SeamSession -ExePath $ExePath -ConfigText $config
+    $proc = $script:Session.Proc
+    Write-Host ("pid={0} pipe={1} iterations={2}" -f
+        $proc.Id, (Get-SeamPipeName $script:Session.Token), $Iterations)
     Write-Host 'seam connected'
 
     for ($i = 1; $i -le $Iterations; $i++) {
@@ -202,7 +201,7 @@ try {
     Assert-Order $fresh $titles 'drag leg seed'
     [void](Invoke-Seam @{ op = 'unpin'; index = 0 })
     $drag = Invoke-Seam @{ op = 'drag'; from = 1; to = 3 }
-    Assert-Order $drag @('tab-1', 'tab-3', 'tab-4', 'tab-2', 'tab-5') 'drag leg'
+    Assert-DragOrder $drag @('tab-1', 'tab-3', 'tab-4', 'tab-2', 'tab-5') 'drag leg'
     if ($drag.landed -ne 3) {
         throw ("PRODUCT_FAIL: drag landed at {0}, wanted 3" -f $drag.landed)
     }
@@ -219,8 +218,8 @@ try {
         }
     }
 
-    Write-Host ("SEAM-ACCEPTANCE PASS: {0} iterations + drag leg, " +
-        "no flakes, no input injected" -f $Iterations)
+    Write-Host (("SEAM-ACCEPTANCE PASS: {0} iterations + drag leg, " +
+        "no flakes, no input injected") -f $Iterations)
     exit 0
 }
 catch {
@@ -230,21 +229,5 @@ catch {
     exit 2
 }
 finally {
-    if ($script:Writer) { try { $script:Writer.Dispose() } catch { } }
-    if ($script:Reader) { try { $script:Reader.Dispose() } catch { } }
-    if ($script:Pipe) { try { $script:Pipe.Dispose() } catch { } }
-
-    # Only the instance this run started; identified by stamp and exe path.
-    try {
-        Stop-WinttyStartedAfter -Since $stamp -ExePath (Resolve-Path $ExePath).Path
-    } catch {
-        Write-Host ("HARNESS: cleanup could not confirm every process it " +
-            "started: {0}" -f $_.Exception.Message)
-    }
-
-    if ($origXdgSet) { $env:XDG_CONFIG_HOME = $origXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    if ($origSeamSet) { $env:WINTTY_TEST_SEAM = $origSeam }
-    else { Remove-Item Env:WINTTY_TEST_SEAM -ErrorAction SilentlyContinue }
-    Remove-Item $tempXdg -Recurse -Force -ErrorAction SilentlyContinue
+    if ($script:Session) { Stop-SeamSession $script:Session }
 }

@@ -333,6 +333,7 @@ internal static class TestSeam
             {
                 return await RunOnUiThreadAsync(
                     window,
+                    opName,
                     () => ExecuteOnUiThreadAsync(window, opName, root),
                     settle: !IsObserver(opName));
             }
@@ -340,7 +341,7 @@ internal static class TestSeam
             {
                 // A command that throws IS a finding: the response carries
                 // it and the app keeps running.
-                return Error(opName, ex.Message);
+                return Error(opName, Describe(ex));
             }
         }
     }
@@ -367,7 +368,8 @@ internal static class TestSeam
     /// window's UI thread and the response awaits the work.
     /// </summary>
     private static Task<string> RunOnUiThreadAsync(
-        MainWindow window, Func<Task<string>> action, bool settle = true)
+        MainWindow window, string op, Func<Task<string>> action,
+        bool settle = true)
     {
         var done = new TaskCompletionSource<string>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -380,10 +382,10 @@ internal static class TestSeam
                     if (settle) window.TestSeamSettleLayout();
                     done.SetResult(result);
                 }
-                catch (Exception ex) { done.SetResult(Error("ui", ex.Message)); }
+                catch (Exception ex) { done.SetResult(Error(op, Describe(ex))); }
             }))
         {
-            done.SetResult(Error("ui", "dispatcher unavailable"));
+            done.SetResult(Error(op, "dispatcher unavailable"));
         }
         return done.Task;
     }
@@ -1101,6 +1103,49 @@ internal static class TestSeam
         // this flush. The dispose-time flush is too late for a read.
         json.Flush();
         return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    /// <summary>
+    /// What an exception IS, not merely what it said. Several types that
+    /// reach these handlers carry an empty <see cref="Exception.Message"/>
+    /// -- XamlParseException among them -- so reporting the message alone
+    /// answers a driver with "something threw and I will not say what",
+    /// which is the one answer a seam exists to never give. The type name
+    /// is a diagnosis on its own; the inner exception is usually the real
+    /// one; the top frame says where to look.
+    /// </summary>
+    private static string Describe(Exception ex)
+    {
+        var text = new StringBuilder(ex.GetType().Name);
+        if (!string.IsNullOrWhiteSpace(ex.Message)) text.Append(": ").Append(ex.Message);
+        if (ex.InnerException is { } inner)
+        {
+            text.Append(" <- ").Append(inner.GetType().Name);
+            if (!string.IsNullOrWhiteSpace(inner.Message))
+            {
+                text.Append(": ").Append(inner.Message);
+            }
+        }
+        if (TopFrame(ex) is { } frame) text.Append(" at ").Append(frame);
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// The first frame of the stack, preferring the inner exception's --
+    /// a wrapper's top frame is the wrapping site, not the fault. The whole
+    /// trace does not survive the response's one-line framing, and the
+    /// frame that threw is the one worth the bytes.
+    /// </summary>
+    private static string? TopFrame(Exception ex)
+    {
+        var trace = (ex.InnerException ?? ex).StackTrace ?? ex.StackTrace;
+        if (string.IsNullOrEmpty(trace)) return null;
+        foreach (var line in trace.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length > 0) return trimmed;
+        }
+        return null;
     }
 
     private static string Error(string op, string message)
