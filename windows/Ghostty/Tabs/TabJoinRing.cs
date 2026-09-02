@@ -127,7 +127,9 @@ internal sealed partial class TabJoinRing : Grid
     public void Reset()
     {
         SetProgress(0);
-        SetArmed(false, motion: false);
+        // Disarming needs no policy: both forms of the halo go to nothing, and
+        // the next arm re-reads the live High Contrast state anyway.
+        SetArmed(false, motion: false, highContrast: false);
     }
 
     private void SetProgress(double progress)

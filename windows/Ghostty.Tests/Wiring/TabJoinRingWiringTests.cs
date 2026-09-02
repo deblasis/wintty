@@ -1,5 +1,7 @@
+using System;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -76,8 +78,7 @@ public class TabJoinRingWiringTests
             // false arm fell through would ring on every row.
             var guard = update.DescendantNodes().OfType<IfStatementSyntax>()
                 .Single(i => i.Condition.ToString().Contains("TabJoinDrop.CanJoin"));
-            Assert.Contains("ClearJoinDwell", guard.Statement.ToString());
-            Assert.Contains("return", guard.Statement.ToString());
+            AssertClearsAndReturns(guard);
         }
     }
 
@@ -165,13 +166,37 @@ public class TabJoinRingWiringTests
             .First(i => i.Condition.ToString().Contains("drag.Group is not null"));
         Assert.Contains("drag.Tab.IsPinned", verticalGuard.Condition.ToString());
         Assert.Contains("_pinPreview is not null", verticalGuard.Condition.ToString());
-        Assert.Contains("ClearJoinDwell", verticalGuard.Statement.ToString());
+        AssertClearsAndReturns(verticalGuard);
 
         var horizontal = Horizontal().Method("UpdateJoinDwell");
         var horizontalGuard = horizontal.DescendantNodes().OfType<IfStatementSyntax>()
             .First(i => i.Condition.ToString().Contains("drag.Group is not null"));
-        Assert.Contains("IsPinned", horizontalGuard.Condition.ToString());
-        Assert.Contains("ClearJoinDwell", horizontalGuard.Statement.ToString());
+        // The OPERAND, not a substring of the whole condition: "IsPinned" is
+        // equally present in "!dragged.IsPinned", which rings on exactly the
+        // rows this guard exists to refuse.
+        Assert.Contains(
+            horizontalGuard.Condition.DescendantNodesAndSelf()
+                .OfType<MemberAccessExpressionSyntax>()
+                .Select(m => m.ToString()),
+            s => s == "dragged.IsPinned");
+        AssertClearsAndReturns(horizontalGuard);
+    }
+
+    /// <summary>
+    /// The guard withdraws the dwell and leaves, asserted as nodes.
+    ///
+    /// As text it was Contains("ClearJoinDwell") and Contains("return"), and
+    /// both are substrings: the first is satisfied by ClearJoinDwellTypo, and
+    /// the second by any identifier with "return" in it -- or by a "return"
+    /// that is not the guard's own. What has to be true is that this arm calls
+    /// the clear AND leaves, since clearing without leaving falls through into
+    /// the hold and re-arms the thing just withdrawn.
+    /// </summary>
+    private static void AssertClearsAndReturns(IfStatementSyntax guard)
+    {
+        Assert.Single(guard.Statement.Calls("ClearJoinDwell"));
+        Assert.NotEmpty(guard.Statement.DescendantNodesAndSelf()
+            .OfType<ReturnStatementSyntax>());
     }
 
     /// <summary>
@@ -211,8 +236,87 @@ public class TabJoinRingWiringTests
             Assert.Single(start.AssignsTo("_joinTimer").Where(
                 a => a.Right.ToString() == "timer"));
             Assert.NotNull(start.Call("timer.Start"));
+
+            // REPEATING, which is the whole claim. A DispatcherQueueTimer is
+            // one-shot by default, so dropping this line ships a ring that
+            // advances exactly once and then waits for a pointer event that,
+            // by the dwell's own premise, never comes -- "a ring advanced only
+            // by pointer moves could never complete", which is the sentence
+            // this test is named after and did not check. AssignsTo cannot see
+            // it: the left side is a member access, not a bare identifier.
+            var repeating = start.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                .Where(a => a.Left is MemberAccessExpressionSyntax m
+                            && m.Name.Identifier.ValueText == "IsRepeating")
+                .ToList();
+            Assert.True(
+                repeating.Count == 1 && repeating[0].Right.ToString() == "true",
+                "the join timer is not set repeating, so the ring advances once and stops");
+
+            // And it refuses to start a second clock. Without the early return
+            // every pointer move during a hold mints a fresh 16ms timer and
+            // leaks all but the last, which is a pile of clocks all filling one
+            // ring.
+            var reentry = start.DescendantNodes().OfType<IfStatementSyntax>()
+                .FirstOrDefault(i => IsEarlyReturn(i.Statement)
+                    && i.Condition.ToString().Contains("_joinTimer", StringComparison.Ordinal));
+            Assert.True(
+                reentry is not null && reentry.SpanStart < start.Call("timer.Start").SpanStart,
+                "StartJoinTimer does not refuse a second timer before creating one");
         }
     }
+
+    /// <summary>
+    /// The TICK re-asks whether the join is still possible, before advancing.
+    ///
+    /// This is the one that matters, and it is the one the pointer-driven
+    /// guards structurally cannot cover. The dwell's premise is that no pointer
+    /// event arrives for 450ms -- that is what it is measuring -- so the
+    /// pointer path's CanJoin check is not consulted once during the window
+    /// that decides the gesture. Without this the ring completed on a pair the
+    /// release then refused: the target pinned by an accelerator mid-hold,
+    /// gathered into the dragged tab's own group by another actor, or closed.
+    ///
+    /// And it must stand BEFORE the hold, or the frame that armed is the frame
+    /// nobody checked.
+    /// </summary>
+    [Fact]
+    public void BothStrips_ReAskCanJoinOnEveryTick_BeforeAdvancingTheDwell()
+    {
+        foreach (var tick in new[]
+                 {
+                     Vertical().Method("TickJoinDwell"),
+                     Horizontal().Method("TickJoinDwell"),
+                 })
+        {
+            var guard = tick.DescendantNodes().OfType<IfStatementSyntax>()
+                .FirstOrDefault(i => i.Condition.ToString()
+                    .Contains("TabJoinDrop.CanJoin", StringComparison.Ordinal));
+            Assert.True(
+                guard is not null,
+                "the dwell tick advances without re-asking whether the join is still "
+                + "possible, so the 450ms that decides the gesture is unchecked");
+
+            var negation = Assert.IsType<PrefixUnaryExpressionSyntax>(guard!.Condition);
+            Assert.True(
+                negation.IsKind(SyntaxKind.LogicalNotExpression),
+                "the tick's CanJoin guard is not negated, so it withdraws the dwell "
+                + "exactly when the join IS possible");
+            AssertClearsAndReturns(guard);
+
+            var hold = Assert.Single(tick.Calls("_joinDwell.Hold"));
+            Assert.True(
+                guard.SpanStart < hold.SpanStart,
+                "the check runs after the dwell has already advanced, so the frame "
+                + "that armed is the frame nobody checked");
+        }
+    }
+
+    /// <summary>An if-body that is a return, braced or not.</summary>
+    private static bool IsEarlyReturn(StatementSyntax body)
+        => body is ReturnStatementSyntax
+            || (body is BlockSyntax block
+                && block.Statements.Count == 1
+                && block.Statements[0] is ReturnStatementSyntax);
 
     /// <summary>
     /// The seam's join op pins a virtual clock for the length of the

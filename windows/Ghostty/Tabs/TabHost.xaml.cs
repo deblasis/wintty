@@ -2672,6 +2672,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // the item's own pipeline answers this release. The engine
             // never held the pointer, so there is nothing to hand back
             // and no side effect to undo.
+            //
+            // Except the ring, which is cleared for the same reason
+            // CancelHorizontalDrag clears it before its own phase gate: this
+            // path nulls the drag, and the invariant is that no path does that
+            // and leaves the promise standing.
+            ClearJoinDwell();
             drag.Machine.Cancel();
             return;
         }

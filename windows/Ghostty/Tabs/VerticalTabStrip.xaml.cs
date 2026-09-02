@@ -4274,13 +4274,23 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
 
         var (rows, _) = DragSlots();
-        int slot = rows.IndexOf(drag.Tab);
-        if (slot < 0) { ClearJoinDwell(); return; }
-        var centers = new double[rows.Count];
-        for (int i = 0; i < rows.Count; i++) centers[i] = RowCenterY(rows[i]);
+        var machine = drag.Machine;
+        // The machine's centres, not a fourth sweep of the strip.
+        //
+        // EvaluateDrag has already called DragSlots twice, built its own
+        // beforeCenters with a full RowCenterY walk, and pushed a third walk
+        // into the machine through RemeasureCenters -- three lines above this.
+        // Measuring again meant ~30 more TransformToVisual calls and two
+        // allocations per frame, at 60Hz, for the whole of every drag, to serve
+        // a gesture that is live in a small fraction of them. The horizontal
+        // strip reads machine.CenterOf(i); this is that, which also removes the
+        // last place the two strips derived the mapping differently.
+        if (rows.Count != machine.RowCount) { ClearJoinDwell(); return; }
+        var centers = new double[machine.RowCount];
+        for (int i = 0; i < centers.Length; i++) centers[i] = machine.CenterOf(i);
 
         int pick = TabJoinDrop.PickTarget(
-            centers, slot, draggedCenter, TabStripMotion.JoinBandFraction);
+            centers, machine.Index, draggedCenter, TabStripMotion.JoinBandFraction);
         // The ring never promises a join the release would refuse: the
         // same no-false-promise rule the pin ghost obeys.
         if (pick < 0 || !TabJoinDrop.CanJoin(_manager, drag.Tab, rows[pick]))
@@ -4939,6 +4949,14 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             // The gesture never lifted: a press that stayed a click has
             // no trace pair and no visuals to tear down.
+            //
+            // The dwell is cleared anyway. The invariant this file states --
+            // every path that nulls _drag takes the ring back with it -- is
+            // worth more than the one branch where it is currently
+            // unreachable, and the horizontal strip's CancelHorizontalDrag
+            // already reasons exactly this way one method along, about a press
+            // that stayed a click while an earlier gesture's ring was still up.
+            ClearJoinDwell();
             _drag = null;
             return;
         }
