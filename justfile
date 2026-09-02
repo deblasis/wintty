@@ -279,6 +279,64 @@ frame-style-fuzz args="": _no-wintty-running build-dll build-win
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/frame-style-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
 
+# The theme matrix (#937): every selected theme against desktop polarity,
+# app and frame material, tab layout and a backdrop scene behind the window,
+# measured in rendered pixels against lib/contrast.ps1's floors. Hours for the
+# curated set, a day and more for `-Theme all`; a red run is the expected
+# outcome and windows/scripts/theme-matrix/matrix.md is the deliverable.
+#
+# It goes through the incoda lane, and the lane is taken BEFORE the builds:
+# this harness flips the desktop theme and the wallpaper and puts a topmost
+# stage on screen, so nothing else may own the desktop while it runs, and a
+# build started outside the lane while another lane holder ran would be the
+# collision the lane exists to stop. Hence two recipes: this one only takes
+# the lane, the private one below it does the work inside.
+#
+# incoda is looked up on PATH and then in its installer's location, because
+# the agent shell this was written under had the latter and not the former.
+#
+# Every axis takes one value, a comma list, or all. Pass args through, e.g.
+#   just theme-matrix "-Theme wintty-dark -Polarity dark -Layout vertical"
+#   just theme-matrix "-Theme all -App solid -Frame inherit -Scene black,photo"
+#   just theme-matrix "-Theme 'Catppuccin Mocha,Nord' -App crystal"
+#   just theme-matrix "-NoFlip"    never touch the desktop theme
+# A theme list with a space in it is ONE inner single-quoted string with the
+# commas inside, as in the third line. The recipe body is PowerShell:
+# `"Catppuccin Mocha",Nord` there would be an array that reaches the harness
+# as two arguments, the second of which lands on -Polarity, and a `\"` is
+# not an escape at all. The args cross the lane inside double quotes, so a
+# double quote or a `$` is what cannot be passed.
+#
+# Exit codes: 0 clean, 2 findings, 1 could not run or a surface went unmeasured.
+#
+# Run the theme matrix (#937) under the incoda lane against the Debug build.
+[windows]
+theme-matrix args="":
+    $inc = (Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path $env:LOCALAPPDATA 'Programs\incoda\incoda.exe'); & $inc run --queue wintty --reason "theme matrix (#937)" -- just _theme-matrix-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+
+[windows]
+_theme-matrix-in-lane args="": _no-wintty-running build-dll build-win
+    pwsh -NoProfile -File windows/scripts/theme-matrix.ps1 \
+        -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
+        -OutDir windows/scripts/theme-matrix {{args}}; exit ($LASTEXITCODE ?? 1)
+
+# No lane, no build, no desktop, same args as theme-matrix.
+#
+# Print the processes a theme-matrix filter selects and their cost; launch nothing.
+[windows]
+theme-matrix-plan args="":
+    pwsh -NoProfile -File windows/scripts/theme-matrix.ps1 -DryRun \
+        -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
+        -OutDir windows/scripts/theme-matrix {{args}}; exit ($LASTEXITCODE ?? 1)
+
+# The harness writes matrix.md itself; this is for a run dir kept from
+# earlier. Paste the result into #937.
+#
+# Rebuild matrix.md from a theme-matrix run that already happened.
+[windows]
+theme-matrix-report run="windows/scripts/theme-matrix":
+    pwsh -NoProfile -File windows/scripts/theme-matrix-report.ps1 -RunDir "{{run}}"; exit ($LASTEXITCODE ?? 1)
+
 # Real windows and real input, so it needs an interactive desktop and holds
 # the foreground for the duration - about 43 minutes budgeted for everything,
 # 7 for `-Tag smoke` (measured 5). Each harness is killed if it overruns its
@@ -392,6 +450,8 @@ fuzz-selftest:
 #
 # Exit codes: 0 sound, 1 not sound or could not start. No 2: this judges the
 # instrument, never the product.
+#
+# Prove the backdrop stage paints what it is told and never takes focus.
 [windows]
 backdrop-stage-selftest:
     pwsh -NoProfile -File windows/scripts/backdrop-stage-selftest.ps1; exit ($LASTEXITCODE ?? 1)

@@ -231,6 +231,37 @@ per-monitor wallpaper comes back as its current image.
 `just backdrop-stage-selftest` proves the instrument against the screen. It
 launches no Wintty and is safe with one open.
 
+## The theme matrix
+
+`theme-matrix.ps1` (#937) is the one harness here that SETS machine state:
+it flips the desktop light/dark theme and the wallpaper while it runs, and
+puts everything back in its `finally`: the wallpaper through the API that
+applies one, the polarity through the broadcast, then the env guard's
+restore and read-back. A restore that fails is the run's exit code (1),
+whatever it measured. That is why it is not in the suite and why
+`just theme-matrix` takes the incoda lane before it builds. `-NoFlip` keeps
+the read-only policy every other harness has.
+
+After a hard kill (a `taskkill`, the lane's own timeout) the `finally`
+never ran, and the manual recovery is: end `BackdropStage.exe` if it is
+still up, `just env-restore` for the registry, then toggle the desktop
+light/dark setting once by hand and re-apply the wallpaper, because a
+registry restore alone repaints neither. The snapshot the run took is also
+kept as `env-before.json` in its output dir, since the well-known one is
+overwritten by whatever harness runs next.
+
+Every axis (theme, polarity, app, frame, layout, scene) takes one value, a
+comma list, or `all`; `just theme-matrix-plan` prints what a filter selects
+and what it would cost without touching anything. Themes go into the config
+as absolute paths under a staged copy of the catalogue, because a bare name
+that resolves to nothing falls back silently (#877); each process then
+proves the theme reached the glass by comparing the terminal ground it
+photographs with the theme file's own `background`, and a process whose
+ground is not the theme's is reported unmeasured rather than scored.
+
+The run leaves `result.json`, `shots/`, `scenes/` and `matrix.md`; the
+markdown is what gets pasted into #937, one comment per run.
+
 ## Process policy
 
 `lib/wintty-process.ps1` holds the rule:

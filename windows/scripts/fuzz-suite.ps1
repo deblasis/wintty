@@ -269,6 +269,13 @@ $NotInSuite = [ordered]@{
     'seam-crash-dump.ps1'           = 'writes WER LocalDumps registry state (snapshot, set, restore) and needs to be the only thing holding the process, since WER does not run under a debugger. Its exits are inverted for this suite''s purpose: 2 means the app SURVIVED and there was no crash to dump, which the runner would file as a product finding'
     'layout-motion-profile.ps1'     = 'an analysis tool, not a harness: it reads a layout-switch-filmstrip run that has already happened (-RunDir and -Tag, no -ExePath) and prints what moved, when and where. It launches nothing and returns no verdict; the change-box column is for a human reading a filmstrip that already failed'
     'backdrop-stage-selftest.ps1'   = 'measures an instrument, not the product: it proves lib/BackdropStage paints the scene it was told to and never takes the foreground. Launches no Wintty, takes no -ExePath, and has no findings exit'
+    # The theme matrix is exploratory and long: hours for the curated set, a
+    # day and more for the catalogue, and it flips the desktop theme and the
+    # wallpaper while it runs, which no other harness here does. Its red run
+    # is the expected outcome and the matrix.md it leaves is the deliverable
+    # (#937), so aggregating its exit into a suite verdict would say nothing.
+    'theme-matrix.ps1'              = 'hours long by design and it sets the desktop theme and wallpaper; run it on its own through `just theme-matrix`, under the incoda lane, and read its matrix.md (#937)'
+    'theme-matrix-report.ps1'       = 'an analysis tool: it reads a theme-matrix run that has already happened (-RunDir, no -ExePath) and writes matrix.md. Launches nothing and returns no verdict'
 }
 
 # The one form every check compares a script path in: the path relative to this
