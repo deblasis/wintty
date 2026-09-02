@@ -384,7 +384,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// its slot in this list. Buffers outlive the GPU command
             /// list because DX12 IASetVertexBuffers does not retain the
             /// underlying resource. Recycled when this frame slot is
-            /// reused, after frame_sema confirms the GPU is done.
+            /// reused; the backend, not frame_sema, decides when the
+            /// underlying GPU resource is actually freed (see
+            /// recycleImageBuffers).
             image_instance_buffers: std.ArrayListUnmanaged(ImageBuffer) = .empty,
 
             const UniformBuffer = Buffer(shaderpkg.Uniforms);
@@ -476,10 +478,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.custom_shader_state) |*state| state.deinit();
             }
 
-            /// Drain all per-placement image vertex buffers from the
-            /// previous use of this frame slot. Safe to call only after
-            /// frame_sema has released this slot -- that signals the GPU
-            /// has finished reading them.
+            /// Drop all per-placement image vertex buffers from the
+            /// previous use of this frame slot.
+            ///
+            /// This does NOT mean the GPU is finished with them.
+            /// frame_sema only says the CPU may reuse this frame slot's
+            /// state; on Metal that coincides with GPU completion because
+            /// the completion handler posts it, but on DX12 the semaphore
+            /// is posted from `drawFrameEnd` after the fence *signal*,
+            /// i.e. after submission, not after execution. Deciding when
+            /// the GPU resource can really be freed is the backend's job:
+            /// Metal retains what a command buffer references, and DX12
+            /// routes `Buffer.deinit` through the device's deferred-release
+            /// queue (issue #944).
             pub fn recycleImageBuffers(self: *FrameState) void {
                 for (self.image_instance_buffers.items) |*b| b.deinit();
                 self.image_instance_buffers.clearRetainingCapacity();
@@ -1899,10 +1910,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             errdefer swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{swap_chain.frame_index});
 
-            // `nextFrame` has waited on frame_sema, so the GPU is no
-            // longer reading last frame's image vertex buffers. Recycle
-            // them now, before any new draw calls in this frame can
-            // append fresh ones.
+            // `nextFrame` has waited on frame_sema, so this frame slot's
+            // state is ours again and last frame's image vertex buffers
+            // can be dropped before any new draw calls append fresh ones.
+            //
+            // frame_sema does not say the GPU has finished reading them --
+            // on DX12 it is posted after the fence signal rather than
+            // after completion. The backend's Buffer.deinit is what keeps
+            // the resources alive until the fence proves otherwise.
             frame.recycleImageBuffers();
 
             // If we need to reinitialize our shaders, do so.

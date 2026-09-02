@@ -14,6 +14,7 @@ const d3d12 = @import("d3d12.zig");
 const dxgi = @import("dxgi.zig");
 const com = @import("com.zig");
 const DescriptorHeap = @import("descriptor_heap.zig").DescriptorHeap;
+const Retirement = @import("retire.zig").Retirement;
 
 const log = std.log.scoped(.directx12);
 
@@ -21,6 +22,16 @@ pub const Options = struct {
     device: ?*d3d12.ID3D12Device = null,
     command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
     srv_heap: ?*DescriptorHeap = null,
+    /// Where this texture's resource and its upload staging buffers go
+    /// when they are no longer needed. Null releases them immediately,
+    /// which is only safe for a texture no submitted command list has ever
+    /// touched. DirectX12.zig's option builders always supply the device's
+    /// queue.
+    ///
+    /// Deliberately without a default, for the same reason as
+    /// buffer.Options.retire: an omitted field must not be able to mean
+    /// "release immediately" by accident.
+    retire: ?*Retirement,
     /// Required when render_target is true. RTV descriptors are allocated from
     /// a separate RTV descriptor heap (D3D12_DESCRIPTOR_HEAP_TYPE_RTV).
     rtv_heap: ?*DescriptorHeap = null,
@@ -76,6 +87,16 @@ format: dxgi.DXGI_FORMAT = .R8_UNORM,
 device: ?*d3d12.ID3D12Device = null,
 /// Cached command list for replaceRegion uploads.
 command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
+/// Deferred-release queue for this texture's resource and staging
+/// buffers. See Options.retire.
+///
+/// This one keeps its default, unlike Options.retire, because `Texture{}`
+/// is the zero-value idiom several tests use for a texture that owns
+/// nothing. That is safe only while `Texture.init` is the sole production
+/// constructor -- it is today. A hand-rolled `Texture{ .resource = ... }`
+/// in production would opt out of the queue with no compile error, so
+/// build textures through init.
+retire: ?*Retirement = null,
 /// Current resource state for barrier tracking.
 state: d3d12.D3D12_RESOURCE_STATES = d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE,
 /// Staging buffers from the most recent upload, one per row-band, kept
@@ -167,6 +188,7 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         .format = opts.pixel_format,
         .device = device,
         .command_list = opts.command_list,
+        .retire = opts.retire,
         .state = if (opts.render_target)
             d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE
         else
@@ -189,9 +211,17 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     return tex;
 }
 
+/// Give up this texture's GPU resource and any staging buffers.
+///
+/// Both go to the retirement queue rather than being released here.
+/// Textures are dropped from live code paths -- an image unloading, a
+/// custom-shader state being torn down when the shader is removed, a frame
+/// slot resizing -- while command lists that sample from them or copy into
+/// them are still executing. D3D12 does not retain what a submitted
+/// command list references.
 pub fn deinit(self: Texture) void {
     for (self.pending_staging.items) |staging| {
-        _ = staging.Release();
+        self.releaseResource(staging);
     }
     // deinit takes self by value to match Metal/OpenGL Texture and the
     // switch-capture call sites in image.zig. Copying self locally lets
@@ -200,10 +230,17 @@ pub fn deinit(self: Texture) void {
     var self_mut = self;
     self_mut.pending_staging.deinit(std.heap.c_allocator);
     if (self.resource) |res| {
-        _ = res.Release();
+        self.releaseResource(res);
     }
     // SRV descriptor is owned by the heap's linear allocator --
     // it gets freed when the heap itself is destroyed.
+}
+
+/// Hand a resource to the retirement queue, or release it outright when
+/// there is no queue (standalone textures in the GPU unit tests, which no
+/// submitted command list has ever referenced).
+fn releaseResource(self: *const Texture, resource: *d3d12.ID3D12Resource) void {
+    if (self.retire) |q| q.retire(resource) else _ = resource.Release();
 }
 
 /// Update the cached command list to the current frame's.
@@ -218,9 +255,12 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 ///
 /// The staging buffers are kept alive until the next replaceRegion call
 /// or deinit, because D3D12 does not extend resource lifetimes for
-/// recorded commands. The previous staging buffers are safe to release
-/// here because the frame's fence wait in beginFrame guarantees the GPU
-/// finished executing the prior CopyTextureRegion calls.
+/// recorded commands. The previous ones are retired rather than released:
+/// the fence wait in beginFrame covers only the frame slot being started,
+/// and a texture shared across slots (a kitty image, an atlas after a
+/// present-only frame has rotated the back buffer index out of step with
+/// the renderer's frame index) can still be read by a submission that wait
+/// says nothing about.
 ///
 /// Returns error{}!void for API compatibility with Metal's replaceRegion
 /// which cannot fail. DX12 upload failures are caught here and logged at
@@ -241,11 +281,11 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// it) but worth knowing if anyone calls replaceRegion on a multi-band
 /// region of a user-visible texture.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
-    // Release the staging buffers from the previous upload. Safe because
-    // beginFrame waited on the fence for this frame slot, so the GPU
-    // has finished reading from them.
+    // Retire the staging buffers from the previous upload. They are the
+    // source of CopyTextureRegion calls that may still be executing, so
+    // the retirement queue decides when they are actually freed.
     for (self.pending_staging.items) |prev| {
-        _ = prev.Release();
+        self.releaseResource(prev);
     }
     self.pending_staging.clearRetainingCapacity();
     self.pending_staging_bytes = 0;
@@ -366,11 +406,13 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
         cmd_list.CopyTextureRegion(&dst_loc, x, y + band.start_row, 0, &src_loc, &src_box);
 
         // Keep the band's staging buffer alive until the GPU finishes the
-        // copy. Released together with the other bands at the start of
-        // the next replaceRegion or in deinit. On append failure we must
-        // release the just-created buffer to avoid leaking it.
+        // copy. Retired together with the other bands at the start of the
+        // next replaceRegion or in deinit. On append failure we hand it
+        // straight to the retirement queue instead of leaking it -- and
+        // not to a plain Release, because the CopyTextureRegion above
+        // already references it.
         self.pending_staging.append(std.heap.c_allocator, staging) catch {
-            _ = staging.Release();
+            self.releaseResource(staging);
             log.warn("failed to track staging buffer for chunked upload", .{});
             return error.UploadFailed;
         };
@@ -688,11 +730,30 @@ test "Texture pending_staging_bytes defaults to 0" {
 }
 
 test "Texture.Options defaults" {
-    const opts = Options{};
+    const opts = Options{ .retire = null };
     try std.testing.expect(opts.device == null);
     try std.testing.expect(opts.command_list == null);
     try std.testing.expect(opts.srv_heap == null);
     try std.testing.expectEqual(dxgi.DXGI_FORMAT.R8_UNORM, opts.pixel_format);
+}
+
+test "Texture.Options.retire has no default" {
+    // The one field that must not have one. An omitted `retire` would mean
+    // "release immediately", which is the GPU use-after-free this type
+    // exists to prevent -- and it would compile and test green while doing
+    // it. Having no default is what makes the compiler name every
+    // construction site, so it is worth a test of its own.
+    //
+    // The found flag is the anti-vacuity half: rename the field and the
+    // loop would otherwise match nothing and pass.
+    var found = false;
+    inline for (@typeInfo(Options).@"struct".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "retire")) {
+            found = true;
+            try std.testing.expect(field.default_value_ptr == null);
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "Error set carries UploadFailed" {
@@ -765,7 +826,7 @@ test "setCommandList updates cached command list" {
 }
 
 test "Texture.Options has render_target field" {
-    const opts = Options{ .render_target = true };
+    const opts = Options{ .render_target = true, .retire = null };
     try std.testing.expect(opts.render_target);
 }
 

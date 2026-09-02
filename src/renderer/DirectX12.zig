@@ -40,6 +40,7 @@ pub const dcomp = @import("directx12/dcomp.zig");
 pub const descriptor_heap = @import("directx12/descriptor_heap.zig");
 pub const device = @import("directx12/device.zig");
 pub const dxgi = @import("directx12/dxgi.zig");
+pub const retire = @import("directx12/retire.zig");
 
 pub const custom_shader_target: shadertoy.Target = .hlsl;
 
@@ -144,12 +145,29 @@ init_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// Must be saved here because GetCurrentBackBufferIndex advances after Present.
 pending_frame_index: u32 = 0,
 
-/// Deferred frame completion state. DX12 must signal the GPU fence before
-/// releasing the frame semaphore (which happens in frameCompleted), because
-/// frame.resize() reuses descriptor slots that the GPU may still be reading.
-/// Metal's completion handler naturally runs after GPU finish; DX12's
-/// complete() runs before command list execution, so we defer frameCompleted
-/// to drawFrameEnd() which runs after ExecuteCommandLists + Signal.
+/// Deferred frame completion state. DX12 must at least submit the frame
+/// and signal the GPU fence before releasing the frame semaphore (which
+/// happens in frameCompleted), because frame.resize() reuses descriptor
+/// slots. Metal's completion handler runs after the GPU finishes; DX12's
+/// complete() runs before command list execution, so we defer
+/// frameCompleted to drawFrameEnd() which runs after ExecuteCommandLists
+/// + Signal.
+///
+/// Note what this does NOT buy, because the sentence above overstates it:
+/// a signal is not a completion, so the frame semaphore says nothing about
+/// whether the GPU has finished the frame it releases. Resource lifetimes
+/// must not lean on it -- that is what the device's retirement queue is
+/// for (issue #944).
+///
+/// Which means the "because frame.resize() reuses descriptor slots" reason
+/// is NOT satisfied by this deferral, and that hole is still open:
+/// CustomShaderState.resize reuses front_srv_slot/back_srv_slot in the
+/// SHADER-VISIBLE heap, and it runs before beginFrame's per-slot fence
+/// wait. The retirement queue keeps the old resource alive, so this is no
+/// longer a use-after-free -- but the descriptor is overwritten while the
+/// previous submission may still sample through it, so that frame reads
+/// the wrong texture. Descriptor lifetime is a different mechanism from
+/// resource lifetime and wants its own fix; tracked separately.
 pending_complete: ?struct {
     renderer: *Renderer,
     health: rendererpkg.Health,
@@ -428,9 +446,14 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
 }
 
 pub fn deinit(self: *DirectX12) void {
-    // Wait for GPU to finish before releasing anything.
+    // Wait for GPU to finish before releasing anything. Everything below
+    // final-releases resources directly rather than retiring them, so a
+    // failed drain has to be visible: it means the back buffers and frame
+    // command allocators go away while the GPU may still be using them.
     if (self.dev) |*dev_ptr| {
-        dev_ptr.waitForGpu() catch {};
+        dev_ptr.waitForGpu() catch |err| {
+            log.err("waitForGpu before renderer teardown failed: {}", .{err});
+        };
     }
 
     // Release init command list if never flushed (error during init).
@@ -528,12 +551,17 @@ pub fn flushInitCommands(self: *DirectX12) void {
     self.pending_command_list = null;
 }
 
-/// Block until the GPU finishes all submitted work.
-/// Must be called before freeing any GPU resources (textures,
-/// buffers, pipelines) to prevent use-after-free on the GPU.
+/// Block until the GPU finishes all submitted work, then release
+/// everything the retirement queue is holding.
+///
+/// Used by the generic renderer before it destroys state the retirement
+/// queue does not cover -- PSOs and root signatures on a shader reinit,
+/// and every frame's resources at teardown.
 pub fn waitGpu(self: *DirectX12) void {
     if (self.dev) |*dev_ptr| {
-        dev_ptr.waitForGpu() catch {};
+        dev_ptr.waitForGpu() catch |err| {
+            log.err("waitForGpu failed: {}; GPU state may still be in use", .{err});
+        };
     }
 }
 
@@ -549,9 +577,11 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     // frameCompleted (called by the defer below) posts the swap-chain
     // semaphore, which allows the next frame to proceed.  In Metal the
     // completion handler fires after the GPU finishes; DX12's complete()
-    // fires before ExecuteCommandLists, so we must defer the semaphore
-    // release until after the fence signal to prevent frame.resize()
-    // from overwriting descriptor slots the GPU hasn't finished reading.
+    // fires before ExecuteCommandLists, so we defer the semaphore release
+    // until after the fence signal -- the frame is at least submitted and
+    // has a fence value by then.  It is not finished: anything whose
+    // lifetime depends on the GPU actually being done goes through
+    // dev.retirement, not the semaphore.
     defer {
         if (self.pending_complete) |pc| {
             self.pending_complete = null;
@@ -597,7 +627,15 @@ pub fn drawFrameEnd(self: *DirectX12) void {
         f.fence_value = new_fence_value;
     }
     const signal_hr = dev_ptr.command_queue.Signal(dev_ptr.fence, new_fence_value);
-    if (com.FAILED(signal_hr)) {
+    if (!com.FAILED(signal_hr)) {
+        // Bind every resource retired since the last submission to this
+        // frame's fence value. Anything retired before this signal can
+        // only have been referenced by work submitted at or before it, so
+        // reaching this value is proof the GPU is done reading it. If the
+        // Signal failed there is nothing to bind them to; they stay staged
+        // for the next successful submission, or for teardown.
+        dev_ptr.retirement.seal(new_fence_value);
+    } else {
         log.err("fence Signal failed: 0x{x}", .{@as(u32, @bitCast(signal_hr))});
         // A TDR between Present and Signal leaves the fence unsignaled.
         // Without this check the next beginFrame would deadlock waiting
@@ -874,6 +912,12 @@ pub inline fn beginFrame(
         _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
     }
 
+    // Free resources whose last referencing submission the GPU has now
+    // finished. This reads the fence rather than assuming the wait above
+    // covers a given resource: the wait is per-slot, while a retirement
+    // may have been sealed against any submission.
+    dev_ptr.retirement.collect(dev_ptr.fence.GetCompletedValue());
+
     // Point the target at the chosen render target resource and RTV.
     target.resource = render_target;
     target.rtv_handle = rtv_handle;
@@ -925,6 +969,7 @@ fn handleDeviceRemoved(self: *DirectX12) void {
 pub inline fn bufferOptions(self: DirectX12) bufferpkg.Options {
     return .{
         .device = if (self.dev) |*d| d.device else null,
+        .retire = if (self.dev) |*d| d.retirement else null,
     };
 }
 
@@ -946,6 +991,7 @@ pub inline fn textureOptions(self: DirectX12) Texture.Options {
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
         .srv_heap = self.srv_heap,
+        .retire = if (self.dev) |*d| d.retirement else null,
     };
 }
 
@@ -963,6 +1009,7 @@ pub inline fn renderTargetTextureOptions(
         .command_list = self.pending_command_list,
         .srv_heap = self.srv_heap,
         .rtv_heap = self.rtv_heap,
+        .retire = if (self.dev) |*d| d.retirement else null,
         .pixel_format = .B8G8R8A8_UNORM,
         .render_target = true,
         .rtv_slot = rtv_slot,
@@ -993,6 +1040,7 @@ pub inline fn imageTextureOptions(
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
         .srv_heap = self.srv_heap,
+        .retire = if (self.dev) |*d| d.retirement else null,
         .pixel_format = switch (format) {
             .gray => .R8_UNORM,
             .rgba => .R8G8B8A8_UNORM,
@@ -1017,6 +1065,7 @@ pub fn initAtlasTexture(
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
         .srv_heap = self.srv_heap,
+        .retire = if (self.dev) |*d| d.retirement else null,
         .pixel_format = pixel_format,
     }, size, size, null);
 }
@@ -1035,6 +1084,7 @@ test {
     _ = descriptor_heap;
     _ = device;
     _ = dxgi;
+    _ = retire;
 }
 
 test "DirectX12 does not have frame_fence_values" {
