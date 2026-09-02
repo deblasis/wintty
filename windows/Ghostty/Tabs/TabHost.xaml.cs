@@ -129,9 +129,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         {
             foreach (var child in row.Children)
             {
+                // No "pin" part: the pushpin is gone, and the pinned tab's
+                // mark is its own shape -- which a driver reads as the
+                // "row" part's width, not as a glyph inside it.
                 var match = part switch
                 {
-                    "pin" => child is FontIcon pin && pin.Glyph != BellGlyph,
                     "bell" => child is FontIcon bell && bell.Glyph == BellGlyph,
                     "icon" => child is TabIconPresenter,
                     "title" => child is TextBlock,
@@ -299,26 +301,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // subscribes to the TabIconViewModel's INPC events directly.
         var iconRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 0 };
 
-        // The pin mark: Segoe Fluent E718 in the leading slot of the
-        // icon row. Equal-width keeps a pinned tab full-size -- shrinking
-        // it to the icon alone would read as a different kind of slot, not
-        // a pinned tab -- so this glyph is the pinned tab's only inline
-        // marker. Collapsed until the tab pins; the IsPinned branch below
-        // is the only thing that shows it.
-        var pinGlyph = new FontIcon
-        {
-            Glyph = "\uE718", // Segoe Fluent / MDL2 "Pin"
-            // FontIcon's default FontFamily is not guaranteed to be the
-            // symbol font, so pin it explicitly (as the close button and
-            // the bell do) or the glyph can render as nothing.
-            FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)
-                Application.Current.Resources["SymbolThemeFontFamily"],
-            FontSize = 12,
-            Margin = new Thickness(0, 0, 6, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-            Visibility = tab.IsPinned ? Visibility.Visible : Visibility.Collapsed,
-        };
-        iconRow.Children.Add(pinGlyph);
+        // No pin mark. The glyph existed because equal-width kept a
+        // pinned tab full-size, so nothing about the slot said "pinned"
+        // and an inline marker had to. The slot says it now -- a pinned
+        // tab IS an icon square -- and a pushpin crowded into 48px beside
+        // the icon it is meant to caption reads as clutter, not as a mark.
         var iconHost = new TabIconPresenter
         {
             VerticalAlignment = VerticalAlignment.Center,
@@ -400,6 +387,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
             {
                 headerText.Text = tab.EffectiveTitle;
                 ApplyItemAccessibleText(item, tab);
+                // headerText is COLLAPSED on a pinned tab, so the line above
+                // updates something nobody can see and the tooltip -- the
+                // square's only visible carrier of the title -- was left
+                // saying whatever the tab was called when it was pinned,
+                // until a theme change or a drag happened to re-run the
+                // anatomy sweep. The vertical band's square already refreshes
+                // on these same three property names; this is the horizontal
+                // edition catching up.
+                ApplyPinnedTabAnatomy(item, tab);
             }
             else if (e.PropertyName == nameof(TabModel.Progress))
             {
@@ -429,10 +425,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 // to the zone boundary and skips TabMoved when from == to
                 // (the boundary tab pinning up, the last pinned tab
                 // unpinning), so a relocation-path refresh alone would
-                // leave the boundary tab's status stale for life.
-                pinGlyph.Visibility = tab.IsPinned
-                    ? Visibility.Visible
-                    : Visibility.Collapsed;
+                // leave the boundary tab's status stale for life. The
+                // shape follows the flag for exactly the same reason.
+                ApplyPinnedTabAnatomy(item, tab);
                 ApplyItemAccessibleText(item, tab);
             }
             else if (e.PropertyName == nameof(TabModel.Group))
@@ -455,6 +450,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _headerTextByModel[tab] = headerText;
         _iconRowByModel[tab] = iconRow;
         TabViewControl.TabItems.Add(item);
+        // After the registries: the anatomy pass reads the icon row back
+        // out of _iconRowByModel, so a tab that arrives already pinned
+        // (a session restore, a detach into a new window) has to be
+        // findable before it is asked to take its shape.
+        ApplyPinnedTabAnatomy(item, tab);
         ApplyTabChrome(item, headerPanel, tab, selected: false);
     }
 
@@ -1267,8 +1267,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 selectedItem = viewItem;
         }
         RecolorTabText();
-        // The stroke's ink is the accent resolved per call: the theme
-        // refresh is what re-reads it.
+        // The pinned shape survives a theme swap, but the pass is cheap
+        // and this is the one place that re-derives every item's chrome
+        // from scratch; leaving the shape out of it would make the theme
+        // refresh the one pass that can disagree with the rest.
         ApplyPinZoneChrome();
         RefreshTabViewTheme();
         if (selectedItem is not null)
@@ -1911,60 +1913,77 @@ internal sealed partial class TabHost : UserControl, ITabHost
     }
 
     /// <summary>
-    /// The pin zone's edge, horizontal: a 1px right border stroke on
-    /// the LAST pinned tab, nothing on its neighbours. One writer owns the
-    /// border -- this pass -- so a stale stroke has exactly one place to
-    /// come from and every drag exit lands here to clear it. The predicate
-    /// reads manager truth: during a drag the strip's order is TabView's
-    /// preview, and the zone edge is the manager's prefix length, not the
-    /// preview's.
+    /// The pin zone's edge, horizontal: no stroke at all. A pinned tab is
+    /// an icon square and a body tab is a full-width tab, and two shapes
+    /// side by side need nothing drawn between them -- the same grammar
+    /// the vertical band speaks, laid along the strip instead of down it.
+    /// Three pins spend one tab's width here where three used to.
     ///
-    /// The brighten/dim is the vertical stroke's semantics (4b-1), alpha
-    /// for alpha: dim at 0x59 while idle, bright at 0xE6 while a drag is
-    /// live -- the boundary is what a drag-to-pin is aiming at. The swap
-    /// is deliberate rather than a color animation: the vertical edition
-    /// ships the same swap, refreshed by passes that already run, so the
-    /// state never waits on an animation (the 167ms BoundaryStroke token
-    /// governs a transition neither strip draws).
+    /// One writer owns the anatomy -- this pass -- so a tab left in the
+    /// wrong shape has exactly one place to come from. The predicate reads
+    /// each tab's own flag rather than the prefix length: during a drag
+    /// the strip's order is TabView's preview, and a tab's shape must
+    /// follow what it IS, not where the preview currently has it.
     /// </summary>
     private void ApplyPinZoneChrome()
     {
-        var boundary = _manager.PinCount > 0
-            ? _manager.Tabs[_manager.PinCount - 1]
-            : null;
         foreach (var (model, item) in _itemByModel)
-        {
-            if (ReferenceEquals(model, boundary))
-            {
-                item.BorderThickness = new Thickness(0, 0, 1, 0);
-                item.BorderBrush = PinBoundaryBrush();
-            }
-            else
-            {
-                item.BorderThickness = default;
-                item.BorderBrush = null;
-            }
-        }
+            ApplyPinnedTabAnatomy(item, model);
     }
 
     /// <summary>
-    /// The boundary stroke's ink: the accent, resolved from the theme
-    /// resources on every call the way the bell glyph's is, so High
-    /// Contrast re-themes it and a runtime theme change is picked up by
-    /// the next pass (RefreshTabColors re-runs this). A fresh brush per
-    /// call because mutating one shared brush's alpha would retint every
-    /// other reader of the resource.
+    /// The width a pinned tab spends: one icon square plus the inset the
+    /// vertical rail gives the same square, which is why the two layouts
+    /// collapse a pin to the same size. Both bounds, not one: TabView's
+    /// Equal mode writes Width on every item it holds, and layout clamps
+    /// that Width against Min/Max -- so the clamp is the only way to say
+    /// "this slot is fixed" without fighting the strip's own sizing pass
+    /// every time an item is added.
     /// </summary>
-    private Brush PinBoundaryBrush()
+    private const double PinnedTabInset = 4;
+    private const double PinnedTabWidth = TabPinBand.ChipSize + 2 * PinnedTabInset;
+
+    /// <summary>
+    /// One tab's pinned anatomy. Pinned: an icon square, its title on the
+    /// tooltip, no close button -- a 48px slot has no room for one, and a
+    /// pinned tab is not meant to be closed by a stray click anyway; the
+    /// context menu and the close keybind still take that decision.
+    /// Unpinned: everything back, including the width the strip shares out.
+    /// </summary>
+    private void ApplyPinnedTabAnatomy(TabViewItem item, TabModel tab)
     {
-        // Bright only while a drag is LIVE: an armed-but-not-dragging
-        // strip keeps the idle stroke, or the boundary would flash on
-        // every session the strip opens.
-        byte alpha = _stripDragActive ? (byte)0xE6 : (byte)0x59;
-        if (Application.Current.Resources.TryGetValue("SystemAccentColor", out var v)
-            && v is Windows.UI.Color accent)
-            return new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, accent.R, accent.G, accent.B));
-        return new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, 0x60, 0xCD, 0xFF));
+        var pinned = tab.IsPinned;
+        item.MinWidth = pinned ? PinnedTabWidth : 0;
+        item.MaxWidth = pinned ? PinnedTabWidth : double.PositiveInfinity;
+        item.IsClosable = !pinned;
+        // The title the square gives up rides the tooltip, and owes it:
+        // two shells of the same kind draw the same icon. An unpinned tab
+        // wears its title, so it is not owed one.
+        ToolTipService.SetToolTip(item, pinned ? tab.EffectiveTitle : null);
+
+        if (!_iconRowByModel.TryGetValue(tab, out var row)) return;
+        // Centred in the square rather than run from the leading edge:
+        // the row is the only thing left in the slot.
+        row.HorizontalAlignment = pinned
+            ? HorizontalAlignment.Center
+            : HorizontalAlignment.Stretch;
+        foreach (var child in row.Children)
+        {
+            switch (child)
+            {
+                case TabIconPresenter icon:
+                    icon.Margin = new Thickness(0, 0, pinned ? 0 : 6, 0);
+                    break;
+                case TextBlock title:
+                    title.Visibility = pinned ? Visibility.Collapsed : Visibility.Visible;
+                    break;
+                case FontIcon bell:
+                    // The bell keeps its badge on a pinned square; what it
+                    // gives up is the gap before a title that is not there.
+                    bell.Margin = new Thickness(pinned ? 0 : 6, 0, 0, 0);
+                    break;
+            }
+        }
     }
 
     /// <summary>
@@ -2593,13 +2612,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
         if (_joinRing is null)
         {
-            // The accent OPAQUE, not PinBoundaryBrush(). That returns the
-            // accent at 0xE6 while a drag is live -- and the ring is only ever
-            // drawn during a drag, so it took that alpha and the halo came out
-            // at 0.27 here against the vertical strip's 0.30. One gesture, two
-            // layouts, one colour. The pin boundary's alpha policy also has
-            // nothing to do with joining, so borrowing it means this moves the
-            // next time that policy does, for a reason nobody will connect.
+            // The accent OPAQUE, and it has its own resolver rather than
+            // borrowing one. The strip used to have a pin-boundary brush that
+            // handed back the accent at 0xE6 while a drag was live, and since
+            // the ring is only ever drawn during a drag it took that alpha:
+            // the halo came out at 0.27 here against the vertical strip's
+            // 0.30. One gesture, two layouts, one colour. That brush retired
+            // with the boundary stroke, but the rule it taught stands -- an
+            // alpha policy written for something else moves when that thing
+            // moves, for a reason nobody will connect back to here.
             _joinRing = new TabJoinRing(JoinRingBrush());
             JoinOverlay.Children.Add(_joinRing);
         }
@@ -2707,9 +2728,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // would overlap the dragged tab's lift, which is the one overlap
         // the label rule exists to forbid.
         ApplyLabelPhase(_labelRules.DragStarting());
-        // The boundary stroke brightens for the length of the drag: the
-        // zone edge is what a drag-to-pin is aiming at.
-        ApplyPinZoneChrome();
         // Hidden synchronously: the drag is live from this call onward,
         // and the crossings below move slots the manager is asked to
         // agree to as they land.
@@ -2948,8 +2966,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
         _stripDragActive = false;
         // The drag is over: the cut demand lifts, and hover may show the
-        // label again; the boundary stroke dims back, the cleanup every
-        // completed drag runs.
+        // label again; every tab's shape is re-derived from its own pin
+        // flag, because a gesture can have pinned or unpinned mid-flight
+        // and a crossing the manager refused raised nothing at all.
         ApplyLabelPhase(_labelRules.DragEnded());
         ApplyPinZoneChrome();
         // The sweep is unconditional: a crossing the manager refused or
