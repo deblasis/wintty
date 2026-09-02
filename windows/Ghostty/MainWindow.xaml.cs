@@ -4022,7 +4022,8 @@ public sealed partial class MainWindow : Window
     /// One-shot setup applied when this window is the singleton quick
     /// (quake / drop-down) terminal:
     ///   - <c>AppWindow.IsShownInSwitchers = false</c> hides the icon
-    ///     from the taskbar.
+    ///     from the taskbar. Best-effort: the platform may refuse it, and
+    ///     WS_EX_TOOLWINDOW below already covers the taskbar by itself.
     ///   - <c>WS_EX_TOOLWINDOW</c> hides the window from the Alt+Tab
     ///     switcher (IsShownInSwitchers alone leaves it visible there).
     ///   - <c>AppWindow.Closing</c> is intercepted so the close button
@@ -4032,7 +4033,34 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyQuickTerminalBehaviour()
     {
-        AppWindow.IsShownInSwitchers = false;
+        // The one call in this method that reaches a platform surface
+        // allowed to refuse: observed throwing NotImplementedException
+        // ("SetShownInSwitchers failed", E_NOTIMPL) out of the WinAppSDK
+        // windowing layer.
+        //
+        // OnLaunched now catches anything this constructor throws, so an
+        // unguarded refusal here would no longer take the process down -- it
+        // would cost the entire quick terminal instead. Bad trade, for a call
+        // whose effect is redundant: WS_EX_TOOLWINDOW, set immediately below,
+        // hides the window from the taskbar AND from Alt+Tab on its own. The
+        // assignment stays because it records the intent in the AppWindow
+        // model rather than only in a Win32 style bit; it is kept honest by
+        // being swallowed.
+        //
+        // Broad on purpose. The CLR's HRESULT mapping is not stable enough to
+        // enumerate -- the same refusal surfaces as NotImplementedException,
+        // COMException or a bare Exception carrying an HResult depending on
+        // the projection -- and the try body is one statement whose failure
+        // costs nothing, so over-catching costs a log line and under-catching
+        // costs the feature.
+        try
+        {
+            AppWindow.IsShownInSwitchers = false;
+        }
+        catch (Exception refused)
+        {
+            _logger.LogSwitcherRefused(refused);
+        }
 
         var hwnd = new HWND(WindowNative.GetWindowHandle(this));
         var ex = (WINDOW_EX_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
@@ -5510,6 +5538,12 @@ public sealed partial class MainWindow : Window
 
 internal static partial class MainWindowLogExtensions
 {
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.MainWindow.SwitcherRefused,
+                   Level = LogLevel.Warning,
+                   Message = "AppWindow.IsShownInSwitchers refused on the quick terminal; WS_EX_TOOLWINDOW still hides it from the taskbar and Alt+Tab")]
+    internal static partial void LogSwitcherRefused(
+        this ILogger<MainWindow> logger, System.Exception ex);
+
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.MainWindow.DialogDrainFailed,
                    Level = LogLevel.Warning,
                    Message = "DialogTracker drain failed")]

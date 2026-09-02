@@ -941,12 +941,29 @@ public partial class App : Application
         // by the global hotkey via WindowsGlobalHotKey. Same MainWindow
         // class as a regular window, just with IsQuickTerminal = true
         // for the no-taskbar / no-AltTab / close-hides behaviour.
-        _quakeWindow = new MainWindow(
-            _configService, _bootstrapHost, _lifetimeSupervisor, factory,
-            isQuickTerminal: true);
-        _quakeWindow.Closed += OnAnyWindowClosedInternal;
-        _quakeWindow.Activate();          // creates the HWND
-        _quakeWindow.AppWindow.Hide();    // immediately hide
+        // Every call in here reaches Microsoft.UI.Windowing, and that
+        // surface is allowed to refuse -- IsShownInSwitchers has been seen
+        // throwing NotImplementedException (E_NOTIMPL) on a machine where
+        // nothing else was wrong. Unguarded, any one of them takes the whole
+        // process down mid-launch, AFTER the real window above is already on
+        // screen, which reads to a user as a crash rather than as a missing
+        // feature. The quake window is optional; the app is not. Same shape
+        // as the tray icon below, and _quakeWindow is nullable precisely so
+        // the rest of the app copes with it never being built.
+        try
+        {
+            _quakeWindow = new MainWindow(
+                _configService, _bootstrapHost, _lifetimeSupervisor, factory,
+                isQuickTerminal: true);
+            _quakeWindow.Closed += OnAnyWindowClosedInternal;
+            _quakeWindow.Activate();          // creates the HWND
+            _quakeWindow.AppWindow.Hide();    // immediately hide
+        }
+        catch (System.Exception ex)
+        {
+            _quakeWindow = null;
+            Ghostty.Logging.StaticLoggers.App.LogQuakeWindowFailed(ex);
+        }
 
         // Chord comes from quick-terminal-key config (Default = Ctrl+`).
         // MOD_NOREPEAT prevents auto-fire while the user holds the chord.
@@ -2206,6 +2223,12 @@ internal static partial class AppLogExtensions
                    Level = LogLevel.Warning,
                    Message = "A forwarded launch could not be acted on; it was dropped.")]
     internal static partial void LogInboundLaunchFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.QuakeWindowFailed,
+                   Level = LogLevel.Warning,
+                   Message = "The quick terminal could not be built; its hotkey does nothing this session.")]
+    internal static partial void LogQuakeWindowFailed(
         this ILogger<App> logger, System.Exception ex);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.TrayInitFailed,
