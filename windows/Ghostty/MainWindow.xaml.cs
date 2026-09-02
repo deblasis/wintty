@@ -4032,7 +4032,30 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyQuickTerminalBehaviour()
     {
-        AppWindow.IsShownInSwitchers = false;
+        // Belt to the WS_EX_TOOLWINDOW braces below, and the one call here
+        // that reaches a platform surface allowed to refuse. It has been
+        // observed throwing NotImplementedException ("SetShownInSwitchers
+        // failed", E_NOTIMPL) from the WinAppSDK windowing layer, and
+        // because OnLaunched builds the quake window on EVERY launch, an
+        // unguarded throw here does not cost a taskbar icon -- it takes the
+        // whole app down before any window exists, with no way back short of
+        // the platform recovering on its own.
+        //
+        // Nothing is lost by continuing. WS_EX_TOOLWINDOW, set immediately
+        // below, already hides the window from the taskbar AND from Alt+Tab;
+        // IsShownInSwitchers is the tidier API for half of that, not the
+        // load-bearing half.
+        try
+        {
+            AppWindow.IsShownInSwitchers = false;
+        }
+        catch (Exception refused)
+        {
+            _logger.LogWarning(
+                refused,
+                "AppWindow.IsShownInSwitchers refused on the quick terminal; "
+                + "WS_EX_TOOLWINDOW still hides it from the taskbar and Alt+Tab.");
+        }
 
         var hwnd = new HWND(WindowNative.GetWindowHandle(this));
         var ex = (WINDOW_EX_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
