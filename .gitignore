@@ -62,6 +62,7 @@ windows/scripts/vtabs-layout-switch/
 windows/scripts/vtabs-morph/
 windows/scripts/vtabs-switcher/
 windows/scripts/backdrop-stage-selftest/
+windows/scripts/theme-matrix/
 
 # Gallery tooling scratch renders (WARP PPMs and PNGs diffed during
 # shader bring-up; never something we want committed).
