@@ -2836,11 +2836,21 @@ internal sealed partial class VerticalTabStrip : UserControl
         // press-time answer is the one that describes where the user aimed.
         public FrameworkElement? PressRow;
         public double PressY;
+        // The press X, for the one gesture that is not confined to the
+        // strip's axis: a reorder inside a band row is pure sideways
+        // travel. See DragMove's lift.
+        public double PressX;
         public double PressBaseCenter;
         // The arranged center the anchor currently assumes; the tick's
         // measurement is only believed when it moves off this.
         public double AssumedCenter;
         public double LastPointerY;
+        // The pointer's X, carried only for the pinned band. Everything
+        // else in this gesture speaks one axis -- the machine's whole
+        // contract is a scalar along it -- and the band is the one surface
+        // that wraps, so it is the one place a second axis has to be
+        // answered. Nothing outside BandTargetSlot reads this.
+        public double LastPointerX;
         public double AnchorY;
         public double LastScrollOffset;
         public double LastAutoscrollSpeed;
@@ -2888,8 +2898,9 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void OnDragPointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        var point = e.GetCurrentPoint(this).Position;
         DragPress(e.OriginalSource as DependencyObject, e.Pointer.PointerId,
-            e.GetCurrentPoint(this).Position.Y);
+            point.Y, point.X);
     }
 
     /// <summary>
@@ -2900,7 +2911,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// passes the same three values itself and lands here anyway. Everything
     /// from the row resolution down is the one gesture body either way.
     /// </summary>
-    private void DragPress(DependencyObject? source, uint pointerId, double y)
+    private void DragPress(DependencyObject? source, uint pointerId, double y, double x = double.NaN)
     {
         if (_drag is not null)
         {
@@ -2929,7 +2940,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         // exactly as before.
         if (item is VerticalTabGroupHeaderItem { Tag: TabGroup group })
         {
-            ArmGroupDrag(group, item, pointerId, y);
+            ArmGroupDrag(group, item, pointerId, y, x);
             return;
         }
 
@@ -2953,6 +2964,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             PointerId = pointerId,
             PressRow = owned,
             LastPointerY = y,
+            LastPointerX = x,
+            PressX = x,
             PressY = y,
         };
     }
@@ -2966,7 +2979,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// prefix contributes no units, so the drag never even offers a
     /// crossing into the zone MoveGroup's clamp would refuse.
     /// </summary>
-    private void ArmGroupDrag(TabGroup group, FrameworkElement header, uint pointerId, double y)
+    private void ArmGroupDrag(TabGroup group, FrameworkElement header, uint pointerId, double y, double x)
     {
         var run = _manager.MembersOf(group);
         if (run.Count == 0) return;
@@ -2991,6 +3004,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             PointerId = pointerId,
             PressRow = header,
             LastPointerY = y,
+            LastPointerX = x,
+            PressX = x,
             PressY = y,
         };
     }
@@ -3010,21 +3025,55 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void OnDragPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        DragMove(e.Pointer.PointerId, e.GetCurrentPoint(this).Position.Y);
+        var point = e.GetCurrentPoint(this).Position;
+        DragMove(e.Pointer.PointerId, point.Y, point.X);
     }
 
-    /// <summary>The move, parameterized the same way as the press.</summary>
-    private void DragMove(uint pointerId, double y)
+    /// <summary>
+    /// The move, parameterized the same way as the press.
+    ///
+    /// <paramref name="x"/> is the band's axis and nothing else's. It does
+    /// NOT reach <see cref="TabDragReorder.Begin"/>: the start threshold is
+    /// deliberately one-axis, so a grab that jitters sideways stays a
+    /// click, and admitting X there would start a drag on a hand tremor.
+    /// </summary>
+    private void DragMove(uint pointerId, double y, double x = double.NaN)
     {
         if (_drag is not { } drag || pointerId != drag.PointerId) return;
 
         if (drag.Machine.Phase == TabDragPhase.Pressed)
         {
-            if (!drag.Machine.Begin(y)) return;
+            // A press on a band square lifts on travel in EITHER direction,
+            // and it has to: the band wraps, so a reorder between two
+            // squares on one row is pure sideways travel at an unchanging
+            // Y, and the one-axis threshold would keep that gesture a click
+            // no matter how far it went.
+            //
+            // Only for a square. A body row keeps the one-axis rule, so a
+            // hand tremor across a click still cannot lift it.
+            // PER-AXIS, not the straight-line distance. A disc of radius
+            // 4 is SMALLER than the +/-4 square the one-axis rule left a
+            // click: 3px of horizontal and 3px of vertical travel is 4.24
+            // away, so a click on a 40px icon with ordinary jitter lifted
+            // -- and a lifted press that ends in the zone keeps its pin and
+            // never activates, because only the click path calls
+            // ActivateFromShelf. Taking the larger of the two axes is the
+            // OR of two one-axis rules: the Y door is exactly what it was,
+            // and X gets a door of the same width rather than the gesture
+            // getting a smaller one overall.
+            var lifted = drag.PressRow is VerticalTabPinnedRow
+                         && !double.IsNaN(x) && !double.IsNaN(drag.PressX)
+                ? drag.Machine.BeginOnTravel(
+                    Math.Max(
+                        Math.Abs(y - drag.PressY),
+                        Math.Abs(x - drag.PressX)))
+                : drag.Machine.Begin(y);
+            if (!lifted) return;
             StartDragVisual(drag);
             if (_drag is null) return; // start refused; the click falls through
         }
 
+        if (!double.IsNaN(x)) drag.LastPointerX = x;
         drag.LastPointerY = y;
         drag.Machine.SampleVelocity(y, Environment.TickCount64);
         drag.Properties?.InsertVector3("pointer", new Vector3(0, (float)y, 0));
@@ -3116,25 +3165,24 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (drag.Tab.IsPinned)
         {
             var releaseY = y;
-            double shelfTop = double.NaN, shelfBottom = double.NaN;
-            try
-            {
-                var origin = _pinnedPanel.TransformToVisual(this)
-                    .TransformPoint(new Windows.Foundation.Point(0, 0));
-                shelfTop = origin.Y;
-                shelfBottom = origin.Y + _pinnedPanel.ActualHeight;
-            }
-            catch (Exception ex) when (IsLayoutReadFailure(ex))
-            {
-                // No honest shelf bounds: NaN fails the IsNaN gate below,
-                // so the release is treated as OUT of the zone and the
-                // unpin arm runs. That polarity is deliberate -- unpin
-                // unless provably in-zone -- and safe to act on without
-                // the bounds, because BodySlotAtY reads the body pairing
-                // and never the shelf's layout.
-            }
-            var inZone = !double.IsNaN(shelfTop)
-                && releaseY >= shelfTop && releaseY <= shelfBottom;
+            // The boundary is the arbitration's own, and there is only one.
+            // The tick loop hands the band every pointer above ShelfBottomY
+            // and pins an arriving row the moment it gets one, so a release
+            // that asked a different edge could only overturn what the drag
+            // had already committed. The panel's rect is that different
+            // edge: it sits inset inside the shelf, which makes its top and
+            // bottom margins exactly the strips where the band pinned a row
+            // and this arm unpinned it again. No top bound either, for the
+            // same reason -- above the shelf the band still answers, so
+            // above the shelf the release must still keep.
+            //
+            // No honest bound reads NaN, which fails the gate and runs the
+            // unpin arm. That polarity is deliberate -- unpin unless
+            // provably in-zone -- and safe to act on without the bounds,
+            // because BodySlotAtY reads the body pairing and never the
+            // shelf's layout.
+            var shelfBottom = ShelfBottomY();
+            var inZone = !double.IsNaN(shelfBottom) && releaseY < shelfBottom;
             if (!inZone)
             {
                 _commitChurn = true;
@@ -4158,7 +4206,49 @@ internal sealed partial class VerticalTabStrip : UserControl
             beforeCenters[i] = RowCenterY(beforeRows[i]);
 
         var committed = false;
-        while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
+        // The band answers for itself while the pointer is over it, and the
+        // crossing engine is not consulted at all on that tick.
+        //
+        // Not an optimisation -- the crossing engine cannot answer here and
+        // is actively wrong when asked. It commits on the dragged centre
+        // passing a NEIGHBOUR'S centre along one axis, and squares sharing a
+        // band row share that centre: no crossing between them can ever be
+        // produced, so a reorder inside a row was impossible. Worse, the
+        // comparison that fires for one square on the row fires for every
+        // square on it, and this loop drains crossings until none is left --
+        // so a drag arriving at the band committed 2->1, re-evaluated
+        // against the identical centre, committed 1->0, and landed at slot 0
+        // whatever the pointer was pointing at.
+        // ...and a PINNED row is never handed to it, band tick or not. The
+        // paragraph above is only half true while the pointer is over the
+        // band: carry a square below the shelf and BandTargetSlot declines,
+        // which hands the crossing engine that same array of equal centres
+        // and it drains three commits in one tick, shuffling the square to
+        // slot 0 exactly as described. Below the shelf a pinned row's
+        // position among body rows means nothing anyway -- it is still in
+        // the band -- and where it ends up is the release's call, which
+        // unpins and places it under the release point. So there is nothing
+        // for a crossing to decide here, and letting it try is the bug.
+        var bandTarget = BandTargetSlot(drag);
+        if (drag.Tab.IsPinned && bandTarget is null)
+        {
+            // No reorder this tick. The tail still runs: the ghost, the
+            // dwell and the glides are all still this gesture's business.
+        }
+        else if (bandTarget is { } bandSlot)
+        {
+            committed = CommitBandTarget(drag, bandSlot, beforeCenters);
+            // CommitBandTarget can cancel the session, and the crossing arm
+            // below returns on its own cancels rather than finishing the
+            // tick. This owes the same: EndDrag has already hidden the
+            // ghost and cleared the ring, and the tail of this method would
+            // re-derive both from a torn-down session -- ShowPinPreview
+            // adds a fresh row to PreviewHost that nothing then owns, and
+            // CountLeakedMotion does not count it, so the oracle reports a
+            // clean gesture while a phantom pin sits on the shelf.
+            if (_drag is null) return;
+        }
+        else while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
         {
             // The machine speaks in visible slots, the manager in tabs;
             // a slot the pairing does not name is refused, never guessed.
@@ -4252,7 +4342,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             }
         }
 
-        UpdatePinPreview(drag, draggedCenter);
+        UpdatePinPreview(drag);
         UpdateJoinDwell(drag, draggedCenter);
     }
 
@@ -4471,29 +4561,129 @@ internal sealed partial class VerticalTabStrip : UserControl
     // -----------------------------------------------------------------
 
     /// <summary>
+    /// Put the dragged tab in band slot <paramref name="target"/>: the
+    /// band's whole commit, and it is ONE move rather than a drained run
+    /// of crossings.
+    ///
+    /// That is the shape the two-axis hit test buys. A crossing engine has
+    /// to walk a drag slot by slot because each step is a comparison
+    /// against one neighbour; the band already knows the answer outright,
+    /// so there is nothing to iterate and no way for the iteration to run
+    /// away. <see cref="TabPinBand.NearestSlot"/> only changes its answer
+    /// at the midpoint between two squares, so a pointer resting on a
+    /// boundary cannot thrash the manager either.
+    ///
+    /// An unpinned tab arriving is pinned first and then placed, the same
+    /// two steps the boundary crossing takes and for the same reason: Move
+    /// alone clamps to the tab's own zone, so a pin has to exist before it
+    /// can be positioned among the pins.
+    ///
+    /// Returns whether anything committed, which is what the caller's
+    /// anchor-adoption rule reads.
+    ///
+    /// Of the three "closed" cancels below, only the last -- the row
+    /// element being gone after the churn -- is live. EvaluateDrag has
+    /// already proved the tab is in the manager, and SetPinned relocates
+    /// rather than removes, so neither IndexOf can return -1. They stay as
+    /// belt-and-braces on a path that mutates manager state mid-gesture,
+    /// but do not read the method as having three failure modes.
+    /// </summary>
+    private bool CommitBandTarget(DragSession drag, int target, double[] beforeCenters)
+    {
+        var wasPinned = drag.Tab.IsPinned;
+        var from = _manager.IndexOf(drag.Tab);
+        if (from < 0) { CancelDrag("closed"); return false; }
+        // The band's slots ARE the manager's pinned prefix, in order, so a
+        // band slot is a manager index directly -- no pairing to walk. The
+        // clamp is the arriving case: a tab that is not pinned yet cannot
+        // land past the end of the prefix it is joining.
+        var managerTo = Math.Min(target, wasPinned ? _manager.PinCount - 1 : _manager.PinCount);
+        if (wasPinned && managerTo == from) return false;
+
+        _commitChurn = true;
+        try
+        {
+            if (!wasPinned)
+            {
+                _manager.SetPinned(drag.Tab, true);
+                from = _manager.IndexOf(drag.Tab);
+                if (from < 0) { CancelDrag("closed"); return false; }
+            }
+            if (from != managerTo) _manager.Move(from, managerTo);
+        }
+        finally { _commitChurn = false; }
+
+        if (!wasPinned)
+        {
+            // The zone moved, so the boundary this gesture aims at repaints
+            // now -- the same exception the crossing path makes for a pin.
+            if (drag.HidesSelectionRow) UpdateSelectionRow();
+            else UpdateRowSeparators(selectionRowVisible: true);
+        }
+        if (RowElementOf(drag.Tab) is null) { CancelDrag("closed"); return false; }
+
+        // Read the truth back rather than trusting the request: Move clamps,
+        // and a target the manager declined must not re-anchor the row to a
+        // slot it never reached.
+        var (_, nowIndex) = DragSlots();
+        var actualSlot = nowIndex.IndexOf(_manager.IndexOf(drag.Tab));
+        if (actualSlot < 0)
+        {
+            DragTrace($"BAND refused ->{target}");
+            return false;
+        }
+        drag.Machine.UpdateIndex(actualSlot);
+        // The anchor re-bases on where the square was BEFORE this move, so
+        // the row keeps following the pointer instead of jumping by the
+        // slot delta. Out of the pre-commit frame the caller measured, and
+        // only when that frame actually holds the slot: a tab arriving from
+        // the list was not in the band when those centers were read.
+        if (actualSlot < beforeCenters.Length && !double.IsNaN(beforeCenters[actualSlot]))
+            RebindFollow(drag, beforeCenters[actualSlot]);
+        DragTrace($"BAND commit ->{actualSlot}");
+        return true;
+    }
+
+    /// <summary>
     /// Re-derive the ghost from this tick's truth. The promise is only
     /// alive while the dragged row is still unpinned, pins exist, and the
     /// row's center is over the shelf; any other state hides it. An
     /// unreadable measurement also hides it -- a ghost at a stale position
     /// is a wrong promise, and no ghost is the honest one.
     /// </summary>
-    private void UpdatePinPreview(DragSession drag, double draggedCenter)
+    private void UpdatePinPreview(DragSession drag)
     {
+        // The POINTER's Y, not the dragged row's centre. BandTargetSlot
+        // arbitrates on the pointer, and it acts on that answer by pinning
+        // an arriving row the moment it gets one -- so a ghost gated on the
+        // centre disagrees by the grab offset, up to half a row height.
+        // Grab a body row near its top edge and there is a band of
+        // positions where the band commits a pin while this refused to
+        // promise one, which is the drop landing somewhere the user was
+        // never shown. One reader of one number, or the promise is not a
+        // promise.
         var shelfBottom = ShelfBottomY();
         if (drag.Tab.IsPinned || _manager.PinCount == 0
-            || double.IsNaN(shelfBottom) || draggedCenter >= shelfBottom)
+            || double.IsNaN(shelfBottom) || double.IsNaN(drag.LastPointerY)
+            || drag.LastPointerY >= shelfBottom)
         {
             HidePinPreview();
             return;
         }
 
-        // The slot one past the end of the band, asked of the band itself
-        // rather than derived from the last square's center. A band wraps,
-        // so "the next slot" is sometimes beside the last square and
-        // sometimes at the start of a new row, and only the panel that
-        // arranges the squares knows which -- re-deriving it here would be
-        // a second layout opinion that disagrees at every column boundary.
-        var slot = BandSlotRect(_manager.PinCount);
+        // The slot the pointer is actually over, asked of the band itself
+        // rather than derived here. A band wraps, so a slot is sometimes
+        // beside the last square and sometimes at the start of a new row,
+        // and only the panel that arranges the squares knows which --
+        // re-deriving it would be a second layout opinion that disagrees at
+        // every column boundary.
+        //
+        // The ghost and the landing are the SAME answer: both come from
+        // BandTargetSlot, so the promise cannot differ from what the release
+        // does. Falling back to the end slot when the pointer is not over
+        // the band keeps the old promise for the approach, which is the
+        // only time that gate is open and the band has not answered.
+        var slot = BandSlotRect(BandTargetSlot(drag) ?? _manager.PinCount);
         if (double.IsNaN(slot.X) || double.IsNaN(slot.Y))
         {
             HidePinPreview();
@@ -4538,6 +4728,64 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             return double.NaN;
         }
+    }
+
+    /// <summary>
+    /// The band slot the pointer is asking for, or null when the pointer is
+    /// not over the band and the linear machine owns the gesture.
+    ///
+    /// This is the arbitration between the two engines, and the axis it
+    /// arbitrates on is the machine's own. The band spans the pane's width,
+    /// so horizontally there is nothing to decide -- the only question is
+    /// whether the pointer's Y is inside the band's rows. Above the shelf's
+    /// bottom the band answers; below it the list does. Split that way the
+    /// two engines cannot both claim a tick, which is what keeps the
+    /// handover from needing a state machine of its own.
+    ///
+    /// Null on three refusals rather than a guess:
+    ///   - no X. A driver that supplies only Y (the seam's Y-only drag, and
+    ///     every pre-band caller) gets the linear behaviour it has always
+    ///     had, instead of a hit test against a column it never named.
+    ///   - no pins. There is no band to hit-test, and nothing else picks
+    ///     the gesture up either: TabPinBoundary.Classify only answers Pin
+    ///     for a slot inside the pinned prefix, and with no pins there is
+    ///     no such slot. So no drag creates the FIRST pin, before this
+    ///     change or after it -- the refusal is right, but do not read it
+    ///     as "the boundary classification handles that case".
+    ///   - a run drag. A group cannot be pinned, so the band is not a place
+    ///     it can land.
+    /// </summary>
+    private int? BandTargetSlot(DragSession drag)
+    {
+        if (drag.Group is not null) return null;
+        if (double.IsNaN(drag.LastPointerX)) return null;
+        if (_manager.PinCount == 0) return null;
+
+        var shelfBottom = ShelfBottomY();
+        if (double.IsNaN(shelfBottom) || drag.LastPointerY >= shelfBottom) return null;
+
+        Windows.Foundation.Point local;
+        try
+        {
+            local = TransformToVisual(_pinnedPanel).TransformPoint(
+                new Windows.Foundation.Point(drag.LastPointerX, drag.LastPointerY));
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            // The band is not arranged into the tree this tick. No target
+            // is the honest answer; the linear machine's own measurements
+            // are refused the same way one tick at a time.
+            return null;
+        }
+        if (double.IsNaN(local.X) || double.IsNaN(local.Y)) return null;
+
+        // One more slot than there are pins when the dragged tab is not one
+        // of them: it is arriving, and the slot past the end is a real place
+        // for it to land -- the same slot the ghost draws. A pin already in
+        // the band is only ever reordered among the squares that exist.
+        var slots = drag.Tab.IsPinned ? _manager.PinCount : _manager.PinCount + 1;
+        return TabPinBand.NearestSlot(
+            local.X, local.Y, Math.Max(1, _pinnedPanel.Columns), slots);
     }
 
     /// <summary>
@@ -4880,6 +5128,26 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             return item.TransformToVisual(this)
                 .TransformPoint(new Windows.Foundation.Point(0, 0)).Y + item.ActualHeight / 2;
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return double.NaN;
+        }
+    }
+
+    /// <summary>
+    /// An element's centre X in strip space, for the one caller that needs
+    /// a second axis: the seam's drag, which has to be able to name a square
+    /// on a band row. NaN when the element has no arranged truth, the same
+    /// refusal <see cref="RowCenterY"/> makes.
+    /// </summary>
+    private double RowCenterX(FrameworkElement item)
+    {
+        if (item.ActualWidth <= 0) return double.NaN;
+        try
+        {
+            return item.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).X + item.ActualWidth / 2;
         }
         catch (Exception ex) when (IsLayoutReadFailure(ex))
         {
@@ -5278,7 +5546,14 @@ internal sealed partial class VerticalTabStrip : UserControl
             return outcome.Fail("drag row has no arranged center; layout has not run");
 
         const uint seamPointer = 0x5749_4E54; // 'WINT'; no real pointer carries it
-        DragPress(row, seamPointer, y);
+        // The pointer's X, carried so a walk that ends inside the pinned
+        // band can say WHICH square it means. A band row holds several
+        // squares at one Y, so a Y-only walk cannot name one of them --
+        // which is the whole reason the band answers a hit test rather than
+        // a crossing. Seeded from the row's own centre, so a drag that
+        // never touches the band moves along the axis it always did.
+        double x = RowCenterX(row);
+        DragPress(row, seamPointer, y, x);
 
         // Steps of 12px: past the 4px start threshold on the first move,
         // under the row pitch, so each tick is one honest crossing decision
@@ -5291,9 +5566,16 @@ internal sealed partial class VerticalTabStrip : UserControl
 
             var (rows, managerIndex) = DragSlots();
             int slot = managerIndex.IndexOf(to);
-            double target = slot >= 0 && slot < rows.Count
-                ? RowCenterY(rows[slot])
-                : double.NaN;
+            // A destination inside the band is a POINT, not a height: the
+            // band's own slot rect, which is the same geometry the drop
+            // preview and the panel's arrange read. Outside it, the row's
+            // centre height and the X the walk already holds.
+            var band = to < _manager.PinCount ? BandSlotRect(slot) : default;
+            var toBand = to < _manager.PinCount && !double.IsNaN(band.X);
+            double target = toBand
+                ? band.Y + band.Height / 2
+                : slot >= 0 && slot < rows.Count ? RowCenterY(rows[slot]) : double.NaN;
+            double targetX = toBand ? band.X + band.Width / 2 : x;
             // An unreadable target means the strip is mid-arrange (a commit
             // churned the containers); stand still this tick and re-read
             // the next, exactly as a hovering pointer would.
@@ -5308,18 +5590,23 @@ internal sealed partial class VerticalTabStrip : UserControl
                 // own token; once the commit lands it comes back to the
                 // center and settles there -- the overshoot-and-return a
                 // human finger performs.
+                //
+                // The band takes no such token: it commits on the NEAREST
+                // square, so aiming at the square's centre is already the
+                // answer and an overshoot would aim at its neighbour.
                 bool committed = _manager.IndexOf(tab) == to;
-                if (committed && Math.Abs(target - y) <= 1)
+                if (committed && Math.Abs(target - y) <= 1 && Math.Abs(targetX - x) <= 1)
                 {
                     reached = true;
                     break;
                 }
-                double aim = committed
+                double aim = committed || toBand
                     ? target
                     : target + Math.Sign(to - from)
                         * (TabStripMotion.CrossingHysteresisPx + 4);
                 y += Math.Clamp(aim - y, -stepPx, stepPx);
-                DragMove(seamPointer, y);
+                x += Math.Clamp(targetX - x, -stepPx, stepPx);
+                DragMove(seamPointer, y, x);
             }
 
             // One handoff below the drag tick's Normal priority: the
@@ -5340,6 +5627,12 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         DragRelease(seamPointer, y);
         outcome.Landed = _manager.IndexOf(tab);
+        // A drag into the band CHANGES this, and the manager is the only
+        // honest witness to it: the release classifies pin-out, so the
+        // gesture's own aim does not tell a caller what it got. Reported
+        // by every other drag entry point, and its absence here read as a
+        // product bug for as long as this path skipped it.
+        outcome.Pinned = tab.IsPinned;
         outcome.Order = TabStripProjection.Rows(_manager)
             .Select(t => t.EffectiveTitle).ToList();
         if (outcome.Landed != to)

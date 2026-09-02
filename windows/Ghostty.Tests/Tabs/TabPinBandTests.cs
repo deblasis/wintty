@@ -182,6 +182,79 @@ public class TabPinBandTests
     }
 
     [Fact]
+    public void The_nearest_slot_is_the_square_the_pointer_is_over()
+    {
+        const double pitch = TabPinBand.ChipSize + TabPinBand.ChipGap;
+        // Dead centre of each of four squares on one row.
+        for (int i = 0; i < 4; i++)
+        {
+            var x = i * pitch + TabPinBand.ChipSize / 2;
+            Assert.Equal(i, TabPinBand.NearestSlot(x, TabPinBand.ChipSize / 2, 4, 4));
+        }
+        // ...and the second row, which is the half a crossing engine on one
+        // axis cannot reach at all.
+        Assert.Equal(4, TabPinBand.NearestSlot(
+            TabPinBand.ChipSize / 2, pitch + TabPinBand.ChipSize / 2, 4, 8));
+        Assert.Equal(6, TabPinBand.NearestSlot(
+            2 * pitch + TabPinBand.ChipSize / 2, pitch + TabPinBand.ChipSize / 2, 4, 8));
+    }
+
+    [Fact]
+    public void The_answer_changes_at_the_midpoint_between_two_squares()
+    {
+        // Half a pitch of hysteresis, and it costs no state. The crossing
+        // engine spends 8px and has to remember which way it last went.
+        const double pitch = TabPinBand.ChipSize + TabPinBand.ChipGap;
+        var midpoint = TabPinBand.ChipSize / 2 + pitch / 2;
+        var y = TabPinBand.ChipSize / 2;
+        Assert.Equal(0, TabPinBand.NearestSlot(midpoint - 0.5, y, 4, 4));
+        Assert.Equal(1, TabPinBand.NearestSlot(midpoint + 0.5, y, 4, 4));
+        // A tie goes to the lower slot, so one gesture cannot land two ways
+        // depending on which side the pointer arrived from.
+        Assert.Equal(0, TabPinBand.NearestSlot(midpoint, y, 4, 4));
+    }
+
+    [Fact]
+    public void A_pointer_past_the_end_of_a_row_belongs_to_the_last_square_on_it()
+    {
+        // Nearest centre, not containment: the gutters and the ragged end
+        // of a partial row have to belong to something, or a drop there
+        // reads as "nowhere" and falls through to the list below.
+        const double pitch = TabPinBand.ChipSize + TabPinBand.ChipGap;
+        var y = TabPinBand.ChipSize / 2;
+        // Three pins in a four-column band: well past the third square.
+        Assert.Equal(2, TabPinBand.NearestSlot(3 * pitch + 100, y, 4, 3));
+        // ...and before the first.
+        Assert.Equal(0, TabPinBand.NearestSlot(-100, y, 4, 3));
+        // Below the last row, which is where a pointer on its way out of
+        // the band sits for a frame.
+        Assert.Equal(2, TabPinBand.NearestSlot(2 * pitch + 20, 500, 4, 3));
+    }
+
+    [Fact]
+    public void The_slot_one_past_the_end_is_reachable_only_when_asked_for()
+    {
+        // The difference between a reorder and a drop from outside. Three
+        // pins in a four-column band, pointer over the empty fourth column:
+        // a reorder has nowhere to put it but the third square, and an
+        // insertion has the slot the drop preview is drawing.
+        const double pitch = TabPinBand.ChipSize + TabPinBand.ChipGap;
+        var x = 3 * pitch + TabPinBand.ChipSize / 2;
+        var y = TabPinBand.ChipSize / 2;
+        Assert.Equal(2, TabPinBand.NearestSlot(x, y, 4, slotCount: 3));
+        Assert.Equal(3, TabPinBand.NearestSlot(x, y, 4, slotCount: 4));
+    }
+
+    [Fact]
+    public void A_slotless_band_is_corrupt_state_not_a_hit_test()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabPinBand.NearestSlot(0, 0, columns: 4, slotCount: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabPinBand.NearestSlot(0, 0, columns: 0, slotCount: 3));
+    }
+
+    [Fact]
     public void A_bandless_column_count_is_corrupt_state_not_a_layout()
     {
         Assert.Throws<ArgumentOutOfRangeException>(
