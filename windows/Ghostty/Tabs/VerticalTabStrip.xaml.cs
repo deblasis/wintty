@@ -3042,20 +3042,34 @@ internal sealed partial class VerticalTabStrip : UserControl
         // made to the row the ring was drawn on.
         if (_joinDwell.IsArmed && _joinDwell.Target is TabModel joinTarget)
         {
+            TabGroup? group;
             _commitChurn = true;
             try
             {
-                var group = TabJoinDrop.Join(_manager, drag.Tab, joinTarget);
+                group = TabJoinDrop.Join(_manager, drag.Tab, joinTarget);
                 DragTrace(group is null
                     ? "DRAG join refused"
                     : $"DRAG join group={group.Title} landed={_manager.IndexOf(drag.Tab)}");
             }
             finally { _commitChurn = false; }
-            // The join's gather churns the dragged row's container, so
-            // there is no live visual left for a settle spring to move:
-            // the row lands as a cut in the slot the run gathered it into.
-            EndDrag(drag, settle: false, velocity: 0);
-            return;
+
+            // Only a join that HAPPENED ends the gesture here. The arm says
+            // what the release means; whether it could be honoured is the
+            // manager's answer, and a refusal -- the target's shell exited
+            // during the hold, so it is no longer in the manager -- leaves an
+            // ordinary reorder to finish. Ending on the arm regardless cut the
+            // settle spring the motion gate promises and skipped the pin arms
+            // below, so a refused join was a drag that snapped home with no
+            // settle and no group. The horizontal strip already keeps the
+            // result and falls through; this is that rule.
+            if (group is not null)
+            {
+                // The join's gather churns the dragged row's container, so
+                // there is no live visual left for a settle spring to move:
+                // the row lands as a cut in the slot the run gathered it into.
+                EndDrag(drag, settle: false, velocity: 0);
+                return;
+            }
         }
         // PIN-OUT (release-classified): a row the drag pinned mid-gesture
         // ends where the user LET GO -- the same signal the horizontal
@@ -4294,14 +4308,31 @@ internal sealed partial class VerticalTabStrip : UserControl
             ClearJoinDwell();
             return;
         }
+        // Re-asked every tick, not only on the pointer path. The dwell's whole
+        // premise is that no pointer event arrives for 450ms, so this is the
+        // one window that decides the gesture -- and it was the one window in
+        // which eligibility went unchecked. A target pinned by an accelerator
+        // mid-hold, gathered into the dragged tab's own group by another actor,
+        // or closed, armed a promise the release could no longer keep.
+        if (!TabJoinDrop.CanJoin(_manager, drag.Tab, target))
+        {
+            ClearJoinDwell();
+            return;
+        }
         _joinDwell.Hold(target, drag.LastPointerY, JoinClockMs);
         UpdateJoinRing();
     }
 
     /// <summary>
     /// Draw the ring over the target's arranged row. An unreadable
-    /// measurement withdraws it: a ring on a stale rect is a promise
-    /// about the wrong row, and no ring is the honest picture.
+    /// measurement withdraws the whole DWELL, not just the visual.
+    ///
+    /// "No ring is the honest picture" was only half of it: hiding the ring
+    /// while the clock kept filling left the gesture arming with nothing on
+    /// screen, so a release meant JOIN with no affordance ever having been
+    /// shown. No ring plus a live promise is the dishonest picture -- and the
+    /// PR's central claim is that the fill IS the dwell's progress, which is
+    /// only true if the two are withdrawn together.
     /// </summary>
     private void UpdateJoinRing()
     {
@@ -4309,7 +4340,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             || RowElementOf(target) is not { } element
             || element.ActualHeight <= 0)
         {
-            HideJoinRing();
+            ClearJoinDwell();
             return;
         }
         Windows.Foundation.Point origin;
@@ -4320,7 +4351,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
         catch (Exception ex) when (IsLayoutReadFailure(ex))
         {
-            HideJoinRing();
+            ClearJoinDwell();
             return;
         }
 
@@ -4335,7 +4366,8 @@ internal sealed partial class VerticalTabStrip : UserControl
                 origin.X, origin.Y, element.ActualWidth, element.ActualHeight),
             _joinDwell.Progress,
             _joinDwell.IsArmed,
-            _drag is { MotionOn: true });
+            _drag is { MotionOn: true },
+            _highContrast);
     }
 
     /// <summary>

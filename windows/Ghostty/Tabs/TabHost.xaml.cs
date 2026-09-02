@@ -2552,6 +2552,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
             ClearJoinDwell();
             return;
         }
+        // Re-asked every tick, not only on the pointer path -- see the vertical
+        // strip's copy. The 450ms the dwell measures is precisely the window in
+        // which no pointer event arrives, so without this the eligibility rule
+        // is not enforced at all while the gesture is being decided.
+        if (!TabJoinDrop.CanJoin(_manager, drag.Tab, target))
+        {
+            ClearJoinDwell();
+            return;
+        }
         _joinDwell.Hold(target, drag.LastX, Environment.TickCount64);
         UpdateJoinRing();
     }
@@ -2567,7 +2576,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             || !_itemByModel.TryGetValue(target, out var item)
             || item.ActualHeight <= 0)
         {
-            HideJoinRing();
+            ClearJoinDwell();
             return;
         }
         Point origin;
@@ -2578,13 +2587,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
             or System.Runtime.InteropServices.COMException or NullReferenceException)
         {
-            HideJoinRing();
+            ClearJoinDwell();
             return;
         }
 
         if (_joinRing is null)
         {
-            _joinRing = new TabJoinRing(PinBoundaryBrush());
+            // The accent OPAQUE, not PinBoundaryBrush(). That returns the
+            // accent at 0xE6 while a drag is live -- and the ring is only ever
+            // drawn during a drag, so it took that alpha and the halo came out
+            // at 0.27 here against the vertical strip's 0.30. One gesture, two
+            // layouts, one colour. The pin boundary's alpha policy also has
+            // nothing to do with joining, so borrowing it means this moves the
+            // next time that policy does, for a reason nobody will connect.
+            _joinRing = new TabJoinRing(JoinRingBrush());
             JoinOverlay.Children.Add(_joinRing);
         }
         JoinOverlay.Visibility = Visibility.Visible;
@@ -2592,7 +2608,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
             new Rect(origin.X, origin.Y, item.ActualWidth, item.ActualHeight),
             _joinDwell.Progress,
             _joinDwell.IsArmed,
-            TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast));
+            TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast),
+            _highContrast);
+    }
+
+    /// <summary>
+    /// The join ring's ink: the accent at full strength, resolved the way the
+    /// vertical strip's own accent is.
+    /// </summary>
+    private Brush JoinRingBrush()
+    {
+        if (Application.Current?.Resources.TryGetValue("SystemAccentColor", out var v) == true
+            && v is Windows.UI.Color accent)
+            return new SolidColorBrush(accent);
+        return new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0x60, 0xCD, 0xFF));
     }
 
     /// <summary>

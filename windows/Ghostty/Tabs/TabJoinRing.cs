@@ -42,6 +42,11 @@ internal sealed partial class TabJoinRing : Grid
     // written in.
     private readonly double _sweepUnits;
     private bool _armed;
+    // Held apart so the armed state can choose between them: a wash normally,
+    // an outline in High Contrast, where a translucent fill over the row's own
+    // title is the thing the mode forbids.
+    private readonly Brush _haloFill;
+    private readonly Brush _haloEdge;
 
     public TabJoinRing(Brush accent)
     {
@@ -49,6 +54,8 @@ internal sealed partial class TabJoinRing : Grid
         IsTabStop = false;
         AutomationProperties.SetAccessibilityView(this, AccessibilityView.Raw);
 
+        _haloFill = accent;
+        _haloEdge = accent;
         _halo = new Border
         {
             CornerRadius = new CornerRadius(4),
@@ -60,8 +67,19 @@ internal sealed partial class TabJoinRing : Grid
         double diameter = TabStripMotion.JoinRingDiameterPx;
         double stroke = TabStripMotion.JoinRingStrokePx;
         // The stroke straddles the geometry, so the drawn circle's
-        // circumference is the one through the middle of the ink.
-        _sweepUnits = Math.PI * diameter / stroke;
+        // circumference is the one through the middle of the ink -- and a
+        // Shape with the default Stretch insets its geometry by half the
+        // stroke on every side to keep the ink inside Width x Height. The
+        // mid-ink circle is therefore (diameter - stroke) across, not
+        // diameter.
+        //
+        // Off by that much, the dash reached full wrap at 31.4 of the 34.6
+        // units the sweep believed it had: the ring closed at about 91% and
+        // sat closed for the last 40ms, so a release the instant the circle
+        // completed still sorted. The class exists to keep the ring from
+        // lying about what the release means, and this was the ring lying
+        // early.
+        _sweepUnits = Math.PI * (diameter - stroke) / stroke;
         _ring = new Ellipse
         {
             Width = diameter,
@@ -90,14 +108,15 @@ internal sealed partial class TabJoinRing : Grid
     /// <paramref name="motion"/> is the strip's motion gate: with it off
     /// the arm is a cut, like every other spring in the strip.
     /// </summary>
-    public void Place(Rect target, double progress, bool armed, bool motion)
+    public void Place(
+        Rect target, double progress, bool armed, bool motion, bool highContrast)
     {
         Width = target.Width;
         Height = target.Height;
         Canvas.SetLeft(this, target.X);
         Canvas.SetTop(this, target.Y);
         SetProgress(progress);
-        SetArmed(armed, motion);
+        SetArmed(armed, motion, highContrast);
     }
 
     /// <summary>
@@ -121,19 +140,33 @@ internal sealed partial class TabJoinRing : Grid
         _ring.Opacity = progress > 0 ? 1 : 0;
     }
 
-    private void SetArmed(bool armed, bool motion)
+    private void SetArmed(bool armed, bool motion, bool highContrast)
     {
         if (armed == _armed) return;
         _armed = armed;
-        double haloOpacity = armed ? TabStripMotion.JoinHaloOpacity : 0;
+
+        // High Contrast takes an OUTLINE, not a wash.
+        //
+        // The halo is a 30%-alpha accent fill over the target row, and the row
+        // has the tab's title in it. That is a translucent tint laid over text,
+        // which is the contrast regression High Contrast exists to forbid --
+        // and it was reached because the only thing consulted here was the
+        // motion gate, which composes animations-off WITH High Contrast. Those
+        // are two different questions: one asks whether the arm may spring, the
+        // other asks what the arm may be made of.
+        _halo.Background = highContrast ? null : _haloFill;
+        _halo.BorderBrush = _haloEdge;
+        _halo.BorderThickness = new Thickness(
+            highContrast && armed ? TabStripMotion.JoinRingStrokePx : 0);
+
+        double haloOpacity = armed ? (highContrast ? 1 : TabStripMotion.JoinHaloOpacity) : 0;
         float ringScale = armed ? TabStripMotion.JoinArmRingScale : 1f;
+        _halo.Opacity = haloOpacity;
         if (!motion)
         {
-            _halo.Opacity = haloOpacity;
             SetRingScale(ringScale);
             return;
         }
-        _halo.Opacity = haloOpacity;
         SpringRingScale(ringScale);
     }
 
