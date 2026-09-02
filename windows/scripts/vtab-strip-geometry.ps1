@@ -7,16 +7,26 @@
     behind the window, and the questions asked here are about where things
     were laid out, which layout answers exactly.
 
-    One process, one seeded state (one pin, one group, three loose tabs),
+    One process, one seeded state (two pins, one group, two loose tabs),
     measured at both pane widths: compact (the 48px rail the strip starts
     in) and expanded (the pinned sidebar, reached with toggle-sidebar).
 
     Checks, each at both widths unless stated:
 
-      boundary-centred      the pinned zone's boundary rule is centred on
-                            the row band it separates. The rule stops short
-                            of the pane edge on purpose; stopping short on
-                            one side only is what makes it read crooked.
+      band-squares          every pinned tab is arranged as the SAME
+                            square, and the band's box contains them all.
+                            The zone's division is structural now, so the
+                            square is the division: a pin that arranged as
+                            a row again would read as an ordinary row with
+                            nothing marking the zone.
+      band-wraps            two pins share a band row in the expanded pane
+                            and stack in the 48px rail (expanded/compact
+                            respectively). This is the shape's whole
+                            claim -- pins cost band rows, not list rows.
+      no-boundary-rule      the retired boundary stroke is not arranged.
+                            A rule redrawn beside a structural division
+                            states the division twice, which is what the
+                            shape was chosen to stop.
       close-inset           the close glyph's right edge sits one named
                             inset in from the pane edge (expanded), and the
                             compact rail carries no close glyph at all --
@@ -56,6 +66,11 @@ $Tolerance = 0.5
 # row's fill runs all the way to that edge, so this reads as padding inside
 # the fill rather than as a second inset.
 $CloseInsetRight = 8
+
+# The pinned square's edge, from Ghostty.Core.Tabs.TabPinBand.ChipSize.
+# Repeated here rather than read out of the seam on purpose: a harness that
+# asks the product what the product should be measures nothing.
+$ChipSize = 40
 
 # A stock strip, not the developer's: the seam session stages this as the
 # whole of XDG_CONFIG_HOME, so nothing from the machine's own config
@@ -105,20 +120,71 @@ function Save-StripShot([int64]$Hwnd64, [string]$Name) {
 
 # ---- the checks ------------------------------------------------------------
 
-# The rule between the pinned zone and the body list marks a boundary
-# across the row band, so its center must be the band's center. The pinned
-# rows define that band: they are the strip's own rows rather than MUXC's,
-# laid out from the same left inset the separators and the selection fill
-# use.
-function Test-BoundaryCentred($Rects, [string]$Leg) {
-    $boundary = Assert-Rect $Rects.boundary "the boundary rule ($Leg)"
-    if (@($Rects.pinned).Count -eq 0) { throw "HARVEST_MISS: no pinned row in the $Leg leg" }
-    $row = Assert-Rect @($Rects.pinned)[0].row "the pinned row ($Leg)"
-    $drift = (CenterX $boundary) - (CenterX $row)
-    Add-Check "boundary-centred-$Leg" (
-        "rule {0:F1}..{1:F1} center {2:F1}, row center {3:F1}, drift {4:F1}px" -f
-        $boundary.x, (Right $boundary), (CenterX $boundary), (CenterX $row), $drift
-    ) ([math]::Abs($drift) -le $Tolerance)
+# A pinned tab is an icon square, and that change of shape is what marks
+# the zone now that nothing is drawn between the zones. So the square is
+# the thing to measure: every pin the same size, and all of them inside the
+# band's own box, which is the element whose bottom edge IS the zone's end.
+function Test-BandSquares($Rects, [string]$Leg) {
+    $band = Assert-Rect $Rects.band "the pinned band ($Leg)"
+    $pins = @($Rects.pinned)
+    if ($pins.Count -eq 0) { throw "HARVEST_MISS: no pinned row in the $Leg leg" }
+
+    $worst = 0.0
+    $detail = ''
+    foreach ($pin in $pins) {
+        $r = Assert-Rect $pin.row "the pinned square '$($pin.title)' ($Leg)"
+        # Off-square in either dimension, and outside the band in either
+        # direction, all fold into one worst-case number: the check is
+        # "this is a square in the band", and any of them failing is it.
+        $offs = @(
+            [math]::Abs($r.w - $ChipSize)
+            [math]::Abs($r.h - $ChipSize)
+            [math]::Max(0, $band.x - $r.x)
+            [math]::Max(0, $band.y - $r.y)
+            [math]::Max(0, (Right $r) - (Right $band))
+            [math]::Max(0, ($r.y + $r.h) - ($band.y + $band.h))
+        )
+        $off = ($offs | Measure-Object -Maximum).Maximum
+        if ($off -ge $worst) {
+            $worst = $off
+            $detail = "'{0}' {1:F1}x{2:F1} at ({3:F1},{4:F1}); band {5:F1}x{6:F1} at ({7:F1},{8:F1}); worst off {9:F1}px (want {10}px squares inside the band)" -f
+                $pin.title, $r.w, $r.h, $r.x, $r.y, $band.w, $band.h, $band.x, $band.y, $off, $ChipSize
+        }
+    }
+    Add-Check "band-squares-$Leg" $detail ($worst -le $Tolerance)
+}
+
+# The shape's whole claim: pins cost BAND rows. Two pins share a row in the
+# expanded pane (220px fits four columns) and stack in the 48px rail (one
+# column). Same-row is a shared y; stacked is a y one square-pitch apart --
+# read as "different y", because the pitch itself is TabPinBand's business
+# and Test-BandSquares already pins the size.
+function Test-BandWraps($Rects, [string]$Leg, [bool]$SameRow) {
+    $pins = @($Rects.pinned)
+    if ($pins.Count -lt 2) { throw "HARVEST_MISS: the $Leg leg needs two pins to show wrapping" }
+    $a = Assert-Rect $pins[0].row "the first pinned square ($Leg)"
+    $b = Assert-Rect $pins[1].row "the second pinned square ($Leg)"
+    $shares = [math]::Abs($a.y - $b.y) -le $Tolerance
+    $beside = $b.x -gt $a.x + $Tolerance
+    $ok = if ($SameRow) { $shares -and $beside } else { -not $shares }
+    Add-Check "band-wraps-$Leg" (
+        "pins at ({0:F1},{1:F1}) and ({2:F1},{3:F1}); want {4}" -f
+        $a.x, $a.y, $b.x, $b.y, $(if ($SameRow) { 'one band row' } else { 'stacked' })
+    ) $ok
+}
+
+# The retired stroke stays retired. The seam reports an element it cannot
+# measure as visible:$false, and it no longer writes a 'boundary' key at
+# all -- so both "the key came back" and "the key came back arranged" are
+# a finding, and only a genuinely absent rule passes.
+function Test-NoBoundaryRule($Rects, [string]$Leg) {
+    $drawn = ($null -ne $Rects.boundary) -and $Rects.boundary.visible
+    $detail = if ($null -eq $Rects.boundary) {
+        'no boundary rect is reported'
+    } else {
+        "a boundary rect is reported, visible=$($Rects.boundary.visible)"
+    }
+    Add-Check "no-boundary-rule-$Leg" $detail (-not $drawn)
 }
 
 # Expanded: the close glyph's right edge is one named inset in from the
@@ -191,13 +257,17 @@ try {
     Assert-NoWintty -Context 'The vertical strip geometry harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
 
-    # One pin so the zone exists, one group so a header renders, and loose
-    # rows on both sides of the header so the body list is not degenerate.
+    # TWO pins, because one cannot show a band: whether pins share a row
+    # or stack is the shape's claim, and a single square satisfies either
+    # reading. One group so a header renders, and a loose row left over so
+    # the body list is not degenerate.
     [void](Invoke-SeamCommand $session @{ op = 'seed-tabs'; count = 5; titles = $names })
     [void](Invoke-SeamCommand $session @{ op = 'pin'; index = 0; via = 'router' })
+    [void](Invoke-SeamCommand $session @{ op = 'pin'; index = 1; via = 'router' })
     [void](Invoke-SeamCommand $session @{ op = 'group'; indices = @(3, 4) })
-    # Off the group, so nothing folds and every row stays measurable.
-    [void](Invoke-SeamCommand $session @{ op = 'select'; index = 1 })
+    # Off the group AND off the band, so nothing folds, every row stays
+    # measurable, and the selection chrome is not sitting on a square.
+    [void](Invoke-SeamCommand $session @{ op = 'select'; index = 2 })
 
     $compact = Invoke-SeamCommand $session @{ op = 'element-rects' }
     if ($compact.state.paneWidth -ge 96) {
@@ -217,13 +287,17 @@ try {
 
     Write-Host ''
     Write-Host "=== compact (pane $($compact.state.paneWidth)px) ==="
-    Test-BoundaryCentred $compact.rects 'compact'
+    Test-BandSquares $compact.rects 'compact'
+    Test-BandWraps $compact.rects 'compact' $false
+    Test-NoBoundaryRule $compact.rects 'compact'
     Test-NoCloseWhenCompact $compact.rects
     Test-HeaderFits $compact.rects 'compact'
 
     Write-Host ''
     Write-Host "=== expanded (pane $($expanded.state.paneWidth)px) ==="
-    Test-BoundaryCentred $expanded.rects 'expanded'
+    Test-BandSquares $expanded.rects 'expanded'
+    Test-BandWraps $expanded.rects 'expanded' $true
+    Test-NoBoundaryRule $expanded.rects 'expanded'
     Test-CloseInsetExpanded $expanded.rects
     Test-HeaderFits $expanded.rects 'expanded'
 

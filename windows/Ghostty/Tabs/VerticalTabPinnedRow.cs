@@ -9,59 +9,55 @@ using Microsoft.UI.Xaml.Media;
 namespace Ghostty.Tabs;
 
 /// <summary>
-/// A pinned tab in the fixed panel above the scrolling list. Deliberately
-/// not a <see cref="NavigationViewItem"/>: the panel must neither scroll
-/// nor take part in MUXC selection, so the row is a plain element the
-/// strip hosts in its PaneCustomContent.
+/// A pinned tab, as an icon square in the band above the scrolling list.
+/// Deliberately not a <see cref="NavigationViewItem"/>: the band must
+/// neither scroll nor take part in MUXC selection, so the square is a
+/// plain element the strip hosts in its PaneCustomContent.
 ///
-/// One row, two widths. In the expanded pane the row is a body row in
-/// everything but scroll and close: icon, title, bell -- the anatomy the
-/// pane's scrolling rows wear, at the same 40px pitch, so the pinned
-/// cluster reads as ordinary tabs and the boundary line under the last
-/// one is what marks the zone. In the compact pane the title column
-/// collapses and the row degrades to the icon-only slot that fits 48px;
-/// the title rides the tooltip, and the accessible name and the "Pinned"
-/// status sit on the row itself, which is the leaf the automation tree
-/// sees here.
+/// One shape, both pane widths. A pinned tab is an icon square and
+/// nothing else -- no title column, no close glyph -- which is what lets
+/// <see cref="TabPinBandPanel"/> wrap several of them into one band row
+/// where the old rows spent one row each. That change of shape is also
+/// what separates the zones: the band and the list are visibly different
+/// kinds of thing, so the pinned zone needs no rule drawn under it.
+///
+/// The title the square gives up rides the tooltip, which the square
+/// therefore owes rather than merely offers: two shells of the same kind
+/// draw the same icon, and without the tooltip nothing tells them apart.
+/// The accessible name and the "Pinned" status sit on the square itself,
+/// which is the leaf the automation tree sees here.
 /// </summary>
 internal sealed partial class VerticalTabPinnedRow : Grid
 {
-    /// <summary>Row height. Fits the 48px compact pane with its inset.</summary>
-    internal const double RowHeight = 40;
-
-    /// <summary>The icon slot is a square, the one shape both pane widths agree on.</summary>
-    private const double IconSlotSize = 40;
-
     /// <summary>
-    /// Pane width at or above which the title column shows. The compact
-    /// pane is 48px wide; the expanded pane 220. Anything at or past this
-    /// is wide enough to read a trimmed title.
+    /// The square's edge, from the band's own geometry: the panel
+    /// arranges every child at exactly this, and the drop preview
+    /// promises a box of exactly this, so all three read one number.
     /// </summary>
-    internal const double TitlePaneWidthThreshold = 96;
+    internal const double RowHeight = TabPinBand.ChipSize;
 
     private readonly Grid _iconSlot;
     private readonly FontIcon _bell;
-    private readonly TextBlock _title;
-    private readonly Grid _textColumn;
     private IconElement? _icon;
     private TextBlock? _iconFallback;
-    private bool _showTitle;
 
     public VerticalTabPinnedRow(TabModel tab, SolidColorBrush accentBrush)
     {
         Tag = tab;
-        // Transparent, not null: a null background leaves the row's empty
-        // span to hit-test through to the pane, so clicks and presses off
-        // the icon would fall through entirely. Body rows hit-test
-        // full-bleed through their template; this is that parity.
+        // Transparent, not null: a null background leaves the square's
+        // empty span to hit-test through to the pane, so clicks and
+        // presses off the icon would fall through entirely. Body rows
+        // hit-test full-bleed through their template; this is that parity.
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Width = RowHeight;
         Height = RowHeight;
-        // Same inset the body rows get from MUXC's own item template
-        // (NavigationViewItemButtonMargin, 4,2), so the shelf's rows and
-        // the pane's rows sit on one grid.
-        Margin = new Thickness(4, 2, 0, 2);
+        // No margin: the band panel owns every gutter between squares and
+        // the strip owns the band's own inset. A margin here would be a
+        // second opinion about the pitch, and the two would disagree the
+        // moment the band re-columns.
+        Margin = new Thickness(0);
         // Keyboard parity with the body rows: MUXC's containers are tab
-        // stops with their own arrow traversal, and this row is outside
+        // stops with their own arrow traversal, and this square is outside
         // MUXC, so it carries the tab stop itself and the strip's key
         // handler moves focus across the boundary. The drop-preview ghost
         // is built from this same class and turns the flag back off.
@@ -71,22 +67,18 @@ internal sealed partial class VerticalTabPinnedRow : Grid
         AutomationProperties.SetAutomationControlType(
             this, AutomationControlType.ListItem);
 
-        ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(IconSlotSize) });
-        ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
         _iconSlot = new Grid
         {
-            Width = IconSlotSize,
-            Height = IconSlotSize,
+            Width = RowHeight,
+            Height = RowHeight,
+            HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
         };
-        Grid.SetColumn(_iconSlot, 0);
         Children.Add(_iconSlot);
 
-        // Over the icon's corner while the row is icon-only, so the row
-        // reads as "this icon is ringing" at either pane width. When the
-        // title column shows, the bell moves inline after the title, the
-        // way a body row wears it.
+        // Over the icon's corner: the square reads as "this icon is
+        // ringing" without spending width it does not have. There is no
+        // inline slot to move to any more -- the square never widens.
         _bell = new FontIcon
         {
             Glyph = "\uEA8F",
@@ -98,66 +90,13 @@ internal sealed partial class VerticalTabPinnedRow : Grid
         };
         _iconSlot.Children.Add(_bell);
 
-        _title = new TextBlock
-        {
-            VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            Margin = new Thickness(0, 0, 4, 0),
-            Text = tab.EffectiveTitle,
-        };
-        ToolTipService.SetToolTip(_title, tab.EffectiveTitle);
-        // The title column carries title + bell once the row goes wide;
-        // the bell itself starts in the icon slot's corner and re-parents
-        // in ShowTitle.
-        var bellHost = new Grid();
-        bellHost.Children.Add(_title);
-        _textColumn = new Grid { Visibility = Visibility.Collapsed };
-        Grid.SetColumn(_textColumn, 1);
-        _textColumn.Children.Add(bellHost);
-        Children.Add(_textColumn);
-
         Refresh(tab);
-    }
-
-    /// <summary>
-    /// Whether the title column shows. The strip drives this from the pane
-    /// width: expanded shows the body-row anatomy, compact collapses back
-    /// to the icon-only slot. A no-op when the state did not change, so a
-    /// width sweep does not re-parent the bell on every tick.
-    /// </summary>
-    internal bool ShowTitle
-    {
-        get => _showTitle;
-        set
-        {
-            if (_showTitle == value) return;
-            _showTitle = value;
-            _textColumn.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
-            // The bell re-parents between the icon slot's corner (compact)
-            // and the title column's trailing edge (expanded).
-            if (value)
-            {
-                _iconSlot.Children.Remove(_bell);
-                _bell.HorizontalAlignment = HorizontalAlignment.Right;
-                _bell.VerticalAlignment = VerticalAlignment.Center;
-                _bell.Margin = new Thickness(0, 0, 4, 0);
-                _textColumn.Children.Add(_bell);
-            }
-            else
-            {
-                _textColumn.Children.Remove(_bell);
-                _bell.HorizontalAlignment = HorizontalAlignment.Right;
-                _bell.VerticalAlignment = VerticalAlignment.Bottom;
-                _bell.Margin = new Thickness(0);
-                _iconSlot.Children.Add(_bell);
-            }
-        }
     }
 
     /// <summary>The icon square, for the seam's geometry readout.</summary>
     internal FrameworkElement TestSeamIconSlot => _iconSlot;
 
-    /// <summary>Swap the row's icon for a freshly built one.</summary>
+    /// <summary>Swap the square's icon for a freshly built one.</summary>
     public void SetIcon(IconElement? icon)
     {
         if (_icon is not null) _iconSlot.Children.Remove(_icon);
@@ -173,9 +112,9 @@ internal sealed partial class VerticalTabPinnedRow : Grid
         }
         else
         {
-            // A row with nothing in the icon slot is a blank slot: fall back
-            // to the title's initial, the same stand-in a collapsed body row
-            // reads as when the foreground process has no icon.
+            // A square with nothing in the icon slot is a blank slot: fall
+            // back to the title's initial, the same stand-in a collapsed
+            // body row reads as when the foreground process has no icon.
             if (Tag is not TabModel tab) return;
             _iconFallback = new TextBlock
             {
@@ -201,19 +140,19 @@ internal sealed partial class VerticalTabPinnedRow : Grid
     }
 
     /// <summary>
-    /// The row has to be its own peer for focus to be visible to a client
-    /// at all: a plain Grid gets no peer, and without one the keyboard
-    /// focus this row takes raises no automation focus event, so a screen
-    /// reader never knows the shelf is where focus went.
+    /// The square has to be its own peer for focus to be visible to a
+    /// client at all: a plain Grid gets no peer, and without one the
+    /// keyboard focus this square takes raises no automation focus event,
+    /// so a screen reader never knows the band is where focus went.
     /// </summary>
     protected override AutomationPeer OnCreateAutomationPeer()
         => new VerticalTabPinnedRowAutomationPeer(this);
 
     /// <summary>
-    /// Apply the ink the row draws with: the icon and the title take the
-    /// row's foreground (full strength when the selection overlay sits
-    /// behind it, muted otherwise) -- the same active/inactive rule a body
-    /// row's title follows -- and the bell stays accent.
+    /// Apply the ink the square draws with: the icon takes the square's
+    /// foreground (full strength when the selection overlay sits behind
+    /// it, muted otherwise) -- the same active/inactive rule a body row's
+    /// title follows -- and the bell stays accent.
     /// </summary>
     public void ApplyInk(Brush? foreground)
     {
@@ -227,20 +166,28 @@ internal sealed partial class VerticalTabPinnedRow : Grid
             if (foreground is not null) _iconFallback.Foreground = foreground;
             else _iconFallback.ClearValue(TextBlock.ForegroundProperty);
         }
-        if (foreground is not null) _title.Foreground = foreground;
-        else _title.ClearValue(TextBlock.ForegroundProperty);
     }
 
     /// <summary>
     /// Everything that follows the tab's title or transient state: the
     /// tooltip, the bell, and the text an assistive client reads.
+    ///
+    /// The tooltip is not decoration here. The square shows an icon and
+    /// no title, so it is the only thing that tells two shells of the
+    /// same kind apart with a pointer.
     /// </summary>
     public void Refresh(TabModel tab)
     {
         ToolTipService.SetToolTip(this, tab.EffectiveTitle);
-        _title.Text = tab.EffectiveTitle;
         AutomationProperties.SetName(this, TabAccessibleText.Name(tab));
         AutomationProperties.SetItemStatus(this, TabAccessibleText.Status(tab));
+        // The initial follows the title too. It was written only by SetIcon,
+        // which runs on the ICON changing, so a square whose process
+        // resolves no icon kept the letter its title started with when it
+        // was pinned -- and on a square that letter is not a stand-in beside
+        // the title, it is the only thing drawn.
+        if (_iconFallback is not null)
+            _iconFallback.Text = InitialOf(TabAccessibleText.Name(tab));
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
     }
 }

@@ -1,0 +1,196 @@
+using System;
+using Ghostty.Core.Tabs;
+using Xunit;
+
+namespace Ghostty.Tests.Tabs;
+
+/// <summary>
+/// The pinned zone is a band of icon squares that wraps, and that shape is
+/// what separates the zones now that no rule is drawn between them. Three
+/// readers depend on the same arithmetic -- the panel that arranges the
+/// band, the drop preview that promises the next slot, and the geometry
+/// harness that measures the result -- so the arithmetic is pinned here,
+/// where it needs no WinUI host to answer.
+///
+/// The numbers this fixes: the 48px compact rail carries exactly one
+/// column, the 220px expanded pane carries four, and a band never reports
+/// zero columns however narrow the pane gets.
+/// </summary>
+public class TabPinBandTests
+{
+    /// <summary>
+    /// The band's own inset in the strip: the rows' 4px left inset, and
+    /// the same again at the right so a column is not flush to the pane
+    /// edge. What the strip actually hands the panel is the pane width
+    /// less this.
+    /// </summary>
+    private const double PaneInset = 8;
+
+    [Fact]
+    public void The_compact_rail_carries_exactly_one_column()
+    {
+        // 48px pane, less the band's insets, is one square and no gutter.
+        Assert.Equal(1, TabPinBand.ColumnsFor(48 - PaneInset));
+    }
+
+    [Fact]
+    public void The_expanded_pane_carries_four_columns()
+    {
+        // 220px pane: four 40px squares and three 4px gutters is 172,
+        // and a fifth would need another 44.
+        Assert.Equal(4, TabPinBand.ColumnsFor(220 - PaneInset));
+    }
+
+    [Fact]
+    public void Three_pins_cost_one_band_row_in_the_expanded_pane()
+    {
+        var columns = TabPinBand.ColumnsFor(220 - PaneInset);
+        Assert.Equal(1, TabPinBand.RowsFor(3, columns));
+        // The whole point of the shape: as rows they cost three.
+        Assert.Equal(3, TabPinBand.RowsFor(3, TabPinBand.ColumnsFor(48 - PaneInset)));
+    }
+
+    [Fact]
+    public void A_band_narrower_than_one_square_still_has_a_column()
+    {
+        // A zero-column band divides by zero in every slot query and
+        // reports no height for pins that exist. One is the floor.
+        Assert.Equal(1, TabPinBand.ColumnsFor(0));
+        Assert.Equal(1, TabPinBand.ColumnsFor(12));
+        Assert.Equal(1, TabPinBand.ColumnsFor(double.NaN));
+    }
+
+    [Fact]
+    public void Slots_run_in_reading_order()
+    {
+        // Left to right, then down: the same order the pinned prefix is
+        // in, so the band never reorders what the manager holds.
+        Assert.Equal((0, 0), TabPinBand.SlotOf(0, columns: 3));
+        Assert.Equal((0, 2), TabPinBand.SlotOf(2, columns: 3));
+        Assert.Equal((1, 0), TabPinBand.SlotOf(3, columns: 3));
+        Assert.Equal((2, 1), TabPinBand.SlotOf(7, columns: 3));
+    }
+
+    [Fact]
+    public void A_slot_origin_is_the_pitch_times_the_slot()
+    {
+        const double pitch = TabPinBand.ChipSize + TabPinBand.ChipGap;
+        Assert.Equal((0d, 0d), TabPinBand.OriginOf(0, columns: 3));
+        Assert.Equal((2 * pitch, 0d), TabPinBand.OriginOf(2, columns: 3));
+        Assert.Equal((0d, pitch), TabPinBand.OriginOf(3, columns: 3));
+    }
+
+    [Fact]
+    public void The_slot_one_past_the_end_is_where_the_next_pin_lands()
+    {
+        // What the drop preview promises. On a full row it wraps, which
+        // is exactly the case arithmetic derived from "one row pitch
+        // below the last square" would get wrong.
+        var (x, y) = TabPinBand.OriginOf(3, columns: 3);
+        Assert.Equal(0d, x);
+        Assert.Equal(TabPinBand.ChipSize + TabPinBand.ChipGap, y);
+    }
+
+    [Fact]
+    public void An_empty_band_measures_nothing()
+    {
+        Assert.Equal(0, TabPinBand.RowsFor(0, columns: 4));
+        Assert.Equal(0d, TabPinBand.BandWidth(0, columns: 4));
+        Assert.Equal(0d, TabPinBand.BandHeight(0, columns: 4));
+    }
+
+    [Fact]
+    public void The_band_measures_the_columns_in_use_and_the_rows_it_fills()
+    {
+        const double pitch = TabPinBand.ChipSize + TabPinBand.ChipGap;
+        // Two squares in a four-column band: two wide, one tall.
+        Assert.Equal(2 * TabPinBand.ChipSize + TabPinBand.ChipGap,
+            TabPinBand.BandWidth(2, columns: 4));
+        Assert.Equal(TabPinBand.ChipSize, TabPinBand.BandHeight(2, columns: 4));
+        // Five squares: the band is full width and two rows tall.
+        Assert.Equal(4 * TabPinBand.ChipSize + 3 * TabPinBand.ChipGap,
+            TabPinBand.BandWidth(5, columns: 4));
+        Assert.Equal(pitch + TabPinBand.ChipSize, TabPinBand.BandHeight(5, columns: 4));
+    }
+
+    [Fact]
+    public void One_column_is_pitch_identical_to_the_rows_it_replaced()
+    {
+        // The compact rail's band and the stack of 40px rows it replaced
+        // put their squares on the same vertical pitch, so a pin landing
+        // in a compact rail does not shift the list under it.
+        Assert.Equal(44d, TabPinBand.ChipSize + TabPinBand.ChipGap);
+        Assert.Equal(3 * 44d - TabPinBand.ChipGap, TabPinBand.BandHeight(3, columns: 1));
+    }
+
+    [Fact]
+    public void A_column_appears_exactly_when_its_pitch_is_paid_for()
+    {
+        // The boundaries themselves, because the "+ ChipGap before the
+        // divide" is what makes the last column not owe a trailing gutter,
+        // and an off-by-one there is invisible everywhere except here.
+        const double pitch = TabPinBand.ChipSize + TabPinBand.ChipGap;
+        Assert.Equal(1, TabPinBand.ColumnsFor(TabPinBand.ChipSize));
+        Assert.Equal(1, TabPinBand.ColumnsFor(TabPinBand.ChipSize - 0.01));
+        // Two squares and one gutter is exactly two columns; a hair under
+        // is still one.
+        Assert.Equal(2, TabPinBand.ColumnsFor(2 * TabPinBand.ChipSize + TabPinBand.ChipGap));
+        Assert.Equal(1, TabPinBand.ColumnsFor(2 * TabPinBand.ChipSize + TabPinBand.ChipGap - 0.01));
+        Assert.Equal(3, TabPinBand.ColumnsFor(3 * pitch - TabPinBand.ChipGap));
+    }
+
+    [Fact]
+    public void An_unbounded_width_is_one_row_rather_than_a_wrapped_negative()
+    {
+        // A parent that measures with infinity is ordinary WinUI. The
+        // arithmetic does not degrade to it on its own: (int) of an
+        // infinite double is undefined in C# and lands on int.MinValue,
+        // which the column floor would turn into a ONE-column band -- every
+        // pin stacked vertically in a pane with room for a dozen.
+        var columns = TabPinBand.ColumnsFor(double.PositiveInfinity);
+        Assert.True(columns > 1000, "an unbounded width is not one column");
+
+        // ...and the row count must survive that number. The ceiling
+        // division adds `columns` to the count, which overflows unchecked
+        // and wraps negative: the band reported zero rows for squares that
+        // exist, so nothing was given any height to arrange in.
+        Assert.Equal(1, TabPinBand.RowsFor(3, columns));
+        Assert.Equal(1, TabPinBand.RowsFor(1, columns));
+        Assert.Equal(TabPinBand.ChipSize, TabPinBand.BandHeight(3, columns));
+    }
+
+    [Fact]
+    public void The_bands_own_width_is_not_where_its_column_count_comes_from()
+    {
+        // The trap the panel walks into if it re-derives columns from the
+        // size it was ARRANGED at. The band is left-aligned, so that size
+        // is its own desired width -- and feeding that back through
+        // ColumnsFor answers "as many columns as there are squares".
+        const double paneWidth = 220 - PaneInset;
+        var capacity = TabPinBand.ColumnsFor(paneWidth);
+        Assert.Equal(4, capacity);
+
+        var width = TabPinBand.BandWidth(3, capacity);
+        Assert.Equal(3, TabPinBand.ColumnsFor(width));
+
+        // Which matters for exactly one thing: the slot one past the end,
+        // which is the only slot the drop preview draws. Under the wrong
+        // count it promises a second band row; under the right one it is
+        // the fourth column of the first.
+        Assert.Equal((1, 0), TabPinBand.SlotOf(3, TabPinBand.ColumnsFor(width)));
+        Assert.Equal((0, 3), TabPinBand.SlotOf(3, capacity));
+    }
+
+    [Fact]
+    public void A_bandless_column_count_is_corrupt_state_not_a_layout()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabPinBand.RowsFor(3, columns: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabPinBand.SlotOf(0, columns: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabPinBand.BandWidth(3, columns: -1));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabPinBand.SlotOf(-1, columns: 3));
+    }
+}

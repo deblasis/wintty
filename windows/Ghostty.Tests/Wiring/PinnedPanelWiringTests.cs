@@ -1,20 +1,19 @@
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// The pinned panel's structure (spec 5.1, restated by the zone-visual
-/// design): a fixed, non-scrolling section above the list, announced by
-/// structure rather than a label -- body-row anatomy in the expanded
-/// pane, icon-only in the compact pane, and one confident boundary line
-/// under the last pinned row. The guards here pin the seams the two row
-/// containers create: where the shelf is hosted, who owns order and
-/// membership, how a row is measured, the zone's visual anchor, and the
-/// one trap a fixed section above the scroller sets for the drag
-/// machine's autoscroll.
+/// The pinned panel's structure: a fixed, non-scrolling section above
+/// the list, announced by structure rather than a label or a rule -- a
+/// band of icon squares that wraps, at every pane width. The guards here
+/// pin the seams the two row containers create: where the shelf is
+/// hosted, who owns order and membership, how a row is measured, the
+/// zone's visual anchor, and the one trap a fixed section above the
+/// scroller sets for the drag machine's autoscroll.
 ///
 /// Wiring guards, not behaviour tests: whether the panel paints on the
 /// right pixels is only observable on a live strip.
@@ -23,7 +22,7 @@ public class PinnedPanelWiringTests
 {
     private static ShellSource Strip() => ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
 
-    // Assignments spelled through a member (the boundary stroke's chrome)
+    // Assignments spelled through a member (the band's own chrome)
     // -- SyntaxQueries.AssignsTo matches bare identifiers only.
     private static System.Collections.Generic.IEnumerable<AssignmentExpressionSyntax>
         Assignments(SyntaxNode node, string left)
@@ -62,25 +61,24 @@ public class PinnedPanelWiringTests
     }
 
     /// <summary>
-    /// The zone is announced by structure, not a label: no header element
-    /// is built, named, or gated anywhere in the shelf's wiring, and the
-    /// shelf's children are exactly the row panel and the boundary stroke.
-    /// The per-row "Pinned" ItemStatus (PinnedRows_KeepTheirNameAndStatus)
-    /// is what keeps the zone in the automation tree after the heading's
-    /// removal.
+    /// The zone is announced by structure, not a label and not a rule: no
+    /// header element is built, named, or gated anywhere in the shelf's
+    /// wiring, and the shelf's one child is the band. The per-square
+    /// "Pinned" ItemStatus (PinnedRows_KeepTheirNameAndStatus) is what
+    /// keeps the zone in the automation tree.
     /// </summary>
     [Fact]
     public void TheZone_IsAnnouncedByStructure_WithNoHeaderLabel()
     {
         var build = Strip().Method("BuildPinnedShelf");
 
-        // The shelf's own children: the row panel, then the boundary
-        // stroke. Nothing else -- a label would be a second answer to a
-        // question the anatomy already settles.
+        // The shelf's own child: the band, and nothing else. A label or a
+        // rule would each be a second answer to a question the anatomy
+        // already settles.
         var adds = build.Calls("_pinnedShelf.Children.Add")
             .Select(c => c.Arg(0))
             .ToList();
-        Assert.Equal(new[] { "_pinnedPanel", "_boundaryStroke" }, adds);
+        Assert.Equal(new[] { "_pinnedPanel" }, adds);
         Assert.Empty(build.Calls("_pinnedPanel.Children.Add"));
 
         // And the header is gone from the class, not just from the build:
@@ -88,89 +86,134 @@ public class PinnedPanelWiringTests
         var source = Strip().Root.ToString();
         Assert.DoesNotContain("_pinnedHeader", source, StringComparison.Ordinal);
 
-        // The chrome refresh drives the shelf's two remaining states --
-        // visibility and the boundary -- and nothing header-shaped.
+        // The chrome refresh drives the shelf's remaining states and
+        // nothing header-shaped.
         var shelf = Strip().Method("UpdatePinnedShelfChrome");
         Assert.DoesNotContain("Header", shelf.ToFullString(), StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The boundary line is the zone's one anchor, so its placement and
-    /// presence are pinned at the parsed call sites: twice an ordinary row
-    /// line, a breath below the cluster, and stopping the SAME distance
-    /// short of the row band at both ends so it reads as drawn between the
-    /// zones without drifting off the band's center; visible exactly while
-    /// both zones exist, and painted by the brush that carries the drag's
-    /// aiming feedback and the High Contrast opaque override.
+    /// The band IS the zone's anchor: a different shape from the list, so
+    /// nothing is drawn between them. This guard is mostly an absence --
+    /// the retired stroke has to stay retired, because a rule redrawn
+    /// beside a structural division is the exact double statement the
+    /// shape was chosen to replace -- plus the one positive fact the
+    /// absence rests on: the shelf's panel is the band, and the band's
+    /// geometry comes from the shared arithmetic rather than a second
+    /// copy of the numbers.
     /// </summary>
     [Fact]
-    public void TheBoundary_IsTheZoneAnchor()
+    public void TheBand_IsTheZoneAnchor()
     {
-        var build = Strip().Method("BuildPinnedShelf");
+        var source = Strip().Root.ToString();
 
-        Assert.Equal("BoundaryStrokeHeight",
-            Assignments(build, "_boundaryStroke.Height").Single().Right.ToString());
-        // Argument by argument, because the band starts at the rows' own
-        // left inset: an equal inset on both ends of the band spells as
-        // RowInsetLeft + the inset on the left and the inset alone on the
-        // right. Dropping either term is what puts the rule off center.
+        // The stroke is gone from the class, not just from the build: a
+        // field kept "for later" is a rule that comes back.
+        Assert.DoesNotContain("_boundaryStroke", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("BoundaryStroke", source, StringComparison.Ordinal);
+
+        // The band is the shelf's panel, and it is the band type -- a
+        // StackPanel here would spend one row per pin again.
+        var (panel, _) = Strip().Field("_pinnedPanel");
+        var declared = panel.Ancestors().OfType<FieldDeclarationSyntax>()
+            .First().Declaration.Type.ToString();
+        Assert.Equal("TabPinBandPanel", declared);
+
+        // The band's inset in the pane: the rows' own inset on BOTH sides,
+        // so the column count is what the pane can hold rather than what
+        // it can hold flush to its edge. Argument by argument, because
+        // dropping the trailing one is invisible until the pane width
+        // happens to land exactly on a column boundary.
+        var build = Strip().Method("BuildPinnedShelf");
         var margin = Assert.IsType<ObjectCreationExpressionSyntax>(
-            Assignments(build, "_boundaryStroke.Margin").Single().Right);
+            Assignments(build, "_pinnedPanel.Margin").Single().Right);
         Assert.Equal(
-            new[] { "RowInsetLeft + BoundaryStrokeInset", "3", "BoundaryStrokeInset", "0" },
+            new[] { "RowInsetLeft", "RowInsetVertical", "RowInsetLeft", "BandInsetBottom" },
             margin.ArgumentList!.Arguments.Select(a => a.ToString()).ToArray());
 
-        var shelf = Strip().Method("UpdatePinnedShelfChrome");
-        var visible = Assignments(shelf, "_boundaryStroke.Visibility").Single();
-        Assert.Equal("bothZones ? Visibility.Visible : Visibility.Collapsed",
-            visible.Right.ToString());
-        // The brush is only written under the same gate: a boundary painted
-        // while hidden is chrome nobody sees, and a gate without the paint
-        // is a line that never brightens.
-        var paint = Assignments(shelf, "_boundaryStroke.Background").Single();
-        Assert.True(visible.Span.End < paint.Span.Start,
-            "the boundary's visibility gate must precede its paint");
+        // One arithmetic, not two: the panel arranges from TabPinBand and
+        // the drop preview asks the panel, so the ghost and the square it
+        // promises cannot disagree about where the next slot is.
+        var bandPanel = ShellSource.Load("Tabs.TabPinBandPanel.cs");
+        Assert.Single(bandPanel.Method("SlotRect").Calls("TabPinBand.OriginOf"));
+        Assert.Single(Strip().Method("BandSlotRect").Calls("_pinnedPanel.SlotRect"));
 
-        var brush = Strip().Method("BoundaryStrokeBrush");
-        // The drag gate rides the alpha declaration: idle presence while
-        // no drag holds the strip, near-full while one aims at it.
-        var alpha = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>()
-            .Single(v => v.Identifier.ValueText == "alpha");
-        var ternary = Assert.IsType<ConditionalExpressionSyntax>(alpha.Initializer!.Value);
-        Assert.Equal("_drag is null", ternary.Condition.ToString());
-        Assert.Equal("idle", ternary.WhenTrue.ToString());
-        Assert.Equal("live", ternary.WhenFalse.ToString());
+        // The column count comes from the width the PANE offered, in both
+        // passes -- the argument, not merely the call. The band is
+        // left-aligned, so the size it is arranged at is its own desired
+        // width, and ColumnsFor of that answers "as many columns as there
+        // are squares". Every square survived it (with fewer squares than
+        // columns they are all in row 0 either way); the slot one PAST the
+        // end did not, and that slot is the only thing the drop preview
+        // draws. Three pins in a pane that fits five put the ghost on a
+        // second band row while the square landed beside the last one.
+        Assert.Equal("availableSize.Width",
+            bandPanel.Method("MeasureOverride").Calls("TabPinBand.ColumnsFor").Single().Arg(0));
+        Assert.Equal("_offeredWidth",
+            bandPanel.Method("ArrangeOverride").Calls("TabPinBand.ColumnsFor").Single().Arg(0));
 
-        // High Contrast overrides translucency: both states resolve
-        // opaque there, on the system's HC accent.
-        var declarators = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>().ToList();
-        Assert.Contains(declarators, v => v.Identifier.ValueText == "idle"
-            && v.Initializer!.Value.ToString().Contains("_highContrast")
-            && v.Initializer.Value.ToString().Contains("0xFF"));
-        Assert.Contains(declarators, v => v.Identifier.ValueText == "live"
-            && v.Initializer!.Value.ToString().Contains("0xFF"));
+        // ...and the measure is the only pass that can capture it.
+        Assert.Equal("availableSize.Width",
+            Assignments(bandPanel.Method("MeasureOverride"), "_offeredWidth")
+                .Single().Right.ToString());
+        Assert.Empty(Assignments(bandPanel.Method("ArrangeOverride"), "_offeredWidth"));
     }
 
     /// <summary>
-    /// The pinned row's anatomy follows the pane: full body-row anatomy --
-    /// icon, title, bell -- once the pane is wide enough to read a
-    /// trimmed title, and the icon-only slot the compact pane fits below
-    /// that. The strip drives it from ApplyPaneLayout, the one pass every
-    /// width change rides, and the row degrades by collapsing the title
-    /// column, never by re-building the row.
+    /// A pinned square is an icon square at every pane width. It has no
+    /// title column to collapse and no width threshold to answer to, and
+    /// the title it gives up rides the tooltip -- which the square OWES,
+    /// not merely offers: two shells of the same kind draw the same icon,
+    /// so without it nothing tells them apart with a pointer.
+    ///
+    /// The width threshold survives for the rows that do still carry a
+    /// title, on the strip itself rather than on the class that no longer
+    /// has one; ApplyPaneLayout stays the choke point every width change
+    /// rides.
     /// </summary>
     [Fact]
-    public void PinnedRows_WearBodyAnatomy_WhenThePaneIsWide()
+    public void PinnedSquares_AreIconOnly_AtEveryPaneWidth()
     {
-        var shelf = Strip().Method("UpdatePinnedShelfChrome");
-        var flip = Assignments(shelf, "row.ShowTitle").Single();
-        // The shared threshold, not a local copy: the shelf, the body rows
-        // and the group headers must degrade at one width or the rail
-        // degrades in pieces.
-        Assert.Equal("ShowsTitles", flip.Right.ToString());
+        var rowSource = ShellSource.Load("Tabs.VerticalTabPinnedRow.cs");
+        var square = rowSource.Root.ToString();
+
+        // No title column, no width switch, no threshold of its own.
+        Assert.DoesNotContain("ShowTitle", square, StringComparison.Ordinal);
+        Assert.DoesNotContain("_textColumn", square, StringComparison.Ordinal);
+        Assert.DoesNotContain("TitlePaneWidthThreshold", square, StringComparison.Ordinal);
+        Assert.Empty(Strip().Method("UpdatePinnedShelfChrome")
+            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString().EndsWith(".ShowTitle", StringComparison.Ordinal)));
+
+        // A square: one edge, and it is the band's, so the panel, the
+        // ghost and the harness all measure against one number. Read at
+        // statement level, because the icon slot inside carries the same
+        // two property names in its own initializer.
+        var ctor = rowSource.Root.DescendantNodes()
+            .OfType<ConstructorDeclarationSyntax>().Single();
+        var edges = ctor.Body!.Statements.OfType<ExpressionStatementSyntax>()
+            .Select(s => s.Expression).OfType<AssignmentExpressionSyntax>().ToList();
+        Assert.Equal("RowHeight",
+            edges.Single(a => a.Left.ToString() == "Width").Right.ToString());
+        Assert.Equal("RowHeight",
+            edges.Single(a => a.Left.ToString() == "Height").Right.ToString());
+        var edge = rowSource.Root.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "RowHeight");
+        Assert.Equal("TabPinBand.ChipSize", edge.Initializer!.Value.ToString());
+
+        // The tooltip is the title's only remaining home, and it is
+        // refreshed with the title rather than set once at build.
+        var refresh = rowSource.Method("Refresh");
+        var tip = refresh.Call("ToolTipService.SetToolTip");
+        Assert.Equal("this", tip.Arg(0));
+        Assert.Equal("tab.EffectiveTitle", tip.Arg(1));
+
+        // The shared threshold lives on the strip now -- the body rows
+        // and the group headers must still degrade at one width, or the
+        // rail degrades in pieces.
         var threshold = Strip().Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
             .Single(p => p.Identifier.ValueText == "ShowsTitles");
-        Assert.Equal("_paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold",
+        Assert.Equal("_paneWidth >= TitlePaneWidthThreshold",
             threshold.ExpressionBody!.Expression.ToString());
 
         // ApplyPaneLayout is the choke point: the width lands there, the
@@ -178,40 +221,129 @@ public class PinnedPanelWiringTests
         var layout = Strip().Method("ApplyPaneLayout");
         var stored = layout.AssignsTo("_paneWidth").Single();
         Assert.Equal("width", stored.Right.ToString());
-        var refresh = layout.Calls("ApplyPaneWidthAnatomy").Single();
+        var anatomy = layout.Calls("ApplyPaneWidthAnatomy").Single();
         var gate = layout.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "_paneWidth != width");
-        Assert.True(gate.Span.Contains(refresh.Span),
+        Assert.True(gate.Span.Contains(anatomy.Span),
             "the anatomy pass must ride the width-changed gate");
         Assert.Single(Strip().Method("ApplyPaneWidthAnatomy")
             .Calls("UpdatePinnedShelfChrome"));
 
-        // The row degrades structurally: the title column collapses, and
-        // the bell re-parents between the icon slot's corner and the
-        // title column's trailing edge -- the two states a compact pane
-        // and an expanded one wear.
-        var rowSource = ShellSource.Load("Tabs.VerticalTabPinnedRow.cs");
-        var showTitle = rowSource.Root.DescendantNodes()
-            .OfType<PropertyDeclarationSyntax>()
-            .Single(p => p.Identifier.ValueText == "ShowTitle");
-        var setter = showTitle.AccessorList!.Accessors
-            .Single(a => a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SetAccessorDeclaration));
-        var collapse = setter.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left.ToString() == "_textColumn.Visibility");
-        Assert.Contains("value", collapse.Right.ToString(), StringComparison.Ordinal);
-        Assert.Contains("_iconSlot.Children.Remove(_bell)",
-            setter.ToFullString(), StringComparison.Ordinal);
-        Assert.Contains("_textColumn.Children.Add(_bell)",
-            setter.ToFullString(), StringComparison.Ordinal);
-        Assert.Contains("_iconSlot.Children.Add(_bell)",
-            setter.ToFullString(), StringComparison.Ordinal);
-
-        // And the title takes the row's ink -- the same active/inactive
-        // brush the icon follows -- so a pinned row's title matches a body
-        // row's in every state the strip paints.
+        // The icon takes the square's ink -- the same active/inactive
+        // brush a body row's title follows -- so a pinned square matches
+        // the list in every state the strip paints.
         var ink = rowSource.Method("ApplyInk");
-        Assert.Contains(Assignments(ink, "_title.Foreground").ToList(),
+        Assert.Contains(Assignments(ink, "_icon.Foreground").ToList(),
             a => a.Right.ToString() == "foreground");
+
+        // And the selection fill takes the square's shape, not the lane's.
+        // A lane-wide bar behind a 40px square marks four slots the active
+        // tab does not occupy -- which is exactly what the fill did before
+        // the pins stopped being rows, and is invisible until a pin is the
+        // active tab.
+        var place = Strip().Method("UpdateSelectionRow");
+        var isSquare = place.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "square");
+        Assert.Equal("item is VerticalTabPinnedRow", isSquare.Initializer!.Value.ToString());
+        // Each axis to its own measurement. "StartsWith item.Actual" was
+        // satisfied by both, so the two could be swapped -- benign only
+        // while the square happens to be 40x40.
+        foreach (var (name, axis) in new[]
+                 { ("rowWidth", "item.ActualWidth"), ("rowHeight", "item.ActualHeight") })
+        {
+            var sized = place.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+                .Single(v => v.Identifier.ValueText == name);
+            var fork = Assert.IsType<ConditionalExpressionSyntax>(sized.Initializer!.Value);
+            Assert.Equal("square", fork.Condition.ToString());
+            Assert.Equal(axis, fork.WhenTrue.ToString());
+        }
+
+        // And the fill's POSITION forks too, which is where a wrapping band
+        // actually differs from a lane: a square in column 1, 2 or 3 sits
+        // 44, 88 or 132px along, and an unconditional Canvas.SetLeft of the
+        // row inset would draw the selection on the first column every time.
+        // Invisible to the geometry harness, which selects a body row.
+        foreach (var setter in new[] { "Canvas.SetLeft", "Canvas.SetTop" })
+        {
+            var call = place.Calls(setter).Single();
+            Assert.Equal("SelectionRow", call.Arg(0));
+            Assert.Contains("square", call.Arg(1));
+        }
+        // Closed on all four sides: the folder stroke's open edge exists
+        // because a body row MEETS the terminal there, and a square in the
+        // middle of a band meets nothing.
+        var stroke = Assert.IsType<ConditionalExpressionSyntax>(
+            Assignments(place, "SelectionRow.BorderThickness").Single().Right);
+        Assert.Equal("square", stroke.Condition.ToString());
+        Assert.Equal("new Thickness(1)", stroke.WhenTrue.ToString());
+        Assert.Equal("new Thickness(1, 1, 0, 1)", stroke.WhenFalse.ToString());
+    }
+
+    /// <summary>
+    /// The band glides its squares between slots, and hands them back
+    /// whenever a gesture takes over their composition Translation.
+    ///
+    /// This is the transition the wrapping shape creates: a pin added or
+    /// removed reflows the band in BOTH axes -- a square pushed off the
+    /// end of a row travels down and back to the left -- which the list's
+    /// vertical-only glide could not express. It is also the one place
+    /// two writers could meet, so the stand-down is pinned as hard as the
+    /// motion is.
+    /// </summary>
+    [Fact]
+    public void TheBand_Glides_AndStandsDownUnderAGesture()
+    {
+        var bandPanel = ShellSource.Load("Tabs.TabPinBandPanel.cs");
+
+        // Both axes. A vertical-only delta slides a wrapping square
+        // through the squares it is passing.
+        var reflow = bandPanel.Method("Reflow");
+        var delta = reflow.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "delta");
+        var text = delta.Initializer!.Value.ToString();
+        Assert.Contains("was.X - origin.X", text, StringComparison.Ordinal);
+        Assert.Contains("was.Y - origin.Y", text, StringComparison.Ordinal);
+
+        // A square arranged for the first time only records its slot: it
+        // has no old slot to come from, and gliding it from the band's
+        // origin flies every pin in from the corner on the first frame.
+        var first = reflow.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("_lastOrigin.TryGetValue"));
+        Assert.Contains("return", first.Statement.ToString(), StringComparison.Ordinal);
+
+        // Motion off is a cut that still owes the hand-back: a square
+        // stopped mid-glide keeps whatever Translation it held.
+        //
+        // The condition WHOLE, and the return with it. Two substrings --
+        // "!MotionEnabled" in the condition and "HandBack(child)" in the
+        // body -- survive turning the `||` into `&&`, which starts a
+        // composition animation on every reflow with motion off, and they
+        // survive deleting the `return` too, which falls straight through
+        // into the animation path after handing the square back.
+        var cut = reflow.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString().Contains("MotionEnabled", StringComparison.Ordinal));
+        Assert.Equal("!MotionEnabled || delta.LengthSquared() < 0.25f", cut.Condition.ToString());
+        Assert.Contains("HandBack(child)", cut.Statement.ToString(), StringComparison.Ordinal);
+        Assert.Contains("return", cut.Statement.ToString(), StringComparison.Ordinal);
+
+        // One writer on Translation: the strip turns the band off for the
+        // length of a gesture and hands the squares back before the drag
+        // arms its own follow.
+        //
+        // An AND, asserted as one -- `&&` and `||` are both a
+        // BinaryExpressionSyntax and both contain the same two substrings.
+        // Under `||` the band glides while a live drag owns every row's
+        // Translation, which is the two-writer collision this guard's own
+        // summary says it pins as hard as the motion; under a negated gate
+        // it glides only in the reduce-motion sessions that must see a cut.
+        var gate = Assignments(
+            Strip().Method("UpdatePinnedShelfChrome"), "_pinnedPanel.MotionEnabled").Single();
+        var conjunction = Assert.IsType<BinaryExpressionSyntax>(gate.Right);
+        Assert.True(conjunction.IsKind(SyntaxKind.LogicalAndExpression),
+            "the band's motion needs BOTH facts: no live drag AND the strip's motion gate");
+        Assert.Equal("_drag is null", conjunction.Left.ToString());
+        conjunction.Right.AssertCallTo("TabStripMotion.Enabled");
+        Assert.Single(Strip().Method("StartDragVisual").Calls("_pinnedPanel.StopMotion"));
     }
 
     /// <summary>
