@@ -822,14 +822,25 @@ function Find-SwitcherHost {
     return $null
 }
 
-# Whether one rect sits inside another, and whether two overlap at all.
-# UIA hands back .X/.Y/.Width/.Height; the seam hands back .x/.y/.w/.h.
-function Test-RectInside($Inner, $Outer) {
+# Whether a UIA rect sits inside, or overlaps, a rect the SEAM reported.
+#
+# Named for the seam on purpose. The UIA-to-UIA containment test one screen
+# up is called Test-RectInside, and a second function of that name here
+# silently replaced it for the whole file: PowerShell defines functions as
+# it reads them, so by the time anything is called the later one is the one
+# in scope, and Test-Samplable -- the gate on EVERY ink sample -- started
+# asking this version about two UIA rects. Property lookup is
+# case-insensitive, so `.x` found `.X` and the comparison looked sane, while
+# `.w` found nothing at all and came back null: `Inner.X + Inner.Width -le
+# Outer.X + $null` is false for any element with width, so every surface in
+# both strips reported "no visible, unclipped run" and the oracle exited 1
+# on a whole table of NOT MEASURED. Two shapes of rect want two names.
+function Test-InsideSeamRect($Inner, $Outer) {
     return ($Inner.X -ge $Outer.x) -and ($Inner.Y -ge $Outer.y) -and
            (($Inner.X + $Inner.Width) -le ($Outer.x + $Outer.w)) -and
            (($Inner.Y + $Inner.Height) -le ($Outer.y + $Outer.h))
 }
-function Test-RectOverlaps($A, $B) {
+function Test-OverlapsSeamRect($A, $B) {
     return ($A.X -lt ($B.x + $B.w)) -and (($A.X + $A.Width) -gt $B.x) -and
            ($A.Y -lt ($B.y + $B.h)) -and (($A.Y + $A.Height) -gt $B.y)
 }
@@ -871,8 +882,8 @@ function Get-SwitcherTileRect($Session) {
     }
     foreach ($run in (Get-TextRuns $el)) {
         $r = $run.Current.BoundingRectangle
-        if (-not (Test-RectInside $r $lit[0].card)) { continue }
-        if ($null -ne $lit[0].preview -and (Test-RectOverlaps $r $lit[0].preview)) { continue }
+        if (-not (Test-InsideSeamRect $r $lit[0].card)) { continue }
+        if ($null -ne $lit[0].preview -and (Test-OverlapsSeamRect $r $lit[0].preview)) { continue }
         return $r
     }
     return $null
