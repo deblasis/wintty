@@ -582,6 +582,78 @@ Invoke-Scenario 'drop-on-chip-join' {
     Assert-TraceSession $sessions[0] 'the drop-on-chip join' 0 'on'
 }
 
+Invoke-Scenario 'join-hold-ring' {
+    param($s)
+    [void](Invoke-Seed $s)
+    # HOLD WITH A RING: the row is walked onto its neighbour and held
+    # there until the ring fills, and the release joins the two into a
+    # group. The hold is not a sleep - the seam pins the dwell's clock
+    # for the length of the gesture and moves it past the token in one
+    # assignment, so what this measures is the ring rather than how busy
+    # the machine was.
+    $join = Invoke-SeamCommand $s @{ op = 'drag-join'; from = 1; to = 2; hold = $true }
+    if (-not $join.ok) { throw "PRODUCT_FAIL: the join gesture failed: $($join.error)" }
+    if (-not $join.armed) { throw 'PRODUCT_FAIL: the ring never completed over the neighbour' }
+    $state = Invoke-SeamCommand $s @{ op = 'get-state' }
+    if (@($state.state.groups).Count -ne 1) {
+        throw "PRODUCT_FAIL: the held release registered $(@($state.state.groups).Count) group(s), expected 1"
+    }
+    $title = $state.state.groups[0].title
+    foreach ($name in @('fuzzdrag-2', 'fuzzdrag-3')) {
+        $tab = @($state.state.tabs | Where-Object { $_.title -eq $name })[0]
+        if ($tab.group -ne $title) {
+            throw "PRODUCT_FAIL: $name is in group '$($tab.group)' after the held release, expected '$title'"
+        }
+    }
+    # Nothing outside the pair was swept in, and the strip renders the
+    # run with its header - the join is a thing the user can see, not
+    # just manager state.
+    foreach ($name in @('fuzzdrag-1', 'fuzzdrag-4', 'fuzzdrag-5')) {
+        $tab = @($state.state.tabs | Where-Object { $_.title -eq $name })[0]
+        if ($null -ne $tab.group -and $tab.group -ne '') {
+            throw "PRODUCT_FAIL: $name was swept into group '$($tab.group)' by a join it was not part of"
+        }
+    }
+    [void](Wait-Order $V @('fuzzdrag-1', $title, 'fuzzdrag-2', 'fuzzdrag-3', 'fuzzdrag-4', 'fuzzdrag-5'))
+    $sessions = @(Get-ScenarioTrace 'join-hold-ring')
+    if ($sessions.Count -lt 1) { throw 'PRODUCT_FAIL: no trace session for the join' }
+    Assert-TraceSession $sessions[0] 'the held join' 0 'on'
+    if (-not (@($sessions[0].raw) -like 'DRAG join group=*')) {
+        throw 'PRODUCT_FAIL: the gesture ended without tracing a join'
+    }
+}
+
+Invoke-Scenario 'join-quick-release' {
+    param($s)
+    [void](Invoke-Seed $s)
+    # The other half of the same contract: the identical gesture with the
+    # ring NOT held to completion groups nothing, and the sort the engine
+    # always did is still there afterwards. Both legs run the same walker
+    # over the same rows, so the only difference between a join and a
+    # sort is the hold - which is the decision this gesture is.
+    $quick = Invoke-SeamCommand $s @{ op = 'drag-join'; from = 1; to = 2; hold = $false }
+    if (-not $quick.ok) { throw "PRODUCT_FAIL: the quick-release gesture failed: $($quick.error)" }
+    if ($quick.armed) { throw 'PRODUCT_FAIL: the ring armed on a release that never held' }
+    $state = Invoke-SeamCommand $s @{ op = 'get-state' }
+    if (@($state.state.groups).Count -ne 0) {
+        throw 'PRODUCT_FAIL: a quick release grouped tabs - the dwell is not what decides the join'
+    }
+    Assert-StateOrder $state $names 'the quick release'
+    [void](Wait-TraceQuiet 'join-quick-release')
+    # And the ordinary sort still lands, in the same process, right after
+    # a gesture that declined to join: the join wiring must not have
+    # eaten the release the reorder answers.
+    [void](Invoke-SeamCommand $s @{ op = 'drag'; from = 1; to = 2 })
+    [void](Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5'))
+    $sessions = @(Get-ScenarioTrace 'join-quick-release')
+    if ($sessions.Count -lt 2) { throw "PRODUCT_FAIL: $($sessions.Count) trace session(s), expected 2" }
+    Assert-TraceSession $sessions[0] 'the quick release' 0 'on'
+    Assert-TraceSession $sessions[1] 'the sort after it' 1 'on'
+    if (@($sessions[0].raw) -like 'DRAG join*') {
+        throw 'PRODUCT_FAIL: the quick release traced a join'
+    }
+}
+
 Invoke-Scenario 'layout-toggle' {
     param($s)
     [void](Invoke-Seed $s)

@@ -615,6 +615,7 @@ internal static class TestSeam
             case "drag-paced":
             case "drag-zone":
             case "drag-header":
+            case "drag-join":
             {
                 var strip = window.TestSeamVerticalStrip;
                 if (strip is null)
@@ -633,6 +634,14 @@ internal static class TestSeam
                     // grammar decides what the landing means.
                     "drag-header" => await strip.TestSeamDragToHeaderAsync(
                         ArgInt(args, "from", -1), ArgString(args, "group") ?? ""),
+                    // Both outcomes of the hold-with-a-ring join: hold
+                    // fills the ring and the release groups the pair,
+                    // hold=false is the quick release that still sorts.
+                    // The dwell's clock is the seam's for the length of
+                    // the gesture, so neither outcome is a race.
+                    "drag-join" => await strip.TestSeamDragJoinAsync(
+                        ArgInt(args, "from", -1), ArgInt(args, "to", -1),
+                        ArgBool(args, "hold", true)),
                     _ => await strip.TestSeamDragAsync(
                         ArgInt(args, "from", -1), ArgInt(args, "to", -1)),
                 };
@@ -904,6 +913,12 @@ internal static class TestSeam
             if (outcome.Error is { } error) json.WriteString("error", error);
             json.WriteNumber("landed", outcome.Landed);
             json.WriteBoolean("pinned", outcome.Pinned);
+            // The join gesture's two answers: what the ring had reached
+            // by the release, and the group the release actually landed
+            // the row in -- read off the manager, so a driver asserts the
+            // commit rather than the promise.
+            if (outcome.Armed is { } armed) json.WriteBoolean("armed", armed);
+            if (outcome.Group is { } group) json.WriteString("group", group);
             if (outcome.CommitMs >= 0) json.WriteNumber("commitMs", outcome.CommitMs);
             if (outcome.ReleaseMs >= 0) json.WriteNumber("releaseMs", outcome.ReleaseMs);
             json.WriteStartArray("order");
@@ -1337,6 +1352,12 @@ internal sealed class TestSeamDragOutcome
     public string? Error;
     public int Landed = -1;
     public bool Pinned;
+    // The join gesture's own two fields, absent from the response for
+    // every other drag op: nullable rather than defaulted, so a driver
+    // cannot read "not armed, no group" off a gesture that was never
+    // asked the question.
+    public bool? Armed;
+    public string? Group;
     public long CommitMs = -1;
     public long ReleaseMs = -1;
     public List<string> Order = new();

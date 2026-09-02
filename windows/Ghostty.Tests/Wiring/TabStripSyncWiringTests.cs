@@ -595,9 +595,21 @@ public sealed class TabStripSyncWiringTests
         Assert.Equal("drag.Machine.Phase != TabDragPhase.Dragging",
             gate.Condition.ToString());
         var arm = Assert.IsType<BlockSyntax>(gate.Statement);
-        Assert.Equal(2, arm.Statements.Count);
-        Assert.Contains(arm.DescendantNodes().OfType<InvocationExpressionSyntax>(),
-            c => c.CalleeText() == "drag.Machine.Cancel");
+        // The arm's calls named, rather than counted. A count says "two
+        // statements" and means "nothing that touches the strip"; naming them
+        // says the second thing, and lets a withdrawal that takes something
+        // BACK -- the join ring, which this path must not leave standing when
+        // it nulls the drag -- join the arm without the rule having to be
+        // re-litigated as a number.
+        Assert.Equal(
+            new[] { "ClearJoinDwell", "drag.Machine.Cancel" },
+            arm.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Select(c => c.CalleeText()).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+        // The statement count too, so the rule still means "nothing that
+        // touches the strip": naming the calls alone would accept a bare field
+        // write -- `_stripDragActive = false;`, `e.Handled = true;` -- which is
+        // exactly the kind of side effect this path must not have.
+        Assert.Equal(3, arm.Statements.Count);
         Assert.True(
             arm.Statements.Last() is ReturnStatementSyntax { Expression: null },
             "the sub-threshold arm must return: the finish pass is for drags "

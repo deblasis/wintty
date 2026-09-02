@@ -86,6 +86,56 @@ internal static class TabStripMotion
     public const double FieldSettleMs = 167;
 
     /// <summary>
+    /// The join gesture's dwell: how long a dragged row must be held over
+    /// a neighbour before the ring completes and the release joins the
+    /// two into a group. Deliberately far under the couple of seconds a
+    /// hold-to-confirm usually costs -- the ring is filling the whole
+    /// time, so the wait only has to outlast a hand passing through.
+    /// </summary>
+    public const double JoinDwellMs = 450;
+
+    /// <summary>
+    /// Travel along the axis that restarts the dwell. The ring is a
+    /// promise about a pointer that has STOPPED; without this a drag
+    /// flicked down the strip would ring on whatever row it happened to
+    /// be over for a frame.
+    /// </summary>
+    public const double JoinJitterPx = 3;
+
+    /// <summary>
+    /// How close to a neighbour's arranged center the dragged row must
+    /// come to count as being OVER it, as a fraction of the pitch to that
+    /// neighbour. Half a pitch: the row has travelled most of the way
+    /// there. A row at rest in its own slot is a full pitch away, so it
+    /// targets nothing.
+    /// </summary>
+    public const double JoinBandFraction = 0.5;
+
+    /// <summary>
+    /// The ring's own frame: it fills on a clock, not on pointer events,
+    /// because a hand held perfectly still raises none and a ring that
+    /// only advanced on motion could never complete. Every tick is a
+    /// property set on one small element, so the fill IS the dwell's
+    /// progress and the two cannot drift apart.
+    /// </summary>
+    public const double JoinRingTickMs = 16;
+
+    /// <summary>The ring itself: a circle over the target's center, stroked thin.</summary>
+    public const double JoinRingDiameterPx = 22;
+    public const double JoinRingStrokePx = 2;
+
+    /// <summary>
+    /// The completed ring hands off to a halo over the target row: the
+    /// moment the release changes meaning has to be a thing the eye
+    /// catches, not a number only the code knows. The pop is the one
+    /// flourish the gesture spends, on the lift's spring family.
+    /// </summary>
+    public const double JoinHaloOpacity = 0.30;
+    public const float JoinArmDampingRatio = 0.60f;
+    public const double JoinArmPeriodMs = 60;
+    public const float JoinArmRingScale = 1.15f;
+
+    /// <summary>
     /// The horizontal drag's handback: the lifted tab's shadow fades out
     /// on this clock while its scale springs down. The spring is the
     /// landing; the fade is what keeps the shadow from popping off a tab
