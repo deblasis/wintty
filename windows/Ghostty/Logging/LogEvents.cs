@@ -15,6 +15,7 @@ internal static class LogEvents
         public const int TrayInitFailed      = 2003;
         public const int StaleAumidRemoved   = 2004;
         public const int ConfigOpenFailed    = 2005;
+        public const int QuakeWindowFailed   = 2006;
     }
 
     // 2100-2199: Clipboard
@@ -67,6 +68,7 @@ internal static class LogEvents
         // 2500 retired (was ConfigOpenFailed; the action moved to App and
         // logs under Startup.ConfigOpenFailed). Not reused: old logs carry it.
         public const int DialogDrainFailed = 2501;
+        public const int SwitcherRefused   = 2502;
     }
 
     // 2600-2699: Settings UI
