@@ -47,6 +47,9 @@ internal sealed partial class TabJoinRing : Grid
     // title is the thing the mode forbids.
     private readonly Brush _haloFill;
     private readonly Brush _haloEdge;
+    // The dash pattern, allocated once and mutated: SetProgress runs on every
+    // frame of a live dwell.
+    private readonly DoubleCollection _dash = new() { 0, 0 };
 
     public TabJoinRing(Brush accent)
     {
@@ -135,31 +138,37 @@ internal sealed partial class TabJoinRing : Grid
     private void SetProgress(double progress)
     {
         double filled = Math.Clamp(progress, 0, 1) * _sweepUnits;
-        // A zero-length dash with a round cap still paints a dot, which
-        // is the honest picture of a ring that has just started; the
-        // remainder is one long gap, so exactly one arc is drawn.
-        _ring.StrokeDashArray = new DoubleCollection { filled, _sweepUnits * 2 };
+        // One collection, mutated. This runs 62 times a second for the whole
+        // of a live dwell, and the same review round removed two allocations
+        // per frame from the vertical strip's dwell for exactly this reason.
+        //
+        // The two entries are the drawn arc and one long gap, so exactly one
+        // arc is painted. A zero-length dash with a round cap still paints a
+        // dot, which is the honest picture of a ring that has just started --
+        // and the same round cap extends the arc by half a stroke at each end,
+        // so a full ring overshoots its own start by about 1% of the
+        // circumference. That is deliberate: a ring that reads closed when it
+        // IS closed is the artefact this gesture wants, and the alternative
+        // reads open at the moment the release changes meaning.
+        _dash[0] = filled;
+        _dash[1] = _sweepUnits * 2;
+        _ring.StrokeDashArray = _dash;
         _ring.Opacity = progress > 0 ? 1 : 0;
     }
 
     private void SetArmed(bool armed, bool motion, bool highContrast)
     {
+        // The halo's FORM is re-applied every call, above the edge guard.
+        // Behind it, a High Contrast flip that happens inside a hold -- the
+        // mode can be turned on at any moment, and the strip is told through
+        // SetRowSeparator while the ring keeps being placed at 16ms -- would
+        // find armed unchanged, return, and leave the translucent tint sitting
+        // over the target row's title for the rest of the dwell. Which is the
+        // state this branch exists to forbid.
+        SetHaloForm(highContrast);
+
         if (armed == _armed) return;
         _armed = armed;
-
-        // High Contrast takes an OUTLINE, not a wash.
-        //
-        // The halo is a 30%-alpha accent fill over the target row, and the row
-        // has the tab's title in it. That is a translucent tint laid over text,
-        // which is the contrast regression High Contrast exists to forbid --
-        // and it was reached because the only thing consulted here was the
-        // motion gate, which composes animations-off WITH High Contrast. Those
-        // are two different questions: one asks whether the arm may spring, the
-        // other asks what the arm may be made of.
-        _halo.Background = highContrast ? null : _haloFill;
-        _halo.BorderBrush = _haloEdge;
-        _halo.BorderThickness = new Thickness(
-            highContrast && armed ? TabStripMotion.JoinRingStrokePx : 0);
 
         double haloOpacity = armed ? (highContrast ? 1 : TabStripMotion.JoinHaloOpacity) : 0;
         float ringScale = armed ? TabStripMotion.JoinArmRingScale : 1f;
@@ -170,6 +179,31 @@ internal sealed partial class TabJoinRing : Grid
             return;
         }
         SpringRingScale(ringScale);
+    }
+
+    /// <summary>
+    /// What the armed halo is MADE of: a wash normally, an outline in High
+    /// Contrast.
+    ///
+    /// The halo is a 30%-alpha accent fill over the target row, and the row has
+    /// the tab's title in it -- a translucent tint laid over text, which is the
+    /// contrast regression High Contrast exists to forbid. It was reached
+    /// because the only thing consulted was the motion gate, which composes
+    /// animations-off WITH High Contrast: two different questions, one asking
+    /// whether the arm may spring and the other what the arm may be made of.
+    ///
+    /// The ink stays the accent, which is the same call
+    /// <c>BoundaryStrokeBrush</c> makes one file along ("the system's HC accent
+    /// carries the color"), so the two chrome affordances agree. A theme whose
+    /// ground sits near the accent is the residual risk, and it is the strip's
+    /// standing one rather than this gesture's.
+    /// </summary>
+    private void SetHaloForm(bool highContrast)
+    {
+        _halo.Background = highContrast ? null : _haloFill;
+        _halo.BorderBrush = _haloEdge;
+        _halo.BorderThickness = new Thickness(
+            highContrast ? TabStripMotion.JoinRingStrokePx : 0);
     }
 
     private void SetRingScale(float scale)

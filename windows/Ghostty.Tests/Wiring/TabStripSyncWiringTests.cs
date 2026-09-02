@@ -604,7 +604,12 @@ public sealed class TabStripSyncWiringTests
         Assert.Equal(
             new[] { "ClearJoinDwell", "drag.Machine.Cancel" },
             arm.DescendantNodes().OfType<InvocationExpressionSyntax>()
-                .Select(c => c.CalleeText()).OrderBy(s => s).ToArray());
+                .Select(c => c.CalleeText()).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+        // The statement count too, so the rule still means "nothing that
+        // touches the strip": naming the calls alone would accept a bare field
+        // write -- `_stripDragActive = false;`, `e.Handled = true;` -- which is
+        // exactly the kind of side effect this path must not have.
+        Assert.Equal(3, arm.Statements.Count);
         Assert.True(
             arm.Statements.Last() is ReturnStatementSyntax { Expression: null },
             "the sub-threshold arm must return: the finish pass is for drags "

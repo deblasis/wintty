@@ -216,6 +216,74 @@ public class TabJoinRingWiringTests
     }
 
     /// <summary>
+    /// Stated as the invariant rather than as a list of doors: EVERY place that
+    /// nulls the drag takes the ring with it.
+    ///
+    /// Naming three methods covers the three that existed when it was written.
+    /// The vertical strip has two more exits that null `_drag` without going
+    /// through `EndDrag` -- `DragRelease`'s click path and `CancelDrag`'s
+    /// non-dragging arm -- and a clear was added to the second of those in this
+    /// change with nothing to hold it there. A sweep is the only form of this
+    /// rule that survives the next exit being added.
+    /// </summary>
+    [Fact]
+    public void VerticalStrip_EveryPathThatNullsTheDrag_TakesTheRingWithIt()
+    {
+        var strip = Vertical();
+        var nulls = strip.Root.AssignsTo("_drag")
+            .Where(a => a.Right is LiteralExpressionSyntax { RawKind: (int)SyntaxKind.NullLiteralExpression })
+            .ToList();
+        Assert.NotEmpty(nulls);
+
+        foreach (var assignment in nulls)
+        {
+            var owner = assignment.FirstAncestorOrSelf<MethodDeclarationSyntax>();
+            Assert.True(owner is not null, "a _drag = null outside any method");
+
+            // The enclosing BLOCK, not the whole method. Method scope makes the
+            // rule vacuous the moment a method has two exits: CancelDrag's
+            // early arm can drop its clear entirely and still pass, because the
+            // method's OTHER path calls EndDrag further down. The arm that
+            // nulls the drag is the arm that has to withdraw the promise.
+            var arm = assignment.FirstAncestorOrSelf<BlockSyntax>();
+            Assert.True(arm is not null, "a _drag = null outside any block");
+
+            var clears = arm!.Calls("ClearJoinDwell").Count > 0
+                || arm.Calls("EndDrag").Count > 0
+                || owner!.Identifier.ValueText == "EndDrag";
+            Assert.True(
+                clears,
+                $"'{owner!.Identifier.ValueText}' nulls the drag on a path that neither "
+                + "withdraws the join ring nor hands off to EndDrag, so an armed promise "
+                + "outlives the gesture that made it and the NEXT release reads it");
+        }
+    }
+
+    /// <summary>
+    /// The halo's FORM is chosen on every call, above the arm/disarm edge.
+    ///
+    /// SetArmed opens with `if (armed == _armed) return;`, so anything below
+    /// that runs only when the armed state changes. High Contrast can be turned
+    /// on at any moment -- including inside a hold, while the ring is being
+    /// placed at 16ms and `armed` is not changing -- and behind the edge the
+    /// translucent tint stays over the target row's title for the rest of the
+    /// dwell, which is the exact state the High Contrast branch exists to
+    /// forbid.
+    /// </summary>
+    [Fact]
+    public void TheHaloForm_IsChosenAboveTheArmEdge()
+    {
+        var setArmed = ShellSource.Load("Tabs.TabJoinRing.cs").Method("SetArmed");
+        var form = Assert.Single(setArmed.Calls("SetHaloForm"));
+        var edge = setArmed.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("_armed", StringComparison.Ordinal));
+        Assert.True(
+            form.SpanStart < edge.SpanStart,
+            "the halo's form is chosen below the armed-state early return, so a High "
+            + "Contrast flip inside a hold leaves the wash over the row's title");
+    }
+
+    /// <summary>
     /// The ring fills on a repeating timer, on the shared frame token.
     /// A ring advanced only by pointer moves could never complete: the
     /// dwell's own premise is a pointer that has stopped, and a stopped
@@ -262,6 +330,13 @@ public class TabJoinRingWiringTests
             Assert.True(
                 reentry is not null && reentry.SpanStart < start.Call("timer.Start").SpanStart,
                 "StartJoinTimer does not refuse a second timer before creating one");
+
+            // And with the right POLARITY. "_joinTimer is null" also mentions
+            // _joinTimer and also returns early -- and means the timer is never
+            // created at all, so the ring never advances. Existence and
+            // position are not the property; "there is already one" is.
+            Assert.Equal(
+                "_joinTimer is not null", reentry!.Condition.ToString());
         }
     }
 
