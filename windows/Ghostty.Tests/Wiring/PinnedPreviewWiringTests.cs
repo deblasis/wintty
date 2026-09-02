@@ -38,13 +38,15 @@ public class PinnedPreviewWiringTests
 
     /// <summary>
     /// Show means "the drop would pin": the dragged row is still unpinned,
-    /// pins exist, and its center is over the shelf. The pinned arm of the
+    /// pins exist, and the POINTER is over the shelf. The pinned arm of the
     /// gate is the one that goes wrong silently -- once the crossing has
     /// committed, the real icon-only row is in the shelf following the
     /// pointer, and a ghost alongside it promises a slot the real row
     /// already holds. The shelf-bottom comparison is the "over the shelf"
-    /// half of the grammar, in the coordinates the machine judges
-    /// crossings in.
+    /// half of the grammar, and it is asked of the pointer because that is
+    /// what the band's arbitration asks: a gate on the dragged row's centre
+    /// instead disagrees by the grab offset, and disagreement here means a
+    /// pin committed with no promise ever shown.
     /// </summary>
     [Fact]
     public void ThePreview_ShowsOnlyWhileTheDropWouldPin()
@@ -61,7 +63,16 @@ public class PinnedPreviewWiringTests
         Assert.StartsWith(
             "drag.Tab.IsPinned || _manager.PinCount == 0",
             gate.Condition.ToString());
-        Assert.Contains("draggedCenter >= shelfBottom", gate.Condition.ToString());
+        // The POINTER's Y, and nothing else. This used to read
+        // `draggedCenter`, which is the pointer plus the grab offset --
+        // half a row height away from the number BandTargetSlot arbitrates
+        // on. That gap was a band of positions where the drag pinned an
+        // arriving row while this gate refused to promise anything, so the
+        // tab landed somewhere the user was never shown. Naming the
+        // variable here is the point: the promise and the commit have to
+        // be the same reading, not two readings that usually agree.
+        Assert.Contains("drag.LastPointerY >= shelfBottom", gate.Condition.ToString());
+        Assert.DoesNotContain("draggedCenter", gate.Condition.ToString());
         Assert.Contains(
             gate.Statement.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>(),
             c => c.CalleeText() == "HidePinPreview");
@@ -82,8 +93,20 @@ public class PinnedPreviewWiringTests
             .Single(v => v.Identifier.ValueText == "slot");
         var ask = Assert.IsType<InvocationExpressionSyntax>(slot.Initializer!.Value);
         Assert.Equal("BandSlotRect", ask.CalleeText());
-        // One past the end: the slot the pin about to land will take.
-        Assert.Equal("_manager.PinCount", ask.Arg(0));
+
+        // The ghost and the landing are ONE answer. Both read
+        // BandTargetSlot, so the slot the preview promises cannot differ
+        // from the slot the release commits -- which is what a promise
+        // means. Asserted as the same call the tick's commit fork makes,
+        // not as a spelling: the preview used to name the end slot
+        // unconditionally and was right only because nothing else had an
+        // opinion.
+        Assert.StartsWith("BandTargetSlot(drag)", ask.Arg(0), StringComparison.Ordinal);
+        Assert.Single(Strip().Method("EvaluateDrag").Calls("BandTargetSlot"));
+        // ...and the fallback is the end slot, for the approach: the gate
+        // above is open while the row is still outside the band, and there
+        // the band has no answer to give.
+        Assert.Contains("_manager.PinCount", ask.Arg(0));
 
         // The three named arguments, each pinned to ITS axis. Looking for
         // "slot.X" and "slot.Y" anywhere among the method's arguments is

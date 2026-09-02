@@ -90,9 +90,29 @@ public sealed class TabDragReorder
     /// never starts the drag, so a jittering grab stays a click.
     /// </summary>
     public bool Begin(double position)
+        => BeginOnTravel(Math.Abs(position - _pressPosition));
+
+    /// <summary>
+    /// Lift on a travel the CALLER measured, for a grab whose gesture is
+    /// not confined to this machine's axis.
+    ///
+    /// The pinned band is the one such surface: it wraps, so two of its
+    /// squares can share this machine's axis exactly, and a reorder between
+    /// them is pure cross-axis travel. Asked through
+    /// <see cref="Begin(double)"/> that gesture can never lift at all --
+    /// the row the user is dragging sideways sits at an unchanging Y, and
+    /// the press stays a click forever.
+    ///
+    /// The one-axis rule stays the DEFAULT, and deliberately: a body row is
+    /// dragged up and down a list, and admitting sideways travel there
+    /// would turn a hand tremor on a click into a drag. Only a caller that
+    /// knows its surface has a second axis is allowed to say so, and it
+    /// says so by measuring the travel itself.
+    /// </summary>
+    public bool BeginOnTravel(double travelPx)
     {
         if (_phase != TabDragPhase.Pressed) return false;
-        if (Math.Abs(position - _pressPosition) < _startThresholdPx) return false;
+        if (travelPx < _startThresholdPx) return false;
         _phase = TabDragPhase.Dragging;
         return true;
     }

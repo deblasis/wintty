@@ -1,5 +1,6 @@
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -606,15 +607,52 @@ public class VerticalTabGroupDragWiringTests
             + "fix -- hoisted out it always unpins, inverted it never does.");
 
         // The inZone initializer is the second prong: the ancestors-pin
-        // cannot catch a VALUE-level flip (swapping >=/<= inside inZone's
-        // initializer still passes everything). The initializer must
-        // compare releaseY against BOTH shelf bounds.
-        Assert.Contains("releaseY >= shelfTop && releaseY <= shelfBottom",
-            arm.DescendantNodes()
-               .OfType<VariableDeclaratorSyntax>()
-               .Single(v => v.Identifier.ValueText == "inZone")
-               .Initializer!.Value.ToFullString(),
-            StringComparison.Ordinal);
+        // cannot catch a VALUE-level flip (swapping the comparison inside
+        // inZone's initializer still passes everything).
+        //
+        // ONE bound, and it is the band's. The zone ends where the band
+        // stops claiming the pointer -- ShelfBottomY, the edge
+        // BandTargetSlot arbitrates on -- so the release cannot overturn a
+        // pin the drag already committed. There is deliberately no top
+        // bound: above the shelf the band still answers, so above the
+        // shelf the release must still keep. A second bound here would put
+        // the panel's own margins back in play as a strip where the two
+        // disagree.
+        // Asserted as a TREE, not a substring. The version this replaced
+        // pinned "releaseY >= shelfTop && releaseY <= shelfBottom", which
+        // carried its own connective inside the asserted text; dropping to
+        // one bound and keeping a substring assertion silently gave up the
+        // `&&` between the NaN guard and the comparison. Flip that to `||`
+        // and inZone is permanently true -- pin-out stops working
+        // altogether -- while every substring in sight still matches.
+        var inZoneInit = arm.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "inZone")
+            .Initializer!.Value;
+        var conjunction = Assert.IsType<BinaryExpressionSyntax>(inZoneInit);
+        Assert.True(
+            conjunction.IsKind(SyntaxKind.LogicalAndExpression),
+            "inZone must AND the NaN guard with the bound: under || an "
+            + "unreadable shelf reads as in-zone and the unpin never runs.");
+        Assert.Equal("!double.IsNaN(shelfBottom)", conjunction.Left.ToString());
+
+        // The bound itself, also as a tree: `<` and `>` are both
+        // BinaryExpressionSyntax, so the kind is what separates "below the
+        // shelf keeps the pin" from its exact opposite.
+        var comparison = Assert.IsType<BinaryExpressionSyntax>(conjunction.Right);
+        Assert.True(
+            comparison.IsKind(SyntaxKind.LessThanExpression),
+            "the release is in-zone strictly ABOVE the shelf's bottom.");
+        Assert.Equal("releaseY", comparison.Left.ToString());
+        Assert.Equal("shelfBottom", comparison.Right.ToString());
+        Assert.DoesNotContain("shelfTop", inZoneInit.ToFullString(), StringComparison.Ordinal);
+
+        // ...and that bound is read from the arbitration's own helper, not
+        // re-derived from a rect that merely looks equivalent.
+        var bound = arm.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "shelfBottom");
+        Assert.Equal("ShelfBottomY()", bound.Initializer!.Value.ToString());
 
         // The mid-drag crossing arm PINS only: the gate is the Pin
         // classification, and the Unpin classification hangs off it as an

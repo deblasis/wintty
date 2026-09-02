@@ -131,4 +131,65 @@ public static class TabPinBand
         var rows = RowsFor(chipCount, columns);
         return rows == 0 ? 0 : rows * ChipSize + (rows - 1) * ChipGap;
     }
+
+    /// <summary>
+    /// The slot a pointer at <paramref name="x"/>, <paramref name="y"/> in
+    /// band space is asking for: the one whose square is nearest, over
+    /// slots <c>0 .. slotCount - 1</c>.
+    ///
+    /// This is the band's answer to the question the linear drag machine
+    /// cannot be asked. That machine commits on a CROSSING along one axis:
+    /// the dragged row's centre passing a neighbour's centre. Two squares
+    /// sharing a band row share a centre on that axis, so no crossing
+    /// between them can ever be produced -- and worse, a comparison that
+    /// holds for one of them holds for every other square on the row, so
+    /// the strip's drain-the-crossings loop walked the drag all the way to
+    /// slot 0 in a single tick. A wrapping band is two axes, and two axes
+    /// want a hit test rather than a crossing.
+    ///
+    /// Nearest CENTRE rather than strict containment, so the gutters and
+    /// the ragged end of a partial row belong to the square beside them
+    /// instead of answering "nowhere". It carries its own hysteresis for
+    /// free: the answer only changes when the pointer passes the midpoint
+    /// between two squares, which is half a pitch -- far more than the
+    /// 8px the crossing engine spends, and it needs no state to hold.
+    ///
+    /// <paramref name="slotCount"/> is what the caller is asking ABOUT, and
+    /// the two callers differ: a reorder among the pins passes the pin
+    /// count, and a drop from outside the band passes one more, because the
+    /// slot one past the end is a real place for a new pin to land and is
+    /// the slot the drop preview draws.
+    /// </summary>
+    public static int NearestSlot(double x, double y, int columns, int slotCount)
+    {
+        if (columns < 1)
+            throw new ArgumentOutOfRangeException(
+                nameof(columns), columns, "A band has at least one column.");
+        if (slotCount < 1)
+            throw new ArgumentOutOfRangeException(
+                nameof(slotCount), slotCount,
+                "A band with no slots has no slot to name; the caller decides what to do "
+                + "with an empty band before asking.");
+
+        var best = 0;
+        var bestDistance = double.PositiveInfinity;
+        for (int i = 0; i < slotCount; i++)
+        {
+            var (left, top) = OriginOf(i, columns);
+            var dx = x - (left + ChipSize / 2);
+            var dy = y - (top + ChipSize / 2);
+            var distance = dx * dx + dy * dy;
+            // Strictly nearer, so a tie goes to the LOWER slot. Ties are
+            // reachable -- a pointer exactly between two squares is one
+            // pixel of travel, and a rule that picked the higher slot there
+            // would make the same gesture land differently depending on
+            // which way the pointer happened to arrive.
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = i;
+            }
+        }
+        return best;
+    }
 }
