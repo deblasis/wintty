@@ -176,8 +176,19 @@ run-win-release: build-dll-release build-win-release
 # stalling a signoff. Added after a proven FakeTransport pipe deadlock hung
 # the whole Ghostty.Tests host at zero CPU; the pipe-buffer fix removed that
 # hang, and blame-hang turns any future one into evidence.
+#
+# The APP is built first, and that is not redundant. Neither test project
+# references Ghostty.csproj -- that is a deliberate boundary, and it is why
+# ShippingBuildGateTests cannot open Wintty.dll -- so `dotnet test` alone never
+# compiles the shell. A change that breaks only the app therefore left this leg
+# green, which is not a theory: #921 merged a file that did not compile, with a
+# signoff PASS recorded against it, because the ladder's only Windows leg had no
+# reason to build the project the mistake was in. The whole solution is built
+# rather than the one project, so a new project cannot join the tree and be
+# missed the same way.
 [windows]
 test-win:
+    dotnet build windows/Ghostty.sln /p:Platform=x64
     dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
     dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
 

@@ -1585,7 +1585,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// The element one horizontal slot renders as, or null while the strip
     /// has not built it. A chip counts: it is the folded run's only slot,
     /// so its own ends are the run's ends.
-    /// </summary>    private FrameworkElement? SlotElement(TabStripProjection.HorizontalRow row)
+    /// </summary>
+    private FrameworkElement? SlotElement(TabStripProjection.HorizontalRow row)
         => row switch
         {
             TabStripProjection.HorizontalRow.Chip { Group: { } group }
