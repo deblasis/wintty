@@ -241,33 +241,43 @@ public sealed partial class MainWindow : Window
     internal bool TestSeamSwitcherOpen => TabSwitcherPopupHost.IsOpen;
 
     /// <summary>
-    /// The first switcher tile's pane-preview rect in screen pixels, or null
-    /// when the cycle popup is not up, when the preview has no XamlRoot, or
-    /// when the client-to-screen conversion failed -- the last of which is a
-    /// harness miss and not a measurement, which is why it is a null here and
-    /// not a rect. A pixel oracle cannot locate this
-    /// surface the way it locates the tile's title: the preview body is a
-    /// bare Canvas, which gets no automation peer and so never appears in
-    /// the UIA tree. Screen pixels because that is the space a window
-    /// capture is indexed in.
+    /// Every slot the cycle popup is showing, with the rects a pixel oracle
+    /// has to point at: the card, the group field's header band, and the
+    /// pane preview. None of the three is reachable over UIA -- they are
+    /// bare panels and get no automation peer -- and the popup dismisses
+    /// itself on a timer, so the geometry is handed over rather than hunted
+    /// for. Written straight into the response, so what a driver reads is
+    /// one reading of the tree rather than two.
+    ///
+    /// A rect comes back null when the element has no XamlRoot or when the
+    /// client-to-screen conversion failed. Both are harness misses rather
+    /// than measurements, which is why they are a null here and not a rect a
+    /// driver would sample.
     /// </summary>
-    internal (int X, int Y, int W, int H)? TestSeamSwitcherPreviewRect()
-    {
-        if (!TabSwitcherPopupHost.IsOpen) return null;
-        if (TabSwitcherPopupUI.TestSeamFirstPreviewBody is not { } body) return null;
-        if (body.XamlRoot is not { } root) return null;
+    internal void TestSeamWriteSwitcherCells(System.Text.Json.Utf8JsonWriter json)
+        => TabSwitcherPopupUI.TestSeamWriteCells(
+            json, element => (object?)TestSeamScreenRect(element));
 
-        // DIP -> physical pixels via RasterizationScale, then client ->
-        // screen: the same two hops SystemMenuPopup makes to place a menu.
+    /// <summary>
+    /// One arranged element's rect in screen pixels: DIP -> physical pixels
+    /// via RasterizationScale, then client -> screen, the same two hops
+    /// SystemMenuPopup makes to place a menu. Screen pixels because that is
+    /// the space a window capture is indexed in. Null when the element has
+    /// no XamlRoot -- an element that never arranged has no rect, and a
+    /// stale offset is worse than no answer.
+    /// </summary>
+    private (int X, int Y, int W, int H)? TestSeamScreenRect(FrameworkElement element)
+    {
+        if (element.XamlRoot is not { } root) return null;
         var scale = root.RasterizationScale;
-        var topLeft = body.TransformToVisual(null)
+        var topLeft = element.TransformToVisual(null)
             .TransformPoint(new Windows.Foundation.Point(0, 0));
         var origin = new System.Drawing.Point(
             (int)(topLeft.X * scale), (int)(topLeft.Y * scale));
         if (!PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref origin))
             return null;
         return (origin.X, origin.Y,
-            (int)(body.ActualWidth * scale), (int)(body.ActualHeight * scale));
+            (int)(element.ActualWidth * scale), (int)(element.ActualHeight * scale));
     }
 
     /// <summary>
@@ -2462,6 +2472,15 @@ public sealed partial class MainWindow : Window
             TabSwitcherPopupHost.IsOpen = false;
         };
 
+        // On Closed rather than beside the IsOpen = false above: the timer is
+        // one way the popup goes down and not the only one, and what the card
+        // is holding onto -- every TabModel it drew, every pane preview's
+        // visual tree, and a highlight clock that may still be running --
+        // should be dropped however it went down. Handing it back at the top
+        // of the next Show would keep a closed tab's preview alive for as
+        // long as the window lives.
+        TabSwitcherPopupHost.Closed += (_, _) => TabSwitcherPopupUI.Dismissed();
+
         _router.MruCycleRequested += (_, forward) => CycleTab(forward);
         _router.ShowTabOverviewRequested += (_, _) => ShowTabOverview();
 
@@ -2520,7 +2539,26 @@ public sealed partial class MainWindow : Window
         FocusActiveLeaf();
 
         SizeTabSwitcherPopup();
-        TabSwitcherPopupUI.Show(_tabManager, _tabManager.ActiveTab, _configService.FontFamily);
+        // Three facts only the window holds. The motion gate is the strips':
+        // asked at the press rather than cached, because UISettings can
+        // throw in packaged contexts and the answer can change under the
+        // user mid-session. High Contrast is passed BESIDE it and not
+        // through it: the gate composes animations-off WITH High Contrast,
+        // which answers "may this spring" and not "what may this be made
+        // of", and the join ring passes the two separately one file along
+        // for exactly this reason. And `fresh` says whether this press
+        // OPENED the popup or landed on one already up -- the entrance must
+        // not replay under a fast cycle, and nothing inside the popup can
+        // tell the two apart. The ground the group wash composites against
+        // is the popup's own card, not the window's backdrop; see the Show
+        // doc.
+        TabSwitcherPopupUI.Show(
+            _tabManager,
+            _tabManager.ActiveTab,
+            _configService.FontFamily,
+            TabStripMotion.Enabled(SystemAnimationsEnabled(), HighContrastChromeActive),
+            HighContrastChromeActive,
+            fresh: !TabSwitcherPopupHost.IsOpen);
         TabSwitcherPopupHost.IsOpen = true;
         _cyclePopupTimer?.Stop();
         _cyclePopupTimer?.Start();

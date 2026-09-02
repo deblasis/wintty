@@ -174,6 +174,21 @@ public class TabGroupColorTests
             () => TabColorPalette.EffectiveBackgroundRgb(TabColor.None, selected: false, 0x1E1E1E));
         Assert.Throws<ArgumentOutOfRangeException>(
             () => TabColorPalette.ForegroundRgb(TabColor.None, selected: false, 0x1E1E1E));
+        // The field helpers reach the palette through the same private
+        // composite the tab tint does, and they are listed here for a reason
+        // that is not symmetry. That composite was introduced in the same
+        // change that added them, and its first version indexed the
+        // dictionary -- which compiles, and passes every value test in this
+        // file, because a declared colour never misses. Nothing but this
+        // named the difference, so the field path would have carried the bare
+        // dictionary miss back onto the paint path for the whole family while
+        // the suite stayed green.
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabColorPalette.FieldBackgroundRgb(TabColor.None, 0x1E1E1E));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabColorPalette.FieldForegroundRgb(TabColor.None, 0x1E1E1E));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TabColorPalette.FieldBackgroundRgb((TabColor)42, 0x1E1E1E));
 
         var thrown = Assert.Throws<ArgumentOutOfRangeException>(
             () => TabColorPalette.Border(TabColor.None));

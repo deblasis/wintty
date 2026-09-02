@@ -6,12 +6,13 @@ namespace Ghostty.Tests.Wiring;
 
 /// <summary>
 /// The Ctrl+Tab switcher's chip wiring: the popup reads the strip
-/// projection's rows, a collapsed group renders as ONE chip row carrying
+/// projection's rows, a collapsed group renders as ONE chip cell carrying
 /// the strip chip's four-part anatomy, and a chip activation expands
 /// through the same command door the strip's own chip selection uses.
 /// The shell cannot load into this test host, so these parse it; the
 /// projection's row semantics are tested outright in
-/// TabStripProjectionTests.
+/// TabStripProjectionTests, and the cell plan those rows are lowered into
+/// in TabSwitcherFieldTests.
 /// </summary>
 public sealed class TabSwitcherChipWiringTests
 {
@@ -34,21 +35,25 @@ public sealed class TabSwitcherChipWiringTests
             show.Calls("TabStripProjection.HorizontalRows").Count == 1,
             "Show must read the projection once; a second walk is a parallel reading.");
 
-        // One case per row kind, each landing on its own builder: the chip
-        // row builds no pane preview, because the members it stands for
-        // were suppressed by the projection -- a preview here would be a
-        // second decision about what a collapsed run shows.
-        var chip = popup.Case("Show", "HorizontalRow.Chip");
-        var item = popup.Case("Show", "HorizontalRow.Item");
-        Assert.True(chip.Calls("BuildGroupChip").Count == 1,
-            "the chip case must build the chip card.");
-        Assert.Empty(chip.Calls("BuildTabTile"));
-        Assert.True(item.Calls("BuildTabTile").Count == 1,
-            "the item case must build the tab tile.");
+        // And it lowers them through the field plan rather than rendering
+        // rows directly: the plan is where "which cells are one group" is
+        // decided, and a popup that decided it inline would be a second
+        // answer to a question the strips already answer.
+        Assert.True(
+            show.Calls("TabSwitcherField.Plan").Count == 1,
+            "Show must lower the rows through the field plan exactly once.");
 
-        // The preview belongs to the tile builder alone: a pane layout on a
-        // chip row would be a second decision about what a collapsed run
-        // shows, and the projection already made it.
+        // One builder per cell kind, chosen by whether the cell carries a
+        // tab: the chip cell builds no pane preview, because the members it
+        // stands for were suppressed by the projection -- a preview here
+        // would be a second decision about what a collapsed run shows.
+        var slot = popup.Method("BuildSlot");
+        Assert.True(slot.Calls("BuildTabTile").Count == 1,
+            "the tab branch must build the tile.");
+        Assert.True(slot.Calls("BuildGroupChip").Count == 1,
+            "the tabless branch must build the chip card.");
+
+        // The preview belongs to the tile builder alone.
         var tile = popup.Method("BuildTabTile");
         Assert.True(tile.Calls("renderer.BuildMiniLayout").Count == 1,
             "the tab tile's preview is the pane layout.");
@@ -57,7 +62,7 @@ public sealed class TabSwitcherChipWiringTests
     }
 
     [Fact]
-    public void A_chip_row_carries_the_strips_chip_anatomy()
+    public void A_chip_cell_carries_the_strips_chip_anatomy()
     {
         var build = ShellSource.Load(PopupSource).Method("BuildGroupChip");
 
@@ -93,18 +98,32 @@ public sealed class TabSwitcherChipWiringTests
         Assert.Contains("group.Title", textSets);
         Assert.Contains("manager.MembersOf(group).Count.ToString()", textSets);
 
-        // The card takes the tile's outer width so both row kinds share
-        // the wrap grid's column math, tinted like the popup's colored
-        // tiles: translucent preset wash over a preset border ring.
+        // The card takes the tile's card width so both cell kinds share the
+        // wrap grid's column math, tinted like the popup's colored tiles:
+        // translucent preset wash over a preset border ring.
         var widths = build.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Where(a => a.Left.ToString() == "Width")
             .Select(a => a.Right.ToString())
             .ToList();
-        Assert.Contains("CellOuterWidth", widths);
+        Assert.Contains("CardWidth", widths);
         Assert.Contains("10", widths);
         Assert.Contains(build.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             c => c.CalleeText() == "TabColorPalette.Background");
-        Assert.Equal(2, build.Calls("TabColorPalette.Border").Count); // dot + card ring
+
+        // The ring takes the raw preset -- it sits on the popup's card,
+        // outside the chip's own wash. The DOT does not: it sits on that
+        // wash, which is this same preset, and a Yellow dot on a Yellow chip
+        // is 1.3:1 on the light theme. So one raw Border call, and the dot
+        // goes through the strips' visibility rule against the composite it
+        // is actually painted on.
+        Assert.Equal(1, build.Calls("TabColorPalette.Border").Count);
+        var lift = build.Call("TabGroupField.TerminalRgbOn");
+        Assert.Equal("chipGroundRgb", lift.Arg(0));
+        Assert.Equal("group.Color", lift.Arg(1));
+        var composite = build.Call("TabColorPalette.EffectiveBackgroundRgb");
+        Assert.Equal("group.Color", composite.Arg(0));
+        Assert.Equal("selected: false", composite.Arg(1));
+        Assert.Equal("groundRgb", composite.Arg(2));
     }
 
     [Fact]
@@ -117,9 +136,9 @@ public sealed class TabSwitcherChipWiringTests
         // group could be highlighted through. A chip-keyed map here is how
         // a ring ends up parked on a group nobody can activate.
         Assert.DoesNotContain(
-            popup.Root.DescendantNodes().OfType<GenericNameSyntax>().ToList(),
-            g => g.Identifier.ValueText == "Dictionary"
-                 && g.TypeArgumentList.ToString().Contains("TabGroup"));
+            popup.Root.DescendantNodes().OfType<GenericNameSyntax>()
+                .Where(g => g.Identifier.ValueText == "Dictionary").ToList(),
+            g => g.TypeArgumentList.ToString().Contains("TabGroup"));
 
         // Highlight walks the tab-keyed map alone.
         var highlight = popup.Method("Highlight");
