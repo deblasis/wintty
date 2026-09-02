@@ -231,6 +231,27 @@ per-monitor wallpaper comes back as its current image.
 `just backdrop-stage-selftest` proves the instrument against the screen. It
 launches no Wintty and is safe with one open.
 
+## The theme matrix
+
+`theme-matrix.ps1` (#937) is the one harness here that SETS machine state:
+it flips the desktop light/dark theme and the wallpaper while it runs, and
+puts everything back through the env guard's snapshot and read-back. That
+is why it is not in the suite and why `just theme-matrix` takes the incoda
+lane before it builds. `-NoFlip` keeps the read-only policy every other
+harness has.
+
+Every axis (theme, polarity, app, frame, layout, scene) takes one value, a
+comma list, or `all`; `just theme-matrix-plan` prints what a filter selects
+and what it would cost without touching anything. Themes go into the config
+as absolute paths under a staged copy of the catalogue, because a bare name
+that resolves to nothing falls back silently (#877); each process then
+proves the theme reached the glass by comparing the terminal ground it
+photographs with the theme file's own `background`, and a process whose
+ground is not the theme's is reported unmeasured rather than scored.
+
+The run leaves `result.json`, `shots/`, `scenes/` and `matrix.md`; the
+markdown is what gets pasted into #937, one comment per run.
+
 ## Process policy
 
 `lib/wintty-process.ps1` holds the rule:
