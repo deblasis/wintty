@@ -383,6 +383,19 @@ fuzz-list:
 fuzz-selftest:
     pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -SelfTest; exit ($LASTEXITCODE ?? 1)
 
+# Prove the backdrop stage (windows/scripts/lib/BackdropStage) is an
+# instrument: it comes up where it was told, never takes the foreground,
+# paints every catalogued scene so the screen reads it back, moves, survives
+# a refused op, and exits 0 on quit. Builds the stage on first use. Launches
+# no Wintty and sets no wallpaper, so it is safe with a Wintty open; it does
+# put a small topmost window on screen for about ten seconds.
+#
+# Exit codes: 0 sound, 1 not sound or could not start. No 2: this judges the
+# instrument, never the product.
+[windows]
+backdrop-stage-selftest:
+    pwsh -NoProfile -File windows/scripts/backdrop-stage-selftest.ps1; exit ($LASTEXITCODE ?? 1)
+
 # Manual recovery after a harness crashed with system state (High Contrast,
 # desktop colour, app theme) left behind: restores from the snapshot the
 # env-guard library takes, and throws if the read-back does not match it.
