@@ -506,6 +506,16 @@ def self_test():
         (["src/build/GitVersion.zig"], False, ["gates-selftest", "zig-fmt", "zig-tests"]),
         (["src/build/Config.zig"], False, ["gates-selftest", "zig-fmt", "zig-tests"]),
         (["windows/App.xaml.cs"], False, ["windows-tests"]),
+        # The release gate is narrow on purpose: ordinary shell source does
+        # not pull it in, but anything that can define a constant or set the
+        # gate properties does. The .csproj case is the one a plain suffix
+        # rule could not express -- the windows/ prefix matches first, and
+        # suffixes are only consulted when no prefix did.
+        (["windows/Ghostty/Ghostty.csproj"], False, ["release-gate", "windows-tests"]),
+        (["windows/Directory.Build.targets"], False, ["release-gate", "windows-tests"]),
+        (["windows/Ghostty.Tests/Demo/ShippingBuildGateTests.cs"], False,
+         ["release-gate", "windows-tests"]),
+        ([".agents/scripts/release_gate_check.ps1"], False, ["release-gate"]),
         (["src/a.zig", "windows/b.cs"], False, ["windows-tests", "zig-fmt", "zig-tests"]),
         (["brand/new/dir/thing.bin"], False, sorted(gate_scope.ALL_LEGS)),
         (["justfile"], list(gate_scope.ALL_LEGS), sorted(gate_scope.ALL_LEGS)),
