@@ -822,15 +822,60 @@ function Find-SwitcherHost {
     return $null
 }
 
-# The tile rect is located BEFORE the capture, not after: the popup
-# dismisses itself on a 1.2s timer, so a lookup that ran after the
-# screenshot would be asking about a window that had already gone.
-function Get-SwitcherTileRect {
+# Whether one rect sits inside another, and whether two overlap at all.
+# UIA hands back .X/.Y/.Width/.Height; the seam hands back .x/.y/.w/.h.
+function Test-RectInside($Inner, $Outer) {
+    return ($Inner.X -ge $Outer.x) -and ($Inner.Y -ge $Outer.y) -and
+           (($Inner.X + $Inner.Width) -le ($Outer.x + $Outer.w)) -and
+           (($Inner.Y + $Inner.Height) -le ($Outer.y + $Outer.h))
+}
+function Test-RectOverlaps($A, $B) {
+    return ($A.X -lt ($B.x + $B.w)) -and (($A.X + $A.Width) -gt $B.x) -and
+           ($A.Y -lt ($B.y + $B.h)) -and (($A.Y + $A.Height) -gt $B.y)
+}
+
+# The ACTIVE tile's TITLE, and it is located from the geometry the product
+# hands over rather than by "leftmost text under the popup".
+#
+# Get-TextRuns sorts by X, so the old $runs[0] was the leftmost text ANYWHERE
+# in the switcher host -- and a pane preview draws miniature terminal text of
+# its own, a couple of pixels from the title above it. Which of the two won
+# was decided by whichever inset happened to be larger, and a slot that grew
+# to make room for a group field's wash flipped it. The oracle then measured
+# a preview's mini-text and reported it as the tile title: #131620 on
+# #131620, an "illegible tile" that was a pane with nothing drawn in it, and
+# 3.58:1 on the light theme for text no user is trying to read.
+#
+# The seam reports the card and the preview per slot, so the title is
+# findable exactly: the text run inside the active card that is NOT inside
+# its preview. A run that matches nothing is a harness miss, not a
+# measurement.
+#
+# Located BEFORE the capture, not after: the popup dismisses itself on a 1.2s
+# timer, so a lookup that ran after the screenshot would be asking about a
+# window that had already gone. That does put one seam round trip in the gap
+# between the cycle and the shutter where there used to be only a UIA lookup
+# -- a slightly wider gap, paid for knowing WHICH surface was measured. The
+# up-check after the shutter is what catches a leg that loses the race, and
+# it still retries three times.
+function Get-SwitcherTileRect($Session) {
     $el = Find-SwitcherHost
     if ($null -eq $el) { return $null }
-    $runs = @(Get-TextRuns $el)
-    if ($runs.Count -eq 0) { return $null }
-    return $runs[0].Current.BoundingRectangle
+    $cells = @((Invoke-SeamCommand $Session @{ op = 'switcher-cells' }).cells)
+    $lit = @($cells | Where-Object { $_.active -and $_.kind -eq 'tile' })
+    if ($lit.Count -ne 1) {
+        throw ("HARVEST_MISS: the popup reports {0} active tiles, not one" -f $lit.Count)
+    }
+    if ($null -eq $lit[0].card) {
+        throw 'HARVEST_MISS: the seam could not place the active tile''s card on screen'
+    }
+    foreach ($run in (Get-TextRuns $el)) {
+        $r = $run.Current.BoundingRectangle
+        if (-not (Test-RectInside $r $lit[0].card)) { continue }
+        if ($null -ne $lit[0].preview -and (Test-RectOverlaps $r $lit[0].preview)) { continue }
+        return $r
+    }
+    return $null
 }
 
 function Measure-Switcher($Cap, [string]$Leg, $TileRect) {
@@ -850,20 +895,31 @@ function Measure-Switcher($Cap, [string]$Leg, $TileRect) {
 # down -- which arrives here as a throw, not as a false.
 #
 # ONLY that one refusal means "we were too slow". Invoke-SeamCommand throws for
-# a product exit and for a broken pipe as well, and the op has a second refusal
-# of its own for a rect it could not place on screen -- a coordinate failure in
-# the product, which is exactly the bug the seam splits its two refusals to keep
-# visible. Swallowing those as a lost race would file a real defect as a missed
-# photograph and retry it twice for good measure, so anything that is not the
-# popup's own absence is re-thrown to the leg's handler.
+# a product exit and for a broken pipe as well, and the op refuses per-rect for
+# a coordinate it could not place on screen -- a failure in the product, which
+# is exactly the bug the seam keeps visible. Swallowing those as a lost race
+# would file a real defect as a missed photograph and retry it twice for good
+# measure, so anything that is not the popup's own absence is re-thrown to the
+# leg's handler.
+#
+# The op NAME is the fragile part, and it has already moved once
+# (switcher-preview-rect -> switcher-cells). An unknown op refuses too, and a
+# refusal is a throw, so a stale name here would have reached the `throw` below
+# and failed the leg -- loudly, but wearing a coordinate failure's clothes. It
+# is matched explicitly instead, so the next rename says what it is.
 function Test-SwitcherUp($Session) {
     try {
-        $r = Invoke-SeamCommand $Session @{ op = 'switcher-preview-rect' }
+        $r = Invoke-SeamCommand $Session @{ op = 'switcher-cells' }
         return $null -ne $r
     } catch {
         # Matched on the seam's own sentence for a closed popup. Kept in step
-        # with TestSeam.cs's "switcher-preview-rect" arm.
+        # with TestSeam.cs's "switcher-cells" arm.
         if ("$_" -like '*the cycle popup is not up*') { return $false }
+        if ("$_" -like "*unknown op*") {
+            throw ("the seam does not know 'switcher-cells': the op was renamed " +
+                   "and this check has been asking a dead name, so every leg it " +
+                   "guarded has been unguarded. Original: $_")
+        }
         throw
     }
 }
@@ -885,7 +941,7 @@ function Test-SwitcherUp($Session) {
 function Measure-SwitcherLeg($Session, [string]$ShotName, [string]$Leg) {
     foreach ($attempt in 1, 2, 3) {
         [void](Invoke-SeamCommand $Session @{ op = 'cycle'; forward = $true })
-        $tileRect = Get-SwitcherTileRect
+        $tileRect = Get-SwitcherTileRect $Session
         # One capture per attempt, not one per leg. A retry that reused the
         # name overwrote the shot of the run that LOST the race -- the single
         # artefact that identified this bug in the first place, deleted by the
