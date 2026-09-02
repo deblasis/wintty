@@ -289,6 +289,43 @@ expect_fail "a reused deep-history subject is still refused" "f1: fork file" J s
 ( cd work && git checkout -q windows && git branch -q -D series-wip )
 # The guards below need a standing wip; rebuild one without the sneaky work.
 J sync
+J sync-publish
+
+say "test 11: a PR that lands unsquashed is folded in whole"
+# The flow assumes PRs squash-merge into windows. When one lands as a merge
+# commit instead, it sits on the same first-parent chain as the snapshots while
+# its own commits sit off that chain. Both halves of sync have to cope: the
+# snapshot walk must not mistake it for a snapshot, and the fold must reach the
+# content, which a first-parent walk cannot see.
+( cd up && echo lib11 >> lib.txt && $G add -A && $G commit -qm "u12: unsquashed era" )
+( cd work
+  git checkout -q windows
+  git reset -q --hard refs/remotes/origin/windows
+  git checkout -q -b feature/unsquashed
+  echo one > mc1.txt && $G add -A && $G commit -qm "m1: first commit of an unsquashed PR"
+  echo two > mc2.txt && $G add -A && $G commit -qm "m2: second commit of an unsquashed PR"
+  git checkout -q windows
+  $G merge -q --no-ff -m "Merge pull request #999 from fixture/unsquashed" feature/unsquashed
+  git push -q origin windows
+)
+MC=$(git -C work rev-parse refs/heads/windows)
+check_eq "the fixture PR really is an unsquashed merge" \
+  "$(git -C work rev-list --count --min-parents=2 "$MC~1..$MC")" "1"
+quiet "sync survives a PR merge on the first-parent chain" J sync
+check "the merged PR's first commit is folded in" git -C work cat-file -e 'series-wip:mc1.txt'
+check "the merged PR's second commit is folded in" git -C work cat-file -e 'series-wip:mc2.txt'
+check_eq "the PR merge itself is not replayed as a commit" \
+  "$(git -C work log --oneline refs/remotes/upstream/main..series-wip | grep -c 'Merge pull request' || true)" "0"
+quiet "sync-verify fast (unsquashed fold)" J sync-verify fast
+J sync-publish
+MU=$(git -C origin.git rev-parse refs/heads/windows)
+check_eq "the new snapshot carries the series tree" \
+  "$(git -C work rev-parse "$MU^{tree}")" "$(git -C work rev-parse 'series-wip^{tree}')"
+check "the unsquashed PR reached the published tree" \
+  git -C work cat-file -e "$MU:mc2.txt"
+# A second sync is where the old walk broke: it reads the snapshot past the PR
+# merge still sitting on the chain below it.
+quiet "the next sync still finds the snapshot" J sync
 
 say "guards"
 ( cd work && git checkout -q -b random "$M4" )
