@@ -235,10 +235,20 @@ launches no Wintty and is safe with one open.
 
 `theme-matrix.ps1` (#937) is the one harness here that SETS machine state:
 it flips the desktop light/dark theme and the wallpaper while it runs, and
-puts everything back through the env guard's snapshot and read-back. That
-is why it is not in the suite and why `just theme-matrix` takes the incoda
-lane before it builds. `-NoFlip` keeps the read-only policy every other
-harness has.
+puts everything back in its `finally`: the wallpaper through the API that
+applies one, the polarity through the broadcast, then the env guard's
+restore and read-back. A restore that fails is the run's exit code (1),
+whatever it measured. That is why it is not in the suite and why
+`just theme-matrix` takes the incoda lane before it builds. `-NoFlip` keeps
+the read-only policy every other harness has.
+
+After a hard kill (a `taskkill`, the lane's own timeout) the `finally`
+never ran, and the manual recovery is: end `BackdropStage.exe` if it is
+still up, `just env-restore` for the registry, then toggle the desktop
+light/dark setting once by hand and re-apply the wallpaper, because a
+registry restore alone repaints neither. The snapshot the run took is also
+kept as `env-before.json` in its output dir, since the well-known one is
+overwritten by whatever harness runs next.
 
 Every axis (theme, polarity, app, frame, layout, scene) takes one value, a
 comma list, or `all`; `just theme-matrix-plan` prints what a filter selects
