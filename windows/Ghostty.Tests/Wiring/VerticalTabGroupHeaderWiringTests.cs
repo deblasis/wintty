@@ -290,18 +290,20 @@ public class VerticalTabGroupHeaderWiringTests
     }
 
     /// <summary>
-    /// One threshold degrades the whole strip. The pinned shelf, the body
-    /// rows and the group headers each drop their titles at the same pane
-    /// width, and the width change is the pass that moves all three: a
-    /// header left on the wide anatomy in the 48px rail spills its chevron
-    /// past the pane edge, which is what vtab-strip-geometry.ps1 measures.
+    /// One threshold degrades every row that carries a title. The body
+    /// rows and the group headers drop theirs at the same pane width, and
+    /// the width change is the pass that moves both: a header left on the
+    /// wide anatomy in the 48px rail spills its chevron past the pane
+    /// edge, which is what vtab-strip-geometry.ps1 measures. (The pinned
+    /// band answers to no width -- an icon square is an icon square in
+    /// either pane -- so it is not on this list.)
     /// </summary>
     [Fact]
     public void EveryRowKind_DegradesAtTheSameWidth()
     {
         var strip = Strip();
         Assert.Equal(
-            "_paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold",
+            "_paneWidth >= TitlePaneWidthThreshold",
             Property(strip, "ShowsTitles").ExpressionBody!.Expression.ToString());
 
         // The right inset only past the threshold: MUXC already arranges a

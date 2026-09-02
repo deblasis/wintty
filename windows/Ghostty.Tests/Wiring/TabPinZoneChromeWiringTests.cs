@@ -5,10 +5,10 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// The horizontal pin zone's chrome: the glyph rides the header's
-/// existing chrome build, and the boundary stroke has one writer, one
-/// predicate, and the vertical stroke's brighten-only-while-live polarity
-/// (4b-1). The vertical stroke's drag-machine facts live in
+/// The horizontal pin zone's chrome: a pinned tab is an icon square, and
+/// the zone's edge is that change of shape rather than a stroke. The
+/// anatomy has one writer, one predicate, and one pass every drag exit
+/// runs. The vertical band's drag-machine facts live in
 /// TabPinZoneWiringTests; this is the horizontal edition's paint, which
 /// the shell cannot load into this test host to check -- so these parse
 /// it.
@@ -17,159 +17,169 @@ public sealed class TabPinZoneChromeWiringTests
 {
     private const string TabHostSource = "Tabs.TabHost.xaml.cs";
 
+    /// <summary>
+    /// The pinned tab collapses to an icon square, and the square is the
+    /// zone mark. The pushpin glyph that used to carry that job is gone:
+    /// it existed because equal-width kept a pinned tab full-size, so
+    /// nothing about the slot said "pinned" and an inline marker had to.
+    /// A glyph reintroduced beside the icon it captions is the double
+    /// statement the shape replaced -- so its absence is pinned here, not
+    /// merely left to taste.
+    /// </summary>
     [Fact]
-    public void The_pin_glyph_rides_the_chrome_build_not_a_parallel_path()
+    public void A_pinned_tab_is_an_icon_square_and_carries_no_pushpin()
     {
         var tabHost = ShellSource.Load(TabHostSource);
-        var addItem = tabHost.Method("AddItem");
+        var source = tabHost.Root.ToString();
 
-        // Built in the header's build loop, exactly once: a glyph minted
-        // by a second path (a refresh method, a template) drifts from the
-        // chrome the rest of the header rides. The rail's twin lesson.
-        var pinIcons = addItem.DescendantNodes()
-            .OfType<ObjectCreationExpressionSyntax>()
-            .Where(o => o.Type.ToString().Contains("FontIcon"))
-            .Where(o => o.Initializer.ToString().Contains("\\uE718"))
-            .ToList();
-        Assert.True(
-            pinIcons.Count == 1,
-            $"AddItem builds the pin glyph exactly once; found {pinIcons.Count}.");
+        // The pushpin is gone from the class, not just from the build.
+        Assert.DoesNotContain("pinGlyph", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("E718", source, StringComparison.Ordinal);
 
-        // Leading slot of the icon row: the pin is read before the
-        // profile icon and the title, which is what makes it a zone mark
-        // rather than an attachment.
-        var adds = addItem.Calls("iconRow.Children.Add");
-        var glyphAdd = adds.FirstOrDefault(a => a.Arg(0) == "pinGlyph");
-        var iconAdd = adds.FirstOrDefault(a => a.Arg(0) == "iconHost");
-        Assert.True(
-            glyphAdd is not null && iconAdd is not null
-                && glyphAdd.SpanStart < iconAdd.SpanStart,
-            "the pin glyph takes the icon row's leading slot.");
+        // Both bounds, not one: TabView's Equal mode writes Width on every
+        // item it holds, and only the Min/Max clamp survives that pass.
+        // Setting one alone leaves the strip's own sizing free to win.
+        var anatomy = tabHost.Method("ApplyPinnedTabAnatomy");
+        var min = anatomy.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "item.MinWidth");
+        var max = anatomy.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "item.MaxWidth");
+        Assert.Equal("pinned ? PinnedTabWidth : 0", min.Right.ToString());
+        Assert.Equal(
+            "pinned ? PinnedTabWidth : double.PositiveInfinity", max.Right.ToString());
 
-        // The IsPinned INPC branch is the only thing that shows it:
-        // SetPinned can skip TabMoved (the boundary tab pinning up, the
-        // last pinned tab unpinning both relocate without one), so the
-        // flag change itself must carry the toggle.
-        var toggle = addItem.DescendantNodes().OfType<IfStatementSyntax>()
-            .FirstOrDefault(i => i.Condition.ToString().Contains("IsPinned")
-                && i.Statement.ToString().Contains("pinGlyph.Visibility"));
-        Assert.True(
-            toggle is not null,
-            "the IsPinned INPC branch must toggle the glyph.");
+        // The same square the vertical band spends, from the same number:
+        // the two layouts collapse a pin to one size, or the grammar is
+        // two grammars that happen to rhyme.
+        var width = tabHost.Root.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "PinnedTabWidth");
+        Assert.Contains(
+            "TabPinBand.ChipSize", width.Initializer!.Value.ToString(),
+            StringComparison.Ordinal);
 
-        // And nothing else in the shell writes it: one writer, or two
-        // pin states that can disagree.
-        var stray = tabHost.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "pinGlyph.Visibility"
-                && !addItem.FullSpan.Contains(a.Span))
-            .ToList();
-        Assert.Empty(stray);
+        // The title the square gives up rides the tooltip, and only while
+        // pinned: an unpinned tab wears its title and is owed nothing.
+        var tip = anatomy.Call("ToolTipService.SetToolTip");
+        Assert.Equal("item", tip.Arg(0));
+        Assert.Equal("pinned ? tab.EffectiveTitle : null", tip.Arg(1));
+
+        // No close button in a 48px slot. Closing a pinned tab stays a
+        // decision the context menu and the keybind take.
+        var closable = anatomy.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "item.IsClosable");
+        Assert.Equal("!pinned", closable.Right.ToString());
     }
 
+    /// <summary>
+    /// One writer owns the anatomy, and every drag exit runs it. A tab's
+    /// shape follows its OWN pin flag rather than the prefix length: a
+    /// drag mid-flight has the strip showing TabView's preview order, and
+    /// a shape derived from "which slot is last in the prefix" would
+    /// collapse whichever tab the preview currently has there.
+    /// </summary>
     [Fact]
-    public void The_boundary_stroke_cleans_up_on_every_drag_exit()
+    public void The_pinned_anatomy_has_one_writer_and_every_drag_exit_runs_it()
     {
         var tabHost = ShellSource.Load(TabHostSource);
-        var dragEnd = tabHost.Method("FinishHorizontalDrag");
+        var anatomy = tabHost.Method("ApplyPinnedTabAnatomy");
 
-        // The release is the one pass every completed drag runs, so it is
-        // where the dim has to live -- a cleanup on any narrower event is
-        // a stroke a cancelled or off-strip release can outlive. The leak
-        // census is the shape: ApplyPinZoneChrome is the border's ONLY
-        // writer in the shell, so any assignment outside it is a stroke
-        // this pass does not own.
-        var apply = tabHost.Method("ApplyPinZoneChrome");
-        Assert.True(
-            dragEnd.Calls("ApplyPinZoneChrome").Count == 1,
-            "FinishHorizontalDrag must run the boundary pass: the dim is " +
-            "the cleanup, and the release is the pass every drag exits by.");
-        // The other exit: CancelHorizontalDrag runs the same pass for a
-        // canceled, captured-away, or stale session, so those ends dim
-        // the stroke too.
+        // The predicate: the tab's own flag, and no read of the strip's
+        // inventory or of the prefix length.
+        var pinned = anatomy.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "pinned");
+        Assert.Equal("tab.IsPinned", pinned.Initializer!.Value.ToString());
+        Assert.DoesNotContain("PinCount", anatomy.Body!.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("TabItems", anatomy.Body!.ToString(), StringComparison.Ordinal);
+
+        // The leak census: the width clamp has exactly one writer, so a
+        // tab stuck in the wrong shape has one place to have come from.
         var stray = tabHost.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => (a.Left.ToString().EndsWith(".BorderBrush")
-                    || a.Left.ToString().EndsWith(".BorderThickness"))
-                && !apply.FullSpan.Contains(a.Span))
+            .Where(a => (a.Left.ToString().EndsWith(".MinWidth", StringComparison.Ordinal)
+                    || a.Left.ToString().EndsWith(".MaxWidth", StringComparison.Ordinal)
+                    || a.Left.ToString().EndsWith(".IsClosable", StringComparison.Ordinal))
+                && !anatomy.FullSpan.Contains(a.Span))
             .ToList();
         Assert.Empty(stray);
 
-        // After the flag drops, not before: the pass reads the flag, so a
-        // cleanup ordered ahead of the drop would repaint the bright
-        // stroke it exists to remove.
+        // The sweep pass fans the writer over every item, and both drag
+        // exits run it: a gesture can pin or unpin mid-flight, and a
+        // crossing the manager refused raised no event at all.
+        Assert.Single(tabHost.Method("ApplyPinZoneChrome").Calls("ApplyPinnedTabAnatomy"));
+        Assert.Single(tabHost.Method("FinishHorizontalDrag").Calls("ApplyPinZoneChrome"));
+        Assert.Single(tabHost.Method("CancelHorizontalDrag").Calls("ApplyPinZoneChrome"));
+
+        // After the flag drops, not before -- the ordering the stroke's
+        // brighten/dim needed is still the ordering the sweep wants: a
+        // pass ordered ahead of the drop reads a drag that is over.
+        var dragEnd = tabHost.Method("FinishHorizontalDrag");
         var flagDrop = dragEnd.AssignsTo("_stripDragActive")
             .First(a => a.Right.ToString() == "false");
-        var cleanup = dragEnd.Call("ApplyPinZoneChrome");
         Assert.True(
-            flagDrop.SpanStart < cleanup.SpanStart,
-            "the boundary cleanup must follow the drag flag dropping.");
+            flagDrop.SpanStart < dragEnd.Call("ApplyPinZoneChrome").SpanStart,
+            "the anatomy sweep must follow the drag flag dropping.");
+
+        // The build takes the shape too, and only after the registries:
+        // the pass reads the icon row back out of _iconRowByModel, so a
+        // tab that arrives already pinned has to be findable first.
+        //
+        // THREE calls in AddItem, and the count is pinned because each is a
+        // different reason: the INPC lambda's title branch, the INPC
+        // lambda's IsPinned branch -- both declared early, inside a lambda
+        // that runs much later -- and the build's own, which is the one
+        // that has to follow the registries and so is the last of the
+        // three. The title branch is there because a pinned tab's title
+        // TextBlock is collapsed: the tooltip is the only visible carrier
+        // of the title, and this pass is its only writer.
+        var addItem = tabHost.Method("AddItem");
+        var takes = addItem.Calls("ApplyPinnedTabAnatomy");
+        Assert.Equal(3, takes.Count);
+        var register = addItem.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "_iconRowByModel[tab]");
+        Assert.True(
+            register.SpanStart < takes.Last().SpanStart,
+            "the anatomy pass must follow the icon row being registered.");
+
+        // And the flag change carries it: SetPinned relocates to the zone
+        // boundary and skips TabMoved when from == to, so a
+        // relocation-path refresh alone leaves a tab in the wrong shape.
+        Assert.Contains(
+            addItem.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Condition.ToString().Contains("IsPinned")
+                && i.Statement.ToString().Contains("ApplyPinnedTabAnatomy"));
+
+        // ...and so does the TITLE change, which is the branch a count
+        // alone would not pin to any particular place. On a pinned tab the
+        // header TextBlock this branch writes is collapsed, so without the
+        // anatomy pass the square's tooltip kept saying whatever the tab
+        // was called when it was pinned.
+        Assert.Contains(
+            addItem.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Condition.ToString().Contains("EffectiveTitle")
+                && i.Statement.ToString().Contains("ApplyPinnedTabAnatomy"));
     }
 
+    /// <summary>
+    /// Nothing draws a rule between the zones. The horizontal stroke went
+    /// with the vertical one for the same reason: the shapes divide, and
+    /// a line beside a structural division states it twice.
+    /// </summary>
     [Fact]
-    public void The_stroke_brightens_only_while_a_drag_is_live()
+    public void No_stroke_is_drawn_between_the_zones()
     {
         var tabHost = ShellSource.Load(TabHostSource);
-        var brush = tabHost.Method("PinBoundaryBrush");
 
-        // Polarity, by arm and not by substring: bright 0xE6 under the
-        // live flag, dim 0x59 otherwise. A hover, an armed-but-undragged
-        // session, and an idle strip all read the dim branch -- the exact
-        // match on the condition is what a `!` or a `!=` fails.
-        var branch = brush.DescendantNodes().OfType<ConditionalExpressionSyntax>()
-            .ToList();
-        Assert.True(
-            branch.Count == 1,
-            $"PinBoundaryBrush branches once on drag liveness; found {branch.Count}.");
-        Assert.Equal("_stripDragActive", branch[0].Condition.ToString());
-        Assert.Contains("0xE6", branch[0].WhenTrue.ToString());
-        Assert.Contains("0x59", branch[0].WhenFalse.ToString());
-
-        // And the brighten pass itself reads the flag already live: the
-        // raise precedes the pass in the engine's begin pass, so the
-        // first boundary brush of a drag is the bright one, not a frame
-        // late.
-        var dragStart = tabHost.Method("BeginHorizontalDragVisual");
-        var flagRaise = dragStart.AssignsTo("_stripDragActive")
-            .First(a => a.Right.ToString() == "true");
-        var brighten = dragStart.Call("ApplyPinZoneChrome");
-        Assert.True(
-            flagRaise.SpanStart < brighten.SpanStart,
-            "the drag begin must raise the flag before its boundary pass.");
-    }
-
-    [Fact]
-    public void The_stroke_marks_the_last_pinned_tab_and_nothing_else()
-    {
-        var tabHost = ShellSource.Load(TabHostSource);
-        var apply = tabHost.Method("ApplyPinZoneChrome");
-
-        // The predicate is the manager's prefix length minus one: the zone
-        // edge is manager truth, and during a drag the strip's order is
-        // TabView's preview -- no TabItems read here, ever.
-        var edge = apply.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
-            .FirstOrDefault(e => e.Expression.ToString() == "_manager.Tabs");
-        Assert.True(
-            edge is not null,
-            "the zone edge reads the manager's tab list.");
-        Assert.Contains("PinCount - 1", edge.ArgumentList.ToString());
-        var guard = apply.DescendantNodes().OfType<ConditionalExpressionSyntax>()
-            .ToList();
-        Assert.True(
-            guard.Count == 1 && guard[0].WhenFalse.ToString() == "null",
-            "an empty pin zone draws nothing: the edge is null, not tab 0.");
-        Assert.DoesNotContain("TabItems", apply.Body!.ToString());
-
-        // And the neighbour carries nothing: every non-boundary item gets
-        // the default thickness and no brush, which is what keeps the
-        // stroke an edge instead of a fence around the zone.
-        var fork = apply.DescendantNodes().OfType<IfStatementSyntax>()
-            .FirstOrDefault(i => i.Condition.ToString()
-                .Contains("ReferenceEquals(model, boundary)"));
-        Assert.True(
-            fork is not null,
-            "the stroke forks on the boundary identity.");
-        Assert.Contains(
-            "BorderThickness = default", fork.Else?.Statement.ToString() ?? string.Empty);
-        Assert.Contains(
-            "BorderBrush = null", fork.Else?.Statement.ToString() ?? string.Empty);
+        // Parsed, not scanned. `Root.ToString()` is the file's TEXT, comments
+        // included, and the join ring's own comment explains why it does not
+        // borrow this brush -- so the guard went red on prose describing the
+        // very absence it was asserting. An identifier sweep sees declarations
+        // and references and nothing else; trivia is not a use.
+        Assert.Empty(tabHost.Root.DescendantNodes()
+            .Where(n => n is IdentifierNameSyntax { Identifier.ValueText: "PinBoundaryBrush" }
+                     or MethodDeclarationSyntax { Identifier.ValueText: "PinBoundaryBrush" }));
+        // The border was the stroke's only expression on a TabViewItem;
+        // nothing in the strip writes one now.
+        Assert.Empty(tabHost.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString().EndsWith(".BorderBrush", StringComparison.Ordinal)
+                || a.Left.ToString().EndsWith(".BorderThickness", StringComparison.Ordinal)));
     }
 }

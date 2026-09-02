@@ -3346,6 +3346,14 @@ public sealed partial class MainWindow : Window
         // applied, not the host's Visibility.
         if (!_verticalTabsVisible
             || _stripForciblyHidden
+            // A pinned square does not reach the pane. The cover is placed
+            // from the row's RIGHT EDGE on the premise that the edge is the
+            // border being hidden; a 40px square's right edge is in the
+            // middle of the band, so the cover became a bar of terminal
+            // colour drawn across the band's gutter while the border beside
+            // the square stayed uncovered. There is no seam to hide, because
+            // a square meets nothing.
+            || !_verticalTabHost.ActiveRowMeetsThePane
             || row.Visibility != Visibility.Visible
             || row.ActualWidth <= 0
             || row.ActualHeight <= 2
