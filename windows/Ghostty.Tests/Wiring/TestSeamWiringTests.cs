@@ -600,4 +600,84 @@ public class TestSeamWiringTests
         var active = state.Calls("manager.IndexOf").Single();
         Assert.Equal("manager.ActiveTab", active.ArgumentList.Arguments[0].ToString());
     }
+
+    /// <summary>
+    /// Every failure the seam reports names the exception's TYPE, and the
+    /// op that actually failed.
+    ///
+    /// Reporting <c>ex.Message</c> alone was the whole of #942's diagnostic
+    /// half: several types that reach these handlers carry an empty Message,
+    /// so an acceptance run's first op answered
+    /// <c>{"ok":false,"op":"ui","error":""}</c> -- something threw, and the
+    /// seam would not say what. The op field lied as well: both failures in
+    /// the UI-thread marshal reported the literal "ui" rather than the
+    /// command that failed, so a driver reading the response alone could not
+    /// even name the op.
+    ///
+    /// Counts are pinned on both sweeps. A guard that only checks the sites
+    /// it knows about reports green the day a third reporting site is added
+    /// with the old shape.
+    /// </summary>
+    [Fact]
+    public void EveryReportedFailure_NamesTheExceptionType_AndTheFailingOp()
+    {
+        var seam = ShellSource.Load("Testing.TestSeam.cs");
+
+        // Nothing hands Error a bare message. The parse arm's interpolated
+        // "request is not JSON: {ex.Message}" is deliberately still allowed:
+        // JsonException always carries one, and it arrives with its context.
+        // Matched as a tree, not as the text "ex.Message": a new site spelled
+        // `catch (COMException e) { Error(op, e.Message); }` is a different
+        // identifier and would walk straight through a substring rule.
+        Assert.DoesNotContain(
+            seam.Root.Calls("Error"),
+            c => c.ArgumentList.Arguments.Count > 1
+                 && c.ArgumentList.Arguments[1].Expression is MemberAccessExpressionSyntax m
+                 && m.Name.Identifier.ValueText == "Message");
+
+        // The two unfiltered general handlers -- the dispatch's and the
+        // marshal's -- are the reporting sites, and both describe.
+        var general = seam.Root.DescendantNodes().OfType<CatchClauseSyntax>()
+            .Where(c => c.Filter is null && c.Declaration?.Type.ToString() == "Exception")
+            .ToList();
+        Assert.Equal(2, general.Count);
+        // The RESPONSE must carry Describe's result. "Describe is called
+        // somewhere in the handler" is satisfied by
+        //     Debug.WriteLine(Describe(ex));
+        //     done.SetResult(Error(op, "command failed"));
+        // which restores #942's symptom exactly, so the argument is pinned.
+        foreach (var handler in general)
+        {
+            Assert.Equal("Describe(ex)", handler.Call("Error").Arg(1));
+        }
+
+        // Describe leads with the type, whatever the message turns out to
+        // be, and reaches for the frame that threw.
+        var describe = seam.Method("Describe");
+        // The type SEEDS the builder, so it is unconditional. Merely finding
+        // `ex.GetType().Name` somewhere in the method also passes for
+        //     if (!string.IsNullOrWhiteSpace(ex.Message)) text.Append(ex.GetType().Name)...
+        // which answers an empty-message exception with no type at all.
+        var seeded = Assert.Single(
+            describe.DescendantNodes().OfType<ObjectCreationExpressionSyntax>().ToList(),
+            o => o.Type.ToString() == "StringBuilder");
+        Assert.Equal("ex.GetType().Name", seeded.ArgumentList!.Arguments[0].ToString());
+
+        // And the frame is appended, not merely computed.
+        Assert.Single(describe.Calls("TopFrame"));
+        Assert.Contains(
+            describe.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.ArgumentList.Arguments.Count == 1
+                 && i.ArgumentList.Arguments[0].ToString() == "frame");
+
+        // The marshal reports under the caller's op, never a fixed literal.
+        var marshal = seam.Method("RunOnUiThreadAsync");
+        Assert.Contains(marshal.ParameterList.Parameters, p => p.Identifier.ValueText == "op");
+        var reports = marshal.Calls("Error");
+        Assert.Equal(2, reports.Count);
+        foreach (var report in reports) Assert.Equal("op", report.Arg(0));
+
+        // And the op it reports under is the one the request named.
+        Assert.Equal("opName", seam.Method("ExecuteAsync").Call("RunOnUiThreadAsync").Arg(1));
+    }
 }
