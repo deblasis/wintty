@@ -693,38 +693,36 @@ internal static class TestSeam
                 });
             }
 
-            case "switcher-preview-rect":
+            case "switcher-cells":
             {
-                // Where a pixel oracle should point at the pane preview the
-                // cycle popup is showing. It cannot ask UIA: the preview body
-                // is a bare Canvas and gets no automation peer, so the tile's
-                // title is the only thing in the tree. Read while the popup is
-                // up -- it dismisses itself on a 1.2s timer.
-                // Two reasons for null, and they get two REFUSALS rather than
-                // one message naming both, because they send an investigation
-                // in opposite directions: the popup was never up, or it was up
-                // and the client-to-screen conversion failed. Naming only the
-                // first sent a bisect after the popup lifetime for a coordinate
-                // failure -- and one message naming both is no better to a
-                // caller, which can only match on text. A harness racing the
-                // popup's 1.2s dismissal has to tell "I was too slow" from "the
-                // product cannot place its own rect", and retry only the first.
+                // The cycle popup's card, slot by slot: what each one
+                // renders, which group field it sits in and which end of
+                // that field it carries, whether it is the selection, and
+                // the rects to sample. A UIA client sees only the tile
+                // titles -- the field, the header band and the preview body
+                // are bare panels with no automation peer -- so an oracle
+                // for the group grammar or for "which tile is lit" has to
+                // come through here. Read while the popup is up: it
+                // dismisses itself on a 1.2s timer.
+                //
+                // ONE refusal, and it is the popup's absence. The predecessor
+                // op refused a second time when the client-to-screen
+                // conversion failed, because it had a single rect to report
+                // and no way to report half of it. This one has a rect per
+                // slot per surface, so a conversion that fails writes a null
+                // into that slot and the rest of the card still arrives: a
+                // harness reading a null there knows the popup was up and
+                // that one rect could not be placed, which is the same
+                // distinction the second refusal carried and is now carried
+                // per-rect instead of for the whole reply.
                 if (!window.TestSeamSwitcherOpen)
                     return Error(op, "no switcher: the cycle popup is not up");
-                if (window.TestSeamSwitcherPreviewRect() is not { } rect)
-                    return Error(op, "the cycle popup is up but its rect could "
-                        + "not be placed on screen");
                 return Json(json =>
                 {
                     json.WriteStartObject();
                     json.WriteBoolean("ok", true);
                     json.WriteString("op", op);
-                    json.WriteStartObject("rect");
-                    json.WriteNumber("x", rect.X);
-                    json.WriteNumber("y", rect.Y);
-                    json.WriteNumber("w", rect.W);
-                    json.WriteNumber("h", rect.H);
-                    json.WriteEndObject();
+                    window.TestSeamWriteSwitcherCells(json);
                     WriteState(json, window, manager);
                     json.WriteEndObject();
                 });

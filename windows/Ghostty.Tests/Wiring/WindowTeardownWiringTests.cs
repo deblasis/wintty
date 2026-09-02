@@ -105,6 +105,7 @@ public class WindowTeardownWiringTests
         ("CommandPalettePopup", "named element of MainWindow.xaml"),
         ("TabOverviewHost", "named element of MainWindow.xaml"),
         ("TabOverviewUI", "named element of MainWindow.xaml"),
+        ("TabSwitcherPopupHost", "named element of MainWindow.xaml"),
         ("_commandPaletteVm", "per-window view model, constructed and held only by this window"),
         ("_router", "per-window keybind router, constructed by this window"),
         // Judged against when the surfaces stop being routed to, not against

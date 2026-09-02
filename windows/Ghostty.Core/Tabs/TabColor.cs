@@ -183,6 +183,14 @@ internal static class TabColorPalette
     public static Color Border(TabColor color) => Preset(color);
 
     /// <summary>
+    /// A group FIELD's wash. Lighter than a tab's own tint because a field
+    /// is a GROUND: it sits behind whole tiles, several of which carry
+    /// preset tints of their own, and a field at the tab alpha turns the
+    /// run into one block of colour with the tiles lost inside it.
+    /// </summary>
+    public const byte FieldWashAlpha = 46;
+
+    /// <summary>
     /// sRGB backdrop after compositing a preset tint over the strip fill.
     /// Selected rows use the full preset; inactive rows alpha-blend over
     /// <paramref name="stripBackdropRgb"/> (0x00RRGGBB).
@@ -190,15 +198,51 @@ internal static class TabColorPalette
     public static uint EffectiveBackgroundRgb(
         TabColor color, bool selected, uint stripBackdropRgb)
     {
+        if (!selected)
+            return Composite(color, UnselectedBackgroundAlpha, stripBackdropRgb);
         var preset = Preset(color);
-        if (selected)
-            return PackRgb(preset.R, preset.G, preset.B);
+        return PackRgb(preset.R, preset.G, preset.B);
+    }
 
-        var alpha = UnselectedBackgroundAlpha / 255.0;
+    /// <summary>
+    /// A group field's fill, as an OPAQUE sRGB value (0x00RRGGBB) rather
+    /// than a translucent brush.
+    ///
+    /// The difference is not cosmetic. A translucent wash handed to XAML is
+    /// composited by the system over whatever material is behind the
+    /// surface, and over Mica that is a backdrop the app does not control:
+    /// the tint comes back desaturated by an amount that changes with the
+    /// user's wallpaper. Compositing here against the ground the window
+    /// reports produces one colour the painter can commit to, which is what
+    /// makes a field readable as the SAME field across every cell of a run.
+    /// </summary>
+    public static uint FieldBackgroundRgb(TabColor color, uint groundRgb)
+        => Composite(color, FieldWashAlpha, groundRgb);
+
+    /// <summary>
+    /// Foreground sRGB (0x00RRGGBB) readable on a field's wash -- the
+    /// header's title and count ink.
+    /// </summary>
+    public static uint FieldForegroundRgb(TabColor color, uint groundRgb)
+    {
+        var bg = FieldBackgroundRgb(color, groundRgb);
+        return ThemeResolution.EnsureReadableForeground(bg, bg);
+    }
+
+    /// <summary>One preset alpha-blended over an opaque ground.</summary>
+    private static uint Composite(TabColor color, byte tintAlpha, uint groundRgb)
+    {
+        // Preset, not Colors[color]: this method is the one place every tint
+        // composite now funnels through, so an indexer here would put the bare
+        // KeyNotFoundException back on the paint path for the whole family --
+        // fields and switcher cards included, which is more callers than the
+        // indexer ever had.
+        var preset = Preset(color);
+        var alpha = tintAlpha / 255.0;
         var inv = 1.0 - alpha;
-        var br = (stripBackdropRgb >> 16) & 0xFF;
-        var bg = (stripBackdropRgb >> 8) & 0xFF;
-        var bb = stripBackdropRgb & 0xFF;
+        var br = (groundRgb >> 16) & 0xFF;
+        var bg = (groundRgb >> 8) & 0xFF;
+        var bb = groundRgb & 0xFF;
         return PackRgb(
             (byte)Math.Clamp(preset.R * alpha + br * inv, 0, 255),
             (byte)Math.Clamp(preset.G * alpha + bg * inv, 0, 255),
