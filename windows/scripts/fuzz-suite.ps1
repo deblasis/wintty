@@ -268,6 +268,7 @@ $NotInSuite = [ordered]@{
     'seam-cdb.ps1'                  = 'needs cdb on PATH and takes a full dump at a fail-fast. Exits 0 with a dump path, 1 when the dump never appeared - so a crash that IS reproduced and a debugger that never fired look alike to an aggregator'
     'seam-crash-dump.ps1'           = 'writes WER LocalDumps registry state (snapshot, set, restore) and needs to be the only thing holding the process, since WER does not run under a debugger. Its exits are inverted for this suite''s purpose: 2 means the app SURVIVED and there was no crash to dump, which the runner would file as a product finding'
     'layout-motion-profile.ps1'     = 'an analysis tool, not a harness: it reads a layout-switch-filmstrip run that has already happened (-RunDir and -Tag, no -ExePath) and prints what moved, when and where. It launches nothing and returns no verdict; the change-box column is for a human reading a filmstrip that already failed'
+    'backdrop-stage-selftest.ps1'   = 'measures an instrument, not the product: it proves lib/BackdropStage paints the scene it was told to and never takes the foreground. Launches no Wintty, takes no -ExePath, and has no findings exit'
 }
 
 # The one form every check compares a script path in: the path relative to this

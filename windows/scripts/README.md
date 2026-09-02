@@ -195,6 +195,42 @@ switch's own amplitude) and how the retargeted version was verified: after
 the fix, no post-switch box is wider than the struck strip's own band.
 Point it at a `layout-switch-filmstrip.ps1` out dir and a leg tag.
 
+## Scenery
+
+`lib/backdrop-stage.ps1` plus `lib/BackdropStage/` is the shared backdrop: a
+window a harness parks UNDER the one it is measuring and paints a named scene
+on. Use it whenever the question depends on what is behind the chrome, which
+for a translucent material is every question.
+
+The scene goes to two places because the materials look at two things:
+crystal and frosted show or blur the **window behind**, solid is Mica and
+samples the **desktop wallpaper**. `Set-BackdropScene -Wallpaper` paints the
+stage AND sets the same PNG as the wallpaper. A harness that passes it owns
+putting the wallpaper back: `$before = Get-DesktopWallpaper` first and
+`Set-DesktopWallpaper -Snapshot $before` in a `finally`, which restores the
+user's own style and tiling and reads the registry back. `lib/env-guard.ps1`'s
+snapshot covers the registry side for `just env-restore` after a crash, but a
+registry restore does not repaint the desktop: after a crashed `-Wallpaper`
+run, re-run `Set-DesktopWallpaper` (or log off) to see the old wallpaper
+again. Only a single static image is captured; a slideshow, Spotlight or
+per-monitor wallpaper comes back as its current image.
+
+- `Start-BackdropStage -X -Y -W -H` builds the tool on first use (not in
+  `Ghostty.sln`, like WindowCapture) and launches it at a device-pixel rect,
+  TOPMOST and non-activating. Place the window under test TOPMOST afterwards
+  and it lands above the stage.
+- `Get-BackdropScenes` is the catalogue: black, white, grey, brand, sunrise,
+  photo, editor, checker, each generated from its name, size and seed.
+- `Get-ScreenPixel` reads one device pixel: read the stage's own margin before
+  photographing, so the scene on screen is the one asked for, and ask
+  `Get-WindowPidAt` first so the pixel is known to be the stage's.
+- The stage closes itself when the shell that launched it dies, so a
+  Ctrl+C cannot leave a window that has no taskbar entry and cannot be
+  focused for Alt+F4.
+
+`just backdrop-stage-selftest` proves the instrument against the screen. It
+launches no Wintty and is safe with one open.
+
 ## Process policy
 
 `lib/wintty-process.ps1` holds the rule:
