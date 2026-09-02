@@ -298,14 +298,21 @@ frame-style-fuzz args="": _no-wintty-running build-dll build-win
 # Every axis takes one value, a comma list, or all. Pass args through, e.g.
 #   just theme-matrix "-Theme wintty-dark -Polarity dark -Layout vertical"
 #   just theme-matrix "-Theme all -App solid -Frame inherit -Scene black,photo"
+#   just theme-matrix "-Theme 'Catppuccin Mocha,Nord' -App crystal"
 #   just theme-matrix "-NoFlip"    never touch the desktop theme
+# A theme list with a space in it is ONE inner single-quoted string with the
+# commas inside, as in the third line. The recipe body is PowerShell:
+# `"Catppuccin Mocha",Nord` there would be an array that reaches the harness
+# as two arguments, the second of which lands on -Polarity, and a `\"` is
+# not an escape at all. The args cross the lane inside double quotes, so a
+# double quote or a `$` is what cannot be passed.
 #
 # Exit codes: 0 clean, 2 findings, 1 could not run or a surface went unmeasured.
 #
 # Run the theme matrix (#937) under the incoda lane against the Debug build.
 [windows]
 theme-matrix args="":
-    $inc = (Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path $env:LOCALAPPDATA 'Programs\incoda\incoda.exe'); & $inc run --queue wintty --reason "theme matrix (#937)" -- just _theme-matrix-in-lane '{{args}}'; exit ($LASTEXITCODE ?? 1)
+    $inc = (Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path $env:LOCALAPPDATA 'Programs\incoda\incoda.exe'); & $inc run --queue wintty --reason "theme matrix (#937)" -- just _theme-matrix-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
 
 [windows]
 _theme-matrix-in-lane args="": _no-wintty-running build-dll build-win
@@ -328,7 +335,7 @@ theme-matrix-plan args="":
 # Rebuild matrix.md from a theme-matrix run that already happened.
 [windows]
 theme-matrix-report run="windows/scripts/theme-matrix":
-    pwsh -NoProfile -File windows/scripts/theme-matrix-report.ps1 -RunDir {{run}}; exit ($LASTEXITCODE ?? 1)
+    pwsh -NoProfile -File windows/scripts/theme-matrix-report.ps1 -RunDir "{{run}}"; exit ($LASTEXITCODE ?? 1)
 
 # Real windows and real input, so it needs an interactive desktop and holds
 # the foreground for the duration - about 43 minutes budgeted for everything,

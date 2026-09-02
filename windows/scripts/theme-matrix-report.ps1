@@ -21,9 +21,12 @@ if (-not $OutFile) { $OutFile = Join-Path $RunDir 'matrix.md' }
 $r = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
 
 $rows = @($r.rows); $findings = @($r.findings); $unmeasured = @($r.unmeasured); $deltas = @($r.deltas)
-# Invariant, round-trip: the machine's own culture read the ISO date with
-# its day and month swapped.
+# Every number in the markdown goes through this. PowerShell's -f follows
+# the machine's culture, and on a comma-decimal desktop "4,50" in a ratio
+# column is a different number to every reader of #937.
 $inv = [System.Globalization.CultureInfo]::InvariantCulture
+function N2($v) { return ([double]$v).ToString('0.00', $inv) }
+# Invariant, round-trip, so the culture cannot reorder the fields.
 $started = [datetime]::Parse($r.startedUtc, $inv, [System.Globalization.DateTimeStyles]::RoundtripKind)
 $finished = [datetime]::Parse($r.finishedUtc, $inv, [System.Globalization.DateTimeStyles]::RoundtripKind)
 $md = [System.Text.StringBuilder]::new()
@@ -31,9 +34,10 @@ function L([string]$s = '') { [void]$md.AppendLine($s) }
 
 L "## theme matrix run $($started.ToString('yyyy-MM-dd HH:mm')) UTC"
 L
-L ("build ``{0}``, {1} min, {2} rows, **{3} finding(s)**, {4} unmeasured{5}" -f
-    $r.buildSha, [Math]::Round(($finished - $started).TotalMinutes, 1), $rows.Count, $findings.Count, $unmeasured.Count,
-    $(if ($r.fatal) { ", RUN FAILED: $($r.fatal)" } else { '' }))
+L ("build ``{0}``, {1} min, {2} rows, **{3} finding(s)**, {4} unmeasured{5}{6}" -f
+    $r.buildSha, ($finished - $started).TotalMinutes.ToString('0.0', $inv), $rows.Count, $findings.Count, $unmeasured.Count,
+    $(if ($r.fatal) { ", RUN FAILED: $($r.fatal)" } else { '' }),
+    $(if (@($r.restoreErrors).Count -gt 0) { ", **RESTORE FAILED**: " + (@($r.restoreErrors) -join '; ') } else { '' }))
 L
 L ("desktop was **{0}** with wallpaper ``{1}``{2}; filters: theme={3} polarity={4} app={5} frame={6} layout={7} scene={8}{9}{10}" -f
     $r.machine.polarityBefore, $r.machine.wallpaperBefore, $(if ($r.machine.noFlip) { ' (no flip)' } else { '' }),
@@ -66,7 +70,7 @@ foreach ($polarity in $r.axes.polarities) {
             $judged = @($inCell | Where-Object { $_.class -ne 'field' })
             $worst = $(if ($judged.Count -gt 0) { ($judged | Measure-Object -Property ratio -Minimum).Minimum } else { $null })
             $fails = @($inCell | Where-Object { -not $_.pass }).Count
-            $text = $(if ($null -ne $worst) { '{0:N2}' -f $worst } else { 'field' })
+            $text = $(if ($null -ne $worst) { N2 $worst } else { 'field' })
             if ($fails -gt 0) { $text = "**$text** ($fails)" }
             if ($missing -gt 0) { $text += ' ?' }
             $line += " $text |"
@@ -87,8 +91,8 @@ if ($deltas.Count -gt 0) {
         if ($d.Count -eq 0) { continue }
         $vt = @($d | Where-Object delta -eq 'strip-vs-terminal' | Measure-Object -Property ratio -Average).Average
         $vs = @($d | Where-Object delta -eq 'strip-vs-scene')
-        $vsText = $(if ($vs.Count -gt 0) { '{0:N2}' -f ($vs | Measure-Object -Property ratio -Average).Average } else { '-' })
-        L ('| {0} | {1} | {2:N2} | {3} | {4} |' -f $polarity, $col, $vt, $vsText, $d.Count)
+        $vsText = $(if ($vs.Count -gt 0) { N2 ($vs | Measure-Object -Property ratio -Average).Average } else { '-' })
+        L ('| {0} | {1} | {2} | {3} | {4} |' -f $polarity, $col, (N2 $vt), $vsText, $d.Count)
     } }
 }
 
@@ -99,8 +103,8 @@ if ($findings.Count -gt 0) {
     L '| desktop | theme | app/frame | layout | scene | surface | ratio | floor | ink on ground |'
     L '|---|---|---|---|---|---|---:|---:|---|'
     foreach ($f in ($findings | Sort-Object polarity, theme, app, frame, layout, scene, surface)) {
-        L ('| {0} | {1} | {2}/{3} | {4} | {5} | {6} | {7:N2} | {8} | {9} on {10} |' -f
-            $f.polarity, $f.theme, $f.app, $f.frame, $f.layout, $f.scene, $f.surface, $f.ratio, $f.min, $f.fg, $f.bg)
+        L ('| {0} | {1} | {2}/{3} | {4} | {5} | {6} | {7} | {8} | {9} on {10} |' -f
+            $f.polarity, $f.theme, $f.app, $f.frame, $f.layout, $f.scene, $f.surface, (N2 $f.ratio), ([double]$f.min).ToString($inv), $f.fg, $f.bg)
     }
 }
 

@@ -185,18 +185,6 @@ if ($ThemesDir) { Get-ChildItem -LiteralPath $ThemesDir -File | Copy-Item -Desti
 [IO.File]::WriteAllText((Join-Path $stagedThemes 'wintty-dark'), (Get-BuiltinTheme 'dark') + "`n")
 $catalogue = @(Get-ChildItem -LiteralPath $stagedThemes -File | Select-Object -ExpandProperty Name | Sort-Object)
 
-$themeValues = @($Theme | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$themes = [System.Collections.Generic.List[string]]::new()
-$skippedThemes = [System.Collections.Generic.List[string]]::new()
-foreach ($t in $themeValues) {
-    $want = switch ($t) { 'all' { $catalogue } 'curated' { $CuratedThemes } default { @($t) } }
-    foreach ($name in $want) {
-        if ($catalogue -contains $name) { if ($themes -notcontains $name) { $themes.Add($name) } }
-        else { $skippedThemes.Add($name) }
-    }
-}
-if ($themes.Count -eq 0) { throw "HARNESS: no selected theme exists in the staged catalogue ($($catalogue.Count) names from '$ThemesDir')" }
-
 # The colour the theme says its ground is, so a process can prove the theme
 # it was given is the theme on the glass.
 function Get-ThemeBackground([string]$Name) {
@@ -206,9 +194,34 @@ function Get-ThemeBackground([string]$Name) {
     return $null
 }
 
+$themeValues = @($Theme | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$themes = [System.Collections.Generic.List[string]]::new()
+$skippedThemes = [System.Collections.Generic.List[string]]::new()
+foreach ($t in $themeValues) {
+    $want = switch ($t) { 'all' { $catalogue } 'curated' { $CuratedThemes } default { @($t) } }
+    foreach ($name in $want) {
+        if ($catalogue -notcontains $name) { $skippedThemes.Add($name); continue }
+        # A theme with no background line cannot be proven on the glass, and
+        # scoring it would be exactly the silent fallback the proof exists
+        # to catch; it is skipped and named rather than measured blind.
+        if ($null -eq (Get-ThemeBackground $name)) { $skippedThemes.Add("$name (no background line)"); continue }
+        if ($themes -notcontains $name) { $themes.Add($name) }
+    }
+}
+if ($themes.Count -eq 0) { throw "HARNESS: no selected theme exists in the staged catalogue ($($catalogue.Count) names from '$ThemesDir')" }
+
+# ---- desktop polarity --------------------------------------------------------
+
+# One reader, used by the plan and by the run, so the two cannot disagree
+# on what a missing value means.
+function Get-DesktopPolarity {
+    $v = (Get-ItemProperty -LiteralPath $script:PersonalizeKey -ErrorAction SilentlyContinue).AppsUseLightTheme
+    return $(if ($null -ne $v -and [int]$v -eq 0) { 'dark' } else { 'light' })
+}
+
 # ---- the plan ----------------------------------------------------------------
 
-$current = if ([int](Get-ItemProperty -LiteralPath $script:PersonalizeKey -ErrorAction SilentlyContinue).AppsUseLightTheme -eq 0) { 'dark' } else { 'light' }
+$current = Get-DesktopPolarity
 # Current polarity first, so a -NoFlip run and the first half of a flipping
 # run measure the same thing.
 $polarityOrder = @(@($polarities | Where-Object { $_ -eq $current }) + @($polarities | Where-Object { $_ -ne $current }))
@@ -251,7 +264,7 @@ $script:Rows = [System.Collections.Generic.List[object]]::new()
 $script:Findings = [System.Collections.Generic.List[object]]::new()
 $script:Unmeasured = [System.Collections.Generic.List[object]]::new()
 $script:Deltas = [System.Collections.Generic.List[object]]::new()
-$script:Cell = $null; $script:LayoutName = ''; $script:SceneName = ''; $script:Shot = ''
+$script:Cell = $null; $script:LayoutName = ''; $script:SceneName = ''; $script:Shot = ''; $script:Activated = $false
 $script:MainHwnd64 = 0; $script:ProcId = 0
 
 function Add-Row([string]$Surface, [string]$Class, [double]$Ratio, [string]$Fg, [string]$Bg, [string]$Note) {
@@ -261,6 +274,9 @@ function Add-Row([string]$Surface, [string]$Class, [double]$Ratio, [string]$Fg, 
         polarity = $script:Cell.Polarity; theme = $script:Cell.Theme; app = $script:Cell.App; frame = $script:Cell.Frame
         layout = $script:LayoutName; scene = $script:SceneName; surface = $Surface; class = $Class
         ratio = [Math]::Round($Ratio, 2); min = $rule.Min; rule = $rule.Source; fg = $Fg; bg = $Bg; pass = $pass; note = $Note; shot = $script:Shot
+        # The chrome paints an inactive window differently, so each number
+        # says which state it was read in (the oracle records the same).
+        activated = $script:Activated
     }
     $script:Rows.Add($row)
     if (-not $pass) { $script:Findings.Add($row) }
@@ -371,8 +387,53 @@ function Measure-Ink([string]$Surface, [string]$Class, $Cap, $Rect, [int]$Inset 
 }
 function New-Rect([double]$X, [double]$Y, [double]$W, [double]$H) { return New-Object System.Windows.Rect($X, $Y, $W, $H) }
 
+# The ground the theme should produce, and the rule it is held to.
+#   exact    an opaque terminal: the theme's own background, within 60 counts
+#            summed over the channels (compositor dither and the sampler's
+#            bucketing both move the number; the compile-time default a
+#            silent fallback lands on, #282C34, is far from most themes,
+#            though not from One Half Dark, whose background it IS, so for
+#            that one theme the proof cannot tell the fallback apart)
+#   blend    crystal over a flat scene: theme*opacity + scene*(1-opacity),
+#            same budget, since crystal is plain alpha over the stage
+#   segment  frosted over a flat scene: acrylic adds its own tint and
+#            luminosity to the scene before the alpha, so the exact blend
+#            is not predictable; what is, is that the ground lies on the
+#            line between the theme and the scene, nearer the theme. The
+#            ground must be within 25 counts of that segment and at least
+#            half way toward the theme, which still refuses a fallback
+#            palette that is nowhere near the line.
+function New-GlassExpectation([string]$Mode, [string]$ThemeHex, $SceneRgb, [double]$Alpha) {
+    return [pscustomobject]@{ Mode = $Mode; Theme = (ConvertTo-DrawingColor $ThemeHex); Scene = $SceneRgb; Alpha = $Alpha; ThemeHex = $ThemeHex }
+}
+function Test-ThemeOnGlass($Ground, $Expect) {
+    $t = $Expect.Theme
+    switch ($Expect.Mode) {
+        'segment' {
+            $s = $Expect.Scene
+            $dx = $t.R - $s.BgR; $dy = $t.G - $s.BgG; $dz = $t.B - $s.BgB
+            $len2 = $dx * $dx + $dy * $dy + $dz * $dz
+            if ($len2 -lt 1) { $Expect = New-GlassExpectation 'exact' $Expect.ThemeHex $null 1.0; break }
+            $gx = $Ground.BgR - $s.BgR; $gy = $Ground.BgG - $s.BgG; $gz = $Ground.BgB - $s.BgB
+            $u = ($gx * $dx + $gy * $dy + $gz * $dz) / $len2
+            $px = $s.BgR + $u * $dx; $py = $s.BgG + $u * $dy; $pz = $s.BgB + $u * $dz
+            $dist = [Math]::Sqrt(($Ground.BgR - $px) * ($Ground.BgR - $px) + ($Ground.BgG - $py) * ($Ground.BgG - $py) + ($Ground.BgB - $pz) * ($Ground.BgB - $pz))
+            if ($u -ge 0.5 -and $u -le 1.15 -and $dist -le 25) { return $null }
+            return ("the terminal ground is {0}, which is not on the line from the {1} scene to the theme's {2} (blend {3:N2}, off the line by {4:N0})" -f $Ground.BgHex, $s.BgHex, $Expect.ThemeHex, $u, $dist)
+        }
+    }
+    $r = $t.R; $g = $t.G; $b = $t.B
+    if ($Expect.Mode -eq 'blend') {
+        $a = $Expect.Alpha; $s = $Expect.Scene
+        $r = $t.R * $a + $s.BgR * (1 - $a); $g = $t.G * $a + $s.BgG * (1 - $a); $b = $t.B * $a + $s.BgB * (1 - $a)
+    }
+    $off = [Math]::Abs($Ground.BgR - $r) + [Math]::Abs($Ground.BgG - $g) + [Math]::Abs($Ground.BgB - $b)
+    if ($off -le 60) { return $null }
+    return ("the terminal ground is {0}, it should read about #{1:X2}{2:X2}{3:X2}" -f $Ground.BgHex, [int][Math]::Round($r), [int][Math]::Round($g), [int][Math]::Round($b))
+}
+
 # One photograph, five judged surfaces and three deltas.
-function Measure-Capture($Cap, [string]$LayoutName, [string]$ThemeBg, $SceneGround, [bool]$GroundIsPicture = $false) {
+function Measure-Capture($Cap, [string]$LayoutName, $Expect, $SceneGround, [bool]$GroundIsPicture = $false) {
     $tabs = Get-StripTabs $LayoutName
     $active = @($tabs | Where-Object Selected) | Select-Object -First 1
     $idle = @($tabs | Where-Object { -not $_.Selected }) | Select-Object -First 1
@@ -382,21 +443,13 @@ function Measure-Capture($Cap, [string]$LayoutName, [string]$ThemeBg, $SceneGrou
     # decides whether the theme is on the glass at all.
     $ground = Sample $Cap (New-Rect ($Cap.L + $Cap.W - 220) ($Cap.T + $Cap.H - 160) 48 48) 0
     if ($null -eq $ground -or -not $ground.Ok) { Add-Unmeasured 'terminal-ground' 'the terminal band could not be sampled'; return }
-    # $ThemeBg is what the ground should read: the theme's own value on an
-    # opaque terminal, the theme blended with the scene on a translucent one
-    # over a flat scene, and null over an image scene at opacity below 1,
-    # where the ground is the picture and nothing can be proven from it.
-    if ($ThemeBg) {
-        $expect = ConvertTo-DrawingColor $ThemeBg
-        $off = [Math]::Abs($ground.BgR - $expect.R) + [Math]::Abs($ground.BgG - $expect.G) + [Math]::Abs($ground.BgB - $expect.B)
-        # Wide, because the compositor's blend and the sampler's bucketing
-        # both move the number; the compile-time default (#282C34) a silent
-        # fallback lands on is dozens of counts per channel away from any
-        # theme this is likely to be run with.
-        if ($off -gt 60) {
-            Add-Unmeasured 'theme-on-glass' ("the terminal ground is {0}, it should read {1}: the theme did not reach the glass, so nothing here is scored" -f $ground.BgHex, $ThemeBg)
-            return
-        }
+    # Is the theme on the glass? $Expect says what the ground should be and
+    # how strictly: null means nothing can be proven (a picture behind a
+    # translucent terminal), and the check refuses the capture rather than
+    # scoring a fallback palette as the theme.
+    if ($null -ne $Expect) {
+        $why = Test-ThemeOnGlass $ground $Expect
+        if ($why) { Add-Unmeasured 'theme-on-glass' ($why + ': the theme did not reach the glass, so nothing here is scored'); return }
     }
 
     if ($null -eq $active) { Add-Unmeasured 'tab-title-active' 'no tab reports itself selected'; Add-Unmeasured 'tab-close-active' 'no tab reports itself selected'; Add-Unmeasured 'tab-field' 'no tab reports itself selected' }
@@ -430,6 +483,7 @@ function Measure-Capture($Cap, [string]$LayoutName, [string]$ThemeBg, $SceneGrou
     # with ink would do on an opaque terminal, but a translucent one over a
     # busy scene has "ink" in every band, and the prompt is the one where the
     # real glyphs beat the scene's own variance.
+    if ($tabs.Count -eq 0) { Add-Unmeasured 'terminal-fg-on-bg' 'no tab was located, so there is nothing to anchor the terminal band on'; return }
     $left = if ($LayoutName -eq 'vertical') { ($tabs | ForEach-Object { $_.Rect.X + $_.Rect.Width } | Measure-Object -Maximum).Maximum + 12 } else { $Cap.L + 12 }
     $top = if ($LayoutName -eq 'vertical') { $Cap.T + 44 } else { ($tabs | ForEach-Object { $_.Rect.Y + $_.Rect.Height } | Measure-Object -Maximum).Maximum + 12 }
     #
@@ -460,12 +514,6 @@ function Measure-Capture($Cap, [string]$LayoutName, [string]$ThemeBg, $SceneGrou
     }
 }
 
-# ---- desktop polarity --------------------------------------------------------
-
-function Get-DesktopPolarity {
-    $v = (Get-ItemProperty -LiteralPath $script:PersonalizeKey -ErrorAction SilentlyContinue).AppsUseLightTheme
-    return $(if ($null -ne $v -and [int]$v -eq 0) { 'dark' } else { 'light' })
-}
 # Both Personalize values and the broadcast Settings sends, then a read-back.
 # Explorer, DWM and UISettings all pick the change up from the broadcast, and
 # the app launched afterwards reads the system value fresh.
@@ -482,11 +530,17 @@ function Set-DesktopPolarity([string]$P) {
 
 $startedUtc = (Get-Date).ToUniversalTime().ToString('o')
 $snapshotPath = Save-EnvSnapshot
+# A copy the next harness cannot overwrite: the well-known snapshot is
+# replaced by whoever runs next, and after a kill mid-flip that would be a
+# snapshot of the flipped desktop.
+Copy-Item -LiteralPath $snapshotPath -Destination (Join-Path $OutDir 'env-before.json') -Force
 $wallpaperBefore = Get-DesktopWallpaper
 $polarityBefore = Get-DesktopPolarity
 $stage = $null
 $cellVerdicts = [System.Collections.Generic.List[object]]::new()
 $fatal = ''
+$restoreErrors = [System.Collections.Generic.List[string]]::new()
+$occludedInARow = 0
 $titles = @('alpha', 'bravo', 'charlie')
 $sceneDir = Join-Path $OutDir 'scenes'
 $marginPoint = @{ X = $WinX - [int]($Margin / 2); Y = $WinY + [int]($WinH / 2) }
@@ -494,37 +548,38 @@ $marginPoint = @{ X = $WinX - [int]($Margin / 2); Y = $WinY + [int]($WinH / 2) }
 try {
     $stage = Start-BackdropStage -X ($WinX - $Margin) -Y ($WinY - $Margin) -W ($WinW + 2 * $Margin) -H ($WinH + 2 * $Margin)
     $activePolarity = $polarityBefore
-    foreach ($cell in $cells) {
-        if ($cell.Polarity -ne $activePolarity) {
+    foreach ($plan in $cells) {
+        if ($plan.Polarity -ne $activePolarity) {
             if ($NoFlip) {
-                $script:Cell = $cell; $script:LayoutName = '*'; $script:SceneName = '*'; $script:Shot = ''
-                Add-Unmeasured 'cell' "-NoFlip: the desktop is $activePolarity and this cell needs $($cell.Polarity)"
+                $script:Cell = $plan; $script:LayoutName = '*'; $script:SceneName = '*'; $script:Shot = ''
+                Add-Unmeasured 'cell' "-NoFlip: the desktop is $activePolarity and this cell needs $($plan.Polarity)"
+                $cellVerdicts.Add([pscustomobject]@{ id = $plan.Id; error = 'skipped: -NoFlip' })
                 continue
             }
-            Write-Host ("=== flipping the desktop to {0} ===" -f $cell.Polarity) -ForegroundColor Cyan
-            Set-DesktopPolarity $cell.Polarity
-            $activePolarity = $cell.Polarity
+            Write-Host ("=== flipping the desktop to {0} ===" -f $plan.Polarity) -ForegroundColor Cyan
+            Set-DesktopPolarity $plan.Polarity
+            $activePolarity = $plan.Polarity
             # The flip recreates the stage's window underneath WinForms; the
             # placement is re-asserted so it is topmost again before the
             # next window under test is placed above it.
             [void](Invoke-BackdropStage $stage @{ op = 'place'; x = ($WinX - $Margin); y = ($WinY - $Margin); w = ($WinW + 2 * $Margin); h = ($WinH + 2 * $Margin) })
         }
-        $script:Cell = $cell
+        $script:Cell = $plan
         Write-Host ""
-        Write-Host ("=== {0} ===" -f $cell.Id) -ForegroundColor Cyan
+        Write-Host ("=== {0} ===" -f $plan.Id) -ForegroundColor Cyan
         $firstLayout = $layouts[0]
-        $themePath = Join-Path $stagedThemes $cell.Theme
+        $themePath = Join-Path $stagedThemes $plan.Theme
         $config = @(
             'windows-single-instance = false', 'window-save-state = never', 'windows-settings-ui = true',
             ('vertical-tabs = ' + $(if ($firstLayout -eq 'vertical') { 'true' } else { 'false' })),
             'vertical-tabs-hover-expand = false', 'vertical-tabs-pinned = true',
             "theme = $themePath",
-            "background-style = $($cell.App)")
-        if ($cell.Frame -ne 'inherit') { $config += "frame-style = $($cell.Frame)" }
-        if ($cell.App -ne 'solid') { $config += ('background-opacity = {0}' -f $Opacity.ToString('F2', [System.Globalization.CultureInfo]::InvariantCulture)) }
-        $themeBg = Get-ThemeBackground $cell.Theme
+            "background-style = $($plan.App)")
+        if ($plan.Frame -ne 'inherit') { $config += "frame-style = $($plan.Frame)" }
+        if ($plan.App -ne 'solid') { $config += ('background-opacity = {0}' -f $Opacity.ToString('F2', [System.Globalization.CultureInfo]::InvariantCulture)) }
+        $themeBg = Get-ThemeBackground $plan.Theme
         if ($Mutate -eq 'terminal') { $config += 'background = #808080', 'foreground = #858585'; $themeBg = '#808080' }
-        $translucent = ($cell.App -ne 'solid') -or ($cell.Frame -in @('frosted', 'crystal'))
+        $translucent = ($plan.App -ne 'solid') -or ($plan.Frame -in @('frosted', 'crystal'))
 
         $s = $null; $cellErr = ''
         try {
@@ -566,21 +621,17 @@ try {
                 if ($sc.Kind -eq 'solid' -and -not (Test-PixelNear $marginPx $sc.Color 3)) { throw "HARNESS: the stage margin reads $($marginPx.Hex), not the $($sc.Name) scene's $($sc.Color)" }
                 $sceneGround = $(if ($sc.Kind -eq 'solid') { [pscustomobject]@{ BgR = $marginPx.R; BgG = $marginPx.G; BgB = $marginPx.B; BgHex = $marginPx.Hex } } else { $null })
                 # What the terminal ground should read under this cell's
-                # opacity: the theme itself when opaque, the theme blended
-                # with a flat scene when not, nothing provable over a picture.
-                $expectBg = $themeBg
-                if ($cell.App -ne 'solid' -and $themeBg) {
-                    if ($sc.Kind -eq 'solid') {
-                        $tc = ConvertTo-DrawingColor $themeBg
-                        $expectBg = '#{0:X2}{1:X2}{2:X2}' -f [int][Math]::Round($tc.R * $Opacity + $marginPx.R * (1 - $Opacity)),
-                            [int][Math]::Round($tc.G * $Opacity + $marginPx.G * (1 - $Opacity)),
-                            [int][Math]::Round($tc.B * $Opacity + $marginPx.B * (1 - $Opacity))
-                    } else { $expectBg = $null }
-                }
+                # material (see New-GlassExpectation): exact when opaque, a
+                # blend or a segment over a flat scene, nothing provable over
+                # a picture.
+                $expect = $(if ($plan.App -eq 'solid') { New-GlassExpectation 'exact' $themeBg $null 1.0 }
+                    elseif ($null -eq $sceneGround) { $null }
+                    elseif ($plan.App -eq 'crystal') { New-GlassExpectation 'blend' $themeBg $sceneGround $Opacity }
+                    else { New-GlassExpectation 'segment' $themeBg $sceneGround $Opacity })
 
-                foreach ($layoutName in $layouts) {
-                    $script:LayoutName = $layoutName
-                    $wantVertical = ($layoutName -eq 'vertical')
+                foreach ($ln in $layouts) {
+                    $script:LayoutName = $ln
+                    $wantVertical = ($ln -eq 'vertical')
                     $state = Invoke-SeamCommand $s @{ op = 'get-state' }
                     for ($try = 0; $try -lt 3 -and ([bool]$state.state.vertical -ne $wantVertical); $try++) {
                         $state = Invoke-SeamCommand $s @{ op = 'toggle-layout' }
@@ -592,16 +643,17 @@ try {
                         continue
                     }
                     Start-Sleep -Milliseconds 700
-                    Write-Host ("-- {0} / {1}" -f $sc.Name, $layoutName)
+                    Write-Host ("-- {0} / {1}" -f $sc.Name, $ln)
                     $cap = New-Capture
-                    try { Measure-Capture $cap $layoutName $expectBg $sceneGround ($cell.App -ne 'solid' -and $sc.Kind -ne 'solid') }
+                    $script:Activated = $cap.Activated
+                    try { Measure-Capture $cap $ln $expect $sceneGround ($plan.App -ne 'solid' -and $sc.Kind -ne 'solid') }
                     finally { $cap.Bmp.Dispose() }
                 }
             }
         }
         catch {
             $cellErr = "$($_.Exception.Message)"
-            Write-Host ("CELL FAILED {0}: {1}" -f $cell.Id, $cellErr) -ForegroundColor Red
+            Write-Host ("CELL FAILED {0}: {1}" -f $plan.Id, $cellErr) -ForegroundColor Red
             # The frame, because a binding error names a parameter and not
             # the call that bound it.
             Write-Host ("  at " + (($_.ScriptStackTrace -split "`n" | Select-Object -First 3) -join "`n  at ")) -ForegroundColor DarkGray
@@ -611,7 +663,12 @@ try {
         finally {
             if ($null -ne $s) { Stop-SeamSession $s }
         }
-        $cellVerdicts.Add([pscustomobject]@{ id = $cell.Id; error = $cellErr })
+        $cellVerdicts.Add([pscustomobject]@{ id = $plan.Id; error = $cellErr })
+        # A window parked over the stage fails every cell the same way; three
+        # in a row is a desk problem, not a matrix, and hours of exit-1 noise
+        # would say nothing more than this does.
+        $occludedInARow = $(if ($cellErr -like 'OCCLUDED*') { $occludedInARow + 1 } else { 0 })
+        if ($occludedInARow -ge 3) { throw "three cells in a row were occluded; something is parked over the stage, stopping ($cellErr)" }
     }
 }
 catch {
@@ -622,10 +679,14 @@ finally {
     # Everything back, in the order that makes the read-back true: the
     # wallpaper through the API that actually applies one, the polarity
     # through the broadcast, then the env guard's own restore and read-back.
+    # A restore that fails is recorded, and it decides the exit code below:
+    # a machine left in the other polarity or wearing a scene is the one
+    # thing that must never look green.
     if ($null -ne $stage) { try { Stop-BackdropStage $stage } catch { } }
-    try { Set-DesktopWallpaper -Path $wallpaperBefore.Path -Style $wallpaperBefore.Style -Tile $wallpaperBefore.Tile } catch { Write-Host "RESTORE: wallpaper: $_" -ForegroundColor Red }
-    try { if ((Get-DesktopPolarity) -ne $polarityBefore) { Set-DesktopPolarity $polarityBefore } } catch { Write-Host "RESTORE: polarity: $_" -ForegroundColor Red }
-    try { Restore-EnvSnapshot -Path $snapshotPath } catch { Write-Host "RESTORE: env guard: $_ (run 'just env-restore')" -ForegroundColor Red }
+    try { Set-DesktopWallpaper -Snapshot $wallpaperBefore } catch { $restoreErrors.Add("wallpaper: $_") }
+    try { if ((Get-DesktopPolarity) -ne $polarityBefore) { Set-DesktopPolarity $polarityBefore } } catch { $restoreErrors.Add("polarity: $_") }
+    try { Restore-EnvSnapshot -Path $snapshotPath } catch { $restoreErrors.Add("env guard: $_ (run 'just env-restore')") }
+    foreach ($e in $restoreErrors) { Write-Host "RESTORE FAILED: $e" -ForegroundColor Red }
     Remove-Item $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -651,13 +712,20 @@ $result = [ordered]@{
     findings = $script:Findings
     unmeasured = $script:Unmeasured
     fatal = $fatal
+    restoreErrors = @($restoreErrors)
 }
 $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
-& (Join-Path $PSScriptRoot 'theme-matrix-report.ps1') -RunDir $OutDir | Out-Null
+# The renderer is not the verdict: a failure in it is printed, and the exit
+# code below still comes from the measurements.
+try { & (Join-Path $PSScriptRoot 'theme-matrix-report.ps1') -RunDir $OutDir | Out-Null }
+catch { Write-Host "REPORT: matrix.md could not be written: $_ (result.json is there; run 'just theme-matrix-report')" -ForegroundColor Red }
 
 Write-Host ""
 Write-Host ("theme-matrix: {0} rows, {1} findings, {2} unmeasured, {3} deltas -> {4}" -f
     $script:Rows.Count, $script:Findings.Count, $script:Unmeasured.Count, $script:Deltas.Count, (Join-Path $OutDir 'matrix.md'))
+# A failed restore outranks everything: the operator has to act on the
+# machine before the findings mean anything.
+if ($restoreErrors.Count -gt 0) { exit 1 }
 if ($script:Findings.Count -gt 0) { exit 2 }
 if ($fatal -or $script:Unmeasured.Count -gt 0 -or $script:Rows.Count -eq 0) { exit 1 }
 exit 0
