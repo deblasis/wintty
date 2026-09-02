@@ -162,10 +162,17 @@ function Wait-SeamReady($proc) {
 }
 
 # One app, one pipe, one scenario. The relaunch-per-scenario structure is
-# deliberate: repeated seed-tabs churn in a single process trips a known,
-# separately-filed 0xC0000005 in coreclr around the seventh cumulative
-# seed, and a fresh process per scenario both stays clear of that threshold
-# and keeps scenarios from contaminating each other.
+# deliberate: repeated churn in a single process trips a 0xC0000005, and a
+# fresh process per scenario both stays clear of it and keeps scenarios from
+# contaminating each other.
+#
+# This note used to say "around the seventh cumulative seed" and cite a
+# separately-filed issue. Both halves were checked on 2026-09-02 and are
+# wrong. Measured: the THIRD seed-tabs of a process, deterministically, and
+# only when a group has survived two layout round trips -- five bare seeds in
+# a row are harmless. No such issue exists in this repo. The crash faults in
+# CThemeResource::SetLastResolvedValue, reached from a synchronous
+# NavigationView.SelectedItem assignment inside TabManager.CloseTab.
 function Start-SeamSession(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$ConfigText,
@@ -222,17 +229,30 @@ function Start-SeamSession(
     if ($Arguments.Count -gt 0) { $startArgs.ArgumentList = $Arguments }
     $proc = Start-Process @startArgs
     $session.Proc = $proc
-    $main = Wait-SeamReady $proc
-    $session.Hwnd64 = [int64]$main.Hwnd64
+    # Everything from here can throw -- Wait-SeamReady on a window that never
+    # appears or a splash that never drops, Wait-SeamPipe on a Release build
+    # with the seam compiled out, Connect-SeamPipe on a timeout -- and the
+    # caller does not hold the session yet, so ITS finally cannot clean up.
+    # Left alone that strands a running Wintty, and Assert-NoWintty refuses to
+    # kill instances it did not start, so one orphan blocks every seam harness
+    # on the machine until a human intervenes. Tear down here and rethrow.
+    try {
+        $main = Wait-SeamReady $proc
+        $session.Hwnd64 = [int64]$main.Hwnd64
 
-    # The seam pipe appears once OnLaunched has built the window.
-    [void](Wait-SeamPipe -Token $session.Token -Proc $proc)
-    $session.Pipe = Connect-SeamPipe -Token $session.Token
-    $session.Reader = [System.IO.StreamReader]::new($session.Pipe)
-    $session.Writer = [System.IO.StreamWriter]::new(
-        $session.Pipe, [System.Text.UTF8Encoding]::new($false))
-    $session.Writer.AutoFlush = $true
-    $session.Writer.NewLine = "`n"
+        # The seam pipe appears once OnLaunched has built the window.
+        [void](Wait-SeamPipe -Token $session.Token -Proc $proc)
+        $session.Pipe = Connect-SeamPipe -Token $session.Token
+        $session.Reader = [System.IO.StreamReader]::new($session.Pipe)
+        $session.Writer = [System.IO.StreamWriter]::new(
+            $session.Pipe, [System.Text.UTF8Encoding]::new($false))
+        $session.Writer.AutoFlush = $true
+        $session.Writer.NewLine = "`n"
+    }
+    catch {
+        Stop-SeamSession $session
+        throw
+    }
     return $session
 }
 
@@ -251,8 +271,14 @@ function Receive-SeamResponse([Parameter(Mandatory)]$Session, [string]$OpName = 
     $line = $Session.Reader.ReadLine()
     if ($null -eq $line) {
         if ($Session.Proc.HasExited) {
-            throw ("PRODUCT_EXIT: the seam pipe closed and the app exited " +
-                "(code {0}) during '{1}'" -f $Session.Proc.ExitCode, $OpName)
+            # Parens close before -f, which is the whole point: -f binds
+            # tighter than +, so with the paren at the end it would format
+            # only the second fragment. Correct here today purely because
+            # both placeholders happen to live in that fragment; moving one
+            # up would print it literally. Same bug shipped twice in
+            # seam-acceptance.ps1 before anyone saw the message.
+            throw (("PRODUCT_EXIT: the seam pipe closed and the app exited " +
+                "(code {0}) during '{1}'") -f $Session.Proc.ExitCode, $OpName)
         }
         throw ("HARNESS: the seam closed the connection without a response to '{0}'" -f $OpName)
     }
