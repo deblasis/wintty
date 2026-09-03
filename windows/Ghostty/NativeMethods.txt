@@ -113,3 +113,5 @@ VARENUM
 // Ghostty.Core so the equivalence test in Ghostty.Tests can call it
 // without pulling in the WinUI 3 Ghostty assembly. AppearancePage
 // delegates to Ghostty.Core.
+ReleaseCapture
+WM_NCLBUTTONDOWN
