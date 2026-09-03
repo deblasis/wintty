@@ -65,12 +65,24 @@
     merge from a copy of this directory rather than from this one, because a
     fixture manifest placed here would be found by every other run from it.
 
-    Five integrity checks run on every invocation, including -List, and all
-    are free: the manifest cannot name a script that is gone, a script cannot
-    sit in this directory unclassified, a harness cannot stop declaring a
-    parameter the manifest passes it, no name or tag may hold the comma the
-    filters split on, and the two numbers the run loop does arithmetic on have
-    to be numbers it can do arithmetic with. The third matters because
+    Six integrity checks run on every invocation, including -List: the
+    manifest cannot name a script that is gone, a script cannot sit in this
+    directory unclassified, a harness cannot stop declaring a parameter the
+    manifest passes it, no name or tag may hold the comma the filters split
+    on, the two numbers the run loop does arithmetic on have to be numbers it
+    can do arithmetic with, and no script may define a function name twice or
+    define one a script it shares a scope with already defines.
+
+    The first five are free -- hashtable and string work over a 36-entry
+    manifest. The sixth is NOT: it parses every .ps1 under this directory,
+    which measures at about four and a half seconds and roughly quadruples
+    what -List costs. It runs anyway, and on -List too, for the reason the
+    other five do: the suite's own most likely defect is the one that looks
+    like success, and #938 is what that looks like -- a harness silently
+    asking the wrong function about the wrong rects, reported as a table of
+    NOT MEASURED and read as the product being unreachable. Four seconds is
+    cheaper than that, but it is not free and the contract should not say it
+    is. The third matters because
     `pwsh -File` ignores an argument the script does not declare, so a renamed
     -ExePath would leave every harness quietly testing its own default build.
 
@@ -276,6 +288,20 @@ $NotInSuite = [ordered]@{
     # (#937), so aggregating its exit into a suite verdict would say nothing.
     'theme-matrix.ps1'              = 'hours long by design and it sets the desktop theme and wallpaper; run it on its own through `just theme-matrix`, under the incoda lane, and read its matrix.md (#937)'
     'theme-matrix-report.ps1'       = 'an analysis tool: it reads a theme-matrix run that has already happened (-RunDir, no -ExePath) and writes matrix.md. Launches nothing and returns no verdict'
+}
+
+# Deliberate redefinitions integrity check 6 must not refuse, value = why.
+# Two key shapes, because they answer different questions and one must not
+# silence the other: "<file>::<Function>" excuses a repeat WITHIN that file,
+# and "<file>::<lib>::<Function>" excuses that file deliberately overriding a
+# name from that library. A single namespace would let an entry written to
+# allow a library override wave through a genuine in-file duplicate of the
+# same name -- which is exactly the #938 shape.
+#
+# A reason is required, for the same purpose $NotInSuite's entries carry one:
+# an unexplained exception is how the next silent shadowing gets waved
+# through. Empty is the expected state.
+$FunctionOverrides = [ordered]@{
 }
 
 # The one form every check compares a script path in: the path relative to this
@@ -1137,8 +1163,8 @@ function Invoke-Harness {
 
 # ---- manifest integrity ---------------------------------------------------
 # All of this is cheap and needs no desktop, and it runs on every invocation
-# including -List. Between them these five checks cover the ways the manifest
-# rots, in both directions.
+# including -List. Between them these six checks cover the ways the manifest
+# rots, in both directions, and the way a harness rots itself.
 #
 # Every path below is read with -LiteralPath, and the directory is enumerated
 # the same way. Test-Path and Get-ChildItem take a WILDCARD by default, so a
@@ -1318,6 +1344,191 @@ foreach ($h in @($Harnesses) + @($SelfTestHarnesses)) {
         } else {
             $h.timeoutSeconds = $read.value
         }
+    }
+}
+
+# 6. A script defining the same function name twice, or defining one a script
+#    it shares a scope with through a dot-source already defines. PowerShell
+#    defines functions as it reads them, so the later definition silently
+#    replaces the earlier for the whole scope -- including for calls written
+#    ABOVE it. There is no shadowing diagnostic, no default analyzer rule, and
+#    nothing fails at parse time, so the only symptom is the wrong body running.
+#
+#    #938 is the worked example: contrast-oracle.ps1 grew a second
+#    Test-RectInside for the seam's rects while the first served UIA's, and
+#    Test-Samplable -- the gate on every ink sample in both strips -- began
+#    asking the seam version about UIA rects. Case-insensitive property lookup
+#    let .x find .X so the comparison looked plausible; .w found nothing and
+#    returned $null. The run came back a full table of NOT MEASURED and exit 1,
+#    which reads as "the harness could not reach the product" rather than "the
+#    harness broke itself" -- and it survived a review, a signoff and a merge.
+$dupRoot = $PSScriptRoot
+# RECURSIVE. Enumerating this directory flat reached 66 of the 125 .ps1 files
+# under it and missed lib/fuzz-selftest/ entirely -- which is where the guards
+# for the other five checks live, and which dot-sources back into a scanned
+# lib, so the blind spot ran in both directions.
+$dupScanFiles = @(Get-ChildItem -LiteralPath $dupRoot -Filter '*.ps1' -File -Recurse)
+
+# Keyed by path relative to this directory, because recursion makes a leaf
+# ambiguous: lib/pro/x.ps1 and x.ps1 are two files with one leaf.
+$dupDefs = @{}
+$dupSources = @{}
+foreach ($f in $dupScanFiles) {
+    $rel = $f.FullName.Substring($dupRoot.Length).TrimStart(
+        [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $rel = $rel.Replace([IO.Path]::DirectorySeparatorChar, [char]0x2F)
+
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $f.FullName, [ref]$null, [ref]$parseErrors)
+    # Reported, not discarded. ParseFile returns an AST for unparseable input
+    # and simply stops collecting at the break, so a duplicate after it is
+    # invisible -- and check 3 parses only manifest harnesses, so for anything
+    # under lib/ this is the only parse there is. The lesson is check 3's, 150
+    # lines above: say what actually broke.
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        $problems += ("$rel does not parse, so nothing in it can be checked: " +
+                      $parseErrors[0].Message +
+                      " (line $($parseErrors[0].Extent.StartLineNumber))")
+        continue
+    }
+
+    # Top-level only. FindAll recurses, and a function defined inside another
+    # function -- or inside a script block that is invoked separately -- is
+    # scoped to that call, so counting it would refuse working code.
+    $byName = @{}
+    foreach ($fn in $ast.FindAll({
+            param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        $nested = $false
+        $parent = $fn.Parent
+        while ($parent) {
+            if ($parent -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
+                $parent -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                $nested = $true; break
+            }
+            $parent = $parent.Parent
+        }
+        if ($nested) { continue }
+        # Function names are case-insensitive in PowerShell, so Get-Foo and
+        # get-foo are one function and one shadowing the other is the bug.
+        $key = $fn.Name.ToLowerInvariant()
+        if (-not $byName.Contains($key)) { $byName[$key] = @() }
+        $byName[$key] += @{ Name = $fn.Name; Line = $fn.Extent.StartLineNumber }
+    }
+    $dupDefs[$rel] = $byName
+
+    # Dot-sourced files, read as TEXT out of the command's extent rather than
+    # as a string literal. `. (Join-Path $PSScriptRoot 'lib/x.ps1')` is a
+    # constant, but `. "$PSScriptRoot/lib/x.ps1"` is an expandable string and a
+    # literal-only reader skips it in silence -- which switches this whole half
+    # of the check off for that file while every guard stays green. Same
+    # nesting rule as above: a dot-source inside a function is function-scoped.
+    $sourced = @()
+    foreach ($cmd in $ast.FindAll({
+            param($n) $n -is [System.Management.Automation.Language.CommandAst] -and
+                      $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true)) {
+        $nested = $false
+        $parent = $cmd.Parent
+        while ($parent) {
+            if ($parent -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
+                $parent -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                $nested = $true; break
+            }
+            $parent = $parent.Parent
+        }
+        if ($nested) { continue }
+        $found = [regex]::Matches($cmd.Extent.Text, '[\w.\-]+\.ps1')
+        if ($found.Count -lt 1) {
+            # A path this cannot reduce to a name is REFUSED, not skipped.
+            # Skipping is how a spelling nobody anticipated turns the check off
+            # without saying so.
+            $problems += ("$rel dot-sources something this check cannot resolve to a file name, " +
+                          "so it cannot be compared: " + $cmd.Extent.Text.Trim())
+            continue
+        }
+        foreach ($hit in $found) { $sourced += $hit.Value }
+    }
+    $dupSources[$rel] = @($sourced | Sort-Object -Unique)
+}
+
+# Leaf -> the relative paths carrying it, so a dot-source naming x.ps1 resolves
+# back to the file that was scanned.
+$dupByLeaf = @{}
+foreach ($rel in $dupDefs.Keys) {
+    $leaf = @($rel -split [char]0x2F)[-1]
+    if (-not $dupByLeaf.Contains($leaf)) { $dupByLeaf[$leaf] = @() }
+    $dupByLeaf[$leaf] += $rel
+}
+
+# The per-file half.
+foreach ($rel in ($dupDefs.Keys | Sort-Object)) {
+    foreach ($key in ($dupDefs[$rel].Keys | Sort-Object)) {
+        $defs = @($dupDefs[$rel][$key])
+        if ($defs.Count -lt 2) { continue }
+        if ($FunctionOverrides.Contains($rel + '::' + $defs[0].Name)) { continue }
+        $problems += ("$rel defines $($defs[0].Name) $($defs.Count) times, at lines " +
+                      (($defs | ForEach-Object { $_.Line }) -join ' and ') +
+                      '; PowerShell keeps the last, so every call in the file reaches that one')
+    }
+}
+
+# The cross-file half, over the TRANSITIVE closure and over every pair in it.
+# Comparing only a file against its own libraries missed two shapes that shadow
+# just as completely: two libraries co-sourced by one harness colliding with
+# each other (theme-matrix.ps1 co-sources five, which is ten unchecked pairs),
+# and a collision one hop further out (A sources B, B sources C, A and C
+# collide).
+foreach ($rel in ($dupSources.Keys | Sort-Object)) {
+    $closure = New-Object System.Collections.Generic.List[string]
+    $pending = New-Object System.Collections.Generic.Queue[string]
+    $pending.Enqueue($rel)
+    $seen = @{}
+    while ($pending.Count -gt 0) {
+        $cur = $pending.Dequeue()
+        if ($seen.Contains($cur)) { continue }
+        $seen[$cur] = $true
+        if ($cur -ne $rel) { [void]$closure.Add($cur) }
+        foreach ($leaf in @($dupSources[$cur])) {
+            # A dot-source can legitimately name a file outside this tree --
+            # layout-switch-filmstrip.ps1 sources C:/temp/seam-lock.ps1 -- and
+            # an unscanned leaf has no definitions to compare. Skipped rather
+            # than refused: it is reachable and intentional, unlike a path this
+            # check could not reduce to a name at all.
+            if (-not $dupByLeaf.Contains($leaf)) { continue }
+            foreach ($target in @($dupByLeaf[$leaf])) {
+                if ($null -eq $target) { continue }
+                if (-not $seen.Contains($target)) { $pending.Enqueue($target) }
+            }
+        }
+    }
+    if ($closure.Count -lt 1) { continue }
+
+    # Every pair in the closure, the file itself included, compared once.
+    $members = @(@($rel) + $closure)
+    for ($i = 0; $i -lt $members.Count; $i++) {
+        for ($j = $i + 1; $j -lt $members.Count; $j++) {
+            $a = $members[$i]
+            $b = $members[$j]
+            foreach ($key in ($dupDefs[$a].Keys | Sort-Object)) {
+                if (-not $dupDefs[$b].Contains($key)) { continue }
+                $mine = @($dupDefs[$a][$key])[0]
+                $theirs = @($dupDefs[$b][$key])[0]
+                if ($FunctionOverrides.Contains($a + '::' + $b + '::' + $mine.Name)) { continue }
+                if ($FunctionOverrides.Contains($b + '::' + $a + '::' + $mine.Name)) { continue }
+                $problems += ("$a defines $($mine.Name) at line $($mine.Line) and shares a scope with " +
+                              "$b through a dot-source, which defines it at line $($theirs.Line); " +
+                              'whichever is read last wins for the whole scope')
+            }
+        }
+    }
+}
+
+# An override that excuses without saying why is the exception nobody can
+# review, which is the rule $NotInSuite already carries.
+foreach ($overrideKey in $FunctionOverrides.Keys) {
+    if (-not ([string]$FunctionOverrides[$overrideKey]).Trim()) {
+        $problems += ("a `$FunctionOverrides entry has no reason, so the exception cannot be reviewed: " +
+                      $overrideKey)
     }
 }
 
@@ -2624,6 +2835,90 @@ exit 0
         # the same dead end wearing better words.
         $bad += "layer/no-lib: the refusal said '$noLibSaid' without naming the directory it was handed, $noLib"
     }
+
+    # Integrity check 6, both halves, from lib/ because check 2 enumerates this
+    # directory flat: a fixture dropped beside the runner would be refused as
+    # unclassified before check 6 saw it, and the case would assert the wrong
+    # refusal.
+    #
+    # The per-file half. Two definitions of one name in one file, which is the
+    # shape #938 shipped -- contrast-oracle.ps1 grew a second Test-RectInside
+    # and the first stopped existing for the whole file, calls above it
+    # included. The line numbers are asserted, not just the name: they are the
+    # only part of the message that sends someone to the right place, and a
+    # message naming the file and function alone is a diagnosis that stops
+    # short of the address.
+    Assert-Layer -Run (Invoke-Layer -Case 'dup-function-in-one-file' -Inject @{
+        'layer-scripts/lib/st-dupe-one.ps1' =
+            (@('function Test-StDupe { 1 }', 'function Test-StDupe { 2 }') -join [Environment]::NewLine)
+    }) -Exit 1 `
+        -Says @('st-dupe-one.ps1 defines Test-StDupe 2 times, at lines 1 and 2')
+
+    # The cross-file half, and the more valuable one: neither file repeats a
+    # name, so the per-file rule cannot see this at all. Both fixtures are
+    # libraries so that neither trips check 2, and the dot-source is written
+    # the way every harness here writes it -- through Join-Path, so the leaf
+    # has to be read out of the command rather than the path evaluated.
+    Assert-Layer -Run (Invoke-Layer -Case 'dup-function-across-dot-source' -Inject @{
+        'layer-scripts/lib/st-dupe-lib.ps1' = 'function Test-StShared { 1 }'
+        'layer-scripts/lib/st-dupe-user.ps1' =
+            (@('. (Join-Path $PSScriptRoot ''st-dupe-lib.ps1'')',
+               'function Test-StShared { 2 }') -join [Environment]::NewLine)
+    }) -Exit 1 `
+        -Says @('defines Test-StShared at line 2 and shares a scope with',
+                'which defines it at line 1')
+
+    # And the polarity the two cases above cannot carry between them: a file
+    # defining a name ANOTHER file defines, with no dot-source joining them, is
+    # not an error -- they never share a scope, and refusing it would make the
+    # check unusable across 36 harnesses that all want a Get-Rect.
+    Assert-Layer -Run (Invoke-Layer -Case 'same-name-no-dot-source' -Inject @{
+        'layer-scripts/lib/st-apart-a.ps1' = 'function Test-StApart { 1 }'
+        'layer-scripts/lib/st-apart-b.ps1' = 'function Test-StApart { 2 }'
+    }) -Exit 0 `
+        -Silent @('Test-StApart')
+
+    # The allow-list, which had no witness at all -- and "a check with no
+    # fixture is a claim, not a guard" applies to the exception as much as to
+    # the rule. Three cases, because the interesting property is not that it
+    # excuses but WHAT it excuses.
+    $overrideRunner = Edit-RunnerCopy -Case 'override-honoured' -Edits @(
+        @{ from = "`$FunctionOverrides = [ordered]@{`n}"
+           to   = "`$FunctionOverrides = [ordered]@{`n    'lib/st-ovr.ps1::Test-StOvr' = 'fixture'`n}" })
+    Assert-Layer -Run (Invoke-Layer -Case 'override-honoured' -Inject @{
+        'layer-scripts/fuzz-suite.ps1' = $overrideRunner
+        'layer-scripts/lib/st-ovr.ps1' =
+            (@('function Test-StOvr { 1 }', 'function Test-StOvr { 2 }') -join [Environment]::NewLine)
+    }) -Exit 0 `
+        -Silent @('Test-StOvr')
+
+    # The two key shapes answer different questions and one must not silence
+    # the other: an entry excusing an in-file repeat must NOT excuse that file
+    # deliberately overriding a library's name, or an entry written for one
+    # waves through the other -- which is the #938 shape arriving by the back
+    # door. The per-file key is present here and the cross-file collision is
+    # still refused.
+    $narrowRunner = Edit-RunnerCopy -Case 'override-is-not-a-blanket' -Edits @(
+        @{ from = "`$FunctionOverrides = [ordered]@{`n}"
+           to   = "`$FunctionOverrides = [ordered]@{`n    'lib/st-narrow-user.ps1::Test-StNarrow' = 'fixture'`n}" })
+    Assert-Layer -Run (Invoke-Layer -Case 'override-is-not-a-blanket' -Inject @{
+        'layer-scripts/fuzz-suite.ps1' = $narrowRunner
+        'layer-scripts/lib/st-narrow-lib.ps1' = 'function Test-StNarrow { 1 }'
+        'layer-scripts/lib/st-narrow-user.ps1' =
+            (@('. (Join-Path $PSScriptRoot ''st-narrow-lib.ps1'')',
+               'function Test-StNarrow { 2 }') -join [Environment]::NewLine)
+    }) -Exit 1 `
+        -Says @('shares a scope with')
+
+    # And a reason is not optional. $NotInSuite refuses an empty one; an
+    # exception nobody can review is the one that outlives its reason.
+    $mutelessRunner = Edit-RunnerCopy -Case 'override-without-a-reason' -Edits @(
+        @{ from = "`$FunctionOverrides = [ordered]@{`n}"
+           to   = "`$FunctionOverrides = [ordered]@{`n    'lib/st-mute.ps1::Test-StMute' = ''`n}" })
+    Assert-Layer -Run (Invoke-Layer -Case 'override-without-a-reason' -Inject @{
+        'layer-scripts/fuzz-suite.ps1' = $mutelessRunner
+    }) -Exit 1 `
+        -Says @('has no reason, so the exception cannot be reviewed')
 
     # Injected over a file the copy legitimately carries, which is what the
     # sweep's restore branch exists for and what nothing else reaches: every
