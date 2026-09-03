@@ -111,8 +111,15 @@ try {
         if (-not $r.dispatched) {
             throw "HARVEST_MISS: the close chord was not dispatched (focus was '$($r.focus)')"
         }
-        Start-Sleep -Milliseconds 500
-        return [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($hwnd64))
+        # The dialog is shown asynchronously; poll rather than read once,
+        # so a busy machine's slow ContentDialog is not filed as a finding.
+        $deadline = (Get-Date).AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 250
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($hwnd64))
+            if ($null -ne (Find-Name $root 'Close tab?')) { return $root }
+        } while ((Get-Date) -lt $deadline)
+        return $root
     }
 
     # First close: the dialog must appear.

@@ -9,8 +9,12 @@
     -AllowInput): the old WM_CHAR posts almost certainly never delivered,
     so the inspector had whatever default content it paints, and the render
     stats were measuring an unseeded surface. The dismissal oracle is a
-    config-bound Ctrl+T (keybind = ctrl+t:new_tab) through the same chord
-    path, replacing the strip's New tab button.
+    config-bound Ctrl+T (keybind = ctrl+t=new_tab) through the same chord
+    path, replacing the strip's New tab button. The windows-curated default
+    already binds this chord; the explicit line pins it against a default
+    changing out from under the oracle - note '=' is the trigger/action
+    separator and ':' is a flag prefix, so the first draft's ':' made the
+    line a silent no-op the default was covering for.
 
     Dropped, ungated (issue #930, MUST_STAY_REAL_INPUT): the
     inspector-centre click, the plain wheel scroll, the ctrl+wheel zoom and
@@ -42,7 +46,7 @@ Add-Type -AssemblyName UIAutomationTypes
 $Config = @'
 windows-single-instance = true
 window-save-state = never
-keybind = ctrl+t:new_tab
+keybind = ctrl+t=new_tab
 '@
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
@@ -65,16 +69,21 @@ function Shot([int64]$Hwnd64, [string]$name) {
 }
 
 function Get-ShotStats([string]$path) {
+    # The old harness's own grid and thresholds, kept exactly: a ~36x36
+    # adaptive grid with a >35 nonDark line. A fixed 4px step both costs
+    # ~60k GetPixel calls and, by scaling nonDark with sample count,
+    # quietly weakens the render floor.
     $bmp = [System.Drawing.Image]::FromFile($path)
     try {
         $uniq = [System.Collections.Generic.HashSet[int]]::new()
         $nonDark = 0
-        $step = 4
-        for ($y = 0; $y -lt $bmp.Height; $y += $step) {
-            for ($x = 0; $x -lt $bmp.Width; $x += $step) {
+        $stepX = [Math]::Max(1, [int]($bmp.Width / 36))
+        $stepY = [Math]::Max(1, [int]($bmp.Height / 36))
+        for ($y = 0; $y -lt $bmp.Height; $y += $stepY) {
+            for ($x = 0; $x -lt $bmp.Width; $x += $stepX) {
                 $c = $bmp.GetPixel($x, $y)
                 [void]$uniq.Add(($c.R * 65536) + ($c.G * 256) + $c.B)
-                if ($c.R -gt 40 -or $c.G -gt 40 -or $c.B -gt 40) { $nonDark++ }
+                if ($c.R -gt 35 -or $c.G -gt 35 -or $c.B -gt 35) { $nonDark++ }
             }
         }
         return @{ unique = $uniq.Count; nonDark = $nonDark }

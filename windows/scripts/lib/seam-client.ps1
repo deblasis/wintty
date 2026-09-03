@@ -80,7 +80,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-// Read-only window plumbing: enumeration, rects and one MoveWindow for a
+// Window plumbing: enumeration, rects, one MoveWindow for a capture
 // capture harness that needs known geometry. Deliberately no SendInput,
 // no mouse_event, no focus theft -- the seam is the actuator now.
 public static class SeamWin {

@@ -105,8 +105,14 @@ try {
     }
 
     Invoke-Chord $session 0x5A
-    Start-Sleep -Milliseconds 600
+    # The undo runs asynchronously behind the chord ack; poll for the
+    # return to the pre-split count rather than read once.
     $afterUndo = LeafCount $session
+    $deadline = (Get-Date).AddSeconds(5)
+    while ($afterUndo -gt $before -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        $afterUndo = LeafCount $session
+    }
     Write-Host "leaves $afterUndo after undo"
     Shot $session '02-undo'
     if ($afterUndo -ne $before) {
@@ -124,8 +130,12 @@ try {
     }
 
     Invoke-Chord $session 0x54
-    Start-Sleep -Milliseconds 800
     $tabsAfterReopen = TabCount $session
+    $deadline = (Get-Date).AddSeconds(5)
+    while ($tabsAfterReopen -le $tabsAfterClose -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        $tabsAfterReopen = TabCount $session
+    }
     Write-Host "tabs $tabsAfterReopen after reopen"
     Shot $session '04-reopen'
     if ($tabsAfterReopen -le $tabsAfterClose) {
