@@ -1,155 +1,58 @@
 #requires -Version 7
-# confirm-close-surface=always: single-pane tab Close must show the dialog.
-# Isolated XDG. No modifier chords. No caption Close.
+<#
+    confirm-close-surface=always: closing a tab must raise the
+    confirmation dialog, Cancel must keep the tab, Close must drop it.
+
+    Seam-actuated (#930): seed two tabs, put focus on the frame, and raise
+    the close through chord{0x57,ctrl,shift} - Ctrl+Shift+W, the window's
+    real routing, the same TabCloseConfirmation.RequestAsync every close
+    path shares. The dialog is then found and answered by UIA exactly as
+    before; the harness synthesizes zero OS input.
+
+    Two entry-point changes come with that, both stated: the close used to
+    be the tab menu's Close item and closed the LEFTMOST tab the
+    right-click landed on; the chord closes the ACTIVE tab. And the tab
+    counts are the seam's manager truth now, not a UIA tree walk - the
+    question is whether tabs survive, and the manager is the authority.
+
+    Exits 0 clean, 2 findings, 1 could-not-run.
+#>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
-# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
-# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
-# not run" - which the suite retries and then reports as an area nothing is
-# known about. Every finally below still runs: exit from a trap unwinds
-# through them, and `break` rethrows anything that is not a product failure so
-# a genuine harness failure still leaves with 1.
-trap {
-    if ("$_" -like 'PRODUCT_FAIL*') {
-        Write-Host "$_" -ForegroundColor Red
-        exit 2
-    }
-    break
-}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
-
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-public static class MzCA {
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-    public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-    public class Hit { public bool Ok; public string Why; public int X,Y; public uint HitPid; public string HitClass; }
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd); RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L=r.L,T=r.T,R=r.R,B=r.B };
-        return (wr.W < 80 || wr.Hh < 80) ? null : wr;
-    }
-    public static string ClassOf(IntPtr h) {
-        var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString();
-    }
-    public static string TitleOf(IntPtr h) {
-        var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString();
-    }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    static Hit Miss(string why, int x, int y, uint pid, string cls) {
-        return new Hit { Ok=false, Why=why, X=x, Y=y, HitPid=pid, HitClass=cls };
-    }
-    public static Hit ClickScreen(uint pid, int x, int y, bool right) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        uint hitPid = PidOf(hit); string cls = ClassOf(hit);
-        if (cls == "WinttySplash") return Miss("splash", x, y, hitPid, cls);
-        if (hitPid != pid) return Miss("not Wintty", x, y, hitPid, cls);
-        if (!SetCursorPos(x, y)) return Miss("SetCursorPos", x, y, hitPid, cls);
-        Thread.Sleep(40);
-        hit = WindowFromPoint(new POINT { X=x, Y=y });
-        hitPid = PidOf(hit); cls = ClassOf(hit);
-        if (hitPid != pid) return Miss("not Wintty after move", x, y, hitPid, cls);
-        if (right) {
-            mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,UIntPtr.Zero);
-        } else {
-            mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,UIntPtr.Zero);
-        }
-        Thread.Sleep(250);
-        return new Hit { Ok=true, X=x, Y=y, HitPid=hitPid, HitClass=cls };
-    }
-}
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
+
+$Config = @'
+windows-single-instance = true
+window-save-state = never
+confirm-close-surface = always
 '@
 
-function Get-WinUiWindows([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [MzCA+EnumProc]{
-        param($h,$lp)
-        [uint32]$o=0; [void][MzCA]::GetWindowThreadProcessId($h,[ref]$o)
-        if ($o -ne $ProcId -or -not [MzCA]::IsWindowVisible($h)) { return $true }
-        if ([MzCA]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [MzCA]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64=$hwnd64; Title=[MzCA]::TitleOf($h); Area=($rc.W*$rc.Hh) })
-        return $true
-    }
-    [void][MzCA]::EnumWindows($cb,[IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending
-}
+$titles = @('confirm-a', 'confirm-b')
+$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
+$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-function Splash-Visible([int]$ProcId) {
-    $script:splashSeen = $false
-    $cb = [MzCA+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner=0; [void][MzCA]::GetWindowThreadProcessId($hwnd,[ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        if ([MzCA]::ClassOf($hwnd) -eq 'WinttySplash' -and [MzCA]::IsWindowVisible($hwnd)) { $script:splashSeen = $true }
-        return $true
-    }
-    [void][MzCA]::EnumWindows($cb,[IntPtr]::Zero)
-    return $script:splashSeen
-}
+$script:Findings = [System.Collections.Generic.List[string]]::new()
+$harnessError = ''
+$session = $null
 
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(40)
-    $got = $null
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL startup exit=$($proc.ExitCode)" }
-        $got = @(Get-WinUiWindows ([uint32]$proc.Id)) | Select-Object -First 1
-        if ($got) { break }
-    }
-    if (-not $got) { throw "HARVEST_MISS: no WinUI hwnd" }
-    $dl = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $dl) {
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL during splash" }
-        if (Splash-Visible $proc.Id) { Start-Sleep -Milliseconds 200; continue }
-        Start-Sleep -Milliseconds 900
-        if (-not (Splash-Visible $proc.Id)) { return $got }
-    }
-    throw "HARVEST_MISS: splash never dropped"
-}
-
-function Shot([int64]$Hwnd64, [string]$name) {
-    $rc = [MzCA]::RectOf($Hwnd64)
-    if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
+function Shot($Session, [string]$Name) {
+    $rc = [SeamWin]::RectOf($Session.Hwnd64)
+    if ($null -eq $rc) { return }
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rc.L,$rc.T,0,0,$bmp.Size)
-    $p = Join-Path $OutDir "shots\$name.png"
-    $bmp.Save($p); $g.Dispose(); $bmp.Dispose()
-    Write-Host "shot $name $($rc.W)x$($rc.Hh)"
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
+    $bmp.Save((Join-Path $OutDir "shots\$Name.png"))
+    $g.Dispose(); $bmp.Dispose()
 }
 
 function Find-Name($root, [string]$name) {
@@ -159,174 +62,129 @@ function Find-Name($root, [string]$name) {
     return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
 }
 
-function Invoke-El($el, [uint32]$ProcId, [string]$what, [int64]$MainHwnd) {
+function Invoke-El($el, [string]$what) {
     if ($null -eq $el) { throw "HARVEST_MISS: no UIA element for $what" }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $pat.Invoke()
-        Write-Host "invoke $what"
-        Start-Sleep -Milliseconds 400
-        return
-    } catch { Write-Host "invoke $what unsupported, clicking bounds" }
-    $r = $el.Current.BoundingRectangle
-    $x = [int]($r.X + $r.Width/2); $y = [int]($r.Y + $r.Height/2)
-    $hit = [MzCA]::ClickScreen($ProcId, $x, $y, $false)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
-    Write-Host "click $what $x,$y"
+    $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $pat.Invoke()
+    Write-Host "invoke $what"
     Start-Sleep -Milliseconds 400
 }
 
-function Count-TabItemsOn([int64]$Hwnd64) {
-    $root = $null
-    try {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzCA]::P($Hwnd64))
-    } catch {
-        return 0
-    }
-    if ($null -eq $root) { return 0 }
-    $ct = [System.Windows.Automation.ControlType]::TabItem
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $ct)
-    return @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)).Count
-}
-
+# The caption's Close is also named "Close"; invoking it kills Wintty. The
+# dialog's button sits below the caption band.
 function Find-DialogCloseButton($root, [int64]$Hwnd64) {
-    # Window caption Close is also named "Close". Never invoke that —
-    # it kills Wintty while we are trying to confirm the tab dialog.
-    $rc = [MzCA]::RectOf($Hwnd64)
+    $rc = [SeamWin]::RectOf($Hwnd64)
     if ($null -eq $rc -or $null -eq $root) { return $null }
-    $btnCt = [System.Windows.Automation.ControlType]::Button
     $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $btnCt)
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Button)
     foreach ($b in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
         if ($b.Current.Name -ne 'Close') { continue }
-        $r = $b.Current.BoundingRectangle
-        if ($r.Y -gt ($rc.T + 40)) { return $b }
+        if ($b.Current.BoundingRectangle.Y -gt ($rc.T + 40)) { return $b }
     }
     return $null
 }
 
-function Find-CloseMenuItem($root) {
-    $miCt = [System.Windows.Automation.ControlType]::MenuItem
-    $miCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $miCt)
-    foreach ($mi in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $miCond)) {
-        if ($mi.Current.Name -eq 'Close') { return $mi }
-    }
-    return $null
+function TabCount($Session) {
+    # Response assigned first: a member chain on a hashtable LITERAL in
+    # argument mode parses as separate arguments and binds $Command null.
+    $r = Invoke-SeamCommand $Session @{ op = 'get-state' }
+    return @($r.state.tabs).Count
 }
 
-function Open-TabCloseMenu([int64]$Hwnd64, [uint32]$ProcId) {
-    $rc = [MzCA]::RectOf($Hwnd64)
-    $hit = [MzCA]::ClickScreen($ProcId, $rc.L + 80, $rc.T + 16, $true)
-    if (-not $hit.Ok) { throw "tab menu $($hit.Why)" }
-    Start-Sleep -Milliseconds 400
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzCA]::P($Hwnd64))
-    $closeTab = Find-CloseMenuItem $root
-    if ($null -eq $closeTab) { throw "no Close MenuItem on tab flyout" }
-    return $closeTab
-}
-
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-
-$originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
-$tempXdg = Join-Path $env:TEMP ("wintty-fuzz-xdg-ca-{0:HHmmss}" -f (Get-Date))
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-[IO.File]::WriteAllText((Join-Path $tempXdg 'wintty\config.wintty'), @"
-windows-single-instance = true
-window-save-state = never
-windows-settings-ui = true
-confirm-close-surface = always
-"@)
-
-$proc = $null
-$dialogShown = $false
-$cancelKeptTabs = $false
-$closeDroppedTabs = $false
-$tabsAfterNew = 0
-$tabsAfterCancel = 0
-$tabsAfterClose = 0
-
-Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
 try {
-    $env:XDG_CONFIG_HOME = $tempXdg
-    Start-Sleep -Milliseconds 500
-    $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
-    $pid32 = [uint32]$proc.Id
-    $main = Wait-Ready $proc
-    Start-Sleep -Seconds 1
-    $main = @(Get-WinUiWindows $pid32) | Select-Object -First 1
-    $hwnd64 = [int64]$main.Hwnd64
-    Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
-    Shot $hwnd64 '00-launch'
+    Assert-NoWintty -Context 'The confirm-always harness'
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    $hwnd64 = [int64]$session.Hwnd64
+    Write-Host "hwnd=$hwnd64 pid=$($session.Proc.Id)"
+    Shot $session '00-launch'
 
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzCA]::P($hwnd64))
-    $newTab = Find-Name $root 'New tab'
-    if ($null -eq $newTab) { throw "HARVEST_MISS: New tab" }
-    Invoke-El $newTab $pid32 'New tab' $hwnd64
-    Start-Sleep -Milliseconds 600
-    $tabsAfterNew = Count-TabItemsOn $hwnd64
+    [void](Invoke-SeamCommand $session @{ op = 'seed-tabs'; count = 2; titles = $titles })
+    $tabsAfterNew = TabCount $session
     Write-Host "tabsAfterNew=$tabsAfterNew"
-    if ($tabsAfterNew -lt 2) { throw "PRODUCT_FAIL: expected 2 tabs after New tab, got $tabsAfterNew" }
-    Shot $hwnd64 '01-two-tabs'
+    if ($tabsAfterNew -ne 2) { $script:Findings.Add("seed left $tabsAfterNew tabs, wanted 2") }
+    Shot $session '01-two-tabs'
 
-    $closeTab = Open-TabCloseMenu $hwnd64 $pid32
-    Invoke-El $closeTab $pid32 'Close tab menu' $hwnd64
-    Start-Sleep -Milliseconds 500
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzCA]::P($hwnd64))
+    function Invoke-CloseChord {
+        [void](Invoke-SeamCommand $session @{ op = 'focus'; target = 'frame' })
+        $r = Invoke-SeamCommand $session @{ op = 'chord'; key = 0x57; ctrl = $true; shift = $true }
+        if (-not $r.dispatched) {
+            throw "HARVEST_MISS: the close chord was not dispatched (focus was '$($r.focus)')"
+        }
+        # The dialog is shown asynchronously; poll rather than read once,
+        # so a busy machine's slow ContentDialog is not filed as a finding.
+        $deadline = (Get-Date).AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 250
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($hwnd64))
+            if ($null -ne (Find-Name $root 'Close tab?')) { return $root }
+        } while ((Get-Date) -lt $deadline)
+        return $root
+    }
+
+    # First close: the dialog must appear.
+    $root = Invoke-CloseChord
     $dlg = Find-Name $root 'Close tab?'
     $dialogShown = $null -ne $dlg
     Write-Host "dialogShown=$dialogShown"
-    Shot $hwnd64 '02-dialog'
-    if (-not $dialogShown) { throw "PRODUCT_FAIL: confirm-close-surface=always did not show Close tab?" }
+    Shot $session '02-dialog'
+    if (-not $dialogShown) {
+        $script:Findings.Add('confirm-close-surface=always did not show the Close tab? dialog for the chord close')
+    }
+    else {
+        $cancel = Find-Name $root 'Cancel'
+        if ($null -eq $cancel) { throw "HARVEST_MISS: Cancel on close dialog" }
+        Invoke-El $cancel 'Cancel'
+        Start-Sleep -Milliseconds 400
+        $tabsAfterCancel = TabCount $session
+        Write-Host "tabsAfterCancel=$tabsAfterCancel"
+        Shot $session '03-after-cancel'
+        if ($tabsAfterCancel -ne $tabsAfterNew) {
+            $script:Findings.Add("Cancel dropped a tab: $tabsAfterCancel of $tabsAfterNew")
+        }
+    }
 
-    $cancel = Find-Name $root 'Cancel'
-    if ($null -eq $cancel) { throw "HARVEST_MISS: Cancel on close dialog" }
-    Invoke-El $cancel $pid32 'Cancel' $hwnd64
-    Start-Sleep -Milliseconds 400
-    $tabsAfterCancel = Count-TabItemsOn $hwnd64
-    $cancelKeptTabs = $tabsAfterCancel -eq $tabsAfterNew
-    Write-Host "tabsAfterCancel=$tabsAfterCancel cancelKeptTabs=$cancelKeptTabs"
-    Shot $hwnd64 '03-after-cancel'
-    if (-not $cancelKeptTabs) { throw "PRODUCT_FAIL: Cancel dropped a tab" }
-
-    $closeTab = Open-TabCloseMenu $hwnd64 $pid32
-    Invoke-El $closeTab $pid32 'Close tab menu 2' $hwnd64
-    Start-Sleep -Milliseconds 500
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzCA]::P($hwnd64))
+    # Second close: answer it.
+    $root = Invoke-CloseChord
     $closeBtn = Find-DialogCloseButton $root $hwnd64
     if ($null -eq $closeBtn) { throw "HARVEST_MISS: Close on confirm dialog (below caption)" }
-    Invoke-El $closeBtn $pid32 'dialog Close' $hwnd64
+    Invoke-El $closeBtn 'dialog Close'
     Start-Sleep -Milliseconds 800
-    $tabsAfterClose = Count-TabItemsOn $hwnd64
-    $closeDroppedTabs = $tabsAfterClose -lt $tabsAfterCancel
-    Write-Host "tabsAfterClose=$tabsAfterClose closeDroppedTabs=$closeDroppedTabs"
-    Shot $hwnd64 '04-after-close'
+    $tabsAfterClose = TabCount $session
+    Write-Host "tabsAfterClose=$tabsAfterClose"
+    Shot $session '04-after-close'
+    if ($tabsAfterClose -ge $tabsAfterNew) {
+        $script:Findings.Add("the confirmed close left $tabsAfterClose tabs of $tabsAfterNew")
+    }
+
+    if ($session.Proc.HasExited) {
+        throw "APP_EXIT: the app exited during the run (code $($session.Proc.ExitCode))"
+    }
+}
+catch {
+    $msg = "$($_.Exception.Message)"
+    if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { $script:Findings.Add($msg) }
+    else { $harnessError = $msg }
+    Write-Host "ERROR: $msg" -ForegroundColor Red
 }
 finally {
-    if ($null -ne $proc) {
-        $proc.Refresh()
-        if (-not $proc.HasExited) { try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { } }
-    }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
-$result = @{
-    crashGrew = $crashGrew
-    dialogShown = $dialogShown
-    cancelKeptTabs = $cancelKeptTabs
-    closeDroppedTabs = $closeDroppedTabs
-    tabsAfterNew = $tabsAfterNew
-    tabsAfterCancel = $tabsAfterCancel
-    tabsAfterClose = $tabsAfterClose
+if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    $script:Findings.Add('crash.log grew during the run')
 }
-$result | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
-Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-if ($crashGrew -or -not $dialogShown -or -not $cancelKeptTabs -or -not $closeDroppedTabs) { exit 2 }
+
+[ordered]@{
+    actuation       = 'seam (WINTTY_TEST_SEAM=<session token>); close via focus+chord, dialog answered by UIA'
+    dialogShown     = $(if ($null -ne $dlg) { $true } else { $false })
+    tabsAfterNew    = $tabsAfterNew
+    tabsAfterCancel = $tabsAfterCancel
+    tabsAfterClose  = $tabsAfterClose
+    findings        = $script:Findings
+    harness         = $harnessError
+} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
+
+if ($script:Findings.Count -gt 0) { exit 2 }
+if ($harnessError) { exit 1 }
 exit 0

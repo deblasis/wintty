@@ -1,451 +1,200 @@
 #requires -Version 7
-# Undo after split, reopen-closed-tab, OSC/console title via WM_CHAR.
-# Isolated XDG. No modifier chords. No caption Close.
+<#
+    Undo after split, reopen-closed-tab, and the OSC title round trip.
+
+    Seam-actuated (#930). Seed two tabs, split the active one, undo the
+    split through chord{0x5A,ctrl,shift} (Ctrl+Shift+Z, the binding), close
+    a tab through the seam's close op, reopen it through
+    chord{0x54,ctrl,shift} (Ctrl+Shift+T), and set the window title from
+    the shell with the seam's send-text op (armed per-harness with
+    -AllowInput; the old WM_CHAR posts almost certainly never delivered,
+    which is why the OSC leg used to print OSC_UNVERIFIED and exit 0).
+    The OSC read is in-process - tab-labels' shellTitle, the OSC result
+    itself - because the seeded UserOverrideTitle masks any shell title
+    from the window caption.
+
+    The old undo verdict was `$undoOk = $true` - written after invoking the
+    palette item, gated on nothing. The real oracle is the state the seam
+    already reports: the tab's leaf count going 1 -> 2 across the split and
+    back to 1 across the undo. The OSC title now gates exit 2 on a miss
+    (#930's acceptance list); an unverified title is a finding, not a note.
+
+    Exits 0 clean, 2 findings, 1 could-not-run.
+#>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
-# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
-# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
-# not run" - which the suite retries and then reports as an area nothing is
-# known about. Every finally below still runs: exit from a trap unwinds
-# through them, and `break` rethrows anything that is not a product failure so
-# a genuine harness failure still leaves with 1.
-trap {
-    if ("$_" -like 'PRODUCT_FAIL*') {
-        Write-Host "$_" -ForegroundColor Red
-        exit 2
-    }
-    break
-}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
-
 Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-public static class MzUO {
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-    public static void Chars(long hwnd, string text) {
-        var h = P(hwnd);
-        foreach (var ch in text) {
-            PostMessage(h, 0x0102, (IntPtr)(ushort)ch, IntPtr.Zero);
-            Thread.Sleep(20);
-        }
-    }
-    public static void Key(long hwnd, int vk) {
-        var h = P(hwnd);
-        PostMessage(h, 0x0100, (IntPtr)vk, IntPtr.Zero);
-        Thread.Sleep(40);
-        PostMessage(h, 0x0101, (IntPtr)vk, IntPtr.Zero);
-    }
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-    public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-    public class Hit { public bool Ok; public string Why; public int X,Y; public uint HitPid; public string HitClass; }
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd); RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L=r.L,T=r.T,R=r.R,B=r.B };
-        return (wr.W < 80 || wr.Hh < 80) ? null : wr;
-    }
-    public static string ClassOf(IntPtr h) {
-        var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString();
-    }
-    public static string TitleOf(IntPtr h) {
-        var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString();
-    }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    static Hit Miss(string why, int x, int y, uint pid, string cls) {
-        return new Hit { Ok=false, Why=why, X=x, Y=y, HitPid=pid, HitClass=cls };
-    }
-    public static Hit ClickScreen(uint pid, int x, int y, bool right) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        uint hitPid = PidOf(hit); string cls = ClassOf(hit);
-        if (cls == "WinttySplash") return Miss("splash", x, y, hitPid, cls);
-        if (hitPid != pid) return Miss("not Wintty", x, y, hitPid, cls);
-        if (!SetCursorPos(x, y)) return Miss("SetCursorPos", x, y, hitPid, cls);
-        Thread.Sleep(40);
-        hit = WindowFromPoint(new POINT { X=x, Y=y });
-        hitPid = PidOf(hit); cls = ClassOf(hit);
-        if (hitPid != pid) return Miss("not Wintty after move", x, y, hitPid, cls);
-        if (right) {
-            mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,UIntPtr.Zero);
-        } else {
-            mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,UIntPtr.Zero);
-        }
-        Thread.Sleep(250);
-        return new Hit { Ok=true, X=x, Y=y, HitPid=hitPid, HitClass=cls };
-    }
-}
-'@
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
-function Get-WinUiWindows([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [MzUO+EnumProc]{
-        param($h,$lp)
-        [uint32]$o=0; [void][MzUO]::GetWindowThreadProcessId($h,[ref]$o)
-        if ($o -ne $ProcId -or -not [MzUO]::IsWindowVisible($h)) { return $true }
-        if ([MzUO]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [MzUO]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64=$hwnd64; Title=[MzUO]::TitleOf($h); Area=($rc.W*$rc.Hh) })
-        return $true
-    }
-    [void][MzUO]::EnumWindows($cb,[IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending
-}
-
-function Splash-Visible([int]$ProcId) {
-    $script:splashSeen = $false
-    $cb = [MzUO+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner=0; [void][MzUO]::GetWindowThreadProcessId($hwnd,[ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        if ([MzUO]::ClassOf($hwnd) -eq 'WinttySplash' -and [MzUO]::IsWindowVisible($hwnd)) { $script:splashSeen = $true }
-        return $true
-    }
-    [void][MzUO]::EnumWindows($cb,[IntPtr]::Zero)
-    return $script:splashSeen
-}
-
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(40)
-    $got = $null
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL startup exit=$($proc.ExitCode)" }
-        $got = @(Get-WinUiWindows ([uint32]$proc.Id)) | Select-Object -First 1
-        if ($got) { break }
-    }
-    if (-not $got) { throw "HARVEST_MISS: no WinUI hwnd" }
-    $dl = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $dl) {
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL during splash" }
-        if (Splash-Visible $proc.Id) { Start-Sleep -Milliseconds 200; continue }
-        Start-Sleep -Milliseconds 900
-        if (-not (Splash-Visible $proc.Id)) { return $got }
-    }
-    throw "HARVEST_MISS: splash never dropped"
-}
-
-function Shot([int64]$Hwnd64, [string]$name) {
-    $rc = [MzUO]::RectOf($Hwnd64)
-    if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
-    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rc.L,$rc.T,0,0,$bmp.Size)
-    $p = Join-Path $OutDir "shots\$name.png"
-    $bmp.Save($p); $g.Dispose(); $bmp.Dispose()
-    Write-Host "shot $name $($rc.W)x$($rc.Hh)"
-}
-
-function Find-Name($root, [string]$name) {
-    if ($null -eq $root) { return $null }
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-    return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-}
-
-function Invoke-El($el, [uint32]$ProcId, [string]$what, [int64]$MainHwnd) {
-    if ($null -eq $el) { throw "HARVEST_MISS: no UIA element for $what" }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $pat.Invoke()
-        Write-Host "invoke $what"
-        Start-Sleep -Milliseconds 400
-        return
-    } catch { Write-Host "invoke $what unsupported, clicking bounds" }
-    $r = $el.Current.BoundingRectangle
-    $x = [int]($r.X + $r.Width/2); $y = [int]($r.Y + $r.Height/2)
-    $hit = [MzUO]::ClickScreen($ProcId, $x, $y, $false)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
-    Write-Host "click $what $x,$y"
-    Start-Sleep -Milliseconds 400
-}
-
-function Count-TabItemsOn([int64]$Hwnd64) {
-    $root = $null
-    try {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($Hwnd64))
-    } catch {
-        return 0
-    }
-    if ($null -eq $root) { return 0 }
-    $ct = [System.Windows.Automation.ControlType]::TabItem
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $ct)
-    return @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)).Count
-}
-
-function Find-DialogCloseButton($root, [int64]$Hwnd64) {
-    # Window caption Close is also named "Close". Never invoke that —
-    # it kills Wintty while we are trying to confirm the tab dialog.
-    $rc = [MzUO]::RectOf($Hwnd64)
-    if ($null -eq $rc -or $null -eq $root) { return $null }
-    $btnCt = [System.Windows.Automation.ControlType]::Button
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $btnCt)
-    foreach ($b in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
-        if ($b.Current.Name -ne 'Close') { continue }
-        $r = $b.Current.BoundingRectangle
-        if ($r.Y -gt ($rc.T + 40)) { return $b }
-    }
-    return $null
-}
-
-function Find-CloseMenuItem($root) {
-    $miCt = [System.Windows.Automation.ControlType]::MenuItem
-    $miCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $miCt)
-    foreach ($mi in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $miCond)) {
-        if ($mi.Current.Name -eq 'Close') { return $mi }
-    }
-    return $null
-}
-
-function Open-TabCloseMenu([int64]$Hwnd64, [uint32]$ProcId) {
-    $rc = [MzUO]::RectOf($Hwnd64)
-    $hit = [MzUO]::ClickScreen($ProcId, $rc.L + 80, $rc.T + 16, $true)
-    if (-not $hit.Ok) { throw "tab menu $($hit.Why)" }
-    Start-Sleep -Milliseconds 400
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($Hwnd64))
-    $closeTab = Find-CloseMenuItem $root
-    if ($null -eq $closeTab) { throw "no Close MenuItem on tab flyout" }
-    return $closeTab
-}
-
-function Get-ListItemAncestor($el) {
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $cur = $el
-    while ($null -ne $cur) {
-        try {
-            if ($cur.Current.ControlType.ProgrammaticName -eq 'ControlType.ListItem') { return $cur }
-        } catch { return $el }
-        $cur = $walker.GetParent($cur)
-    }
-    return $el
-}
-
-function Find-NamedListItem($root, [string]$name) {
-    if ($null -eq $root) { return $null }
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
-        $item = Get-ListItemAncestor $el
-        try {
-            if ($item.Current.ControlType.ProgrammaticName -eq 'ControlType.ListItem') { return $item }
-        } catch { }
-    }
-    return $null
-}
-
-function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
-    $rc = [MzUO]::RectOf($MainHwnd)
-    $hit = [MzUO]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: grid context $($hit.Why)" }
-    Start-Sleep -Milliseconds 300
-    $pal = $null
-    $dl = (Get-Date).AddMilliseconds(1200)
-    while ((Get-Date) -lt $dl -and $null -eq $pal) {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($MainHwnd))
-        $pal = Find-Name $root 'Command Palette'
-        Start-Sleep -Milliseconds 80
-    }
-    if ($null -eq $pal) {
-        [void][MzUO]::ClickScreen($ProcId, $rc.L + 200, $rc.T + 200, $false)
-        Start-Sleep -Milliseconds 300
-        $hit = [MzUO]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-        if (-not $hit.Ok) { throw "HARVEST_MISS: grid context retry $($hit.Why)" }
-        Start-Sleep -Milliseconds 300
-        $dl = (Get-Date).AddMilliseconds(1200)
-        while ((Get-Date) -lt $dl -and $null -eq $pal) {
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($MainHwnd))
-            $pal = Find-Name $root 'Command Palette'
-            Start-Sleep -Milliseconds 80
-        }
-    }
-    if ($null -eq $pal) { throw "HARVEST_MISS: Command Palette menu item" }
-    Invoke-El $pal $ProcId 'Command Palette' $MainHwnd
-    Start-Sleep -Milliseconds 400
-}
-
-function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($MainHwnd))
-    # By AutomationId, not "the first Edit under the window". The terminal
-    # keeps a 1x1 IME sink TextBox focused whenever a pane has focus, and it
-    # sorts ahead of the palette in the tree - so FindFirst(Edit) returned the
-    # sink, SetValue typed into it, and the palette never filtered. The list
-    # then still held every command, so the lookup below failed on a command
-    # that was present the whole time.
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
-    $edit = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { throw "HARVEST_MISS: no SearchBox in palette" }
-    $vp = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-    $vp.SetValue($text)
-    Write-Host "filter '$text'"
-    Start-Sleep -Milliseconds 350
-}
-
-function Invoke-PaletteCommand([int64]$MainHwnd, [uint32]$ProcId, [string]$filter, [string]$title) {
-    Open-Palette $MainHwnd $ProcId
-    Set-PaletteFilter $MainHwnd $filter
-    $el = $null
-    $dl = (Get-Date).AddMilliseconds(1200)
-    while ((Get-Date) -lt $dl -and $null -eq $el) {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($MainHwnd))
-        $el = Find-NamedListItem $root $title
-        Start-Sleep -Milliseconds 80
-    }
-    if ($null -eq $el) { throw "HARVEST_MISS: palette ListItem '$title'" }
-    Invoke-El $el $ProcId $title $MainHwnd
-    Start-Sleep -Milliseconds 1000
-}
-
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-
-$originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
-$tempXdg = Join-Path $env:TEMP ("wintty-fuzz-xdg-uo-{0:HHmmss}" -f (Get-Date))
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-[IO.File]::WriteAllText((Join-Path $tempXdg 'wintty\config.wintty'), @"
+$Config = @'
 windows-single-instance = true
 window-save-state = never
-windows-settings-ui = true
 confirm-close-surface = false
 profile.pwsh.name = PowerShell
 profile.pwsh.command = pwsh.exe
 default-profile = pwsh
-"@)
+'@
 
-$proc = $null
-$undoOk = $false
-$reopenOk = $false
-$oscOk = $false
-$tabsAfterNew = 0
-$tabsAfterClose = 0
-$tabsAfterReopen = 0
-$oscTitle = ''
+$titles = @('undo-a', 'undo-b')
+$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
+$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
+$script:Findings = [System.Collections.Generic.List[string]]::new()
+$harnessError = ''
+$session = $null
+
+function Shot($Session, [string]$Name) {
+    $rc = [SeamWin]::RectOf($Session.Hwnd64)
+    if ($null -eq $rc) { return }
+    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
+    $bmp.Save((Join-Path $OutDir "shots\$Name.png"))
+    $g.Dispose(); $bmp.Dispose()
+}
+
+# The active tab's leaf count, straight out of the seam's state block.
+function LeafCount($Session) {
+    $st = Invoke-SeamCommand $Session @{ op = 'get-state' }
+    # state.active is the INDEX of the active tab; leaves rides its entry.
+    $i = [int]$st.state.active
+    $tab = @($st.state.tabs)[$i]
+    if ($null -eq $tab) { throw "HARVEST_MISS: state.active is $i but the tab list is shorter" }
+    return [int]$tab.leaves
+}
+
+function TabCount($Session) {
+    # Response assigned first: a member chain on a hashtable LITERAL in
+    # argument mode parses as separate arguments and binds $Command null.
+    $r = Invoke-SeamCommand $Session @{ op = 'get-state' }
+    return @($r.state.tabs).Count
+}
+
+function Invoke-Chord($Session, [int]$Key) {
+    [void](Invoke-SeamCommand $Session @{ op = 'focus'; target = 'frame' })
+    $r = Invoke-SeamCommand $Session @{ op = 'chord'; key = $Key; ctrl = $true; shift = $true }
+    if (-not $r.dispatched) {
+        throw ("HARVEST_MISS: chord 0x{0:X2} was not dispatched (focus was '{1}')" -f $Key, $r.focus)
+    }
+}
+
 try {
-    $env:XDG_CONFIG_HOME = $tempXdg
-    Start-Sleep -Milliseconds 500
-    $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
-    $pid32 = [uint32]$proc.Id
-    $main = Wait-Ready $proc
-    Start-Sleep -Seconds 1
-    $main = @(Get-WinUiWindows $pid32) | Select-Object -First 1
-    $hwnd64 = [int64]$main.Hwnd64
-    Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
-    Shot $hwnd64 '00-launch'
+    Assert-NoWintty -Context 'The undo-osc harness'
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
+    $hwnd64 = [int64]$session.Hwnd64
+    Write-Host "hwnd=$hwnd64 pid=$($session.Proc.Id)"
+    Shot $session '00-launch'
 
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($hwnd64))
-    $newTab = Find-Name $root 'New tab'
-    if ($null -eq $newTab) { throw "HARVEST_MISS: New tab" }
-    Invoke-El $newTab $pid32 'New tab' $hwnd64
-    Start-Sleep -Milliseconds 600
-    $tabsAfterNew = Count-TabItemsOn $hwnd64
-    if ($tabsAfterNew -lt 2) { throw "PRODUCT_FAIL: expected 2 tabs, got $tabsAfterNew" }
-    Shot $hwnd64 '01-two-tabs'
+    [void](Invoke-SeamCommand $session @{ op = 'seed-tabs'; count = 2; titles = $titles })
+    [void](Invoke-SeamCommand $session @{ op = 'select'; index = 1 })
 
-    $rc = [MzUO]::RectOf($hwnd64)
-    $hit = [MzUO]::ClickScreen($pid32, $rc.L + 400, $rc.T + 280, $true)
-    if (-not $hit.Ok) { throw "pane menu $($hit.Why)" }
-    Start-Sleep -Milliseconds 400
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzUO]::P($hwnd64))
-    $split = Find-Name $root 'Split Right'
-    if ($null -eq $split) { throw "HARVEST_MISS: Split Right" }
-    Invoke-El $split $pid32 'Split Right' $hwnd64
-    Start-Sleep -Milliseconds 800
-    Shot $hwnd64 '02-split'
+    $before = LeafCount $session
+    [void](Invoke-SeamCommand $session @{ op = 'split' })
+    $afterSplit = LeafCount $session
+    Write-Host "leaves $before -> $afterSplit after split"
+    Shot $session '01-split'
+    if ($afterSplit -ne ($before + 1)) {
+        $script:Findings.Add("split took the active tab from $before to $afterSplit leaves, wanted +1")
+    }
 
-    Invoke-PaletteCommand $hwnd64 $pid32 'undo' 'Undo'
-    Start-Sleep -Milliseconds 600
-    Shot $hwnd64 '03-undo'
-    $undoOk = $true
-    Write-Host "undoOk=$undoOk"
+    Invoke-Chord $session 0x5A
+    # The undo runs asynchronously behind the chord ack; poll for the
+    # return to the pre-split count rather than read once.
+    $afterUndo = LeafCount $session
+    $deadline = (Get-Date).AddSeconds(5)
+    while ($afterUndo -gt $before -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        $afterUndo = LeafCount $session
+    }
+    Write-Host "leaves $afterUndo after undo"
+    Shot $session '02-undo'
+    if ($afterUndo -ne $before) {
+        $script:Findings.Add("undo left the tab at $afterUndo leaves, wanted back to $before")
+    }
 
-    $closeTab = Open-TabCloseMenu $hwnd64 $pid32
-    Invoke-El $closeTab $pid32 'Close tab menu' $hwnd64
-    Start-Sleep -Milliseconds 600
-    $tabsAfterClose = Count-TabItemsOn $hwnd64
-    Write-Host "tabsAfterClose=$tabsAfterClose"
-    Shot $hwnd64 '04-closed'
-    if ($tabsAfterClose -ge $tabsAfterNew) { throw "PRODUCT_FAIL: close did not drop a tab" }
+    # Close the single-pane tab, then reopen it through the binding.
+    $tabsBefore = TabCount $session
+    [void](Invoke-SeamCommand $session @{ op = 'close'; index = 0 })
+    $tabsAfterClose = TabCount $session
+    Write-Host "tabs $tabsBefore -> $tabsAfterClose after close"
+    Shot $session '03-closed'
+    if ($tabsAfterClose -ne ($tabsBefore - 1)) {
+        $script:Findings.Add("close left $tabsAfterClose tabs of $tabsBefore")
+    }
 
-    Invoke-PaletteCommand $hwnd64 $pid32 'reopen' 'Reopen Closed Tab'
-    Start-Sleep -Milliseconds 800
-    $tabsAfterReopen = Count-TabItemsOn $hwnd64
-    $reopenOk = $tabsAfterReopen -gt $tabsAfterClose
-    Write-Host "tabsAfterReopen=$tabsAfterReopen reopenOk=$reopenOk"
-    Shot $hwnd64 '05-reopen'
-    if (-not $reopenOk) { throw "PRODUCT_FAIL: Reopen Closed Tab did not restore a tab" }
+    Invoke-Chord $session 0x54
+    $tabsAfterReopen = TabCount $session
+    $deadline = (Get-Date).AddSeconds(5)
+    while ($tabsAfterReopen -le $tabsAfterClose -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        $tabsAfterReopen = TabCount $session
+    }
+    Write-Host "tabs $tabsAfterReopen after reopen"
+    Shot $session '04-reopen'
+    if ($tabsAfterReopen -le $tabsAfterClose) {
+        $script:Findings.Add("Reopen Closed Tab left $tabsAfterReopen tabs, wanted more than $tabsAfterClose")
+    }
 
-    $rc = [MzUO]::RectOf($hwnd64)
-    $hit = [MzUO]::ClickScreen($pid32, $rc.L + 400, $rc.T + 280, $false)
-    if (-not $hit.Ok) { throw "grid focus $($hit.Why)" }
-    Start-Sleep -Milliseconds 200
-    [MzUO]::Chars($hwnd64, 'Write-Host "`e]0;OSC-FUZZ`a"')
-    [MzUO]::Key($hwnd64, 0x0D)
-    Start-Sleep -Milliseconds 1200
-    $oscTitle = [MzUO]::TitleOf([MzUO]::P($hwnd64))
-    $oscOk = $oscTitle -match 'OSC-FUZZ'
-    Write-Host "oscTitle=$oscTitle oscOk=$oscOk"
-    Shot $hwnd64 '06-osc'
+    # OSC title round trip, read in-process: the seeded UserOverrideTitle
+    # beats any shell title in the caption, so the WINDOW caption can never
+    # show OSC-FUZZ here and gating on it would be structurally blind. The
+    # shell-reported title is the OSC result itself.
+    [void](Invoke-SeamCommand $session @{ op = 'send-text'; text = 'Write-Host "`e]0;OSC-FUZZ`a"' + "`r" })
+    # The reopened tab's shell is freshly started and needs a moment before
+    # it executes the line, so poll for the title rather than read once -
+    # a fixed 1.2s read a startup title that was about to change.
+    $oscTitle = ''
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        $labels = Invoke-SeamCommand $session @{ op = 'tab-labels' }
+        $active = @($labels.labels)[[int](Invoke-SeamCommand $session @{ op = 'get-state' }).state.active]
+        $oscTitle = "$($active.shellTitle)"
+        if ($oscTitle -match 'OSC-FUZZ') { break }
+        Start-Sleep -Milliseconds 400
+    }
+    Write-Host "shellTitle=$oscTitle caption=$([SeamWin]::TitleOf([SeamWin]::P($hwnd64)))"
+    Shot $session '05-osc'
+    if ($oscTitle -notmatch 'OSC-FUZZ') {
+        $script:Findings.Add("the OSC title never reached the tab's shell-reported title: '$oscTitle'")
+    }
+
+    if ($session.Proc.HasExited) {
+        throw "APP_EXIT: the app exited during the run (code $($session.Proc.ExitCode))"
+    }
+}
+catch {
+    $msg = "$($_.Exception.Message)"
+    if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { $script:Findings.Add($msg) }
+    else { $harnessError = $msg }
+    Write-Host "ERROR: $msg" -ForegroundColor Red
 }
 finally {
-    if ($null -ne $proc) {
-        $proc.Refresh()
-        if (-not $proc.HasExited) { try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { } }
-    }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
-$result = @{
-    crashGrew = $crashGrew
-    undoOk = $undoOk
-    reopenOk = $reopenOk
-    oscOk = $oscOk
-    oscTitle = $oscTitle
-    tabsAfterNew = $tabsAfterNew
-    tabsAfterClose = $tabsAfterClose
-    tabsAfterReopen = $tabsAfterReopen
+if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    $script:Findings.Add('crash.log grew during the run')
 }
-$result | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
-Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-if ($crashGrew -or -not $undoOk -or -not $reopenOk) { exit 2 }
-if (-not $oscOk) { Write-Host 'OSC_UNVERIFIED: title did not become OSC-FUZZ' }
+
+[ordered]@{
+    actuation       = 'seam (WINTTY_TEST_SEAM=<session token>, send-text armed); undo/reopen via chords'
+    leavesBefore    = $before
+    leavesAfterSplit = $afterSplit
+    leavesAfterUndo = $afterUndo
+    tabsAfterClose  = $tabsAfterClose
+    tabsAfterReopen = $tabsAfterReopen
+    oscTitle        = $oscTitle
+    findings        = $script:Findings
+    harness         = $harnessError
+} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
+
+if ($script:Findings.Count -gt 0) { exit 2 }
+if ($harnessError) { exit 1 }
 exit 0

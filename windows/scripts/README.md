@@ -372,7 +372,10 @@ Two more things will stop a seam session that used to work:
   commands as the user, so it has a second opt-in of its own and is off by
   default. Pass `-AllowInput` to `Start-SeamSession` (or set
   `WINTTY_TEST_SEAM_INPUT=1`) only in a harness that genuinely needs the shell
-  to run something. `seam-cwd-tab-label.ps1` is the only one that does.
+  to run something. The harnesses that arm it: `seam-cwd-tab-label.ps1` (the
+  cwd round trip), `mouse-fuzz-inspector.ps1` (shell seeding so the inspector
+  has surface state) and `mouse-fuzz-undo-osc.ps1` (the OSC title command).
+  That list expanding is a policy change and belongs in the PR that does it.
 
 ## Driving input
 
