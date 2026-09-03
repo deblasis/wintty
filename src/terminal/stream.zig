@@ -2709,6 +2709,26 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.size_report, .iterm2_report_cell_size);
                 },
 
+                .prompt_report => |v| {
+                    // The record's directory feeds the same slot OSC 7 and
+                    // OSC 9;9 feed, and takes the same validation on the way
+                    // in, so every consumer that already reads the pwd keeps
+                    // working without knowing this OSC exists. The rest of
+                    // the record has no consumer in the terminal yet; it is
+                    // reachable on the OSC command for embedders that want
+                    // it, and gets its own action when something acts on it.
+                    //
+                    // Unconditional, because `Stream` is generic over the
+                    // handler and has no business deciding what one of them
+                    // makes of a value. The empty case that would have
+                    // needed deciding -- `report_pwd` reads empty as "forget
+                    // the directory", which is not what an empty cwd means
+                    // -- cannot arrive: the parser refuses a v1 report whose
+                    // cwd is empty, so the schema settles it rather than
+                    // this switch.
+                    self.handler.vt(.report_pwd, .{ .url = v.cwd });
+                },
+
                 .conemu_sleep,
                 .conemu_show_message_box,
                 .conemu_change_tab_title,
@@ -5375,4 +5395,100 @@ test "stream: continuation every-byte cuts preserve future behavior" {
             restored_final_writer.buffered(),
         );
     };
+}
+
+test "stream: OSC 7777 report feeds the existing pwd consumers" {
+    // The whole point of the compatibility decision: a consumer that only
+    // knows about the report_pwd action, which is every pwd consumer in the
+    // tree and the daemon that polls the terminal's pwd slot, must see this
+    // directory without knowing OSC 7777 exists.
+    const H = struct {
+        pwd: ?[]const u8 = null,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .report_pwd => self.pwd = value.url,
+                else => {},
+            }
+        }
+    };
+
+    var s: Stream(H) = .init(.{ .handler = .{} });
+
+    // {"v":1,"cwd":"C:\\Users\\me","exit":0,"shell":"pwsh"}
+    const input = "\x1b]7777;p;7B2276223A312C22637764223A22433A5C5C55736572735C5C6D65222" ++
+        "C2265786974223A302C227368656C6C223A2270777368227D\x07";
+    for (input) |ch| s.next(ch);
+
+    try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd.?);
+}
+
+test "stream: OSC 7777 empty cwd never reaches the pwd" {
+    // `report_pwd` reads an empty value as "forget the directory", which is
+    // not what an empty cwd in a report means. The parser refuses such a
+    // report outright, so nothing here has to decide: this asserts the
+    // outcome that matters, which is that the directory the same prompt just
+    // set survives.
+    //
+    // The handler copies rather than borrowing, because this test outlives a
+    // sequence: value.url points into the OSC parser's buffer and the next
+    // sequence overwrites it.
+    const H = struct {
+        buf: [256]u8 = undefined,
+        len: ?usize = null,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .report_pwd => {
+                    @memcpy(self.buf[0..value.url.len], value.url);
+                    self.len = value.url.len;
+                },
+                else => {},
+            }
+        }
+
+        fn pwd(self: *const @This()) []const u8 {
+            return self.buf[0 .. self.len orelse 0];
+        }
+    };
+
+    var s: Stream(H) = .init(.{ .handler = .{} });
+
+    // A real pwd first, then a report with an empty cwd.
+    for ("\x1b]9;9;C:\\Users\\me\x07") |ch| s.next(ch);
+    try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd());
+
+    // {"v":1,"cwd":""}
+    for ("\x1b]7777;p;7B2276223A312C22637764223A22227D\x07") |ch| s.next(ch);
+    try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd());
+}
+
+test "stream: OSC 7777 malformed report leaves the pwd alone" {
+    const H = struct {
+        pwd: ?[]const u8 = null,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .report_pwd => self.pwd = value.url,
+                else => {},
+            }
+        }
+    };
+
+    var s: Stream(H) = .init(.{ .handler = .{} });
+
+    for ("\x1b]7777;p;ZZZZ\x07") |ch| s.next(ch);
+    try testing.expect(s.handler.pwd == null);
 }

@@ -22,6 +22,7 @@ pub const ValidKind = enum {
     hyperlink_end,
     conemu_progress,
     iterm2_notification,
+    prompt_report,
 };
 
 /// Invalid OSC request kinds that can be generated.
@@ -265,6 +266,42 @@ fn nextUnwrappedValidExact(self: *const Osc, writer: *std.Io.Writer, k: ValidKin
             if (max_len < 3) break :iterm2_notification;
             // add a prefix to ensure that this is not interpreted as a ConEmu OSC
             try writer.print("9;_{f}", .{self.bytes().newAlphabet(ascii_alphabet).atMost(max_len - 3)});
+        },
+
+        .prompt_report => prompt_report: {
+            const prefix = "7777;p;";
+
+            // This kind has to build its payload and then encode it, unlike
+            // every other kind here. Random bytes dropped straight into the
+            // slot would die on the hex decode before the JSON scanner or the
+            // schema check ever ran, and a scanner running over bytes a child
+            // chose is the reason this kind is worth generating at all.
+            //
+            // The path is alphanumeric segments: JSON escapes are their own
+            // surface with their own tests, and what this feeds the fuzzer is
+            // volume through the decode, scan and schema path.
+            var json_buf: [192]u8 = undefined;
+            var jw: std.Io.Writer = .fixed(&json_buf);
+
+            // Bounded by construction: 16 for the head, at most 3 segments of
+            // 2 + 16, and 28 for the tail, so 98 against 192.
+            jw.writeAll("{\"v\":1,\"cwd\":\"C:") catch unreachable;
+            for (0..self.rand.intRangeAtMost(usize, 1, 3)) |_| {
+                jw.writeAll("\\\\") catch unreachable;
+                _ = self.bytes()
+                    .newAlphabet(alphanumeric_alphabet)
+                    .atMost(16)
+                    .write(&jw) catch unreachable;
+            }
+            jw.print(
+                "\",\"exit\":{d},\"shell\":\"pwsh\"}}",
+                .{self.rand.int(u8)},
+            ) catch unreachable;
+
+            const json = jw.buffered();
+            if (max_len < prefix.len + json.len * 2) break :prompt_report;
+            try writer.writeAll(prefix);
+            for (json) |b| try writer.print("{X:0>2}", .{b});
         },
     }
 }

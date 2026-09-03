@@ -689,6 +689,17 @@ const VTEvent = struct {
                     }
                 },
 
+                // A payload too wide for the command union travels as a
+                // pointer into the parser's buffer (OSC 7777). What the
+                // inspector has to show is the record, not the address.
+                .pointer => |ptr| switch (ptr.size) {
+                    .one => try encodeMetadata(alloc, md, v.*),
+                    else => {
+                        @compileLog(T);
+                        @compileError("unsupported type, see log");
+                    },
+                },
+
                 else => {
                     @compileLog(T);
                     @compileError("unsupported type, see log");

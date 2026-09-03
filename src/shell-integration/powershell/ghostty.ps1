@@ -23,6 +23,61 @@ $global:__GhosttyShellIntegrationLoaded = $true
 $global:__GhosttyEsc = [char]0x1b
 $global:__GhosttyBel = [char]0x07
 
+# Which shell is reporting. PowerShell 7+ identifies as Core; anything else
+# here is Windows PowerShell 5.1.
+$global:__GhosttyShellName = if ($PSVersionTable.PSEdition -eq 'Core') {
+    'pwsh'
+} else {
+    'powershell'
+}
+
+# [Convert]::ToHexString arrived with .NET 5, so it exists under PowerShell 7
+# and not under Windows PowerShell 5.1. Resolved once here rather than per
+# prompt, because the fallback allocates a dashed string and then rewrites it.
+$global:__GhosttyHasToHexString = $null -ne [Convert].GetMethod(
+    'ToHexString', [type[]]@([byte[]]))
+
+# Percent-encode the path half of a file:// URI, the way upstream Ghostty's
+# fish integration does with `string escape --style=url $PWD`.
+#
+# This is not cosmetic. It is what makes OSC 7 carry a Windows path
+# correctly at all:
+#
+#   * The output is pure ASCII, so the child console's code page has nothing
+#     to transcode or substitute. A path with a non-ASCII character reaches
+#     the terminal intact from a default Windows install, where writing the
+#     raw bytes does not.
+#
+#   * ESC, BEL and ST become %1B, %07 and %9C, so no character of a
+#     directory name can terminate the sequence reporting it.
+#
+#   * `%` is a legal Windows path character. Sending it raw is a live bug:
+#     the terminal parses OSC 7 with percent-decoding on, so `C:\100%` used
+#     to arrive as whatever `%` plus the next two characters happened to
+#     decode to. Encoding it as %25 is what makes it survive.
+#
+# The unreserved set is RFC 3986's, plus the two characters this URI's path
+# needs to keep its shape: `/` as the separator (fish keeps it too) and `:`
+# after the drive letter. Written out by hand rather than reaching for
+# [System.Uri]::EscapeDataString or [System.Web.HttpUtility], because those
+# differ between Windows PowerShell 5.1 and PowerShell 7 over which
+# characters are reserved, and this has to produce the same bytes on both.
+function Get-GhosttyUriPath([string] $path) {
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($b in [System.Text.Encoding]::UTF8.GetBytes($path)) {
+        if (($b -ge 0x41 -and $b -le 0x5A) -or `
+            ($b -ge 0x61 -and $b -le 0x7A) -or `
+            ($b -ge 0x30 -and $b -le 0x39) -or `
+            $b -eq 0x2D -or $b -eq 0x2E -or $b -eq 0x5F -or $b -eq 0x7E -or `
+            $b -eq 0x2F -or $b -eq 0x3A) {
+            [void]$sb.Append([char]$b)
+        } else {
+            [void]$sb.AppendFormat('%{0:X2}', $b)
+        }
+    }
+    return $sb.ToString()
+}
+
 # Convert a Windows path (e.g. C:\Users\me) to an OSC 7 file:// URI of the
 # form file://HOST/c:/Users/me. We lowercase the drive letter to match the
 # convention used by upstream Ghostty's other shells and convert backslashes
@@ -35,7 +90,68 @@ function Get-GhosttyFileUri([string] $path) {
         $drive = $matches[1].ToLowerInvariant()
         $normalized = "${drive}:" + $normalized.Substring(2)
     }
-    return "file://$env:COMPUTERNAME/$normalized"
+    return "file://$env:COMPUTERNAME/$(Get-GhosttyUriPath $normalized)"
+}
+
+# Build the OSC 7777 prompt report for the current shell state.
+#
+#     ESC ] 7777 ; p ; <hex-encoded UTF-8 JSON> BEL
+#
+# Two things this buys that the separate OSC 7 / 9;9 / 133 sequences cannot:
+#
+#   * The JSON is encoded to UTF-8 here, by us, so what goes on the wire does
+#     not depend on the console code page. [Console]::Write emits in the
+#     child console's encoding, which is a legacy OEM page on a default
+#     Windows install, and that transcodes or substitutes every non-ASCII
+#     character of a path. Hex digits are ASCII, so no code page can touch
+#     them.
+#
+#   * Hex means no byte of the payload can end the sequence carrying it, so a
+#     path holding ESC, BEL or ST cannot truncate its own report, and a
+#     replay that stops mid-sequence cannot splice into live bytes and
+#     fabricate a path.
+#
+# Schema v1 fields: v (schema version), cwd, exit, shell. The schema grows
+# additively: a reader ignores fields it does not know and a missing field is
+# not an error, `v` gates changes that would break an existing field's
+# meaning, and absent is distinct from empty (absent means we did not look).
+# Reserved and deliberately not sent yet: git_head, git_branch, git_dirty.
+# The parser already accepts them; the shell side needs a cache design that
+# stays inside the per-prompt budget, and that is not this change.
+#
+# Kept as its own function so it can be exercised directly, which is how the
+# code page behaviour above is measured rather than assumed.
+#
+# Returns the empty string when the payload will not fit, which the caller
+# treats as "send nothing this prompt".
+function global:Get-GhosttyPromptReport([string] $cwd, [int] $exitCode) {
+    $payload = [ordered]@{
+        v     = 1
+        cwd   = $cwd
+        exit  = $exitCode
+        shell = $global:__GhosttyShellName
+    }
+    $json = ConvertTo-Json -InputObject $payload -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+    # The terminal accepts at most 1024 hex characters, so 512 encoded bytes,
+    # and drops anything longer. Checking here rather than sending and being
+    # dropped: the shell knows the answer for free, and the alternative is a
+    # kilobyte written to the pty and a warning logged on every single prompt
+    # for as long as the user stands in that directory. Measured ceiling, in
+    # path characters past the drive: 468 ASCII, 234 Latin-1, 156 CJK, since
+    # a character outside ASCII costs two to four bytes and each separator
+    # costs two. OSC 7 and OSC 9;9 still carry the directory on those
+    # prompts, so the loss is the report and not the path.
+    $__GhosttyMaxReportBytes = 512
+    if ($bytes.Length -gt $__GhosttyMaxReportBytes) { return '' }
+
+    $hex = if ($global:__GhosttyHasToHexString) {
+        [Convert]::ToHexString($bytes)
+    } else {
+        [BitConverter]::ToString($bytes).Replace('-', '')
+    }
+    return "$($global:__GhosttyEsc)]7777;p;$hex$($global:__GhosttyBel)"
 }
 
 # Capture the user's existing prompt function so frameworks like
@@ -74,6 +190,17 @@ function global:prompt {
         $uri = Get-GhosttyFileUri $cwd
         [Console]::Write("$($global:__GhosttyEsc)]7;$uri$($global:__GhosttyBel)")
         [Console]::Write("$($global:__GhosttyEsc)]9;9;$cwd$($global:__GhosttyBel)")
+
+        # The structured report carries the same directory losslessly plus
+        # the rest of the prompt's state. Additive: the two sequences above
+        # stay exactly as they are for consumers that only speak those.
+        # Wrapped because nothing about reporting is worth breaking a prompt
+        # over; a terminal that never receives it simply falls back to them.
+        try {
+            $report = Get-GhosttyPromptReport $cwd $exitCode
+            if ($report) { [Console]::Write($report) }
+        } catch {
+        }
     }
 
     # Prompt start.
