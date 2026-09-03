@@ -1,0 +1,50 @@
+# Runs the C# test suites on the fork. Upstream test.yml gates every job on
+# ghostty-org/ghostty, so it is inert here; this workflow mirrors `just
+# test-win` so CI runs the same legs as the signoff ladder.
+
+name: windows-tests
+
+on:
+  push:
+    branches: [windows]
+  pull_request: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name != 'windows' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-win:
+    if: github.repository == 'deblasis/wintty'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No version input: reads .minimum_zig_version from build.zig.zon, and
+      # caches zig's own caches (use-cache defaults to true).
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+
+      # No version input: installs the SDK pinned by the root global.json.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+
+      # Ghostty.csproj hard-errors without zig-out/lib/ghostty.dll
+      # (ErrorIfNoLibghostty), so the dll must exist before any dotnet build.
+      - name: Build ghostty.dll
+        run: zig build -Dapp-runtime=none
+
+      # The whole solution, not just the test projects: neither test project
+      # references Ghostty.csproj, so an app-only break is invisible to
+      # `dotnet test` on its own.
+      - name: Build solution
+        run: dotnet build windows/Ghostty.sln /p:Platform=x64
+
+      - name: Ghostty.Tests
+        run: dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
+
+      - name: Ghostty.Tests.Windows
+        run: dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
