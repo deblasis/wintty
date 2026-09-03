@@ -246,7 +246,7 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
 # because the integrity check below reads it: a new harness dropped into this
 # directory has to be classified, and prose does not fail a run.
 $NotInSuite = [ordered]@{
-    'ShellIntegrationPs1.Tests.ps1' = 'a plain-assert test file run directly by its own command line (see its header), not a harness: no -ExePath, no app, no verdict shape'
+    'ShellIntegrationPs1.Tests.ps1' = 'plain-assert tests with their own 0/1 exit (see its header), run by its own command line; deliberately unautomated - no recipe, no CI, no suite entry'
     'fuzz-suite.ps1'                = 'this runner'
     'aot-fuzz.ps1'                  = 'a runner; targets the NativeAOT publish, which this suite can also do with -ExePath'
     'vtabs-visual-qa.ps1'           = 'a runner'
@@ -1418,6 +1418,7 @@ foreach ($f in $dupScanFiles) {
     # literal-only reader skips it in silence -- which switches this whole half
     # of the check off for that file while every guard stays green. Same
     # nesting rule as above: a dot-source inside a function is function-scoped.
+    $fileText = [IO.File]::ReadAllText($f.FullName)
     $sourced = @()
     foreach ($cmd in $ast.FindAll({
             param($n) $n -is [System.Management.Automation.Language.CommandAst] -and
@@ -1432,21 +1433,33 @@ foreach ($f in $dupScanFiles) {
             $parent = $parent.Parent
         }
         if ($nested) { continue }
-        $found = [regex]::Matches($cmd.Extent.Text, '[\w.\-]+\.ps1')
+        $found = [regex]::Matches($cmd.Extent.Text, '[\w.\-]+\.ps[dm]?1')
         if ($found.Count -lt 1) {
-            if ($cmd.Extent.Text -notmatch '\.ps1') {
-                # DYNAMIC by design: a variable or expression path with no
-                # .ps1 literal anywhere in the command (ShellIntegrationPs1
-                # dot-sources `$script:integration`, built at runtime from
-                # Join-Path). There is no name to misread, so skipping costs
-                # nothing the refusing rule protects; the leaf it loads is
-                # invisible either way.
+            # A VARIABLE dot-source is resolved through its own file before
+            # being excused: ShellIntegrationPs1.Tests.ps1 writes
+            # `$script:integration = Join-Path $PSScriptRoot '...ghostty.ps1'`
+            # one line up, and the leaf is right there in the assignment.
+            # Reading it keeps `. $p` where `$p = 'x.ps1'` visible to this
+            # check instead of silently dynamic.
+            $varDot = [regex]::Match($cmd.Extent.Text, '\.\s*(\$(?:script:|local:|global:|private:)?[A-Za-z_]\w*)')
+            if ($varDot.Success) {
+                $esc = [regex]::Escape($varDot.Groups[1].Value)
+                $assign = [regex]::Match($fileText, ($esc + '\s*=\s*([^\r\n]+)'))
+                if ($assign.Success) {
+                    $found = [regex]::Matches($assign.Groups[1].Value, '[\w.\-]+\.ps[dm]?1')
+                }
+            }
+        }
+        if ($found.Count -lt 1) {
+            if (-not $varDot.Success) {
+                # DYNAMIC by design after resolution failed: no path literal
+                # in the command and no literal in the variable's own
+                # assignment - composed at runtime from non-literals. There
+                # is no name anywhere in the file to misread.
                 continue
             }
-            # The command NAMES a .ps1 but no leaf could be extracted - a
-            # spelling the reader misread. REFUSED, not skipped: skipping is
-            # how the next spelling nobody anticipated turns the check off
-            # without saying so.
+            # The command NAMES a script file but no leaf could be extracted
+            # - a spelling the reader misread. REFUSED, not skipped.
             $problems += ("$rel dot-sources something this check cannot resolve to a file name, " +
                           "so it cannot be compared: " + $cmd.Extent.Text.Trim())
             continue
