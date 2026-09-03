@@ -26,8 +26,7 @@
     Run it with `just search-fuzz`, optionally passing "-Seed N -Iterations N".
     A seed reproduces an entire op sequence, so a finding can be replayed.
 
-    Exit codes, numbered to match verified-input-probe.ps1 and the
-    mouse-fuzz scripts:
+    Exit codes, numbered to match the fuzz-suite convention:
       0  clean
       2  product findings - see run-<seed>.json and shots/ under -OutDir
       1  the harness could not run; the product was never exercised, so do

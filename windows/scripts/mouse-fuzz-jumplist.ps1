@@ -177,34 +177,6 @@ function Find-Name($root, [string]$name) {
     return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
 }
 
-function Get-ListItemAncestor($el) {
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $cur = $el
-    while ($null -ne $cur) {
-        try {
-            if ($cur.Current.ControlType.ProgrammaticName -eq 'ControlType.ListItem') { return $cur }
-        } catch { return $el }
-        $cur = $walker.GetParent($cur)
-    }
-    return $el
-}
-
-# ModeLabel.Text is "Search". Find-Name('Search') hits that TextBlock, not
-# the command ListItem. Only accept a match that lives under a ListItem.
-function Find-NamedListItem($root, [string]$name) {
-    if ($null -eq $root) { return $null }
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    foreach ($el in $all) {
-        $item = Get-ListItemAncestor $el
-        try {
-            if ($item.Current.ControlType.ProgrammaticName -eq 'ControlType.ListItem') { return $item }
-        } catch { }
-    }
-    return $null
-}
-
 function Invoke-El($el, [uint32]$ProcId, [string]$what, [int64]$MainHwnd = 0) {
     if ($null -eq $el) { throw "HARVEST_MISS: no UIA element for $what" }
     try {
@@ -229,86 +201,6 @@ function Invoke-El($el, [uint32]$ProcId, [string]$what, [int64]$MainHwnd = 0) {
     if (-not $hit.Ok) { throw "HARVEST_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
     Write-Host "click $what $x,$y"
     Start-Sleep -Milliseconds 400
-}
-
-function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-    $rc = [MzD]::RectOf($MainHwnd)
-    $hit = [MzD]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: grid context $($hit.Why) class=$($hit.HitClass)" }
-    Start-Sleep -Milliseconds 300
-    $pal = $null
-    $dl = (Get-Date).AddMilliseconds(1200)
-    while ((Get-Date) -lt $dl -and $null -eq $pal) {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-        $pal = Find-Name $root 'Command Palette'
-        Start-Sleep -Milliseconds 80
-    }
-    if ($null -eq $pal) {
-        # Leftover MenuFlyout eats the next right-click. Left-click the
-        # grid to dismiss, then retry once.
-        $dismiss = [MzD]::ClickScreen($ProcId, $rc.L + 200, $rc.T + 200, $false)
-        Write-Host "palette miss, grid dismiss ok=$($dismiss.Ok)"
-        Start-Sleep -Milliseconds 300
-        $hit = [MzD]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-        if (-not $hit.Ok) { throw "HARVEST_MISS: grid context retry $($hit.Why) class=$($hit.HitClass)" }
-        Start-Sleep -Milliseconds 300
-        $dl = (Get-Date).AddMilliseconds(1200)
-        while ((Get-Date) -lt $dl -and $null -eq $pal) {
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-            $pal = Find-Name $root 'Command Palette'
-            Start-Sleep -Milliseconds 80
-        }
-    }
-    if ($null -eq $pal) { throw "HARVEST_MISS: Command Palette menu item not under hwnd" }
-    Invoke-El $pal $ProcId 'Command Palette' $MainHwnd
-    Start-Sleep -Milliseconds 400
-}
-
-function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-    # By AutomationId, not "the first Edit under the window". The terminal
-    # keeps a 1x1 IME sink TextBox focused whenever a pane has focus, and it
-    # sorts ahead of the palette in the tree - so FindFirst(Edit) returned the
-    # sink, SetValue typed into it, and the palette never filtered. The list
-    # then still held every command, so the lookup below failed on a command
-    # that was present the whole time.
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
-    $edit = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { throw "HARVEST_MISS: no SearchBox in palette" }
-    $vp = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-    $vp.SetValue($text)
-    Write-Host "filter '$text'"
-    Start-Sleep -Milliseconds 350
-}
-
-function Invoke-PaletteCommand([int64]$MainHwnd, [uint32]$ProcId, [string]$filter, [string]$title) {
-    Open-Palette $MainHwnd $ProcId
-    Set-PaletteFilter $MainHwnd $filter
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-    $el = $null
-    $dl = (Get-Date).AddMilliseconds(1200)
-    while ((Get-Date) -lt $dl -and $null -eq $el) {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-        $el = Find-NamedListItem $root $title
-        Start-Sleep -Milliseconds 80
-    }
-    if ($null -eq $el) { throw "HARVEST_MISS: palette ListItem '$title' not under hwnd after filter '$filter'" }
-    Invoke-El $el $ProcId $title $MainHwnd
-    Start-Sleep -Milliseconds 1200
-}
-
-function Close-Extras([int64]$MainHwnd, [uint32]$ProcId) {
-    foreach ($w in @(Get-WinUiWindows $ProcId)) {
-        if ($w.Hwnd64 -eq $MainHwnd) { continue }
-        Write-Host "closing extra '$($w.Title)' hwnd=$($w.Hwnd64)"
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($w.Hwnd64))
-        $close = Find-Name $root 'Close'
-        if ($null -ne $close) { Invoke-El $close $ProcId "Close $($w.Title)" $MainHwnd }
-        else { Write-Host "HARVEST_MISS: no Close on extra window" }
-        Start-Sleep -Milliseconds 300
-    }
 }
 
 function Count-TabItemsOn([int64]$Hwnd64) {
