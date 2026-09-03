@@ -2603,7 +2603,19 @@ pub fn Stream(comptime H: type) type {
                     // the record has no consumer in the terminal yet; it is
                     // reachable on the OSC command for embedders that want
                     // it, and gets its own action when something acts on it.
-                    self.handler.vt(.report_pwd, .{ .url = v.cwd });
+                    //
+                    // An empty cwd is dropped rather than forwarded. The
+                    // schema allows it, meaning "the shell does not know",
+                    // but report_pwd reads an empty value as "forget the
+                    // directory": it clears the pwd and blanks a
+                    // pwd-derived title. A v1 report exists to carry a
+                    // directory, and a report that carries none must not
+                    // throw away the one OSC 7 and OSC 9;9 just set on this
+                    // same prompt. A kind that genuinely means "reset" can
+                    // say so on its own terms.
+                    if (v.cwd.len > 0) {
+                        self.handler.vt(.report_pwd, .{ .url = v.cwd });
+                    }
                 },
 
                 .conemu_sleep,
@@ -4957,6 +4969,49 @@ test "OSC 7777: the report feeds the existing pwd consumers" {
     for (input) |ch| s.next(ch);
 
     try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd.?);
+}
+
+test "OSC 7777: an empty cwd is not forwarded as a pwd reset" {
+    // The schema allows an empty cwd and the parser accepts it, but
+    // report_pwd reads empty as "forget the directory". Dropping it here is
+    // what keeps a future report that carries no directory from wiping the
+    // one the same prompt just set.
+    //
+    // The handler copies rather than borrowing, because this test outlives a
+    // sequence: value.url points into the OSC parser's buffer and the next
+    // sequence overwrites it.
+    const H = struct {
+        buf: [256]u8 = undefined,
+        len: ?usize = null,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .report_pwd => {
+                    @memcpy(self.buf[0..value.url.len], value.url);
+                    self.len = value.url.len;
+                },
+                else => {},
+            }
+        }
+
+        fn pwd(self: *const @This()) []const u8 {
+            return self.buf[0 .. self.len orelse 0];
+        }
+    };
+
+    var s: Stream(H) = .init(.{ .handler = .{} });
+
+    // A real pwd first, then a report with an empty cwd.
+    for ("\x1b]9;9;C:\\Users\\me\x07") |ch| s.next(ch);
+    try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd());
+
+    // {"v":1,"cwd":""}
+    for ("\x1b]7777;p;7B2276223A312C22637764223A22227D\x07") |ch| s.next(ch);
+    try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd());
 }
 
 test "OSC 7777: a malformed report leaves the pwd alone" {

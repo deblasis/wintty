@@ -1700,14 +1700,27 @@ pub const StreamHandler = struct {
     /// land identically.
     fn setPwdReported(self: *StreamHandler, reported: []const u8) !void {
         log.debug("terminal pwd: {s}", .{reported});
-        try self.terminal.setPwd(reported);
 
-        // Report it to the surface. If creating our write request fails
-        // then we just ignore it.
-        if (apprt.surface.Message.WriteReq.init(self.alloc, reported)) |req| {
-            self.surfaceMessageWriter(.{ .pwd_change = req });
-        } else |err| {
-            log.warn("error notifying surface of pwd change err={}", .{err});
+        // One prompt reports its directory more than once: OSC 7 and OSC 9;9
+        // both carry it, and OSC 7777 carries it again. Only the first is
+        // news. The rest each cost a copy, a heap allocation and a
+        // cross-thread message to tell the surface a value it already holds,
+        // and pwd_change lands on an idempotent action.
+        //
+        // The title is deliberately outside the check: whether it is wanted
+        // depends on seen_title, which can change between two otherwise
+        // identical reports.
+        const known = self.terminal.getPwd();
+        if (known == null or !std.mem.eql(u8, known.?, reported)) {
+            try self.terminal.setPwd(reported);
+
+            // Report it to the surface. If creating our write request fails
+            // then we just ignore it.
+            if (apprt.surface.Message.WriteReq.init(self.alloc, reported)) |req| {
+                self.surfaceMessageWriter(.{ .pwd_change = req });
+            } else |err| {
+                log.warn("error notifying surface of pwd change err={}", .{err});
+            }
         }
 
         // If we haven't seen a title, use our pwd as the title.

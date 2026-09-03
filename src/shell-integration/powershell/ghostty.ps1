@@ -80,6 +80,9 @@ function Get-GhosttyFileUri([string] $path) {
 #
 # Kept as its own function so it can be exercised directly, which is how the
 # code page behaviour above is measured rather than assumed.
+#
+# Returns the empty string when the payload will not fit, which the caller
+# treats as "send nothing this prompt".
 function global:Get-GhosttyPromptReport([string] $cwd, [int] $exitCode) {
     $payload = [ordered]@{
         v     = 1
@@ -89,6 +92,19 @@ function global:Get-GhosttyPromptReport([string] $cwd, [int] $exitCode) {
     }
     $json = ConvertTo-Json -InputObject $payload -Compress
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+    # The terminal accepts at most 1024 hex characters, so 512 encoded bytes,
+    # and drops anything longer. Checking here rather than sending and being
+    # dropped: the shell knows the answer for free, and the alternative is a
+    # kilobyte written to the pty and a warning logged on every single prompt
+    # for as long as the user stands in that directory. Measured ceiling, in
+    # path characters past the drive: 468 ASCII, 234 Latin-1, 156 CJK, since
+    # a character outside ASCII costs two to four bytes and each separator
+    # costs two. OSC 7 and OSC 9;9 still carry the directory on those
+    # prompts, so the loss is the report and not the path.
+    $__GhosttyMaxReportBytes = 512
+    if ($bytes.Length -gt $__GhosttyMaxReportBytes) { return '' }
+
     $hex = if ($global:__GhosttyHasToHexString) {
         [Convert]::ToHexString($bytes)
     } else {
@@ -140,7 +156,8 @@ function global:prompt {
         # Wrapped because nothing about reporting is worth breaking a prompt
         # over; a terminal that never receives it simply falls back to them.
         try {
-            [Console]::Write((Get-GhosttyPromptReport $cwd $exitCode))
+            $report = Get-GhosttyPromptReport $cwd $exitCode
+            if ($report) { [Console]::Write($report) }
         } catch {
         }
     }

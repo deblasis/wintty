@@ -335,16 +335,47 @@ test "OSC 7777: full record" {
     try testing.expectEqual(@as(?bool, true), r.git_dirty);
 }
 
-test "OSC 7777: non-ASCII directory survives" {
+test "OSC 7777: non-ASCII directory survives unescaped" {
     const testing = std.testing;
 
     var p: Parser = .init(null);
     defer p.deinit();
 
-    // What PowerShell's ConvertTo-Json actually emits for a path with
-    // non-ASCII characters: the escaped form, not the raw bytes. This is the
-    // case the whole design exists for, so it is checked against the exact
-    // UTF-8 the terminal has to end up with.
+    // What the shipped emitter actually sends, measured from a directory
+    // with these characters under both PowerShell 7 and Windows PowerShell
+    // 5.1: ConvertTo-Json leaves non-ASCII as raw UTF-8 inside the JSON
+    // string and does not escape it. So this is the branch the encoding
+    // defect is fixed on, and it is a different branch from the escaped
+    // form below: the bytes are borrowed straight out of the buffer with
+    // only utf8ValidateSlice between them and the record.
+    const cmd = parseJson(&p,
+        \\{"v":1,"cwd":"C:\\Grüße\\日本"}
+    ).?.*;
+
+    try testing.expect(cmd == .prompt_report);
+    try testing.expectEqualStrings("C:\\Grüße\\日本", cmd.prompt_report.cwd);
+}
+
+test "OSC 7777: invalid UTF-8 in a string is rejected" {
+    const testing = std.testing;
+
+    var p: Parser = .init(null);
+    defer p.deinit();
+
+    // A lone continuation byte inside the string. Nothing stops a child
+    // sending one, and every consumer of this record treats cwd as text.
+    try testing.expect(parseJson(&p, "{\"v\":1,\"cwd\":\"C:\\\\\x80\"}") == null);
+}
+
+test "OSC 7777: escaped non-ASCII directory survives" {
+    const testing = std.testing;
+
+    var p: Parser = .init(null);
+    defer p.deinit();
+
+    // The escaped form. Our emitter does not produce it (see above), but
+    // JSON escapes are legal wherever a string is, and another producer on
+    // this schema may well emit them, so the decoder has to handle them.
     const cmd = parseJson(&p,
         \\{"v":1,"cwd":"C:\\Gr\u00fc\u00dfe\\\u65e5\u672c"}
     ).?.*;

@@ -322,6 +322,11 @@ pub const Command = union(Key) {
 
     pub const KittyDesktopNotification = parsers.kitty_desktop_notification.OSC;
 
+    // NOTE: `GhosttyOscCommandType` in include/ghostty/vt/osc.h is this list,
+    // and has to be updated in lockstep. Nothing checks that today:
+    // lib.checkGhosttyHEnum only covers include/ghostty.h, so a value added
+    // here and not there drifts in silence, which is how the header came to
+    // be three values short of this list.
     pub const Key = LibEnum(
         lib.target,
         // NOTE: Order matters, see LibEnum documentation.
