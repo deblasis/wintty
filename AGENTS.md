@@ -46,17 +46,19 @@ The rules above are upstream's. They do not describe how work lands here.
 
 Issues and PRs against `deblasis/wintty` are the normal, required workflow:
 branch from `windows`, open a PR with `--repo deblasis/wintty`, get it
-reviewed, run `just signoff` green against the exact head sha, and squash
-merge through `just merge-checked <pr>` - never a raw `gh pr merge`. The
-`pr_gate` hook refuses a merge without that signoff, and it also refuses a
-raw merge whose signoff window has moved (commits landed on `windows` after
-the record's base): per #969 the merge itself is then still allowed, but it
-goes through the guard, which files the `resignoff-required` issue carrying
-the delta and the risks instead of re-gating inline. A same-window merge
-may still go raw. The one deliberate exception is `just sync-publish`, which
-lands the upstream snapshot merge without a PR; in exchange it runs its own
-assertions at publish time: nothing windows merged may be missing from the
-replay, and work no PR reviewed may ride along unnamed or unacknowledged.
+reviewed, run `just signoff` green against the exact head sha, and merge
+through `just merge-checked <pr>` by default. A raw `gh pr merge` is
+tolerated only for a provably same-window merge, and your view of
+`windows` is only as fresh as your last fetch. The `pr_gate` hook refuses
+a merge without that signoff, and it also refuses a raw merge whose
+signoff window has moved (commits landed on `windows` after the record's
+base): per #969 the merge itself is then still allowed, but it goes
+through the guard, which files the `resignoff-required` issue carrying
+the delta and the risks instead of re-gating inline. The one deliberate
+exception is `just sync-publish`, which lands the upstream snapshot merge
+without a PR; in exchange it runs its own assertions at publish time:
+nothing windows merged may be missing from the replay, and work no PR
+reviewed may ride along unnamed or unacknowledged.
 
 Always pass `--repo deblasis/wintty`. Never open anything against
 `ghostty-org/ghostty`.

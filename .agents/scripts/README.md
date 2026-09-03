@@ -25,17 +25,27 @@ human) working in this repo uses the same contract:
   raw `gh pr merge` whose signoff window has moved (commits landed on
   `origin/windows` after the record's base) and names the guard recipe,
   because per #969 such a merge is allowed but its resignoff issue is not
-  optional; a same-window merge stays allowed raw.
-- `just merge-checked <n>` - the only way to merge a moved-window PR: the
-  merge guard (`merge_guard.py`) re-validates the record (missing, red and
-  ledger-blocked records still refuse; the policy forgives head movement,
-  never a bad run), measures the delta from the record's base to
-  `origin/windows` first-parent, squash-merges, reads back the squash sha,
-  and files a `resignoff-required` issue in the shape of the hand-filed
-  #970: the delta with per-commit attribution, the risks in words (same
-  files, same top-level directories, same signoff legs as the record's
-  scope), and the resignoff-in-flight status. `--dry-run` prints all of it
-  and mutates nothing.
+  optional; a same-window merge stays allowed raw, and any window answer
+  is only as fresh as the checkout's last fetch. Its honest limits: a hook
+  only sees commands typed through tools it is wired into, so the GitHub
+  web UI or mobile, a plain `git push` to `windows` (which has no branch
+  protection), and hosts without the hook wiring are all uncovered, and
+  `gh pr merge --auto` is judged at submit time.
+- `just merge-checked <n>` - the merge guard (`merge_guard.py`) and the
+  normal way to merge: it re-validates the record (missing, red,
+  scope-mismatched and ledger-blocked records still refuse; the policy
+  forgives head movement, never a bad run), fetches and measures the delta
+  from the record's base to `origin/windows` first-parent, squash-merges,
+  reads back the squash sha, verifies it against a second fetch, and files
+  a `resignoff-required` issue on the #970 template, with a structured
+  delta: per-commit attribution, the risks in words (same files, same
+  top-level directories, same signoff legs as the record's scope, plus the
+  never-signed-off squash itself), and the resignoff status. `--dry-run`
+  prints all of it and mutates nothing (it also accepts a MERGED pr);
+  `--file-only <n>` files the owed issue without merging, for a merge that
+  landed outside the guard. A bypass does not just skip the rule: the
+  resignoff issue only exists if the guard ran, since the record and the
+  delta it files both come from it.
 - `just doctor` - verify everything the gates depend on: required tools on
   PATH, scripts where the hook wiring points, settings parseable, nightly
   task registration. A Claude Code SessionStart hook runs the fast subset
