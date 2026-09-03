@@ -53,24 +53,16 @@ function Step([string]$name, [scriptblock]$body, [switch]$NoVerdict) {
     Start-Sleep -Milliseconds 400
 }
 
-Step 'layout-switch-capture' {
+# The filmstrip replaced the retired capture script (#930) and carries a
+# verdict, so this step is judged now rather than captured.
+Step 'layout-switch-filmstrip' {
     param($dir)
-    & (Join-Path $PSScriptRoot 'vtabs-layout-switch-capture.ps1') -ExePath $ExePath -OutDir $dir
-} -NoVerdict
+    & (Join-Path $PSScriptRoot 'layout-switch-filmstrip.ps1') -ExePath $ExePath -OutDir $dir
+}
 
 Step 'mouse-fuzz-tab-colors' {
     param($dir)
     & (Join-Path $PSScriptRoot 'mouse-fuzz-tab-colors.ps1') -ExePath $ExePath -OutDir $dir
-}
-
-Step 'mouse-fuzz-vertical-tabs' {
-    param($dir)
-    & (Join-Path $PSScriptRoot 'mouse-fuzz-vertical-tabs.ps1') -ExePath $ExePath -OutDir $dir
-}
-
-Step 'mouse-fuzz-loop' {
-    param($dir)
-    & (Join-Path $PSScriptRoot 'mouse-fuzz-loop.ps1') -ExePath $ExePath -OutDir $dir
 }
 
 $summaryPath = Join-Path $OutRoot 'summary.json'

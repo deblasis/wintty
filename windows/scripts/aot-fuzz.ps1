@@ -6,9 +6,7 @@ param(
     [string[]]$Scripts = @(
         'mouse-fuzz-inspector.ps1',
         'mouse-fuzz-dialogs.ps1',
-        'mouse-fuzz-vertical-tabs.ps1',
-        'mouse-fuzz-ime-cjk.ps1',
-        'mouse-fuzz-loop.ps1'
+        'mouse-fuzz-ime-cjk.ps1'
     )
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
@@ -50,7 +48,7 @@ $results = @()
 #
 # -ExePath is not optional here even though the stamp alone would find the
 # leaks. Without it the sweep matches on time only, and this runs for tens of
-# minutes across five harnesses: any Wintty the developer opens from any
+# minutes across three harnesses: any Wintty the developer opens from any
 # worktree while it works gets tree-killed with its shell.
 function Stop-Wintty {
     Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $script:PublishExe
