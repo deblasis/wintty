@@ -29,9 +29,11 @@ extension Ghostty {
                     Self.writingSystemKeyRange.contains(physical.rawValue),
                     let inputKey = Input.Key(cKey: physical),
                     let keyCode = inputKey.keyCode,
+                    // Command can select a distinct layout table. Other modifiers remain
+                    // separate in the menu's modifier mask and must not affect this character.
                     let character = KeyboardLayout.character(
                         for: keyCode,
-                        modifiers: modifierFlags)
+                        modifiers: modifierFlags.intersection(.command))
                 else { return nil }
 
                 // Printable physical keys must be translated through the current layout.
@@ -235,6 +237,66 @@ extension Ghostty.Input {
                 return execute(keyEvent)
             }
         }
+    }
+}
+
+extension Ghostty.Input.KeyEvent {
+    /// Create a translated key event for programmatic input (e.g. AppleScript).
+    ///
+    /// - Parameters:
+    ///   - key: The key being pressed or released.
+    ///   - action: The key action.
+    ///   - mods: The full set of modifiers for the event.
+    ///   - translationMods: The subset of `mods` that participates in text
+    ///     translation. Use `Surface.keyTranslationMods(_:)` so that
+    ///     configuration such as `macos-option-as-alt` is honored.
+    ///
+    /// - Note: Translation is a single stateless pass through the keyboard layout.
+    ///   A key that starts a dead-key sequence (e.g. option+E on a US layout)
+    ///   produces its standalone character or nothing.
+    @MainActor
+    init(
+        synthesizing key: Ghostty.Input.Key,
+        action: Ghostty.Input.Action,
+        mods: Ghostty.Input.Mods,
+        translationMods: Ghostty.Input.Mods
+    ) {
+        let keyCode = key.keyCode
+
+        // Control never contributes to the translation of text,
+        // matching `NSEvent.ghosttyCharacters`.
+        let text: String?
+        if action == .release {
+            // We don't need to attach text to a release key event,
+            // as real NSEvents don't carry them in most cases.
+            text = nil
+        } else {
+            text = keyCode
+                .flatMap {
+                    KeyboardLayout.character(
+                        for: $0,
+                        modifiers: translationMods.nsFlags.subtracting(.control))
+                }
+                .flatMap { String($0).keyEventText }
+        }
+
+        // The unshifted codepoint ignores all modifiers. Control characters are
+        // reported as no codepoint (0) so that Ghostty encodes such keys from
+        // the key enum instead.
+        let unshiftedCodepoint = keyCode
+            .flatMap { KeyboardLayout.character(for: $0, modifiers: []) }
+            .flatMap { String($0).keyEventText }?
+            .unicodeScalars.first?.value ?? 0
+
+        self.init(
+            key: key,
+            action: action,
+            text: text,
+            mods: mods,
+            // Same as `NSEvent.ghosttyKeyEvent`
+            consumedMods: translationMods.subtracting([.ctrl, .super]),
+            unshiftedCodepoint: unshiftedCodepoint
+        )
     }
 }
 

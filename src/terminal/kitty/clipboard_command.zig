@@ -95,10 +95,10 @@ pub const Metadata = struct {
             max_mime_len,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            // Base64 acceptance is intentionally left unchanged while the
-            // protocol's exact requirements are being specified.
-            error.InvalidBase64 => return null,
-            error.Overflow, error.InvalidUtf8 => return error.InvalidValue,
+            error.Overflow,
+            error.InvalidBase64,
+            error.InvalidUtf8,
+            => return error.InvalidValue,
         };
         result.pw = decodeValue(
             alloc,
@@ -106,11 +106,10 @@ pub const Metadata = struct {
             max_pw_len,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidBase64 => return null,
+            error.InvalidBase64, error.InvalidUtf8 => return error.InvalidValue,
             // An over-long password behaves as if none was given: it can
             // never match a stored grant.
             error.Overflow => "",
-            error.InvalidUtf8 => return error.InvalidValue,
         };
         result.name = decodeValue(
             alloc,
@@ -118,8 +117,10 @@ pub const Metadata = struct {
             max_name_len,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidBase64 => return null,
-            error.Overflow, error.InvalidUtf8 => return error.InvalidValue,
+            error.Overflow,
+            error.InvalidBase64,
+            error.InvalidUtf8,
+            => return error.InvalidValue,
         };
         return result;
     }
@@ -193,7 +194,8 @@ pub const Metadata = struct {
 
     /// Base64-decode a metadata value. Per the spec these values "are
     /// UTF-8 strings that are base64 encoded", so the decoded result
-    /// must be valid UTF-8.
+    /// must be valid UTF-8, and the encoding is strict RFC 4648 with
+    /// required padding per the spec's "Encoding of payloads" section.
     fn decodeValue(alloc: Allocator, value: []const u8, max_len: usize) error{
         OutOfMemory,
         Overflow,
@@ -208,9 +210,10 @@ pub const Metadata = struct {
         // Decode
         const buf = try alloc.alloc(u8, simd.base64.maxLen(value));
         errdefer alloc.free(buf);
-        const decoded = simd.base64.decode(
+        const decoded = simd.base64.decodeStrict(
             value,
             buf,
+            .required,
         ) catch return error.InvalidBase64;
 
         // Must be valid UTF-8
@@ -227,17 +230,20 @@ pub const Payload = struct {
     buf: []u8,
     data: []const u8,
 
-    /// Decode a base64 payload into freshly allocated memory. An
-    /// invalid payload means the sequence is dropped.
+    /// Decode a base64 payload into freshly allocated memory. The
+    /// encoding is strict RFC 4648 with required padding per the
+    /// spec's "Encoding of payloads" section; how an invalid payload
+    /// is reported (or not) depends on the packet type.
     pub fn init(
         alloc: Allocator,
         payload: []const u8,
     ) error{ OutOfMemory, Invalid }!Payload {
         const buf = try alloc.alloc(u8, simd.base64.maxLen(payload));
         errdefer alloc.free(buf);
-        const data = simd.base64.decode(
+        const data = simd.base64.decodeStrict(
             payload,
             buf,
+            .required,
         ) catch return error.Invalid;
         return .{ .buf = buf, .data = data };
     }
@@ -363,11 +369,35 @@ test "metadata: mime decoded" {
     try testing.expectEqualStrings("text/plain", meta.mime);
 }
 
-test "metadata: invalid mime base64 dropped" {
+test "metadata: invalid mime base64 reported" {
     const testing = std.testing;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expect((try Metadata.parse(arena.allocator(), "type=wdata:mime=!!!")) == null);
+
+    // Invalid base64 in a metadata value aborts an in-flight write
+    // per the spec, so like invalid UTF-8 it is reported rather than
+    // silently dropping the packet. Unpadded or whitespace-laced
+    // values are invalid too: metadata values use the same strict
+    // encoding as payloads.
+    const cases = [_][]const u8{
+        "type=wdata:mime=!!!",
+        // "text/plain" without its padding.
+        "type=wdata:mime=dGV4dC9wbGFpbg",
+        // "text/plain" with its final byte replaced by '!'.
+        "type=wdata:mime=dGV4dC9wbGFpbg=!",
+        // A newline inside otherwise valid base64.
+        "type=wdata:mime=dGV4dC9w\nbGFpbg==",
+    };
+    for (cases) |case| {
+        try testing.expectError(
+            error.InvalidValue,
+            Metadata.parse(arena.allocator(), case),
+        );
+        try testing.expectEqual(
+            Operation.wdata,
+            Metadata.operation(case).?,
+        );
+    }
 }
 
 test "metadata: invalid mime utf8 reported" {
@@ -447,10 +477,20 @@ test "payload: mime iterator" {
 
 test "payload: invalid base64" {
     const testing = std.testing;
-    try testing.expectError(
-        error.Invalid,
-        Payload.init(testing.allocator, "!!!"),
-    );
+    const cases = [_][]const u8{
+        "!!!",
+        // "text/plain" without its padding: payloads use the strict
+        // encoding, so missing padding is rejected.
+        "dGV4dC9wbGFpbg",
+        // A newline inside otherwise valid base64.
+        "dGV4dC9w\nbGFpbg==",
+    };
+    for (cases) |case| {
+        try testing.expectError(
+            error.Invalid,
+            Payload.init(testing.allocator, case),
+        );
+    }
 }
 
 test "payload: decoded text must be valid utf8" {

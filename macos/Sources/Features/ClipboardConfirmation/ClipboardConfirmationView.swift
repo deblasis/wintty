@@ -71,7 +71,7 @@ struct ClipboardConfirmationView: View {
             if let previewImage {
                 Image(nsImage: previewImage)
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.horizontal)
             } else {

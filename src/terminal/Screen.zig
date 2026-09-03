@@ -941,6 +941,12 @@ pub fn cursorDownScroll(self: *Screen) !void {
                 self.cursor.page_row,
                 page.getCells(self.cursor.page_row),
             );
+
+            // The row is a fresh blank row now and must not retain
+            // metadata (wrap state, semantic prompt) from the
+            // discarded content.
+            self.cursor.page_row.reset();
+
             self.cursorMarkDirty();
         } else {
             // The call to `eraseRow` will move the tracked cursor pin up by one
@@ -1220,6 +1226,11 @@ fn cursorScrollAboveRotate(
         cur_page.getCells(&cur_rows[self.cursor.page_pin.y]),
     );
 
+    // The recycled storage becomes the new blank cursor row and must
+    // not retain metadata (wrap state, semantic prompt) from the row
+    // whose content was moved to the next page.
+    cur_rows[self.cursor.page_pin.y].reset();
+
     // Mark the whole page as dirty.
     //
     // Technically we only need to mark from the cursor row to the
@@ -1293,6 +1304,11 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
             // row with our blank cell, preserving the background color.
             self.clearCells(page, row, page.getCells(row));
         }
+
+        // The row becomes the new blank cursor row after the rotation
+        // below and must not retain metadata (wrap state, semantic
+        // prompt) from the discarded content.
+        row.reset();
     }
 
     // Rotate the region rows so the now-blank top row moves to the
@@ -1933,6 +1949,11 @@ pub fn splitCellBoundary(
                         p_rac.row,
                         p_cells[p_row.node.cols() - 1 ..][0..1],
                     );
+
+                    // `clearCells` does not mark rows dirty, and our
+                    // callers only mark the cursor row, so mark the
+                    // previous row here.
+                    p_row.markDirty();
                 }
             }
         }
@@ -12108,4 +12129,223 @@ test "Screen: promptClickMove click right of input cursor on last char" {
 
     try testing.expectEqual(@as(usize, 1), result.right);
     try testing.expectEqual(@as(usize, 0), result.left);
+}
+
+test "Screen: cursorScrollRegionUp recycled row has default metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 5, .rows = 5, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+    try s.testWriteString("1ABCD\n2EFGH\n3IJKL\n4MNOP\n5QRST");
+
+    // Simulate the top region row being part of a soft-wrapped,
+    // prompt-marked line. Its Row storage is recycled as the new
+    // blank cursor row and must not retain the metadata.
+    {
+        const rac = s.pages.getCell(.{ .active = .{} }).?;
+        rac.row.wrap = true;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt;
+    }
+
+    s.cursorAbsolute(1, 2);
+    try s.cursorScrollRegionUp(2);
+
+    {
+        const rac = s.pages.getCell(.{ .active = .{ .y = 2 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .screen = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("2EFGH\n3IJKL\n\n4MNOP\n5QRST", contents);
+    }
+}
+
+test "Screen: cursorScrollRegionUp cross-page recycled row has default metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 10, .rows = 5, .max_scrollback_bytes = 10 });
+    defer s.deinit();
+
+    // We need to get the active area to span two pages so that the
+    // scroll region does too, exercising the slow path (eraseRowBounded).
+    const first_page_size = s.pages.pages.first.?.capacity().rows;
+    s.pages.pages.first.?.page().pauseIntegrityChecks(true);
+    for (0..first_page_size - 3) |_| try s.testWriteString("\n");
+    s.pages.pages.first.?.page().pauseIntegrityChecks(false);
+    try s.testWriteString("1A\n2B\n3C\n4D\n5E");
+
+    // The first row of the last page is the Row storage that ends up
+    // recycled as the blank region-bottom row: the erased row's
+    // storage stays on the first page (receiving this row's content
+    // via clone) while this storage is cleared for the blank row.
+    {
+        const rac = s.pages.getCell(.{ .active = .{ .y = 3 } }).?;
+        rac.row.wrap = true;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt;
+    }
+
+    // Region rows 1-3 with the cursor on the region bottom, which is
+    // on the second page while the region top is on the first page.
+    s.cursorAbsolute(0, 3);
+    try s.cursorScrollRegionUp(2);
+
+    {
+        const rac = s.pages.getCell(.{ .active = .{ .y = 3 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("1A\n3C\n4D\n\n5E", contents);
+    }
+}
+
+test "Screen: cursorScrollAbove cross-page recycled row has default metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 10, .rows = 5, .max_scrollback_bytes = 10 });
+    defer s.deinit();
+
+    // Get the cursor page and the last page to differ so that
+    // cursorScrollAbove takes the cross-page rotate path.
+    const first_page_size = s.pages.pages.first.?.capacity().rows;
+    s.pages.pages.first.?.page().pauseIntegrityChecks(true);
+    for (0..first_page_size - 3) |_| try s.testWriteString("\n");
+    s.pages.pages.first.?.page().pauseIntegrityChecks(false);
+    try s.testWriteString("1A\n2B\n3C\n4D\n5E");
+    s.cursorAbsolute(0, 1);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try testing.expect(s.pages.pages.first.?.next != null);
+
+    // The last row of the cursor page is the Row storage that gets
+    // recycled as the new blank row below the cursor after its content
+    // is moved down to the next page.
+    {
+        const rac = s.pages.getCell(.{ .active = .{ .y = 2 } }).?;
+        rac.row.wrap = true;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt;
+    }
+
+    try s.cursorScrollAbove();
+
+    // One row scrolled into history, so the blank row is at active
+    // y=1 (just below the cursor's original row).
+    {
+        const rac = s.pages.getCell(.{ .active = .{ .y = 1 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("2B\n\n3C\n4D\n5E", contents);
+    }
+}
+
+test "Screen: cursorDownScroll no scrollback recycled row has default metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 5, .rows = 3, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+    try s.testWriteString("1ABCD\n2EFGH\n3IJKL");
+
+    {
+        const rac = s.pages.getCell(.{ .active = .{} }).?;
+        rac.row.wrap = true;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt;
+    }
+
+    s.cursorAbsolute(0, 2);
+    try s.cursorDownScroll();
+
+    {
+        const rac = s.pages.getCell(.{ .active = .{ .y = 2 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "Screen: cursorDownScroll single row no scrollback resets metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 5, .rows = 1, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+    try s.testWriteString("1ABCD");
+
+    {
+        const rac = s.pages.getCell(.{ .active = .{} }).?;
+        rac.row.wrap = true;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt;
+    }
+
+    try s.cursorDownScroll();
+
+    {
+        const rac = s.pages.getCell(.{ .active = .{} }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "Screen: selectLine does not join lines across a recycled row" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 6, .rows = 5, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+
+    // A soft-wrapped line across rows 0 and 1: row 0 gets wrap=true.
+    try s.testWriteString("AAAAAAA");
+
+    // Scroll a region of rows 0-2 up by one: row 0 is discarded and
+    // its Row storage recycled as the blank row 2.
+    s.cursorAbsolute(0, 2);
+    try s.cursorScrollRegionUp(2);
+
+    // Write unrelated single-line words on the recycled row and below.
+    s.cursorAbsolute(0, 2);
+    try s.testWriteString("world");
+    s.cursorAbsolute(0, 3);
+    try s.testWriteString("hello");
+
+    // Selecting the line "world" must not extend into "hello": these
+    // are separate hard lines. A stale wrap flag on the recycled row
+    // would join them.
+    {
+        var sel = s.selectLine(.{ .pin = s.pages.pin(.{ .active = .{
+            .x = 0,
+            .y = 2,
+        } }).? }).?;
+        defer sel.deinit(&s);
+        const contents = try s.selectionString(alloc, .{
+            .sel = sel,
+            .trim = false,
+        });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("world", contents);
+    }
 }

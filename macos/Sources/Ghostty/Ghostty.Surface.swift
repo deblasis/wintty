@@ -58,6 +58,17 @@ extension Ghostty {
             }
         }
 
+        /// Returns the modifiers that participate in text translation for key
+        /// events on this surface. This honors configuration such as
+        /// `macos-option-as-alt`, which may exclude option from translation.
+        ///
+        /// - Parameter mods: The full set of modifiers for the key event.
+        /// - Returns: The subset of `mods` to use for keyboard layout translation.
+        @MainActor
+        func keyTranslationMods(_ mods: Input.Mods) -> Input.Mods {
+            Input.Mods(cMods: ghostty_surface_key_translation_mods(surface, mods.cMods))
+        }
+
         /// Send a key event to the terminal.
         ///
         /// This sends the full key event including modifiers, action type, and text to the terminal.

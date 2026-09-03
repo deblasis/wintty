@@ -686,12 +686,20 @@ pub const Handler = struct {
         }
 
         // Decode the base64 payload with the SIMD decoder (the same one
-        // used for Kitty graphics payloads) rather than the scalar std
-        // implementation; clipboard payloads can be megabytes.
+        // used for Kitty clipboard payloads) rather than the scalar std
+        // implementation; clipboard payloads can be megabytes. The
+        // Kitty clipboard spec governs OSC 52 base64 handling too: a
+        // request with characters outside the base64 alphabet is
+        // discarded entirely (never partially decoded), while a
+        // missing-padding tail is tolerated since OSC 52 has no way
+        // to report errors to the client.
         const alloc = self.terminal.gpa();
         const buf = try alloc.alloc(u8, simd.base64.maxLen(data));
         defer alloc.free(buf);
-        const decoded = try simd.base64.decode(data, buf);
+        const decoded = simd.base64.decodeStrict(data, buf, .optional) catch {
+            log.warn("OSC 52 clipboard write is not valid base64, ignoring", .{});
+            return;
+        };
 
         const contents = [_]clipboard.Content{.{
             .mime = "text/plain",
@@ -1100,6 +1108,13 @@ pub const Handler = struct {
                 .EFBIG,
                 terminator,
             ),
+
+            // An invalid base64 payload stream aborts the transaction.
+            error.Invalid => self.kittyClipboardFinish(
+                state,
+                .EINVAL,
+                terminator,
+            ),
         };
     }
 
@@ -1152,6 +1167,13 @@ pub const Handler = struct {
             error.OutOfMemory => {
                 self.kittyClipboardFinish(state, .EIO, terminator);
                 return error.OutOfMemory;
+            },
+
+            // The last MIME type's payload stream was not correctly
+            // padded, which aborts the transaction.
+            error.Invalid => {
+                self.kittyClipboardFinish(state, .EINVAL, terminator);
+                return;
             },
         };
         defer committed.deinit(alloc);
@@ -3468,6 +3490,9 @@ test "clipboard_write effect callback" {
         .{ .sequence = "\x1B]52;0;Y3V0\x1B\\", .location = .standard, .data = "cut" },
         .{ .sequence = "\x1B]52;x;ZmFsbGJhY2s=\x1B\\", .location = .standard, .data = "fallback" },
         .{ .sequence = "\x1B]52;c;YQBi\x1B\\", .location = .standard, .data = "a\x00b" },
+        // Missing padding is tolerated for OSC 52 since it has no way
+        // to report errors to the client, matching kitty.
+        .{ .sequence = "\x1B]52;c;dW5wYWRkZWQ\x1B\\", .location = .standard, .data = "unpadded" },
     };
 
     for (cases, 1..) |case, expected_count| {
@@ -3487,9 +3512,14 @@ test "clipboard_write effect callback" {
     try testing.expect(S.last_mime == null);
     try testing.expect(S.last_data == null);
 
-    // Reads and malformed base64 are ignored.
+    // Reads and malformed base64 are ignored. The whole request is
+    // discarded on invalid characters (including whitespace) rather
+    // than decoding around them, per the Kitty clipboard spec that
+    // governs OSC 52 base64 handling.
     s.nextSlice("\x1B]52;c;?\x1B\\");
     s.nextSlice("\x1B]52;c;***\x1B\\");
+    s.nextSlice("\x1B]52;c;SGVs!!!bG8=\x1B\\");
+    s.nextSlice("\x1B]52;c;aGVs bG8=\x1B\\");
     try testing.expectEqual(@as(usize, cases.len + 1), S.count);
 
     // OSC 1337 Copy shares the normalized clipboard write path.
@@ -4440,7 +4470,7 @@ test "kitty clipboard oversized text write aborts with EFBIG" {
     );
 }
 
-test "kitty clipboard invalid wdata chunk is skipped" {
+test "kitty clipboard invalid wdata chunk aborts with EINVAL" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
@@ -4453,18 +4483,79 @@ test "kitty clipboard invalid wdata chunk is skipped" {
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
-    s.nextSlice("\x1B]5522;type=write\x1B\\");
+    s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
     s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbG8=\x1B\\"); // "Hello"
     s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;!!!bad!!!\x1B\\");
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
+        S.responseSlice(),
+    );
+    try testing.expect(!s.handler.semantic_failure);
+
+    // The transaction is gone: later data and the commit do nothing.
     s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;V29ybGQ=\x1B\\"); // "World"
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.write_count);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
+        S.responseSlice(),
+    );
+}
+
+test "kitty clipboard wdata chunks split one base64 stream" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // "some data" encoded as one stream, split at non-group
+    // boundaries across packets.
+    s.nextSlice("\x1B]5522;type=write\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;c29\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;tZSBk\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;YXRh\x1B\\");
     s.nextSlice("\x1B]5522;type=wdata\x1B\\");
 
     try testing.expectEqual(@as(usize, 1), S.write_count);
-    try testing.expectEqualStrings("HelloWorld", S.dataAt(0));
+    try testing.expectEqualStrings("some data", S.dataAt(0));
     try testing.expectEqualStrings(
         "\x1B]5522;type=write:status=DONE\x1B\\",
         S.responseSlice(),
     );
+}
+
+test "kitty clipboard unpadded wdata stream aborts at commit" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // "Hello" without its final padding byte: every packet decodes,
+    // but the stream ends mid-group so the commit reports EINVAL.
+    s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbG8\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.responses_len);
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.write_count);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
+        S.responseSlice(),
+    );
+    try testing.expect(!s.handler.semantic_failure);
 }
 
 test "kitty clipboard in-flight transaction is freed on deinit" {
