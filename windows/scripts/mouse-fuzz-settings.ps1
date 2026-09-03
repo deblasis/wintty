@@ -1,11 +1,18 @@
 #requires -Version 7
 # Palette Open Config with windows-settings-ui=true (isolated XDG).
-# UIA scoped to Wintty hwnds only. No desktop-root walk. No modifier chords.
+# Seam-launched (#930): the palette opens through focus{frame} +
+# chord{0x50,ctrl,shift} - the window's real routing, one call below the
+# framework - instead of a right-click on the pane grid. Everything inside
+# the palette and the Settings window was already UIA and stays UIA; the
+# old bounds-click fallback on an element without InvokePattern is gone
+# (a loud HARVEST_MISS now), so this harness synthesizes zero OS input.
+# No desktop-root walk. UIA scoped to Wintty hwnds only.
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
 # A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
@@ -32,16 +39,10 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 public static class MzS {
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    // Posted to the app's own window only - window-targeted, no foreground
+    // steal, the same pattern frame-keybind-live-key uses.
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     public static void Key(long hwnd, int vk) {
@@ -57,7 +58,6 @@ public static class MzS {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
     public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-    public class Hit { public bool Ok; public string Why; public int X,Y; public uint HitPid; public string HitClass; }
     public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
     public static WinRect RectOf(long hwnd) {
         var h = P(hwnd); RECT r;
@@ -70,30 +70,6 @@ public static class MzS {
     }
     public static string TitleOf(IntPtr h) {
         var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString();
-    }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    static Hit Miss(string why, int x, int y, uint pid, string cls) {
-        return new Hit { Ok=false, Why=why, X=x, Y=y, HitPid=pid, HitClass=cls };
-    }
-    public static Hit ClickScreen(uint pid, int x, int y, bool right) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        uint hitPid = PidOf(hit); string cls = ClassOf(hit);
-        if (cls == "WinttySplash") return Miss("splash", x, y, hitPid, cls);
-        if (hitPid != pid) return Miss("not Wintty", x, y, hitPid, cls);
-        if (!SetCursorPos(x, y)) return Miss("SetCursorPos", x, y, hitPid, cls);
-        Thread.Sleep(40);
-        hit = WindowFromPoint(new POINT { X=x, Y=y });
-        hitPid = PidOf(hit); cls = ClassOf(hit);
-        if (hitPid != pid) return Miss("not Wintty after move", x, y, hitPid, cls);
-        if (right) {
-            mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,UIntPtr.Zero);
-        } else {
-            mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,UIntPtr.Zero);
-        }
-        Thread.Sleep(250);
-        return new Hit { Ok=true, X=x, Y=y, HitPid=hitPid, HitClass=cls };
     }
 }
 '@
@@ -113,39 +89,6 @@ function Get-WinUiWindows([uint32]$ProcId) {
     }
     [void][MzS]::EnumWindows($cb,[IntPtr]::Zero)
     return $hits | Sort-Object Area -Descending
-}
-
-function Splash-Visible([int]$ProcId) {
-    $script:splashSeen = $false
-    $cb = [MzS+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner=0; [void][MzS]::GetWindowThreadProcessId($hwnd,[ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        if ([MzS]::ClassOf($hwnd) -eq 'WinttySplash' -and [MzS]::IsWindowVisible($hwnd)) { $script:splashSeen = $true }
-        return $true
-    }
-    [void][MzS]::EnumWindows($cb,[IntPtr]::Zero)
-    return $script:splashSeen
-}
-
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(40)
-    $got = $null
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL startup exit=$($proc.ExitCode)" }
-        $got = @(Get-WinUiWindows ([uint32]$proc.Id)) | Select-Object -First 1
-        if ($got) { break }
-    }
-    if (-not $got) { throw "HARVEST_MISS: no WinUI hwnd" }
-    $dl = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $dl) {
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL during splash" }
-        if (Splash-Visible $proc.Id) { Start-Sleep -Milliseconds 200; continue }
-        Start-Sleep -Milliseconds 900
-        if (-not (Splash-Visible $proc.Id)) { return $got }
-    }
-    throw "HARVEST_MISS: splash never dropped"
 }
 
 function Shot([int64]$Hwnd64, [string]$name) {
@@ -189,52 +132,39 @@ function Get-ListItemAncestor($el) {
     return $el
 }
 
-function Invoke-El($el, [uint32]$ProcId, [string]$what) {
+function Invoke-El($el, [string]$what) {
     if ($null -eq $el) { throw "HARVEST_MISS: no UIA element for $what" }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $pat.Invoke()
-        Write-Host "invoke $what"
-        Start-Sleep -Milliseconds 400
-        return
-    } catch { Write-Host "invoke $what unsupported, clicking bounds" }
-    $r = $el.Current.BoundingRectangle
-    if ($r.Width -lt 4 -or $r.Height -lt 4) { throw "HARVEST_MISS: empty bounds for $what" }
-    $x = [int]($r.X + $r.Width/2); $y = [int]($r.Y + $r.Height/2)
-    $hit = [MzS]::ClickScreen($ProcId, $x, $y, $false)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
-    Write-Host "click $what $x,$y"
+    # InvokePattern or a loud miss - never a bounds click. A click is OS
+    # input this harness no longer synthesizes (#930), and a silent
+    # fallback would hide a control that stopped being invokable.
+    $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $pat.Invoke()
+    Write-Host "invoke $what"
     Start-Sleep -Milliseconds 400
+    return
 }
 
-function Select-Nav($root, [uint32]$ProcId, [string]$name) {
+function Select-Nav($root, [string]$name) {
     $el = Find-Name $root $name
     if ($null -eq $el) { throw "HARVEST_MISS: nav '$name'" }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-        $pat.Select()
-        Write-Host "select $name"
-        Start-Sleep -Milliseconds 700
-        return
-    } catch { Write-Host "select $name unsupported" }
-    Invoke-El $el $ProcId $name
-    Start-Sleep -Milliseconds 300
+    # Selection or a loud miss - no click fallback, same rule as Invoke-El.
+    $pat = $el.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    $pat.Select()
+    Write-Host "select $name"
+    Start-Sleep -Milliseconds 700
 }
 
-function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
-    $rc = [MzS]::RectOf($MainHwnd)
-    $hit = [MzS]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: grid context $($hit.Why) class=$($hit.HitClass)" }
-    Start-Sleep -Milliseconds 300
-    $pal = $null
-    $dl = (Get-Date).AddMilliseconds(1200)
-    while ((Get-Date) -lt $dl -and $null -eq $pal) {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzS]::P($MainHwnd))
-        $pal = Find-Name $root 'Command Palette'
-        Start-Sleep -Milliseconds 80
+function Open-Palette($Session) {
+    # The palette chord through the seam: focus{frame} + chord{0x50,ctrl,shift}
+    # runs the window's real routing (focus gate, residual table, libghostty
+    # match, dispatch) - the same path the menu item landed in, one call
+    # below the framework. The dispatched answer says whether a chord was
+    # taken; the palette element itself is then found by UIA as before.
+    [void](Invoke-SeamCommand $Session @{ op = 'focus'; target = 'frame' })
+    $r = Invoke-SeamCommand $Session @{ op = 'chord'; key = 0x50; ctrl = $true; shift = $true }
+    if (-not $r.dispatched) {
+        throw "HARVEST_MISS: the palette chord was not dispatched (focus was '$($r.focus)')"
     }
-    if ($null -eq $pal) { throw "HARVEST_MISS: Command Palette menu item not under hwnd" }
-    Invoke-El $pal $ProcId 'Command Palette'
     Start-Sleep -Milliseconds 400
 }
 
@@ -256,8 +186,8 @@ function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
     Start-Sleep -Milliseconds 350
 }
 
-function Invoke-PaletteCommand([int64]$MainHwnd, [uint32]$ProcId, [string]$filter, [string]$title) {
-    Open-Palette $MainHwnd $ProcId
+function Invoke-PaletteCommand($Session, [int64]$MainHwnd, [string]$filter, [string]$title) {
+    Open-Palette $Session
     Set-PaletteFilter $MainHwnd $filter
     $el = $null
     $dl = (Get-Date).AddMilliseconds(1200)
@@ -268,7 +198,7 @@ function Invoke-PaletteCommand([int64]$MainHwnd, [uint32]$ProcId, [string]$filte
     }
     if ($null -eq $el) { throw "HARVEST_MISS: palette item '$title' not under hwnd after filter '$filter'" }
     $el = Get-ListItemAncestor $el
-    Invoke-El $el $ProcId $title
+    Invoke-El $el $title
     Start-Sleep -Milliseconds 1200
 }
 
@@ -285,53 +215,37 @@ function Wait-SettingsWindow([uint32]$ProcId, [int64]$MainHwnd) {
     throw "HARVEST_MISS: no Settings window (Open Config probably shelled the file). titles=$($titles -join '|')"
 }
 
-function New-IsolatedConfig {
-    $tempXdg = Join-Path $env:TEMP ("wintty-fuzz-xdg-{0:HHmmss}" -f (Get-Date))
-    $winttyDir = Join-Path $tempXdg 'wintty'
-    New-Item -ItemType Directory -Force -Path $winttyDir | Out-Null
-    $dst = Join-Path $winttyDir 'config.wintty'
+function New-ConfigText {
+    # Same content policy the isolated XDG copy had: the developer's real
+    # config, with windows-settings-ui forced on - Start-SeamSession stages
+    # it as the whole of XDG_CONFIG_HOME.
     $src = Join-Path $env:APPDATA 'Ghostty\config'
     $raw = if (Test-Path -LiteralPath $src) { [IO.File]::ReadAllText($src) } else { "command = pwsh.exe`n" }
     if ($raw -notmatch '(?m)^windows-settings-ui\s*=\s*true\s*$') {
         $raw = "windows-settings-ui = true`n" + $raw
     }
-    $header = "# fuzz isolated XDG copy; windows-settings-ui forced true`nwindows-settings-ui = true`n"
-    # Last-wins if the copy already has the key; header first then body is fine
-    # because body already contains the true assignment. Keep a leading force
-    # anyway so GetFileValue's top-level cache cannot miss it if the copy is empty.
-    [IO.File]::WriteAllText($dst, $header + $raw)
-    Write-Host "XDG_CONFIG_HOME=$tempXdg"
-    Write-Host "config=$dst"
-    return $tempXdg
+    return "windows-settings-ui = true`n" + $raw
 }
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-$originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
-$tempXdg = New-IsolatedConfig
-$proc = $null
+$session = $null
 $keybindKilled = $false
 $settingsTitle = $null
 $pages = @()
 $script:vtabFound = @()
 
-Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
+Assert-NoWintty -Context 'The settings harness'
 try {
-    $env:XDG_CONFIG_HOME = $tempXdg
-    Start-Sleep -Milliseconds 400
-    $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText (New-ConfigText)
+    $proc = $session.Proc
     $pid32 = [uint32]$proc.Id
-    $main = Wait-Ready $proc
-    Start-Sleep -Seconds 2
-    $main = @(Get-WinUiWindows $pid32) | Select-Object -First 1
-    $hwnd64 = [int64]$main.Hwnd64
-    Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
+    $hwnd64 = [int64]$session.Hwnd64
+    Write-Host "hwnd=$hwnd64 pid=$pid32"
     Shot $hwnd64 '00-launch'
 
-    Invoke-PaletteCommand $hwnd64 $pid32 'open config' 'Open Config'
+    Invoke-PaletteCommand $session $hwnd64 'open config' 'Open Config'
     $settings = Wait-SettingsWindow $pid32 $hwnd64
     $settingsHwnd = [int64]$settings.Hwnd64
     $settingsTitle = $settings.Title
@@ -353,7 +267,7 @@ try {
     foreach ($n in $nav) {
         $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL died before $($n.Name) exit=$($proc.ExitCode)" }
         $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzS]::P($settingsHwnd))
-        Select-Nav $sroot $pid32 $n.Name
+        Select-Nav $sroot $n.Name
         $pages += $n.Name
         Shot $settingsHwnd $n.Shot
     }
@@ -401,7 +315,7 @@ try {
 
     try {
         $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzS]::P($settingsHwnd))
-        Select-Nav $sroot $pid32 'Keybindings'
+        Select-Nav $sroot 'Keybindings'
         # Loaded → ApplyFilter → ItemsSource can kill the UI thread after Select returns.
         Start-Sleep -Seconds 2
         $proc.Refresh()
@@ -423,7 +337,7 @@ try {
         try {
             $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzS]::P($settingsHwnd))
             $close = Find-Name $sroot 'Close'
-            if ($null -ne $close) { Invoke-El $close $pid32 'Close Wintty Settings' }
+            if ($null -ne $close) { Invoke-El $close 'Close Wintty Settings' }
             else { Write-Host "HARVEST_MISS: no Close on Settings" }
         } catch { Write-Host "close settings: $_" }
         Start-Sleep -Milliseconds 400
@@ -432,16 +346,7 @@ try {
     }
 }
 finally {
-    if ($null -ne $proc) {
-        $proc.Refresh()
-        if (-not $proc.HasExited) {
-            try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
-            Start-Sleep -Milliseconds 300
-        }
-    }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($null -ne $session) { Stop-SeamSession $session }
 }
 
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
@@ -452,7 +357,6 @@ $result = @{
     settingsTitle = $settingsTitle
     pages = $pages
     vtabCards = $script:vtabFound
-    xdg = $tempXdg
 }
 $result | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
