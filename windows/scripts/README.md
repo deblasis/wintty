@@ -139,7 +139,6 @@ meets.
 | script | why |
 |---|---|
 | `mouse-smoke-run.ps1` | the operator drives the checklist by hand |
-| `vtabs-switcher-capture.ps1` | produces frames for a human to look at; no verdict to aggregate |
 | `gen-bell.ps1` | generates a test asset |
 | `aot-fuzz.ps1`, `vtabs-visual-qa.ps1`, `release-smoke.ps1` | runners in their own right. `aot-fuzz` targets the NativeAOT publish, which the suite can also do with `-ExePath` |
 | `tab-tag-ink.ps1` | one regression, not a sweep: it measures whether a colour-tagged tab's pin glyph is painted in the tag foreground (#883). Like `contrast-oracle.ps1` it needs the seam pipe to itself |
