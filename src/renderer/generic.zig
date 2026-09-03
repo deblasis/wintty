@@ -1870,6 +1870,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const swap_chain: *SwapChain, const swap_chain_rebuilt: bool =
                 if (self.swap_chain) |*sc| .{ sc, false } else rebuild: {
                     self.swap_chain = try SwapChain.init(
+                        self.alloc,
                         self.api,
                         self.has_custom_shaders,
                     );
