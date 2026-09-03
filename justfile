@@ -557,14 +557,22 @@ sync force="":
         exit 1
     fi
     prev="refs/tags/series/v${prev_n}"
-    # The last snapshot is the only merge commit in FORK-ONLY history, because
-    # PRs squash-merge - hence the range bound. Unbounded, this walk would
-    # sail past the fork's linear commits into upstream's first-parent chain,
-    # which is full of upstream's own PR merges, and return one of those; the
-    # bound excludes them while keeping the snapshot, which is never reachable
-    # from upstream/main. Before the first snapshot exists the range holds no
-    # merge at all, and the v0 tag plays the role.
-    mprev=$(git rev-list --min-parents=2 --first-parent -1 refs/remotes/upstream/main..refs/remotes/origin/windows)
+    # A snapshot merge is the one shape on windows whose SECOND parent is an
+    # upstream commit; every other merge there joins two fork commits. Reading
+    # it as 'the newest merge' instead assumed every PR squash-merges, and a
+    # PR that landed unsquashed sat on the same first-parent chain, was taken
+    # for the snapshot, and refused the sync while hiding its own commits from
+    # the fold below. The range bound stays: unbounded, the walk sails into
+    # upstream's first-parent chain, which is all merges. Before the first
+    # snapshot exists the range holds no merge at all, and the v0 tag plays
+    # the role.
+    mprev=""
+    for c in $(git rev-list --min-parents=2 --first-parent refs/remotes/upstream/main..refs/remotes/origin/windows); do
+        if git merge-base --is-ancestor "${c}^2" refs/remotes/upstream/main; then
+            mprev="$c"
+            break
+        fi
+    done
     if [ -z "$mprev" ]; then
         mprev=$(git rev-parse "${prev}^{commit}")
     fi
@@ -614,8 +622,12 @@ sync force="":
     plus=$(git cherry HEAD refs/remotes/origin/windows "$mprev" | awk '$1 == "+" { print $2 }')
     fold=""
     if [ -n "$plus" ]; then
-        # git cherry answers membership; the rev-list keeps first-parent order.
-        fold=$(git rev-list --reverse --first-parent --no-merges "${mprev}..refs/remotes/origin/windows" \
+        # git cherry answers membership; the rev-list keeps topological order.
+        # Not --first-parent: a PR that lands as a merge keeps its content off
+        # that chain, so the narrower walk folded in every squash around it
+        # and dropped the whole PR without a word. The full walk minus merges
+        # is exactly the set git cherry measures, which is why the two agree.
+        fold=$(git rev-list --reverse --topo-order --no-merges "${mprev}..refs/remotes/origin/windows" \
             | grep -Fx -f <(printf '%s\n' "$plus") || true)
     fi
     if [ -n "$fold" ]; then
@@ -752,7 +764,14 @@ sync-publish ack="":
     #                named, and the publish refuses unless each is explicitly
     #                acknowledged with a reason that lands in history.
     prev="refs/tags/series/v${prev_n}"
-    mprev=$(git rev-list --min-parents=2 --first-parent -1 refs/remotes/upstream/main..refs/remotes/origin/windows)
+    # The snapshot is identified by its shape, not by being newest; see sync.
+    mprev=""
+    for c in $(git rev-list --min-parents=2 --first-parent refs/remotes/upstream/main..refs/remotes/origin/windows); do
+        if git merge-base --is-ancestor "${c}^2" refs/remotes/upstream/main; then
+            mprev="$c"
+            break
+        fi
+    done
     if [ -z "$mprev" ]; then
         mprev=$(git rev-parse "${prev}^{commit}")
     fi
