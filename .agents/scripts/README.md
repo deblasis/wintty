@@ -30,6 +30,15 @@ human) working in this repo uses the same contract:
 - `just gates-selftest` - prove the gates still catch what they exist for
   (recorded-PR replays, matcher escapes, exemption anchoring) and that the
   nightly scripts' helpers roundtrip. Runs `gitversion-selftest` first.
+- `just release-gate-check` - prove the shipping-build gate REFUSES a leak,
+  by evaluating Release rather than by reading the targets file. Three probe
+  sets: the build-time refusal in both polarities and by both routes (a `-p:`
+  on the derived property, and an environment variable); what a Release
+  evaluation actually defines, per project, since the target reads
+  `DemoEnabled` and never `DefineConstants`; and the two `#if !DEBUG` facts
+  in `ShippingBuildGateTests`, each asserted by name and by a count of
+  exactly one, because that class also holds facts that run in Debug.
+  Windows-only, and nothing compiles: the target is invoked directly.
 - `just gitversion-selftest` - prove a tag outside the release namespace
   cannot name a version. `sync-publish` tags each published snapshot
   `series/vN` and Config.init panics on a tag it does not recognise, so

@@ -62,6 +62,15 @@ PREFIX_SUFFIX_RULES = (
     ("windows/", ".csproj", (LEG_WIN, LEG_RELEASE_GATE)),
     ("windows/", ".props", (LEG_WIN, LEG_RELEASE_GATE)),
     ("windows/", ".targets", (LEG_WIN, LEG_RELEASE_GATE)),
+    ("windows/", ".sln", (LEG_WIN, LEG_RELEASE_GATE)),
+    # A response file is the sharp one. MSBuild treats its contents as
+    # command-line arguments, so `-p:Demo=true` in one arrives as a GLOBAL
+    # property: it satisfies the opt-in test the gate uses to tell a
+    # deliberate opt-in from a leak, AND defines DEMO_OPTIN, which compiles
+    # the runtime guard out as well. Every check stays green and demo mode
+    # ships.
+    ("windows/", ".rsp", (LEG_WIN, LEG_RELEASE_GATE)),
+    ("windows/", ".config", (LEG_WIN, LEG_RELEASE_GATE)),
 )
 
 # Ordered, first match wins, so a more specific prefix must precede its
@@ -119,7 +128,7 @@ EXACT_RULES = {
     "build.zig.zon.json": ZIG_LEGS,
     "build.zig.zon.nix": (),
     "build.zig.zon.txt": (),
-    "global.json": (LEG_WIN,),
+    "global.json": (LEG_WIN, LEG_RELEASE_GATE),
     "Directory.Build.props": (LEG_WIN,),
     ".gitignore": (),
     ".gitattributes": (),

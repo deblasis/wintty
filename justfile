@@ -1553,11 +1553,6 @@ gitversion-selftest:
 # scripts' helpers roundtripping. `gitversion-selftest` runs first.
 #
 # Prove the gates still catch what they exist for.
-# Prove the shipping-build gate refuses a leak in a real Release evaluation (#929)
-[windows]
-release-gate-check:
-    pwsh -NoProfile -File .agents/scripts/release_gate_check.ps1
-
 gates-selftest: gitversion-selftest
     python .agents/scripts/pr_gate.py --self-test
     python .agents/scripts/workspace_guard.py --self-test
@@ -1565,3 +1560,8 @@ gates-selftest: gitversion-selftest
     python .agents/scripts/test_reachability.py --self-test
     pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
+
+# Prove the shipping-build gate refuses a leak in a real Release evaluation (#929)
+[windows]
+release-gate-check:
+    pwsh -NoProfile -File .agents/scripts/release_gate_check.ps1

@@ -516,6 +516,14 @@ def self_test():
         (["windows/Ghostty.Tests/Demo/ShippingBuildGateTests.cs"], False,
          ["release-gate", "windows-tests"]),
         ([".agents/scripts/release_gate_check.ps1"], False, ["release-gate"]),
+        # A response file under windows/ turns its contents into command-line
+        # arguments, i.e. GLOBAL properties -- the one shape that satisfies
+        # the gate's own opt-in test while also compiling the runtime guard
+        # out. It must not resolve to windows-tests alone.
+        (["windows/Directory.Build.rsp"], False, ["release-gate", "windows-tests"]),
+        (["windows/Ghostty.sln"], False, ["release-gate", "windows-tests"]),
+        # The SDK pin is the MSBuild that evaluates the gate.
+        (["global.json"], False, ["release-gate", "windows-tests"]),
         (["src/a.zig", "windows/b.cs"], False, ["windows-tests", "zig-fmt", "zig-tests"]),
         (["brand/new/dir/thing.bin"], False, sorted(gate_scope.ALL_LEGS)),
         (["justfile"], list(gate_scope.ALL_LEGS), sorted(gate_scope.ALL_LEGS)),
