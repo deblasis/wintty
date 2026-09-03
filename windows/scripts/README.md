@@ -22,7 +22,7 @@ just fuzz-list                  # what it runs, no build and no desktop needed
 just fuzz-selftest              # prove the runner classifies exit codes, seconds
 just fuzz                       # everything, about 43 minutes budgeted
 just fuzz "-Tag smoke"          # the fast, high-signal subset, 7 budgeted / 5 measured
-just fuzz "-Only search,loop"
+just fuzz "-Only search,probe"
 ```
 
 Individual harnesses still run standalone, which is what you want while
@@ -119,8 +119,6 @@ a green run:
 - `tab-colors` reads no pixel at all. It confirms the swatches were findable
   and the layout switched; a build that painted every tab the same colour
   would pass.
-- `loop` saves screenshots and reads none of them back, and skips any
-  affordance it cannot find. Its verdict is liveness.
 - `mica-dpi` never changes the DPI - it reads it once - and checks
   `PerMonitorV2` by grepping the manifest in the source tree rather than the
   binary under test.

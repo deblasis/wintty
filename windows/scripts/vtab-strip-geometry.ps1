@@ -40,6 +40,11 @@
       header-fits           a group header's painted span -- swatch through
                             chevron -- stays inside the pane at both
                             widths.
+      sidebar-launch        the strip starts at the compact rail. A
+                            precondition here would downgrade a build that
+                            ignored vertical-tabs-pinned=false into "could
+                            not run"; it is a finding, as it was where
+                            this leg folds in from.
       sidebar-round-trip    expanded -> compact -> expanded again, every
                             width in DIPs off the seam's paneWidth. The
                             third width was recorded and gated nowhere in
@@ -426,9 +431,18 @@ try {
     [void](Invoke-SeamCommand $session @{ op = 'select'; index = 2 })
 
     $compact = Invoke-SeamCommand $session @{ op = 'element-rects' }
-    if ($compact.state.paneWidth -ge 96) {
-        throw "HARVEST_MISS: the strip started at $($compact.state.paneWidth)px, expected the compact rail"
+    # FINDING-grade, not a harvest miss: the config names the compact rail,
+    # so a build that starts expanded ignored its own config -- the exact
+    # gate mouse-fuzz-vertical-tabs carried as PRODUCT_FAIL, which a
+    # precondition here would quietly downgrade to "could not run". An
+    # unreadable width (<=0) is the only miss left.
+    if ($compact.state.paneWidth -le 0) {
+        throw "HARVEST_MISS: the strip reported pane width $($compact.state.paneWidth)"
     }
+    Add-Check 'sidebar-launch-collapsed' (
+        'strip started at {0} DIP (want the 48 rail, <90)' -f
+            $compact.state.paneWidth) (
+        $compact.state.paneWidth -lt 90)
     Save-StripShot $session.Hwnd64 'compact'
 
     [void](Invoke-SeamCommand $session @{ op = 'toggle-sidebar' })
