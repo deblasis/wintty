@@ -191,6 +191,11 @@ test-win:
     dotnet build windows/Ghostty.sln /p:Platform=x64
     dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
     dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
+    # IconGen/SplashGen were compiled by the solution line above but executed
+    # by nothing until a coverage audit caught it; AnyCPU in the sln, so they
+    # take no /p:Platform=x64 unlike the two above.
+    dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
+    dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
 
 # Launch two instances a few hundred ms apart and watch for a launch splash
 # owned by the one that should be forwarding itself to the other. Opens real
