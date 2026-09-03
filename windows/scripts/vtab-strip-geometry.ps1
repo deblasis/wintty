@@ -40,6 +40,20 @@
       header-fits           a group header's painted span -- swatch through
                             chevron -- stays inside the pane at both
                             widths.
+      sidebar-launch        the strip starts at the compact rail. A
+                            precondition here would downgrade a build that
+                            ignored vertical-tabs-pinned=false into "could
+                            not run"; it is a finding, as it was where
+                            this leg folds in from.
+      sidebar-round-trip    expanded -> compact -> expanded again, every
+                            width in DIPs off the seam's paneWidth. The
+                            third width was recorded and gated nowhere in
+                            the harness this leg folds in from.
+      toggle-a11y-name      the pane toggle's UIA name tracks the pane:
+                            "Collapse sidebar" expanded, "Expand sidebar"
+                            collapsed. The XAML default is "Toggle
+                            sidebar"; seeing it means UpdatePaneToggleChrome
+                            never ran.
 
     And in the second process, expanded only, with four pins staged:
 
@@ -60,6 +74,9 @@
                             is derived from the arranged rects, so the
                             check does not assume a four-column band.
 
+    The sidebar round trip and the toggle's accessible name fold in from
+    mouse-fuzz-vertical-tabs.ps1, retired with the SendInput suite (#930).
+
     Findings are collected rather than thrown one at a time: a geometry run
     that reports the first bad number and stops hides the rest of the
     picture, and every check here is independent.
@@ -78,6 +95,8 @@ $ErrorActionPreference = 'Stop'
 
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 # Half a pixel: the strip lays out on whole pixels at 100% scaling, so
@@ -129,6 +148,17 @@ function Assert-Rect($Rect, [string]$What) {
 
 function Right($Rect) { return $Rect.x + $Rect.w }
 function CenterX($Rect) { return $Rect.x + $Rect.w / 2 }
+
+# The pane toggle's accessible name, read-only. UpdatePaneToggleChrome
+# sets it from the pane state; the XAML ships "Toggle sidebar".
+function Get-PaneToggleName([int64]$Hwnd64) {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Hwnd64)
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PaneToggleButton')
+    $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($null -eq $el) { return $null }
+    return $el.Current.Name
+}
 
 function Save-StripShot([int64]$Hwnd64, [string]$Name) {
     $rc = [SeamWin]::RectOf($Hwnd64)
@@ -401,9 +431,18 @@ try {
     [void](Invoke-SeamCommand $session @{ op = 'select'; index = 2 })
 
     $compact = Invoke-SeamCommand $session @{ op = 'element-rects' }
-    if ($compact.state.paneWidth -ge 96) {
-        throw "HARVEST_MISS: the strip started at $($compact.state.paneWidth)px, expected the compact rail"
+    # FINDING-grade, not a harvest miss: the config names the compact rail,
+    # so a build that starts expanded ignored its own config -- the exact
+    # gate mouse-fuzz-vertical-tabs carried as PRODUCT_FAIL, which a
+    # precondition here would quietly downgrade to "could not run". An
+    # unreadable width (<=0) is the only miss left.
+    if ($compact.state.paneWidth -le 0) {
+        throw "HARVEST_MISS: the strip reported pane width $($compact.state.paneWidth)"
     }
+    Add-Check 'sidebar-launch-collapsed' (
+        'strip started at {0} DIP (want the 48 rail, <90)' -f
+            $compact.state.paneWidth) (
+        $compact.state.paneWidth -lt 90)
     Save-StripShot $session.Hwnd64 'compact'
 
     [void](Invoke-SeamCommand $session @{ op = 'toggle-sidebar' })
@@ -415,6 +454,35 @@ try {
 
     @{ compact = $compact; expanded = $expanded } |
         ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir 'rects.json') -Encoding utf8
+
+    # The sidebar round trip, folded in from mouse-fuzz-vertical-tabs.ps1
+    # (#930). Every width is a DIP -- state.paneWidth is the strip's own
+    # arranged width -- so the thresholds hold at any monitor scale, where
+    # the folded file read physical pixels off a UIA rect and passed for
+    # the wrong reason at 150%. A dead toggle is a FINDING, not a miss:
+    # toggle-sidebar answering ok while the pane never moves is the product
+    # lying, and the old file's third width was recorded and gated nowhere.
+    $nameExpanded = Get-PaneToggleName $session.Hwnd64
+    $collapsedBack = Invoke-SeamCommand $session @{ op = 'toggle-sidebar' }
+    Add-Check 'sidebar-collapse-back' (
+        'pane {0} -> {1} DIP after collapse (want the 48 rail)' -f
+            $expanded.state.paneWidth, $collapsedBack.state.paneWidth) (
+        $collapsedBack.state.paneWidth -gt 0 -and $collapsedBack.state.paneWidth -lt 90)
+
+    $nameCollapsed = Get-PaneToggleName $session.Hwnd64
+    $reopened = Invoke-SeamCommand $session @{ op = 'toggle-sidebar' }
+    Add-Check 'sidebar-reopen' (
+        'pane reopened to {0} DIP (want >= 200; was {1} before)' -f
+            $reopened.state.paneWidth, $expanded.state.paneWidth) (
+        $reopened.state.paneWidth -ge 200)
+    $nameReopened = Get-PaneToggleName $session.Hwnd64
+
+    $okNames = $nameExpanded -eq 'Collapse sidebar' -and
+               $nameCollapsed -eq 'Expand sidebar' -and
+               $nameReopened -eq 'Collapse sidebar'
+    Add-Check 'toggle-a11y-name' (
+        'expanded="{0}" collapsed="{1}" reopened="{2}" (want Collapse/Expand/Collapse)' -f
+            "$nameExpanded", "$nameCollapsed", "$nameReopened") $okNames
 
     Write-Host ''
     Write-Host "=== compact (pane $($compact.state.paneWidth)px) ==="
