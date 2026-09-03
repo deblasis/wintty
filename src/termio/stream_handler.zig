@@ -4,6 +4,7 @@ const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const global = @import("../global.zig");
 const xev = global.xev;
+const App = @import("../App.zig");
 const apprt = @import("../apprt.zig");
 const build_config = @import("../build_config.zig");
 const configpkg = @import("../config.zig");
@@ -107,6 +108,16 @@ pub const StreamHandler = struct {
     /// This is set to true when we've seen a title escape sequence. We use
     /// this to determine if we need to default the window title.
     seen_title: bool = false,
+
+    /// Whether a pwd has ever been reported to the surface from this
+    /// handler. The terminal's pwd slot is pre-seeded at spawn from the
+    /// subprocess's own working directory with no surface message behind it
+    /// (see `Exec.initTerminal`), so a first prompt reporting that same
+    /// directory matches a value the surface was never told. Without this,
+    /// the dedupe below would swallow the first `pwd_change` of the session,
+    /// and an app that treats that first one as the "shell is alive and
+    /// reporting" edge would never see it.
+    pwd_reported: bool = false,
 
     pub const Stream = terminal.Stream(StreamHandler);
 
@@ -1560,6 +1571,13 @@ pub const StreamHandler = struct {
         try self.terminal.semanticPrompt(cmd);
     }
 
+    /// Adopt a directory a child reported.
+    ///
+    /// Three sequences land here and the action does not say which: OSC 7
+    /// (a file:// URL), OSC 9;9 (a raw path) and OSC 7777 (a raw path out of
+    /// the prompt report). The parameter is named `url` because the action's
+    /// field is, and it is only a URL on the first of those, so the warnings
+    /// below name the set rather than guessing.
     fn reportPwd(self: *StreamHandler, url: []const u8) !void {
         // Special handling for the empty URL. We treat the empty URL
         // as resetting the pwd as if we never saw a pwd. I can't find any
@@ -1596,13 +1614,13 @@ pub const StreamHandler = struct {
         if (comptime builtin.os.tag == .windows) {
             if (internal_os.posix_path.isWindowsAbsolute(url)) {
                 const host = internal_os.posix_path.pathHost(url) catch {
-                    log.warn("OSC 7/9;9 path names no directory we can use", .{});
+                    log.warn("reported pwd (OSC 7/9;9/7777) names no directory we can use", .{});
                     return;
                 };
                 switch (host) {
                     .local => {},
                     .server => |name| if (!uncHostIsLocal(name)) {
-                        log.warn("OSC 7/9;9 UNC host ({s}) must be local", .{name});
+                        log.warn("reported pwd (OSC 7/9;9/7777) UNC host ({s}) must be local", .{name});
                         return;
                     },
                 }
@@ -1617,14 +1635,14 @@ pub const StreamHandler = struct {
             .mac_address = comptime builtin.os.tag != .macos,
             .raw_path = std.mem.startsWith(u8, url, "kitty-shell-cwd://"),
         }) catch |e| {
-            log.warn("invalid url in OSC 7: {}", .{e});
+            log.warn("invalid url in reported pwd (OSC 7/9;9/7777): {}", .{e});
             return;
         };
 
         if (!std.mem.eql(u8, "file", uri.scheme) and
             !std.mem.eql(u8, "kitty-shell-cwd", uri.scheme))
         {
-            log.warn("OSC 7 scheme must be file or kitty-shell-cwd, got: {s}", .{uri.scheme});
+            log.warn("reported pwd (OSC 7/9;9/7777) scheme must be file or kitty-shell-cwd, got: {s}", .{uri.scheme});
             return;
         }
 
@@ -1636,7 +1654,7 @@ pub const StreamHandler = struct {
             var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
             const host = uri.getHost(&host_buffer) catch |err| switch (err) {
                 error.UriMissingHost => {
-                    log.warn("OSC 7 uri must contain a hostname: {}", .{err});
+                    log.warn("reported pwd (OSC 7/9;9/7777) uri must contain a hostname: {}", .{err});
                     return;
                 },
             };
@@ -1648,12 +1666,12 @@ pub const StreamHandler = struct {
                 error.PermissionDenied,
                 error.Unexpected,
                 => {
-                    log.warn("failed to get hostname for OSC 7 validation: {}", .{err});
+                    log.warn("failed to get hostname for reported pwd validation: {}", .{err});
                     return;
                 },
             };
             if (!host_valid) {
-                log.warn("OSC 7 host ({s}) must be local", .{host.bytes});
+                log.warn("reported pwd (OSC 7/9;9/7777) host ({s}) must be local", .{host.bytes});
                 return;
             }
         }
@@ -1682,7 +1700,7 @@ pub const StreamHandler = struct {
                 .wsl => |w| internal_os.posix_path.wslToWindows(salloc, path, w.distro),
                 .rooted => |r| internal_os.posix_path.rootedToWindows(salloc, path, r.install_root),
             } else internal_os.posix_path.uriPathToWindows(salloc, path)) catch |err| {
-                log.warn("OSC 7 path translation failed: {}", .{err});
+                log.warn("reported pwd (OSC 7/9;9/7777) path translation failed: {}", .{err});
                 return;
             }
         else
@@ -1716,29 +1734,47 @@ pub const StreamHandler = struct {
     fn setPwdReported(self: *StreamHandler, reported: []const u8) !void {
         log.debug("terminal pwd: {s}", .{reported});
 
-        // One prompt reports its directory more than once: OSC 7 and OSC 9;9
-        // both carry it, and OSC 7777 carries it again. Only the first is
-        // news. The rest each cost a copy, a heap allocation and a
-        // cross-thread message to tell the surface a value it already holds,
-        // and pwd_change lands on an idempotent action.
+        // One prompt reports its directory three times: OSC 7 and OSC 9;9
+        // both carry it and OSC 7777 carries it again. Only the first is
+        // news. Each of the others otherwise costs a copy, a heap
+        // allocation and a cross-thread message to tell the surface a value
+        // it already holds, plus a second cross-thread message and a
+        // 256-byte title buffer to set the title to what it already says.
         //
-        // The title is deliberately outside the check: whether it is wanted
-        // depends on seen_title, which can change between two otherwise
-        // identical reports.
+        // The return is whole-function, following `setMouseShape` in this
+        // file, because the title needs nothing either: the only title this
+        // function ever sets is the one derived from the pwd, so an
+        // unchanged pwd is an unchanged title. A title an application set
+        // stops us anyway (`seen_title`), and the one thing that can clear
+        // `seen_title` behind our back -- an empty OSC 0/2 -- already
+        // re-derives the title from the pwd itself.
+        //
+        // It also stops a directory too long to be a title from re-logging
+        // its refusal on every prompt, forever, for a user standing in a
+        // deep tree: it is refused once per directory now.
+        //
+        // `pwd_reported` rather than the pwd alone, because the pwd slot is
+        // pre-seeded at spawn without a surface message. See its docs.
         const known = self.terminal.getPwd();
-        if (known == null or !std.mem.eql(u8, known.?, reported)) {
-            try self.terminal.setPwd(reported);
+        if (self.pwd_reported and
+            known != null and
+            std.mem.eql(u8, known.?, reported)) return;
+        self.pwd_reported = true;
 
-            // Report it to the surface. If creating our write request fails
-            // then we just ignore it.
-            if (apprt.surface.Message.WriteReq.init(self.alloc, reported)) |req| {
-                self.surfaceMessageWriter(.{ .pwd_change = req });
-            } else |err| {
-                log.warn("error notifying surface of pwd change err={}", .{err});
-            }
+        try self.terminal.setPwd(reported);
+
+        // Report it to the surface. If creating our write request fails
+        // then we just ignore it.
+        if (apprt.surface.Message.WriteReq.init(self.alloc, reported)) |req| {
+            self.surfaceMessageWriter(.{ .pwd_change = req });
+        } else |err| {
+            log.warn("error notifying surface of pwd change err={}", .{err});
         }
 
-        // If we haven't seen a title, use our pwd as the title.
+        // If we haven't seen a title, use our pwd as the title. The reset
+        // after the call is load-bearing: `windowTitle` sets `seen_title`,
+        // and a title we derived ourselves must not count as one an
+        // application set, or the window would stop tracking the folder.
         if (!self.seen_title) {
             try self.windowTitle(reported);
             self.seen_title = false;
@@ -2213,4 +2249,175 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     // Teardown leaves no transaction that could be committed and
     // forwarded to the macOS clipboard path.
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+/// Everything a pwd report needs from a `StreamHandler`, and nothing else.
+/// The handler is huge and mostly irrelevant here, so the fields the pwd path
+/// reads are set and the rest is left alone; touching another one from this
+/// path would show up as a crash rather than a wrong answer.
+const PwdTestHarness = struct {
+    arena: std.heap.ArenaAllocator,
+    term: terminal.Terminal,
+    mutex: std.Io.Mutex,
+    renderer_state: renderer.State,
+    app_mailbox: *App.Mailbox.Queue,
+    rt_app: apprt.App,
+    handler: StreamHandler,
+
+    const Counts = struct { pwd: usize = 0, title: usize = 0 };
+
+    fn init(self: *PwdTestHarness, alloc: Allocator) !void {
+        self.arena = .init(alloc);
+        errdefer self.arena.deinit();
+
+        self.term = try terminal.Terminal.init(
+            global.io(),
+            alloc,
+            .{ .cols = 80, .rows = 24 },
+        );
+        errdefer self.term.deinit(alloc);
+
+        self.app_mailbox = try App.Mailbox.Queue.create(alloc);
+        errdefer self.app_mailbox.destroy(alloc);
+
+        self.mutex = .init;
+        self.mutex.lockUncancelable(global.io());
+
+        self.renderer_state = .{ .mutex = &self.mutex, .terminal = &self.term };
+
+        self.handler = undefined;
+        self.handler.alloc = self.arena.allocator();
+        self.handler.terminal = &self.term;
+        self.handler.renderer_state = &self.renderer_state;
+        self.rt_app = .{};
+        self.handler.surface_mailbox = .{
+            // Never dereferenced: the mailbox only carries the pointer
+            // through to the app thread, which this test stands in for.
+            .surface = undefined,
+            .app = .{ .rt_app = &self.rt_app, .mailbox = self.app_mailbox },
+        };
+        self.handler.osc7 = null;
+        self.handler.seen_title = false;
+        self.handler.pwd_reported = false;
+    }
+
+    fn deinit(self: *PwdTestHarness, alloc: Allocator) void {
+        self.mutex.unlock(global.io());
+        self.app_mailbox.destroy(alloc);
+        self.term.deinit(alloc);
+        self.arena.deinit();
+    }
+
+    /// Drive raw bytes through a real `Stream`, so what is counted below is
+    /// what an actual prompt burst produces and not a hand-called method.
+    fn feed(self: *PwdTestHarness, input: []const u8) void {
+        var stream: terminal.Stream(*StreamHandler) = .init(.{
+            .handler = &self.handler,
+        });
+        for (input) |c| stream.next(c);
+    }
+
+    /// Drain the app mailbox and count what the surface would have acted on.
+    fn drain(self: *PwdTestHarness) Counts {
+        var counts: Counts = .{};
+        while (self.app_mailbox.pop(global.io())) |msg| switch (msg) {
+            .surface_message => |sm| switch (sm.message) {
+                .pwd_change => counts.pwd += 1,
+                .set_title => counts.title += 1,
+                else => {},
+            },
+            else => {},
+        };
+        return counts;
+    }
+};
+
+test "pwd: one prompt's OSC 7, 9;9 and 7777 burst reports once" {
+    // The burst is Windows-shaped: OSC 9;9 and OSC 7777 both carry a raw
+    // Windows path, and only the Windows arm of reportPwd adopts one.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var h: PwdTestHarness = undefined;
+    try h.init(testing.allocator);
+    defer h.deinit(testing.allocator);
+
+    // What the shipped PowerShell integration writes for one prompt in
+    // C:\Users\me, in the order it writes it. The OSC 7 URL spells the drive
+    // lower and percent-encodes the path; the other two carry the raw path.
+    // All three name one directory, so the surface hears about it once.
+    h.feed(
+        "\x1b]7;file://MYPC/c:/Users/me\x07" ++
+            "\x1b]9;9;C:\\Users\\me\x07" ++
+            "\x1b]7777;p;7B2276223A312C22637764223A22433A5C5C55736572735C5C6D65222C2265786974223A302C227368656C6C223A2270777368227D\x07",
+    );
+
+    const first = h.drain();
+    try testing.expectEqual(@as(usize, 1), first.pwd);
+    try testing.expectEqual(@as(usize, 1), first.title);
+    try testing.expectEqualStrings("C:\\Users\\me", h.handler.terminal.getPwd().?);
+
+    // A second identical prompt is not news either.
+    h.feed("\x1b]9;9;C:\\Users\\me\x07");
+    const again = h.drain();
+    try testing.expectEqual(@as(usize, 0), again.pwd);
+    try testing.expectEqual(@as(usize, 0), again.title);
+
+    // A genuinely new directory is, once, on both counts.
+    h.feed(
+        "\x1b]7;file://MYPC/c:/Users/me/src\x07" ++
+            "\x1b]9;9;C:\\Users\\me\\src\x07",
+    );
+    const moved = h.drain();
+    try testing.expectEqual(@as(usize, 1), moved.pwd);
+    try testing.expectEqual(@as(usize, 1), moved.title);
+    try testing.expectEqualStrings("C:\\Users\\me\\src", h.handler.terminal.getPwd().?);
+}
+
+test "pwd: a title an application set survives the next prompt's burst" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var h: PwdTestHarness = undefined;
+    try h.init(testing.allocator);
+    defer h.deinit(testing.allocator);
+
+    // The window title tracks the folder until an application claims it.
+    // That is the behaviour the dedupe must not disturb in either direction:
+    // the folder still sets the title while no one else has, and stops the
+    // moment someone does.
+    h.feed("\x1b]9;9;C:\\Users\\me\x07");
+    try testing.expectEqual(@as(usize, 1), h.drain().title);
+    try testing.expect(!h.handler.seen_title);
+
+    h.feed("\x1b]0;vim\x07");
+    _ = h.drain();
+    try testing.expect(h.handler.seen_title);
+
+    // A new directory still moves the pwd, and no longer touches the title.
+    h.feed("\x1b]9;9;C:\\Users\\me\\src\x07");
+    const after = h.drain();
+    try testing.expectEqual(@as(usize, 1), after.pwd);
+    try testing.expectEqual(@as(usize, 0), after.title);
+    try testing.expectEqualStrings("vim", h.handler.terminal.getTitle().?);
+}
+
+test "pwd: the first report of a session is not swallowed by the spawn cwd" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var h: PwdTestHarness = undefined;
+    try h.init(testing.allocator);
+    defer h.deinit(testing.allocator);
+
+    // `Exec.initTerminal` seeds the pwd slot from the subprocess's own
+    // working directory and sends no surface message, so the first prompt in
+    // that directory matches a value the surface was never told. Comparing
+    // the pwd alone would drop the first `pwd_change` of every session.
+    try h.term.setPwd("C:\\Users\\me");
+
+    h.feed("\x1b]9;9;C:\\Users\\me\x07");
+    const counts = h.drain();
+    try testing.expectEqual(@as(usize, 1), counts.pwd);
+    try testing.expectEqual(@as(usize, 1), counts.title);
 }
