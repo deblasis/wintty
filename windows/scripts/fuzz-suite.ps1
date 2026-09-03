@@ -183,6 +183,8 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
                 oracle = 'the crash investigation''s repro made deterministic, driven entirely over the in-process seam (zero synthesized OS input, zero focus steals, so the machine stays usable). Per iteration: seed 5 tabs, pin one, group two, collapse one, toggle the layout twice - so every iteration contains one switch INTO the vertical layout with pins, groups and collapsed chips already in the strip, which is the compound that died on 2026-08-31 (COMException 0x800F1000, a NavigationViewItem style applied onto a ContentControl through ApplyPaneLayout -> set_PaneDisplayMode -> MeasureOverride). It asserts manager truth after every step - order, pin flag, group membership, collapse bit - and that the process is still alive; a final leg drives the drag engine''s real press/threshold/crossing/release and asserts the landed order. It reads the MANAGER, never a pixel and never UIA, so a strip that models the right state and renders it wrongly passes. It runs at the tight command train by default: -GapMs 400 is the pacing that died 6/6 before the realization guard, and the suite does not stage it, so the timing-dependent half of that crash is not covered here' }
     [ordered]@{ name = 'pane-memory';    script = 'pane-focus-tab-switch.ps1';     tags = @('smoke','panes');  outDir = $true;  seed = $false; minutes = 2
                 oracle = 'the per-tab active pane, end to end (#869): split a tab, park focus on its RIGHT leaf, leave for another tab, come back, and demand the right leaf is both where typing lands AND where the active-pane chrome is drawn. Two oracles deliberately different in kind. The focus report is read out of FocusManager rather than out of PaneHost.ActiveLeaf, because "the tab remembers its last pane" and "you can type into it" are separate claims - the memory was always there, and asserting it would have passed straight over the bug. The other is pixels from a screenshot of the real window: the inactive-pane dim film must lie over the LEFT leaf, and the cursor block inside the right leaf must be the filled one a focused surface draws rather than the hollow outline an unfocused one leaves. The dim-film assert is a regression guard on the drawing path and is green with or without the focus restore; the focus report and the cursor-block count are the two that go red without it. Seam-actuated, so zero OS input is synthesized and the only thing done to the desktop is reading pixels off it. One split, one shape, two tabs: a deeper tree or a vertical split is not staged' }
+    [ordered]@{ name = 'switcher-wrap';  script = 'vtabs-switcher-capture.ps1';   tags = @('tabs','chrome');  outDir = $true;  seed = $false; minutes = 3
+                oracle = 'seam-actuated: fourteen real ctrl+t tabs, six tab-colour ops, then cycle{forward} raises the switcher through the chord''s own dispatch. The wrap claim is GATED for the first time: every tile rect read over UIA inside the popup''s 1.2s life must sit within the window''s right edge, and that many tiles must occupy more than one row - the file described this for its whole life and asserted it nowhere. The colours are read back off the state block, and the overview chord lands last for the picture' }
     [ordered]@{ name = 'vtab-geometry';  script = 'vtab-strip-geometry.ps1';       tags = @('tabs','chrome');  outDir = $true;  seed = $false; minutes = 2
                 oracle = 'reads the vertical strip''s ARRANGED LAYOUT back over the seam''s element-rects op rather than sampling pixels, because the strip wears Mica and a grab would answer for the desktop behind the window. One process, one seeded state (two pins, one group, two loose tabs), measured at both pane widths - the 48px compact rail and the expanded sidebar. Eight independent checks, findings collected rather than thrown one at a time: every pinned tab is arranged as the same 40px square and every square is inside the band''s own box; two pins share a band row in the expanded pane and stack in the compact rail, which is the wrapping band''s whole claim; the retired pin-boundary stroke is not arranged at either width, so a rule redrawn beside the structural division would be a finding; the close glyph''s right edge sits one named inset in from the pane edge when expanded, and the compact rail carries none at all, since MUXC''s item template lays row content out past 48px and a close button there would be arranged outside the pane; and a group header''s painted span, swatch through chevron, stays inside the pane at both widths. The sidebar also makes a full round trip - expanded, collapsed to the 48 rail, reopened - with every width a DIP off the seam''s paneWidth so the thresholds hold at any monitor scale, and the pane toggle''s UIA name must track the pane (Collapse/Expand sidebar; the XAML default Toggle sidebar is a finding), folded in from the retired mouse-fuzz-vertical-tabs (#930). Because it measures layout it says nothing about paint: a square arranged correctly and drawn in the wrong colour, or not drawn at all, passes. It says nothing about MOTION either - the band''s reflow glide is a composition animation no arranged rect records. It measures one seeded state at two pins, so a band that breaks only at a column boundary (five pins in the expanded pane) is not covered, and only the VERTICAL strip is staged: the horizontal strip''s pinned squares have no element-rects op' }
     [ordered]@{ name = 'field-seam';     script = 'tab-field-seam.ps1';            tags = @('tabs','chrome');  outDir = $true;  seed = $false; minutes = 4
@@ -244,12 +246,12 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
 # because the integrity check below reads it: a new harness dropped into this
 # directory has to be classified, and prose does not fail a run.
 $NotInSuite = [ordered]@{
+    'ShellIntegrationPs1.Tests.ps1' = 'a plain-assert test file run directly by its own command line (see its header), not a harness: no -ExePath, no app, no verdict shape'
     'fuzz-suite.ps1'                = 'this runner'
     'aot-fuzz.ps1'                  = 'a runner; targets the NativeAOT publish, which this suite can also do with -ExePath'
     'vtabs-visual-qa.ps1'           = 'a runner'
     'release-smoke.ps1'             = 'a runner'
     'mouse-smoke-run.ps1'           = 'the operator drives the checklist by hand'
-    'vtabs-switcher-capture.ps1'    = 'produces frames for a human to look at; no verdict to aggregate'
     'dump-uia-state.ps1'            = 'a UIA-loss discrimination battery an operator points at a live window at a HARVEST_MISS moment; emits an evidence block, no verdict to aggregate'
     'gen-bell.ps1'                  = 'generates a test asset'
     'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
@@ -1432,8 +1434,18 @@ foreach ($f in $dupScanFiles) {
         if ($nested) { continue }
         $found = [regex]::Matches($cmd.Extent.Text, '[\w.\-]+\.ps1')
         if ($found.Count -lt 1) {
-            # A path this cannot reduce to a name is REFUSED, not skipped.
-            # Skipping is how a spelling nobody anticipated turns the check off
+            if ($cmd.Extent.Text -notmatch '\.ps1') {
+                # DYNAMIC by design: a variable or expression path with no
+                # .ps1 literal anywhere in the command (ShellIntegrationPs1
+                # dot-sources `$script:integration`, built at runtime from
+                # Join-Path). There is no name to misread, so skipping costs
+                # nothing the refusing rule protects; the leaf it loads is
+                # invisible either way.
+                continue
+            }
+            # The command NAMES a .ps1 but no leaf could be extracted - a
+            # spelling the reader misread. REFUSED, not skipped: skipping is
+            # how the next spelling nobody anticipated turns the check off
             # without saying so.
             $problems += ("$rel dot-sources something this check cannot resolve to a file name, " +
                           "so it cannot be compared: " + $cmd.Extent.Text.Trim())
