@@ -2718,18 +2718,15 @@ pub fn Stream(comptime H: type) type {
                     // reachable on the OSC command for embedders that want
                     // it, and gets its own action when something acts on it.
                     //
-                    // An empty cwd is dropped rather than forwarded. The
-                    // schema allows it, meaning "the shell does not know",
-                    // but report_pwd reads an empty value as "forget the
-                    // directory": it clears the pwd and blanks a
-                    // pwd-derived title. A v1 report exists to carry a
-                    // directory, and a report that carries none must not
-                    // throw away the one OSC 7 and OSC 9;9 just set on this
-                    // same prompt. A kind that genuinely means "reset" can
-                    // say so on its own terms.
-                    if (v.cwd.len > 0) {
-                        self.handler.vt(.report_pwd, .{ .url = v.cwd });
-                    }
+                    // Unconditional, because `Stream` is generic over the
+                    // handler and has no business deciding what one of them
+                    // makes of a value. The empty case that would have
+                    // needed deciding -- `report_pwd` reads empty as "forget
+                    // the directory", which is not what an empty cwd means
+                    // -- cannot arrive: the parser refuses a v1 report whose
+                    // cwd is empty, so the schema settles it rather than
+                    // this switch.
+                    self.handler.vt(.report_pwd, .{ .url = v.cwd });
                 },
 
                 .conemu_sleep,
@@ -5400,7 +5397,7 @@ test "stream: continuation every-byte cuts preserve future behavior" {
     };
 }
 
-test "OSC 7777: the report feeds the existing pwd consumers" {
+test "stream: OSC 7777 report feeds the existing pwd consumers" {
     // The whole point of the compatibility decision: a consumer that only
     // knows about the report_pwd action, which is every pwd consumer in the
     // tree and the daemon that polls the terminal's pwd slot, must see this
@@ -5430,11 +5427,12 @@ test "OSC 7777: the report feeds the existing pwd consumers" {
     try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd.?);
 }
 
-test "OSC 7777: an empty cwd is not forwarded as a pwd reset" {
-    // The schema allows an empty cwd and the parser accepts it, but
-    // report_pwd reads empty as "forget the directory". Dropping it here is
-    // what keeps a future report that carries no directory from wiping the
-    // one the same prompt just set.
+test "stream: OSC 7777 empty cwd never reaches the pwd" {
+    // `report_pwd` reads an empty value as "forget the directory", which is
+    // not what an empty cwd in a report means. The parser refuses such a
+    // report outright, so nothing here has to decide: this asserts the
+    // outcome that matters, which is that the directory the same prompt just
+    // set survives.
     //
     // The handler copies rather than borrowing, because this test outlives a
     // sequence: value.url points into the OSC parser's buffer and the next
@@ -5473,7 +5471,7 @@ test "OSC 7777: an empty cwd is not forwarded as a pwd reset" {
     try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd());
 }
 
-test "OSC 7777: a malformed report leaves the pwd alone" {
+test "stream: OSC 7777 malformed report leaves the pwd alone" {
     const H = struct {
         pwd: ?[]const u8 = null,
 

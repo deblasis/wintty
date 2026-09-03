@@ -60,13 +60,16 @@ pub const CommandData = enum(c_int) {
     // OSC 7777 prompt report. Each field is queried on its own, and a query
     // for a field the report did not carry returns false: absent is a real
     // answer here, distinct from an empty value.
-    prompt_report_version_u32 = 2,
-    prompt_report_cwd_str = 3,
-    prompt_report_exit_code_i64 = 4,
-    prompt_report_shell_str = 5,
-    prompt_report_git_head_str = 6,
-    prompt_report_git_branch_str = 7,
-    prompt_report_git_dirty_bool = 8,
+    //
+    // There is no query for the schema version: the parser rejects every
+    // version but the one it was built for, so an accessor for it could only
+    // ever answer 1.
+    prompt_report_cwd_str = 2,
+    prompt_report_exit_code_i64 = 3,
+    prompt_report_shell_str = 4,
+    prompt_report_git_head_str = 5,
+    prompt_report_git_branch_str = 6,
+    prompt_report_git_dirty_bool = 7,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: CommandData) type {
@@ -78,7 +81,6 @@ pub const CommandData = enum(c_int) {
             .prompt_report_git_head_str,
             .prompt_report_git_branch_str,
             => [*:0]const u8,
-            .prompt_report_version_u32 => u32,
             .prompt_report_exit_code_i64 => i64,
             .prompt_report_git_dirty_bool => bool,
         };
@@ -117,11 +119,6 @@ fn commandDataTyped(
         .invalid => return false,
         .change_window_title_str => switch (command.*) {
             .change_window_title => |v| out.* = v.ptr,
-            else => return false,
-        },
-
-        .prompt_report_version_u32 => switch (command.*) {
-            .prompt_report => |v| out.* = v.version,
             else => return false,
         },
 
@@ -214,10 +211,6 @@ test "prompt report" {
     var cwd: [*:0]const u8 = undefined;
     try testing.expect(commandData(cmd, .prompt_report_cwd_str, @ptrCast(&cwd)));
     try testing.expectEqualStrings("C:\\x", std.mem.span(cwd));
-
-    var version: u32 = 0;
-    try testing.expect(commandData(cmd, .prompt_report_version_u32, @ptrCast(&version)));
-    try testing.expectEqual(@as(u32, 1), version);
 
     var exit_code: i64 = 0;
     try testing.expect(commandData(cmd, .prompt_report_exit_code_i64, @ptrCast(&exit_code)));

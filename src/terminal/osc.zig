@@ -828,6 +828,27 @@ pub const Parser = struct {
         }
     };
 
+    /// Split the inline buffer for a parser that decodes its capture in
+    /// place, returning the front `len` bytes to write the decoded form
+    /// into and everything past it as scratch.
+    ///
+    /// A `.fixed` capture's bytes are the front of `self.buffer`, so a key
+    /// whose payload decodes to something shorter than it arrived as -- hex,
+    /// base64 -- can rewrite it where it lies and then use the room the
+    /// shorter form freed as working memory with exactly the command's
+    /// lifetime. No allocator, and nothing to free.
+    ///
+    /// Only sound for a `.fixed` capture, which never promotes off the
+    /// inline buffer. Which mode a key captures in is decided by the state
+    /// table above at comptime, so reaching here with an allocating capture
+    /// is a bug in this file rather than something a child can provoke.
+    pub fn decodeInPlace(self: *Parser, len: usize) struct { []u8, []u8 } {
+        assert(self.capture != null);
+        assert(self.capture.?.backing == .fixed);
+        assert(len <= self.buffer.len);
+        return .{ self.buffer[0..len], self.buffer[len..] };
+    }
+
     /// Begin capturing trailing data. All inputs to next from this point
     /// forward will be captured into the `self.capture.writer` buffer.
     /// Both modes start in `self.buffer`; `.allocating` additionally
