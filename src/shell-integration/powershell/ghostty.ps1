@@ -37,6 +37,47 @@ $global:__GhosttyShellName = if ($PSVersionTable.PSEdition -eq 'Core') {
 $global:__GhosttyHasToHexString = $null -ne [Convert].GetMethod(
     'ToHexString', [type[]]@([byte[]]))
 
+# Percent-encode the path half of a file:// URI, the way upstream Ghostty's
+# fish integration does with `string escape --style=url $PWD`.
+#
+# This is not cosmetic. It is what makes OSC 7 carry a Windows path
+# correctly at all:
+#
+#   * The output is pure ASCII, so the child console's code page has nothing
+#     to transcode or substitute. A path with a non-ASCII character reaches
+#     the terminal intact from a default Windows install, where writing the
+#     raw bytes does not.
+#
+#   * ESC, BEL and ST become %1B, %07 and %9C, so no character of a
+#     directory name can terminate the sequence reporting it.
+#
+#   * `%` is a legal Windows path character. Sending it raw is a live bug:
+#     the terminal parses OSC 7 with percent-decoding on, so `C:\100%` used
+#     to arrive as whatever `%` plus the next two characters happened to
+#     decode to. Encoding it as %25 is what makes it survive.
+#
+# The unreserved set is RFC 3986's, plus the two characters this URI's path
+# needs to keep its shape: `/` as the separator (fish keeps it too) and `:`
+# after the drive letter. Written out by hand rather than reaching for
+# [System.Uri]::EscapeDataString or [System.Web.HttpUtility], because those
+# differ between Windows PowerShell 5.1 and PowerShell 7 over which
+# characters are reserved, and this has to produce the same bytes on both.
+function Get-GhosttyUriPath([string] $path) {
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($b in [System.Text.Encoding]::UTF8.GetBytes($path)) {
+        if (($b -ge 0x41 -and $b -le 0x5A) -or `
+            ($b -ge 0x61 -and $b -le 0x7A) -or `
+            ($b -ge 0x30 -and $b -le 0x39) -or `
+            $b -eq 0x2D -or $b -eq 0x2E -or $b -eq 0x5F -or $b -eq 0x7E -or `
+            $b -eq 0x2F -or $b -eq 0x3A) {
+            [void]$sb.Append([char]$b)
+        } else {
+            [void]$sb.AppendFormat('%{0:X2}', $b)
+        }
+    }
+    return $sb.ToString()
+}
+
 # Convert a Windows path (e.g. C:\Users\me) to an OSC 7 file:// URI of the
 # form file://HOST/c:/Users/me. We lowercase the drive letter to match the
 # convention used by upstream Ghostty's other shells and convert backslashes
@@ -49,7 +90,7 @@ function Get-GhosttyFileUri([string] $path) {
         $drive = $matches[1].ToLowerInvariant()
         $normalized = "${drive}:" + $normalized.Substring(2)
     }
-    return "file://$env:COMPUTERNAME/$normalized"
+    return "file://$env:COMPUTERNAME/$(Get-GhosttyUriPath $normalized)"
 }
 
 # Build the OSC 7777 prompt report for the current shell state.
