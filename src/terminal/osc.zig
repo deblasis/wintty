@@ -186,6 +186,13 @@ pub const Command = union(Key) {
     /// collide with the response wire format.
     iterm2_report_cell_size,
 
+    /// OSC 7777. One structured, versioned report of the shell's state, sent
+    /// once per prompt. The pointer is into the parser's buffer, like every
+    /// other payload here, so it is only valid until the next call into the
+    /// parser. It is a pointer rather than the record itself because the
+    /// record is wider than this union's size budget.
+    prompt_report: *const parsers.prompt_report.Report,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     /// iTerm2 OSC 1337 File= inline image payload + parsed geometry hints.
@@ -349,6 +356,7 @@ pub const Command = union(Key) {
             "iterm2_image_transmit",
             "iterm2_multipart_image",
             "iterm2_report_cell_size",
+            "prompt_report",
         },
     );
 
@@ -530,6 +538,7 @@ pub const Parser = struct {
         @"552",
         @"777",
         @"1337",
+        @"7777",
         @"5522",
     };
 
@@ -600,6 +609,7 @@ pub const Parser = struct {
             .iterm2_image_transmit,
             .iterm2_multipart_image,
             .iterm2_report_cell_size,
+            .prompt_report,
             => {},
         }
 
@@ -984,6 +994,20 @@ pub const Parser = struct {
                 else => self.state = .invalid,
             },
 
+            .@"777" => switch (c) {
+                ';' => self.captureTrailing(.fixed),
+                '7' => self.state = .@"7777",
+                else => self.state = .invalid,
+            },
+
+            // Deliberately fixed rather than allocating: OSC 7777 arrives on
+            // every prompt and its own limit is well under the inline buffer,
+            // so it must never reach the allocator.
+            .@"7777" => switch (c) {
+                ';' => self.captureTrailing(.fixed),
+                else => self.state = .invalid,
+            },
+
             .@"133",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
@@ -1030,7 +1054,6 @@ pub const Parser = struct {
 
             .@"0",
             .@"22",
-            .@"777",
             .@"8",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
@@ -1119,6 +1142,8 @@ pub const Parser = struct {
             .@"552" => null,
 
             .@"777" => parsers.rxvt_extension.parse(self, terminator_ch),
+
+            .@"7777" => parsers.prompt_report.parse(self, terminator_ch),
 
             .@"1337" => parsers.iterm2.parse(self, terminator_ch),
 

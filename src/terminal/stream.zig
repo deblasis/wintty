@@ -2595,6 +2595,17 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.size_report, .iterm2_report_cell_size);
                 },
 
+                .prompt_report => |v| {
+                    // The record's directory feeds the same slot OSC 7 and
+                    // OSC 9;9 feed, and takes the same validation on the way
+                    // in, so every consumer that already reads the pwd keeps
+                    // working without knowing this OSC exists. The rest of
+                    // the record has no consumer in the terminal yet; it is
+                    // reachable on the OSC command for embedders that want
+                    // it, and gets its own action when something acts on it.
+                    self.handler.vt(.report_pwd, .{ .url = v.cwd });
+                },
+
                 .conemu_sleep,
                 .conemu_show_message_box,
                 .conemu_change_tab_title,
@@ -4916,4 +4927,56 @@ test "stream: continuation every-byte cuts preserve future behavior" {
             restored_final_writer.buffered(),
         );
     };
+}
+
+test "OSC 7777: the report feeds the existing pwd consumers" {
+    // The whole point of the compatibility decision: a consumer that only
+    // knows about the report_pwd action, which is every pwd consumer in the
+    // tree and the daemon that polls the terminal's pwd slot, must see this
+    // directory without knowing OSC 7777 exists.
+    const H = struct {
+        pwd: ?[]const u8 = null,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .report_pwd => self.pwd = value.url,
+                else => {},
+            }
+        }
+    };
+
+    var s: Stream(H) = .init(.{ .handler = .{} });
+
+    // {"v":1,"cwd":"C:\\Users\\me","exit":0,"shell":"pwsh"}
+    const input = "\x1b]7777;p;7B2276223A312C22637764223A22433A5C5C55736572735C5C6D65222" ++
+        "C2265786974223A302C227368656C6C223A2270777368227D\x07";
+    for (input) |ch| s.next(ch);
+
+    try testing.expectEqualStrings("C:\\Users\\me", s.handler.pwd.?);
+}
+
+test "OSC 7777: a malformed report leaves the pwd alone" {
+    const H = struct {
+        pwd: ?[]const u8 = null,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .report_pwd => self.pwd = value.url,
+                else => {},
+            }
+        }
+    };
+
+    var s: Stream(H) = .init(.{ .handler = .{} });
+
+    for ("\x1b]7777;p;ZZZZ\x07") |ch| s.next(ch);
+    try testing.expect(s.handler.pwd == null);
 }
