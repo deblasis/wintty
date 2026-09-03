@@ -10,16 +10,16 @@
     seam's close op on a SINGLE-PANE tab - which is what the old flow
     actually closed (the leftmost tab), so the scenario is the same shape.
 
-    The title oracle changed too, for the better. The old file matched
-    'pwsh' against the window title, which can never succeed under this
-    config: profile.pwsh.name = PowerShell, and "PowerShell" does not
-    contain "pwsh" - the same rotted family as #964, and this harness was
-    red on it before the migration. Under a one-profile config the profile
-    survivor's title is the deterministic expectation - the caption tracks
-    the active tab, so the closed tab's title leaking into it is the wrong
-    answer this catches - and the in-process half
-    (tab-labels' shellTitle, the OSC round trip) says the label followed
-    the shell rather than the window caption.
+    Two halves, each blind to what the other sees. The caption half: the
+    window title is the ACTIVE tab's EffectiveTitle, and a seeded
+    UserOverrideTitle beats everything including the shell's own report,
+    so this half catches exactly one bug - the caption left pointing at
+    the closed tab's override. A shell-title leak cannot reach it. The
+    in-process half (tab-labels' shellTitle, the OSC round trip) is the
+    leak oracle, and a shell that reports nothing within 10s is a MISS
+    rather than a vacuous pass. The old file matched 'pwsh' against the
+    caption, which could never succeed under this config - the #964
+    family, and this harness was red on it before the migration.
 
     The old header claimed the survivor "must not pick up cmd.exe from the
     dying split pane". False as stated: this config defines one profile,

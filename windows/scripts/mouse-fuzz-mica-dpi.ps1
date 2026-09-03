@@ -39,7 +39,6 @@ using System.Threading;
 public static class MzMD {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
@@ -232,7 +231,7 @@ function Select-ComboItem($root, [string]$card, [string]$item, [string]$Automati
     Start-Sleep -Milliseconds 400
     Dump-NamesMatching $root 'Acrylic|Frosted|Crystal|Mica|Opaque|Solid|backdrop'
     $itemEl = Find-Name $root $item
-    if ($null -eq $itemEl) { $itemEl = Find-NameOnPid $ProcId $item }
+    if ($null -eq $itemEl) { $itemEl = Find-NameOnPid $pid32 $item }
     if ($null -eq $itemEl) { throw "HARVEST_MISS: combo item '$item' under '$card'" }
     try {
         $exp = $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
@@ -252,7 +251,7 @@ function Select-ComboItem($root, [string]$card, [string]$item, [string]$Automati
         Start-Sleep -Milliseconds 500
         return
     } catch { }
-    Invoke-El $itemEl $ProcId $item
+    Invoke-El $itemEl $item
 }
 
 function Select-Nav($root, [string]$name) {
@@ -305,7 +304,7 @@ function Invoke-PaletteCommand($Session, [int64]$MainHwnd, [string]$filter, [str
     }
     if ($null -eq $el) { throw "HARVEST_MISS: palette item '$title' not under hwnd after filter '$filter'" }
     $el = Get-ListItemAncestor $el
-    Invoke-El $el $ProcId $title
+    Invoke-El $el $title
     Start-Sleep -Milliseconds 1200
 }
 
