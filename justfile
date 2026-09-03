@@ -1542,6 +1542,15 @@ signoff-debt:
 pr-gate pr:
     python .agents/scripts/pr_gate.py --check-pr {{pr}}
 
+# Squash-merge a PR through the merge guard (#969): the record is validated,
+# the delta between its base and origin/windows is measured, and a
+# resignoff-required issue is filed when the window moved. Raw `gh pr merge`
+# of a moved-window PR is denied by the pr_gate hook, which names this
+# recipe. `--dry-run` shows the inputs, delta, risks and issue body without
+# touching anything: python .agents/scripts/merge_guard.py --dry-run <pr>.
+merge-checked pr:
+    python .agents/scripts/merge_guard.py {{pr}}
+
 # Check that everything the gates depend on is present and wired: tools on
 # PATH, scripts where the hooks point, settings parseable, nightly task
 # registration. A SessionStart hook runs the fast subset automatically.
@@ -1573,12 +1582,15 @@ doctor:
 gitversion-selftest:
     pwsh -NoProfile -File .agents/scripts/gitversion_selftest.ps1
 
-# Recorded-PR replays, matcher escapes, exemption anchoring, and the nightly
-# scripts' helpers roundtripping. `gitversion-selftest` runs first.
+# Recorded-PR replays, matcher escapes, exemption anchoring, the merge
+# guard's refusal matrix and golden issue body, and the nightly scripts'
+# helpers roundtripping. `gitversion-selftest` runs first.
 #
 # Prove the gates still catch what they exist for.
 gates-selftest: gitversion-selftest
     python .agents/scripts/pr_gate.py --self-test
+    python .agents/scripts/signoff.py --self-test
+    python .agents/scripts/merge_guard.py --self-test
     python .agents/scripts/workspace_guard.py --self-test
     python .agents/scripts/doctor.py --self-test
     python .agents/scripts/test_reachability.py --self-test

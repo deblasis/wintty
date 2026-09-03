@@ -19,6 +19,14 @@ The record is keyed by commit sha, so it survives worktree switches and
 cannot vouch for code that was changed after the run. Rerun after any
 amend or rebase.
 
+Each record also carries `base`, the merge base with origin/windows at
+the time the run was taken. The merge guard (#969) reads it to measure
+what moved on the branch between the run and the merge, so a green record
+whose window has since moved can merge anyway with the risk filed instead
+of re-gating inline. Records written before this field existed have no
+base; downstream readers must treat that as base-unknown and re-estimate,
+never as "the window did not move".
+
 Usage: just signoff          (scoped to what changed)
        just signoff-full     (every leg, whatever changed)
 """
@@ -157,18 +165,21 @@ def justfile_legs(base):
 
 
 def plan(full=False):
-    """Returns (legs, paths, justfile_legs, reason)."""
+    """Returns (legs, paths, justfile_legs, reason, base). `base` is the
+    merge base with origin/windows, recorded in the payload so the merge
+    guard can later measure what moved; it is resolved even for a full run,
+    which scoping does not need but the record should still carry."""
     every = sorted(gate_scope.ALL_LEGS)
     base = merge_base()
     if full:
-        return every, None, every, "--full requested"
+        return every, None, every, "--full requested", base
     if not base:
-        return every, None, every, f"could not resolve a merge base with {BASE_REF}"
+        return every, None, every, f"could not resolve a merge base with {BASE_REF}", None
     paths = changed_paths(base)
     if paths is None:
-        return every, None, every, "could not list changed paths"
+        return every, None, every, "could not list changed paths", base
     if not paths:
-        return every, [], every, "no changes against the base; nothing to scope"
+        return every, [], every, "no changes against the base; nothing to scope", base
     jf = sorted(justfile_legs(base)) if "justfile" in paths else []
     legs = gate_scope.required_legs(paths, justfile_legs=jf)
     unknown = gate_scope.unknown_paths(paths)
@@ -178,7 +189,29 @@ def plan(full=False):
         reason = f"scoped to {len(paths)} changed path(s); justfile edit touches {', '.join(jf)}"
     else:
         reason = f"scoped to {len(paths)} changed path(s)"
-    return legs, paths, jf, reason
+    return legs, paths, jf, reason, base
+
+
+def record_payload(head, base, steps, ok, legs, paths, jf, reason, full):
+    """The record shape both write paths share. `base` rides at the top
+    level next to `sha` because the guard reads the pair together: the run
+    vouches for `sha` against a branch that was at `base`. A None base is
+    legal (git could not resolve one) and means base-unknown downstream,
+    never "the window did not move"."""
+    return {
+        "sha": head,
+        "base": base,
+        "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "steps": steps,
+        "pass": ok,
+        "scope": {
+            "legs_run": legs,
+            "paths": paths,
+            "justfile_legs": jf,
+            "reason": reason,
+            "full": bool(full),
+        },
+    }
 
 
 def signoff_dir():
@@ -222,24 +255,17 @@ def defer(reason):
         return 1
 
     head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
-    legs, paths, jf, _ = plan(False)
+    legs, paths, jf, _, base = plan(False)
     created = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    record = {
-        "sha": head,
-        "created": created,
-        "steps": {},
-        "pass": True,
-        "deferred": True,
-        "reason": reason.strip(),
-        "scope": {
-            "legs_run": list(gate_scope.ALL_LEGS),
-            "legs_deferred": legs,
-            "paths": paths,
-            "justfile_legs": jf,
-            "reason": "deferred",
-            "full": False,
-        },
-    }
+    # A deferral borrows against a future run, so its record needs the same
+    # base a real one carries: the guard has to know which window the credit
+    # was issued against when it later measures what moved.
+    record = record_payload(head, base, {}, True, list(gate_scope.ALL_LEGS),
+                            paths, jf, "deferred", False)
+    record["created"] = created
+    record["deferred"] = True
+    record["reason"] = reason.strip()
+    record["scope"]["legs_deferred"] = legs
     with open(os.path.join(d, f"{head}.json"), "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
     entries.append({"sha": head, "created": created, "reason": reason.strip(),
@@ -287,7 +313,7 @@ def main(argv):
         print(dirty)
         return 1
 
-    legs, paths, jf, reason = plan(full)
+    legs, paths, jf, reason, base = plan(full)
     print(f"signoff: {reason}")
     print(f"signoff: legs: {', '.join(legs) if legs else '(none needed)'}")
 
@@ -318,19 +344,7 @@ def main(argv):
         return 2
     outdir = os.path.join(common, "pr-signoff")
     os.makedirs(outdir, exist_ok=True)
-    record = {
-        "sha": head,
-        "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "steps": results,
-        "pass": ok,
-        "scope": {
-            "legs_run": legs,
-            "paths": paths,
-            "justfile_legs": jf,
-            "reason": reason,
-            "full": bool(full),
-        },
-    }
+    record = record_payload(head, base, results, ok, legs, paths, jf, reason, full)
     path = os.path.join(outdir, f"{head}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
@@ -405,6 +419,17 @@ def self_test():
     report(_hunk_lines(deletion, "-") == {20, 21, 22}, "hunk-deletion", str(sorted(_hunk_lines(deletion, "-"))))
     report(_hunk_lines(deletion, "+") == set(), "hunk-deletion-new", str(sorted(_hunk_lines(deletion, "+"))))
 
+    # The record must carry the window it was taken against: the merge guard
+    # reads `base` next to `sha` to measure what moved on the branch. A None
+    # base must still be PRESENT in the payload, so a reader distinguishing
+    # "unknown" from "did not move" can tell them apart by key, not by guess.
+    payload = record_payload("a" * 40, "b" * 40, {"windows-tests": {"rc": 0}}, True,
+                             ["windows-tests"], ["windows/x.cs"], [], "scoped", False)
+    report(payload["base"] == "b" * 40 and payload["sha"] == "a" * 40, "record-base",
+           f"sha/base recorded: {payload['sha'][:8]}/{payload['base'][:8]}")
+    report("base" in record_payload("a" * 40, None, {}, True, [], None, [], "r", False),
+           "record-base-null", "an unknown base is recorded as null, not omitted")
+
     print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
     return 1 if failed else 0
 
@@ -414,10 +439,11 @@ if __name__ == "__main__":
     if "--self-test" in argv:
         sys.exit(self_test())
     if "--plan" in argv:
-        legs, paths, jf, reason = plan("--full" in argv)
+        legs, paths, jf, reason, base = plan("--full" in argv)
         print(f"reason: {reason}")
         print(f"legs:   {', '.join(legs) if legs else '(none needed)'}")
         print(f"paths:  {len(paths) if paths is not None else 'unknown'}")
+        print(f"base:   {base or 'unknown'}")
         sys.exit(0)
     if "--debt" in argv:
         report_debt()
