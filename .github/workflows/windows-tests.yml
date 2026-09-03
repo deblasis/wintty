@@ -30,7 +30,11 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
 
       # No version input: installs the SDK pinned by the root global.json.
+      # cache: the WAS self-contained restore is large and a cold run is
+      # the tight one against the 90-minute budget.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          cache: true
 
       # Ghostty.csproj hard-errors without zig-out/lib/ghostty.dll
       # (ErrorIfNoLibghostty), so the dll must exist before any dotnet build.
@@ -48,3 +52,10 @@ jobs:
 
       - name: Ghostty.Tests.Windows
         run: dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
+
+      # AnyCPU, so no /p:Platform=x64 - same asymmetry as the recipe.
+      - name: IconGen.Tests
+        run: dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
+
+      - name: SplashGen.Tests
+        run: dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
