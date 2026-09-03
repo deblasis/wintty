@@ -42,6 +42,7 @@ LEG_COMMANDS = {
     gate_scope.LEG_ZIG: ["just", "test"],
     gate_scope.LEG_WIN: ["just", "test-win"],
     gate_scope.LEG_GATES: ["just", "gates-selftest"],
+    gate_scope.LEG_RELEASE_GATE: ["just", "release-gate-check"],
 }
 
 
