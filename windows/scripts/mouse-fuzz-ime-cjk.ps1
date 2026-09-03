@@ -20,10 +20,19 @@
     dispatch, UTF-8 encoding, the shell parsing the escape, the OSC
     report - had to break.
 
+    What this does NOT gate: the grid's rendering of these bytes - cell
+    widths, shaping, tofu - remains eyeball-only in the shots; the title
+    channel is the cheapest sound read-back the seam offers.
+
     The clipboard is the owner's real one (paste has to come from
     somewhere and there is no seam op for it): the previous TEXT is
-    snapshotted and restored after; non-text formats are lost, which is
-    stated here rather than hidden.
+    snapshotted with backoff and restored with a verified read-back, and a
+    restore that cannot be confirmed is a recorded harness error, not a
+    silent clean pass. Non-text formats are lost, and a snapshot read that
+    stays empty leaves the clipboard untouched rather than wiping it -
+    both stated here rather than hidden. The shell runs with -NoProfile so
+    the owner's prompt (which may set titles of its own) cannot race the
+    marker.
 
     Exits 0 clean, 2 findings, 1 could-not-run.
 #>
@@ -44,7 +53,7 @@ windows-single-instance = true
 window-save-state = never
 clipboard-paste-protection = false
 profile.pwsh.name = PowerShell
-profile.pwsh.command = pwsh.exe
+profile.pwsh.command = pwsh.exe -NoProfile
 default-profile = pwsh
 '@
 
@@ -79,15 +88,38 @@ try {
 
     # The paste needs real clipboard content; snapshot the owner's TEXT and
     # restore it in the finally. Non-text formats are lost - stated in the
-    # header, not hidden.
-    $hadOwnerText = $null -ne (Get-Clipboard)
-    if ($hadOwnerText) { $ownerText = Get-Clipboard -Raw }
+    # header, not hidden. Get-Clipboard returns EMPTY both for no text and
+    # for a read that lost a contention race (clipboard managers re-open on
+    # change), so the read is retried with real backoff before being
+    # believed; and the finally never writes when unsure - an empty
+    # clipboard is left alone rather than confirmed with a wipe.
+    $ownerText = $null
+    $hadOwnerText = $false
+    foreach ($attempt in 1..5) {
+        $probe = Get-Clipboard -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $probe -and "$probe" -ne '') { $ownerText = $probe; $hadOwnerText = $true; break }
+        Start-Sleep -Milliseconds (150 * $attempt)
+    }
+    if (-not $hadOwnerText) {
+        Write-Host 'HARNESS: no owner clipboard text read (empty, non-text, or contended); leaving it untouched'
+    }
 
     # The command sets the shell-reported title to the CJK marker. The
     # backtick escapes are the SHELL's (single-quoted here so they survive
-    # to pwsh); the trailing CR submits the pasted line.
+    # to pwsh); the trailing CR submits the pasted line - which only works
+    # because the paste arrives UNBRACKETED: core wraps pastes in
+    # ESC[200~..201~ when the surface has mode 2004 set, and PSReadLine
+    # does not execute a trailing newline inside a bracketed paste. That
+    # mode is evidently not reaching core through ConPTY today; if
+    # passthrough ever changes that, this harness goes red and this
+    # comment is why.
+    # The settle delay is deliberate: clipboard listeners react to the
+    # write milliseconds after it lands, and the product's paste read
+    # treats a locked clipboard as "no text" - firing the chord into that
+    # window would misread contention as a CJK failure.
     Set-Clipboard -Value ('Write-Host "`e]0;' + $marker + '`a"' + "`r")
     Write-Host 'clipboard set (CJK OSC title command + CR)'
+    Start-Sleep -Milliseconds 400
 
     [void](Invoke-SeamCommand $session @{ op = 'focus'; target = 'frame' })
     $r = Invoke-SeamCommand $session @{ op = 'chord'; key = 0x56; ctrl = $true; shift = $true }
@@ -98,8 +130,10 @@ try {
 
     # Poll the shell-reported title: the OSC only lands once the shell has
     # parsed and run the pasted line.
+    # 15s: the budget starts at the chord and must absorb a cold pwsh
+    # start, profile load, and the queued paste - not just the OSC itself.
     $shellTitle = ''
-    $deadline = (Get-Date).AddSeconds(10)
+    $deadline = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
         $labels = Invoke-SeamCommand $session @{ op = 'tab-labels' }
         $active = @($labels.labels)[0]
@@ -110,7 +144,8 @@ try {
     Write-Host "shellTitle=$shellTitle"
     Shot $session '03-cjk-title'
     if ($shellTitle -notmatch '日中文' -or $shellTitle -notmatch '🚀') {
-        $script:Findings.Add(("the CJK marker did not survive the paste round trip: shellTitle='$shellTitle'"))
+        $script:Findings.Add(("the CJK marker did not arrive in the shell-reported title: '$shellTitle' " +
+            '(clipboard read, paste dispatch, shell start, or title plumbing)'))
     }
 
     if ($session.Proc.HasExited) {
@@ -124,12 +159,26 @@ catch {
     Write-Host "ERROR: $msg" -ForegroundColor Red
 }
 finally {
-    # Restore the owner's text clipboard AFTER the run; non-text formats
-    # are gone either way.
-    try {
-        if ($hadOwnerText -and $null -ne $ownerText) { Set-Clipboard -Value $ownerText }
-        elseif (-not $hadOwnerText) { Set-Clipboard -Value '' }
-    } catch { Write-Host "HARNESS: clipboard restore failed: $($_.Exception.Message)" }
+    # Restore the owner's text clipboard. Set-Clipboard does NOT throw when
+    # it loses a contention race - it reports success with nothing written -
+    # so the restore is verified by reading back, with retries, and a
+    # persistent failure is a recorded HARNESS error (exit 1), not a silent
+    # clean pass with the marker left in the owner's clipboard. When no
+    # owner text was read, nothing is written at all: an uncertain state is
+    # left untouched rather than confirmed with a wipe.
+    if ($hadOwnerText -and $null -ne $ownerText) {
+        $restored = $false
+        foreach ($attempt in 1..5) {
+            try { Set-Clipboard -Value $ownerText } catch { }
+            Start-Sleep -Milliseconds (150 * $attempt)
+            $check = Get-Clipboard -Raw -ErrorAction SilentlyContinue
+            if ($null -ne $check -and "$check" -eq "$ownerText") { $restored = $true; break }
+        }
+        if (-not $restored) {
+            $harnessError = "the owner's clipboard text could not be restored (contended); the marker may be left in it"
+            Write-Host "HARNESS: $harnessError" -ForegroundColor Red
+        }
+    }
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
