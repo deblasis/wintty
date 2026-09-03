@@ -214,20 +214,30 @@ pub fn isLocalShareHost(host: []const u8) bool {
 /// Translate the path component of an OSC 7 `file://` URL reported by a
 /// Windows-native shell into a plain Windows path:
 ///
-///   /c:/Users/alex  -> c:\Users\alex
+///   /c:/Users/alex  -> C:\Users\alex
 ///
 /// The leading slash is the URI's own path root, not part of the path. Anything
 /// that is not drive-rooted once it is gone yields error.InvalidPath: a UNC
 /// share arrives here as `//server/share`, which the shells deliberately report
 /// via OSC 9;9 instead, and guessing at it would produce a confidently-wrong
 /// cwd. Caller owns the returned slice.
+///
+/// The drive letter is upper-cased, like `driveForm` below does for the same
+/// reason. A file URL conventionally spells it lower (our PowerShell
+/// integration does, and so does every other producer of these URLs), while a
+/// shell reporting a raw path over OSC 9;9 or OSC 7777 spells it however
+/// Windows handed it over, which is upper. Both name the same directory, so
+/// leaving the two forms alone would make one prompt look like two different
+/// directories to anything comparing the reported strings -- which the pwd
+/// dedupe in `StreamHandler.setPwdReported` does.
 pub fn uriPathToWindows(alloc: Allocator, uri_path: []const u8) Error![]u8 {
     const p = if (uri_path.len > 0 and uri_path[0] == '/') uri_path[1..] else uri_path;
     if (p.len < 2 or p[1] != ':' or !std.ascii.isAlphabetic(p[0])) return error.InvalidPath;
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
-    try buf.appendSlice(alloc, p[0..2]);
+    try buf.append(alloc, std.ascii.toUpper(p[0]));
+    try buf.append(alloc, ':');
     try appendBackslashed(alloc, &buf, p[2..]);
     return buf.toOwnedSlice(alloc);
 }
@@ -482,11 +492,16 @@ test "posix_path: OSC 7 file:// from a native Windows shell (reportPwd seam)" {
     });
     const path = try u.path.toRawMaybeAlloc(aa);
     const got = try uriPathToWindows(aa, path);
-    try std.testing.expectEqualStrings("c:\\Users\\alex", got);
+
+    // Upper `C`, from a URL that spelled it lower: one prompt reports its
+    // directory over OSC 7, OSC 9;9 and OSC 7777, the raw-path sequences
+    // spell the drive the way Windows hands it over, and anything comparing
+    // the three reported strings has to see one directory and not two.
+    try std.testing.expectEqualStrings("C:\\Users\\alex", got);
 }
 
 test "posix_path: uriPathToWindows rejects what it cannot place" {
-    try expectUriPath("c:\\Users\\alex", "/c:/Users/alex");
+    try expectUriPath("C:\\Users\\alex", "/c:/Users/alex");
     try expectUriPath("D:\\", "/D:/");
     // UNC arrives as `//server/share`; OSC 9;9 carries that form instead.
     try std.testing.expectError(

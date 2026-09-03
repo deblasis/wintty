@@ -186,6 +186,13 @@ pub const Command = union(Key) {
     /// collide with the response wire format.
     iterm2_report_cell_size,
 
+    /// OSC 7777. One structured, versioned report of the shell's state, sent
+    /// once per prompt. The pointer is into the parser's buffer, like every
+    /// other payload here, so it is only valid until the next call into the
+    /// parser. It is a pointer rather than the record itself because the
+    /// record is wider than this union's size budget.
+    prompt_report: *const parsers.prompt_report.Report,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     /// iTerm2 OSC 1337 File= inline image payload + parsed geometry hints.
@@ -315,6 +322,11 @@ pub const Command = union(Key) {
 
     pub const KittyDesktopNotification = parsers.kitty_desktop_notification.OSC;
 
+    // NOTE: `GhosttyOscCommandType` in include/ghostty/vt/osc.h is this list,
+    // and has to be updated in lockstep. Nothing checks that today:
+    // lib.checkGhosttyHEnum only covers include/ghostty.h, so a value added
+    // here and not there drifts in silence, which is how the header came to
+    // be three values short of this list.
     pub const Key = LibEnum(
         lib.target,
         // NOTE: Order matters, see LibEnum documentation.
@@ -349,6 +361,7 @@ pub const Command = union(Key) {
             "iterm2_image_transmit",
             "iterm2_multipart_image",
             "iterm2_report_cell_size",
+            "prompt_report",
         },
     );
 
@@ -530,6 +543,7 @@ pub const Parser = struct {
         @"552",
         @"777",
         @"1337",
+        @"7777",
         @"5522",
     };
 
@@ -600,6 +614,7 @@ pub const Parser = struct {
             .iterm2_image_transmit,
             .iterm2_multipart_image,
             .iterm2_report_cell_size,
+            .prompt_report,
             => {},
         }
 
@@ -812,6 +827,27 @@ pub const Parser = struct {
             return self.writer.buffered();
         }
     };
+
+    /// Split the inline buffer for a parser that decodes its capture in
+    /// place, returning the front `len` bytes to write the decoded form
+    /// into and everything past it as scratch.
+    ///
+    /// A `.fixed` capture's bytes are the front of `self.buffer`, so a key
+    /// whose payload decodes to something shorter than it arrived as -- hex,
+    /// base64 -- can rewrite it where it lies and then use the room the
+    /// shorter form freed as working memory with exactly the command's
+    /// lifetime. No allocator, and nothing to free.
+    ///
+    /// Only sound for a `.fixed` capture, which never promotes off the
+    /// inline buffer. Which mode a key captures in is decided by the state
+    /// table above at comptime, so reaching here with an allocating capture
+    /// is a bug in this file rather than something a child can provoke.
+    pub fn decodeInPlace(self: *Parser, len: usize) struct { []u8, []u8 } {
+        assert(self.capture != null);
+        assert(self.capture.?.backing == .fixed);
+        assert(len <= self.buffer.len);
+        return .{ self.buffer[0..len], self.buffer[len..] };
+    }
 
     /// Begin capturing trailing data. All inputs to next from this point
     /// forward will be captured into the `self.capture.writer` buffer.
@@ -1062,6 +1098,20 @@ pub const Parser = struct {
                 else => self.state = .invalid,
             },
 
+            .@"777" => switch (c) {
+                ';' => self.captureTrailing(.fixed),
+                '7' => self.state = .@"7777",
+                else => self.state = .invalid,
+            },
+
+            // Deliberately fixed rather than allocating: OSC 7777 arrives on
+            // every prompt and its own limit is well under the inline buffer,
+            // so it must never reach the allocator.
+            .@"7777" => switch (c) {
+                ';' => self.captureTrailing(.fixed),
+                else => self.state = .invalid,
+            },
+
             .@"133",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
@@ -1108,7 +1158,6 @@ pub const Parser = struct {
 
             .@"0",
             .@"22",
-            .@"777",
             .@"8",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
@@ -1197,6 +1246,8 @@ pub const Parser = struct {
             .@"552" => null,
 
             .@"777" => parsers.rxvt_extension.parse(self, terminator_ch),
+
+            .@"7777" => parsers.prompt_report.parse(self, terminator_ch),
 
             .@"1337" => parsers.iterm2.parse(self, terminator_ch),
 

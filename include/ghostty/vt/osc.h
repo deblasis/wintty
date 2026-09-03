@@ -67,6 +67,10 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_OSC_COMMAND_KITTY_DND_PROTOCOL = 24,
   GHOSTTY_OSC_COMMAND_CONTEXT_SIGNAL = 25,
   GHOSTTY_OSC_COMMAND_KITTY_DESKTOP_NOTIFICATION = 26,
+  GHOSTTY_OSC_COMMAND_ITERM2_IMAGE_TRANSMIT = 27,
+  GHOSTTY_OSC_COMMAND_ITERM2_MULTIPART_IMAGE = 28,
+  GHOSTTY_OSC_COMMAND_ITERM2_REPORT_CELL_SIZE = 29,
+  GHOSTTY_OSC_COMMAND_PROMPT_REPORT = 30,
   GHOSTTY_OSC_COMMAND_TYPE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyOscCommandType;
 
@@ -93,6 +97,48 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * the same parser instance. Memory is owned by the parser.
    */
   GHOSTTY_OSC_DATA_CHANGE_WINDOW_TITLE_STR = 1,
+
+  /*
+   * OSC 7777 prompt report fields.
+   *
+   * Valid for: GHOSTTY_OSC_COMMAND_PROMPT_REPORT
+   *
+   * A field the report did not carry makes the query return false. That is
+   * a real answer and not an error: absent means the shell did not look,
+   * which is different from an empty value meaning it looked and found
+   * nothing. Only the working directory is always present.
+   *
+   * Lifetime (string fields): valid until the next call to any ghostty_osc_*
+   * function with the same parser instance. Memory is owned by the parser.
+   */
+
+  /*
+   * There is no query for the schema version: the parser rejects every
+   * version but the one it was built for, so it could only ever answer 1.
+   */
+
+  /**
+   * Working directory in the shell's native form (a raw path from a
+   * Windows shell, not a URL). Never empty and never carries a byte below
+   * 0x20 or 0x7f. Output type: const char **
+   */
+  GHOSTTY_OSC_DATA_PROMPT_REPORT_CWD_STR = 2,
+
+  /** Exit code of the command before this prompt. Output type: int64_t * */
+  GHOSTTY_OSC_DATA_PROMPT_REPORT_EXIT_CODE_I64 = 3,
+
+  /** Shell that produced the report. Output type: const char ** */
+  GHOSTTY_OSC_DATA_PROMPT_REPORT_SHELL_STR = 4,
+
+  /** Commit HEAD points at, empty for a repo with no commits. Output type: const char ** */
+  GHOSTTY_OSC_DATA_PROMPT_REPORT_GIT_HEAD_STR = 5,
+
+  /** Branch name, empty when HEAD is detached. Output type: const char ** */
+  GHOSTTY_OSC_DATA_PROMPT_REPORT_GIT_BRANCH_STR = 6,
+
+  /** Whether the working tree has changes. Output type: bool * */
+  GHOSTTY_OSC_DATA_PROMPT_REPORT_GIT_DIRTY_BOOL = 7,
+
   GHOSTTY_OSC_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyOscCommandData;
 
