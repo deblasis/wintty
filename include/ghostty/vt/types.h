@@ -189,6 +189,19 @@ typedef struct GhosttyRenderStateRowIteratorImpl* GhosttyRenderStateRowIterator;
 typedef struct GhosttyRenderStateRowCellsImpl* GhosttyRenderStateRowCells;
 
 /**
+ * Opaque handle to a terminal search.
+ *
+ * A search is bound to the terminal it was created with. It borrows the
+ * terminal, so it never frees it, and the search must be freed with
+ * ghostty_search_free(). If the terminal is freed first, the search
+ * detects this: calls that need the terminal fail cleanly and the
+ * search can still be freed.
+ *
+ * @ingroup search
+ */
+typedef struct GhosttySearchImpl* GhosttySearch;
+
+/**
  * Opaque handle to an SGR parser instance.
  *
  * This handle represents an SGR (Select Graphic Rendition) parser that can

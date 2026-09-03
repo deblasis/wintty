@@ -150,26 +150,36 @@ pub fn build(b: *std.Build) !void {
     }
 
     // libghostty-vt
-    const libghostty_vt_shared = shared: {
+    const native_freestanding = config.target.result.os.tag == .freestanding and
+        !config.target.result.cpu.arch.isWasm();
+    const libghostty_vt_shared: ?buildpkg.GhosttyLibVt = shared: {
         if (config.target.result.cpu.arch.isWasm()) {
             break :shared try buildpkg.GhosttyLibVt.initWasm(
                 b,
                 &mod,
             );
         }
+        if (native_freestanding) break :shared null;
 
         break :shared try buildpkg.GhosttyLibVt.initShared(
             b,
             &mod,
         );
     };
-    libghostty_vt_shared.install(b.getInstallStep());
+    if (libghostty_vt_shared) |shared| {
+        shared.install(b.getInstallStep());
 
-    const type_schema_test = b.addSystemCommand(&.{"python3"});
-    type_schema_test.addFileArg(b.path("src/terminal/c/types-schema-verify.py"));
-    type_schema_test.addFileArg(b.path("src/terminal/c/types.schema.json"));
-    type_schema_test.addFileArg(libghostty_vt_shared.output);
-    test_lib_vt_schema_step.dependOn(&type_schema_test.step);
+        const type_schema_test = b.addSystemCommand(&.{"python3"});
+        type_schema_test.addFileArg(b.path("src/terminal/c/types-schema-verify.py"));
+        type_schema_test.addFileArg(b.path("src/terminal/c/types.schema.json"));
+        type_schema_test.addFileArg(shared.output);
+        test_lib_vt_schema_step.dependOn(&type_schema_test.step);
+    } else {
+        try test_lib_vt_schema_step.addError(
+            "cannot execute the ABI manifest for a native freestanding target",
+            .{},
+        );
+    }
 
     // libghostty-vt static lib
     const libghostty_vt_static = try buildpkg.GhosttyLibVt.initStatic(
@@ -192,6 +202,15 @@ pub fn build(b: *std.Build) !void {
             libghostty_vt_static.output,
             static_lib_name,
         ).step);
+
+        if (native_freestanding) {
+            b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+                .source_dir = b.path("include/ghostty"),
+                .install_dir = .header,
+                .install_subdir = "ghostty",
+                .include_extensions = &.{".h"},
+            }).step);
+        }
     }
 
     // libghostty-vt xcframework (Apple only, universal binary).

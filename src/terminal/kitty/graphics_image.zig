@@ -221,6 +221,15 @@ pub const LoadingImage = struct {
             return error.UnsupportedMedium;
         }
 
+        // POSIX shared memory names must begin with a slash, contain at
+        // least one character after it, contain no other slashes, and fit
+        // within NAME_MAX. Some shm_open implementations accept names
+        // without the leading slash, but the Kitty protocol does not.
+        if (!validSharedMemoryName(path, posix.NAME_MAX)) {
+            log.warn("invalid shared memory name", .{});
+            return error.InvalidData;
+        }
+
         // Since we're only supporting posix then max_path_bytes should
         // be enough to stack allocate the path.
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -989,6 +998,16 @@ pub const Rect = struct {
     }
 };
 
+/// Returns whether a name follows the POSIX shared memory name format.
+fn validSharedMemoryName(name: []const u8, name_max: usize) bool {
+    if (name.len < 2 or name.len > name_max or name[0] != '/') return false;
+    for (name[1..]) |c| {
+        if (c == '/' or c == 0) return false;
+    }
+
+    return true;
+}
+
 /// Returns true if `path` is `dir` or is contained within it, requiring a
 /// path-separator boundary so similarly prefixed directories do not match.
 fn isPathInDir(dir: []const u8, path: []const u8) bool {
@@ -1008,6 +1027,53 @@ test "temporary file path must be inside directory" {
     try testing.expect(!isPathInDir("/tmp", "/tmpX/tty-graphics-protocol-image.data"));
     try testing.expect(!isPathInDir("/dev/shm", "/dev/shm-evil/tty-graphics-protocol-image.data"));
     try testing.expect(!isPathInDir("/custom/tmp", "/custom/tmp-suffix/tty-graphics-protocol-image.data"));
+}
+
+test "shared memory names follow POSIX rules" {
+    const testing = std.testing;
+
+    try testing.expect(validSharedMemoryName("/kitty", 8));
+    try testing.expect(validSharedMemoryName("/1234567", 8));
+
+    try testing.expect(!validSharedMemoryName("", 8));
+    try testing.expect(!validSharedMemoryName("/", 8));
+    try testing.expect(!validSharedMemoryName("kitty", 8));
+    try testing.expect(!validSharedMemoryName("/kitty/image", 16));
+    try testing.expect(!validSharedMemoryName("/kitty\x00image", 16));
+    try testing.expect(!validSharedMemoryName("/12345678", 8));
+}
+
+test "image load rejects invalid POSIX shared memory names" {
+    if (comptime builtin.abi.isAndroid() or
+        builtin.target.os.tag == .windows or
+        !builtin.link_libc)
+    {
+        return error.SkipZigTest;
+    }
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .shared_memory,
+            .width = 1,
+            .height = 1,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, "kitty-without-leading-slash"),
+    };
+    defer cmd.deinit(alloc);
+
+    try testing.expectError(
+        error.InvalidData,
+        LoadingImage.init(testing.io, alloc, &cmd, .{
+            .file = false,
+            .temporary_file = .disabled,
+            .shared_memory = true,
+        }),
+    );
 }
 
 test "shared memory range with offset and size" {

@@ -8,27 +8,34 @@
 //! disagree in places. Notable reference behaviors we reproduce:
 //!
 //!   * Malformed metadata (any record without '=', including an empty
-//!     metadata section), an unknown or missing `type`, and invalid
-//!     base64 in `mime`, `name`, or `pw` all silently drop the request
-//!     with no response.
+//!     metadata section) and an unknown or missing `type` silently drop
+//!     the request with no response.
+//!   * All base64 (payloads and the `mime`, `name`, and `pw` metadata
+//!     values) is strict RFC 4648 per the spec's "Encoding of payloads"
+//!     section: characters outside the standard alphabet (including
+//!     whitespace) and incorrect padding are rejected, never silently
+//!     skipped. An invalid value on `wdata` or `walias` aborts an
+//!     in-flight write with EINVAL; an invalid `read` is dropped with
+//!     no response since reads have no error status.
 //!   * Decoded metadata and MIME-list payloads must be valid UTF-8. An
 //!     invalid value on `wdata` or `walias`, or a `walias` without a
 //!     target MIME type, aborts an in-flight write with EINVAL.
+//!   * The `wdata` payloads for one MIME type form a single base64
+//!     stream split at arbitrary packet boundaries; only the
+//!     concatenation must be correctly padded. Like kitty (which
+//!     resets its streaming decoder on EOF), a packet ending exactly
+//!     at terminal padding restarts the stream, so independently
+//!     encoded chunks also work.
 //!   * `mime`, `name`, and `pw` metadata values are base64-encoded UTF-8;
 //!     everything else is verbatim. Unknown keys are ignored.
 //!   * `id` is sanitized by stripping characters outside [a-zA-Z0-9-_+.]
 //!     and truncating to 512 bytes, then echoed verbatim in every
 //!     response packet (omitted when empty).
-//!   * A write data chunk with invalid base64 is dropped and the
-//!     transaction continues; it is not a protocol error.
 //!   * A `type=write` silently replaces any in-flight transaction. A
 //!     commit (`type=wdata` without a MIME type) with no in-flight
 //!     transaction is silently ignored.
 //!   * Responses never send a payload section for an empty payload,
 //!     except the targets ('.') listing DATA packet which is always sent.
-//!
-//! I plan to open an upstream issue asking for clarification on these
-//! once I implement this.
 //!
 //! Specification: https://sw.kovidgoyal.net/kitty/clipboard/
 

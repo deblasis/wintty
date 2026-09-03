@@ -151,15 +151,6 @@ pub const Page = struct {
             @alignOf(Cell),
             StyleSet.base_align.toByteUnits(),
         ) == 0);
-
-        // The PageList memory pool requires that initBuf overwrites at
-        // least the first pointer-size bytes of the backing buffer:
-        // std.heap.MemoryPool stores its free list node there when a
-        // page buffer is returned to it, and pool reuse skips zeroing
-        // in release builds. This holds because the rows array is at
-        // offset 0 (see layout), a page always has at least one row,
-        // and initBuf fully rewrites every row.
-        assert(@sizeOf(Row) >= @sizeOf(usize));
     }
 
     /// The backing memory for the page. A page is always made up of a
@@ -254,10 +245,7 @@ pub const Page = struct {
     pub inline fn initBuf(buf: OffsetBuf, l: Layout) Page {
         const cap = l.capacity;
 
-        // A page must always have at least one row. Aside from being
-        // useless otherwise, the row initialization below must always
-        // overwrite the start of the buffer for pool reuse. See the
-        // comptime assert at the top of Page.
+        // A page must always have at least one row.
         assert(cap.rows > 0);
 
         const rows = buf.member(Row, l.rows_start);
@@ -1291,6 +1279,18 @@ pub const Page = struct {
         @memset(@as([]u64, @ptrCast(cells)), 0);
     }
 
+    /// Reset the given row to the default state: all cells zeroed and
+    /// all row metadata reset, as if the row was never used. This
+    /// reclaims memory used by graphemes, styles, etc. like clearCells.
+    ///
+    /// This must be used instead of clearCells whenever a row's storage
+    /// is recycled. Clearing the cells alone is not enough because row
+    /// metadata such as the wrap state and semantic prompt remain.
+    pub inline fn resetRow(self: *Page, row: *Row) void {
+        self.clearCells(row, 0, self.size.cols);
+        row.reset();
+    }
+
     /// Returns the hyperlink ID for the given cell.
     pub inline fn lookupHyperlink(self: *const Page, cell: *const Cell) ?hyperlink.Id {
         const cell_offset = getOffset(Cell, self.memory, cell);
@@ -1733,10 +1733,6 @@ pub const Page = struct {
     pub inline fn layout(cap: Capacity) Layout {
         const rows_count: usize = @intCast(cap.rows);
 
-        // The rows array must stay at offset 0: the PageList memory
-        // pool relies on initBuf overwriting the first bytes of a
-        // reused page buffer, which hold the pool's free list node.
-        // See the comptime assert at the top of Page.
         const rows_start = 0;
         const rows_end: usize = rows_start + (rows_count * @sizeOf(Row));
 
@@ -2040,6 +2036,26 @@ pub const Row = packed struct(u64) {
     pub inline fn managedMemory(self: Row) bool {
         // Ordered on purpose for likelihood.
         return self.styled or self.hyperlink or self.grapheme;
+    }
+
+    /// Reset all row metadata to the default state, preserving only
+    /// the cells offset, and mark the row dirty. This is a single
+    /// 8-byte store.
+    ///
+    /// This must be applied to any row whose storage is recycled as a
+    /// blank row or retired into unused page capacity, in addition to
+    /// clearing its cells (in either order; this doesn't touch cell
+    /// memory). See Page.resetRow, which does both, for details. This
+    /// exists separately for callers that clear the cells in a
+    /// specialized way (e.g. filling with a background-colored blank
+    /// cell rather than zeroing).
+    ///
+    /// Asserts that the row has no managed memory: releasing that is
+    /// the cell-clearing side's job and must happen while the flags
+    /// are still accurate.
+    pub inline fn reset(self: *Row) void {
+        assert(!self.managedMemory());
+        self.* = .{ .cells = self.cells, .dirty = true };
     }
 };
 

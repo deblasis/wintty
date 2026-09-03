@@ -671,8 +671,14 @@ pub const Parser = struct {
             buf: []u8,
             max_bytes: usize,
         ) void {
+            // Sliced to the budget, not just handed the whole buffer. A
+            // budget smaller than the inline buffer would otherwise leave the
+            // capture holding more room than it is allowed to keep, and the
+            // bound would only be enforced on the way in. Slicing keeps the
+            // head start and the bound at once, so a small budget is still
+            // honoured without ever reaching the allocator.
             new.* = .{
-                .backing = .{ .fixed = .fixed(buf) },
+                .backing = .{ .fixed = .fixed(buf[0..@min(buf.len, max_bytes)]) },
                 .writer = &new.*.?.backing.fixed,
                 .max_bytes = max_bytes,
                 .alloc = alloc,
@@ -748,6 +754,51 @@ pub const Parser = struct {
             try self.writer.writeByte(byte);
         }
 
+        /// Append a slice without permitting the backing allocation to
+        /// grow beyond max_bytes. This matches the byte-at-a-time
+        /// semantics of writeByte: bytes are retained up to exactly
+        /// max_bytes and the first byte that doesn't fit fails the
+        /// write.
+        pub fn writeSlice(
+            self: *Capture,
+            bytes: []const u8,
+        ) error{WriteFailed}!void {
+            const avail = self.max_bytes - self.writer.buffered().len;
+            const n = @min(bytes.len, avail);
+
+            // A capture that may grow starts in the parser's inline buffer,
+            // so the bulk path has to promote exactly where writeByte does.
+            // Without this it silently capped every growable capture at the
+            // inline buffer and dropped the sequence, while the same input
+            // fed byte-at-a-time carried it.
+            if (self.backing == .fixed) {
+                const w = &self.backing.fixed;
+                if (w.end + n > w.buffer.len) {
+                    if (self.alloc) |alloc| try self.promote(alloc);
+                }
+            }
+
+            switch (self.backing) {
+                .fixed => {},
+                .allocating => |*w| {
+                    const needed = w.writer.end + n;
+                    if (needed > w.writer.buffer.len) {
+                        const new_capacity = @min(
+                            self.max_bytes,
+                            @max(w.writer.buffer.len *| 2, needed),
+                        );
+                        w.writer.buffer = w.allocator.realloc(
+                            w.writer.buffer,
+                            new_capacity,
+                        ) catch return error.WriteFailed;
+                    }
+                },
+            }
+
+            try self.writer.writeAll(bytes[0..n]);
+            if (n < bytes.len) return error.WriteFailed;
+        }
+
         pub fn deinit(self: *Capture) void {
             switch (self.backing) {
                 .fixed => {},
@@ -797,6 +848,33 @@ pub const Parser = struct {
                 );
             },
         }
+    }
+
+    /// Consume a slice of bytes, advancing the parser state. This is
+    /// equivalent to calling `next` for each byte in order, but is much
+    /// faster once a data capture is active because the remaining bytes
+    /// are appended to the capture in bulk.
+    pub fn nextSlice(self: *Parser, input: []const u8) void {
+        if (self.state == .invalid) return;
+
+        // Run the state machine byte-at-a-time until a capture begins.
+        // The command prefix before a capture starts is only a handful
+        // of bytes so this loop is short in practice.
+        var offset: usize = 0;
+        while (self.capture == null) {
+            if (offset >= input.len) return;
+            self.next(input[offset]);
+            offset += 1;
+            if (self.state == .invalid) return;
+        }
+
+        const rem = input[offset..];
+        if (rem.len == 0) return;
+        self.capture.?.writeSlice(rem) catch |err| switch (err) {
+            // We have overflowed our buffer or had some other error, set
+            // the state to invalid so that we discard any further input.
+            error.WriteFailed => self.state = .invalid,
+        };
     }
 
     /// Consume the next character c and advance the parser state.
@@ -1153,6 +1231,70 @@ test "Parser allocating captures have a hard limit" {
         try testing.expectEqual(Parser.State.invalid, p.state);
         try testing.expectEqual(@as(usize, limit), cap.trailing().len);
         try testing.expectEqual(@as(usize, limit), cap.writer.buffer.len);
+    }
+}
+
+test "Parser nextSlice allocating captures have a hard limit" {
+    const testing = std.testing;
+    const limit = Parser.MAX_BUF + 1;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+    p.max_allocating_bytes = limit;
+
+    const data = try testing.allocator.alloc(u8, limit);
+    defer testing.allocator.free(data);
+    @memset(data, 'a');
+
+    // Exactly at the limit stays valid and bounded.
+    p.nextSlice("52;");
+    p.nextSlice(data);
+    const cap = &p.capture.?;
+    try testing.expect(p.state != .invalid);
+    try testing.expectEqual(@as(usize, limit), cap.trailing().len);
+    try testing.expectEqual(@as(usize, limit), cap.writer.buffer.len);
+
+    // One more byte overflows: the state becomes invalid and the
+    // retained bytes and allocation stay bounded.
+    p.nextSlice("a");
+    try testing.expectEqual(Parser.State.invalid, p.state);
+    try testing.expectEqual(@as(usize, limit), cap.trailing().len);
+    try testing.expectEqual(@as(usize, limit), cap.writer.buffer.len);
+    try testing.expect(p.end(null) == null);
+}
+
+test "Parser nextSlice overflowing slice is truncated at the limit" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+    p.max_allocating_bytes = 4;
+
+    p.nextSlice("52;abcdef");
+    try testing.expectEqual(Parser.State.invalid, p.state);
+    try testing.expect(p.end(null) == null);
+
+    const cap = &p.capture.?;
+    try testing.expectEqualStrings("abcd", cap.trailing());
+    try testing.expectEqual(@as(usize, 4), cap.writer.buffer.len);
+}
+
+test "Parser nextSlice matches per-byte parsing" {
+    const testing = std.testing;
+    const input = "52;c;aGVsbG8=";
+
+    // Every two-way split of the input must parse identically to
+    // the byte-at-a-time path.
+    for (0..input.len + 1) |split| {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice(input[0..split]);
+        p.nextSlice(input[split..]);
+
+        const cmd = p.end(null).?.*;
+        try testing.expect(cmd == .clipboard_contents);
+        try testing.expectEqual(@as(u8, 'c'), cmd.clipboard_contents.kind);
+        try testing.expectEqualStrings("aGVsbG8=", cmd.clipboard_contents.data);
     }
 }
 

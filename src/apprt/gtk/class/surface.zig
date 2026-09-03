@@ -853,14 +853,24 @@ pub const Surface = extern struct {
 
     pub fn bindIsSplit(self: *Self, tree: *SplitTree) void {
         const priv = self.private();
-        if (priv.is_split_binding) |bind| bind.unbind();
+        if (priv.is_split_binding) |binding| {
+            binding.unbind();
+            binding.unref();
+            priv.is_split_binding = null;
+        }
 
-        priv.is_split_binding = tree.as(gobject.Object).bindProperty(
+        const binding = tree.as(gobject.Object).bindProperty(
             "is-split",
             self.as(gobject.Object),
             "is-split",
             .{ .sync_create = true },
         );
+        // The ref created by bindProperty is owned by the binding itself.
+        // We need another ref to prevent the binding object from being
+        // freed if the source object (SplitTree) is finalized. Otherwise
+        // our pointer to the binding could become stale.
+        binding.ref();
+        priv.is_split_binding = binding;
     }
 
     /// Callback used to determine whether unfocused-split-fill / unfocused-split-opacity
@@ -1567,7 +1577,11 @@ pub const Surface = extern struct {
             // https://gitlab.gnome.org/GNOME/libadwaita/-/commit/a7738a4d269bfdf4d8d5429ca73ccdd9b2450421
             // https://gitlab.gnome.org/GNOME/libadwaita/-/commit/9759d3fd81129608dd78116001928f2aed974ead
             if (gtk_xft_dpi <= 0) {
-                log.warn("gtk-xft-dpi has invalid value ({}), using default", .{gtk_xft_dpi});
+                // -1 is a valid value which specifies default scale.
+                // https://docs.gtk.org/gtk4/property.Settings.gtk-xft-dpi.html
+                if (gtk_xft_dpi != -1) {
+                    log.warn("gtk-xft-dpi has invalid value ({}), using default", .{gtk_xft_dpi});
+                }
                 break :xft_scale 1.0;
             }
 
@@ -1879,6 +1893,12 @@ pub const Surface = extern struct {
         if (priv.config) |v| {
             v.unref();
             priv.config = null;
+        }
+
+        if (priv.is_split_binding) |binding| {
+            binding.unbind();
+            binding.unref();
+            priv.is_split_binding = null;
         }
 
         if (priv.vadj_signal_group) |group| {

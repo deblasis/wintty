@@ -17,21 +17,11 @@ struct KeyboardLayoutTests {
         #expect(KeyboardLayout.character(for: UInt16.max, modifiers: []) == nil)
     }
 
-    @Test(arguments: [
-        ([.shift, .control, .option], []),
-        ([.command, .shift, .control, .option], .command),
-    ] as [(NSEvent.ModifierFlags, NSEvent.ModifierFlags)])
-    func characterUsesOnlyCommandModifier(
-        modifiers: NSEvent.ModifierFlags,
-        effectiveModifiers: NSEvent.ModifierFlags
-    ) throws {
+    @Test func characterAppliesModifiers() throws {
         let keyCode: UInt16 = 0x00 // W3C KeyA
-        let expected = try #require(KeyboardLayout.character(
-            for: keyCode,
-            modifiers: effectiveModifiers))
-        let actual = try #require(KeyboardLayout.character(
-            for: keyCode,
-            modifiers: modifiers))
-        #expect(actual == expected)
+        let unmodified = try #require(KeyboardLayout.character(for: keyCode, modifiers: []))
+        let shifted = try #require(KeyboardLayout.character(for: keyCode, modifiers: .shift))
+        #expect(shifted != unmodified)
+        #expect(String(shifted).lowercased() == String(unmodified).lowercased())
     }
 }

@@ -1342,6 +1342,13 @@ pub const StreamHandler = struct {
                 .EFBIG,
                 terminator,
             ),
+
+            // An invalid base64 payload stream aborts the transaction.
+            error.Invalid => try self.kittyClipboardWriteFinish(
+                state,
+                .EINVAL,
+                terminator,
+            ),
         };
     }
 
@@ -1405,6 +1412,14 @@ pub const StreamHandler = struct {
                 );
                 return error.OutOfMemory;
             },
+
+            // The last MIME type's payload stream was not correctly
+            // padded, which aborts the transaction.
+            error.Invalid => return try self.kittyClipboardWriteFinish(
+                state,
+                .EINVAL,
+                terminator,
+            ),
         };
 
         // The transaction is complete; the surface owns the reply.
@@ -1415,7 +1430,7 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         state: *terminal.kitty.clipboard.WriteState,
         terminator: terminal.osc.Terminator,
-    ) error{OutOfMemory}!void {
+    ) error{ OutOfMemory, Invalid }!void {
         const committed = try state.commit(self.alloc);
         defer committed.deinit(self.alloc);
 
