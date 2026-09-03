@@ -671,8 +671,14 @@ pub const Parser = struct {
             buf: []u8,
             max_bytes: usize,
         ) void {
+            // Sliced to the budget, not just handed the whole buffer. A
+            // budget smaller than the inline buffer would otherwise leave the
+            // capture holding more room than it is allowed to keep, and the
+            // bound would only be enforced on the way in. Slicing keeps the
+            // head start and the bound at once, so a small budget is still
+            // honoured without ever reaching the allocator.
             new.* = .{
-                .backing = .{ .fixed = .fixed(buf) },
+                .backing = .{ .fixed = .fixed(buf[0..@min(buf.len, max_bytes)]) },
                 .writer = &new.*.?.backing.fixed,
                 .max_bytes = max_bytes,
                 .alloc = alloc,
@@ -759,6 +765,18 @@ pub const Parser = struct {
         ) error{WriteFailed}!void {
             const avail = self.max_bytes - self.writer.buffered().len;
             const n = @min(bytes.len, avail);
+
+            // A capture that may grow starts in the parser's inline buffer,
+            // so the bulk path has to promote exactly where writeByte does.
+            // Without this it silently capped every growable capture at the
+            // inline buffer and dropped the sequence, while the same input
+            // fed byte-at-a-time carried it.
+            if (self.backing == .fixed) {
+                const w = &self.backing.fixed;
+                if (w.end + n > w.buffer.len) {
+                    if (self.alloc) |alloc| try self.promote(alloc);
+                }
+            }
 
             switch (self.backing) {
                 .fixed => {},
