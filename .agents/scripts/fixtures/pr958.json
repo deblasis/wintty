@@ -1,0 +1,12 @@
+{
+ "number": 958,
+ "title": "osc: carry the shell's prompt state as one versioned hex payload",
+ "body": "The shell's prompt state (directory, command status, continuation depth) now travels as one versioned hex payload in a single OSC, so the terminal can consume it with one parser and one version check instead of chasing per-shell spellings. The powershell integration emits it after each prompt, the Zig terminal side parses it into a typed struct, and a new test file pins the wire format. Verified by the windows-tests leg on the exact head and by the fuzz suite's parser checks.",
+ "additions": 826,
+ "deletions": 5,
+ "headRefOid": "24c3ab8fa0a76631ea1ee31d8a00803526e41e71",
+ "files": [
+  {"path": "windows/scripts/ShellIntegrationPs1.Tests.ps1", "additions": 135, "deletions": 0},
+  {"path": "src/terminal/osc/parsers.zig", "additions": 1, "deletions": 0}
+ ]
+}

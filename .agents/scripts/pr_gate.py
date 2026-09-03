@@ -27,17 +27,36 @@ endpoint) unless the PR passes:
                   Scoping keeps that affordable, and the gate recomputes the
                   requirement here so a cheap record cannot stand in for an
                   expensive one.
+  window          a raw merge of a PR whose signoff window has moved (commits
+                  landed on origin/windows after the record's base) is denied
+                  and pointed at `just merge-checked <pr>`: per #969 the
+                  merge itself is allowed, but the resignoff issue the guard
+                  files is not optional, and a raw merge skips it. A
+                  same-window merge (delta empty) stays allowed raw, but
+                  note the hook is fast and local on purpose: it judges the
+                  window against the local origin/windows, which is only as
+                  fresh as the last fetch.
 
 The size thresholds fit this repository's merge history: focused
 single-concern PRs stay comfortably under the block line, and the warn line
 marks where splitting into a stack is usually worth it.
 
-Known limits, accepted deliberately: a hook can only gate what spawns it, so
-a missing interpreter means no gate (the hook host does not fail closed on
-spawn errors), and command matching is textual, so `gh` aliases or variable
-indirection can sidestep it. The matcher normalizes line continuations and
-quoting and covers the `gh.exe` and `gh api` spellings; anything cleverer is
-out of scope for a string scan.
+Known limits, accepted deliberately, and named rather than pretended away:
+a hook can only gate what spawns it, so a missing interpreter means no gate
+(the hook host does not fail closed on spawn errors), and command matching
+is textual, so `gh` aliases, variable indirection, or the GraphQL
+`mergePullRequest` mutation can sidestep it. The matcher normalizes line
+continuations and quoting and covers the `gh.exe` and `gh api` REST
+spellings; anything cleverer is out of scope for a string scan.
+`--match-head-commit` and friends stay out of scope with it. Also
+uncovered: merging in the GitHub web UI or mobile app, a plain `git push`
+straight to `windows` (which carries no branch protection today), any agent
+host without this hook wired, and `gh pr merge --auto`, whose window is
+judged when the command is submitted, not when GitHub later fires the
+merge. None of these leave evidence: the resignoff issue exists only if
+the guard ran, so a bypass loses the record, not just the rule. Branch
+protection on `windows` and a phase-2 reconciliation job are the
+structural follow-ups.
 
 Modes:
   --hook          PreToolUse hook: read tool-call JSON on stdin, deny or allow.
@@ -59,7 +78,20 @@ from fnmatch import fnmatch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gate_scope  # noqa: E402
 
-REPO = "deblasis/ghostty"
+# One spelling, one alias list, shared with merge_guard: this is the value
+# every repo-scoped decision in the gates reads.
+REPO = "deblasis/wintty"
+# The old name GitHub still resolves (and redirects). A gate keyed to a
+# single spelling is a gate with a hole: the redirect name on fetches and
+# full-URL or HOST/OWNER/REPO --repo values are all the same repo, and
+# every one of them must land in the same comparison.
+REPO_REDIRECT = "deblasis/ghostty"
+FORK_SLUGS = (REPO, REPO_REDIRECT)
+# One branch name and one ref spelling: the merge guard aliases these, so a
+# hook and a guard that must agree on "what did windows move by" cannot
+# quietly start meaning two different branches.
+BASE_BRANCH = "windows"
+BASE_REF = "origin/" + BASE_BRANCH
 WARN_LINES = 500
 BLOCK_LINES = 900
 BODY_MIN_CHARS = 200
@@ -102,6 +134,36 @@ def matchable(command):
     return normalize_command(command).replace('"', " ").replace("'", " ")
 
 
+def normalize_slug(value):
+    """OWNER/REPO out of any spelling of a repo name: a bare slug, a
+    HOST/OWNER/REPO value, a full https or ssh URL, a scp-style git@host:
+    form, with any case, a .git suffix, or a trailing slash. Returns None
+    when nothing slug-shaped remains. This is the one normalizer for every
+    repo string the gates compare; a comparison run on a raw spelling is
+    how the `--repo deblasis/wintty` bypass happened (see is_our_repo)."""
+    s = (value or "").strip().lower()
+    if not s:
+        return None
+    s = re.sub(r"^[a-z][a-z0-9+.-]*://", "", s)  # https://, ssh://
+    s = re.sub(r"^[\w.-]+@", "", s)              # git@, ssh user@
+    s = s.replace(":", "/")                      # scp-style host:owner/repo
+    s = s.rstrip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    parts = [p for p in s.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[-2:])
+
+
+def is_our_repo(value):
+    """True for any spelling of this fork: either name (the current one and
+    the redirect), bare, host-qualified, or a full URL. The one comparison
+    every repo-scoped decision in the gates goes through, so a new spelling
+    is fixed here once or nowhere."""
+    return normalize_slug(value) in FORK_SLUGS
+
+
 def is_exempt(path):
     p = path.replace("\\", "/").lower()
     base = p.rsplit("/", 1)[-1]
@@ -142,7 +204,9 @@ def check_signoff(pr, signoff_lookup, ledger=None):
     rec = signoff_lookup(head)
     if rec is None:
         return ([("signoff-missing",
-                  f"No local signoff for head {head[:10]}. Run 'just signoff' on the PR branch and retry.")], [])
+                  f"No local signoff for head {head[:10]}. Run 'just signoff' on the PR branch "
+                  "and retry (records live in this clone's git dir; a signoff run on another "
+                  "machine does not count here).")], [])
 
     errors, warnings = [], []
 
@@ -256,7 +320,11 @@ def signoff_lookup_factory(cwd):
         try:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError covers corrupt JSON: a half-written record raising
+            # out of the hook would exit 1, which the harness treats as
+            # non-blocking, and an unreadable record must read as absent
+            # (signoff-missing), never as a pass.
             return None
 
     return lookup
@@ -283,6 +351,96 @@ def fetch_pr(number, repo, cwd=None):
 def is_merge_command(command):
     m = matchable(command)
     return bool(MERGE_RE.search(m) or API_MERGE_RE.search(m))
+
+
+def git_run(args, cwd=None):
+    """The real git runner, module-level so the self-test can substitute it
+    the way doctor.py injects resolvers. Takes git's own argument list (no
+    leading "git"), the same shape merge_guard's runner and fakes speak."""
+    return subprocess.run(["git"] + args, cwd=cwd or None, capture_output=True,
+                          text=True, timeout=15)
+
+
+def windows_head(cwd, run=None):
+    """The local position of origin/windows, or None. Local on purpose: the
+    record's base is a local-history sha, so the comparison has to happen in
+    the same history a fetch keeps current."""
+    run = run or git_run
+    out = run(["rev-parse", "--verify", BASE_REF], cwd)
+    sha = out.stdout.strip()
+    return sha if out.returncode == 0 and sha else None
+
+
+def record_base(rec, head, cwd, run=None):
+    """(base, estimated). The recorded base is authoritative; a legacy
+    record without one is base-unknown, never "the window did not move", so
+    the base is re-derived from the merge base. That estimate is stable
+    under ordinary movement (commits landing on windows do not move the
+    merge base of an unchanged head) and errs toward a larger delta when
+    history was rewritten, which is the direction a guard should err."""
+    base = (rec or {}).get("base")
+    if base:
+        return base, False
+    run = run or git_run
+    out = run(["merge-base", head, BASE_REF], cwd)
+    if out.returncode != 0:
+        return None, True
+    return (out.stdout.strip() or None), True
+
+
+def delta_count(base, win, cwd, run=None):
+    """How many commits windows advanced by since `base`, first-parent only:
+    PR squashes and sync-publish merges are what moved, and a plain count
+    would drown in whatever upstream history a sync merged in. None means
+    git could not answer, which the caller treats as cannot-verify."""
+    run = run or git_run
+    out = run(["rev-list", "--first-parent", "--count", f"{base}..{win}"], cwd)
+    if out.returncode != 0:
+        return None
+    try:
+        return int(out.stdout.strip())
+    except ValueError:
+        return None
+
+
+def policy_deny(pr, lookup, cwd, run=None):
+    """The window half of #969's policy. Returns a deny reason when the
+    signoff record's base differs from the current origin/windows head (a
+    non-empty delta), because a raw merge would skip the resignoff issue
+    the merge guard files; None only when the raw merge may proceed. A
+    missing record stays out of the way: check_signoff already refuses it,
+    and one refusal naming the fix beats two naming different fixes.
+
+    Fails closed like every sibling check: when a record exists but the
+    window cannot be measured (no local origin/windows, a legacy record
+    with no derivable base, git failing), the deny is issued anyway. The
+    guard re-measures with a fetch of its own, so "cannot verify here" is
+    exactly the case for the guard and never a reason to wave a merge
+    through."""
+    head = pr.get("headRefOid", "")
+    rec = lookup(head)
+    if rec is None:
+        return None
+    number = pr.get("number", "?")
+    guard = f"Merge through the guard instead: `just merge-checked {number}`."
+    win = windows_head(cwd, run)
+    if not win:
+        return (f"pr-gate: the signoff window cannot be measured - {BASE_REF} does not "
+                f"resolve in this checkout (fetch first). {guard}")
+    base, estimated = record_base(rec, head, cwd, run)
+    n = delta_count(base, win, cwd, run) if base else None
+    if n is None:
+        why = ("the legacy record carries no base and none is derivable" if not base
+               else "git could not measure the delta")
+        return (f"pr-gate: the signoff window cannot be verified - {why}. {guard}")
+    if n == 0:
+        return None
+    est = " (re-estimated at merge time from a legacy record)" if estimated else ""
+    return (
+        f"pr-gate: this PR's signoff window has moved{est} - {n} commit(s) landed on "
+        f"{BASE_REF} since the record's base, and a raw merge would skip the resignoff "
+        f"ceremony. {guard}"
+    )
 
 
 def parse_merge_command(command):
@@ -356,8 +514,8 @@ def hook_main():
     cwd = payload.get("cwd") or os.getcwd()
 
     repo, number = parse_merge_command(command)
-    if repo.lower() != REPO:
-        sys.exit(0)  # other repos are out of this gate's scope
+    if not is_our_repo(repo):
+        sys.exit(0)  # genuinely other repos are out of this gate's scope
     if number is None:
         try:
             out = subprocess.run(
@@ -373,9 +531,22 @@ def hook_main():
     except Exception as e:
         deny(f"pr-gate: could not fetch PR #{number} to validate it ({e}). Refusing to merge unvalidated.")
 
-    errors, warnings = check_pr(pr, signoff_lookup_factory(cwd), ledger_for(cwd))
+    lookup = signoff_lookup_factory(cwd)
+    errors, warnings = check_pr(pr, lookup, ledger_for(cwd))
     if errors:
         deny("pr-gate blocked this merge:\n- " + "\n- ".join(m for _, m in errors))
+    # The window check must fail closed like its siblings: an exception
+    # escaping (a git timeout, a dying session) would exit 1, which a hook
+    # host treats as non-blocking, i.e. an ungated merge. Any surprise here
+    # is therefore a deny, never a shrug.
+    try:
+        policy = policy_deny(pr, lookup, cwd)
+    except Exception as e:
+        deny(f"pr-gate: the window check itself failed ({e}); refusing to merge "
+             f"unmeasured. Fetch and retry, or run `just merge-checked {number}`, "
+             "which measures (with a fetch) and files the resignoff issue.")
+    if policy:
+        deny(policy)
     if warnings:
         print(json.dumps({
             "hookSpecificOutput": {
@@ -466,10 +637,52 @@ def self_test():
         ("gh pr merge 7 --repo=deblasis/other-repo", ("deblasis/other-repo", 7)),
         ("gh api -X PUT repos/deblasis/ghostty/pulls/55/merge", ("deblasis/ghostty", 55)),
         ("gh pr merge --squash", (REPO, None)),
+        # The spelling AGENTS.md sanctions: it must parse to a repo the gate
+        # claims, not to a hole in it. Host-qualified values must parse
+        # too; is_our_repo does the host stripping, so the raw string here
+        # round-trips.
+        ("gh pr merge 958 --repo deblasis/wintty --squash --delete-branch",
+         ("deblasis/wintty", 958)),
+        ("gh pr merge 958 --repo=deblasis/wintty", ("deblasis/wintty", 958)),
+        ("gh pr merge 958 --repo DEBLASIS/WINTTY", ("DEBLASIS/WINTTY", 958)),
+        ("gh pr merge 978 --repo github.com/deblasis/wintty --squash",
+         ("github.com/deblasis/wintty", 978)),
+        ("gh pr merge 978 --repo https://github.com/deblasis/wintty --squash",
+         ("https://github.com/deblasis/wintty", 978)),
     ]
     for cmd, expect in parse_cases:
         got = parse_merge_command(cmd)
         report(got == expect, "parse", f"{cmd!r} -> {got}")
+
+    # Repo identity: both fork names, both cases, .git suffix, whitespace,
+    # and every host-qualified/URL shape a --repo value or a remote can
+    # arrive in. A wrong-owner variant stays foreign even when the repo
+    # name matches, which is the whole point of normalizing before
+    # comparing.
+    repo_cases = [
+        ("deblasis/wintty", True),
+        ("deblasis/ghostty", True),
+        ("DEBLASIS/Wintty", True),
+        ("deblasis/wintty.git", True),
+        (" deblasis/wintty ", True),
+        ("deblasis/wintty/", True),
+        ("github.com/deblasis/wintty", True),
+        ("https://github.com/deblasis/wintty", True),
+        ("https://github.com/deblasis/wintty.git", True),
+        ("git@github.com:deblasis/wintty", True),
+        ("git@github.com:deblasis/wintty.git", True),
+        ("ssh://git@github.com/deblasis/wintty", True),
+        ("github.com/deblasis/wintty/", True),
+        ("github.com/other/wintty", False),
+        ("https://github.com/other/wintty.git", False),
+        ("other/wintty", False),
+        ("ghostty-org/ghostty", False),
+        ("deblasis/other", False),
+        ("", False),
+        (None, False),
+    ]
+    for slug, expect in repo_cases:
+        report(is_our_repo(slug) == expect, "repo", f"{slug!r} -> {is_our_repo(slug)}")
 
     exempt_cases = [
         ("LICENSE", True),
@@ -593,6 +806,172 @@ def self_test():
         ok = len(blockers) == len(expect_fragments) and all(
             any(frag in b for b in blockers) for frag in expect_fragments)
         report(ok, "ledger", f"{len(entries)} entries -> {blockers or ['clear']}")
+
+    # Window policy (#969): a raw merge of a moved window is denied with the
+    # guard's exact invocation; a same-window merge stays allowed raw; a red
+    # or missing record stays check_signoff's business. The git resolver is
+    # injected, so each case spells out what git answers.
+    class R:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    BASE = "19110d76d2ee25345e6e9cfb2dca3dd93a9e9751"
+    WIN = "791cf03445f21e02027bd882d0c7da23821215b3"
+    HEAD = "24c3ab8fa0a76631ea1ee31d8a00803526e41e71"
+
+    def mk_run(win, merge_base, count):
+        def run(args, cwd=None):
+            j = " ".join(args)
+            if j.startswith("rev-parse --verify"):
+                return R(0, win + "\n") if win else R(1)
+            if j.startswith("merge-base"):
+                return R(0, merge_base + "\n") if merge_base else R(1)
+            if j.startswith("rev-list"):
+                return R(0, f"{count}\n") if count is not None else R(1)
+            return R(1, "", "unexpected: " + j)
+        return run
+
+    moved_rec = {"pass": True, "base": BASE, "steps": {}}
+    same_rec = {"pass": True, "base": WIN, "steps": {}}
+    legacy_rec = {"pass": True, "steps": {}}
+    pr970ish = {"number": 958, "headRefOid": HEAD}
+
+    policy_cases = [
+        ("moved-window", pr970ish, moved_rec, mk_run(WIN, BASE, 1), True,
+         "just merge-checked 958"),
+        ("same-window", pr970ish, same_rec, mk_run(WIN, WIN, 0), False, None),
+        ("legacy-base-behind", pr970ish, legacy_rec, mk_run(WIN, BASE, 2), True,
+         "re-estimated at merge time"),
+        ("legacy-base-current", pr970ish, legacy_rec, mk_run(WIN, WIN, 0), False, None),
+        ("no-record", pr970ish, None, mk_run(WIN, BASE, 1), False, None),
+        # Fail closed: a record exists but the window cannot be measured,
+        # for any of the three reasons, is a deny naming the guard, not a
+        # silent allow.
+        ("no-local-windows", pr970ish, moved_rec, mk_run(None, BASE, None), True,
+         "cannot be measured"),
+        ("legacy-base-underivable", pr970ish, legacy_rec, mk_run(WIN, None, None), True,
+         "cannot be verified"),
+        ("git-cannot-answer", pr970ish, moved_rec, mk_run(WIN, BASE, None), True,
+         "cannot be verified"),
+    ]
+    for label, pr, rec, run, expect_deny, needle in policy_cases:
+        lookup = (lambda sha: rec) if rec is not None else (lambda sha: None)
+        got = policy_deny(pr, lookup, None, run)
+        ok = (got is not None and needle in got) if expect_deny else got is None
+        report(ok, "window-policy", f"{label} -> {'deny' if got else 'allow'}")
+
+    # A corrupt record file must read as absent, not raise: an exception
+    # out of the hook exits 1, which the harness treats as non-blocking.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        rec_dir = os.path.join(td, "pr-signoff")
+        os.makedirs(rec_dir)
+        with open(os.path.join(rec_dir, "c" * 40 + ".json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        lookup = signoff_lookup_factory(td)
+        report(lookup("c" * 40) is None, "corrupt-record", "corrupt JSON reads as absent")
+
+    # End-to-end hook replay over the hand-filed #970 numbers, through the
+    # sanctioned --repo deblasis/wintty spelling that the old single-name
+    # comparison silently exempted. The gh, record-store and git resolvers
+    # are substituted, so hook_main runs exactly as the host invokes it.
+    import contextlib
+    import io
+    import tempfile
+
+    pr958 = load(958)
+    record = {
+        "sha": pr958["headRefOid"],
+        "base": BASE,
+        "pass": True,
+        "steps": {"windows-tests": {"rc": 0}, "zig-fmt": {"rc": 0}, "zig-tests": {"rc": 0}},
+        "scope": {"paths": [f["path"] for f in pr958["files"]],
+                  "legs_run": ["windows-tests", "zig-fmt", "zig-tests"],
+                  "justfile_legs": [], "reason": "scoped", "full": False},
+    }
+
+    def feed_hook(payload):
+        buf = io.StringIO()
+        old_stdin = sys.stdin
+        sys.stdin = io.StringIO(json.dumps(payload))
+        try:
+            with contextlib.redirect_stdout(buf):
+                hook_main()
+        except SystemExit:
+            pass
+        finally:
+            sys.stdin = old_stdin
+        return buf.getvalue()
+
+    mod = sys.modules[__name__]
+    saved = {n: getattr(mod, n)
+             for n in ("fetch_pr", "signoff_lookup_factory", "ledger_for", "git_run")}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            rec_dir = os.path.join(td, "pr-signoff")
+            os.makedirs(rec_dir)
+
+            def store(sha, rec):
+                with open(os.path.join(rec_dir, sha + ".json"), "w", encoding="utf-8") as f:
+                    json.dump(rec, f)
+
+            store(pr958["headRefOid"], record)
+            mod.fetch_pr = lambda number, repo, cwd=None: pr958
+            mod.ledger_for = lambda cwd: []
+            mod.signoff_lookup_factory = lambda cwd: (
+                lambda sha: json.load(
+                    open(os.path.join(rec_dir, sha + ".json"), encoding="utf-8")))
+
+            mod.git_run = mk_run(WIN, BASE, 1)
+            moved = feed_hook({"tool_input": {
+                "command": "gh pr merge 958 --repo deblasis/wintty --squash --delete-branch"},
+                "cwd": td})
+            report('"permissionDecision": "deny"' in moved
+                   and "just merge-checked 958" in moved,
+                   "hook-replay-moved", "the sanctioned spelling is denied into the guard")
+
+            # Same numbers, unmoved window: the raw merge stays allowed and
+            # the hook says nothing.
+            mod.git_run = mk_run(WIN, WIN, 0)
+            record["base"] = WIN
+            store(pr958["headRefOid"], record)
+            quiet = feed_hook({"tool_input": {
+                "command": "gh pr merge 958 --repo deblasis/wintty --squash --delete-branch"},
+                "cwd": td})
+            report(quiet.strip() == "", "hook-replay-same-window",
+                   "a raw merge of an unmoved window stays allowed")
+
+            # A genuinely foreign repo is still nobody's business.
+            foreign = feed_hook({"tool_input": {
+                "command": "gh pr merge 958 --repo other/project --squash"}, "cwd": td})
+            report(foreign.strip() == "", "hook-replay-foreign-repo",
+                   "other repos stay out of scope")
+
+            # Host-qualified spellings resolve to the same slug: a full URL
+            # must land in exactly the same place the bare name does, and a
+            # same-owner-elsewhere repo must not be mistaken for ours.
+            mod.git_run = mk_run(WIN, BASE, 1)
+            record["base"] = BASE
+            store(pr958["headRefOid"], record)
+            hostq = feed_hook({"tool_input": {
+                "command": "gh pr merge 958 --repo github.com/deblasis/wintty --squash"},
+                "cwd": td})
+            report('"permissionDecision": "deny"' in hostq
+                   and "just merge-checked 958" in hostq,
+                   "hook-replay-host-qualified",
+                   "a full-URL --repo is normalized, not bypassed")
+
+            mod.git_run = mk_run(WIN, WIN, 0)
+            record["base"] = WIN
+            store(pr958["headRefOid"], record)
+            wrong_owner = feed_hook({"tool_input": {
+                "command": "gh pr merge 958 --repo github.com/other/wintty --squash"},
+                "cwd": td})
+            report(wrong_owner.strip() == "", "hook-replay-wrong-owner",
+                   "same-named repo under another owner stays foreign")
+    finally:
+        for n, fn in saved.items():
+            setattr(mod, n, fn)
 
     print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
     sys.exit(1 if failed else 0)
