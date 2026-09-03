@@ -21,15 +21,30 @@ human) working in this repo uses the same contract:
   merged on credit; the session-start doctor reports it too.
 - `just pr-gate <n>` - validate a PR against the merge gate without
   merging: countable size limit, body present, no unchecked task items,
-  no spaced issue references, signoff present.
+  no spaced issue references, signoff present. The hook form also denies a
+  raw `gh pr merge` whose signoff window has moved (commits landed on
+  `origin/windows` after the record's base) and names the guard recipe,
+  because per #969 such a merge is allowed but its resignoff issue is not
+  optional; a same-window merge stays allowed raw.
+- `just merge-checked <n>` - the only way to merge a moved-window PR: the
+  merge guard (`merge_guard.py`) re-validates the record (missing, red and
+  ledger-blocked records still refuse; the policy forgives head movement,
+  never a bad run), measures the delta from the record's base to
+  `origin/windows` first-parent, squash-merges, reads back the squash sha,
+  and files a `resignoff-required` issue in the shape of the hand-filed
+  #970: the delta with per-commit attribution, the risks in words (same
+  files, same top-level directories, same signoff legs as the record's
+  scope), and the resignoff-in-flight status. `--dry-run` prints all of it
+  and mutates nothing.
 - `just doctor` - verify everything the gates depend on: required tools on
   PATH, scripts where the hook wiring points, settings parseable, nightly
   task registration. A Claude Code SessionStart hook runs the fast subset
   at the start of every session, so a broken gate environment is loud
   instead of silently absent.
 - `just gates-selftest` - prove the gates still catch what they exist for
-  (recorded-PR replays, matcher escapes, exemption anchoring) and that the
-  nightly scripts' helpers roundtrip. Runs `gitversion-selftest` first.
+  (recorded-PR replays, matcher escapes, exemption anchoring, the merge
+  guard's refusal matrix and golden issue body) and that the nightly
+  scripts' helpers roundtrip. Runs `gitversion-selftest` first.
 - `just release-gate-check` - prove the shipping-build gate REFUSES a leak,
   by evaluating Release rather than by reading the targets file. Three probe
   sets: the build-time refusal in both polarities and by both routes (a `-p:`
