@@ -24,8 +24,12 @@ LEG_FMT = "zig-fmt"
 LEG_ZIG = "zig-tests"
 LEG_WIN = "windows-tests"
 LEG_GATES = "gates-selftest"
+# Windows-only, and deliberately not folded into gates-selftest: that leg has
+# no [windows] attribute and runs where a Release build of a WinUI project
+# cannot.
+LEG_RELEASE_GATE = "release-gate"
 
-ALL_LEGS = (LEG_FMT, LEG_ZIG, LEG_WIN, LEG_GATES)
+ALL_LEGS = (LEG_FMT, LEG_ZIG, LEG_WIN, LEG_GATES, LEG_RELEASE_GATE)
 ZIG_LEGS = (LEG_FMT, LEG_ZIG)
 
 # The justfile defines the legs themselves, so editing a recipe a leg runs
@@ -45,7 +49,29 @@ RECIPE_LEGS = {
     "build-win": (LEG_WIN,),
     "gates-selftest": (LEG_GATES,),
     "gitversion-selftest": (LEG_GATES,),
+    "release-gate-check": (LEG_RELEASE_GATE,),
 }
+
+# Checked BEFORE the prefix rules, because these need both ends of the path.
+# A bare ".csproj" suffix rule would never fire for anything under windows/:
+# the windows/ prefix matches first and suffixes are only consulted when no
+# prefix did. And a project file is a real route into a leaking build -- a
+# DefineConstants;DEMO written straight into one never sets DemoEnabled, so
+# the build-time <Error> cannot see it and only the compiled result can.
+PREFIX_SUFFIX_RULES = (
+    ("windows/", ".csproj", (LEG_WIN, LEG_RELEASE_GATE)),
+    ("windows/", ".props", (LEG_WIN, LEG_RELEASE_GATE)),
+    ("windows/", ".targets", (LEG_WIN, LEG_RELEASE_GATE)),
+    ("windows/", ".sln", (LEG_WIN, LEG_RELEASE_GATE)),
+    # A response file is the sharp one. MSBuild treats its contents as
+    # command-line arguments, so `-p:Demo=true` in one arrives as a GLOBAL
+    # property: it satisfies the opt-in test the gate uses to tell a
+    # deliberate opt-in from a leak, AND defines DEMO_OPTIN, which compiles
+    # the runtime guard out as well. Every check stays green and demo mode
+    # ships.
+    ("windows/", ".rsp", (LEG_WIN, LEG_RELEASE_GATE)),
+    ("windows/", ".config", (LEG_WIN, LEG_RELEASE_GATE)),
+)
 
 # Ordered, first match wins, so a more specific prefix must precede its
 # parent. An empty tuple means the path cannot affect any leg.
@@ -73,6 +99,12 @@ PREFIX_RULES = (
 )
 
 EXACT_RULES = {
+    # The check itself. Not a gates-selftest member: that leg runs anywhere,
+    # and this one needs a Windows toolchain.
+    ".agents/scripts/release_gate_check.ps1": (LEG_RELEASE_GATE,),
+    # The compiled-result half of the shipping gate. It is #if !DEBUG, so
+    # editing it proves nothing until a Release run executes it.
+    "windows/Ghostty.Tests/Demo/ShippingBuildGateTests.cs": (LEG_WIN, LEG_RELEASE_GATE),
     # The gates leg runs this script's selftest, which needs no build.
     # Editing it must also run the check itself, and that needs the Zig
     # toolchain, so it rides the Zig leg through `just test`.
@@ -96,7 +128,7 @@ EXACT_RULES = {
     "build.zig.zon.json": ZIG_LEGS,
     "build.zig.zon.nix": (),
     "build.zig.zon.txt": (),
-    "global.json": (LEG_WIN,),
+    "global.json": (LEG_WIN, LEG_RELEASE_GATE),
     "Directory.Build.props": (LEG_WIN,),
     ".gitignore": (),
     ".gitattributes": (),
@@ -136,6 +168,9 @@ def legs_for_path(path):
     p = normalize(path)
     if p in EXACT_RULES:
         return EXACT_RULES[p]
+    for prefix, suffix, legs in PREFIX_SUFFIX_RULES:
+        if p.startswith(prefix) and p.endswith(suffix):
+            return legs
     for prefix, legs in PREFIX_RULES:
         if p.startswith(prefix):
             return legs
