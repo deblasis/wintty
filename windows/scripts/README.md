@@ -31,7 +31,6 @@ fixing something:
 ```
 just search-fuzz "-Seed 99 -Iterations 40"
 just splash-race
-pwsh -NoProfile -File windows/scripts/mouse-fuzz-loop.ps1 -ExePath ... -OutDir ...
 ```
 
 Results go under `windows/scripts/fuzz-out/`, which is git-ignored;
@@ -141,9 +140,8 @@ meets.
 
 | script | why |
 |---|---|
-| `verified-input-probe.ps1` | leaves its window up for inspection by design, which would make the next harness refuse; and its `PASS_PENDING_SCREENSHOT` is not self-checked - its marker does not in fact appear, because it posts `WM_CHAR`, which this app never receives |
 | `mouse-smoke-run.ps1` | the operator drives the checklist by hand |
-| `vtabs-layout-switch-capture.ps1`, `vtabs-switcher-capture.ps1`, `vtabs-morph-filmstrip.ps1` | produce frames for a human to look at; no verdict to aggregate |
+| `vtabs-switcher-capture.ps1` | produces frames for a human to look at; no verdict to aggregate |
 | `gen-bell.ps1` | generates a test asset |
 | `aot-fuzz.ps1`, `vtabs-visual-qa.ps1`, `release-smoke.ps1` | runners in their own right. `aot-fuzz` targets the NativeAOT publish, which the suite can also do with `-ExePath` |
 | `tab-tag-ink.ps1` | one regression, not a sweep: it measures whether a colour-tagged tab's pin glyph is painted in the tag foreground (#883). Like `contrast-oracle.ps1` it needs the seam pipe to itself |
@@ -292,17 +290,15 @@ Every script here that launches Wintty uses the helper except two:
 | `contrast-oracle.ps1`, `tab-tag-ink.ps1`, `switcher-preview-theme.ps1` | they are meant to be runnable beside a Wintty somebody else is using: they read crash.log not at all, launch with `windows-single-instance` off against an isolated `XDG_CONFIG_HOME`, move only their own window and reap only what they started. Each session now names its pipe after its own token, so two runs no longer collide on the name; what still makes them exit 1 rather than measure the wrong window is that each waits for the pipe belonging to the app it launched |
 
 `vtabs-visual-qa.ps1` launches nothing directly - each sub-script gates and
-reaps its own, including `vtabs-layout-switch-capture.ps1`, which it runs
-first and which had neither until it was given both.
+reaps its own, including `layout-switch-filmstrip.ps1`, which it runs
+first.
 
 `justfile` also has its own copy of the gate, so `just fuzz`, `just
 search-fuzz` and `just splash-race` can refuse before paying for a build.
 
-Two scripts need care beyond a single gate. `mouse-fuzz-jumplist.ps1`
+One script needs care beyond a single gate. `mouse-fuzz-jumplist.ps1`
 launches secondaries against a running primary, so its sweep rather than a
-per-process kill is what reaps them. `verified-input-probe.ps1` deliberately
-leaves its window up and therefore takes no stamp and runs no sweep; close it
-by hand before the next harness.
+per-process kill is what reaps them.
 
 Kill the tree, not the process. `Stop-Process -Id` leaves the ConPTY shell
 running as an orphan, and an orphan does not trip `Assert-NoWintty` because

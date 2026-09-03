@@ -71,7 +71,16 @@ param(
     [switch]$NoPictures,
 
     [int]$WinW = 1280,
-    [int]$WinH = 820
+    [int]$WinH = 820,
+
+    # The two knobs vtabs-morph-filmstrip.ps1 carried, folded in when that
+    # capture script was retired (#930). -Pinned starts the vertical pane
+    # expanded -- the pinned rail is where the column tween has distance to
+    # cover. -ColorActive tags the active tab through the seam's tab-color
+    # op, which drives the same assignment the menu's picker makes.
+    [switch]$Pinned,
+    [switch]$ColorActive,
+    [string]$ColorName = 'Red'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -536,6 +545,7 @@ try {
     $session = Start-SeamSession -ExePath $ExePath -ConfigText @"
 windows-single-instance = false
 vertical-tabs = false
+vertical-tabs-pinned = $($Pinned.IsPresent.ToString().ToLower())
 "@
 
     $hwnd = [int64]$session.Hwnd64
@@ -547,6 +557,9 @@ vertical-tabs = false
     Invoke-SeamCommand $session @{ op = 'group'; indices = $GroupIndices } | Out-Null
     Invoke-SeamCommand $session @{ op = 'select'; index = $ActiveIndex } | Out-Null
     Invoke-SeamCommand $session @{ op = 'collapse'; index = $GroupIndices[0]; collapsed = $true; via = 'router' } | Out-Null
+    if ($ColorActive) {
+        Invoke-SeamCommand $session @{ op = 'tab-color'; index = $ActiveIndex; color = $ColorName } | Out-Null
+    }
     $st = Invoke-SeamCommand $session @{ op = 'layout-frame' }
 
     $collapsed = @($st.state.groups | Where-Object { $_.collapsed } | ForEach-Object { $_.title })

@@ -6,9 +6,7 @@ param(
     [string[]]$Scripts = @(
         'mouse-fuzz-inspector.ps1',
         'mouse-fuzz-dialogs.ps1',
-        'mouse-fuzz-vertical-tabs.ps1',
-        'mouse-fuzz-ime-cjk.ps1',
-        'mouse-fuzz-loop.ps1'
+        'mouse-fuzz-ime-cjk.ps1'
     )
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
