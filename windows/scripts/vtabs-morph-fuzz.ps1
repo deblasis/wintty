@@ -108,13 +108,15 @@ function Get-TraceLines {
 
 # A counted toggle needs the coordinator idle: RequestToggleTabLayout
 # no-ops mid-switch, so a toggle fired into a switch still in the air
-# would be counted as an attempt that can never begin.
+# would be counted as an attempt that can never begin. Polled at a slow
+# cadence on purpose: get-state is not an observer op, and forcing a
+# layout pass mid-switch stretches the very flight this is waiting out.
 function Wait-CoordinatorIdle($Session, [int]$Seconds = 5) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
         $r = Invoke-SeamCommand $Session @{ op = 'get-state' }
         if (-not $r.state.switching) { return $true }
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds 300
     }
     return $false
 }
@@ -181,17 +183,32 @@ try {
         throw 'HARVEST_MISS: the probe toggle began no switch - the router never saw it'
     }
     if (-not $traced) {
-        throw "HARVEST_MISS: the probe switch ran but the trace stayed empty at $log - the app ignored WINTTY_MORPH_TRACE (a build older than the trace)"
+        throw ("HARVEST_MISS: the probe switch ran but the trace stayed empty at {0} - the app ignored " +
+            'WINTTY_MORPH_TRACE (a build older than the trace), or this machine runs with animation ' +
+            'effects off and every switch snaps without a begin line') -f $log
     }
+    # Counted like any other toggle: the probe's begin is proven above, and
+    # an uncounted probe would hand the floor a free begin - a router that
+    # dropped exactly one counted toggle would still read begins==attempts.
+    $toggleAttempts++
     Write-Host "probe: began=$probeBegan traced=$traced"
 
     $tabs = 8
+    # Toggle ROLLS (attempted legs, skipped or not) - the corpus floor
+    # below is a share of these, so an all-skip run cannot certify itself.
+    $toggleRolls = 0
     for ($i = 0; $i -lt $Iterations; $i++) {
         if ($session.Proc.HasExited) { throw "APP_EXIT: process exited at iteration $i (code $($session.Proc.ExitCode))" }
+        if (-not [SeamWin]::IsWindow([SeamWin]::P($hwnd64))) {
+            # The old harness threw PRODUCT_FAIL for this: a destroyed
+            # window with a live process is a finding, not a harness miss.
+            throw "PRODUCT_FAIL: the window was destroyed at iteration $i while the process lived"
+        }
 
         $roll = $rng.Next(100)
         if ($roll -lt 45) {
             $act = 'toggle'
+            $toggleRolls++
             if (-not (Wait-CoordinatorIdle $session)) {
                 # Not a finding: a coordinator still busy after 5s means the
                 # next toggle cannot begin, and the floor below would charge
@@ -297,18 +314,16 @@ $ends = @($lines | Where-Object { $_ -match 'SWITCH end' }).Count
 $immediate = @($lines | Where-Object { $_ -match 'MORPH immediate' }).Count
 $deferred = @($lines | Where-Object { $_ -match 'MORPH deferred' }).Count
 $waiting = @($lines | Where-Object { $_ -match 'MORPH waiting' }).Count
-$none = @($lines | Where-Object { $_ -match 'MORPH none' }).Count
 $cancels = @($lines | Where-Object { $_ -match 'SWITCH cancel' }).Count
 $leaked = @($lines | Where-Object { $_ -match 'ghosts=[1-9]|morph=LEAKED' })
 
 Write-Host ''
-Write-Host "layout toggles  : $toggleAttempts"
+Write-Host "layout toggles  : $toggleAttempts  (rolls: $toggleRolls)"
 Write-Host "switches begun  : $begins"
 Write-Host "switches ended  : $ends"
 Write-Host "switches cancel : $cancels"
 Write-Host "morph immediate : $immediate"
 Write-Host "morph deferred  : $deferred  (waited: $waiting)"
-Write-Host "morph none      : $none"
 
 if ($leaked.Count -gt 0) {
     $script:Findings.Add("$($leaked.Count) switch(es) ended with a ghost still on the morph layer")
@@ -321,12 +336,26 @@ if ($immediate -eq 0 -and $begins -gt 0) {
     $script:Findings.Add('no switch ever staged a morph immediately')
 }
 
-# The rewritten vacuity gate: one begin per counted toggle. Counted toggles
-# waited for an idle coordinator first, so the request landed on a
-# coordinator free to begin; a shortfall here means the toggles went out but
-# the router never saw them, and every term above was measured over nothing.
-# Exit 1 - retryable corpus - not 2.
-if ($toggleAttempts -gt 0 -and $begins -lt $toggleAttempts) {
+# The rewritten vacuity gate, two terms. First the corpus floor: a run
+# whose every toggle leg skipped a busy coordinator counts zero attempts
+# and would slip past the begin floor below on the probe's single switch -
+# a probe-only green. Below max(3, a quarter of the rolls) the run leaves
+# with 1: not enough of the product was exercised to judge it. Then the
+# begin floor: counted toggles waited for an idle coordinator first, so a
+# shortfall means the toggles went out but the router never saw them. Both
+# exit 1 - retryable corpus - not 2, and defects outrank an empty corpus.
+if ($toggleAttempts -lt [Math]::Max(3, [int][Math]::Ceiling($toggleRolls * 0.25))) {
+    if ($script:Findings.Count -gt 0) {
+        $script:Findings | ForEach-Object { Write-Host "FAIL: $_" }
+        Write-Host "reproduce with: -Seed $Seed"
+        exit 2
+    }
+    Write-Host ("HARVEST_MISS: only {0} toggle(s) counted of {1} rolls - the coordinator never " +
+        'settled long enough to establish a corpus') -f $toggleAttempts, $toggleRolls
+    Write-Host "reproduce with: -Seed $Seed"
+    exit 1
+}
+if ($begins -lt $toggleAttempts) {
     if ($harnessError) { Write-Host "ERROR: $harnessError" -ForegroundColor Red }
     if ($script:Findings.Count -gt 0) {
         # Defects outrank an empty corpus: report what was measured.
