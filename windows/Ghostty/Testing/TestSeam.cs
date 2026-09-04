@@ -138,6 +138,7 @@ internal static class TestSeam
         {
             try { _lifetime.Cancel(); } catch (ObjectDisposedException) { }
         };
+        Diag("seam starting");
         _ = Task.Run(() => ServeAsync(window, token));
     }
 
@@ -197,11 +198,22 @@ internal static class TestSeam
                 await pipe.WaitForConnectionAsync(token);
                 await ServeConnectionAsync(pipe, window, token);
             }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) { Diag("accept loop: cancelled"); break; }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException)
             {
                 // The client hung up mid-conversation. Fall through to the
                 // finally, then accept the next connection.
+                Diag($"connection recycled: {Describe(ex)}");
+            }
+            catch (Exception ex)
+            {
+                // Anything else used to escape the accept loop entirely,
+                // killing the seam for the rest of the process's life while
+                // the client sat on an open pipe that would never answer.
+                // Recorded, and the loop keeps accepting - paced, so a
+                // persistently recurring fault cannot hot-spin it.
+                Diag($"accept loop swallowed: {Describe(ex)}");
+                Thread.Sleep(250);
             }
             finally
             {
@@ -224,7 +236,11 @@ internal static class TestSeam
         while (!token.IsCancellationRequested && pipe.IsConnected)
         {
             var (status, line) = await reader.ReadLineAsync(token);
-            if (status == LineStatus.Eof) return; // client hung up
+            if (status == LineStatus.Eof)
+            {
+                Diag("loop exit: client hung up (Eof)");
+                return; // client hung up
+            }
             if (status == LineStatus.TooLong)
             {
                 // There is no resyncing after this: the rest of the oversized
@@ -234,12 +250,55 @@ internal static class TestSeam
                 // the accept loop takes the next client.
                 await writer.WriteLineAsync(
                     Error("parse", $"request exceeds {MaxRequestBytes} bytes"));
+                Diag("loop exit: oversized request");
                 return;
             }
             if (string.IsNullOrWhiteSpace(line)) continue;
-            var response = await ExecuteAsync(window, line);
-            await writer.WriteLineAsync(response);
+            Diag($"read: {line[..Math.Min(60, line.Length)]}");
+            string response;
+            try
+            {
+                response = await ExecuteAsync(window, line);
+                Diag("responded");
+            }
+            catch (Exception ex)
+            {
+                // ExecuteAsync guards its own handlers; what escapes here is
+                // infrastructure (the marshal, the settle) and it used to kill
+                // the whole session. Answer it and keep serving.
+                Diag($"ExecuteAsync escaped: {Describe(ex)}");
+                response = Error("seam", Describe(ex));
+            }
+            try
+            {
+                await writer.WriteLineAsync(response);
+            }
+            catch (Exception ex)
+            {
+                Diag($"response write failed: {Describe(ex)}");
+                return;
+            }
         }
+        Diag($"loop exit: cancelled={token.IsCancellationRequested} connected={pipe.IsConnected}");
+    }
+
+    /// <summary>
+    /// Side-channel diagnostics for the seam itself: when the environment
+    /// names a file, every abnormal path above appends a line to it. The
+    /// harnesses drive this pipe blind, so a server that dies silently turns
+    /// every downstream read into an unexplained hang; this is how a hang
+    /// becomes a named exception instead.
+    /// </summary>
+    private static void Diag(string what)
+    {
+        var path = Environment.GetEnvironmentVariable("WINTTY_TEST_SEAM_DIAG");
+        if (string.IsNullOrEmpty(path)) return;
+        try
+        {
+            System.IO.File.AppendAllText(path,
+                $"{DateTimeOffset.Now:O} {what}{Environment.NewLine}");
+        }
+        catch { /* diagnostics must never take the seam down */ }
     }
 
     private enum LineStatus
@@ -377,12 +436,18 @@ internal static class TestSeam
             {
                 try
                 {
+                    Diag($"ui-delegate start: {op}");
                     var result = await action();
                     // Settled means settled: layout, not just the manager.
                     if (settle) window.TestSeamSettleLayout();
+                    Diag($"ui-delegate done: {op}");
                     done.SetResult(result);
                 }
-                catch (Exception ex) { done.SetResult(Error(op, Describe(ex))); }
+                catch (Exception ex)
+                {
+                    Diag($"ui-delegate fault: {op}: {Describe(ex)}");
+                    done.SetResult(Error(op, Describe(ex)));
+                }
             }))
         {
             done.SetResult(Error(op, "dispatcher unavailable"));
