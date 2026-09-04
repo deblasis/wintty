@@ -60,6 +60,12 @@ without a PR; in exchange it runs its own assertions at publish time:
 nothing windows merged may be missing from the replay, and work no PR
 reviewed may ride along unnamed or unacknowledged.
 
+The `resignoff-required` issues the guard files are debt, not blockers:
+they are designed to sit until worked, and working them is the owner's
+loop (`just resignoff-bot`), not an agent's merge step. Never run the bot
+as part of merging; each run is an hour of lane time and the pile is meant
+to wait for it.
+
 Always pass `--repo deblasis/wintty`. Never open anything against
 `ghostty-org/ghostty`.
 

@@ -1551,6 +1551,18 @@ pr-gate pr:
 merge-checked pr:
     python .agents/scripts/merge_guard.py {{pr}}
 
+# Work the resignoff-required pile the merge guard files (#969 phase 2): an
+# operator loop, not a merge step. Each invocation spends at most --max
+# signoff runs (default 1, an hour of lane time each) on the open issues,
+# newest window first, closing the ones a green record retires and
+# bisecting the recorded squash SHAs to a culprit when a window goes red.
+# --max 0 is the greens-only pass: close what the records already retire,
+# spend nothing. An agent merging a PR never runs this; the pile is
+# designed to sit until it is worked. --dry-run prints the decisions and
+# exact commands and touches nothing.
+resignoff-bot *args:
+    python .agents/scripts/resignoff_bot.py {{args}}
+
 # Check that everything the gates depend on is present and wired: tools on
 # PATH, scripts where the hooks point, settings parseable, nightly task
 # registration. A SessionStart hook runs the fast subset automatically.
@@ -1591,6 +1603,7 @@ gates-selftest: gitversion-selftest
     python .agents/scripts/pr_gate.py --self-test
     python .agents/scripts/signoff.py --self-test
     python .agents/scripts/merge_guard.py --self-test
+    python .agents/scripts/resignoff_bot.py --self-test
     python .agents/scripts/workspace_guard.py --self-test
     python .agents/scripts/doctor.py --self-test
     python .agents/scripts/test_reachability.py --self-test

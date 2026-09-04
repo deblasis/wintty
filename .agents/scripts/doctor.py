@@ -40,7 +40,8 @@ REQUIRED_TOOLS = ["git", "gh", "just"]
 # Optional: the signoff ladder and the nightly appliance need these; their
 # absence is a note, not a failure, so non-Windows clones stay quiet.
 OPTIONAL_TOOLS = ["zig", "dotnet", "pwsh"]
-GATE_SCRIPTS = ["pr_gate.py", "workspace_guard.py", "signoff.py", "merge_guard.py"]
+GATE_SCRIPTS = ["pr_gate.py", "workspace_guard.py", "signoff.py", "merge_guard.py",
+                "resignoff_bot.py"]
 
 
 def check(which=shutil.which, settings_path=None, script_dir=SCRIPT_DIR):
