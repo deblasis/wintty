@@ -1538,6 +1538,13 @@ signoff-defer reason:
 signoff-debt:
     python .agents/scripts/signoff.py --debt
 
+# Re-advertise an already-recorded signoff as a GitHub status, without
+# running anything. For the run-then-push order: the automatic post fails
+# harmlessly when the head SHA is not on GitHub yet, and this closes the
+# gap after the push. Takes the record's sha (full or unique prefix).
+signoff-post sha:
+    python .agents/scripts/signoff.py --post {{sha}}
+
 # Validate a PR against the merge quality gate without merging.
 pr-gate pr:
     python .agents/scripts/pr_gate.py --check-pr {{pr}}
