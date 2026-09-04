@@ -71,6 +71,16 @@ internal interface IPaneHost
     event EventHandler? LayoutChanged;
 
     /// <summary>
+    /// The newest activity stamp across every leaf's surface, in
+    /// <see cref="System.Environment.TickCount64"/> milliseconds (0
+    /// until some leaf has loaded). Read by the idle tracker's sweep --
+    /// a tab is idle when no surface under it has seen a keystroke,
+    /// pointer press, or libghostty state-change callback for the idle
+    /// window.
+    /// </summary>
+    long LastActivityTick { get; }
+
+    /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
     /// becomes the active leaf. <paramref name="snapshot"/> is recorded
     /// on the freshly-created leaf.

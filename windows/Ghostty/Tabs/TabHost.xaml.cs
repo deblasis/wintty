@@ -58,6 +58,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // tell the bell from the pin to know which one goes back to the accent.
     private const string BellGlyph = "\uEA8F";
 
+    // Segoe Fluent / MDL2 "QuietHours" moon, shown while TabModel.IsIdle.
+    // Shared with the ink pass for the same reason as the bell.
+    private const string IdleGlyph = "\uE708";
+
+    // How far an idle tab's icon and title fade. Quiet enough to read as
+    // "resting", strong enough to notice in a scan of the strip.
+    private const double IdleOpacity = 0.45;
+
     // One chip per group the projection renders as collapsed-without-the-
     // active-tab. A chip is a real TabViewItem occupying a strip slot, so
     // every slot count and every slot index now includes chips; the maps
@@ -132,11 +140,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 // No "pin" part: the pushpin is gone, and the pinned tab's
                 // mark is its own shape -- which a driver reads as the
                 // "row" part's width, not as a glyph inside it.
+                //
+                // Every part must also be VISIBLE. ActualWidth keeps its
+                // last measured value when an element collapses, so a
+                // glyph-visibility gate is what makes "no rect" mean
+                // "not on screen" rather than "hidden but still holding
+                // stale geometry" -- the rect a pixel harness would
+                // sample for ink that is not there.
                 var match = part switch
                 {
-                    "bell" => child is FontIcon bell && bell.Glyph == BellGlyph,
-                    "icon" => child is TabIconPresenter,
-                    "title" => child is TextBlock,
+                    "bell" => child is FontIcon bell
+                        && bell.Glyph == BellGlyph
+                        && bell.Visibility == Visibility.Visible,
+                    "idle" => child is FontIcon moon
+                        && moon.Glyph == IdleGlyph
+                        && moon.Visibility == Visibility.Visible,
+                    "icon" => child is TabIconPresenter icon
+                        && icon.Visibility == Visibility.Visible,
+                    "title" => child is TextBlock title
+                        && title.Visibility == Visibility.Visible,
                     _ => false,
                 };
                 if (match) { target = child as FrameworkElement; break; }
@@ -341,6 +363,28 @@ internal sealed partial class TabHost : UserControl, ITabHost
         };
         iconRow.Children.Add(bellGlyph);
 
+        // Idle indicator: the moon after the bell slot while the tab has
+        // been untouched (TabIdleTracker). Muted, not accent -- idle is a
+        // rest state, not an alert. The bell owns the badge: a ringing tab
+        // is never idle, and the property handler below keeps the moon
+        // hidden while a bell is up even if IsIdle has not caught up.
+        var idleGlyph = new FontIcon
+        {
+            Glyph = IdleGlyph,
+            FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)
+                Application.Current.Resources["SymbolThemeFontFamily"],
+            FontSize = 12,
+            Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = IdleGlyphBrush(),
+            Visibility = IdleBadgeVisible(tab) ? Visibility.Visible : Visibility.Collapsed,
+        };
+        iconRow.Children.Add(idleGlyph);
+        // The dim rides the row's own elements rather than the whole
+        // TabViewItem: the close button and the hover chrome stay
+        // full-strength so an idle tab still reads as fully operable.
+        ApplyIdleInk(iconHost, headerText, tab);
+
         // The group rail: a 2px line in the group's color in the header's
         // TOP slot. The progress bar owns the bottom slot; the two
         // never fight. Collapsed until a chrome pass finds a group to
@@ -421,7 +465,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 bellGlyph.Visibility = tab.BellRinging
                     ? Visibility.Visible
                     : Visibility.Collapsed;
+                // The bell and the moon share the badge slot; whichever
+                // way the bell moves, the moon re-derives behind it.
+                idleGlyph.Visibility = IdleBadgeVisible(tab)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
                 ApplyItemAccessibleText(item, tab);
+            }
+            else if (e.PropertyName == nameof(TabModel.IsIdle))
+            {
+                idleGlyph.Visibility = IdleBadgeVisible(tab)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+                ApplyIdleInk(iconHost, headerText, tab);
             }
             else if (e.PropertyName == nameof(TabModel.IsPinned))
             {
@@ -2131,6 +2187,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 case FontIcon bell when bell.Glyph == BellGlyph:
                     bell.Foreground = BellAccentBrush();
                     break;
+                // The idle moon is born muted for the same reason: the
+                // clear pass must put its quiet ink back, not primary.
+                case FontIcon idle when idle.Glyph == IdleGlyph:
+                    idle.Foreground = IdleGlyphBrush();
+                    break;
                 case FontIcon fi:
                     fi.ClearValue(FontIcon.ForegroundProperty);
                     break;
@@ -2153,6 +2214,41 @@ internal sealed partial class TabHost : UserControl, ITabHost
             && c is Windows.UI.Color color)
             return new SolidColorBrush(color);
         return new SolidColorBrush(Microsoft.UI.Colors.OrangeRed);
+    }
+
+    /// <summary>
+    /// Muted brush for the idle moon. Secondary text colour, not the
+    /// accent: sleeping is a rest state, not something demanding a look.
+    /// Resolved against live resources each call so it tracks theme
+    /// changes, same contract as <see cref="BellAccentBrush"/>.
+    /// </summary>
+    private static Brush IdleGlyphBrush()
+    {
+        if (Application.Current.Resources.TryGetValue(
+                "TextFillColorSecondaryBrush", out var b) && b is Brush brush)
+            return brush;
+        return new SolidColorBrush(Microsoft.UI.Colors.Gray);
+    }
+
+    /// <summary>
+    /// Whether the moon is shown for this tab right now. The bell owns
+    /// the badge: while one is up the moon stays hidden even if IsIdle
+    /// has not been recomputed yet, so the slot never shows both.
+    /// </summary>
+    private static bool IdleBadgeVisible(TabModel tab)
+        => tab.IsIdle && !tab.BellRinging;
+
+    /// <summary>
+    /// The idle dim: icon and title fade to <see cref="IdleOpacity"/>.
+    /// Shared by the build pass and the IsIdle property arm so a tab
+    /// created already-idle (a restore landing past the threshold)
+    /// starts dimmed instead of flashing bright first.
+    /// </summary>
+    private static void ApplyIdleInk(TabIconPresenter icon, TextBlock title, TabModel tab)
+    {
+        var opacity = tab.IsIdle ? IdleOpacity : 1.0;
+        icon.Opacity = opacity;
+        title.Opacity = opacity;
     }
 
     /// <summary>

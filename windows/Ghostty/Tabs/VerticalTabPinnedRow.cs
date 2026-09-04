@@ -36,8 +36,14 @@ internal sealed partial class VerticalTabPinnedRow : Grid
     /// </summary>
     internal const double RowHeight = TabPinBand.ChipSize;
 
+    // Segoe Fluent / MDL2 "QuietHours" moon and the idle dim, matching
+    // the body row's pair.
+    private const string IdleGlyph = "\uE708";
+    private const double IdleOpacity = 0.45;
+
     private readonly Grid _iconSlot;
     private readonly FontIcon _bell;
+    private readonly FontIcon _idle;
     private IconElement? _icon;
     private TextBlock? _iconFallback;
 
@@ -89,6 +95,21 @@ internal sealed partial class VerticalTabPinnedRow : Grid
             Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed,
         };
         _iconSlot.Children.Add(_bell);
+
+        // The idle moon over the icon's opposite corner: the square
+        // reads as "this icon is asleep" without spending width it does
+        // not have, the same trick the bell plays on its corner. The two
+        // never show together -- a ringing session is not idle.
+        _idle = new FontIcon
+        {
+            Glyph = IdleGlyph,
+            FontSize = 9,
+            Foreground = MutedGlyphBrush(),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Visibility = IdleBadgeVisible(tab),
+        };
+        _iconSlot.Children.Add(_idle);
 
         Refresh(tab);
     }
@@ -189,5 +210,34 @@ internal sealed partial class VerticalTabPinnedRow : Grid
         if (_iconFallback is not null)
             _iconFallback.Text = InitialOf(TabAccessibleText.Name(tab));
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
+        _idle.Visibility = IdleBadgeVisible(tab);
+        // The whole slot dims -- icon and whatever badge is not showing
+        // -- which is the square's only way to whisper "asleep": it has
+        // no title to fade. The bell stays undimmed by never coexisting
+        // with the idle state.
+        _iconSlot.Opacity = tab.IsIdle ? IdleOpacity : 1.0;
+    }
+
+    /// <summary>
+    /// Whether the moon shows right now: idle, and no bell up (the bell
+    /// owns the badge; a ringing session is not idle).
+    /// </summary>
+    private static Visibility IdleBadgeVisible(TabModel tab)
+        => tab.IsIdle && !tab.BellRinging
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    /// <summary>
+    /// Muted brush for the moon: secondary text colour, resolved once at
+    /// row construction. A theme flip after construction leaves the moon
+    /// in the old theme's secondary ink -- the same exposure the bell's
+    /// construction-time accent brush already has in this square.
+    /// </summary>
+    private static Brush MutedGlyphBrush()
+    {
+        if (Application.Current.Resources.TryGetValue(
+                "TextFillColorSecondaryBrush", out var b) && b is Brush brush)
+            return brush;
+        return new SolidColorBrush(Microsoft.UI.Colors.Gray);
     }
 }

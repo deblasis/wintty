@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core;
 using Ghostty.Core.Input;
@@ -416,9 +417,23 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     public string? CurrentTitle => _userTitleOverride ?? _shellTitle;
 
+    // Latest activity on this surface, in Environment.TickCount64
+    // milliseconds -- keystrokes, pointer presses, and every callback
+    // libghostty fires for a real state change (title, cwd, progress,
+    // bell, scrollbar). Written from both the UI thread and the
+    // libghostty thread, so a plain volatile long; read by the idle
+    // tracker's sweep through PaneHost.LastActivityTick.
+    private long _lastActivityTick;
+    internal long LastActivityTick => Volatile.Read(ref _lastActivityTick);
+    private void NoteActivity() => Volatile.Write(ref _lastActivityTick, Environment.TickCount64);
+
     // Raisers invoked by GhosttyHost after routing an action to this leaf.
     internal void RaiseTitleChanged(string title)
     {
+        // A shell pushing a title is the pane doing something: stamp
+        // before anything else so the idle clock sees this even if a
+        // subscriber below throws.
+        NoteActivity();
         _shellTitle = title;
         TitleChanged?.Invoke(this, CurrentTitle ?? string.Empty);
     }
@@ -435,6 +450,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal void RaiseCloseRequested() => CloseRequested?.Invoke(this, EventArgs.Empty);
     internal void RaiseProgressChanged(Ghostty.Core.Tabs.TabProgressState state)
     {
+        // OSC 9;4 is pane output; same idle-stamp contract as the title.
+        NoteActivity();
         CurrentProgress = state;
         ProgressChanged?.Invoke(this, state);
     }
@@ -448,7 +465,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// else with it.
     /// </summary>
     internal event EventHandler<string?>? PwdChanged;
-    internal void RaisePwdChanged(string? pwd) => PwdChanged?.Invoke(this, pwd);
+    internal void RaisePwdChanged(string? pwd)
+    {
+        // OSC 7 / 9;9 is pane output; same idle-stamp contract as the title.
+        NoteActivity();
+        PwdChanged?.Invoke(this, pwd);
+    }
 
     /// <summary>
     /// Hand <paramref name="text"/> to this surface the way committed IME
@@ -494,6 +516,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     internal void RaiseBellRang(Ghostty.Core.Bell.BellFeatures features)
     {
+        // A bell is the pane demanding attention -- the opposite of
+        // asleep. This is the control-level hook, so it fires for
+        // background surfaces too (the tab-level re-emission is
+        // active-leaf only, but the idle clock must see this one).
+        NoteActivity();
         if (features.Border) ShowBellBorder();
         if (features.Title) _bellTitlePending = true;
         BellRang?.Invoke(this, features);
@@ -567,6 +594,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // cached delegate runs once and reads the most recent values.
     internal void QueueScrollbarChanged(ulong total, ulong offset, ulong len)
     {
+        // Scroll state changes when output moves lines through the
+        // viewport, so this doubles as the streaming-output signal the
+        // idle clock reads: a background tab running a build grows its
+        // scrollback and stays awake without a single keystroke. Runs
+        // on the libghostty thread; the stamp is a volatile write.
+        NoteActivity();
         bool needEnqueue;
         lock (_scrollbarLock)
         {
@@ -1488,6 +1521,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (BubbledFromChild(sender, e)) return;
 
+        // Any press on the surface is the user touching this pane:
+        // selection drags and scroll-to-read both count, so the idle
+        // clock restarts here rather than waiting for a keystroke.
+        NoteActivity();
+
         // Take focus on the UserControl, not the panel. Guard with the
         // current focus state to avoid generating a Lost+Got pair when
         // we already have focus.
@@ -1621,6 +1659,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (BubbledFromChild(sender, e)) return;
         if (_surface.Handle == IntPtr.Zero) return;
+        // Scrolling to read is touching the pane; same idle-stamp
+        // contract as a pointer press.
+        NoteActivity();
         var pt = e.GetCurrentPoint(Panel);
         var rawDelta = pt.Properties.MouseWheelDelta;
         var isHorizontal = pt.Properties.IsHorizontalMouseWheel;
@@ -1826,8 +1867,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // Stamp the shared host so VerticalTabHost's hover-expand
         // suppression knows the user is mid-typing and holds back
         // the sidebar pop-open. Unconditional: we want every key
-        // (including chords and IME composition keys) to count.
+        // (including chords and IME composition keys) to count. The
+        // same keydown also stamps this surface's idle clock.
         Host?.NoteKeystroke();
+        NoteActivity();
 
         // Any key reaching the surface acknowledges a pending bell, fading
         // the visual border and clearing the tab indicator (matches macOS).

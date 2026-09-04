@@ -875,6 +875,30 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
+    /// The newest activity stamp across every leaf's surface, for the
+    /// idle tracker's sweep. Computed on demand: the trees are tiny and
+    /// the sweep runs every 30 seconds, so a maintained cached value
+    /// would be write traffic for nothing.
+    /// </summary>
+    public long LastActivityTick
+    {
+        get
+        {
+            // Same teardown guard the other tree walks use: after the
+            // last leaf closes, _root still references it and the walk
+            // would read a terminal CloseLeaf has already torn down.
+            if (_allLeavesClosed) return 0;
+            long latest = 0;
+            foreach (var leaf in PaneTree.Leaves(_root))
+            {
+                var tick = leaf.Terminal().LastActivityTick;
+                if (tick > latest) latest = tick;
+            }
+            return latest;
+        }
+    }
+
+    /// <summary>
     /// Tear down every leaf's libghostty surface. Called by
     /// <see cref="MainWindow"/> when the window is closing, since
     /// surface lifetime is decoupled from <c>Unloaded</c> events and
