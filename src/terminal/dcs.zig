@@ -19,6 +19,11 @@ pub const Handler = struct {
     /// This is arbitrarily set to 1MB today, increase if needed.
     max_bytes: usize = 1024 * 1024,
 
+    /// Bytes fed to the current sixel sequence. Sixel ops and parameter
+    /// accumulators grow with input, so unlike the fixed-size xtgettcap
+    /// buffer this arm needs its own counter against `max_bytes`.
+    sixel_bytes: usize = 0,
+
     pub fn deinit(self: *Handler) void {
         self.discard();
     }
@@ -48,7 +53,7 @@ pub const Handler = struct {
         command: ?Command = null,
     };
 
-    fn tryHook(self: Handler, alloc: Allocator, dcs: DCS) !?Hook {
+    fn tryHook(self: *Handler, alloc: Allocator, dcs: DCS) !?Hook {
         return switch (dcs.intermediates.len) {
             0 => switch (dcs.final) {
                 // Tmux control mode
@@ -82,6 +87,7 @@ pub const Handler = struct {
                         if (i >= intro.len) break;
                         intro[i] = p;
                     }
+                    self.sixel_bytes = 0;
                     break :sixel_hook .{
                         .state = .{ .sixel = sixel.Parser.init(alloc, intro) },
                     };
@@ -163,7 +169,18 @@ pub const Handler = struct {
                 buffer.len += 1;
             },
 
-            .sixel => |*p| p.put(byte),
+            .sixel => |*p| {
+                // Same budget the xtgettcap arm enforces: sixel is the
+                // one DCS state whose memory grows with input (one op
+                // per paint byte), so an unterminated ESC P q followed
+                // by an endless payload must hit this wall and discard
+                // rather than grow until OOM.
+                if (self.sixel_bytes >= self.max_bytes) {
+                    return error.OutOfMemory;
+                }
+                self.sixel_bytes += 1;
+                p.put(byte);
+            },
         }
 
         return null;
@@ -645,4 +662,45 @@ test "sixel DCS with raster attribs" {
     try testing.expect(cmd == .sixel);
     try testing.expectEqual(@as(u16, 100), cmd.sixel.raster.declared_width);
     try testing.expectEqual(@as(u16, 200), cmd.sixel.raster.declared_height);
+}
+
+test "sixel DCS byte cap discards the sequence" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var h: Handler = .{ .max_bytes = 8 };
+    defer h.deinit();
+
+    try testing.expect(h.hook(alloc, .{ .final = 'q' }) == null);
+    try testing.expect(h.state == .sixel);
+
+    // Nine paint bytes: the ninth must trip max_bytes, discard the
+    // parser, and ignore the rest of the sequence like XTGETTCAP does.
+    for ("????????????????????") |b| _ = h.put(b);
+    try testing.expect(h.state == .ignore);
+    try testing.expect(h.unhook() == null);
+    try testing.expect(h.state == .inactive);
+}
+
+test "sixel DCS accumulator is capped" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var h: Handler = .{};
+    defer h.deinit();
+
+    try testing.expect(h.hook(alloc, .{ .final = 'q' }) == null);
+
+    // A color definition number is never more than a few digits; a
+    // digit-only run is pathological input. The parser must stop
+    // accumulating and ignore the rest rather than grow `accum`
+    // with the whole run. Total fed bytes stay far below max_bytes
+    // so only the accumulator cap can trip here.
+    _ = h.put('#');
+    for ("1" ** 100) |b| _ = h.put(b);
+
+    switch (h.state) {
+        .sixel => |p| try testing.expect(p.state == .ignore),
+        else => return error.TestUnexpectedResult,
+    }
 }

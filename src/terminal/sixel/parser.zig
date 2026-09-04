@@ -9,6 +9,16 @@ const raster = @import("raster.zig");
 
 const log = std.log.scoped(.terminal_sixel);
 
+/// Upper bound for the parameter accumulator (raster attribs and color
+/// definitions). A real definition is a handful of numbers each a few
+/// digits long -- at most tens of bytes. A run of digits longer than this
+/// is unterminated garbage, and the cap keeps `accum` from tracking an
+/// endless digit stream until the sequence's terminator arrives; the
+/// handler-level max_bytes cannot bound this case, because a digit-only
+/// payload can be far shorter than that budget while still unbounded in
+/// the accumulator.
+const max_accum_bytes: usize = 64;
+
 /// Parser state.
 const State = enum {
     /// Expecting either a `"` prelude (raster attribs) or first
@@ -78,7 +88,9 @@ pub const Parser = struct {
         self.tryPut(byte) catch |err| {
             log.debug("sixel parser error, ignoring rest: {}", .{err});
             // Drop any partially-accumulated state so we don't sit on
-            // up to max_bytes of accum until deinit.
+            // it until deinit. The accumulator is bounded by
+            // max_accum_bytes, but an error can arrive mid-definition,
+            // so this also returns that bounded memory promptly.
             self.accum.clearAndFree(self.alloc);
             self.state = .ignore;
         };
@@ -148,6 +160,9 @@ pub const Parser = struct {
 
             .color_def => switch (byte) {
                 '0'...'9', ';' => {
+                    if (self.accum.items.len >= max_accum_bytes) {
+                        return error.OutOfMemory;
+                    }
                     try self.accum.append(self.alloc, byte);
                 },
                 else => {
@@ -162,6 +177,9 @@ pub const Parser = struct {
 
             .raster_attribs => switch (byte) {
                 '0'...'9', ';' => {
+                    if (self.accum.items.len >= max_accum_bytes) {
+                        return error.OutOfMemory;
+                    }
                     try self.accum.append(self.alloc, byte);
                 },
                 else => {
