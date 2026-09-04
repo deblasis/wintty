@@ -875,12 +875,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
-    /// Tear down every leaf's libghostty surface. Called by
-    /// <see cref="MainWindow"/> when the window is closing, since
-    /// surface lifetime is decoupled from <c>Unloaded</c> events and
-    /// the framework's natural teardown does not free them.
-    /// </summary>
-    /// <summary>
     /// The newest activity stamp across every leaf's surface, for the
     /// idle tracker's sweep. Computed on demand: the trees are tiny and
     /// the sweep runs every 30 seconds, so a maintained cached value
@@ -904,6 +898,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
     }
 
+    /// <summary>
+    /// Tear down every leaf's libghostty surface. Called by
+    /// <see cref="MainWindow"/> when the window is closing, since
+    /// surface lifetime is decoupled from <c>Unloaded</c> events and
+    /// the framework's natural teardown does not free them.
+    /// </summary>
     public void DisposeAllLeaves()
     {
         // Tear down any in-flight startup glows first so their timers stop

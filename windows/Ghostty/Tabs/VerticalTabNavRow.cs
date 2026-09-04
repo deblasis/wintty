@@ -157,8 +157,11 @@ internal sealed partial class VerticalTabNavRow : Grid
             : Visibility.Collapsed;
 
     /// <summary>
-    /// Muted brush for the moon: secondary text colour, resolved against
-    /// live resources so it tracks theme changes.
+    /// Muted brush for the moon: secondary text colour, resolved once at
+    /// row construction. A theme flip after construction leaves the moon
+    /// in the old theme's secondary ink -- the same exposure the bell's
+    /// construction-time accent brush already has in these rows, and the
+    /// row rebuilds that follow a pin or a group change re-resolve it.
     /// </summary>
     private static Brush MutedGlyphBrush()
     {

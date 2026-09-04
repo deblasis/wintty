@@ -59,8 +59,12 @@ public class TabIdleWiringTests
             property.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             i => i.CalleeText() == "PaneTree.Leaves");
         // And it refuses to walk a collapsed tree, the same teardown
-        // rule the other tree walks in this class follow.
-        Assert.Contains("_allLeavesClosed", property.ToString());
+        // rule the other tree walks in this class follow. The condition
+        // is pinned exactly, as parsed: a negated guard or a comment
+        // that merely mentions the flag would satisfy a substring.
+        Assert.Contains(
+            property.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Condition.ToString() == "_allLeavesClosed");
 
         // The hop the sweep actually takes: the interface member the
         // tracker reads through TabModel.PaneHost.

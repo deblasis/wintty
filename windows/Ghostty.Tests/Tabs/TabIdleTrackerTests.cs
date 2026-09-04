@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Ghostty.Core.Tabs;
 using Xunit;
 
@@ -35,8 +36,13 @@ public class TabIdleTrackerTests
 
         public void Start(TimeSpan? idleAfter = null)
         {
+            // The timer provider never arms a real timer: tests drive
+            // Sweep() themselves, and a live TimeProvider.System timer
+            // would keep sweeping this rig from a threadpool thread for
+            // the rest of the test-host process.
             _tracker = new TabIdleTracker(
-                Manager, a => a(), idleAfter ?? TimeSpan.FromSeconds(10), () => Now);
+                Manager, a => a(), idleAfter ?? TimeSpan.FromSeconds(10),
+                () => Now, new NoTimerProvider());
             _tracker.Start();
         }
 
@@ -44,11 +50,35 @@ public class TabIdleTrackerTests
         public void Sweep() => _tracker!.Sweep();
     }
 
+    /// <summary>
+    /// A TimeProvider whose CreateTimer hands back a timer that never
+    /// fires and cannot be armed -- the null object for the tracker's
+    /// periodic sweep in tests.
+    /// </summary>
+    private sealed class NoTimerProvider : TimeProvider
+    {
+        private sealed class DeadTimer : ITimer
+        {
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => default;
+            public bool Change(TimeSpan dueTime, TimeSpan period) => false;
+        }
+
+        public override ITimer CreateTimer(
+            TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+            => new DeadTimer();
+    }
+
     [Fact]
     public void TheActiveTabIsNeverIdle()
     {
         var rig = new Rig();
         rig.Start();
+        // Stamp the active tab so the elapsed clause of the sweep rule
+        // passes and the active-exemption clause is the only thing left
+        // standing between the tab and the moon: without this the test
+        // passes vacuously through the zero-stamp fresh rule.
+        rig.Manager.Tabs[0].LastActivityTick = rig.Now;
 
         rig.Now += 60_000;
         rig.Sweep();

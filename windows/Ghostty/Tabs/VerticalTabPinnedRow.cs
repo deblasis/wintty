@@ -228,8 +228,10 @@ internal sealed partial class VerticalTabPinnedRow : Grid
             : Visibility.Collapsed;
 
     /// <summary>
-    /// Muted brush for the moon: secondary text colour, resolved against
-    /// live resources so it tracks theme changes.
+    /// Muted brush for the moon: secondary text colour, resolved once at
+    /// row construction. A theme flip after construction leaves the moon
+    /// in the old theme's secondary ink -- the same exposure the bell's
+    /// construction-time accent brush already has in this square.
     /// </summary>
     private static Brush MutedGlyphBrush()
     {
