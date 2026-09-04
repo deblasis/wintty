@@ -162,6 +162,20 @@ pub fn reset(self: *DescriptorHeap) void {
     self.free_mask = 0;
 }
 
+/// Claim the first `n` slots outright, for callers that write descriptors
+/// by handle rather than through allocate() (swap chain back buffers are
+/// the case: their RTVs land in slots 0..n by construction). Writing
+/// `allocated` directly is no longer valid bookkeeping -- the free mask
+/// would disagree and allocate() would hand a live slot to someone else.
+pub fn claimFirst(self: *DescriptorHeap, n: u32) void {
+    std.debug.assert(n <= self.capacity);
+    self.allocated = n;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        self.free_mask |= @as(u128, 1) << @intCast(i);
+    }
+}
+
 /// Allocate the next descriptor slot, preferring a recycled slot over a
 /// fresh one. Returns the CPU/GPU handles and index.
 pub fn allocate(self: *DescriptorHeap) !Descriptor {
@@ -470,4 +484,20 @@ test "allocateContiguous fails when only non-adjacent holes remain" {
     // Free only one of the two: a single hole cannot satisfy a pair.
     heap.release(d1.index);
     try std.testing.expectError(error.DescriptorHeapFull, heap.allocateContiguous(2));
+}
+
+test "claimFirst marks handle-written slots as live" {
+    var heap = testHeap(4, 64);
+
+    // Swap-chain style: RTVs written by handle into slots 0 and 1.
+    heap.claimFirst(2);
+
+    // The next allocation must land past the claim, not recycle slot 0.
+    const d = try heap.allocate();
+    try std.testing.expectEqual(@as(u32, 2), d.index);
+
+    // Releasing a claimed slot returns it to circulation like any other.
+    heap.release(1);
+    const e = try heap.allocate();
+    try std.testing.expectEqual(@as(u32, 1), e.index);
 }

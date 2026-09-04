@@ -357,9 +357,11 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             dev_ptr.device.CreateRenderTargetView(resource, null, rtv_handle);
             result.rtv_handles[i] = rtv_handle;
         }
-        // Advance the linear allocator past the swap chain slots so
-        // custom shader textures get their own RTV descriptors.
-        result.rtv_heap.?.allocated = device.Device.frame_count;
+        // Advance the allocator past the swap chain slots so custom
+        // shader textures get their own RTV descriptors. claimFirst (not
+        // a raw allocated write) so the free mask agrees and recycling
+        // cannot hand these slots out again.
+        result.rtv_heap.?.claimFirst(device.Device.frame_count);
         result.rtv_base = result.rtv_heap.?.allocated;
     } else if (dev_ptr.shared_texture != null) {
         // Shared-texture mode: one RTV pointing at the shared resource.
@@ -370,7 +372,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         const rtv_handle = result.rtv_heap.?.cpuHandle(0);
         dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
         result.shared_rtv = rtv_handle;
-        result.rtv_heap.?.allocated = 1;
+        result.rtv_heap.?.claimFirst(1);
         result.rtv_base = 1;
     }
     errdefer {
