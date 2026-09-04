@@ -173,12 +173,10 @@ internal sealed partial class ThemePreviewService : IDisposable
         NamedPipeServerStream server;
         try
         {
-            server = new NamedPipeServerStream(
-                PipeName,
-                PipeDirection.In,
-                1, // single instance
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
+            // SecureNamedPipe adds CurrentUserOnly for the same reason the
+            // single-instance server does: the name is deterministic, and
+            // the default pipe DACL is broader than this IPC needs.
+            server = SecureNamedPipe.CreateServer(PipeName);
         }
         catch (IOException ex)
         {

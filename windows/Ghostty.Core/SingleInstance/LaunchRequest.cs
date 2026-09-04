@@ -24,6 +24,23 @@ public sealed record LaunchRequest(string WorkingDirectory, IReadOnlyList<string
     private const string Header = "V1";
 
     /// <summary>
+    /// Upper bound on the arg count the parser will honor. Real launches
+    /// carry a shell command line (Windows caps it near 32 KiB, so a few
+    /// hundred args at most) plus a handful of activation arguments; a
+    /// declared count above this is hostile input whose only purpose is the
+    /// <c>List</c> preallocation, which would otherwise request a &gt;2 GB
+    /// array from a parser documented to never throw.
+    /// </summary>
+    public const int MaxArgCount = 1024;
+
+    /// <summary>
+    /// Upper bound on a serialized payload the primary will read off the
+    /// pipe. Generous multiple of any real payload; exists so the pipe read
+    /// can be bounded instead of buffering whatever a peer sends.
+    /// </summary>
+    public const int MaxSerializedBytes = 1 << 20;
+
+    /// <summary>
     /// Length-prefixed UTF-8 encoding. Format:
     /// <c>V1\n</c> then each string as <c>&lt;utf8ByteCount&gt;:&lt;bytes&gt;</c>:
     /// working directory, then the arg count (as its own length-prefixed
@@ -68,7 +85,8 @@ public sealed record LaunchRequest(string WorkingDirectory, IReadOnlyList<string
         if (!TryReadField(rest, ref pos, out var cwd)) return false;
         if (!TryReadField(rest, ref pos, out var countStr)) return false;
         if (!int.TryParse(countStr, NumberStyles.None, CultureInfo.InvariantCulture, out var count)
-            || count < 0)
+            || count < 0
+            || count > MaxArgCount)
             return false;
 
         var args = new List<string>(count);
