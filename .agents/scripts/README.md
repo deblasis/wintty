@@ -46,6 +46,22 @@ human) working in this repo uses the same contract:
   landed outside the guard. A bypass does not just skip the rule: the
   resignoff issue only exists if the guard ran, since the record and the
   delta it files both come from it.
+- `just resignoff-bot [--max N] [--dry-run]` - work the pile the guard
+  files (#969 phase 2): an operator loop, never a merge step, so agents
+  merging a PR do not run it. Each invocation spends at most `--max`
+  signoff runs (default 1; a full ladder is over an hour of lane time),
+  newest window first: a window whose recorded squash already has a green
+  record closes on that evidence, an unproven window takes one claim
+  marker, one detached worktree at the recorded squash sha and one
+  `incoda run --queue wintty -- just signoff`, and a red window bisects
+  the recorded squash SHAs down to a single culprit issue, which gets the
+  `signoff-bisect-culprit` label, the failing legs and the trail, and
+  stays open. One instance at a time: a lock beside the worktree refuses a
+  second live bot (a dead holder's lock is taken over). The records ARE
+  the bisect state, so any re-invocation resumes where the last one
+  stopped; `--max 0` is the greens-only pass, closing what the records
+  already retire and spending nothing; and `--dry-run` prints the
+  decisions and exact commands while mutating nothing.
 - `just doctor` - verify everything the gates depend on: required tools on
   PATH, scripts where the hook wiring points, settings parseable, nightly
   task registration. A Claude Code SessionStart hook runs the fast subset
@@ -101,5 +117,5 @@ Windows-only (PowerShell 7, scheduled tasks, GetLastInputInfo).
 
 Runtime state (not committed): signoff records under the git common dir in
 `pr-signoff/`, workspace-guard state in the per-worktree git dir, nightly
-config/status/logs under `.agents/nightly-logs/`, and the nightly worktree
-under `.agents/worktrees/nightly`.
+config/status/logs under `.agents/nightly-logs/`, and the nightly and
+resignoff worktrees under `.agents/worktrees/`.
