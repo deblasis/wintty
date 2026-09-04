@@ -140,6 +140,11 @@ internal sealed class LayoutCoordinator
     /// </summary>
     private readonly Func<bool>? _motionEnabled;
 
+    // Children of the morph canvas that live there permanently (the run
+    // label). Everything the switch parks must be gone by its end; these
+    // never are, by design, so the ghosts oracle subtracts them.
+    private readonly Func<int> _residentMorphChildren;
+
     private bool _switching;
     // The timeline staged by the most recent switch, non-null exactly while
     // that switch is in flight: Animate stages it, and the landing callback
@@ -175,9 +180,11 @@ internal sealed class LayoutCoordinator
         FrameworkElement morphRoot,
         FrameworkElement paneHost,
         Func<TabModel?> activeTab,
-        Func<bool>? motionEnabled = null)
+        Func<bool>? motionEnabled = null,
+        Func<int>? residentMorphChildren = null)
     {
         _motionEnabled = motionEnabled;
+        _residentMorphChildren = residentMorphChildren ?? (() => 0);
         _horizontalTabHost = horizontalTabHost;
         _morphLayer = morphLayer;
         _morphRoot = morphRoot;
@@ -201,12 +208,25 @@ internal sealed class LayoutCoordinator
     public bool IsSwitching => _switching;
 
     /// <summary>
-    /// What is parked on the morph layer right now: the active-tab ghost,
-    /// the icon stand-in, and the run label the strips share it with. The
-    /// same count MorphTrace prints as <c>ghosts=</c>, exposed so the
-    /// filmstrip can assert per frame rather than only at the end.
+    /// What the SWITCH has parked on the morph layer right now: the
+    /// active-tab ghost and the icon stand-in. The run label shares the
+    /// canvas permanently (the one overlay both strips are measured in),
+    /// so it is excluded here - counted in, it reads as one ghost on
+    /// every frame of every switch, which is exactly what blinded the
+    /// morph fuzz's end-line oracle and the filmstrip's per-frame gate.
+    /// The same number MorphTrace prints as <c>ghosts=</c>, exposed so
+    /// the filmstrip can assert per frame rather than only at the end.
     /// </summary>
-    public int TestSeamMorphLayerCount => _morphLayer.Children.Count;
+    public int TestSeamMorphLayerCount => SwitchOwnedMorphChildren;
+
+    /// <summary>
+    /// The one expression both the trace's <c>ghosts=</c> and
+    /// <see cref="TestSeamMorphLayerCount"/> report: what the switch has
+    /// parked, residents excluded. Shared so the seam and the trace cannot
+    /// quietly disagree after some future edit to one of them.
+    /// </summary>
+    private int SwitchOwnedMorphChildren =>
+        Math.Max(0, _morphLayer.Children.Count - _residentMorphChildren());
 
     /// <summary>
     /// Snap both hosts and the vertical title bar to the end state
@@ -1102,7 +1122,7 @@ internal sealed class LayoutCoordinator
         // ground that already agrees with it.
         Snap(verticalTabs);
         MorphTrace(
-            $"SWITCH end ghosts={_morphLayer.Children.Count} morph={(_morph is null ? "null" : "LEAKED")} uiFrames={StopFrameCount()}");
+            $"SWITCH end ghosts={SwitchOwnedMorphChildren} morph={(_morph is null ? "null" : "LEAKED")} uiFrames={StopFrameCount()}");
         _switching = false;
         onCompleted?.Invoke();
     }
