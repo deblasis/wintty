@@ -1992,12 +1992,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         };
         ApplyItemTitleChrome(item, tab);
 
-        // Title and bell are cheap to reapply, so they share one binding.
-        // Color is separate because it triggers a whole-strip recolor, and
-        // the icon is separate because its spec lives on TabIconViewModel
-        // and changes when the foreground process changes. Folding all
-        // three together would re-decode the icon bitmap and recolor every
-        // row on every OSC 0/2 title the shell emits.
+        // Title, bell, and idle are cheap to reapply, so they share one
+        // binding. Color is separate because it triggers a whole-strip
+        // recolor, and the icon is separate because its spec lives on
+        // TabIconViewModel and changes when the foreground process
+        // changes. Folding them all together would re-decode the icon
+        // bitmap and recolor every row on every OSC 0/2 title the shell
+        // emits.
         var textBinding = AotBinding.Create(tab, _ =>
         {
             if (!_items.TryGetValue(tab, out var navItem)) return;
@@ -2008,7 +2009,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle),
-        nameof(TabModel.BellRinging));
+        nameof(TabModel.BellRinging),
+        nameof(TabModel.IsIdle));
 
         var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
             nameof(TabModel.Color));
@@ -2057,10 +2059,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         row.SetIcon(TabIconElementFactory.Create(tab.TabIcon));
 
         // The same three subscriptions a body row takes, pointed at the
-        // pinned row instead: title and bell feed the tooltip and the a11y
-        // chrome, color re-inks the whole strip, and the icon rebuilds when
-        // the foreground process changes. (AddBodyRow carries the long
-        // version of the split rationale.)
+        // pinned row instead: title, bell, and idle feed the tooltip and
+        // the badges, color re-inks the whole strip, and the icon rebuilds
+        // when the foreground process changes. (AddBodyRow carries the
+        // long version of the split rationale.)
         var textBinding = AotBinding.Create(tab, _ =>
         {
             if (_pinnedRows.TryGetValue(tab, out var pinnedRow))
@@ -2069,7 +2071,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle),
-        nameof(TabModel.BellRinging));
+        nameof(TabModel.BellRinging),
+        nameof(TabModel.IsIdle));
 
         var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
             nameof(TabModel.Color));

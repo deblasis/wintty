@@ -938,6 +938,22 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "tab-idle":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                // Writes the property the idle tracker's sweep owns, so a
+                // harness can verify every strip's reaction to the idle
+                // state (moon glyph + dim, both orientations, pinned and
+                // body rows) without waiting out the one-minute
+                // threshold. The next sweep overwrites this with the
+                // computed truth -- the honest race a scenario must
+                // finish inside.
+                tab.IsIdle = ArgBool(args, "idle", true);
+                return OkWithState(window, manager, op);
+            }
+
             case "header-rect":
             {
                 var index = ArgInt(args, "index", -1);
@@ -1266,6 +1282,7 @@ internal static class TestSeam
             json.WriteNumber("index", i);
             json.WriteString("title", tab.EffectiveTitle);
             json.WriteBoolean("pinned", tab.IsPinned);
+            json.WriteBoolean("idle", tab.IsIdle);
             // Per-tab pane memory: the leaf each tab would come back to.
             if (tab.PaneHost is Ghostty.Panes.PaneHost host)
             {

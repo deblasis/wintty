@@ -7,12 +7,19 @@ namespace Ghostty.Tabs;
 
 /// <summary>
 /// Expanded-pane row content for a vertical-tab
-/// <see cref="NavigationViewItem"/>: title, optional bell, close.
+/// <see cref="NavigationViewItem"/>: title, optional bell and idle moon,
+/// close.
 /// </summary>
 internal sealed partial class VerticalTabNavRow : Grid
 {
+    // Segoe Fluent / MDL2 "QuietHours" moon. Muted like the horizontal
+    // strip's: sleeping is a rest state, not an alert.
+    private const string IdleGlyph = "\uE708";
+    private const double IdleOpacity = 0.45;
+
     private readonly TextBlock _title;
     private readonly FontIcon _bell;
+    private readonly FontIcon _idle;
     private readonly Button _close;
     private Border? _coDragAccent;
 
@@ -38,6 +45,20 @@ internal sealed partial class VerticalTabNavRow : Grid
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 4, 0),
             Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed,
+        };
+
+        // The idle moon: shown while the tab has been untouched
+        // (TabIdleTracker), hidden whenever a bell is up -- the bell owns
+        // the badge. Muted, not accent, so a resting row does not read
+        // as alerting.
+        _idle = new FontIcon
+        {
+            Glyph = IdleGlyph,
+            FontSize = 9,
+            Foreground = MutedGlyphBrush(),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+            Visibility = IdleBadgeVisible(tab),
         };
 
         _close = new Button
@@ -66,10 +87,21 @@ internal sealed partial class VerticalTabNavRow : Grid
         var textRow = new Grid();
         textRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         textRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // Both badges share the one auto column -- moon first, bell
+        // nearest the edge -- so a row carrying both states (idle with a
+        // bell on it, between the sweep hiding the moon and the property
+        // landing) does not reflow the title.
+        var badges = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        badges.Children.Add(_idle);
+        badges.Children.Add(_bell);
         Grid.SetColumn(_title, 0);
-        Grid.SetColumn(_bell, 1);
+        Grid.SetColumn(badges, 1);
         textRow.Children.Add(_title);
-        textRow.Children.Add(_bell);
+        textRow.Children.Add(badges);
 
         Grid.SetColumn(textRow, 0);
         Grid.SetColumn(_close, 1);
@@ -106,7 +138,34 @@ internal sealed partial class VerticalTabNavRow : Grid
         _title.Text = tab.EffectiveTitle;
         ToolTipService.SetToolTip(_title, tab.EffectiveTitle);
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
+        _idle.Visibility = IdleBadgeVisible(tab);
+        // The idle dim rides the title, not the whole row: close stays
+        // full-strength so an idle tab still reads as closable.
+        _title.Opacity = tab.IsIdle ? IdleOpacity : 1.0;
         _close.Tag = tab;
+    }
+
+    /// <summary>
+    /// Whether the moon shows right now: idle, and no bell up (the bell
+    /// owns the badge, and a ringing tab is never idle anyway -- this
+    /// also covers the window where IsIdle has not been recomputed
+    /// since the bell landed).
+    /// </summary>
+    private static Visibility IdleBadgeVisible(TabModel tab)
+        => tab.IsIdle && !tab.BellRinging
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    /// <summary>
+    /// Muted brush for the moon: secondary text colour, resolved against
+    /// live resources so it tracks theme changes.
+    /// </summary>
+    private static Brush MutedGlyphBrush()
+    {
+        if (Application.Current.Resources.TryGetValue(
+                "TextFillColorSecondaryBrush", out var b) && b is Brush brush)
+            return brush;
+        return new SolidColorBrush(Microsoft.UI.Colors.Gray);
     }
 
     /// <summary>
