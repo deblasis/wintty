@@ -81,4 +81,29 @@ public class SurfaceOcclusionWiringTests
             method.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             i => i.ToString().Contains("visible ? (byte)1 : (byte)0"));
     }
+
+    [Fact]
+    public void LateSpawnedSurfacesInheritTheRecordedVisibility()
+    {
+        // A restored background tab's surfaces spawn after SwapActivePane
+        // already ran, so the zero-handle guard skipped them. The recorded
+        // state must be written on every tell and re-applied at spawn --
+        // and only for hidden, since visible is the native default a
+        // spawned surface already has.
+        var tell = PaneHost().Method("SetSurfaceVisibility");
+        Assert.Contains(
+            tell.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "_surfaceVisibility"
+                 && a.Right.ToString() == "visible");
+
+        var spawn = PaneHost().Method("OnLeafSurfaceSpawned");
+        var reapply = spawn.DescendantNodes()
+            .OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.ToString() == "_surfaceVisibility == false")
+            .ToList();
+        Assert.Single(reapply);
+        Assert.Contains(
+            reapply[0].DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "SetSurfaceVisibility");
+    }
 }

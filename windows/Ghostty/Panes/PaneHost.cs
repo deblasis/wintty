@@ -850,6 +850,16 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
+    /// The last visibility this host was told to hold, or null before the
+    /// first <see cref="SetSurfaceVisibility"/> call. Restore seeds a whole
+    /// tree at once while the surfaces do not exist yet, and the zero-handle
+    /// guard skips those leaves -- this records what they missed so
+    /// <see cref="OnLeafSurfaceSpawned"/> can apply it the moment each one
+    /// exists.
+    /// </summary>
+    private bool? _surfaceVisibility;
+
+    /// <summary>
     /// Tell libghostty, per leaf, whether this tab's pixels reach the
     /// screen. A hidden tab stops presenting and releases its GPU atlas
     /// copies until it is shown again (the renderer rebuilds them lazily
@@ -859,6 +869,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     internal void SetSurfaceVisibility(bool visible)
     {
+        _surfaceVisibility = visible;
         foreach (var leaf in PaneTree.Leaves(_root))
         {
             var handle = leaf.Terminal().SurfaceHandle;
@@ -1116,6 +1127,25 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void OnLeafSurfaceSpawned(object? sender, EventArgs e)
     {
         if (sender is not TerminalControl terminal) return;
+
+        // A surface that spawns while this host is hidden missed the
+        // native call: SwapActivePane ran during the restore, before any
+        // surface existed, and the zero-handle guard skipped every leaf.
+        // Without this re-apply, a restored background tab presents into
+        // nothing until the first real tab switch happens to flip it.
+        // Re-calling SetSurfaceVisibility is idempotent for leaves that
+        // already hold the state (libghostty dedups a no-change write).
+        if (_surfaceVisibility == false) SetSurfaceVisibility(false);
+
+        // A surface that spawns while this host is hidden missed the
+        // native call: SwapActivePane ran during the restore, before any
+        // surface existed, and the zero-handle guard skipped every leaf.
+        // Without this re-apply, a restored background tab presents into
+        // nothing until the first real tab switch happens to flip it.
+        // Re-calling SetSurfaceVisibility is idempotent for leaves that
+        // already hold the state (libghostty dedups a no-change write).
+
+
         if (!_startupGlowEnabled) return;
         // One glow per control. SurfaceSpawned fires once per control, so
         // this is only a guard against a future second raise landing here.
