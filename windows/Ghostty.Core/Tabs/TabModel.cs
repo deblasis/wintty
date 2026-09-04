@@ -159,6 +159,32 @@ internal sealed class TabModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// True when nothing has touched this tab for the idle window (see
+    /// <see cref="TabIdleTracker"/>): the strip dims the row and shows a
+    /// moon glyph. Written by the tracker's sweep (and its eager clear on
+    /// activation) -- one writer, so the value is always the computed
+    /// truth, never a stale toggle. Never true for the active tab or a
+    /// tab with an unacknowledged bell. In-memory only.
+    /// </summary>
+    public bool IsIdle
+    {
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    }
+
+    /// <summary>
+    /// Last time anything touched this tab, in
+    /// <see cref="Environment.TickCount64"/> milliseconds: activation
+    /// stamps here on the model itself, while keystrokes and pane output
+    /// land on the surfaces and read back through
+    /// <see cref="IPaneHost.LastActivityTick"/>. Zero until the first
+    /// stamp. Deliberately not INPC -- it is an input to the idle
+    /// tracker's sweep, not a rendered fact; <see cref="IsIdle"/> is the
+    /// rendered fact.
+    /// </summary>
+    internal long LastActivityTick { get; set; }
+
+    /// <summary>
     /// True while the tab sits in the pinned prefix. Set through
     /// <see cref="TabManager.SetPinned"/>, which relocates the tab to the
     /// zone boundary; writing it directly leaves the order to be repaired
