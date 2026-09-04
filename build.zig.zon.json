@@ -174,10 +174,10 @@
     "url": "git+https://github.com/zigimg/zigimg#d695acd97c02e57bb151e8f659d1280f5cd6ca70",
     "hash": "sha256-0IYATQldT6eJxRR2T/2CsIYZuzomqjvmdVyjmsjguyE="
   },
-  "zioshade-0.7.0-8s3a2hNSTgDA_8j-r4WhyCbfEuhsD6TGlETxwat8Xzz8": {
+  "zioshade-0.8.4-8s3a2kNFVAA2mZkIZq45NvtR1fRSG-tKMIAHaFNZajS1": {
     "name": "zioshade",
-    "url": "https://github.com/zioShade/zioshade/archive/refs/tags/v0.7.0.tar.gz",
-    "hash": "sha256-AB8U+6tn9L+GGqTeTtBN+m3bc11GnrnEcREOTRPXmG4="
+    "url": "https://github.com/zioShade/zioshade/archive/refs/tags/v0.8.4.tar.gz",
+    "hash": "sha256-zVWevb7xPvFCUCbmDALGwL5IDP+rYGon6vLAoeRBRFE="
   },
   "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o": {
     "name": "zlib",
