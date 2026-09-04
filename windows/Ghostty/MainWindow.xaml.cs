@@ -936,11 +936,25 @@ public sealed partial class MainWindow : Window
 
         _tabManager.TabAdded += (_, t) =>
         {
+            // Same convention as every tree-touching handler below: a
+            // post-close add (a cross-window adoption racing the close)
+            // must not arm a priming lease nobody cancels.
+            if (_isClosed) return;
             WireTabColor(t);
             AddPaneHost(t);
             AttachProcessTracking(t);
             SwapActivePane();
             ApplyPerTabChrome();
+            // Realized containers survive a strip being collapsed again,
+            // but containers for tabs added WHILE it is collapsed never
+            // come to exist - ItemsRepeater realizes only on a rendered
+            // viewport. Unprimed, the next switch toward that strip fades
+            // in nothing and the whole row pops in late once the viewport
+            // finally arrives mid-flight (measured: an empty caption band
+            // for ~420-490ms at 15 tabs, growing with tab count). Re-prime
+            // on every add so the row is realized before the switch needs
+            // it; the priming pass itself is three transparent frames.
+            _layout.PrimeHiddenStrip();
         };
         _tabManager.TabRemoved += (_, t) =>
         {
@@ -4181,6 +4195,13 @@ public sealed partial class MainWindow : Window
         _layout.SetStripHidden(hidden, _verticalTabsVisible);
         _stripForciblyHidden = hidden;
         RefreshBackdropChrome();
+
+        // The add that un-hid this strip ran the TabAdded prime while the
+        // strip was still hidden, so the prime refused; the just-added
+        // tab's container in the OTHER layout's strip would stay unbuilt
+        // until some later add. Un-hide is itself a strip-state change,
+        // so it gets its own prime.
+        if (!hidden) _layout.PrimeHiddenStrip();
 
         // The seam covers join the selected tab to the pane, so with no
         // strip there is nothing to join and the cover is a bar of tab

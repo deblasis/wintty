@@ -691,5 +691,44 @@ public class TabLayoutSwitchWiringTests
             $"the leader margin narrowed to {inAbove - outBelow:F3} of the switch "
             + $"(outgoing below half at {outBelow:F3}, incoming above at {inAbove:F3})");
     }
+
+    /// <summary>
+    /// Tabs added while the other layout's strip is collapsed never realize
+    /// their containers there - ItemsRepeater realizes only on a rendered
+    /// viewport - so the next switch toward it fades in nothing and the row
+    /// pops in late. PrimeHiddenStrip at construction covers the launch-time
+    /// containers; every arrival after that is covered by the prime inside
+    /// the TabAdded handler, which is the entire fix, so it is pinned here.
+    /// </summary>
+    [Fact]
+    public void TabArrivalsReprimeTheHiddenStrip_BehindTheCloseGate()
+    {
+        var window = Window();
+        // Exactly one TabAdded subscription primes; the quake-visibility
+        // subscription is a zero-work lambda and must not be the one caught.
+        var subscription = Assert.Single(
+            window.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString().EndsWith("_tabManager.TabAdded", StringComparison.Ordinal)
+                 && a.Right is ParenthesizedLambdaExpressionSyntax lambda
+                 && lambda.Body.Calls("_layout.PrimeHiddenStrip").Any());
+        var body = Assert.IsType<BlockSyntax>(
+            ((ParenthesizedLambdaExpressionSyntax)subscription.Right).Body).Statements;
+
+        // The close gate precedes the prime: a post-close add (a cross-window
+        // adoption racing the close) must not arm a three-frame Rendering
+        // lease that CancelStripPriming already ran to detach.
+        var gateIndex = body
+            .TakeWhile(s => s is not IfStatementSyntax i
+                            || !i.Condition.ToString().Contains("_isClosed"))
+            .Count();
+        var primeIndex = body
+            .TakeWhile(s => !s.Calls("_layout.PrimeHiddenStrip").Any())
+            .Count();
+        // Both have to exist, or TakeWhile silently returns the full count and
+        // the ordering assertion below passes while pinning nothing.
+        Assert.True(gateIndex < body.Count, "expected an _isClosed guard in the TabAdded handler");
+        Assert.True(primeIndex < body.Count, "expected the TabAdded handler to prime the hidden strip");
+        Assert.True(gateIndex < primeIndex, "the close gate must precede the prime");
+    }
 }
 
