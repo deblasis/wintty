@@ -217,8 +217,8 @@
   },
   {
     "type": "archive",
-    "url": "https://github.com/zioShade/zioshade/archive/refs/tags/v0.7.0.tar.gz",
-    "dest": "vendor/p/zioshade-0.7.0-8s3a2hNSTgDA_8j-r4WhyCbfEuhsD6TGlETxwat8Xzz8",
-    "sha256": "001f14fbab67f4bf861aa4de4ed04dfa6ddb735d469eb9c471110e4d13d7986e"
+    "url": "https://github.com/zioShade/zioshade/archive/refs/tags/v0.8.4.tar.gz",
+    "dest": "vendor/p/zioshade-0.8.4-8s3a2kNFVAA2mZkIZq45NvtR1fRSG-tKMIAHaFNZajS1",
+    "sha256": "cd559ebdbef13ef1425026e60c02c6e0be480cffab606a27eaf2c0a1e4414451"
   }
 ]
