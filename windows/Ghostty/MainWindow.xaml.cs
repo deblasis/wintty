@@ -2286,9 +2286,16 @@ public sealed partial class MainWindow : Window
         var active = (PaneHost)_tabManager.ActiveTab.PaneHost;
         foreach (UIElement child in PaneHostContainer.Children)
         {
-            child.Visibility = ReferenceEquals(child, active)
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            if (child is not PaneHost host) continue;
+            var isActive = ReferenceEquals(host, active);
+            host.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+            // XAML collapse hides the pixels but tells libghostty nothing,
+            // so a busy background tab kept rendering full frames nobody
+            // sees. The surface now learns it is hidden: presenting stops
+            // and the GPU atlas copies are released until the tab returns.
+            // The active tab's OTHER leaves (splits, the zoom-parked tree)
+            // stay visible - they are on screen by design.
+            host.SetSurfaceVisibility(isActive);
         }
     }
 
