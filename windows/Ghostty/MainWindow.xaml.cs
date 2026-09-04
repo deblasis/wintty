@@ -99,6 +99,14 @@ public sealed partial class MainWindow : Window
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
 
+    // Marks background tabs idle (no data, no interaction, for a minute)
+    // so both strips can dim them and show the moon. Constructed once the
+    // manager exists below; disposed in OnClosedAsync. Subscribes only to
+    // the manager's ActiveTabChanged, and both die with this window, so
+    // like _bellAnnouncer it is an internal cycle, not a cross-object
+    // leak.
+    private readonly TabIdleTracker _idleTracker;
+
     /// <summary>This window's tab manager, exposed for session capture.</summary>
     internal TabManager TabManager => _tabManager;
 
@@ -782,6 +790,14 @@ public sealed partial class MainWindow : Window
             getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
             openProfile: OpenProfile,
             bindingAction: ExecuteBindingAction);
+        // One shared sweep per window writes TabModel.IsIdle; both strips
+        // render from the property. The sweep must run where the models
+        // live (the UI thread), so the timer's fire is marshalled.
+        // (TryEnqueue wants a DispatcherQueueHandler, not an Action, so
+        // the marshal closes over the conversion rather than fighting it.)
+        _idleTracker = new TabIdleTracker(
+            _tabManager, a => DispatcherQueue.TryEnqueue(() => a()));
+        _idleTracker.Start();
         _windowState = WindowState.Load();
         // Apply the restored window geometry when restoring; otherwise use
         // the window-state.json fallback placement.
@@ -2086,6 +2102,7 @@ public sealed partial class MainWindow : Window
         _slideAnimator?.Dispose();
         _taskbar.Dispose();
         _bellAnnouncer.Dispose();
+        _idleTracker.Dispose();
         // _themeManager was disposed at the top of this method, before the
         // first await, so no theme callback can fire mid-teardown (#208).
 
