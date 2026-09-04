@@ -51,6 +51,15 @@ internal sealed class TitleBarCoordinator
     private TabModel? _titleHookedTab;
     private LeafPane? _activeLeaf;
 
+    /// <summary>
+    /// Fired when a caption-inset change has reflowed the strip's content.
+    /// The inset writes the drag region's MinWidth, which moves the tab
+    /// slots without any SizeChanged (the TabView's own size did not
+    /// change) - so whoever places strip-relative chrome from slot offsets
+    /// (the seam cover) needs this nudge or places from stale offsets.
+    /// </summary>
+    public event Action? CaptionInsetChanged;
+
     // Quake window: borderless, no OS caption buttons, so the reserved
     // caption inset (vertical column + horizontal drag-region MinWidth) is
     // dead space and the vertical-mode window title is noise. When set,
@@ -124,10 +133,16 @@ internal sealed class TitleBarCoordinator
                 // it, so setting the column is setting both. It used to
                 // carry its own copy of this width, which is one more
                 // thing that could disagree with the caption lane it is
-                // supposed to be part of.
+                // supposed to be part of. Fired only when the inset MOVED:
+                // AppWindow.Changed arrives per position change, so an
+                // unconditional fire ran the seam refresh on every
+                // mouse-move of a window drag.
+                if (_captionInset.Width.GridUnitType == GridUnitType.Pixel
+                    && Math.Abs(_captionInset.Width.Value - dip) < 0.01) return;
                 _captionInset.Width = new GridLength(dip);
                 if (_horizontalTabHost.DragRegion is FrameworkElement drag)
                     drag.MinWidth = dip;
+                CaptionInsetChanged?.Invoke();
             }
         }
         catch
