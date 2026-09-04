@@ -294,13 +294,16 @@ def post_github_status(record):
     prints one warning and changes nothing about the signoff's verdict.
     Never called for deferrals - a deferred record is a borrow, not
     evidence, and a tick for it would lie.
+
+    Returns True when the status was posted, False otherwise, so the
+    --post path can exit non-zero without the ladder path caring.
     """
     try:
         remote = subprocess.run(["git", "remote", "get-url", "origin"],
                                 cwd=REPO_ROOT, text=True,
                                 capture_output=True, timeout=10).stdout
         if "deblasis/wintty" not in remote:
-            return
+            return False
         legs = sorted(record["steps"])
         total = round(sum(s["seconds"] for s in record["steps"].values()))
         if record["pass"]:
@@ -320,8 +323,61 @@ def post_github_status(record):
         if p.returncode != 0:
             print(f"signoff: GitHub status not posted (signoff unaffected): "
                   f"{p.stderr.strip()[:160]}")
+            return False
+        return True
     except Exception as e:  # noqa: BLE001 - advertising must never fail the gate
         print(f"signoff: GitHub status not posted (signoff unaffected): {e}")
+        return False
+
+
+def resolve_record(record_dir, sha):
+    """Find the record file for `sha` (full hash or an unambiguous prefix).
+
+    The records directory also holds runs for superseded heads - a stack
+    rebuilt after a fix leaves the old SHAs behind - so callers pass an
+    explicit sha rather than "everything", and a prefix that matches two
+    records is an error naming both rather than a guess.
+    """
+    import glob as _glob
+    matches = [
+        p for p in _glob.glob(os.path.join(record_dir, "*.json"))
+        if os.path.basename(p)[:-len(".json")].startswith(sha)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        print(f"signoff: no record for {sha} under {record_dir}")
+        return None
+    print(f"signoff: {sha[:10]} is ambiguous; candidates:")
+    for m in matches:
+        print(f"  {os.path.basename(m)}")
+    return None
+
+
+def post_only(sha):
+    """Re-advertise an already-recorded signoff without running any leg.
+
+    For the run-then-push order: the ladder records against the exact
+    head SHA, and the automatic post fails harmlessly when that SHA is
+    not on GitHub yet. This closes the gap after the push, using the
+    record as recorded - it never fabricates or refreshes anything, and
+    it cannot post a deferral because deferrals live in the ledger, not
+    as per-SHA records.
+    """
+    d = signoff_dir()
+    if not d:
+        print("signoff: could not resolve the git common dir.")
+        return 2
+    path = resolve_record(d, sha)
+    if not path:
+        return 1
+    with open(path, encoding="utf-8") as f:
+        record = json.load(f)
+    ok = post_github_status(record)
+    if ok:
+        print(f"signoff: status posted for {record['sha'][:10]} "
+              f"({'PASS' if record['pass'] else 'FAIL'} as recorded)")
+    return 0 if ok else 1
 
 
 def settle(note):
@@ -477,6 +533,26 @@ def self_test():
     report("base" in record_payload("a" * 40, None, {}, True, [], None, [], "r", False),
            "record-base-null", "an unknown base is recorded as null, not omitted")
 
+    # resolve_record: the records dir also holds superseded heads (a stack
+    # rebuilt after a fix leaves the old SHAs behind), so a prefix must
+    # match exactly one file, ambiguity is an error naming the candidates,
+    # and a miss is reported rather than guessed at.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        exact = "a" * 40
+        sibling = "a" + "b" * 39
+        for sha in (exact, sibling, "c" * 40):
+            with open(os.path.join(td, f"{sha}.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+        report(resolve_record(td, exact) == os.path.join(td, f"{exact}.json"),
+               "resolve-exact", "a full sha resolves to its own file")
+        report(resolve_record(td, "ab") == os.path.join(td, f"{sibling}.json"),
+               "resolve-prefix", "an unambiguous prefix resolves")
+        report(resolve_record(td, "a") is None,
+               "resolve-ambiguous", "'a' matches two records and must refuse")
+        report(resolve_record(td, "d") is None,
+               "resolve-miss", "an unknown prefix reports no record")
+
     print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
     return 1 if failed else 0
 
@@ -495,6 +571,12 @@ if __name__ == "__main__":
     if "--debt" in argv:
         report_debt()
         sys.exit(0)
+    if "--post" in argv:
+        i = argv.index("--post")
+        if i + 1 >= len(argv):
+            print("signoff: --post needs a commit sha (full or unique prefix)")
+            sys.exit(2)
+        sys.exit(post_only(argv[i + 1]))
     if "--defer" in argv:
         i = argv.index("--defer")
         sys.exit(defer(" ".join(argv[i + 1:])))

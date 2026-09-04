@@ -45,11 +45,15 @@ These apply to anything aimed at upstream `ghostty-org/ghostty`:
 The rules above are upstream's. They do not describe how work lands here.
 
 Issues and PRs against `deblasis/wintty` are the normal, required workflow:
-branch from `windows`, open a PR with `--repo deblasis/wintty`, get it
-reviewed, run `just signoff` green against the exact head sha, and merge
-through `just merge-checked <pr>` by default. A raw `gh pr merge` is
-tolerated only for a provably same-window merge, and your view of
-`windows` is only as fresh as your last fetch. The `pr_gate` hook refuses
+branch from `windows`, push the branch, open a PR with `--repo
+deblasis/wintty`, get it reviewed, run `just signoff` green against the
+exact head sha, and merge through `just merge-checked <pr>` by default.
+Push before the signoff: the ladder records against the exact head sha and
+also advertises it as a GitHub status, which can only land once the commit
+exists on GitHub. If the order ever inverts anyway, `just signoff-post
+<sha>` re-advertises the recorded run without re-running anything. A raw
+`gh pr merge` is tolerated only for a provably same-window merge, and your
+view of `windows` is only as fresh as your last fetch. The `pr_gate` hook refuses
 a merge without that signoff, and it also refuses a raw merge whose
 signoff window has moved (commits landed on `windows` after the record's
 base): per #969 the merge itself is then still allowed, but it goes
