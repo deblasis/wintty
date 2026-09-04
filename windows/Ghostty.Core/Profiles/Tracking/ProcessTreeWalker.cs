@@ -21,7 +21,8 @@ internal readonly record struct DescendantInfo(string ExeBasename, string? Comma
 /// given root PID. "Innermost" = deepest by tree depth; ties broken by
 /// the snapshot's natural iteration order (deterministic on stable input).
 ///
-/// One snapshot per call. Caller invokes once per tracker tick (2 Hz).
+/// One snapshot per call. The tracker calls it once per tick, for every
+/// registered root at once.
 ///
 /// The generated CsWin32 class is <c>DWritePInvoke</c> (see
 /// NativeMethods.json "className") to avoid colliding with the
@@ -47,14 +48,22 @@ internal static class ProcessTreeWalker
         };
 
     /// <summary>
-    /// Returns the exe basename + command line of the innermost descendant
-    /// of <paramref name="rootPid"/>. Returns null when the root has no
-    /// descendants, has exited, or the snapshot fails. The command line
-    /// component is null when it could not be read (access denied, race
-    /// with process exit, etc.) but the basename is still reported.
+    /// ONE process snapshot resolves every root. The snapshot cost scales
+    /// with the whole machine's process count, not with any root's
+    /// subtree, so a caller answering N roots one at a time pays N
+    /// full-machine walks per tick - on a process-heavy box that is a
+    /// burned core (measured). The by-parent map is built once and shared;
+    /// each root's BFS then touches only that root's subtree. A root
+    /// missing from the answer reads as null.
     /// </summary>
-    public static DescendantInfo? FindInnermostDescendant(uint rootPid)
+    public static IReadOnlyDictionary<uint, DescendantInfo?> FindInnermostDescendants(
+        IEnumerable<uint> rootPids)
     {
+        var roots = new List<uint>(rootPids);
+        var result = new Dictionary<uint, DescendantInfo?>(roots.Count);
+        if (roots.Count == 0) return result;
+        foreach (var root in roots) result[root] = null;
+
         var snapshot = DWritePInvoke.CreateToolhelp32Snapshot(
             CREATE_TOOLHELP_SNAPSHOT_FLAGS.TH32CS_SNAPPROCESS, 0);
         // CreateToolhelp32Snapshot returns INVALID_HANDLE_VALUE (-1) on
@@ -62,14 +71,14 @@ internal static class ProcessTreeWalker
         // named constant for that, so compare against the raw -1 sentinel
         // via explicit IntPtr-to-HANDLE conversion.
         var invalid = (HANDLE)new IntPtr(-1);
-        if (snapshot == invalid) return null;
+        if (snapshot == invalid) return result;
 
         try
         {
             var byParent = new Dictionary<uint, List<(uint Pid, string ExeBasename)>>();
             var entry = new PROCESSENTRY32W { dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32W>() };
 
-            if (!DWritePInvoke.Process32FirstW(snapshot, ref entry)) return null;
+            if (!DWritePInvoke.Process32FirstW(snapshot, ref entry)) return result;
             do
             {
                 if (!byParent.TryGetValue(entry.th32ParentProcessID, out var list))
@@ -85,7 +94,9 @@ internal static class ProcessTreeWalker
             }
             while (DWritePInvoke.Process32NextW(snapshot, ref entry));
 
-            return DeepestDescendant(byParent, rootPid);
+            foreach (var root in roots)
+                result[root] = DeepestDescendant(byParent, root);
+            return result;
         }
         finally
         {
