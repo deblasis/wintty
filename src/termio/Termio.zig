@@ -49,6 +49,10 @@ renderer_state: *renderer.State,
 /// a repaint should happen. See termio.Options for why this is a pointer.
 renderer_wakeup: *xev.Async,
 
+/// The renderer's published visibility, if the embedder shared it. See
+/// termio.Options for the semantics; null means never drop a wake.
+renderer_visible: ?*const std.atomic.Value(bool),
+
 /// The mailbox for notifying the renderer of things.
 renderer_mailbox: *renderer.Thread.Mailbox,
 
@@ -322,6 +326,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
         .renderer_wakeup = opts.renderer_wakeup,
+        .renderer_visible = opts.renderer_visible,
         .renderer_mailbox = opts.renderer_mailbox,
         .size = &self.size,
         .terminal = &self.terminal,
@@ -342,6 +347,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .config = opts.config,
         .renderer_state = opts.renderer_state,
         .renderer_wakeup = opts.renderer_wakeup,
+        .renderer_visible = opts.renderer_visible,
         .renderer_mailbox = opts.renderer_mailbox,
         .surface_mailbox = opts.surface_mailbox,
         .size = opts.size,

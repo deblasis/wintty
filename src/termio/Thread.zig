@@ -369,8 +369,13 @@ fn drainMailbox(
     }
 
     // Trigger a redraw after we've drained so we don't waste cyces
-    // messaging a redraw.
+    // messaging a redraw. Dropped while the renderer is hidden: output
+    // nobody can see is not worth a thread wake, and the visibility
+    // transition rebuilds from terminal state regardless.
     if (redraw) {
+        if (io.renderer_visible) |v| {
+            if (!v.load(.acquire)) return;
+        }
         try io.renderer_wakeup.notify();
     }
 }
