@@ -32,6 +32,10 @@ internal sealed partial class VerticalTabStrip : UserControl
 {
     private const double RowInsetLeft = 4;
     private const double RowInsetVertical = 2;
+
+    // The idle dim on the collapsed rail's icons; matches the rows'
+    // title dim so one state reads at one strength everywhere.
+    private const double IdleIconOpacity = 0.45;
     // Where a row's trailing glyph stops. The selected row's fill runs to
     // the pane edge, so this reads as padding inside the fill rather than
     // as a second inset.
@@ -2004,6 +2008,14 @@ internal sealed partial class VerticalTabStrip : UserControl
             if (!_items.TryGetValue(tab, out var navItem)) return;
             if (navItem.Content is VerticalTabNavRow navRow)
                 navRow.Refresh(tab);
+            // The collapsed rail is icon-only: the row's content (title,
+            // bell, moon) is laid out past the rail's right edge and
+            // clipped away, so at rest the item's icon is the ONLY thing
+            // carrying this tab's state. The icon itself dims; the
+            // expanded row fades its own title in Refresh. Same 0.45 as
+            // the rows, one number read across all three shapes.
+            if (navItem.Icon is { } icon)
+                icon.Opacity = tab.IsIdle ? IdleIconOpacity : 1.0;
             ApplyItemTitleChrome(navItem, tab);
         },
         nameof(TabModel.EffectiveTitle),

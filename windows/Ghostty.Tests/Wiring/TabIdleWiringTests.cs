@@ -83,6 +83,15 @@ public class TabIdleWiringTests
                             .Any(a => a.ToString() == "nameof(TabModel.IsIdle)"))
             .ToList();
         Assert.Equal(2, bindings.Count);
+
+        // The collapsed rail is icon-only: the row's title, bell, and
+        // moon are laid out past the rail's edge and clipped away, so at
+        // rest the item's icon is the only carrier of the state. Without
+        // this write the resting rail shows nothing for an idle tab.
+        Assert.Contains(
+            Strip().Root.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "icon.Opacity"
+                 && a.Right.ToString() == "tab.IsIdle ? IdleIconOpacity : 1.0");
     }
 
     [Fact]

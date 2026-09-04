@@ -204,9 +204,25 @@ try {
     Start-Sleep -Milliseconds 300
     [void](Shot('v-idle-body'))
 
-    # A pinned idle square: pin tab 2, idle it, shoot the band.
+    # A pinned idle square. Pinning RELOCATES the tab to the front of
+    # the strip, so the index the pin was issued against is stale the
+    # moment it returns -- ask the state which index holds the pinned
+    # tab before driving the idle property at it.
     [void](Invoke-SeamCommand $session @{ op = 'pin'; index = 2 })
-    [void](Invoke-SeamCommand $session @{ op = 'tab-idle'; index = 2; idle = $true })
+    $st = Invoke-SeamCommand $session @{ op = 'get-state' }
+    $pinnedIndex = -1
+    foreach ($t in $st.state.tabs) {
+        if ($t.pinned) { $pinnedIndex = $t.index; break }
+    }
+    if ($pinnedIndex -lt 0) {
+        $script:Findings.Add('vertical pinned: no tab reports pinned after the pin op')
+    }
+    else {
+        $st = Invoke-SeamCommand $session @{ op = 'tab-idle'; index = $pinnedIndex; idle = $true }
+        if (-not $st.state.tabs[$pinnedIndex].idle) {
+            $script:Findings.Add('vertical pinned: tab-idle op did not report the property back')
+        }
+    }
     Start-Sleep -Milliseconds 300
     [void](Shot('v-idle-pinned'))
 }
