@@ -2903,6 +2903,37 @@ pub const CAPI = struct {
         surface.occlusionCallback(visible);
     }
 
+    /// Scrollback memory statistics for a surface's primary screen.
+    ///
+    /// This exists for embedders and harnesses that need to observe the
+    /// idle shed (scrollback compression) as a fact about the terminal
+    /// rather than a delta in process-wide byte counts, which every other
+    /// allocation in the process also moves. Reads the primary screen's
+    /// page list under the renderer state mutex so the walk sees a
+    /// stable list.
+    export fn ghostty_surface_memory_stats(
+        surface: *Surface,
+        out_total_pages: *u64,
+        out_compressed_pages: *u64,
+        out_resident_raw_bytes: *u64,
+        out_decommitted_raw_bytes: *u64,
+        out_encoded_bytes: *u64,
+    ) void {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lockUncancelable(global.io());
+        defer core_surface.renderer_state.mutex.unlock(global.io());
+
+        const pages = &core_surface.renderer_state.terminal
+            .screens.get(.primary).?.pages;
+        const stats = pages.memoryStats();
+
+        out_total_pages.* = @intCast(stats.resident_pages + stats.compressed_pages);
+        out_compressed_pages.* = @intCast(stats.compressed_pages);
+        out_resident_raw_bytes.* = @intCast(stats.resident_raw_bytes);
+        out_decommitted_raw_bytes.* = @intCast(stats.decommitted_raw_bytes);
+        out_encoded_bytes.* = @intCast(stats.encoded_bytes);
+    }
+
     /// Filter the mods if necessary. This handles settings such as
     /// `macos-option-as-alt`. The filtered mods should be used for
     /// key translation but should NOT be sent back via the `_key`
