@@ -278,6 +278,52 @@ def defer(reason):
     return 0
 
 
+def post_github_status(record):
+    """Advertise a finished signoff on GitHub as a commit status.
+
+    The record on disk is the authority and the local merge gate reads it
+    from there; this only puts the green/red tick and the one-line summary
+    where the PR shows them, because GitHub runs nothing by default
+    anymore (CI is dispatch/tag opt-in). The token is whatever `gh`
+    already holds, the context is named so it can never be mistaken for
+    the GitHub-side workflow, and no detail URL is invented - the full
+    record lives in this machine's git dir, which has no URL.
+
+    Best-effort by construction: an unpushed head (422 - status before
+    push is the normal early-run case), a missing `gh`, or an offline box
+    prints one warning and changes nothing about the signoff's verdict.
+    Never called for deferrals - a deferred record is a borrow, not
+    evidence, and a tick for it would lie.
+    """
+    try:
+        remote = subprocess.run(["git", "remote", "get-url", "origin"],
+                                cwd=REPO_ROOT, text=True,
+                                capture_output=True, timeout=10).stdout
+        if "deblasis/wintty" not in remote:
+            return
+        legs = sorted(record["steps"])
+        total = round(sum(s["seconds"] for s in record["steps"].values()))
+        if record["pass"]:
+            state, desc = "success", (
+                f"PASS {len(legs)} leg(s) in {total}s: {', '.join(legs)}")
+        else:
+            bad = [f"{n} rc={s['rc']}" for n, s in sorted(record["steps"].items())
+                   if s["rc"] != 0]
+            state, desc = "failure", f"FAIL: {'; '.join(bad)}"
+        p = subprocess.run(
+            ["gh", "api", "--method", "POST",
+             f"repos/deblasis/wintty/statuses/{record['sha']}",
+             "-f", f"state={state}",
+             "-f", "context=signoff/ladder",
+             "-f", f"description={desc[:140]}"],
+            cwd=REPO_ROOT, text=True, capture_output=True, timeout=20)
+        if p.returncode != 0:
+            print(f"signoff: GitHub status not posted (signoff unaffected): "
+                  f"{p.stderr.strip()[:160]}")
+    except Exception as e:  # noqa: BLE001 - advertising must never fail the gate
+        print(f"signoff: GitHub status not posted (signoff unaffected): {e}")
+
+
 def settle(note):
     d = signoff_dir()
     if not d:
@@ -349,6 +395,7 @@ def main(argv):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
     print(f"signoff: {'PASS' if ok else 'FAIL'} recorded for {head[:10]} at {path}")
+    post_github_status(record)
 
     # A green run of every leg is what deferred merges were borrowing
     # against, so it settles the ledger. A scoped run proves nothing about
