@@ -69,12 +69,12 @@ public sealed partial class SingleInstanceServer : IDisposable
         NamedPipeServerStream server;
         try
         {
-            server = new NamedPipeServerStream(
-                _pipeName,
-                PipeDirection.In,
-                1, // single instance: one forwarded launch at a time
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
+            // SecureNamedPipe adds CurrentUserOnly: the name is
+            // deterministic and publicly derivable, so the default pipe
+            // DACL would let any process in the session hold the single
+            // instance or post a launch the primary replays as its own
+            // command line.
+            server = SecureNamedPipe.CreateServer(_pipeName);
         }
         catch (IOException ex)
         {
@@ -87,12 +87,17 @@ public sealed partial class SingleInstanceServer : IDisposable
             using (server)
             {
                 await server.WaitForConnectionAsync(ct);
-                using var reader = new StreamReader(server);
                 // The secondary writes Serialize() (which may itself
-                // contain '\n' inside fields), so read the whole stream,
-                // not a single line.
-                var payload = await reader.ReadToEndAsync(ct);
-                if (LaunchRequest.TryParse(payload, out var req) && req is not null)
+                // contain '\n' inside fields), so read the whole stream
+                // -- but bounded: an unbounded ReadToEnd would buffer
+                // whatever a connected peer cares to send.
+                var (payload, overflow) = await SecureNamedPipe.ReadAtMostAsync(
+                    server, LaunchRequest.MaxSerializedBytes, ct);
+                if (overflow)
+                {
+                    _logger.LogSingleInstanceBadPayload();
+                }
+                else if (LaunchRequest.TryParse(payload, out var req) && req is not null)
                     _onLaunch(req);
                 else
                     _logger.LogSingleInstanceBadPayload();

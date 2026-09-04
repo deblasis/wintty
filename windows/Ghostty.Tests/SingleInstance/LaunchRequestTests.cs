@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Ghostty.Core.Activation;
 using Ghostty.Core.SingleInstance;
@@ -107,9 +108,37 @@ public sealed class LaunchRequestTests
     [InlineData("V1\n3:abcX")]             // trailing garbage after a field
     [InlineData("V1\nnotanumber:abc")]     // non-numeric length prefix
     [InlineData("V1\n3:cwd")]              // missing arg-count field
+    [InlineData("V1\n2:C:10:2147483647:")] // hostile arg count (see Fact below)
     public void TryParse_Malformed_ReturnsFalse(string s)
     {
         Assert.False(LaunchRequest.TryParse(s, out var back));
         Assert.Null(back);
+    }
+
+    // A declared count of int.MaxValue used to preallocate a List with a
+    // 2^31 capacity -- a >2 GB array request -- out of a parser whose
+    // contract says it never throws. The count cap must reject the payload
+    // before any allocation sized from the wire happens. This is its own
+    // Fact (not another Theory row) so a failure here reads as the OOM
+    // crash it is rather than as one more malformed string.
+    [Fact]
+    public void TryParse_HostileArgCount_ReturnsFalseWithoutThrowing()
+    {
+        Assert.False(LaunchRequest.TryParse("V1\n2:C:10:2147483647:", out var req));
+        Assert.Null(req);
+    }
+
+    // The cap must not reject anything a real launch sends: a command line
+    // at the Windows 32 KiB ceiling is a few hundred args, so 1024 is
+    // already generous headroom and must still round-trip.
+    [Fact]
+    public void TryParse_AllowsArgsUpToTheCap()
+    {
+        var args = new string[LaunchRequest.MaxArgCount];
+        Array.Fill(args, "a");
+        var req = new LaunchRequest(@"C:\dir", args);
+
+        Assert.True(LaunchRequest.TryParse(req.Serialize(), out var back));
+        Assert.Equal(LaunchRequest.MaxArgCount, back!.Args.Count);
     }
 }
