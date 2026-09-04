@@ -579,10 +579,19 @@ internal static partial class NativeMethods
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_occlusion")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    private static partial void SurfaceSetOcclusionNative(GhosttySurface surface, byte occluded);
+    private static partial void SurfaceSetOcclusionNative(GhosttySurface surface, byte visible);
 
-    internal static void SurfaceSetOcclusion(GhosttySurface surface, bool occluded)
-        => SurfaceSetOcclusionNative(surface, occluded ? (byte)1 : (byte)0);
+    /// <summary>
+    /// Tell libghostty whether this surface's pixels reach the screen. The
+    /// native parameter means VISIBILITY (the C API spells it "occlusion"
+    /// but passes <c>visible</c>); a hidden surface stops presenting and
+    /// frees its GPU atlas copies until the next frame rebuilds them. The
+    /// wrapper is named for what it means rather than what the entry point
+    /// is called, because the old name's inverted reading ("occluded:
+    /// true" = fully visible) was a trap waiting for the first caller.
+    /// </summary>
+    internal static void SurfaceSetVisible(GhosttySurface surface, bool visible)
+        => SurfaceSetOcclusionNative(surface, visible ? (byte)1 : (byte)0);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_size")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]

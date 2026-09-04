@@ -50,6 +50,10 @@ pub const StreamHandler = struct {
     /// a repaint should happen. See termio.Options for why this is a pointer.
     renderer_wakeup: *xev.Async,
 
+    /// The renderer's published visibility. Output-driven wakes are
+    /// dropped while it reads false; see termio.Options.
+    renderer_visible: ?*const std.atomic.Value(bool),
+
     /// The response to use for ENQ requests. The memory is owned by
     /// whoever owns StreamHandler.
     enquiry_response: []const u8,
@@ -146,6 +150,12 @@ pub const StreamHandler = struct {
     /// isn't guaranteed to happen immediately but it will happen as soon as
     /// practical.
     pub inline fn queueRender(self: *StreamHandler) !void {
+        // Output nobody can see is not worth a thread wake: while the
+        // renderer is hidden this is the entire cost of the frame, and
+        // the visibility transition rebuilds from terminal state.
+        if (self.renderer_visible) |v| {
+            if (!v.load(.acquire)) return;
+        }
         try self.renderer_wakeup.notify();
     }
 

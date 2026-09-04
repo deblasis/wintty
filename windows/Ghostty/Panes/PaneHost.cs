@@ -850,6 +850,31 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
+    /// Tell libghostty, per leaf, whether this tab's pixels reach the
+    /// screen. A hidden tab stops presenting and releases its GPU atlas
+    /// copies until it is shown again (the renderer rebuilds them lazily
+    /// on the next frame); occlusion is a surface property, so a split tab
+    /// flips every leaf. Keyed on visibility, never on focus: a background
+    /// tab that never gains focus must still come back rendering.
+    /// </summary>
+    internal void SetSurfaceVisibility(bool visible)
+    {
+        foreach (var leaf in PaneTree.Leaves(_root))
+        {
+            var handle = leaf.Terminal().SurfaceHandle;
+            // Zero before the surface exists (the control has not Loaded
+            // yet - SwapActivePane first runs during construction, ahead
+            // of every surface) or after it is disposed; either way the
+            // native call would dereference a null surface. A surface
+            // that does not exist yet renders nothing and will get its
+            // real state from the next swap.
+            if (handle == IntPtr.Zero) continue;
+            Interop.NativeMethods.SurfaceSetVisible(
+                new Interop.GhosttySurface(handle), visible);
+        }
+    }
+
+    /// <summary>
     /// Tear down every leaf's libghostty surface. Called by
     /// <see cref="MainWindow"/> when the window is closing, since
     /// surface lifetime is decoupled from <c>Unloaded</c> events and
