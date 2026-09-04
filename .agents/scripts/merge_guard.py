@@ -685,7 +685,7 @@ def merge_flow(number, mode="merge", gh=None, git=None, sleep=time.sleep):
                   "body (file it with `--file-only`).")
         else:
             print("merge-guard: would merge with: gh pr merge "
-                  f"{number} --repo {REPO} --squash --delete-branch")
+                  f"{number} --repo {REPO} --squash")
         print(f"merge-guard: would file issue titled: {issue_title(pr, squash)}")
         print("merge-guard: with this body:")
         # The backlog line is in the preview too, so the dry-run body is
@@ -711,7 +711,7 @@ def merge_flow(number, mode="merge", gh=None, git=None, sleep=time.sleep):
 
     # mode == "merge": the real thing. From here on a failure is a 1, not
     # a 2, because the merge may already have landed.
-    out = gh(["pr", "merge", str(number), "--repo", REPO, "--squash", "--delete-branch"])
+    out = gh(["pr", "merge", str(number), "--repo", REPO, "--squash"])
     if out.returncode != 0:
         print(f"merge-guard: the merge command failed (rc={out.returncode}): "
               f"{(out.stderr or out.stdout).strip()}")
