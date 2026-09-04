@@ -228,6 +228,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         {
             FinishLift("teardown");
             UnhookAllGroups();
+            if (_tabStripScroller is { } scroller)
+            {
+                scroller.ViewChanged -= OnTabStripScrollerViewChanged;
+                _tabStripScroller = null;
+            }
         };
 
         // The drag lifecycle gates the seam cover below: mid-drag the
@@ -1455,7 +1460,24 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // every settle, and the frames it is wrong in are the frames where a
         // line appears between the tab and the pane.
         SelectedTabSeamChanged?.Invoke(left, width, _field.Brush);
+
+        // A placement made while the strip is still moving - a
+        // bring-into-view settle, an equal-width reflow, a caption-inset
+        // resize - reads valid bounds, looks final, and was never
+        // revisited. Re-check on the next layout pass whenever the span
+        // MOVED; when it stops moving this stops arming, so the chain
+        // converges at the fixpoint instead of running forever.
+        if (left != _lastSeamLeft || width != _lastSeamWidth)
+        {
+            _lastSeamLeft = left;
+            _lastSeamWidth = width;
+            ArmBridgeRetry();
+        }
     }
+
+    // The last span a successful placement reported, for the fixpoint above.
+    private double _lastSeamLeft = double.NaN;
+    private double _lastSeamWidth = double.NaN;
 
     // -----------------------------------------------------------------
     // The group field, horizontal edition.
@@ -1661,6 +1683,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         _tabListView ??= FindDescendantByName(TabViewControl, "TabListView");
         if (_tabListView is not { ActualWidth: > 0 } list) return null;
+        HookTabStripScroller(list);
 
         try
         {
@@ -1675,6 +1698,33 @@ internal sealed partial class TabHost : UserControl, ITabHost
             return null;
         }
     }
+
+    // The scroller the tab list scrolls inside. A user wheel or drag-scroll
+    // moves the drawn tab while its layout offset keeps reporting where the
+    // tab would be, and no enumerated event fires - so the cover sits over a
+    // stretch of border nowhere near the tab until the next unrelated
+    // refresh. ViewChanged re-derives the span, coalesced through the same
+    // queue every other refresh uses.
+    private Microsoft.UI.Xaml.Controls.ScrollViewer? _tabStripScroller;
+
+    private void HookTabStripScroller(Microsoft.UI.Xaml.UIElement list)
+    {
+        if (_tabStripScroller is not null) return;
+        var node = (Microsoft.UI.Xaml.DependencyObject?)list;
+        while (node is not null)
+        {
+            if (node is Microsoft.UI.Xaml.Controls.ScrollViewer scroller)
+            {
+                _tabStripScroller = scroller;
+                scroller.ViewChanged += OnTabStripScrollerViewChanged;
+                return;
+            }
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+    }
+
+    private void OnTabStripScrollerViewChanged(object? sender, object e)
+        => QueueBridgeUpdate();
 
     private static FrameworkElement? FindDescendantByName(DependencyObject root, string name)
     {
