@@ -104,6 +104,13 @@ flags: packed struct {
     focused: bool = true,
 } = .{},
 
+/// Visibility as other threads may read it. `flags.visible` is owned by
+/// this thread; the atomic is the same fact published lock-free so the
+/// termio side can skip waking us for output nobody can see. The
+/// `.visible=true` transition rebuilds from terminal state, so dropped
+/// wakes cost nothing but the invisible frames.
+visible_flag: std.atomic.Value(bool) = .init(true),
+
 pub const DerivedConfig = struct {
     scrollback_compression: bool,
 
@@ -315,6 +322,12 @@ fn drainMailbox(self: *Thread) !void {
 
                 // Set our visible state
                 self.flags.visible = v;
+
+                // Publish for other threads: termio drops its
+                // output-driven redraw wakes while hidden (a wake with
+                // nothing to draw costs more than the frames it would
+                // have carried), so they need a lock-free read of this.
+                self.visible_flag.store(v, .release);
 
                 // Visibility affects our QoS class
                 self.setQosClass();

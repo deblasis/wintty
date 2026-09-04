@@ -1,5 +1,6 @@
 //! The options that are used to configure a terminal IO implementation.
 
+const std = @import("std");
 const xev = @import("../global.zig").xev;
 const apprt = @import("../apprt.zig");
 const renderer = @import("../renderer.zig");
@@ -37,6 +38,13 @@ renderer_state: *renderer.State,
 /// Some xev backends (IOCP) store the wait registration in the struct
 /// itself, so notifying a copy does nothing.
 renderer_wakeup: *xev.Async,
+
+/// The renderer's published visibility, if known. When set and the
+/// renderer is NOT visible, output-driven redraw wakes are dropped: the
+/// wake is the whole cost of an invisible frame, and the visibility
+/// transition rebuilds from terminal state regardless. Optional because
+/// embedders and tests that never hide a surface have no flag to share.
+renderer_visible: ?*const std.atomic.Value(bool) = null,
 
 /// The mailbox for renderer messages.
 renderer_mailbox: *renderer.Thread.Mailbox,

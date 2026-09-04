@@ -706,6 +706,7 @@ pub fn init(
             // The renderer arms its wait on `self.renderer_thread.wakeup`,
             // so only that instance may be notified.
             .renderer_wakeup = &self.renderer_thread.wakeup,
+            .renderer_visible = &self.renderer_thread.visible_flag,
             .renderer_mailbox = self.renderer_thread.mailbox,
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
         });
