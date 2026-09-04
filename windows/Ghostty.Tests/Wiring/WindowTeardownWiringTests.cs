@@ -116,6 +116,7 @@ public class WindowTeardownWiringTests
         ("_host", "this window's own GhosttyHost; its events are raised from surface input, "
                   + "which a closing window no longer receives"),
         ("_tabManager", "this window's own TabManager"),
+        ("_titleBar", "this window's own TitleBarCoordinator; its CaptionInsetChanged re-places strip chrome that dies with the window"),
         ("_verticalTabHost", "this window's own vertical tab host, constructed and held only by "
                              + "this window; its events are raised from strip drag and selection "
                              + "input, which a closing window no longer receives"),

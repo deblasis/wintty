@@ -31,6 +31,7 @@ public sealed class ActiveTabFieldWiringTests
 {
     private const string VerticalStrip = "Tabs.VerticalTabStrip.xaml.cs";
     private const string HorizontalStrip = "Tabs.TabHost.xaml.cs";
+    private const string MainWindowFile = "Ghostty.MainWindow.xaml.cs";
 
     /// <summary>
     /// Each strip and the method that takes the palette. They are the same
@@ -314,5 +315,60 @@ public sealed class ActiveTabFieldWiringTests
             .FirstOrDefault(v => v.Identifier.ValueText == name);
         Assert.True(declared?.Initializer is not null, $"no local '{name}' with an initializer");
         return declared!.Initializer!.Value.ToString();
+    }
+
+    /// <summary>
+    /// The seam cover is a copy of a fact the layout already knows (the
+    /// selected tab's span), and it drifts wherever that copy is not
+    /// re-derived: mid-switch (the cover's cell origin moves with the
+    /// collapsing lane while the span is measured in host space), during
+    /// strip scroll (no enumerated event fires), and across caption-inset
+    /// reflows (MinWidth moves slots without a SizeChanged). These pins are
+    /// the three doors the fix closed, plus the coordinate-basis fix that
+    /// makes the mid-flight door structural rather than timing-dependent.
+    /// </summary>
+    [Fact]
+    public void TheSeamCoverCannotDrift()
+    {
+        var window = ShellSource.Load(MainWindowFile);
+
+        // The cover lives in grid space, not in cell (1,1): a margin in
+        // cell space is only correct while the strip column reads zero.
+        var creation = window.Root.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString().Contains("_tabSeamCover"))
+            .ToList();
+        Assert.Contains(creation,
+            a => a.Right.ToString().Contains("Microsoft.UI.Xaml.Shapes.Rectangle"));
+        var source = window.Root.ToString();
+        Assert.Contains("Grid.SetColumn(_tabSeamCover, 0)", source);
+        Assert.Contains("Grid.SetColumnSpan(_tabSeamCover, 2)", source);
+
+        // The seam gate refuses mid-switch placements: the landing's
+        // RefreshSeam re-places into a settled frame.
+        var gate = window.Method("OnSelectedTabSeamChanged");
+        Assert.Contains(gate.DescendantNodes().OfType<IdentifierNameSyntax>(),
+            i => i.Identifier.ValueText == "IsSwitching");
+
+        // A successful placement re-checks while the span is still moving
+        // and stops when it stops moving: the fixpoint arming.
+        var bridge = ShellSource.Load(HorizontalStrip).Method("UpdateSelectedTabBridge");
+        var successArm = bridge.DescendantNodes()
+            .OfType<IfStatementSyntax>()
+            .SingleOrDefault(i => i.Condition.ToString().Contains("_lastSeamLeft"));
+        Assert.NotNull(successArm);
+        Assert.Contains(successArm.Calls("ArmBridgeRetry"), _ => true);
+
+        // A user scroll moves the drawn tab without firing any enumerated
+        // event; the scroller's ViewChanged re-derives the span. The
+        // subscription must name the real handler - a neutralized no-op
+        // lambda still reads as a subscription.
+        var host = ShellSource.Load(HorizontalStrip).Root;
+        Assert.Contains(host.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.IsKind(SyntaxKind.AddAssignmentExpression)
+                 && a.Right is IdentifierNameSyntax id
+                 && id.Identifier.ValueText == "OnTabStripScrollerViewChanged");
+        var handler = ShellSource.Load(HorizontalStrip).Method("OnTabStripScrollerViewChanged");
+        Assert.Contains(handler.Calls("QueueBridgeUpdate"), _ => true);
     }
 }

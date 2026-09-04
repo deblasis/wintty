@@ -848,7 +848,16 @@ public sealed partial class MainWindow : Window
             Height = Core.Panes.PaneChrome.SurfaceInset,
         };
         Grid.SetRow(_tabSeamCover, 1);
-        Grid.SetColumn(_tabSeamCover, 1);
+        // Grid space, not cell (1,1): the span is measured in the host's
+        // coordinates, and the host spans both columns with its origin at
+        // the grid's - so a margin in cell space is only right while
+        // StripColumn reads zero, which is every resting horizontal frame
+        // and NO frame of a switch back from vertical (the lane is still
+        // open). A placement that slips through mid-flight lands offset by
+        // the whole lane width. Same precedent the vertical cover cites
+        // for living across the whole RootGrid.
+        Grid.SetColumn(_tabSeamCover, 0);
+        Grid.SetColumnSpan(_tabSeamCover, 2);
         RootGrid.Children.Add(_tabSeamCover);
         _horizontalTabHost.SelectedTabSeamChanged += OnSelectedTabSeamChanged;
 
@@ -1081,6 +1090,9 @@ public sealed partial class MainWindow : Window
             isVerticalMode: () => _tabHost is VerticalTabHost);
         _titleBar.ApplyForCurrentMode();
         _titleBar.SyncCaptionInset();
+        // An inset change reflows the tab slots without any SizeChanged,
+        // so the seam cover - placed from slot offsets - re-places here.
+        _titleBar.CaptionInsetChanged += () => _horizontalTabHost.RefreshSeam();
 
         _taskbar = new TaskbarHost(this, _tabManager, loggerFactory.CreateLogger<TaskbarHost>());
 
@@ -3313,7 +3325,14 @@ public sealed partial class MainWindow : Window
         // few frames. Reading it here meant the first placement of every
         // session decided it was in vertical layout and hid the cover, and
         // nothing re-fired until the window happened to be resized.
-        if (width <= 0 || fill is null || _verticalTabsVisible || _stripForciblyHidden)
+        // Mid-switch the placement's own basis is in motion (the lane is
+        // collapsing, the hosts are cross-fading), so hide and let the
+        // landing's RefreshSeam re-place into a settled frame - FinishSwitch
+        // clears IsSwitching before the landing runs, so that placement
+        // sees an open gate. Without this term any bridge event landing in
+        // the 340ms flight paints the cover over chrome that is moving.
+        if (width <= 0 || fill is null || _verticalTabsVisible || _stripForciblyHidden
+            || _layout.IsSwitching)
         {
             _tabSeamCover.Visibility = Visibility.Collapsed;
             return;
