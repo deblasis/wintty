@@ -993,7 +993,15 @@ public sealed partial class MainWindow : Window
             // packaged contexts and the answer can change under the user
             // mid-session.
             motionEnabled: () => TabStripMotion.Enabled(
-                SystemAnimationsEnabled(), HighContrastChromeActive));
+                SystemAnimationsEnabled(), HighContrastChromeActive),
+            // The run label lives on the morph canvas for the window's
+            // whole lifetime, so the ghosts oracle has to know it is there
+            // or every switch ends reporting one ghost that is only the
+            // label. Keyed on parentage rather than on the field: if the
+            // label is ever reparented away, the count follows the canvas
+            // and a real leftover ghost still reads.
+            residentMorphChildren: () =>
+                _runLabel is { } label && TabMorphLayer.Children.Contains(label) ? 1 : 0);
         _layout.Snap(_verticalTabsVisible);
 
         // The horizontal strip's group run label lives here, on the morph
@@ -3309,7 +3317,7 @@ public sealed partial class MainWindow : Window
     // Built here rather than in XAML so it stays code-built and
     // non-focusable by construction -- visual sugar, no automation
     // surface, no light-dismiss plumbing to fight.
-    private TabRunLabel? _runLabel;
+    private readonly TabRunLabel? _runLabel;
 
     /// <summary>
     /// The motion gate the run label reads per fade. Same sources as the
