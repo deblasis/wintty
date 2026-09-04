@@ -1021,6 +1021,7 @@ pub inline fn samplerOptions(self: DirectX12) Sampler.Options {
     return .{
         .device = if (self.dev) |*d| d.device else null,
         .sampler_heap = self.sampler_heap,
+        .retire = if (self.dev) |*d| d.retirement else null,
     };
 }
 
@@ -1061,12 +1062,47 @@ pub fn initAtlasTexture(
         // handle depth conversion when uploading.
         .bgr => .B8G8R8A8_UNORM,
     };
+
+    // The cell pass binds grayscale+color as one descriptor-table range,
+    // so the pair needs adjacent SRV slots. The grayscale half claims a
+    // contiguous pair and parks the partner on the heap for the color
+    // half that follows it (generic.zig always creates them back to
+    // back). Both halves release their slot on deinit, so a regrow
+    // recycles the pair after the covering fence.
+    const srv_slot: ?DescriptorHeap.Descriptor = switch (atlas.format) {
+        .grayscale => pair: {
+            const heap = self.srv_heap orelse break :pair null;
+            if (heap.atlas_partner) |stale| {
+                // A previous pair was abandoned between its two calls
+                // (the color init failed). That partner was never bound
+                // by any command list, so releasing it here is safe.
+                heap.release(stale);
+                heap.atlas_partner = null;
+            }
+            const first = heap.allocateContiguous(2) catch break :pair null;
+            heap.atlas_partner = first.index + 1;
+            break :pair first;
+        },
+        .bgra, .bgr => partner: {
+            const heap = self.srv_heap orelse break :partner null;
+            const idx = heap.atlas_partner orelse break :partner null;
+            heap.atlas_partner = null;
+            break :partner .{
+                .cpu = heap.cpuHandle(idx),
+                .gpu = heap.gpuHandle(idx),
+                .index = idx,
+            };
+        },
+    };
+
     return Texture.init(.{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
         .srv_heap = self.srv_heap,
         .retire = if (self.dev) |*d| d.retirement else null,
         .pixel_format = pixel_format,
+        .srv_slot = srv_slot,
+        .owns_srv_slot = srv_slot != null,
     }, size, size, null);
 }
 
