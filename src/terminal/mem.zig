@@ -26,9 +26,9 @@ pub const DecommitMode = enum {
 ///
 /// Test builds support both modes because `decommit` simulates reclamation by
 /// clearing the supplied range. Runtime reclamation is intentionally limited
-/// to 64-bit Linux and Darwin. Other targets must leave strict callers' memory
-/// resident; zero mode still provides its documented memset fallback through
-/// `decommit` even when this function returns false.
+/// to 64-bit Linux, Darwin, and Windows. Other targets must leave strict
+/// callers' memory resident; zero mode still provides its documented memset
+/// fallback through `decommit` even when this function returns false.
 pub inline fn canReclaim(comptime mode: DecommitMode) bool {
     // Both modes use the same retained-mapping primitives. Keeping the switch
     // exhaustive makes additions to DecommitMode choose target support
@@ -57,6 +57,13 @@ pub inline fn canReclaim(comptime mode: DecommitMode) bool {
             // this feature, so using its madvise entry point adds no new
             // dependency to libghostty-vt.
             if (builtin.target.os.tag.isDarwin()) break :supported true;
+
+            // Windows pairs MEM_DECOMMIT with MEM_COMMIT over the retained
+            // MEM_RESERVE range. Every terminal-page backing is a dedicated
+            // reservation (page.zig AllocWindows), so a range decommit cannot
+            // disturb unrelated memory, and the reserved range keeps the same
+            // address across the decommit/recommit pair.
+            if (builtin.target.os.tag == .windows) break :supported true;
 
             // Other targets have no retained-mapping reclamation contract in
             // this module. Zero mode can still clear through its memset
@@ -112,6 +119,46 @@ pub fn decommit(
         }
     }
 
+    // Windows discards with MEM_DECOMMIT and restores with MEM_COMMIT over
+    // the still-reserved range: the physical pages drop immediately, and a
+    // later commit faults them back in zeroed at the same address. Unlike
+    // MADV_DONTNEED, a decommitted page cannot be read at all until it is
+    // recommitted, so zero mode commits here to honor its read-as-zero
+    // contract; strict mode leaves the range decommitted for its caller's
+    // explicit recommit, the discipline PageList's restore paths keep.
+    if (comptime builtin.os.tag == .windows) {
+        const windows = @import("../os/windows.zig");
+        const addr: windows.LPVOID = @ptrCast(memory.ptr);
+        const discarded = windows.exp.kernel32.VirtualFree(
+            addr,
+            memory.len,
+            windows.MEM_DECOMMIT,
+        ) == windows.TRUE;
+        if (!discarded) {
+            log.warn("VirtualFree(MEM_DECOMMIT) failed", .{});
+            if (comptime mode == .strict) return false;
+            // Zero mode falls through to the memset below, which is safe:
+            // the discard failed, so the mapping was never touched.
+        } else if (comptime mode == .strict) {
+            return true;
+        } else if (windows.exp.kernel32.VirtualAlloc(
+            addr,
+            memory.len,
+            windows.MEM_COMMIT,
+            windows.PAGE_READWRITE,
+        ) != null) {
+            return true;
+        } else {
+            // The commit-charge was refused. The pages stay decommitted --
+            // unreadable until a successful recommit faults them in, at
+            // which point they read as zero, so the zero-mode guarantee
+            // arrives one recommit late rather than being lost. The pool
+            // callers ignore this result and always recommit on take.
+            log.warn("VirtualAlloc(MEM_COMMIT) after decommit failed", .{});
+            return false;
+        }
+    }
+
     // FREE_REUSABLE removes the range from the Darwin process footprint while
     // retaining its mapping. Zero mode clears its dirty prefix first because
     // the kernel may preserve the contents. Strict mode avoids that write
@@ -152,14 +199,33 @@ pub fn decommit(
 ///
 /// Linux and test builds need no explicit operation. Darwin pairs
 /// FREE_REUSABLE with FREE_REUSE so pages touched by the caller are accounted
-/// to the process again. Failure does not invalidate the retained mapping, so
-/// reuse can continue after logging the accounting failure.
+/// to the process again. Windows commits the still-reserved range, faulting
+/// the discarded pages back in zeroed. Failure does not invalidate the
+/// retained mapping, so reuse can continue after logging the accounting
+/// failure.
 pub fn recommit(memory: []align(std.heap.page_size_min) u8) void {
     assert(memory.len > 0);
     assert(@intFromPtr(memory.ptr) % std.heap.page_size_min == 0);
     assert(memory.len % std.heap.page_size_min == 0);
 
     if (comptime builtin.is_test) return;
+    if (comptime builtin.os.tag == .windows) {
+        const windows = @import("../os/windows.zig");
+        const addr: windows.LPVOID = @ptrCast(memory.ptr);
+        if (windows.exp.kernel32.VirtualAlloc(
+            addr,
+            memory.len,
+            windows.MEM_COMMIT,
+            windows.PAGE_READWRITE,
+        ) == null) {
+            // The reservation is intact; the pages are simply still
+            // decommitted. A later recommit can succeed (a commit-charge
+            // refusal is usually pressure, not permanence), so log and
+            // leave the range for that retry.
+            log.warn("VirtualAlloc(MEM_COMMIT) recommit failed", .{});
+        }
+        return;
+    }
     if (comptime builtin.os.tag.isDarwin()) {
         std.posix.madvise(
             memory.ptr,

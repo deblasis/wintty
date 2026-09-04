@@ -342,6 +342,16 @@ fn drainMailbox(self: *Thread) !void {
                 // Notify the renderer so it can update any state.
                 self.renderer.setVisible(v);
 
+                // Hiding is the strongest "activity stopped" signal a
+                // surface gets, and it is also the moment this thread's
+                // other wake sources go quiet: output-driven wakes are
+                // dropped while hidden (see visible_flag above), so
+                // without this kick the compression scheduler would
+                // starve on exactly the idle surfaces it exists for.
+                // The wake is debounced by its own idle interval and
+                // no-ops when nothing changed.
+                self.compression.wake(self);
+
                 // Note that we're explicitly today not stopping any
                 // cursor timers, draw timers, etc. These things have very
                 // little resource cost and properly maintaining their active
@@ -368,6 +378,12 @@ fn drainMailbox(self: *Thread) !void {
                 self.armAnimationTimer();
 
                 if (!v) {
+                    // Losing focus stops the cursor blink below, which is
+                    // this thread's last periodic wake while otherwise
+                    // visible and idle -- the same starvation the hide
+                    // transition kicks against (see .visible).
+                    self.compression.wake(self);
+
                     // If we're not focused, then we stop the cursor blink
                     if (self.cursor_c.state() == .active and
                         self.cursor_c_cancel.state() == .dead)

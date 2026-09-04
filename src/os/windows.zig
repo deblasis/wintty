@@ -120,6 +120,7 @@ pub const FILE_SHARE_READ = 0x00000001;
 pub const GENERIC_READ = 0x80000000;
 pub const HANDLE_FLAG_INHERIT = 0x00000001;
 pub const MEM_COMMIT = 0x1000;
+pub const MEM_DECOMMIT = 0x4000;
 pub const MEM_RELEASE = 0x8000;
 pub const MEM_RESERVE = 0x2000;
 pub const OPEN_EXISTING = 3; // Known as FILE_OPEN in Windows docs
