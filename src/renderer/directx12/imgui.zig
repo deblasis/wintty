@@ -148,6 +148,7 @@ test "SrvHeap recycles freed slots" {
     h.base.increment_size = 32;
     h.base.capacity = 4;
     h.base.allocated = 0;
+    h.base.free_mask = 0;
 
     const a = try h.allocSlot();
     const b = try h.allocSlot();
@@ -168,6 +169,7 @@ test "SrvHeap freeSlot recovers index from cpu handle" {
     h.base.increment_size = 64;
     h.base.capacity = 8;
     h.base.allocated = 5;
+    h.base.free_mask = 0b11111; // slots 0..4 live, matching allocated
 
     h.freeSlot(0x4000 + 3 * 64);
     try std.testing.expectEqual(@as(usize, 1), h.free_len);

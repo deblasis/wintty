@@ -357,9 +357,11 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             dev_ptr.device.CreateRenderTargetView(resource, null, rtv_handle);
             result.rtv_handles[i] = rtv_handle;
         }
-        // Advance the linear allocator past the swap chain slots so
-        // custom shader textures get their own RTV descriptors.
-        result.rtv_heap.?.allocated = device.Device.frame_count;
+        // Advance the allocator past the swap chain slots so custom
+        // shader textures get their own RTV descriptors. claimFirst (not
+        // a raw allocated write) so the free mask agrees and recycling
+        // cannot hand these slots out again.
+        result.rtv_heap.?.claimFirst(device.Device.frame_count);
         result.rtv_base = result.rtv_heap.?.allocated;
     } else if (dev_ptr.shared_texture != null) {
         // Shared-texture mode: one RTV pointing at the shared resource.
@@ -370,7 +372,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         const rtv_handle = result.rtv_heap.?.cpuHandle(0);
         dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
         result.shared_rtv = rtv_handle;
-        result.rtv_heap.?.allocated = 1;
+        result.rtv_heap.?.claimFirst(1);
         result.rtv_base = 1;
     }
     errdefer {
@@ -1021,6 +1023,7 @@ pub inline fn samplerOptions(self: DirectX12) Sampler.Options {
     return .{
         .device = if (self.dev) |*d| d.device else null,
         .sampler_heap = self.sampler_heap,
+        .retire = if (self.dev) |*d| d.retirement else null,
     };
 }
 
@@ -1061,12 +1064,47 @@ pub fn initAtlasTexture(
         // handle depth conversion when uploading.
         .bgr => .B8G8R8A8_UNORM,
     };
+
+    // The cell pass binds grayscale+color as one descriptor-table range,
+    // so the pair needs adjacent SRV slots. The grayscale half claims a
+    // contiguous pair and parks the partner on the heap for the color
+    // half that follows it (generic.zig always creates them back to
+    // back). Both halves release their slot on deinit, so a regrow
+    // recycles the pair after the covering fence.
+    const srv_slot: ?DescriptorHeap.Descriptor = switch (atlas.format) {
+        .grayscale => pair: {
+            const heap = self.srv_heap orelse break :pair null;
+            if (heap.atlas_partner) |stale| {
+                // A previous pair was abandoned between its two calls
+                // (the color init failed). That partner was never bound
+                // by any command list, so releasing it here is safe.
+                heap.release(stale);
+                heap.atlas_partner = null;
+            }
+            const first = heap.allocateContiguous(2) catch break :pair null;
+            heap.atlas_partner = first.index + 1;
+            break :pair first;
+        },
+        .bgra, .bgr => partner: {
+            const heap = self.srv_heap orelse break :partner null;
+            const idx = heap.atlas_partner orelse break :partner null;
+            heap.atlas_partner = null;
+            break :partner .{
+                .cpu = heap.cpuHandle(idx),
+                .gpu = heap.gpuHandle(idx),
+                .index = idx,
+            };
+        },
+    };
+
     return Texture.init(.{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
         .srv_heap = self.srv_heap,
         .retire = if (self.dev) |*d| d.retirement else null,
         .pixel_format = pixel_format,
+        .srv_slot = srv_slot,
+        .owns_srv_slot = srv_slot != null,
     }, size, size, null);
 }
 
