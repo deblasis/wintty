@@ -1659,3 +1659,37 @@ test "buffer.Options.retire has no default" {
     }
     try std.testing.expect(found);
 }
+
+test "Texture: deinit recycles its SRV slot" {
+    var dev = createTestDevice() catch return;
+    defer dev.deinit();
+
+    var srv_heap = DescriptorHeap.init(
+        dev.device,
+        .CBV_SRV_UAV,
+        1, // one slot: the second texture below can only exist by recycling
+        true,
+    ) catch return;
+    defer srv_heap.deinit();
+
+    const opts = Texture.Options{
+        .device = dev.device,
+        .command_list = dev.command_list,
+        .srv_heap = &srv_heap,
+        // Never submitted anywhere, so an immediate slot release is safe.
+        .retire = null,
+        .pixel_format = .R8_UNORM,
+    };
+
+    {
+        const tex = Texture.init(opts, 4, 4, null) catch return;
+        defer tex.deinit();
+        try std.testing.expectEqual(@as(u32, 0), tex.srv.index);
+    }
+
+    // Before the release wiring, the single slot stayed owned by the
+    // dead texture and this init failed with TextureCreateFailed.
+    const tex2 = try Texture.init(opts, 4, 4, null);
+    defer tex2.deinit();
+    try std.testing.expectEqual(@as(u32, 0), tex2.srv.index);
+}

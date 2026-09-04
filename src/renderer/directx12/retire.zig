@@ -53,6 +53,7 @@ const std = @import("std");
 
 const com = @import("com.zig");
 const d3d12 = @import("d3d12.zig");
+const DescriptorHeap = @import("descriptor_heap.zig").DescriptorHeap;
 
 const log = std.log.scoped(.directx12);
 
@@ -67,7 +68,7 @@ pub const Retirement = struct {
 
     /// Retired since the last `seal`. These have no fence value yet
     /// because the submission that will cover them has not happened.
-    staged: std.ArrayListUnmanaged(*d3d12.ID3D12Resource) = .empty,
+    staged: std.ArrayListUnmanaged(Item) = .empty,
 
     /// Sealed retirements, each paired with the fence value that must be
     /// reached before it is safe to release. Kept in insertion order,
@@ -75,8 +76,18 @@ pub const Retirement = struct {
     /// entry the GPU has not reached.
     pending: std.ArrayListUnmanaged(Entry) = .empty,
 
-    pub const Entry = struct {
+    /// Something awaiting release: either a COM reference or a
+    /// descriptor-heap slot. A slot "release" means returning it to its
+    /// heap's free list, which lets a later allocation overwrite the
+    /// descriptor -- exactly as unsafe before the covering fence as an
+    /// early resource Release, hence the same queue.
+    pub const Item = union(enum) {
         resource: *d3d12.ID3D12Resource,
+        slot: struct { heap: *DescriptorHeap, index: u32 },
+    };
+
+    pub const Entry = struct {
+        item: Item,
         fence_value: u64,
     };
 
@@ -102,8 +113,22 @@ pub const Retirement = struct {
     /// GPU. The next `collect` cannot see it, so it is leaked for the
     /// process lifetime.
     pub fn retire(self: *Self, resource: *d3d12.ID3D12Resource) void {
-        self.staged.append(self.alloc, resource) catch {
+        self.staged.append(self.alloc, .{ .resource = resource }) catch {
             log.err("deferred-release queue is out of memory; leaking a GPU resource rather than freeing one the GPU may still read", .{});
+        };
+    }
+
+    /// Return a descriptor-heap slot for reuse, once the GPU has finished
+    /// every submission that could still bind a table covering it. Same
+    /// fence discipline as `retire`: overwriting a slot's descriptor while
+    /// an in-flight command list reads it is as much a use-after-free as
+    /// releasing the resource itself.
+    pub fn retireSlot(self: *Self, heap: *DescriptorHeap, index: u32) void {
+        self.staged.append(
+            self.alloc,
+            .{ .slot = .{ .heap = heap, .index = index } },
+        ) catch {
+            log.err("deferred-release queue is out of memory; leaking a descriptor slot rather than recycling one the GPU may still read", .{});
         };
     }
 
@@ -113,9 +138,9 @@ pub const Retirement = struct {
     /// signal, so reaching it proves those reads are done.
     pub fn seal(self: *Self, fence_value: u64) void {
         if (self.staged.items.len == 0) return;
-        for (self.staged.items) |resource| {
+        for (self.staged.items) |item| {
             self.pending.append(self.alloc, .{
-                .resource = resource,
+                .item = item,
                 .fence_value = fence_value,
             }) catch {
                 log.err("deferred-release queue is out of memory; leaking a GPU resource rather than freeing one the GPU may still read", .{});
@@ -130,7 +155,7 @@ pub const Retirement = struct {
         var released: usize = 0;
         for (self.pending.items) |entry| {
             if (entry.fence_value > completed) break;
-            _ = entry.resource.Release();
+            releaseItem(entry.item);
             released += 1;
         }
         if (released == 0) return;
@@ -146,10 +171,17 @@ pub const Retirement = struct {
     /// Release everything, sealed or not. Only valid once the GPU is known
     /// to be idle -- i.e. straight after a successful full drain.
     pub fn drainAll(self: *Self) void {
-        for (self.pending.items) |entry| _ = entry.resource.Release();
+        for (self.pending.items) |entry| releaseItem(entry.item);
         self.pending.clearRetainingCapacity();
-        for (self.staged.items) |resource| _ = resource.Release();
+        for (self.staged.items) |item| releaseItem(item);
         self.staged.clearRetainingCapacity();
+    }
+
+    fn releaseItem(item: Item) void {
+        switch (item) {
+            .resource => |resource| _ = resource.Release(),
+            .slot => |slot| slot.heap.release(slot.index),
+        }
     }
 
     /// Number of resources the queue is still holding, staged or sealed.
@@ -317,4 +349,57 @@ test "Retirement: drainAll frees staged and sealed alike" {
     q.drainAll();
     try std.testing.expectEqual(@as(usize, 0), test_live);
     try std.testing.expectEqual(@as(usize, 0), q.count());
+}
+
+/// A heap for the slot tests. release()/allocate() only touch the
+/// bookkeeping fields, so a fake base is enough; nothing here reaches D3D12.
+fn testHeap(capacity: u32) DescriptorHeap {
+    return .{
+        .heap = undefined,
+        .cpu_start = .{ .ptr = 0x1000 },
+        .gpu_start = .{ .ptr = 0x2000 },
+        .increment_size = 32,
+        .capacity = capacity,
+        .allocated = 0,
+        .free_mask = 0,
+    };
+}
+
+test "Retirement: slot release waits for the fence like a resource" {
+    var q = Retirement.init(std.testing.allocator);
+    defer q.deinit();
+    defer q.drainAll();
+
+    var heap = testHeap(2);
+    const d0 = try heap.allocate();
+    _ = try heap.allocate();
+    try std.testing.expectError(error.DescriptorHeapFull, heap.allocate());
+
+    q.retireSlot(&heap, d0.index);
+    q.seal(3);
+
+    // Fence not reached: the slot is still owned by in-flight work.
+    q.collect(2);
+    try std.testing.expectError(error.DescriptorHeapFull, heap.allocate());
+
+    // Fence reached: the slot recycles.
+    q.collect(3);
+    const d2 = try heap.allocate();
+    try std.testing.expectEqual(@as(u32, 0), d2.index);
+}
+
+test "Retirement: drainAll frees staged slots without a fence" {
+    var q = Retirement.init(std.testing.allocator);
+    defer q.deinit();
+
+    var heap = testHeap(1);
+    const d0 = try heap.allocate();
+    try std.testing.expectError(error.DescriptorHeapFull, heap.allocate());
+
+    // Staged but never sealed.
+    q.retireSlot(&heap, d0.index);
+    q.drainAll();
+
+    const d1 = try heap.allocate();
+    try std.testing.expectEqual(@as(u32, 0), d1.index);
 }

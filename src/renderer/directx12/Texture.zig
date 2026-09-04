@@ -48,6 +48,13 @@ pub const Options = struct {
     /// a new one from the heap. Used during resize to prevent SRV heap
     /// exhaustion from leaked descriptors.
     srv_slot: ?DescriptorHeap.Descriptor = null,
+    /// Set when a passed-in srv_slot should be RELEASED by this texture's
+    /// deinit (through srv_heap and the retirement queue) rather than
+    /// remaining the caller's. The atlas pair uses this: the slots come
+    /// from a paired allocation, and each texture owns its half outright.
+    /// Slot-passing callers that keep recycling their own slots across
+    /// resizes (custom-shader ping-pong) leave this false.
+    owns_srv_slot: bool = false,
 };
 
 pub const Error = error{
@@ -87,6 +94,13 @@ format: dxgi.DXGI_FORMAT = .R8_UNORM,
 device: ?*d3d12.ID3D12Device = null,
 /// Cached command list for replaceRegion uploads.
 command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
+/// Heap this texture allocated its SRV slot from, when it did. Null when
+/// the slot came from Options.srv_slot (caller-owned) or no SRV exists.
+/// deinit returns the slot through the retirement queue so it can be
+/// recycled without overwriting a descriptor in-flight GPU work reads.
+srv_heap: ?*DescriptorHeap = null,
+/// Same as srv_heap for the RTV slot of render-target textures.
+rtv_heap: ?*DescriptorHeap = null,
 /// Deferred-release queue for this texture's resource and staging
 /// buffers. See Options.retire.
 ///
@@ -189,6 +203,12 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         .device = device,
         .command_list = opts.command_list,
         .retire = opts.retire,
+        // Remember the heaps for the slots this texture will release on
+        // deinit: ones it allocated itself, or passed-in slots explicitly
+        // marked owns_srv_slot. Other slot-passing callers keep their own
+        // slot lifetime (that is the whole point of passing one).
+        .srv_heap = if (opts.srv_slot == null or opts.owns_srv_slot) opts.srv_heap else null,
+        .rtv_heap = if (opts.render_target and opts.rtv_slot == null) opts.rtv_heap else null,
         .state = if (opts.render_target)
             d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE
         else
@@ -232,8 +252,21 @@ pub fn deinit(self: Texture) void {
     if (self.resource) |res| {
         self.releaseResource(res);
     }
-    // SRV descriptor is owned by the heap's linear allocator --
-    // it gets freed when the heap itself is destroyed.
+    // Self-allocated descriptor slots go back the same way the resource
+    // does: through the retirement queue when one exists (the covering
+    // fence proves no in-flight command list still binds a table over the
+    // slot), or immediately when there is no queue -- the same
+    // "never submitted anything" contract releaseResource relies on.
+    if (self.srv_heap) |heap| self.releaseSlot(heap, self.srv.index);
+    if (self.rtv_heap) |heap| self.releaseSlot(heap, self.rtv.index);
+}
+
+fn releaseSlot(self: Texture, heap: *DescriptorHeap, index: u32) void {
+    if (self.retire) |q| {
+        q.retireSlot(heap, index);
+    } else {
+        heap.release(index);
+    }
 }
 
 /// Hand a resource to the retirement queue, or release it outright when

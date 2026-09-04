@@ -10,12 +10,17 @@ const std = @import("std");
 
 const d3d12 = @import("d3d12.zig");
 const DescriptorHeap = @import("descriptor_heap.zig").DescriptorHeap;
+const Retirement = @import("retire.zig").Retirement;
 
 const log = std.log.scoped(.directx12);
 
 pub const Options = struct {
     device: ?*d3d12.ID3D12Device = null,
     sampler_heap: ?*DescriptorHeap = null,
+    /// Where the sampler slot goes on deinit. Null (the default) releases
+    /// it immediately, which is only safe for a sampler no submitted
+    /// command list still binds.
+    retire: ?*Retirement = null,
     filter: d3d12.D3D12_FILTER = .MIN_MAG_MIP_LINEAR,
     address_mode_u: d3d12.D3D12_TEXTURE_ADDRESS_MODE = .CLAMP,
     address_mode_v: d3d12.D3D12_TEXTURE_ADDRESS_MODE = .CLAMP,
@@ -31,6 +36,11 @@ descriptor: DescriptorHeap.Descriptor = .{
     .gpu = .{ .ptr = 0 },
     .index = 0,
 },
+/// Heap the slot came from, for deinit recycling. Null when this Sampler
+/// was built by hand from a borrowed descriptor (tests).
+heap: ?*DescriptorHeap = null,
+/// Deferred-release queue for the slot. See Options.retire.
+retire: ?*Retirement = null,
 
 pub fn init(opts: Options) Error!Sampler {
     const device = opts.device orelse return error.SamplerCreateFailed;
@@ -56,13 +66,23 @@ pub fn init(opts: Options) Error!Sampler {
 
     return .{
         .descriptor = desc,
+        .heap = opts.sampler_heap,
+        .retire = opts.retire,
     };
 }
 
 pub fn deinit(self: Sampler) void {
-    // Sampler descriptors are owned by the heap's linear allocator --
-    // freed when the heap is destroyed.
-    _ = self;
+    // Return the slot for recycling: through the retirement queue when
+    // one exists (the covering fence proves no in-flight command list
+    // still binds the sampler table over it), immediately otherwise --
+    // the same contract Texture applies to its descriptor slots.
+    if (self.heap) |heap| {
+        if (self.retire) |q| {
+            q.retireSlot(heap, self.descriptor.index);
+        } else {
+            heap.release(self.descriptor.index);
+        }
+    }
 }
 
 // --- Tests ---

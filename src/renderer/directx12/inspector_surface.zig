@@ -168,7 +168,7 @@ fn acquireBackBuffers(self: *State) !void {
         self.dev.device.CreateRenderTargetView(resource, null, rtv_handle);
         self.rtv_handles[i] = rtv_handle;
     }
-    self.rtv_heap.allocated = device.frame_count;
+    self.rtv_heap.claimFirst(device.frame_count);
 }
 
 fn releaseBackBuffers(self: *State) void {
