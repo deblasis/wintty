@@ -246,10 +246,11 @@ pub fn release(self: *DescriptorHeap, index: u32) void {
 /// accident.
 pub fn allocateContiguous(self: *DescriptorHeap, n: u32) !Descriptor {
     std.debug.assert(n > 0);
+    // Scan up to the frontier plus n fresh slots, capped at capacity. A
+    // heap whose high-water mark already equals capacity still gets a
+    // full scan: freed holes below the mark are as good as the frontier,
+    // and rejecting on "full" alone would strand recyclable pairs.
     const total: u32 = @min(self.allocated +| n, self.capacity);
-    if (total <= self.allocated and self.allocated >= self.capacity) {
-        return error.DescriptorHeapFull;
-    }
 
     // Scan for a run of n free slots: recycled holes below the
     // high-water mark, or the frontier itself. Capacity is small (64
