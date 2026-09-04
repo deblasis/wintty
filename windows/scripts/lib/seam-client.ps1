@@ -70,7 +70,8 @@ function Connect-SeamPipe(
     $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
         '.', (Get-SeamPipeName $Token),
         [System.IO.Pipes.PipeDirection]::InOut,
-        [System.IO.Pipes.PipeOptions]::CurrentUserOnly)
+        [System.IO.Pipes.PipeOptions]::CurrentUserOnly -bor
+        [System.IO.Pipes.PipeOptions]::Asynchronous)
     $pipe.Connect($TimeoutMs)
     return $pipe
 }

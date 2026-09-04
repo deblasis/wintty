@@ -635,20 +635,34 @@ public class TestSeamWiringTests
                  && c.ArgumentList.Arguments[1].Expression is MemberAccessExpressionSyntax m
                  && m.Name.Identifier.ValueText == "Message");
 
-        // The two unfiltered general handlers -- the dispatch's and the
-        // marshal's -- are the reporting sites, and both describe.
-        var general = seam.Root.DescendantNodes().OfType<CatchClauseSyntax>()
-            .Where(c => c.Filter is null && c.Declaration?.Type.ToString() == "Exception")
-            .ToList();
-        Assert.Equal(2, general.Count);
-        // The RESPONSE must carry Describe's result. "Describe is called
-        // somewhere in the handler" is satisfied by
+        // The unfiltered general handlers split into two shapes, and both
+        // describe. The ones that can still answer a client -- the
+        // dispatch's, the marshal's, and the per-command infrastructure
+        // catch -- report through Error carrying Describe's result. "Describe
+        // is called somewhere in the handler" is satisfied by
         //     Debug.WriteLine(Describe(ex));
         //     done.SetResult(Error(op, "command failed"));
         // which restores #942's symptom exactly, so the argument is pinned.
-        foreach (var handler in general)
+        // The ones with no client left to answer -- the response write and
+        // the accept loop -- record through Diag instead, still carrying
+        // Describe; a bare Diag(ex.Message) there would be the same
+        // empty-message hole, just off the pipe.
+        var general = seam.Root.DescendantNodes().OfType<CatchClauseSyntax>()
+            .Where(c => c.Filter is null && c.Declaration?.Type.ToString() == "Exception")
+            .ToList();
+        Assert.Equal(5, general.Count);
+        var answering = general.Where(h => h.Calls("Error").Any()).ToList();
+        var recording = general.Where(h => !h.Calls("Error").Any()).ToList();
+        Assert.Equal(3, answering.Count);
+        Assert.Equal(2, recording.Count);
+        foreach (var handler in answering)
         {
             Assert.Equal("Describe(ex)", handler.Call("Error").Arg(1));
+        }
+        foreach (var handler in recording)
+        {
+            var diag = Assert.Single(handler.Calls("Diag"));
+            Assert.Contains("Describe(ex)", diag.ToString());
         }
 
         // Describe leads with the type, whatever the message turns out to
