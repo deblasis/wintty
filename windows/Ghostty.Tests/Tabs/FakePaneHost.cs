@@ -24,6 +24,12 @@ internal sealed class FakePaneHost : IPaneHost
     public int CloseActiveCalls { get; private set; }
     public int DisposeAllCalls { get; private set; }
 
+    /// <summary>
+    /// Stand-in for the pane tree's aggregated activity stamp; tests set
+    /// it to simulate a surface receiving data or input.
+    /// </summary>
+    public long LastActivityTick { get; set; }
+
     public PaneOrientation? LastSplitOrientation { get; private set; }
     public ProfileSnapshot? LastSplitSnapshot { get; private set; }
     public int SplitCalls { get; private set; }
