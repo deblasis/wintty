@@ -38,21 +38,37 @@ The loop, per invocation:
      trail, and leave it open. Pickup is manual from there (issue #969).
 
 Resumability: a ladder is over an hour and --max N (default 1) bounds the
-runs an invocation may spend, so the bot is built to be interrupted. The
-records ARE the state: green and red records at recorded squash shas
-reconstruct the bisect bounds exactly, and the claim markers name what was
-last in flight, so any re-invocation continues where the last one stopped.
+runs an invocation may spend, so the bot is built to be interrupted; --max 0
+is the greens-only pass, closing what the records already retire and
+spending nothing. The records are the state: green and red records at
+recorded squash shas reconstruct the bisect bounds exactly, so any
+re-invocation continues where the last one stopped and no window is run
+twice. The claim markers are an audit trail only: nothing reads them back
+and they never block; the record at each sha decides every question.
+
+One instance at a time: the bot owns one shared worktree, and two instances
+resetting and cleaning -fdx under each other would read back as a green
+record for a tree the other was mid-rewrite on. A lock file beside the
+worktree carries pid + timestamp; a live pid refuses the invocation (exit 2,
+naming the holder), a dead pid's lock is taken over with a printed note.
+nightly_fuzz.ps1 guards its worktree the same way.
+
 A lane busy with a resignoff for the same sha is left alone rather than
 double-queued; the guard's status line in every filed issue asks for that
 same check. The lane is never held across non-running work.
 
 Refusals: no open issues exits 0 with nothing to do; incoda missing from
-PATH and from the %LOCALAPPDATA% install exits 2 naming that install; a
-worktree that cannot be prepared skips its issue with a note and moves on;
-a wrong-repo checkout or an unresolvable git common dir exits 2, like the
-merge guard's own. --dry-run prints the pile, the parsed windows, the
-chosen next action and the exact commands, and mutates nothing: no
-worktree, no comment, no close, no label, no lane.
+PATH and from the %LOCALAPPDATA% install exits 2 naming that install, and is
+demanded only when a run is actually spendable (some window owes a run, the
+budget allows spending one, and a bisect has an untested middle left); a
+second live bot instance holding the worktree lock exits 2 naming the
+holder; a worktree that cannot be prepared skips its issue with a note,
+except for the newest window, which stops the group loudly: working older
+windows past an unproven newest would spend hours against a pile whose top
+state is unknown; a wrong-repo checkout or an unresolvable git common dir
+exits 2, like the merge guard's own. --dry-run prints the pile, the parsed
+windows, the chosen next action and the exact commands, and mutates nothing:
+no worktree, no comment, no close, no label, no lane.
 
 Deliberately not here: the reconciliation pass that would diff recently
 merged PRs against filed issues (#979, phase 3; the guard's --file-only is
@@ -136,6 +152,98 @@ def incoda_run(path, args, cwd=None):
                           capture_output=True, text=True)
 
 
+def incoda_status_run(path, args, cwd=None):
+    """The real lane status reader (`incoda status --queue wintty`). Short
+    timeout: a status read that hangs is worse than no status at all, and
+    lane_busy_with treats a failed read as silent."""
+    return subprocess.run([path] + args, cwd=cwd or REPO_ROOT,
+                          capture_output=True, text=True, timeout=30)
+
+
+def pid_alive(pid):
+    """Whether a lock's pid names a live process. Windows os.kill(pid, 0)
+    is not a probe: any signal value other than the CTRL events is
+    TerminateProcess, so liveness goes through OpenProcess +
+    GetExitCodeProcess (STILL_ACTIVE is 259). Elsewhere the classic
+    signal-0 probe is safe."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return True
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+LOCK_SUFFIX = ".lock"
+
+
+def lock_path_for(worktree_dir):
+    """The instance lock's path: beside the worktree it guards, so both move
+    together when worktree_dir is relocated (the self-test relocates both
+    into its temporary directory)."""
+    return os.path.join(os.path.dirname(worktree_dir),
+                        os.path.basename(worktree_dir) + LOCK_SUFFIX)
+
+
+def acquire_instance_lock(env):
+    """(ok, holder) for the one-bot-at-a-time lock beside the shared
+    worktree. A lock naming a live pid refuses (the caller exits 2 naming
+    the holder); a dead pid's lock, or an unreadable one, is taken over
+    with a printed note. Two bots reset/clean -fdx under each other would
+    read back as a green record for a tree the other was mid-rewrite on,
+    which is the false-green this exists to make impossible; the nightly
+    guards its worktree the same way."""
+    os.makedirs(os.path.dirname(env.lock_path), exist_ok=True)
+    holder = ""
+    try:
+        with open(env.lock_path, encoding="utf-8") as f:
+            holder = f.read().strip()
+    except OSError:
+        holder = ""
+    m = re.match(r"^(\d+) at ", holder)
+    if holder and m and env.pid_alive(int(m.group(1))):
+        return False, holder
+    if holder:
+        print(f"resignoff-bot: taking over a stale worktree lock (pid "
+              f"{m.group(1) if m else 'unreadable'} is not alive): {holder}")
+    try:
+        with open(env.lock_path, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} at {env.now()}\n")
+    except OSError as e:
+        return False, f"could not write the lock file: {e}"
+    return True, ""
+
+
+def release_instance_lock(env):
+    """Drop the lock only if it is still ours: a takeover in between wrote
+    someone else's pid, and deleting that would un-guard a live instance."""
+    try:
+        with open(env.lock_path, encoding="utf-8") as f:
+            holder = f.read().strip()
+    except OSError:
+        return
+    m = re.match(r"^(\d+) at ", holder)
+    if m and int(m.group(1)) == os.getpid():
+        with contextlib.suppress(OSError):
+            os.remove(env.lock_path)
+
+
 def locate_incoda(which=None, localappdata=None):
     """The incoda executable, or None. PATH first, then the installer's
     location: the same two places the theme-matrix recipe looks, because the
@@ -167,20 +275,25 @@ def install_hint():
 
 class Env:
     """The injected environment one bot invocation runs against: the gh,
-    git and incoda runners, the lane status reader, the clock, the git
-    common dir that holds the records and the worktree path. Real runners
-    by default; the self-test substitutes every one, the way merge_flow
-    does."""
+    git and incoda runners, the lane status reader (real by default, so the
+    lane-busy guard works in production and not only under test), the
+    clock, the pid-liveness probe, the worktree path and the instance lock
+    derived from it, and the git common dir that holds the records. Real
+    runners by default; the self-test substitutes every one, the way
+    merge_flow does."""
 
     def __init__(self, gh=None, git=None, incoda=None, incoda_status=None,
-                 find_incoda=None, now=None, worktree_dir=None, common=None):
+                 find_incoda=None, now=None, worktree_dir=None, common=None,
+                 lock_path=None, pid_probe=None):
         self.gh = gh or gh_run
         self.git = git or git_run
         self.incoda = incoda
-        self.incoda_status = incoda_status
+        self.incoda_status = incoda_status or incoda_status_run
         self.find_incoda = find_incoda or locate_incoda
         self.now = now or default_now
         self.worktree_dir = worktree_dir or os.path.join(REPO_ROOT, WORKTREE_REL)
+        self.lock_path = lock_path or lock_path_for(self.worktree_dir)
+        self.pid_alive = pid_probe or pid_alive
         self.common = common
 
 
@@ -209,9 +322,11 @@ def parse_window(body, git):
     sha), base, merged head. The squash sha comes from the guard's full-sha
     line when present; a hand-filed body that names only the short form in
     the PR bullet is accepted only when git resolves that short form to
-    exactly one commit in this checkout. Nothing is inferred between those
-    two spellings: a body that satisfies neither is malformed, and a
-    malformed filing is skipped loudly rather than run against.
+    exactly one commit in this checkout. Either way the sha must resolve
+    locally before the window counts: the bot works at the squash, and a
+    sha this checkout cannot place is not a window it can run. The remedy
+    in that case is the guard's own: refile with --file-only once
+    mergeCommit appears (and fetch, in case the object is merely unfetched).
     """
     if not body or not body.strip():
         return None, "empty body"
@@ -230,6 +345,7 @@ def parse_window(body, git):
     if not winhead:
         return None, "no '- `windows` head at merge time' bullet"
 
+    remedy = ("fetch first, or refile with `--file-only` once mergeCommit appears")
     squash = None
     full = RE_SQUASH_LINE.search(body)
     if full:
@@ -244,8 +360,14 @@ def parse_window(body, git):
         got = out.stdout.strip()
         if out.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", got):
             return None, (f"squash sha `{short}` does not resolve to one commit in this "
-                          "checkout (fetch first, or refile with the full sha)")
+                          f"checkout ({remedy})")
         squash = got
+    # The full-sha form gets the same local check: a body naming a sha this
+    # checkout has no object for cannot have a worktree prepared against it.
+    out = git(["rev-parse", "--verify", "--quiet", f"{squash}^{{commit}}"])
+    if out.returncode != 0:
+        return None, (f"squash sha `{merge_guard.short(squash)}` is not in this checkout "
+                      f"({remedy})")
 
     backlog = RE_BACKLOG_LINE.search(body)
     return {
@@ -262,7 +384,9 @@ def parse_all(issues, git):
     """(windows newest first, skipped) over the whole pile. The group is one
     ordered chain by creation, so the newest window is worked first; a
     duplicate squash (the same window filed twice) keeps the newest filing
-    and skips the stale one rather than running one ladder per copy."""
+    rather than running one ladder per copy, and the losing numbers ride
+    along on the winner's `duplicates` so the close can retire them with a
+    cross-reference instead of leaving stale twins open."""
     windows, skipped = [], []
     for issue in issues:
         w, why = parse_window(issue.get("body"), git)
@@ -271,16 +395,19 @@ def parse_all(issues, git):
             continue
         w["created"] = issue.get("createdAt") or ""
         w["title"] = issue.get("title") or ""
+        w["duplicates"] = []
         windows.append(w)
     windows.sort(key=lambda w: (w["created"], w["number"]), reverse=True)
-    seen, deduped = set(), []
+    seen, deduped = {}, []
     for w in windows:
-        if w["squash"] in seen:
+        winner = seen.get(w["squash"])
+        if winner is not None:
+            winner["duplicates"].append(w["number"])
             skipped.append((w["number"], w["title"][:60],
                             f"duplicate of window {merge_guard.short(w['squash'])} "
-                            "(newer filing kept)"))
+                            f"(#{winner['number']}, newer filing kept)"))
             continue
-        seen.add(w["squash"])
+        seen[w["squash"]] = w
         deduped.append(w)
     return deduped, skipped
 
@@ -293,13 +420,31 @@ def load_record(common, sha):
     return merge_guard.load_record(common, sha)[0]
 
 
+def full_ladder(rec):
+    """Whether a record covers every leg the gate requires: the scope says
+    full, or the legs it ran are a superset of the gate's set. A run at a
+    windows squash is always full (signoff finds no changed paths against
+    the base), so a scoped record here means something other than the
+    bot's own run wrote it, and it retires nothing."""
+    scope = rec.get("scope") or {}
+    if scope.get("full"):
+        return True
+    legs = set(scope.get("legs_run") or []) | set((rec.get("steps") or {}).keys())
+    return set(gate_scope.ALL_LEGS) <= legs
+
+
 def verdict(rec):
     """"green", "red", or None when the record is no evidence: absent,
-    corrupt, or a deferral. A deferred record is credit, not a run; at a
-    squash sha it borrows exactly the hour this bot exists to pay."""
+    corrupt, a deferral, or a green that is not a full ladder. A deferred
+    record is credit, not a run; at a squash sha it borrows exactly the
+    hour this bot exists to pay. A scoped green retires nothing: the
+    windows this bot closes are only ever retired by every leg running
+    green, the same bar the gate's full ladder holds."""
     if rec is None or rec.get("deferred"):
         return None
-    return "green" if rec.get("pass") else "red"
+    if rec.get("pass"):
+        return "green" if full_ladder(rec) else None
+    return "red"
 
 
 # --- bodies ----------------------------------------------------------------
@@ -311,11 +456,13 @@ def marker_body(sha, now, k):
     return f"{MARKER_PREFIX} {sha[:SHA7]} at {now}, run {k}\n"
 
 
-def close_body(sha, rec):
-    """The close comment: the record path, the per-leg rcs, and the
-    settling note. merge_guard's legs_note keeps the wording aligned with
-    the hand-filed #970 ("all four legs rc=0"); the settle line is only
-    true of a full ladder, so a scoped record says it settles nothing."""
+def close_body(sha, rec, fresh_run):
+    """The close comment: the record path, the per-leg rcs, whether the
+    record predates this invocation or was written by the run this issue
+    claimed, and the settling note. merge_guard's legs_note keeps the
+    wording aligned with the hand-filed #970 ("all four legs rc=0"); the
+    settle line is only true of a full ladder, so a scoped record says it
+    settles nothing."""
     steps = rec.get("steps") or {}
     legs = ", ".join(f"{name} rc={(steps.get(name) or {}).get('rc', '?')}"
                      for name in sorted(steps)) or "no per-leg detail recorded"
@@ -324,6 +471,8 @@ def close_body(sha, rec):
         "",
         f"- record: `{merge_guard.display_path(sha)}` ({merge_guard.legs_note(rec)})",
         f"- per-leg rcs: {legs}",
+        "- record was " + ("written by the run this issue claimed." if fresh_run
+                           else "already on disk; no run was spent closing this window."),
     ]
     if set(steps) >= set(gate_scope.ALL_LEGS):
         lines.append("- a green full ladder auto-settles the deferral ledger: signoff.py "
@@ -335,12 +484,14 @@ def close_body(sha, rec):
     return "\n".join(lines) + "\n"
 
 
-def trail_body(culprit, failing, rec, entries, lo):
+def trail_body(culprit, failing, rec, entries, lo, excluded=()):
     """The comment an isolated culprit issue carries: the failing legs from
     the record at the culprit window, the trail of verdicts over the
-    recorded squash SHAs, and the manual-pickup note the issue's design ends
-    on. A missing lower anchor is said out loud: a verdict without a green
-    record below covers the recorded windows only."""
+    recorded squash SHAs, the excluded filings (git could not prove them
+    ancestors of the failing head, or their object is missing locally), and
+    the manual-pickup note the issue's design ends on. A missing lower
+    anchor is said out loud: a verdict without a green record below covers
+    the recorded windows only."""
     steps = (rec or {}).get("steps") or {}
     bad = [f"{name} rc={(steps.get(name) or {}).get('rc', '?')}"
            for name in sorted(steps) if (steps.get(name) or {}).get("rc") != 0]
@@ -357,6 +508,12 @@ def trail_body(culprit, failing, rec, entries, lo):
                               "none: no green record exists below the failing window in the "
                               "recorded chain, so this verdict covers the recorded windows "
                               "only."),
+    ]
+    if excluded:
+        lines.append("- excluded from the bisect: " + "; ".join(
+            f"#{n} `{sha[:SHA7]}` (not an ancestor, or object missing)"
+            for n, sha in excluded))
+    lines += [
         "",
         "Bisect trail (oldest first):",
     ] + [f"- `{sha[:SHA7]}` {v} ({how})" for sha, v, how in entries] + [
@@ -368,6 +525,15 @@ def trail_body(culprit, failing, rec, entries, lo):
     return "\n".join(lines) + "\n"
 
 
+def dup_body(winner):
+    """The comment a duplicate filing is closed with: same window, newer
+    filing carries the work, so the record path and per-leg rcs are found
+    in one place."""
+    return (f"Closing as a duplicate of #{winner['number']}: both filings name the same "
+            f"window (`{winner['squash'][:SHA7]}`), and this is the older filing. The newer "
+            "issue carries the record path and per-leg rcs; nothing is owed here.\n")
+
+
 # --- lane and worktree -----------------------------------------------------
 
 def lane_busy_with(env, incoda_path, sha):
@@ -375,11 +541,18 @@ def lane_busy_with(env, incoda_path, sha):
     flight, else None. A textual match on the --reason this bot uses, on
     purpose: the point is not to double-queue a run that is already running.
     Any other holder is the lane's normal business (the run then queues
-    behind it, which is what the lane is for). A failed status read stays
-    silent: the lane serializes regardless."""
+    behind it, which is what the lane is for). The match can be stale: a
+    finished-but-unreleased holder or an old line in the status pane reads
+    the same as a live one, so the skip note surfaces the raw status and
+    names the escalation (check `incoda status --queue wintty`, clear the
+    stale holder or wait) instead of trusting the match silently. A failed
+    status read stays silent: the lane serializes regardless."""
     if env.incoda_status is None:
         return None
-    out = env.incoda_status(incoda_path, ["status", "--queue", "wintty"])
+    try:
+        out = env.incoda_status(incoda_path, ["status", "--queue", "wintty"])
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if out.returncode != 0:
         return None
     text = out.stdout or ""
@@ -394,8 +567,18 @@ def prepare_worktree(git, wt, sha):
     and clean are not cosmetic; the two clean exclusions are the nightly's
     own, keeping the caches that make the next hour bearable. The worktree
     hangs off this clone, so the record the run writes lands in the shared
-    common dir the gate reads."""
+    common dir the gate reads. A directory at the worktree path with no
+    .git in it is a stray (a crashed add, a manual mkdir), not a checkout:
+    it is cleared and re-added rather than failing every run until someone
+    notices."""
     git(["worktree", "prune"])
+    if os.path.exists(wt) and not os.path.exists(os.path.join(wt, ".git")):
+        print(f"resignoff-bot: worktree path holds a stray directory with no .git; "
+              f"clearing and re-adding: {wt}")
+        shutil.rmtree(wt, ignore_errors=True)
+        if os.path.exists(wt):
+            return False, (f"worktree path holds a stray directory that could not be "
+                           f"cleared: {wt}")
     if not os.path.exists(wt):
         add = git(["worktree", "add", "--detach", wt, sha])
         if add.returncode != 0:
@@ -448,19 +631,24 @@ def run_ladder(env, incoda_path, issue_number, sha, budget_line):
 # --- the red path ----------------------------------------------------------
 
 def bisect_bounds(env, failing, older):
-    """(chain, lo, lo_idx, hi_idx): the bisect state the records hold, over
-    the recorded squash SHAs git can place inside the failing window.
-    chain is oldest first; lo/lo_idx is the newest green anchor below the
-    newest red bound (-1 when there is none); hi_idx is the newest red
-    bound, len(chain) when only the failing window itself is known red.
-    Reconstructed from disk every time, which is why a bisect survives
-    being interrupted: no window is ever run twice."""
-    chain = []
+    """(chain, lo, lo_idx, hi_idx, excluded): the bisect state the records
+    hold, over the recorded squash SHAs git can place inside the failing
+    window. chain is oldest first; lo/lo_idx is the newest green anchor
+    below the newest red bound (-1 when there is none); hi_idx is the
+    newest red bound, len(chain) when only the failing window itself is
+    known red. excluded carries the filings left out of the chain, because
+    a verdict that does not sit in the failing window's history proves
+    nothing about it (any non-zero merge-base exit is conflated: not an
+    ancestor, or the object is missing locally). Reconstructed from disk
+    every time, which is why a bisect survives being interrupted: no window
+    is ever run twice."""
+    chain, excluded = [], []
     for c in sorted(older, key=lambda w: (w["created"], w["number"])):
         if env.git(["merge-base", "--is-ancestor", c["squash"],
                     failing["squash"]]).returncode == 0:
             chain.append(c)
         else:
+            excluded.append((c["number"], c["squash"]))
             print(f"resignoff-bot: #{c['number']} ({merge_guard.short(c['squash'])}) is not "
                   f"inside the failing window's history; excluded from the bisect.")
     hi_idx = len(chain)
@@ -473,19 +661,19 @@ def bisect_bounds(env, failing, older):
         if verdict(load_record(env.common, chain[i]["squash"])) == "green":
             lo, lo_idx = chain[i]["squash"], i
             break
-    return chain, lo, lo_idx, hi_idx
+    return chain, lo, lo_idx, hi_idx, excluded
 
 
 def bisect_red(env, failing, older, runs_used, max_runs, incoda_path):
     """Bisect over the RECORDED squash SHAs between the last green anchor
     and the failing head: run the middle window, repeat, until a single
     window isolates the failure. Returns (outcome, runs_spent, culprit,
-    culprit_record, entries, lo) where outcome is "isolated" (culprit is the
-    window whose issue owns the failure) or "paused" (budget spent or a run
-    produced nothing; re-invoke), and entries is the trail for the comment,
-    oldest first. A single-window chain isolates on the records alone, with
-    no run spent."""
-    chain, lo, lo_idx, hi_idx = bisect_bounds(env, failing, older)
+    culprit_record, entries, lo, excluded) where outcome is "isolated"
+    (culprit is the window whose issue owns the failure) or "paused"
+    (budget spent or a run produced nothing; re-invoke), and entries is the
+    trail for the comment, oldest first. A single-window chain isolates on
+    the records alone, with no run spent."""
+    chain, lo, lo_idx, hi_idx, excluded = bisect_bounds(env, failing, older)
 
     def remaining():
         return hi_idx - (lo_idx + 1)
@@ -533,39 +721,64 @@ def bisect_red(env, failing, older, runs_used, max_runs, incoda_path):
     outcome = "isolated" if remaining() == 0 else "paused"
     if outcome == "paused":
         return outcome, spent, failing, load_record(env.common, failing["squash"]), \
-            [(sha, v, how) for _p, sha, v, how in sorted(pos_entries)], lo
+            [(sha, v, how) for _p, sha, v, how in sorted(pos_entries)], lo, excluded
     culprit = chain[hi_idx] if hi_idx < len(chain) else failing
     pos_entries.sort(key=lambda e: e[0])
     return outcome, spent, culprit, load_record(env.common, culprit["squash"]), \
-        [(sha, v, how) for _p, sha, v, how in pos_entries], lo
+        [(sha, v, how) for _p, sha, v, how in pos_entries], lo, excluded
 
 
 # --- the loop --------------------------------------------------------------
 
+def close_duplicates(env, w):
+    """Best-effort retirement of the same-squash filings that lost to this
+    window at parse time: closed with a cross-reference to the winner, so
+    the pile does not keep a stale twin open next to the issue that carries
+    the record. A failure to close one is a note, not a failure of the
+    window's own close."""
+    for dup in w.get("duplicates", ()):
+        out = env.gh(["issue", "close", str(dup), "--repo", REPO,
+                      "--comment", dup_body(w)])
+        if out.returncode != 0:
+            print(f"resignoff-bot: could not close duplicate #{dup} by hand "
+                  f"(rc={out.returncode}); close it by hand: it duplicates "
+                  f"#{w['number']}.")
+        else:
+            print(f"resignoff-bot: #{dup} closed as a duplicate of #{w['number']} "
+                  f"(same window {merge_guard.short(w['squash'])}).")
+
+
 def work_one(env, windows, idx, runs_used, max_runs, incoda_path):
     """One window's slice: (runs_spent, action). action is "closed",
-    "isolated", "ran", "skipped" or "failed"; "isolated" stops the whole
-    group, because every window above a culprit contains the same break.
-    The caller has already resolved the lane (bot_flow refuses before any
-    mutation when the pile owes a run and incoda is missing)."""
+    "isolated", "ran", "skipped", "blocked" or "failed"; "isolated" stops
+    the whole group, because every window above a culprit contains the same
+    break, "blocked" is a worktree that could not be prepared (bot_flow
+    stops the group on it when it happens to the newest window), and
+    "skipped" is the lane-busy case. runs_spent counts every signoff run
+    this window consumed, including its own ladder when the red path
+    follows a fresh run. The caller has already resolved the lane (bot_flow
+    refuses before any mutation when a run is spendable and incoda is
+    missing)."""
     w = windows[idx]
     rec = load_record(env.common, w["squash"])
     v = verdict(rec)
     if v == "green":
         out = env.gh(["issue", "close", str(w["number"]), "--repo", REPO,
-                      "--comment", close_body(w["squash"], rec)])
+                      "--comment", close_body(w["squash"], rec, fresh_run=False)])
         if out.returncode != 0:
             print(f"resignoff-bot: could not close #{w['number']} (rc={out.returncode}): "
                   f"{(out.stderr or out.stdout).strip()}")
             return 0, "failed"
+        close_duplicates(env, w)
         print(f"resignoff-bot: #{w['number']} closed green at "
-              f"{merge_guard.short(w['squash'])} (record already on disk).")
+              f"{merge_guard.short(w['squash'])} (record already on disk; no run spent).")
         return 0, "closed"
 
     if v == "red":
-        outcome, spent, culprit, crec, entries, lo = bisect_red(
+        outcome, spent, culprit, crec, entries, lo, excluded = bisect_red(
             env, w, windows[idx + 1:], runs_used, max_runs, incoda_path)
-        return finish_bisect(env, w, outcome, spent, culprit, crec, entries, lo)
+        return finish_bisect(env, w, outcome, spent, culprit, crec, entries, lo,
+                             excluded)
 
     # Owes a run: the record is absent, corrupt, or a deferral (credit, not
     # evidence: at a squash sha a deferral borrows exactly the hour this bot
@@ -573,13 +786,16 @@ def work_one(env, windows, idx, runs_used, max_runs, incoda_path):
     busy = lane_busy_with(env, incoda_path, w["squash"])
     if busy:
         print(f"resignoff-bot: #{w['number']}: a resignoff for "
-              f"{merge_guard.short(w['squash'])} is already in flight on the lane; "
-              "leaving the issue alone rather than double-queuing it.")
+              f"{merge_guard.short(w['squash'])} appears to be already in flight on the "
+              "lane; leaving the issue alone rather than double-queuing it.")
+        print(f"  holder status: {busy}")
+        print("  this match can be stale: check `incoda status --queue wintty`, clear the "
+              "stale holder or wait, then re-run.")
         return 0, "skipped"
     ok, note = prepare_worktree(env.git, env.worktree_dir, w["squash"])
     if not ok:
         print(f"resignoff-bot: #{w['number']} skipped: {note}")
-        return 0, "skipped"
+        return 0, "blocked"
     if not run_ladder(env, incoda_path, w["number"], w["squash"],
                       f"running the ladder at {merge_guard.short(w['squash'])} "
                       f"(run {runs_used + 1}/{max_runs})"):
@@ -593,40 +809,73 @@ def work_one(env, windows, idx, runs_used, max_runs, incoda_path):
     if v == "red":
         # The run itself went red: bisect with the run just spent counted
         # against the budget, exactly as if the record had been found red.
-        outcome, spent, culprit, crec, entries, lo = bisect_red(
+        # The +1 rides the whole way through finish_bisect: a bisect spend
+        # reported without the failing ladder that paid for it would make
+        # the summary lie about the budget.
+        outcome, spent, culprit, crec, entries, lo, excluded = bisect_red(
             env, w, windows[idx + 1:], runs_used + 1, max_runs, incoda_path)
-        return finish_bisect(env, w, outcome, spent, culprit, crec, entries, lo)
+        return finish_bisect(env, w, outcome, spent + 1, culprit, crec, entries, lo,
+                             excluded)
     out = env.gh(["issue", "close", str(w["number"]), "--repo", REPO,
-                  "--comment", close_body(w["squash"], rec)])
+                  "--comment", close_body(w["squash"], rec, fresh_run=True)])
     if out.returncode != 0:
         print(f"resignoff-bot: could not close #{w['number']} (rc={out.returncode}): "
               f"{(out.stderr or out.stdout).strip()}")
         return 1, "failed"
+    close_duplicates(env, w)
     print(f"resignoff-bot: #{w['number']} closed green at "
-          f"{merge_guard.short(w['squash'])}.")
+          f"{merge_guard.short(w['squash'])} (record written by the run this issue "
+          "claimed).")
     return 1, "closed"
 
 
-def finish_bisect(env, failing, outcome, spent, culprit, crec, entries, lo):
-    """The end of a red path: label the culprit issue, comment the failing
-    legs and the trail, leave it open, and say on the failing issue where
-    the failure actually lives when that is a different issue. Returns
-    (spent, action)."""
+def issue_labels(gh, number):
+    """The labels an issue already carries, [] when the read fails. A failed
+    read errs toward re-posting (a duplicate comment) rather than toward
+    losing the trail: the trail is the part that cannot be reconstructed
+    from the records, so it is the part never skipped on a guess."""
+    out = gh(["issue", "view", str(number), "--repo", REPO, "--json", "labels"])
+    if out.returncode != 0:
+        return []
+    try:
+        return [l.get("name") for l in json.loads(out.stdout).get("labels", [])]
+    except ValueError:
+        return []
+
+
+def finish_bisect(env, failing, outcome, spent, culprit, crec, entries, lo,
+                  excluded=()):
+    """The end of a red path: comment the failing legs and the trail, label
+    the culprit issue (comment first: a label success with a comment
+    failure would leave a labelled issue with no trail, and the trail is
+    the part nothing else reconstructs), and say on the failing issue where
+    the failure actually lives when that is a different issue. Idempotent:
+    a culprit already carrying the label is left alone, so re-invocations
+    on a settled pile do not re-comment forever. spent is this window's
+    total spend (the failing ladder included), which is both the honest
+    number in the paused message and the caller's budget accounting.
+    Returns (spent, action); "isolated" either way once the records
+    isolate, so the group still stops."""
     if outcome != "isolated":
         print(f"resignoff-bot: #{failing['number']} bisect paused with {spent} run(s) "
-              "spent; the records hold the state, re-invoke to continue.")
+              "spent; the records hold the state. Resume with `just resignoff-bot`.")
         return spent, "ran"
+    if CULPRIT_LABEL in issue_labels(env.gh, culprit["number"]):
+        print(f"resignoff-bot: #{culprit['number']} already carries {CULPRIT_LABEL} at "
+              f"{merge_guard.short(culprit['squash'])}; leaving the existing trail and "
+              "stopping the group here.")
+        return spent, "isolated"
+    out = env.gh(["issue", "comment", str(culprit["number"]), "--repo", REPO,
+                  "--body", trail_body(culprit, failing, crec, entries, lo, excluded)])
+    if out.returncode != 0:
+        print(f"resignoff-bot: could not comment the trail on #{culprit['number']} "
+              f"(rc={out.returncode}): {(out.stderr or out.stdout).strip()}")
+        return spent, "failed"
     out = env.gh(["issue", "edit", str(culprit["number"]), "--repo", REPO,
                   "--add-label", CULPRIT_LABEL])
     if out.returncode != 0:
         print(f"resignoff-bot: could not label #{culprit['number']} (rc={out.returncode}): "
               f"{(out.stderr or out.stdout).strip()}")
-        return spent, "failed"
-    out = env.gh(["issue", "comment", str(culprit["number"]), "--repo", REPO,
-                  "--body", trail_body(culprit, failing, crec, entries, lo)])
-    if out.returncode != 0:
-        print(f"resignoff-bot: could not comment the trail on #{culprit['number']} "
-              f"(rc={out.returncode}): {(out.stderr or out.stdout).strip()}")
         return spent, "failed"
     if culprit["number"] != failing["number"]:
         env.gh(["issue", "comment", str(failing["number"]), "--repo", REPO,
@@ -637,6 +886,28 @@ def finish_bisect(env, failing, outcome, spent, culprit, crec, entries, lo):
     print(f"resignoff-bot: #{culprit['number']} labelled {CULPRIT_LABEL} at "
           f"{merge_guard.short(culprit['squash'])}; left open for manual pickup.")
     return spent, "isolated"
+
+
+def run_spendable(env, windows, max_runs):
+    """Whether this invocation could actually spend a signoff run: the
+    budget allows one, and some window owes one - unproven windows always
+    do, a red window only while its bisect still has an untested middle
+    between the reconstructed bounds. This is what gates the incoda
+    refusal, so a pile the records can already finish (greens to close, or
+    a red already isolated) never demands the lane, and --max 0 is the
+    greens-only pass that needs no lane at all."""
+    if max_runs <= 0:
+        return False
+    for idx, w in enumerate(windows):
+        v = verdict(load_record(env.common, w["squash"]))
+        if v is None:
+            return True
+        if v == "red":
+            _chain, _lo, lo_idx, hi_idx, _excluded = bisect_bounds(
+                env, w, windows[idx + 1:])
+            if hi_idx - (lo_idx + 1) > 0:
+                return True
+    return False
 
 
 def bot_flow(max_runs=1, dry_run=False, env=None):
@@ -683,13 +954,16 @@ def bot_flow(max_runs=1, dry_run=False, env=None):
         return dry_run_flow(env, windows, max_runs)
 
     runs_used = 0
-    # The lane is demanded only when the pile actually owes a run: a
-    # all-green pile closes on the records alone with no incoda on the
-    # machine, and a red pile whose records already isolate needs none
-    # either. Refusing here, before any close or comment, keeps exit 2
-    # meaning "nothing was mutated".
+    # The lane is demanded only when a run is actually spendable: some
+    # window owes one (unproven, or red with an untested bisect middle
+    # left) and the budget allows spending it. An all-green pile closes on
+    # the records alone with no incoda on the machine, a red pile whose
+    # records already isolate needs none either, and --max 0 is the
+    # greens-only pass that spends nothing by definition. Refusing here,
+    # before any close or comment, keeps exit 2 meaning "nothing was
+    # mutated".
     incoda_path = None
-    if any(verdict(load_record(env.common, w["squash"])) != "green" for w in windows):
+    if run_spendable(env, windows, max_runs):
         incoda_path = env.find_incoda()
         if not incoda_path:
             print(f"resignoff-bot: refusing (exit 2): the pile owes signoff runs but incoda "
@@ -697,18 +971,45 @@ def bot_flow(max_runs=1, dry_run=False, env=None):
                   "and must not be started outside the lane; install incoda or put it on "
                   "PATH and re-run.")
             return 2
-    for idx in range(len(windows)):
-        if runs_used >= max_runs:
-            print(f"resignoff-bot: run budget exhausted ({max_runs} run(s) spent); "
-                  f"#{windows[idx]['number']} and any older windows stay open for the next "
-                  "invocation.")
-            break
-        spent, action = work_one(env, windows, idx, runs_used, max_runs, incoda_path)
-        runs_used += spent
-        if action == "isolated":
-            break
-        if action == "failed":
-            return 1
+
+    # One instance at a time on the shared worktree (see acquire_instance_lock).
+    ok, holder = acquire_instance_lock(env)
+    if not ok:
+        print(f"resignoff-bot: refusing (exit 2): another resignoff bot instance appears "
+              f"to hold the worktree lock: {holder}. Check that pid and "
+              "`incoda status --queue wintty` before touching anything; a dead pid's "
+              "lock is taken over automatically, so a live one is being named here.")
+        return 2
+    try:
+        for idx in range(len(windows)):
+            # Free closes (already-green records) cost no budget, so the
+            # budget check only gates windows that would actually run; a
+            # spent budget must not stop green windows behind it from
+            # closing.
+            free = verdict(load_record(env.common, windows[idx]["squash"])) == "green"
+            if not free and runs_used >= max_runs:
+                print(f"resignoff-bot: run budget reached ({runs_used} of {max_runs} "
+                      f"run(s) spent); #{windows[idx]['number']} and any older windows "
+                      "stay open for the next invocation. Resume with `just "
+                      "resignoff-bot`.")
+                break
+            spent, action = work_one(env, windows, idx, runs_used, max_runs, incoda_path)
+            runs_used += spent
+            if action == "isolated":
+                break
+            if action == "blocked" and idx == 0:
+                # The newest window cannot be prepared: working older
+                # windows would spend hours against a pile whose top state
+                # is unknown, so stop loudly instead of walking down.
+                print("resignoff-bot: stopping: the NEWEST window's worktree could not "
+                      "be prepared, and working older windows past an unproven newest "
+                      "would report progress the pile cannot stand behind. Check "
+                      "`git worktree list` and the path above, then re-run.")
+                return 1
+            if action == "failed":
+                return 1
+    finally:
+        release_instance_lock(env)
     if runs_used == 0:
         print(f"resignoff-bot: done: {len(windows)} window(s) considered, no run spent.")
     else:
@@ -755,15 +1056,21 @@ def dry_run_flow(env, windows, max_runs):
                   "--comment <record path + per-leg rcs + settle note>")
             continue
         if v == "red":
-            chain, lo, lo_idx, hi_idx = bisect_bounds(env, w, windows[idx + 1:])
+            chain, lo, lo_idx, hi_idx, excluded = bisect_bounds(env, w, windows[idx + 1:])
+            for n, sha in excluded:
+                print(f"resignoff-bot:   excluded from the bisect: #{n} "
+                      f"`{sha[:SHA7]}` (not an ancestor, or object missing)")
             if hi_idx - (lo_idx + 1) == 0:
                 culprit = chain[hi_idx] if hi_idx < len(chain) else w
+                labelled = CULPRIT_LABEL in issue_labels(env.gh, culprit["number"])
                 print("resignoff-bot:   action: LABEL + TRAIL (the records isolate the "
-                      f"culprit at {merge_guard.short(culprit['squash'])} with no run)")
-                print(f"resignoff-bot:   would: gh issue edit {culprit['number']} --repo "
-                      f"{REPO} --add-label {CULPRIT_LABEL}")
-                print(f"resignoff-bot:   would: gh issue comment {culprit['number']} --repo "
-                      f"{REPO} --body <failing legs + bisect trail>")
+                      f"culprit at {merge_guard.short(culprit['squash'])} with no run"
+                      + ("; already labelled and trailed" if labelled else "") + ")")
+                if not labelled:
+                    print(f"resignoff-bot:   would: gh issue comment {culprit['number']} "
+                          f"--repo {REPO} --body <failing legs + bisect trail>")
+                    print(f"resignoff-bot:   would: gh issue edit {culprit['number']} "
+                          f"--repo {REPO} --add-label {CULPRIT_LABEL}")
             else:
                 mid = (lo_idx + 1 + hi_idx) // 2
                 print("resignoff-bot:   action: BISECT (red record at this window; bounds "
@@ -819,6 +1126,9 @@ class FakeGh:
             return merge_guard.Out(0, json.dumps(data))
         if j.startswith("issue view"):
             n = int(args[2])
+            if "--json" in args:
+                return merge_guard.Out(0, json.dumps(
+                    {"labels": [{"name": x} for x in self.issues[n]["labels"]]}))
             body = "\n\n".join(self.issues[n]["comments"])
             return merge_guard.Out(0, f"issue #{n}\n\ncomments:\n{body}\n")
         if j.startswith("issue comment"):
@@ -855,15 +1165,19 @@ class FakeGh:
 class FakeGit:
     """A router for the spellings the bot issues: common dir, origin remote,
     fetch, short-sha resolution, ancestry, and the worktree recipe (answered
-    quietly, with an injectable add failure so the skip path is reachable)."""
+    quietly, with an injectable add failure so the skip path is reachable).
+    Full 40-hex shas resolve to themselves unless resolve_all is False,
+    which is how the missing-object case is reached."""
 
     def __init__(self, common, remote="https://github.com/deblasis/wintty.git",
-                 resolve=None, ancestors=(), fail_worktree_add=False):
+                 resolve=None, ancestors=(), fail_worktree_add=False,
+                 resolve_all=True):
         self.common = common
         self.remote = remote
         self.resolve = resolve or {}
         self.ancestors = set(ancestors)
         self.fail_worktree_add = fail_worktree_add
+        self.resolve_all = resolve_all
         self.calls = []
 
     def __call__(self, args, cwd=None):
@@ -876,7 +1190,10 @@ class FakeGit:
         if a[0] == "fetch":
             return merge_guard.Out(0, "")
         if a[0] == "rev-parse" and a[-1].endswith("^{commit}"):
-            full = self.resolve.get(a[-1].split("^")[0])
+            asked = a[-1].split("^")[0]
+            full = self.resolve.get(asked)
+            if full is None and self.resolve_all and re.fullmatch(r"[0-9a-f]{40}", asked):
+                full = asked
             return merge_guard.Out(0, full + "\n") if full \
                 else merge_guard.Out(1, "", "fatal: not found\n")
         if a[:2] == ["merge-base", "--is-ancestor"]:
@@ -959,7 +1276,7 @@ GUARD_BODY = """Filed by the merge guard (issue #969): this PR merged on a green
 ## Status
 
 Resignoff for `eeeeeeeee`: not started at filing time. Check
-`incoda status --queue wintty` before queuing a run; the #969 bot owns this lane once it lands.
+`incoda status --queue wintty` first; the #969 bot owns this (`just resignoff-bot`, owner-run): agents do not queue runs for it.
 Squash commit: `{squash}` (full sha)
 Outstanding `resignoff-required` issues at filing time: 1 (oldest #690).
 """
@@ -981,13 +1298,18 @@ changed. If it comes back green, this issue closes with that evidence.
 
 def self_test():
     """Replay injected sessions against the whole state machine: strict
-    parsing (guard-template body, hand-filed #970-style body, the rejects,
-    duplicates), newest-first ordering, the idempotent green close and its
-    comment shape, claim markers before every run, the bisect over a
-    synthetic sha chain including the resume across invocations and the
-    isolation with its label and trail, the --max bound, dry-run's
-    zero-mutation promise, and every refusal (nothing to do, incoda
-    missing, worktree failure, lane already busy)."""
+    parsing (guard-template body, hand-filed #970-style body, missing full
+    and short shas, the rejects, duplicates), newest-first ordering, the
+    idempotent green close and its comment shape, claim markers before every
+    run, the bisect over a synthetic sha chain including the resume across
+    invocations, the isolation with its label and trail, excluded filings in
+    the trail, the --max bound on both the disk-red and ran-then-red shapes,
+    the budget not blocking free closes, --max 0 as the greens-only pass,
+    dry-run's zero-mutation promise, duplicate filings closing with the
+    winner, the stray-worktree re-add, the instance lock's refuse and
+    takeover, and every refusal (nothing to do, incoda missing and not
+    demanded, newest-window worktree failure stopping the group, lane
+    already busy)."""
     import tempfile
 
     failed = False
@@ -1022,7 +1344,15 @@ def self_test():
                and w["outstanding"] is None,
                "parse-hand-filed-body", why or "short sha resolved by git")
         w, why = parse_window(HAND_BODY, FakeGit(tmp))
-        report(w is None and "does not resolve" in why, "parse-unresolvable-short", why)
+        report(w is None and "does not resolve" in why and "--file-only" in why,
+               "parse-unresolvable-short", why)
+        # The full-sha form gets the same local check: an object this
+        # checkout lacks is a window the bot cannot run.
+        w, why = parse_window(GUARD_BODY.format(pr=700, signed=signed, squash=squash_g,
+                                                path=merge_guard.display_path(signed)),
+                              FakeGit(tmp, resolve_all=False))
+        report(w is None and "not in this checkout" in why and "--file-only" in why,
+               "parse-full-sha-missing", why)
         for label, body in (("empty", ""),
                             ("no-pr-bullet", "- Signed off: `" + "d" * 40 + "`\n"),
                             ("no-signed-bullet",
@@ -1045,9 +1375,11 @@ def self_test():
                                              path=merge_guard.display_path(signed))}]
         windows, skipped = parse_all(issues, fgit)
         report([x["number"] for x in windows] == [704, 702, 701] and len(skipped) == 1
-               and windows[0]["squash"] == s4 and skipped[0][0] == 703,
+               and windows[0]["squash"] == s4 and skipped[0][0] == 703
+               and windows[0]["duplicates"] == [703],
                "ordering-newest-first",
-               f"order={[x['number'] for x in windows]}, skipped={skipped}")
+               f"order={[x['number'] for x in windows]}, "
+               f"dups={windows[0]['duplicates']}, skipped={skipped}")
 
         # --- nothing to do: the empty pile is exit 0 and nothing else.
         fgh = FakeGh([])
@@ -1067,14 +1399,20 @@ def self_test():
             """One wired environment over its own records dir: the gh and
             incoda fakes share an event list so marker-before-run is
             provable, find_incoda is pinned so the test never depends on the
-            host's install, and every test starts from a real record dir."""
+            host's install, the lane status reads empty (no holder) unless a
+            test overrides it, and the worktree and instance lock live
+            inside the temporary directory so no test touches this clone's
+            own .agents/worktrees."""
             td = common or tempfile.mkdtemp(dir=tmp)
             events = []
             gh = FakeGh(pile, events=events)
             git = FakeGit(td, resolve={"900e44bb4": squash_h}, **kw)
             incoda = FakeIncoda(td, chain, events=events)
             return td, Env(gh=gh, git=git, incoda=incoda, common=td,
-                           find_incoda=lambda: "C:\\fake\\incoda.exe"), gh, git, incoda
+                           find_incoda=lambda: "C:\\fake\\incoda.exe",
+                           incoda_status=lambda path, args: merge_guard.Out(0, ""),
+                           worktree_dir=os.path.join(td, "wt", "resignoff")), \
+                gh, git, incoda
 
         # --- idempotent close: a green record closes with no run and no claim.
         td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
@@ -1084,7 +1422,8 @@ def self_test():
         report(rc == 0 and len(gh.by_kind("close")) == 1 and not incoda.calls
                and not gh.by_kind("comment")
                and merge_guard.display_path(s4) in body and "rc=0" in body
-               and "auto-settles" in body and "all five legs rc=0" in body,
+               and "auto-settles" in body and "all five legs rc=0" in body
+               and "already on disk; no run was spent" in body,
                "idempotent-green-close", f"rc={rc}, closes={len(gh.by_kind('close'))}, "
                                          f"runs={len(incoda.calls)}")
 
@@ -1156,7 +1495,7 @@ def self_test():
         report(rc == 0 and len(incoda.calls) == 1
                and first_reason == f"resignoff {s4[:SHA7]}"
                and len(gh.by_kind("close")) == 1 and 702 in gh.open_numbers()
-               and "budget exhausted" in out,
+               and "budget reached" in out,
                "max-bounds-runs", f"runs={len(incoda.calls)}, "
                                   f"closes={len(gh.by_kind('close'))}, open={gh.open_numbers()}")
 
@@ -1188,13 +1527,25 @@ def self_test():
                and "Programs" in out and "incoda" in out,
                "refuse-incoda-missing", f"rc={rc}, mutations={len(gh.mutations)}")
 
-        # A worktree that cannot be created skips its issue with a note and
-        # still leaves every issue open and the lane untouched.
+        # A worktree that cannot be created on the NEWEST window stops the
+        # group loudly (rc 1): working older windows past an unproven newest
+        # would spend hours against a pile whose top state is unknown.
         td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)], fail_worktree_add=True)
         rc, out = run_capture(bot_flow, 1, False, env)
-        report(rc == 0 and not incoda.calls and not gh.mutations and "skipped" in out
-               and "worktree add failed" in out,
-               "refuse-worktree-failure", f"rc={rc}, runs={len(incoda.calls)}")
+        report(rc == 1 and not incoda.calls and not gh.mutations
+               and "worktree add failed" in out and "stopping" in out
+               and 703 in gh.open_numbers(),
+               "refuse-worktree-failure-newest-stops", f"rc={rc}, runs={len(incoda.calls)}")
+
+        # A non-newest window whose worktree fails is skipped with a note and
+        # the group goes on.
+        td, env, gh, git, incoda = wire([issue_for(s3, 702, 2), issue_for(s4, 703, 3)],
+                                        fail_worktree_add=True)
+        merge_guard.write_record(td, s4, make_record(s4, True))
+        rc, out = run_capture(bot_flow, 1, False, env)
+        report(rc == 0 and not incoda.calls and len(gh.by_kind("close")) == 1
+               and "skipped" in out,
+               "worktree-failure-older-skips", f"rc={rc}, closes={len(gh.by_kind('close'))}")
 
         # --- the lane-busy check: a holder whose reason names this resignoff
         # is left alone instead of double-queued.
@@ -1211,10 +1562,133 @@ def self_test():
                and "in flight" in out, "lane-busy-left-alone",
                f"runs={len(incoda.calls)}")
 
-        # --- verdict(): a deferral is credit, not evidence, at a squash sha.
+        # --- verdict(): a deferral is credit, not evidence, at a squash sha,
+        # and a scoped green retires nothing: only a full ladder does.
         deferred = dict(make_record(s1, True), deferred=True, reason="batching")
+        scoped = make_record(s1, True)
+        scoped["scope"]["full"] = False
+        scoped["scope"]["legs_run"] = ["zig-fmt"]
+        scoped["steps"] = {"zig-fmt": {"rc": 0}}
+        covered = make_record(s1, True)
+        covered["scope"]["full"] = False
         report(verdict(deferred) is None and verdict(make_record(s1, True)) == "green"
-               and verdict(None) is None, "verdict-deferred-not-evidence", "")
+               and verdict(None) is None and verdict(scoped) is None
+               and verdict(covered) == "green",
+               "verdict-deferred-and-scoped-not-evidence", "")
+
+        # --- BLOCKER regression: the newest window's OWN ladder goes red
+        # under --max 1. Exactly one incoda call, the summary says 1, and the
+        # bisect that follows (an empty chain here) does not free-ride.
+        td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
+        incoda.verdicts = {s4: "red"}
+        rc, out = run_capture(bot_flow, 1, False, env)
+        report(rc == 0 and len(incoda.calls) == 1 and "1 signoff run(s) spent" in out
+               and gh.by_kind("label") == [("label", 703, CULPRIT_LABEL)]
+               and 703 in gh.open_numbers(),
+               "red-own-ladder-bounded", f"rc={rc}, runs={len(incoda.calls)}, "
+                                         f"labels={gh.by_kind('label')}")
+
+        # The same shape resumed: the second invocation isolates on the
+        # records alone, and the already-labelled culprit is left alone
+        # (no re-label, no duplicate trail).
+        labels_before = len(gh.by_kind("label"))
+        comments_before = len(gh.by_kind("comment"))
+        rc, out = run_capture(bot_flow, 1, False, env)
+        report(rc == 0 and len(incoda.calls) == 1
+               and len(gh.by_kind("label")) == labels_before
+               and len(gh.by_kind("comment")) == comments_before
+               and 703 in gh.open_numbers(),
+               "red-own-ladder-resume-idempotent",
+               f"rc={rc}, runs={len(incoda.calls)}, labels={len(gh.by_kind('label'))}, "
+               f"comments={len(gh.by_kind('comment'))}")
+
+        # --- the instance lock: a live holder refuses (exit 2, lock intact),
+        # a dead holder's lock is taken over and released on the way out.
+        td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
+        env.pid_alive = lambda p: True
+        os.makedirs(os.path.dirname(env.lock_path), exist_ok=True)
+        with open(env.lock_path, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} at 2026-09-04T00:00:00+00:00\n")
+        rc, out = run_capture(bot_flow, 1, False, env)
+        with open(env.lock_path, encoding="utf-8") as f:
+            kept = f.read().strip()
+        report(rc == 2 and not incoda.calls and not gh.mutations
+               and "worktree lock" in out and kept.startswith(f"{os.getpid()} at "),
+               "refuse-instance-lock", f"rc={rc}, runs={len(incoda.calls)}, lock={kept!r}")
+
+        td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
+        env.pid_alive = lambda p: False
+        os.makedirs(os.path.dirname(env.lock_path), exist_ok=True)
+        with open(env.lock_path, "w", encoding="utf-8") as f:
+            f.write("999999 at 2026-09-03T00:00:00+00:00\n")
+        rc, out = run_capture(bot_flow, 1, False, env)
+        report(rc == 0 and len(incoda.calls) == 1 and "taking over" in out
+               and not os.path.exists(env.lock_path),
+               "lock-takeover-then-release", f"rc={rc}, runs={len(incoda.calls)}")
+
+        # --- duplicate filings: closing a winner retires the same-squash
+        # losers with a cross-reference to where the record lives.
+        td, env, gh, git, incoda = wire([issue_for(s4, 702, 2), issue_for(s4, 703, 3)])
+        merge_guard.write_record(td, s4, make_record(s4, True))
+        rc, out = run_capture(bot_flow, 1, False, env)
+        dup_comment = gh.issues[702]["comments"][-1] if gh.issues[702]["comments"] else ""
+        report(rc == 0 and len(gh.by_kind("close")) == 2 and not incoda.calls
+               and "#703" in dup_comment and "duplicate" in dup_comment,
+               "duplicate-filings-closed", f"rc={rc}, closes={len(gh.by_kind('close'))}, "
+                                           f"dup comment tail={dup_comment[:60]!r}")
+
+        # --- a stray directory at the worktree path (no .git) is cleared and
+        # re-added, not failed on forever.
+        td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
+        os.makedirs(env.worktree_dir, exist_ok=True)
+        rc, out = run_capture(bot_flow, 1, False, env)
+        report(rc == 0 and len(incoda.calls) == 1 and "stray" in out
+               and not os.path.exists(env.worktree_dir),
+               "worktree-stray-readd", f"rc={rc}, runs={len(incoda.calls)}")
+
+        # --- the lane is not demanded when the records can finish the pile:
+        # a greens-only pile closes with an incoda that cannot exist.
+        td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
+        merge_guard.write_record(td, s4, make_record(s4, True))
+
+        def boom():
+            """A lane demand the test must never reach."""
+            raise AssertionError("incoda demanded for a pile that owes no run")
+
+        env.find_incoda = boom
+        rc, out = run_capture(bot_flow, 1, False, env)
+        report(rc == 0 and len(gh.by_kind("close")) == 1 and not incoda.calls,
+               "greens-only-needs-no-lane", f"rc={rc}, closes={len(gh.by_kind('close'))}")
+
+        # --- --max 0 is the greens-only pass: nothing spendable, no lane
+        # demand, owed windows stay open.
+        td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
+        env.find_incoda = boom
+        rc, out = run_capture(bot_flow, 0, False, env)
+        report(rc == 0 and not incoda.calls and not gh.mutations
+               and 703 in gh.open_numbers() and "budget reached" in out,
+               "max-zero-greens-only", f"rc={rc}, mutations={len(gh.mutations)}")
+
+        # --- a spent budget does not stop already-green windows behind it
+        # from closing: closes are free, only runs are budgeted.
+        td, env, gh, git, incoda = wire([issue_for(s3, 702, 2), issue_for(s4, 703, 3)])
+        merge_guard.write_record(td, s3, make_record(s3, True))
+        rc, out = run_capture(bot_flow, 1, False, env)
+        report(rc == 0 and len(incoda.calls) == 1 and len(gh.by_kind("close")) == 2,
+               "budget-spent-greens-still-close",
+               f"rc={rc}, runs={len(incoda.calls)}, closes={len(gh.by_kind('close'))}")
+
+        # --- an excluded filing is named in the trail, not only the console:
+        # a verdict outside the failing window's history proves nothing.
+        td, env, gh, git, incoda = wire([issue_for(s2, 702, 2), issue_for(s4, 703, 3)])
+        merge_guard.write_record(td, s4, make_record(s4, False))
+        rc, out = run_capture(bot_flow, 5, False, env)
+        trail = gh.issues[703]["comments"][-1] if gh.issues[703]["comments"] else ""
+        report(rc == 0 and not incoda.calls
+               and f"excluded from the bisect: #702 `{s2[:SHA7]}` "
+                   "(not an ancestor, or object missing)" in trail
+               and gh.by_kind("label") == [("label", 703, CULPRIT_LABEL)],
+               "excluded-filing-in-trail", f"rc={rc}, runs={len(incoda.calls)}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

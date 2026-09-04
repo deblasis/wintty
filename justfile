@@ -1556,9 +1556,10 @@ merge-checked pr:
 # signoff runs (default 1, an hour of lane time each) on the open issues,
 # newest window first, closing the ones a green record retires and
 # bisecting the recorded squash SHAs to a culprit when a window goes red.
-# An agent merging a PR never runs this; the pile is designed to sit until
-# it is worked. --dry-run prints the decisions and exact commands and
-# touches nothing.
+# --max 0 is the greens-only pass: close what the records already retire,
+# spend nothing. An agent merging a PR never runs this; the pile is
+# designed to sit until it is worked. --dry-run prints the decisions and
+# exact commands and touches nothing.
 resignoff-bot *args:
     python .agents/scripts/resignoff_bot.py {{args}}
 

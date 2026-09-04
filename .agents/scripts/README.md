@@ -56,8 +56,11 @@ human) working in this repo uses the same contract:
   `incoda run --queue wintty -- just signoff`, and a red window bisects
   the recorded squash SHAs down to a single culprit issue, which gets the
   `signoff-bisect-culprit` label, the failing legs and the trail, and
-  stays open. The records ARE the bisect state, so any re-invocation
-  resumes where the last one stopped, and `--dry-run` prints the
+  stays open. One instance at a time: a lock beside the worktree refuses a
+  second live bot (a dead holder's lock is taken over). The records ARE
+  the bisect state, so any re-invocation resumes where the last one
+  stopped; `--max 0` is the greens-only pass, closing what the records
+  already retire and spending nothing; and `--dry-run` prints the
   decisions and exact commands while mutating nothing.
 - `just doctor` - verify everything the gates depend on: required tools on
   PATH, scripts where the hook wiring points, settings parseable, nightly
