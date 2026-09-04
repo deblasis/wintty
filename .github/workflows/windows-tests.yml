@@ -1,13 +1,21 @@
 # Runs the C# test suites on the fork. Upstream test.yml gates every job on
 # ghostty-org/ghostty, so it is inert here; this workflow mirrors `just
-# test-win` so CI runs the same legs as the signoff ladder.
+# test-win` so a GitHub-side run executes the same legs as the signoff
+# ladder.
+#
+# OPT-IN ON THE COMMIT: pushes to windows run only when the head commit's
+# message contains "yesci"; a message that also contains "noci" skips
+# (noci wins when both are present). The job-level `if` skips before any
+# runner spins up, so an ordinary push costs nothing. The default gate
+# remains the local signoff ladder - its verdict is advertised on PRs as
+# the `signoff/ladder` commit status - and workflow_dispatch always runs,
+# as the explicit escape hatch.
 
 name: windows-tests
 
 on:
   push:
     branches: [windows]
-  pull_request: {}
   workflow_dispatch: {}
 
 concurrency:
@@ -19,7 +27,13 @@ permissions:
 
 jobs:
   test-win:
-    if: github.repository == 'deblasis/wintty'
+    # yesci/noci read the PUSH head commit's message (subject and body
+    # together). workflow_dispatch has no head_commit and always runs.
+    if: >-
+      github.repository == 'deblasis/wintty' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (contains(github.event.head_commit.message, 'yesci') &&
+        !contains(github.event.head_commit.message, 'noci')))
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -30,11 +44,11 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
 
       # No version input: installs the SDK pinned by the root global.json.
-      # cache: the WAS self-contained restore is large and a cold run is
-      # the tight one against the 90-minute budget.
+      # No cache: setup-dotnet's NuGet cache demands packages.lock.json
+      # files to hash and this repo has none - with `cache: true` the step
+      # hard-fails before anything builds ("Dependencies lock file is not
+      # found"). CI is rare now; a cold restore is fine.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          cache: true
 
       # Ghostty.csproj hard-errors without zig-out/lib/ghostty.dll
       # (ErrorIfNoLibghostty), so the dll must exist before any dotnet build.
