@@ -4,8 +4,9 @@ const Raster = @import("command.zig").Raster;
 
 /// Per-image RGBA byte budget. 48 MiB ≈ 3500×3500 RGBA, the upper
 /// bound we're willing to allocate per inline image. The DCS layer's
-/// 1 MiB source-byte cap (`dcs.Handler.max_bytes`) already bounds
-/// pathological inputs; this catches large *declared* geometries
+/// 1 MiB source-byte cap (`dcs.Handler.max_bytes`, enforced on the
+/// sixel arm itself -- see the "sixel DCS byte cap" test) bounds
+/// pathological payloads; this catches large *declared* geometries
 /// before the decoder allocates.
 pub const MAX_RGBA_BYTES: usize = 48 * 1024 * 1024;
 
