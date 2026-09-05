@@ -2990,23 +2990,29 @@ fn resizeWithoutReflowGrowCols(
                 dst_row,
                 src_row,
             ) catch {
-                // If an error happens, we undo our row copy and break out
-                // into creating a new page.
+                // If an error happens, we undo our row copy and stop
+                // filling. A partial copy can leave managed memory in the
+                // row, and the row is retired back into unused capacity,
+                // which the grow() fast path re-exposes without any
+                // clearing, so it has to go back to the default state.
+                prev_page.resetRow(dst_row);
                 prev_page.size.rows -= 1;
                 copied -= 1;
-                break :prev;
+                break;
             };
         }
 
-        assert(copied == len);
+        assert(copied <= len);
         assert(prev_page.size.rows <= prev_page.capacity.rows);
 
         // Remap any tracked pins that pointed to rows we just copied to prev.
+        // The rows copied before a failure above still moved, and this page
+        // is destroyed at the end, so this has to run for them too.
         const pin_keys = self.tracked_pins.keys();
         for (pin_keys) |p| {
-            if (p.node != chunk.node or p.y >= len) continue;
+            if (p.node != chunk.node or p.y >= copied) continue;
             p.node = prev_node;
-            p.y += prev_page.size.rows - len;
+            p.y += prev_page.size.rows - copied;
         }
     }
 
@@ -3065,7 +3071,10 @@ fn resizeWithoutReflowGrowCols(
                 );
 
                 // We can actually safely handle this though by exiting
-                // this loop early and cutting our copy short.
+                // this loop early and cutting our copy short. The row goes
+                // back into unused capacity so it must be reset, since a
+                // partial copy can leave managed memory behind.
+                new_page.resetRow(dst_row);
                 new_page.size.rows -= 1;
                 break;
             }
@@ -19320,6 +19329,104 @@ test "PageList resize (no reflow) more cols remaps pins in backfill path" {
     // Verify the pin still points to the cell with our marker content.
     const cell = tracked.rowAndCell().cell;
     try testing.expectEqual(.codepoint, cell.content_tag);
+    try testing.expectEqual(marker, cell.content.codepoint.data);
+}
+
+test "PageList resize (no reflow) more cols remaps pins when backfill fails" {
+    // Regression test: the backfill into the previous page can fail partway
+    // through (the destination can't fit the managed memory of a row). The
+    // rows copied before the failure still have to hand over their tracked
+    // pins, because the source page is destroyed at the end of the resize.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // We start wider than we need and shrink so the first page keeps spare
+    // column capacity and stays in place during the final resize. That
+    // makes it the backfill destination we prepared below.
+    const wide_cols: size.CellCountInt = 80;
+    const cols: size.CellCountInt = wide_cols / 2;
+    const cap = try std_capacity.adjust(.{ .cols = wide_cols });
+    var s = try init(alloc, .{ .cols = wide_cols, .rows = cap.rows });
+    defer s.deinit();
+    try s.resize(.{ .cols = cols, .reflow = false });
+
+    // Grow into a second page and give it a few rows.
+    while (s.pages.first == s.pages.last) _ = try s.grow();
+    const first_node = s.pages.first.?;
+    const second_node = s.pages.last.?;
+    while (second_node.rows() < 4) _ = try s.grow();
+
+    // Free rows in the first page so that the backfill has somewhere to
+    // copy to.
+    s.eraseHistory(.{ .history = .{ .y = 2 } });
+    try testing.expect(first_node.rows() + 2 <= first_node.capacity().rows);
+
+    // Fill the first page's style set so that a styled row can no longer
+    // be cloned into it.
+    {
+        const page = first_node.page();
+        for (0..std_capacity.styles * 2) |i| {
+            _ = page.styles.add(page.memory, .{ .bg_color = .{ .rgb = .{
+                .r = @truncate(i),
+                .g = @truncate(i >> 8),
+                .b = 0,
+            } } }) catch break;
+        }
+
+        if (page.styles.add(
+            page.memory,
+            .{ .flags = .{ .bold = true } },
+        )) |_| return error.StyleSetNotFull else |_| {}
+    }
+
+    // The first row of the second page owns no managed memory so it copies
+    // into the full destination fine. The second row carries a style the
+    // destination can't accept, which aborts the backfill.
+    const marker: u21 = 'X';
+    {
+        const page = second_node.page();
+        {
+            const rac = page.getRowAndCell(0, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = marker } },
+            };
+        }
+        {
+            const style_id = try page.styles.add(
+                page.memory,
+                .{ .flags = .{ .bold = true } },
+            );
+            const rac = page.getRowAndCell(0, 1);
+            rac.row.styled = true;
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = 'Y' } },
+                .style_id = style_id,
+            };
+        }
+    }
+
+    // Track a pin in the row that is copied before the failure.
+    const tracked = try s.trackPin(.{ .node = second_node, .x = 0, .y = 0 });
+    defer s.untrackPin(tracked);
+
+    try s.resize(.{ .cols = cols + 1, .reflow = false });
+
+    // The pin must point at a page that is still in the list.
+    var found = false;
+    var it = s.pages.first;
+    while (it) |node| : (it = node.next) {
+        if (node == tracked.node) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+    try testing.expect(tracked.y < tracked.node.rows());
+
+    // And it must still point at the content it was tracking.
+    const cell = tracked.rowAndCell().cell;
     try testing.expectEqual(marker, cell.content.codepoint.data);
 }
 
