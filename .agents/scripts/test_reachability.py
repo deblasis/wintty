@@ -31,7 +31,7 @@ file that has not been added yet is invisible. And a binary registered with
 running them; what is enforced is the other direction, that no `addTest`
 escapes registration.
 
-Usage: python .agents/scripts/test_reachability.py
+Usage: python .agents/scripts/test_reachability.py [--version-string V]
        python .agents/scripts/test_reachability.py --self-test
 """
 
@@ -54,6 +54,15 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 # run here. Anything a different `-D` would have compiled instead is out of
 # scope by construction, and is why the exclusions below exist.
 BUILD_ARGS = ["test-binaries", "-Dapp-runtime=none"]
+
+# The version string the justfile's test steps compile with (TEST_VERSION
+# there). The test binaries this builds are the ones `just test-full` just
+# ran, and they are only the same cache entries if build_options matches,
+# which the version is part of; a different string here would compile
+# everything a second time. `--version-string` overrides it and the
+# justfile passes its own value through, so the two cannot drift silently:
+# a mismatch costs a cold build, and gates-selftest compares them.
+TEST_VERSION = "0.0.0-test"
 
 # Directories whose `test` blocks are knowingly not run, with the reason.
 #
@@ -337,7 +346,7 @@ def query_test_names(exe):
             proc.kill()
 
 
-def build_test_binaries(repo, prefix):
+def build_test_binaries(repo, prefix, version=TEST_VERSION):
     """Compile every registered test binary.
 
     Returns [(exe path, module root directory)]. The roots come from the
@@ -347,7 +356,8 @@ def build_test_binaries(repo, prefix):
     """
     if not shutil.which("zig"):
         raise HarnessError("zig is not on PATH")
-    cmd = ["zig", "build"] + BUILD_ARGS + ["-p", prefix.replace("\\", "/")]
+    cmd = ["zig", "build"] + BUILD_ARGS + [f"-Dversion-string={version}",
+                                          "-p", prefix.replace("\\", "/")]
     print("building: " + " ".join(cmd), flush=True)
     proc = subprocess.run(cmd, cwd=repo)
     if proc.returncode != 0:
@@ -471,7 +481,7 @@ def evaluate(files_with_tests, all_files, binaries):
 # --- the check itself ------------------------------------------------------
 
 
-def check(repo):
+def check(repo, version=TEST_VERSION):
     paths = git_zig_files(repo)
     included, excluded = scan_for_test_blocks(repo, paths)
 
@@ -490,7 +500,7 @@ def check(repo):
 
     prefix_dir = tempfile.mkdtemp(prefix="test-reachability-")
     try:
-        binaries = build_test_binaries(repo, prefix_dir)
+        binaries = build_test_binaries(repo, prefix_dir, version)
         registered = registered_test_count(repo)
         if registered != len(binaries):
             raise HarnessError(
@@ -681,6 +691,33 @@ def self_test():
         sorted(set(NOT_BUILT_HERE) & set(NOT_ROOTED)),
         [],
     )
+    # The justfile's TEST_VERSION and this file's default are two spellings
+    # of one value; the recipe passes the justfile's through, so a drift
+    # only shows as a cold second compile that nobody reads as a defect.
+    try:
+        with open(os.path.join(REPO_ROOT, "justfile"), encoding="utf-8") as f:
+            justfile_text = f.read()
+    except OSError:
+        justfile_text = ""
+    m = re.search(r'^TEST_VERSION\s*:=\s*"([^"]*)"', justfile_text, re.M)
+    expect(
+        "the justfile's TEST_VERSION equals this script's default",
+        m.group(1) if m else None,
+        TEST_VERSION,
+    )
+    # The recipe bodies run under `pwsh -Command`, which splits an unquoted
+    # `-Dversion-string=0.0.0-test` at the first dot; an unquoted use here
+    # fails every Zig leg with InvalidVersion two seconds in. Any spelling
+    # counts, a literal as much as the {{TEST_VERSION}} reference.
+    body_lines = [
+        ln for ln in justfile_text.splitlines()
+        if ln[:1].isspace() and not ln.strip().startswith("#")
+    ]
+    expect(
+        "every -Dversion-string in a justfile recipe body is quoted",
+        re.findall(r'''(?<!["'])-Dversion-string=\S*''', "\n".join(body_lines)),
+        [],
+    )
 
     if failures:
         for f in failures:
@@ -694,11 +731,19 @@ def self_test():
 def main(argv):
     if "--self-test" in argv:
         return self_test()
+    version = TEST_VERSION
+    if "--version-string" in argv:
+        i = argv.index("--version-string")
+        if i + 1 >= len(argv) or not argv[i + 1].strip():
+            print("harness: --version-string needs a value", file=sys.stderr)
+            return EXIT_HARNESS
+        version = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
     if argv:
         print(__doc__)
         return EXIT_HARNESS
     try:
-        return check(REPO_ROOT)
+        return check(REPO_ROOT, version)
     except HarnessError as e:
         print(f"harness: {e}", file=sys.stderr)
         return EXIT_HARNESS

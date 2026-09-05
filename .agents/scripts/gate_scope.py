@@ -44,6 +44,7 @@ RECIPE_LEGS = {
     "test-full": (LEG_ZIG,),
     "test-pkg": (LEG_ZIG,),
     "test-reachability": (LEG_ZIG,),
+    "test-configure": (LEG_ZIG,),
     "build-dll": (LEG_ZIG, LEG_WIN),
     "test-win": (LEG_WIN,),
     "build-win": (LEG_WIN,),
@@ -78,15 +79,29 @@ PREFIX_SUFFIX_RULES = (
 PREFIX_RULES = (
     ("src/", ZIG_LEGS),
     ("pkg/", ZIG_LEGS),
-    ("include/", ZIG_LEGS),
+    # The C# suite embeds include/ghostty.h and reads it at test time: the
+    # header parity tests pin the action-tag ordinals and the struct layouts
+    # the shell binds against the header's text, so a header edit with no
+    # C# edit is exactly the case they exist to catch, and it must run
+    # them. The src/ files that same project embeds are listed one by one
+    # in EXACT_RULES below.
+    ("include/", ZIG_LEGS + (LEG_WIN,)),
     ("vendor/", ZIG_LEGS),
     ("test/", ZIG_LEGS),
     ("windows/", (LEG_WIN,)),
+    # `just test-win` runs dist/windows/IconGen.Tests and SplashGen.Tests;
+    # before this line the dist/ rule below said an edit there could affect
+    # nothing, so a broken generator test could merge on a scoped record.
+    ("dist/windows/", (LEG_WIN,)),
     (".agents/scripts/", (LEG_GATES,)),
     (".agents/", ()),
     (".claude/", ()),
     (".github/", ()),
     ("docs/", ()),
+    # IconGen rasterises the launch icon from these masters and its tests,
+    # which `just test-win` runs, read them off the repo tree; the images/
+    # rule below is for the screenshots and marketing art.
+    ("images/icons/", (LEG_WIN,)),
     ("images/", ()),
     ("macos/", ()),
     ("nix/", ()),
@@ -102,6 +117,21 @@ EXACT_RULES = {
     # The check itself. Not a gates-selftest member: that leg runs anywhere,
     # and this one needs a Windows toolchain.
     ".agents/scripts/release_gate_check.ps1": (LEG_RELEASE_GATE,),
+    # Embedded by windows/Ghostty.Tests/Ghostty.Tests.csproj and read by its
+    # parity tests: the exported entry points against main_c.zig, the CLI
+    # aliases against cli/ghostty.zig, the keybind and theme facts against
+    # the config sources. An edit to any of them with no C# edit is a
+    # windows-tests failure the src/ rule alone would never run. Keep this
+    # list equal to the csproj's out-of-tree EmbeddedResource entries;
+    # leg_cache's self-test compares the two.
+    "src/apprt/embedded.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/benchmark/CApi.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/cli/ghostty.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/config/CApi.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/config/Config.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/config/wintty_theme.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/log_bridge.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/main_c.zig": ZIG_LEGS + (LEG_WIN,),
     # The compiled-result half of the shipping gate. It is #if !DEBUG, so
     # editing it proves nothing until a Release run executes it.
     "windows/Ghostty.Tests/Demo/ShippingBuildGateTests.cs": (LEG_WIN, LEG_RELEASE_GATE),
