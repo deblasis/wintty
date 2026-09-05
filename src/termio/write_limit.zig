@@ -16,9 +16,14 @@ const std = @import("std");
 /// paste larger than the cap still goes through in full; it just makes us
 /// refuse replies until it drains.
 ///
-/// The counter is written from the termio thread (queueing writes and
-/// their completions) and read from the read thread (deciding whether to
-/// refuse a reply), so it is atomic.
+/// Every field is touched from more than one thread. The outstanding
+/// count is written by the termio thread (queueing writes and their
+/// completions) and read by the read thread (deciding whether to refuse a
+/// reply); the drop counter and the warning timestamp are written by both,
+/// because a config change hands `changeConfig` a colour report to write
+/// from the termio thread while every other reply comes from the read
+/// thread. So all of them are atomic, and the warning claims its interval
+/// with a compare-exchange rather than a load and a store.
 pub const WriteLimit = struct {
     /// Bytes queued to the write stream whose writes have not completed.
     outstanding: std.atomic.Value(usize) = .init(0),
@@ -59,14 +64,27 @@ pub const WriteLimit = struct {
     /// refused since the last warning if it is time to warn again, and
     /// null if the last warning was too recent.
     pub fn recordDrop(self: *WriteLimit, now_ms: i64) ?usize {
-        const count = self.dropped.fetchAdd(1, .monotonic) + 1;
+        _ = self.dropped.fetchAdd(1, .monotonic);
 
-        const last = self.last_warn_ms.load(.monotonic);
-        if (last != 0 and now_ms -| last < warn_interval_ms) return null;
+        // Claim the interval before reporting anything: only the caller
+        // that moves the timestamp gets to warn, so two threads dropping
+        // at once produce one warning rather than two, and only one of
+        // them takes the counter.
+        var last = self.last_warn_ms.load(.monotonic);
+        while (true) {
+            if (last != 0 and now_ms -| last < warn_interval_ms) return null;
+            last = self.last_warn_ms.cmpxchgWeak(
+                last,
+                now_ms,
+                .monotonic,
+                .monotonic,
+            ) orelse break;
+        }
 
-        self.last_warn_ms.store(now_ms, .monotonic);
-        _ = self.dropped.fetchSub(count, .monotonic);
-        return count;
+        // Taking the whole counter rather than subtracting what we
+        // counted keeps the drops another thread added meanwhile, and
+        // can't underflow.
+        return self.dropped.swap(0, .monotonic);
     }
 };
 
@@ -102,5 +120,45 @@ test "termio WriteLimit rate limits its warning" {
     try testing.expectEqual(
         @as(?usize, 3),
         limit.recordDrop(1_000 + WriteLimit.warn_interval_ms),
+    );
+}
+
+test "termio WriteLimit accounts for every drop with two threads warning" {
+    const testing = std.testing;
+
+    const thread_count = 4;
+    const drops_per_thread = 500;
+
+    // A config change writes a colour report from the termio thread while
+    // the read thread is refusing replies, so two threads can be in
+    // recordDrop at once. Whatever the interleaving, every drop has to be
+    // reported exactly once or still be waiting in the counter: reporting
+    // one twice, or losing one, means the subtraction underflowed.
+    const Dropper = struct {
+        limit: *WriteLimit,
+        reported: usize = 0,
+
+        fn run(self: *@This()) void {
+            for (0..drops_per_thread) |i| {
+                const now: i64 = 1 + @as(i64, @intCast(i)) * WriteLimit.warn_interval_ms;
+                if (self.limit.recordDrop(now)) |n| self.reported += n;
+            }
+        }
+    };
+
+    var limit: WriteLimit = .{};
+    var droppers: [thread_count]Dropper = undefined;
+    var threads: [thread_count]std.Thread = undefined;
+    for (&droppers, &threads) |*d, *t| {
+        d.* = .{ .limit = &limit };
+        t.* = try std.Thread.spawn(.{}, Dropper.run, .{d});
+    }
+    for (&threads) |t| t.join();
+
+    var total: usize = limit.dropped.load(.monotonic);
+    for (&droppers) |*d| total += d.reported;
+    try testing.expectEqual(
+        @as(usize, thread_count * drops_per_thread),
+        total,
     );
 }
