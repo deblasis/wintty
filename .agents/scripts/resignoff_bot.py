@@ -475,9 +475,10 @@ def close_body(sha, rec, fresh_run):
                            else "already on disk; no run was spent closing this window."),
     ]
     if set(steps) >= set(gate_scope.ALL_LEGS):
-        lines.append("- a green full ladder auto-settles the deferral ledger: signoff.py "
-                     "settles any outstanding deferrals when every leg runs green, so this "
-                     "run pays that debt too.")
+        lines.append("- a green full ladder settles the deferral ledger when its HEAD "
+                     "contains origin/windows and no carried leg was asserted by hand; "
+                     "a run at a squash inside windows history settles nothing, and "
+                     "signoff.py says which applied.")
     else:
         lines.append("- this record ran a scoped ladder, not every leg, so it settles no "
                      "deferral debt; only a full green run does.")
@@ -1422,7 +1423,7 @@ def self_test():
         report(rc == 0 and len(gh.by_kind("close")) == 1 and not incoda.calls
                and not gh.by_kind("comment")
                and merge_guard.display_path(s4) in body and "rc=0" in body
-               and "auto-settles" in body and "all five legs rc=0" in body
+               and "settles the deferral ledger" in body and "all five legs rc=0" in body
                and "already on disk; no run was spent" in body,
                "idempotent-green-close", f"rc={rc}, closes={len(gh.by_kind('close'))}, "
                                          f"runs={len(incoda.calls)}")

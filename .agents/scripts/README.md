@@ -13,11 +13,31 @@ human) working in this repo uses the same contract:
   decision without running anything; `just signoff-full` runs every leg.
   The gate recomputes the requirement from the PR's own files, so a cheap
   record cannot stand in for an expensive one.
+- `just leg-cache plan` - the content digests behind signoff's carrying
+  (`leg_cache.py`). Each leg has a digest over everything it consumes:
+  the paths `gate_scope.py` routes to it, the justfile recipes it runs
+  through, its command, the toolchain that runs it, and the environment
+  variables its suites read. A green observed for a digest, by any signoff
+  or nightly run in any worktree of this repo, is carried by later
+  signoffs whose digest matches. Digests come from HEAD tree objects
+  only; a dirty tree carries and records nothing; a root entry no rule
+  classifies goes into every digest; an unresolved input forces a run.
+  Records live under `<git-common-dir>/pr-signoff/leg-cache/<machine>/`
+  and name the commit the green was observed at and whether a run
+  observed it (which must hand over the toolchain snapshot it ran under,
+  `just leg-cache snapshot FILE` taken before the legs) or a human
+  asserted it (`just leg-cache record LEG --from-sha HEAD`, on their
+  word). Every carried step in a signoff record says so; `just
+  signoff-fresh` carries nothing and records what it observes instead. The fixed version and seed the Zig test steps use are the same
+  idea one level down; the justfile's `TEST_VERSION` and `TEST_SEED`
+  comments say why.
 - `just signoff-defer "<motivation>"` - merge without running the legs, on
   the record. For batching a run of small PRs behind one later ladder. The
   motivation is stored in a ledger, at most a few deferrals may be
   outstanding and none may go stale, and only a green `signoff-full` (or a
-  green nightly) settles them. `just signoff-debt` lists what is currently
+  green nightly) settles them - on a branch that contains `origin/windows`,
+  since that is where the deferred merges live, and with no leg carried on
+  a human's word rather than a run's. `just signoff-debt` lists what is currently
   merged on credit; the session-start doctor reports it too.
 - `just pr-gate <n>` - validate a PR against the merge gate without
   merging: countable size limit, body present, no unchecked task items,

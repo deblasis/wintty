@@ -301,8 +301,20 @@ Write-Host "nightly: running against origin/windows @ $script:sha"
 
 # Legs read their exit codes through `?? 1`: a null (command never ran)
 # counts as a failure, never as a stale green.
+# The greens this run produces are recorded for reuse below; the digest
+# they are recorded against must describe the toolchain the legs actually
+# ran under, so the environment is snapshotted BEFORE the legs and the
+# record refuses when it has moved since. The worktree's own copy of the
+# script is used so everything is computed against $wt, not this checkout.
+# It runs before the leg's exit-code reset below, so its own exit code can
+# never stand in for a `just` that failed to launch.
+$legCache = Join-Path $wt '.agents\scripts\leg_cache.py'
+$envSnapshot = Join-Path $logDir "$stamp.env.json"
+if (Test-Path $legCache) { python $legCache snapshot $envSnapshot }
+
 Write-Status 'zig-tests'
 $global:LASTEXITCODE = $null
+$legClock = [System.Diagnostics.Stopwatch]::StartNew()
 # The justfile pins the test seed so signoff runs can hit zig's run cache;
 # the nightly is the run that wants fresh randomness, so it draws one. It
 # rides in the failure issue too, or a seed-dependent red could not be
@@ -311,15 +323,33 @@ $env:WINTTY_TEST_SEED = '0x{0:x}' -f (Get-Random -Minimum 1 -Maximum 2147483647)
 Write-Host "nightly: WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED"
 just --justfile (Join-Path $wt 'justfile') --working-directory $wt test
 $testRc = $LASTEXITCODE ?? 1
+$testSeconds = [int]$legClock.Elapsed.TotalSeconds
 $script:status.results['zig-tests'] = $testRc
 Write-Host "nightly: zig tests rc=$testRc"
 
 Write-Status 'windows-tests'
 $global:LASTEXITCODE = $null
+$legClock.Restart()
 just --justfile (Join-Path $wt 'justfile') --working-directory $wt test-win
 $testWinRc = $LASTEXITCODE ?? 1
+$testWinSeconds = [int]$legClock.Elapsed.TotalSeconds
 $script:status.results['windows-tests'] = $testWinRc
 Write-Host "nightly: windows tests rc=$testWinRc"
+
+# A green leg here is a green for its content digest, and the store is
+# shared by every worktree of this repo: recording it lets every branch
+# whose inputs for that leg equal origin/windows carry it in its own
+# signoff. Refusals (a dirty worktree, a toolchain that moved since the
+# snapshot) print their reason and cost nothing; the nightly's verdict
+# does not depend on this.
+if ((Test-Path $legCache) -and $script:sha -and (Test-Path $envSnapshot)) {
+    if ($testRc -eq 0) {
+        python $legCache record zig-tests --from-sha $script:sha --origin observed --seconds $testSeconds --env-snapshot $envSnapshot
+    }
+    if ($testWinRc -eq 0) {
+        python $legCache record windows-tests --from-sha $script:sha --origin observed --seconds $testWinSeconds --env-snapshot $envSnapshot
+    }
+}
 
 if ($testRc -ne 0) { File-Issue '[nightly] zig test suite failed on windows branch' "``just test`` exited $testRc (WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED)." }
 if ($testWinRc -ne 0) { File-Issue '[nightly] Windows test suite failed on windows branch' "``just test-win`` exited $testWinRc." }
