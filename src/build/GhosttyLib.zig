@@ -29,7 +29,7 @@ pub fn initStatic(
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main_c.zig"),
             .target = deps.config.target,
-            .optimize = deps.config.optimize,
+            .optimize = deps.config.zigOptimize(),
             .strip = deps.config.strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
             .unwind_tables = if (deps.config.strip) .none else .sync,
@@ -100,7 +100,7 @@ pub fn initShared(
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main_c.zig"),
             .target = deps.config.target,
-            .optimize = deps.config.optimize,
+            .optimize = deps.config.zigOptimize(),
             .strip = deps.config.strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
             .unwind_tables = if (deps.config.strip) .none else .sync,

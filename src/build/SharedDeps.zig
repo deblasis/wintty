@@ -236,9 +236,15 @@ pub fn add(
     const b = step.step.owner;
 
     // We could use our config.target/optimize fields here but its more
-    // correct to always match our step.
+    // correct to always match our step. The exception is -Dvt-safe, which
+    // raises only our own Zig code: vendored dependencies keep following
+    // -Doptimize so that a safety measurement does not also recompile
+    // simdutf and highway in a different mode.
     const target = step.root_module.resolved_target.?;
-    const optimize = step.root_module.optimize.?;
+    const optimize = if (self.config.vt_safe)
+        self.config.optimize
+    else
+        step.root_module.optimize.?;
 
     // We maintain a list of our static libraries and return it so that
     // we can build a single fat static library for the final app.
@@ -262,7 +268,10 @@ pub fn add(
     step.root_module.addOptions("build_options", self.options);
 
     // Every exe needs the terminal options
-    self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);
+    self.config.terminalOptions(
+        .ghostty,
+        step.root_module.optimize.?,
+    ).add(b, step.root_module);
 
     // Every exe needs the uucode module
     step.root_module.addImport("uucode", self.uucode_mod);
@@ -503,6 +512,7 @@ pub fn add(
     if (self.config.simd) try addSimd(
         b,
         step.root_module,
+        optimize,
         &static_libs,
     );
 
@@ -814,7 +824,10 @@ fn addGtkNg(
 ) !void {
     const b = step.step.owner;
     const target = step.root_module.resolved_target.?;
-    const optimize = step.root_module.optimize.?;
+    const optimize = if (self.config.vt_safe)
+        self.config.optimize
+    else
+        step.root_module.optimize.?;
 
     const gobject_ = b.lazyDependency("gobject", .{
         .target = target,
@@ -1004,10 +1017,10 @@ fn addGtkNg(
 pub fn addSimd(
     b: *std.Build,
     m: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
     static_libs: ?*LazyPathList,
 ) !void {
     const target = m.resolved_target.?;
-    const optimize = m.optimize.?;
     const system_highway = b.systemIntegrationOption("highway", .{ .default = false });
 
     // MSVC's C++ static-init pass populates simdutf's implementation
