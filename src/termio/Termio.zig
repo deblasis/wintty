@@ -182,6 +182,7 @@ pub const DerivedConfig = struct {
     osc_color_report_format: configpkg.Config.OSCColorReportFormat,
     clipboard_write: configpkg.ClipboardAccess,
     clipboard_write_limit: usize,
+    tmux_control_mode: bool,
     enquiry_response: []const u8,
     conditional_state: configpkg.ConditionalState,
 
@@ -219,6 +220,7 @@ pub const DerivedConfig = struct {
             .osc_color_report_format = config.@"osc-color-report-format",
             .clipboard_write = config.@"clipboard-write",
             .clipboard_write_limit = config.@"clipboard-write-limit-bytes".value,
+            .tmux_control_mode = config.@"tmux-control-mode",
             .enquiry_response = try alloc.dupe(u8, config.@"enquiry-response"),
             .conditional_state = config._conditional_state,
 
@@ -333,6 +335,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .osc_color_report_format = opts.config.osc_color_report_format,
         .clipboard_write = opts.config.clipboard_write,
         .clipboard_write_limit = opts.config.clipboard_write_limit,
+        .tmux_control_mode = opts.config.tmux_control_mode,
         .enquiry_response = opts.config.enquiry_response,
     };
 
