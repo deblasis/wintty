@@ -277,18 +277,24 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    switch (internal_os.writePipeEnd(exec.read_thread_pipe, "x")) {
-        .ok => {},
+    //
+    // Windows cannot poll the pty handle and this pipe together, so the
+    // reader there watches the quit flag below instead and never reads
+    // the pipe. A write would wake nobody.
+    if (comptime builtin.os.tag != .windows) {
+        switch (internal_os.writePipeEnd(exec.read_thread_pipe, "x")) {
+            .ok => {},
 
-        // A broken pipe means our read thread is closed already, which
-        // is completely fine since that is what we were trying to
-        // achieve.
-        .broken_pipe => {},
+            // A broken pipe means our read thread is closed already,
+            // which is completely fine since that is what we were
+            // trying to achieve.
+            .broken_pipe => {},
 
-        .failed => log.warn(
-            "error writing to read thread quit pipe",
-            .{},
-        ),
+            .failed => log.warn(
+                "error writing to read thread quit pipe",
+                .{},
+            ),
+        }
     }
 
     if (comptime builtin.os.tag == .windows) {
@@ -302,7 +308,7 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
         // join. So keep interrupting until the reader acknowledges.
         self.read_quit.request();
 
-        const cancel: ReadThread.WindowsCancel = .{
+        var cancel: ReadThread.WindowsCancel = .{
             .fd = exec.read_thread_fd,
             .quit = &self.read_quit,
         };
@@ -2120,20 +2126,30 @@ pub const ReadThread = struct {
         // already pending, and the reader may be parsing output rather
         // than reading. Repeat until one of the interrupts lands while it
         // is blocked, or it finishes on its own.
-        for (0..max_attempts) |_| {
+        for (0..max_attempts) |attempt| {
             if (ops.acked()) return true;
             ops.cancel();
             if (ops.acked()) return true;
-            ops.sleep();
+            ops.wait(attempt);
         }
 
         return ops.acked();
     }
 
-    /// How long to wait between interrupt attempts, and how many to make
-    /// before giving up and joining anyway. The reader normally
-    /// acknowledges on the first attempt; the budget only matters when it
-    /// is busy parsing a large batch of output.
+    /// How many interrupt attempts spin before we start sleeping between
+    /// them. The reader normally acknowledges on the first attempt, and
+    /// the case that needs a second one is a batch of output it is a few
+    /// microseconds from finishing, so the first attempts hand the core
+    /// over rather than paying a scheduler round trip.
+    const cancel_yield_attempts = 8;
+
+    /// How long to wait between the remaining interrupt attempts, and how
+    /// many to make before giving up and joining anyway. The interval is
+    /// a floor, not a period: without a raised timer resolution the
+    /// scheduler rounds it up to a tick, so a full budget is on the order
+    /// of seconds rather than the millisecond product. That only ever
+    /// costs anything if the reader is stuck somewhere that is not the
+    /// read, and the join that follows would then hang outright.
     const cancel_interval_ms = 2;
     const cancel_max_attempts = 500;
 
@@ -2203,13 +2219,22 @@ pub const ReadThread = struct {
         fd: posix.fd_t,
         quit: *const Quit,
 
-        fn cancel(self: *const WindowsCancel) void {
+        /// A failure that is not NOT_FOUND will repeat on every attempt,
+        /// so report it once instead of hundreds of times.
+        reported: bool = false,
+
+        fn cancel(self: *WindowsCancel) void {
             if (windows.exp.kernel32.CancelIoEx(self.fd, null) == windows.FALSE) {
                 switch (windows.GetLastError()) {
                     // Nothing was pending, so the reader is either
                     // between reads or already done.
                     .NOT_FOUND => {},
-                    else => |err| log.warn("error interrupting read thread err={}", .{err}),
+                    else => |err| {
+                        if (!self.reported) {
+                            self.reported = true;
+                            log.warn("error interrupting read thread err={}", .{err});
+                        }
+                    },
                 }
             }
         }
@@ -2218,7 +2243,12 @@ pub const ReadThread = struct {
             return self.quit.acked();
         }
 
-        fn sleep(_: *const WindowsCancel) void {
+        fn wait(_: *WindowsCancel, attempt: usize) void {
+            if (attempt < cancel_yield_attempts) {
+                std.Thread.yield() catch {};
+                return;
+            }
+
             std.Io.sleep(
                 global.io(),
                 .fromMilliseconds(cancel_interval_ms),
@@ -2237,7 +2267,9 @@ pub const ReadThread = struct {
         defer internal_os.closePipeEnd(quit);
 
         // Stop threadExit from interrupting a thread that is on its way
-        // out. This must be the last thing that runs.
+        // out. Registered as a defer so it runs on every return path,
+        // including the error ones, and never leaves threadExit spending
+        // its whole budget on a reader that has already stopped.
         defer quit_state.ack();
 
         // Setup our crash metadata
@@ -3128,7 +3160,7 @@ fn buildWrappedScript(
 }
 
 /// Serialize `arg` into `writer` using the MS C runtime quoting rules
-/// (CommandLineToArgvW inverse). Matches `windowsCreateCommandLine` in
+/// (CommandLineToArgvW inverse). Matches `windowsQuoteArg` in
 /// Command.zig byte-for-byte; we duplicate here rather than cross-
 /// module to avoid leaking an internal helper, and the per-arg surface
 /// area is small enough that drift is easy to audit.
@@ -4674,7 +4706,7 @@ test "ReadThread windows: the reader is interrupted until it acknowledges" {
     // enough.
     const Ops = struct {
         cancels: usize = 0,
-        sleeps: usize = 0,
+        waits: usize = 0,
         ack_after: usize,
 
         fn cancel(self: *@This()) void {
@@ -4685,8 +4717,8 @@ test "ReadThread windows: the reader is interrupted until it acknowledges" {
             return self.cancels >= self.ack_after;
         }
 
-        fn sleep(self: *@This()) void {
-            self.sleeps += 1;
+        fn wait(self: *@This(), _: usize) void {
+            self.waits += 1;
         }
     };
 
