@@ -698,8 +698,10 @@ fragment float4 cell_text_fragment(
       //
       // Since the alpha is premultiplied, we need to divide
       // it out before unlinearizing and re-multiply it after.
+      // A fully transparent texel is all zeroes, so the divisor is
+      // clamped away from zero to keep 0/0 NaNs out of the blender.
       if (!uniforms.use_linear_blending) {
-        color.rgb /= color.a;
+        color.rgb /= max(color.a, 1e-6);
         color = unlinearize(color);
         color.rgb *= color.a;
       }
@@ -751,7 +753,9 @@ fragment float4 cell_text_fragment(
 
       // Otherwise we need to unlinearize the color. Since the alpha is
       // premultiplied, we need to divide it out before unlinearizing.
-      color.rgb /= color.a;
+      // A fully transparent texel is all zeroes, so the divisor is
+      // clamped away from zero to keep 0/0 NaNs out of the blender.
+      color.rgb /= max(color.a, 1e-6);
       color = unlinearize(color);
       color.rgb *= color.a;
 
