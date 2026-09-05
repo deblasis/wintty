@@ -677,7 +677,9 @@ pub const LoadingImage = struct {
             const marker = data[marker_i];
 
             // The markers that carry no payload: TEM, the restart markers,
-            // and a second start of image.
+            // a second start of image, and EOI (which falls into the switch
+            // below and returns not-found, since reaching it means the
+            // stream ended without a frame header).
             if (marker == 0x01 or (marker >= 0xD0 and marker <= 0xD8)) {
                 i = marker_i + 1;
                 continue;
@@ -693,6 +695,13 @@ pub const LoadingImage = struct {
                 // that are not frame headers are the Huffman and arithmetic
                 // coding tables (0xC4, 0xCC) and an extension (0xC8).
                 0xC0...0xC3, 0xC5...0xC7, 0xC9...0xCB, 0xCD...0xCF => {
+                    // A real frame header's declared length covers the
+                    // sample precision, height, width, and the component
+                    // count byte that follows them. Requiring that much
+                    // keeps the read inside the segment the length
+                    // declares, instead of trusting whatever physically
+                    // follows it in the buffer.
+                    if (len < 8) return null;
                     if (payload_i + 7 > data.len) return null;
                     return .{
                         .height = std.mem.readInt(u16, data[payload_i + 3 ..][0..2], .big),
@@ -2367,6 +2376,195 @@ test "image load: animated gif rejects oversized header dimensions before decodi
         loading.complete(failing.allocator()),
     );
     try testing.expect(!failing.has_induced_failure);
+}
+
+/// Asserts `got` matches `(width, height)`, or is null when `width` is null.
+/// `got` is `anytype` (rather than the exact optional struct type) because
+/// `jpegHeaderDimensions` and `gifHeaderDimensions` each return their own
+/// anonymous struct type; comparing fields individually sidesteps having to
+/// name a type identical to either of them.
+fn expectDimensions(
+    name: []const u8,
+    width: ?u32,
+    height: u32,
+    got: anytype,
+) !void {
+    const testing = std.testing;
+    errdefer std.debug.print("case failed: {s}\n", .{name});
+    if (width) |w| {
+        const dims = got orelse return error.TestExpectedEqual;
+        try testing.expectEqual(w, dims.width);
+        try testing.expectEqual(height, dims.height);
+    } else {
+        try testing.expect(got == null);
+    }
+}
+
+test "jpegHeaderDimensions: hostile input" {
+    const jpegHeaderDimensions = LoadingImage.jpegHeaderDimensions;
+
+    // SOI followed by a minimal baseline frame header: a length that covers
+    // precision, height, and width (the least a real SOF ever declares),
+    // with a 2x3 image (height, then width).
+    const valid = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03";
+
+    const cases = [_]struct {
+        name: []const u8,
+        data: []const u8,
+        want_width: ?u32,
+        want_height: u32 = 0,
+    }{
+        .{ .name = "len == 0", .data = "", .want_width = null },
+        .{ .name = "len == 1", .data = "\xff", .want_width = null },
+        .{ .name = "no SOI signature", .data = "\x00\x00\x00\x00", .want_width = null },
+        .{ .name = "SOI only, too short to hold a marker", .data = "\xff\xd8", .want_width = null },
+        .{ .name = "well formed SOF0", .data = valid, .want_width = 3, .want_height = 2 },
+        .{
+            // A marker (here DHT-shaped) whose declared length is far larger
+            // than the buffer. The scan has to advance past the end of the
+            // slice without indexing into it and terminate on the loop
+            // condition rather than a bounds panic.
+            .name = "length running past the end",
+            .data = "\xff\xd8\xff\xc4\xff\xff",
+            .want_width = null,
+        },
+        .{
+            // Any number of 0xFF bytes may pad the front of a marker.
+            .name = "run of 0xFF fill bytes before the marker",
+            .data = "\xff\xd8\xff\xff\xff\xff\xff\xff\xff\xff\xc0\x00\x0b\x08\x00\x02\x00\x03",
+            .want_width = 3,
+            .want_height = 2,
+        },
+        .{
+            // TEM (no payload) then two restart markers (no payload) ahead
+            // of the real frame header.
+            .name = "RST and TEM before the frame header",
+            .data = "\xff\xd8\xff\x01\xff\xd0\xff\xd7\xff\xc0\x00\x0b\x08\x00\x02\x00\x03",
+            .want_width = 3,
+            .want_height = 2,
+        },
+        .{
+            .name = "progressive SOF2",
+            .data = "\xff\xd8\xff\xc2\x00\x0b\x08\x00\x02\x00\x03",
+            .want_width = 3,
+            .want_height = 2,
+        },
+        .{
+            // A Huffman table ahead of the frame header, which the walk has
+            // to skip using the table's own declared length.
+            .name = "DHT before SOF",
+            .data = "\xff\xd8\xff\xc4\x00\x04\xaa\xbb\xff\xc0\x00\x0b\x08\x00\x02\x00\x03",
+            .want_width = 3,
+            .want_height = 2,
+        },
+        .{
+            .name = "no SOF at all, straight to EOI",
+            .data = "\xff\xd8\xff\xd9\x00\x02",
+            .want_width = null,
+        },
+        .{
+            .name = "no SOF at all, straight to SOS",
+            .data = "\xff\xd8\xff\xda\x00\x02",
+            .want_width = null,
+        },
+        .{
+            // Same bytes as the well formed case but the SOF declares a
+            // length too short to legitimately contain the width field, so
+            // reading it would reach outside the segment the length itself
+            // promises.
+            .name = "SOF length too short for its own dimensions",
+            .data = "\xff\xd8\xff\xc0\x00\x07\x08\x00\x02\x00\x03",
+            .want_width = null,
+        },
+        .{
+            .name = "all 0xFF, no SOI",
+            .data = "\xff\xff\xff\xff\xff\xff\xff\xff",
+            .want_width = null,
+        },
+        .{
+            // SOI followed by nothing but fill bytes: the marker scan runs
+            // off the end of the slice while still consuming 0xFF.
+            .name = "all 0xFF after SOI",
+            .data = "\xff\xd8\xff\xff\xff\xff\xff\xff",
+            .want_width = null,
+        },
+    };
+
+    for (cases) |case| {
+        try expectDimensions(
+            case.name,
+            case.want_width,
+            case.want_height,
+            jpegHeaderDimensions(case.data),
+        );
+    }
+}
+
+test "jpegHeaderDimensions: truncated at every length" {
+    const jpegHeaderDimensions = LoadingImage.jpegHeaderDimensions;
+
+    const valid = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03";
+
+    // Every prefix of a well formed header must either be rejected outright
+    // or, only once every byte the header needs is present, accepted.
+    for (0..valid.len + 1) |len| {
+        const want_width: ?u32 = if (len == valid.len) 3 else null;
+        try expectDimensions(
+            "truncated to a given length",
+            want_width,
+            2,
+            jpegHeaderDimensions(valid[0..len]),
+        );
+    }
+}
+
+test "gifHeaderDimensions: hostile input" {
+    const gifHeaderDimensions = LoadingImage.gifHeaderDimensions;
+
+    const cases = [_]struct {
+        name: []const u8,
+        data: []const u8,
+        want_width: ?u32,
+        want_height: u32 = 0,
+    }{
+        .{ .name = "empty", .data = "", .want_width = null },
+        .{
+            .name = "too short for the logical screen descriptor",
+            .data = "GIF89a\x03\x00\x02",
+            .want_width = null,
+        },
+        .{
+            .name = "wrong signature",
+            .data = "XYZ89a\x03\x00\x02\x00",
+            .want_width = null,
+        },
+        .{
+            .name = "wrong version",
+            .data = "GIF88a\x03\x00\x02\x00",
+            .want_width = null,
+        },
+        .{
+            .name = "87a accepted",
+            .data = "GIF87a\x03\x00\x02\x00",
+            .want_width = 3,
+            .want_height = 2,
+        },
+        .{
+            .name = "89a accepted",
+            .data = "GIF89a\x03\x00\x02\x00",
+            .want_width = 3,
+            .want_height = 2,
+        },
+    };
+
+    for (cases) |case| {
+        try expectDimensions(
+            case.name,
+            case.want_width,
+            case.want_height,
+            gifHeaderDimensions(case.data),
+        );
+    }
 }
 
 test "limits: direct medium always allowed" {
