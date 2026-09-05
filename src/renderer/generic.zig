@@ -1602,6 +1602,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // kitty state on every frame because any cell change can move
                 // an image.
                 if (self.images.kittyRequiresUpdate(state.terminal)) {
+                    // The image state is a channel to the renderer of its
+                    // own: it is not part of grid or screen dirtiness, and
+                    // the placements are only drawn on a frame we decide to
+                    // draw. A client that replaces an image in place with
+                    // the cursor hidden dirties no row and moves no uniform,
+                    // so if we don't ask for the frame here nobody will and
+                    // the new image never appears. `kittyUpdate` clears the
+                    // flag, so read it first.
+                    //
+                    // Virtual references alone are not a change: they only
+                    // move when a cell moves, and that dirties the rows that
+                    // carry them.
+                    const changed = state.terminal.screens.active.kitty_images.dirty;
+
                     // We need to grab the draw mutex since this updates
                     // our image state that drawFrame uses.
                     self.draw_mutex.lockUncancelable(global.io());
@@ -1614,6 +1628,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             .height = self.grid_metrics.cell_height,
                         },
                     );
+                    if (changed) self.cells_rebuilt = true;
                 }
 
                 // Determine which OSC 8 hyperlink cells should be
@@ -1849,12 +1864,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
                 // state that survives frames.
-                self.images.overlayUpdate(
+                //
+                // Like the kitty state above, the overlay reaches the frame
+                // through the image path rather than through any row, so it
+                // has to ask for the draw itself. On an error nothing was
+                // changed and the overlay is rebuilt next frame anyway.
+                const overlay_changed = self.images.overlayUpdate(
                     self.alloc,
                     self.overlay,
-                ) catch |err| {
+                ) catch |err| overlay: {
                     log.warn("error updating overlay images err={}", .{err});
+                    break :overlay false;
                 };
+                if (overlay_changed) self.cells_rebuilt = true;
 
                 // Update custom shader uniforms that depend on terminal state.
                 self.updateCustomShaderUniformsFromState();

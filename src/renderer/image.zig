@@ -298,17 +298,22 @@ pub const State = struct {
     }
 
     /// Update our overlay state. Null value deletes any existing overlay.
+    ///
+    /// Returns true if what the overlay contributes to the frame changed.
+    /// Image state reaches the renderer on its own channel, not through
+    /// grid dirtiness, so this is the only thing that can tell the caller
+    /// it owes a draw.
     pub fn overlayUpdate(
         self: *State,
         alloc: Allocator,
         overlay_: ?Overlay,
-    ) !void {
+    ) !bool {
         const overlay = overlay_ orelse {
             // If we don't have an overlay, remove any existing one.
-            if (self.images.getPtr(.overlay)) |data| {
-                data.image.markForUnload();
-            }
-            return;
+            const data = self.images.getPtr(.overlay) orelse return false;
+            if (data.image.isUnloading()) return false;
+            data.image.markForUnload();
+            return true;
         };
 
         // Overlays are always considered new content, so we take a
@@ -346,6 +351,11 @@ pub const State = struct {
             .source_width = pending.width,
             .source_height = pending.height,
         });
+
+        // An overlay is redrawn from scratch every frame it exists and is
+        // stamped with a fresh generation above, so there is always
+        // something new here for the GPU.
+        return true;
     }
 
     /// Returns true if the Kitty graphics state requires an update based
@@ -1678,6 +1688,35 @@ test "kitty renderer uploads the current animation frame" {
         &.{ 0, 0, 255, 255 },
         entry.image.pending.dataSlice(),
     );
+}
+
+test "renderer overlay update reports whether it changed the frame" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var state: State = .empty;
+    defer state.deinit(alloc);
+
+    // Nothing to remove, so nothing changed.
+    try testing.expect(!try state.overlayUpdate(alloc, null));
+
+    const size: @import("size.zig").Size = .{
+        .screen = .{ .width = 20, .height = 20 },
+        .cell = .{ .width = 10, .height = 10 },
+        .padding = .{},
+    };
+    var overlay: Overlay = try .init(alloc, size);
+    defer overlay.deinit(alloc);
+
+    // An overlay is redrawn from scratch every frame, so every update of
+    // one is new content for the GPU.
+    try testing.expect(try state.overlayUpdate(alloc, overlay));
+    try testing.expect(try state.overlayUpdate(alloc, overlay));
+
+    // Taking it away changes the frame once, and then there is nothing
+    // left to take away.
+    try testing.expect(try state.overlayUpdate(alloc, null));
+    try testing.expect(!try state.overlayUpdate(alloc, null));
 }
 
 test "Image.markForUnload pending -> unload_pending" {
