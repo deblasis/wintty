@@ -79,36 +79,80 @@ pub fn isUrlAllowed(kind: apprt.action.OpenUrl.Kind, url: []const u8) bool {
 fn hasAllowedScheme(url: []const u8, opts: struct { file: bool }) bool {
     const scheme = schemeOf(url) orelse return false;
     for (allowed_schemes) |allowed| {
-        if (!opts.file and std.ascii.eqlIgnoreCase(allowed, "file")) continue;
-        if (std.ascii.eqlIgnoreCase(scheme, allowed)) {
-            if (std.ascii.eqlIgnoreCase(scheme, "file") and !isLocalFileAuthority(url)) {
-                return false;
-            }
-            return true;
-        }
+        // `allowed` comes from the list above, so it is already lowercase.
+        if (!opts.file and std.mem.eql(u8, allowed, "file")) continue;
+        if (!std.ascii.eqlIgnoreCase(scheme, allowed)) continue;
+        if (std.mem.eql(u8, allowed, "file") and !isLocalFileUrl(url)) return false;
+        return true;
     }
 
     return false;
 }
 
-/// True if a `file:` URL's authority is empty or `localhost`
-/// (case-insensitively). The authority is the text between `file://` and
-/// the next `/` (or the end of the string). A non-local authority is a
-/// remote host name that, on Windows, `rundll32` resolves to a UNC path and
-/// executes the default verb against it, leaking the current user's NTLM
-/// credentials to that host.
-fn isLocalFileAuthority(url: []const u8) bool {
-    const prefix = "file://";
-    if (url.len < prefix.len or !std.ascii.eqlIgnoreCase(url[0..prefix.len], prefix)) {
-        // No `//` authority marker (e.g. `file:relative/path`): there is no
-        // syntax here for a remote host, so there is nothing to refuse.
-        return true;
+/// True if the `file:` URL `url` names something on this machine.
+///
+/// A remote authority is a host name that, on Windows, `rundll32` resolves
+/// to a UNC path and then runs the default verb against, leaking the current
+/// user's NTLM credentials to that host. What counts as the authority is
+/// decided by the OS canonicalizer, not by us, so this has to agree with it
+/// on where the authority starts: reading "the text up to the first slash"
+/// makes `file:////evil/share` look like an empty authority while the OS
+/// still finds the host. Counting the separators instead is what tells the
+/// two apart.
+///
+/// `url` is known to begin with the `file:` scheme, matched case
+/// insensitively.
+fn isLocalFileUrl(url: []const u8) bool {
+    const scheme = "file:";
+    std.debug.assert(url.len >= scheme.len and
+        std.ascii.eqlIgnoreCase(url[0..scheme.len], scheme));
+    const rest = url[scheme.len..];
+
+    // Backslashes are separators on Windows, so `file:\\evil\share` names
+    // the same host as `file://evil/share` and is counted the same way.
+    const separators = "/\\";
+    const first_sep = std.mem.indexOfAny(u8, rest, separators) orelse rest.len;
+
+    // Percent-encoded separators are not decoded by the count below but are
+    // decoded before the target is resolved, so `file:%2f%2fevil/share`
+    // would otherwise be read here as a plain relative path. Refuse them in
+    // the authority position rather than decoding: nothing we want to open
+    // needs an encoded separator before the path begins.
+    if (hasEncodedSeparator(rest[0..first_sep])) return false;
+
+    const separator_count = rest.len - std.mem.trimStart(u8, rest, separators).len;
+    return switch (separator_count) {
+        // `file:notes.md`, `file:/etc/hosts` and `file:///etc/hosts` have no
+        // authority component at all.
+        0, 1, 3 => true,
+
+        // `file://<authority>/path`: the only spelling with a host in it.
+        2 => authority: {
+            const after = rest[2..];
+            const end = std.mem.indexOfAny(u8, after, separators) orelse after.len;
+            const authority = after[0..end];
+            break :authority authority.len == 0 or
+                std.ascii.eqlIgnoreCase(authority, "localhost");
+        },
+
+        // Four or more: an empty authority to any naive parse, a UNC host to
+        // the OS. Nothing legitimate spells a local file this way.
+        else => false,
+    };
+}
+
+/// True if `text` contains a percent-encoded `/` or `\`.
+fn hasEncodedSeparator(text: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, text, i, '%')) |at| {
+        if (at + 3 > text.len) return false;
+        const escape = text[at .. at + 3];
+        if (std.ascii.eqlIgnoreCase(escape, "%2f") or
+            std.ascii.eqlIgnoreCase(escape, "%5c")) return true;
+        i = at + 1;
     }
 
-    const rest = url[prefix.len..];
-    const authority_end = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
-    const authority = rest[0..authority_end];
-    return authority.len == 0 or std.ascii.eqlIgnoreCase(authority, "localhost");
+    return false;
 }
 
 /// True if `value` looks like a filesystem path rather than a URL. The link
@@ -217,6 +261,31 @@ test "url allow-list refuses file urls with a remote authority" {
     // Scheme case-insensitivity must not open a bypass for the authority
     // check.
     try testing.expect(!isUrlAllowed(.unknown, "FILE://EVIL/x"));
+    // An OSC 8 target never reaches the authority check at all: `file:` is
+    // skipped for it entirely.
+    try testing.expect(!isUrlAllowed(.osc8, "file://localhost/x"));
+}
+
+test "url allow-list refuses file urls that hide a remote authority" {
+    const testing = std.testing;
+    // Reading the text up to the first slash as the authority makes these
+    // look empty, while the OS canonicalizer reads the extra slashes as a
+    // host name.
+    try testing.expect(!isUrlAllowed(.unknown, "file:////evil/share/a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file://///evil/share/a.exe"));
+    // Backslashes separate path components on Windows, so the same target
+    // spelled with them has to be refused too.
+    try testing.expect(!isUrlAllowed(.unknown, "file:\\\\evil\\share\\a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file://evil\\share\\a.exe"));
+    // A percent-encoded separator is invisible to a slash count but is
+    // decoded before the target is resolved.
+    try testing.expect(!isUrlAllowed(.unknown, "file:%2f%2fevil/share/x"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:%5C%5Cevil/share/x"));
+    // Spellings that carry no authority component keep working.
+    try testing.expect(isUrlAllowed(.unknown, "file:/etc/hosts"));
+    try testing.expect(isUrlAllowed(.unknown, "file:///etc/hosts"));
+    // An encoded separator further along is ordinary path data.
+    try testing.expect(isUrlAllowed(.unknown, "file:///tmp/a%2Fb.md"));
 }
 
 test "url allow-list rejects schemes that execute or reconfigure" {
