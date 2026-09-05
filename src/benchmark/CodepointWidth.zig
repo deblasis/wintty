@@ -12,7 +12,6 @@ const Allocator = std.mem.Allocator;
 const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
 const UTF8Decoder = @import("../terminal/UTF8Decoder.zig");
-const simd = @import("../simd/main.zig");
 const table = @import("../unicode/main.zig").table;
 const global = @import("../global.zig");
 
@@ -44,9 +43,6 @@ pub const Mode = enum {
     /// libc wcwidth
     wcwidth,
 
-    /// Our SIMD implementation.
-    simd,
-
     /// Test our lookup table implementation.
     table,
 };
@@ -72,7 +68,6 @@ pub fn benchmark(self: *CodepointWidth) Benchmark {
             .noop => stepNoop,
             .wcwidth => stepWcwidth,
             .table => stepTable,
-            .simd => stepSimd,
         },
         .setupFn = setup,
         .teardownFn = teardown,
@@ -164,33 +159,6 @@ fn stepTable(ptr: *anyopaque) Benchmark.Error!void {
                     1
                 else
                     table.get(@intCast(cp)).width);
-            }
-        }
-    }
-}
-
-fn stepSimd(ptr: *anyopaque) Benchmark.Error!void {
-    const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
-
-    const f = self.data_f orelse return;
-    var read_buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    var f_reader = f.reader(global.io(), &read_buf);
-    var r = &f_reader.interface;
-
-    var d: UTF8Decoder = .{};
-    var buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    while (true) {
-        const n = r.readSliceShort(&buf) catch {
-            log.warn("error reading data file err={?}", .{f_reader.err});
-            return error.BenchmarkFailed;
-        };
-        if (n == 0) break; // EOF reached
-
-        for (buf[0..n]) |c| {
-            const cp_, const consumed = d.next(c);
-            assert(consumed);
-            if (cp_) |cp| {
-                std.mem.doNotOptimizeAway(simd.codepointWidth(cp));
             }
         }
     }

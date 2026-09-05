@@ -1118,7 +1118,6 @@ pub fn addSimd(
         m.addCSourceFiles(.{
             .files = &.{
                 "src/simd/base64.cpp",
-                "src/simd/codepoint_width.cpp",
                 "src/simd/index_of.cpp",
                 "src/simd/vt.cpp",
             },
