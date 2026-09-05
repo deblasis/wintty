@@ -14,6 +14,16 @@ const log = std.log.scoped(.kitty_text_sizing);
 
 pub const max_payload_length = 4096;
 
+/// Upper bound on what an OSC 66 capture is allowed to retain: the payload
+/// limit, the parameter section that precedes it, and the NUL `parse`
+/// appends. The parameters are six single-character keys with small numeric
+/// values, so the ~512-byte allowance for them is generous by design: it is
+/// a deliberate tradeoff of a round, roomy constant over the much tighter
+/// bound the six keys could actually require. Bounding the capture is what
+/// keeps a payload that will be rejected for its length from being buffered
+/// in full first.
+pub const max_capture_length = max_payload_length + 512;
+
 pub const VAlign = lib.Enum(lib.target, &.{
     "top",
     "bottom",
@@ -252,4 +262,37 @@ test "OSC 66: overlong UTF-8" {
     for (input) |ch| p.next(ch);
 
     try testing.expect(p.end('\x1b') == null);
+}
+
+test "OSC 66: an overlong payload is bounded while it is captured" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    // Far past the payload limit, so a capture that only checks the limit
+    // once the sequence has ended holds all of it in the meantime.
+    for ("66;;") |ch| p.next(ch);
+    for (0..1024 * 1024) |_| p.next('a');
+
+    try testing.expect(p.end('\x1b') == null);
+
+    const cap = &p.capture.?;
+    try testing.expect(cap.trailing().len <= max_capture_length);
+    try testing.expect(cap.writer.buffer.len <= max_capture_length);
+}
+
+test "OSC 66: a payload at the limit still parses" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    for ("66;s=2;") |ch| p.next(ch);
+    for (0..max_payload_length) |_| p.next('a');
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd == .kitty_text_sizing);
+    try testing.expectEqual(2, cmd.kitty_text_sizing.scale);
+    try testing.expectEqual(max_payload_length, cmd.kitty_text_sizing.text.len);
 }

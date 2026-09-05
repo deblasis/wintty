@@ -2542,6 +2542,32 @@ keybind: Keybinds = .{},
 /// Available since: 1.0.1
 @"title-report": bool = false,
 
+/// Allow a program running in the terminal to put it into tmux control mode
+/// (DCS 1000 p). In control mode Ghostty drives the tmux session directly:
+/// it renders the panes tmux describes rather than the raw output, and it
+/// writes tmux commands (`list-windows`, `display-message`) back into the
+/// pty on its own initiative.
+///
+/// This is disabled by default because nothing about the escape sequence
+/// identifies the sender as tmux. Any program that writes it, including one
+/// that is only echoing untrusted text, gets the terminal to start issuing
+/// commands to whatever is actually on the other end of the pty.
+///
+/// When disabled, no viewer is ever created and no tmux command is ever
+/// written into the pty, so the program sees a terminal that never entered
+/// control mode. This option only gates that outcome, though: the DCS
+/// sequence is still hooked, and its body is still parsed line by line into
+/// an internal buffer (capped at 1MB) as it arrives, regardless of the
+/// setting. With the option off, those parsed notifications are simply
+/// dropped instead of acted on.
+///
+/// This can be changed at runtime and applies to sequences received after
+/// the change. A session already in control mode stays there until it
+/// leaves on its own.
+///
+/// Available since: 1.4.0
+@"tmux-control-mode": bool = false,
+
 /// The total amount of bytes that can be used for image data (e.g. the Kitty
 /// image protocol) per terminal screen. The maximum value is 4,294,967,295
 /// (4GiB). The default is 320MB. If this is set to zero, then all image

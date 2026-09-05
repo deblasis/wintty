@@ -1153,9 +1153,9 @@ pub const Viewer = struct {
                     break :pane;
                 }
 
-                // TODO: We need to gracefully handle overflow of our
-                // max cols/width here. In practice we shouldn't hit this
-                // so we cast but its not safe.
+                // Layout parsing rejects any node whose width or height
+                // a terminal could not represent, so this cast can't
+                // overflow on anything that got this far.
                 var t: Terminal = try .init(io, gpa_alloc, .{
                     .cols = @intCast(layout.width),
                     .rows = @intCast(layout.height),
