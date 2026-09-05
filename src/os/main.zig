@@ -53,6 +53,7 @@ pub const ensureLocale = locale.ensureLocale;
 pub const clickInterval = mouse.clickInterval;
 pub const open = openpkg.open;
 pub const OpenType = openpkg.Type;
+pub const isUrlSchemeAllowed = openpkg.isSchemeAllowed;
 pub const pipe = pipepkg.pipe;
 pub const closePipeEnd = pipepkg.closeEnd;
 pub const writePipeEnd = pipepkg.writeEnd;
