@@ -12,12 +12,9 @@ pub const variable_italic = @embedFile("jetbrains_mono_variable_italic");
 /// Symbols-only nerd font.
 pub const symbols_nerd_font = @embedFile("nerd_fonts_symbols_only");
 
-/// Static jetbrains mono faces. `regular` is used by tests; `bold`,
-/// `italic`, and `bold_italic` are currently unused.
+/// Static jetbrains mono face. Only used by tests; production code uses
+/// the variable face above.
 pub const regular = @embedFile("jetbrains_mono_regular");
-pub const bold = @embedFile("jetbrains_mono_bold");
-pub const italic = @embedFile("jetbrains_mono_italic");
-pub const bold_italic = @embedFile("jetbrains_mono_bold_italic");
 
 /// Emoji fonts
 pub const emoji = @embedFile("res/NotoColorEmoji.ttf");
