@@ -36,9 +36,9 @@ size: u32 = 0,
 /// `grow` refuses instead and leaves it to the caller to make room some
 /// other way (see `reset`).
 ///
-/// The default is the size guaranteed by D3D feature level 11_0, OpenGL 4.3
-/// and Metal's apple3 family. A backend that knows its device's real limit
-/// should lower this.
+/// Atlases are created before any renderer exists, so the default has to
+/// hold on the weakest device we support (see `default_max_size`). A backend
+/// raises or lowers it with `setMaxSize` once it has a device to ask.
 max_size: u32 = default_max_size,
 
 /// The nodes (rectangles) of available space.
@@ -65,8 +65,17 @@ resized: std.atomic.Value(usize) = .{ .raw = 0 },
 /// atlas coordinates must drop that cache when this changes.
 generation: std.atomic.Value(usize) = .{ .raw = 0 },
 
-/// The default value of `max_size`.
-pub const default_max_size: u32 = 16384;
+/// The default value of `max_size`: the smallest maximum any backend we
+/// support reports. Metal devices below the apple3 family stop at 8192, and
+/// the OpenGL atlas is a rectangle texture, whose limit is its own
+/// (GL_MAX_RECTANGLE_TEXTURE_SIZE) and can be lower than the ordinary 2D
+/// texture limit. Starting here means no device ever gets an atlas it cannot
+/// hold, even before a renderer has attached.
+///
+/// Metal never calls `setMaxSize`: it cannot be built on the machine this
+/// branch is developed on, and 8192 is already its worst case, so it keeps
+/// the default until someone can compile and test the call.
+pub const default_max_size: u32 = 8192;
 
 pub const Format = enum(u8) {
     /// 1 byte per pixel grayscale.
@@ -326,6 +335,16 @@ pub fn setFromLarger(
     }
 
     _ = self.modified.fetchAdd(1, .monotonic);
+}
+
+/// Set the ceiling `grow` refuses to pass, for a caller that has queried
+/// the real limit of the device the atlas is uploaded to.
+///
+/// A limit below the current size is raised to it: the atlas already exists
+/// at that size, and refusing to grow it is the most we can do about a device
+/// that cannot hold it.
+pub fn setMaxSize(self: *Atlas, size_max: u32) void {
+    self.max_size = @max(size_max, self.size);
 }
 
 pub const grow_tw = tripwire.module(enum {
@@ -947,6 +966,26 @@ test "grow past the maximum size" {
     try testing.expectEqual(old_resized, atlas.resized.load(.monotonic));
     try testing.expectEqual(@as(u8, 1), atlas.data[atlas.size + 1]);
     try testing.expectEqual(@as(u8, 2), atlas.data[atlas.size + 2]);
+}
+
+test "setMaxSize" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 4, .grayscale); // +2 for 1px border
+    defer atlas.deinit(alloc);
+
+    // A device that can hold more than the default raises the ceiling.
+    atlas.setMaxSize(16384);
+    try testing.expectEqual(@as(u32, 16384), atlas.max_size);
+    try atlas.grow(alloc, 8);
+
+    // A device that can hold less lowers it, but never below what we
+    // already have.
+    atlas.setMaxSize(4);
+    try testing.expectEqual(@as(u32, 8), atlas.max_size);
+    try testing.expectError(
+        GrowError.AtlasTooLarge,
+        atlas.grow(alloc, 16),
+    );
 }
 
 test "reset empties the atlas and bumps the generation" {
