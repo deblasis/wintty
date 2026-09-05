@@ -2553,8 +2553,13 @@ keybind: Keybinds = .{},
 /// that is only echoing untrusted text, gets the terminal to start issuing
 /// commands to whatever is actually on the other end of the pty.
 ///
-/// When disabled the sequence is ignored and the program sees a terminal
-/// that never entered control mode.
+/// When disabled, no viewer is ever created and no tmux command is ever
+/// written into the pty, so the program sees a terminal that never entered
+/// control mode. This option only gates that outcome, though: the DCS
+/// sequence is still hooked, and its body is still parsed line by line into
+/// an internal buffer (capped at 1MB) as it arrives, regardless of the
+/// setting. With the option off, those parsed notifications are simply
+/// dropped instead of acted on.
 ///
 /// This can be changed at runtime and applies to sequences received after
 /// the change. A session already in control mode stays there until it

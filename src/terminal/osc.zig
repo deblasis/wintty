@@ -875,6 +875,9 @@ pub const Parser = struct {
     ) void {
         assert(self.capture == null);
         switch (mode) {
+            // max_bytes doesn't apply here: the fixed buffer is already the
+            // bound (self.buffer's own size), and there is no allocator to
+            // enforce a smaller one against.
             .fixed => Capture.fixed(
                 &self.capture,
                 &self.buffer,
