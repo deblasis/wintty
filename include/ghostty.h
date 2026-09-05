@@ -1346,6 +1346,8 @@ typedef struct {
 // Returns true on success, false if the surface is not in shared
 // texture mode (in which case `out` is left untouched). The read is
 // atomic -- all fields correspond to the same renderer state snapshot.
+// False is also what a surface returns while its device is being
+// rebuilt after a TDR, so treat it as "poll again", not as a mode change.
 GHOSTTY_API bool ghostty_surface_shared_texture(
     ghostty_surface_t,
     ghostty_surface_shared_texture_s* out);

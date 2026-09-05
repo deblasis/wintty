@@ -2757,7 +2757,7 @@ pub const CAPI = struct {
         // the draw mutex; reading it anywhere else needs the same lock.
         r.draw_mutex.lockUncancelable(global.io());
         defer r.draw_mutex.unlock(global.io());
-        const dev = r.api.dev orelse return null;
+        const dev = if (r.api.dev) |*d| d else return null;
         return @ptrCast(dev.device);
     }
 
@@ -2772,7 +2772,7 @@ pub const CAPI = struct {
         // See ghostty_surface_get_d3d12_device for why the lock.
         r.draw_mutex.lockUncancelable(global.io());
         defer r.draw_mutex.unlock(global.io());
-        const dev = r.api.dev orelse return null;
+        const dev = if (r.api.dev) |*d| d else return null;
         const sc = dev.swap_chain orelse return null;
         return @ptrCast(sc);
     }
@@ -2789,7 +2789,7 @@ pub const CAPI = struct {
         // See ghostty_surface_get_d3d12_device for why the lock.
         r.draw_mutex.lockUncancelable(global.io());
         defer r.draw_mutex.unlock(global.io());
-        const dev = r.api.dev orelse return null;
+        const dev = if (r.api.dev) |*d| d else return null;
         return @ptrCast(dev.swap_chain_surface_handle orelse return null);
     }
 

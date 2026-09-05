@@ -270,6 +270,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// update, whether or not that storage thinks anything changed.
         images_lost: bool = false,
 
+        /// One update pass is owed for `images_lost`, so an idle surface
+        /// gets it without waiting for the terminal to change. Cleared
+        /// by the first update pass that runs, whatever it does: a pass
+        /// that bails on synchronized output leaves the images to the
+        /// terminal's own next wake rather than spinning until then.
+        images_wake_pending: bool = false,
+
         /// Whether or not we have custom shaders.
         has_custom_shaders: bool = false,
 
@@ -1248,17 +1255,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // images dropped with the device runs on the same tick.
             if (self.device_recovery_retry_at) |at| {
                 const now: std.Io.Timestamp = .now(global.io(), .awake);
-                const remaining_ns = now.durationTo(at).nanoseconds;
-                const remaining_ms: u64 = if (remaining_ns > 0)
-                    @intCast(@divTrunc(remaining_ns, std.time.ns_per_ms))
-                else
-                    0;
+                const remaining_ms = now.durationTo(at).toMilliseconds();
+                const due: u64 = if (remaining_ms > 0) @intCast(remaining_ms) else 0;
                 return .{
-                    .delay_ms = @max(remaining_ms, draw_interval_ms),
+                    .delay_ms = @max(due, draw_interval_ms),
                     .kind = .update,
                 };
             }
-            if (self.images_lost) {
+            if (self.images_wake_pending) {
                 return .{ .delay_ms = draw_interval_ms, .kind = .update };
             }
 
@@ -1497,6 +1501,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // the course of a frame. Always flush those objects, including
             // when rebuilding the frame fails due to memory pressure.
             defer self.font_shaper.endFrame();
+
+            // This is the pass a device recovery asked for; whether it
+            // gets as far as the images is up to the terminal state.
+            self.images_wake_pending = false;
 
             // We fully deinit and reset the terminal state every so often
             // so that a particularly large terminal state doesn't cause
@@ -2413,21 +2421,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .awake,
             ).addDuration(device_recovery_retry_delay);
 
-            // The latch says a draw path saw the loss. The second check
-            // covers a loss that landed while the previous attempt was
-            // rebuilding on a device it had just created: no draw ran,
-            // so nothing latched, and the device would otherwise be
-            // built on forever.
-            if (self.api.deviceLost() or self.api.deviceRemoved()) {
-                try self.api.recoverDevice();
-            }
+            // Every attempt rebuilds the device, not only the first. A
+            // loss that lands while the previous attempt was building
+            // shaders and frames on the device it had just created sets
+            // no latch (no draw ran), and that attempt's init command
+            // list still holds barriers naming textures it has since
+            // released; rebuilding the device discards both.
+            try self.api.recoverDevice();
 
             // From here the device is good; only the rebuild on top of it
             // can still fail, and a retry must start from bare shaders.
-            // A failed rebuild retires the descriptor slots of whatever
-            // it did build; on a live device only a drain hands them
-            // back, and without it each retry eats another six.
-            errdefer self.api.waitGpu();
             try self.initShaders(.device_recovered);
             errdefer {
                 self.shaders.deinit(self.alloc);
@@ -2438,7 +2441,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.api,
                 self.has_custom_shaders,
             );
-            if (@hasDecl(GraphicsAPI, "flushInitCommands")) {
+            if (comptime @hasDecl(GraphicsAPI, "flushInitCommands")) {
                 self.api.flushInitCommands();
             }
             self.prepBackgroundImage() catch |err| {
@@ -2449,6 +2452,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.device_recovery_pending = false;
             self.device_recovery_retry_at = null;
+            self.images_wake_pending = true;
             // The shaders were just built from the current config; a
             // reload queued before the loss has nothing left to redo.
             self.reinitialize_shaders = false;

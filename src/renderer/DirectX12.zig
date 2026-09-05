@@ -532,8 +532,10 @@ const SurfaceHandleDisposition = enum {
 fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
     // The apprt-thread exports that read `dev` (device, swap chain,
     // surface handle, shared-texture snapshot) take the renderer's draw
-    // mutex, and every caller of this function holds it, so nothing
-    // observes the Device while it is being released.
+    // mutex. Recovery calls this with that mutex held; final teardown
+    // calls it after the renderer thread is joined and the shell has
+    // stopped asking. Either way nothing observes the Device while it
+    // is being released.
 
     // Wait for GPU to finish before releasing anything. Everything below
     // final-releases resources directly rather than retiring them, so a
@@ -645,16 +647,6 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
 /// `recoverDevice` when it is set.
 pub fn deviceLost(self: *const DirectX12) bool {
     return self.device_lost;
-}
-
-/// Whether the device is gone right now, asked of the driver rather than
-/// of the latch. The draw paths set the latch; a loss that lands while
-/// the generic renderer is rebuilding shaders and frames on a device
-/// that was just recreated sets nothing, and this is how that rebuild
-/// learns it has to start over from the device.
-pub fn deviceRemoved(self: *const DirectX12) bool {
-    const dev_ptr = &(self.dev orelse return true);
-    return dev_ptr.removed();
 }
 
 /// Replace a lost device with a new one built for the same surface.

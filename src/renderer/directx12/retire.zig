@@ -183,6 +183,7 @@ pub const Retirement = struct {
     /// only ever be released into freed memory. Resources are kept; they
     /// still follow the drain-or-leak rule.
     pub fn forgetSlots(self: *Self) void {
+        const before_pending = self.pending.items.len;
         var kept: usize = 0;
         for (self.pending.items) |entry| {
             if (entry.item == .slot) continue;
@@ -191,6 +192,7 @@ pub const Retirement = struct {
         }
         self.pending.shrinkRetainingCapacity(kept);
 
+        const before_staged = self.staged.items.len;
         kept = 0;
         for (self.staged.items) |item| {
             if (item == .slot) continue;
@@ -198,6 +200,13 @@ pub const Retirement = struct {
             kept += 1;
         }
         self.staged.shrinkRetainingCapacity(kept);
+
+        // Normally nothing: a drain ahead of this empties the queue. A
+        // count here is a fence wait that failed on a live device.
+        const dropped = (before_pending - self.pending.items.len) + (before_staged - kept);
+        if (dropped != 0) {
+            log.warn("dropped {d} descriptor slot retirement(s) ahead of heap teardown", .{dropped});
+        }
     }
 
     fn releaseItem(item: Item) void {
