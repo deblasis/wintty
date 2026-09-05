@@ -968,6 +968,31 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "surface-mem":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var handle = tab.PaneHost.ActiveLeaf.Terminal().SurfaceHandle;
+                if (handle == IntPtr.Zero)
+                    return Error(op, $"tab {index} has no live surface");
+                var s = Interop.NativeMethods.GetSurfaceMemoryStats(
+                    new Interop.GhosttySurface(handle));
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("totalPages", s.TotalPages);
+                    json.WriteNumber("compressedPages", s.CompressedPages);
+                    json.WriteNumber("residentRawBytes", s.ResidentRawBytes);
+                    json.WriteNumber("decommittedRawBytes", s.DecommittedRawBytes);
+                    json.WriteNumber("encodedBytes", s.EncodedBytes);
+                    json.WriteNumber("activitySerial", s.ActivitySerial);
+                    json.WriteEndObject();
+                });
+            }
+
             case "header-rect":
             {
                 var index = ArgInt(args, "index", -1);
