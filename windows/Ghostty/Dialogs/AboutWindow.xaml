@@ -63,6 +63,8 @@
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <TextBlock x:Name="VersionValue" Grid.Row="0" Grid.Column="1"
                                FontFamily="Cascadia Mono, Consolas"
+                               TextWrapping="Wrap"
+                               MaxWidth="290"
                                IsTextSelectionEnabled="True" />
 
                     <TextBlock Grid.Row="1" Grid.Column="0" Text="Label"
