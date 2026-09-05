@@ -201,12 +201,13 @@ public class PinnedPanelWiringTests
             .Single(v => v.Identifier.ValueText == "RowHeight");
         Assert.Equal("TabPinBand.ChipSize", edge.Initializer!.Value.ToString());
 
-        // The tooltip is the title's only remaining home, and it is
-        // refreshed with the title rather than set once at build.
+        // The tooltip is the title's only remaining home (composed with the
+        // directory, as TooltipText), and it is refreshed with the title
+        // rather than set once at build.
         var refresh = rowSource.Method("Refresh");
         var tip = refresh.Call("ToolTipService.SetToolTip");
         Assert.Equal("this", tip.Arg(0));
-        Assert.Equal("tab.EffectiveTitle", tip.Arg(1));
+        Assert.Equal("tab.TooltipText", tip.Arg(1));
 
         // The shared threshold lives on the strip now -- the body rows
         // and the group headers must still degrade at one width, or the
@@ -566,6 +567,6 @@ public class PinnedPanelWiringTests
 
         var tooltip = refresh.Call("ToolTipService.SetToolTip");
         Assert.Equal("this", tooltip.Arg(0));
-        Assert.Equal("tab.EffectiveTitle", tooltip.Arg(1));
+        Assert.Equal("tab.TooltipText", tooltip.Arg(1));
     }
 }

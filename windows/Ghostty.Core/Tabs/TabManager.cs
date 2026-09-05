@@ -115,6 +115,8 @@ internal sealed class TabManager
     /// <paramref name="closedTabs"/> is the (app-shared) bounded store that
     /// <see cref="CloseTab"/> pushes a snapshot to before tearing a tab down;
     /// null disables capture (tests / non-reopen contexts).
+    /// <paramref name="homeDirectory"/> is the directory every tab writes as
+    /// <c>~</c>; null means the user's profile directory.
     ///
     /// Seeded construction does NOT raise <see cref="TabAdded"/> for
     /// the seed: it is the initial tab, and TabAdded is for growth.
@@ -133,11 +135,14 @@ internal sealed class TabManager
         Func<ProfileSnapshot?, IPaneHost> paneHostFactory,
         TabModel? seed = null,
         ClosedStack<TabSession>? closedTabs = null,
-        ProfileSnapshot? initialSnapshot = null)
+        ProfileSnapshot? initialSnapshot = null,
+        string? homeDirectory = null)
     {
         _paneHostFactory = paneHostFactory;
         _closedTabs = closedTabs;
         _groupsView = new(_groups);
+        HomeDirectory = homeDirectory
+            ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (seed is null)
         {
             var first = CreateTab(initialSnapshot);
@@ -763,10 +768,17 @@ internal sealed class TabManager
         return members;
     }
 
+    /// <summary>
+    /// The directory this manager's tabs write as <c>~</c>. Set on every
+    /// tab the manager creates or adopts, so the two strips, the switcher
+    /// and the window title all collapse the same prefix.
+    /// </summary>
+    public string HomeDirectory { get; }
+
     private TabModel CreateTab(ProfileSnapshot? snapshot)
     {
         var host = _paneHostFactory(snapshot);
-        var tab = new TabModel(host);
+        var tab = new TabModel(host) { HomeDirectory = HomeDirectory };
         host.LeafFocused += OnLeafFocused;
         // Forward the active-leaf's progress onto the tab model. The
         // handler is captured as a local so CloseTab can unsubscribe
@@ -921,6 +933,7 @@ internal sealed class TabManager
     /// </summary>
     private void WireAdoptedTab(TabModel tab)
     {
+        tab.HomeDirectory ??= HomeDirectory;
         tab.PaneHost.LeafFocused += OnLeafFocused;
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         tab.PaneHost.ProgressChanged += progressHandler;

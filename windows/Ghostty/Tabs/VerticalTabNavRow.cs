@@ -35,7 +35,7 @@ internal sealed partial class VerticalTabNavRow : Grid
             Margin = new Thickness(0, 0, 4, 0),
             Text = tab.EffectiveTitle,
         };
-        ToolTipService.SetToolTip(_title, tab.EffectiveTitle);
+        ToolTipService.SetToolTip(_title, tab.TooltipText);
 
         _bell = new FontIcon
         {
@@ -133,10 +133,15 @@ internal sealed partial class VerticalTabNavRow : Grid
     /// </summary>
     internal string TestSeamRenderedTitle => _title.Text;
 
+    /// <summary>
+    /// The tooltip the title is actually carrying, for the same reason.
+    /// </summary>
+    internal string? TestSeamRenderedTooltip => ToolTipService.GetToolTip(_title) as string;
+
     internal void Refresh(TabModel tab)
     {
         _title.Text = tab.EffectiveTitle;
-        ToolTipService.SetToolTip(_title, tab.EffectiveTitle);
+        ToolTipService.SetToolTip(_title, tab.TooltipText);
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
         _idle.Visibility = IdleBadgeVisible(tab);
         // The idle dim rides the title, not the whole row: close stays

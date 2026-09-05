@@ -22,15 +22,18 @@ namespace Ghostty.Tests.Tabs;
 public class TabTitleSurfacesTests
 {
     /// <summary>
-    /// Every shell file that renders or announces a tab's name. A new one
-    /// belongs here the day it is written.
+    /// Every shell file that renders a tab's name as text. A new one
+    /// belongs here the day it is written. The vertical pinned square is
+    /// not here on purpose: it draws no title, and the two things it does
+    /// carry -- the tooltip and the accessible name -- are composed in
+    /// Core (<c>TooltipText</c>, <c>TabAccessibleText.Name</c>) from the
+    /// same property, which <c>TabTooltipSurfacesTests</c> guards.
     /// </summary>
     public static TheoryData<string> TitleSurfaces() => new()
     {
         "Tabs.TabHost.xaml.cs",             // horizontal strip header
-        "Tabs.VerticalTabStrip.xaml.cs",    // vertical strip tooltip + order
+        "Tabs.VerticalTabStrip.xaml.cs",    // vertical strip order + a11y
         "Tabs.VerticalTabNavRow.cs",        // vertical body row
-        "Tabs.VerticalTabPinnedRow.cs",     // vertical pinned row
         "Tabs.TabSwitcherPopup.xaml.cs",    // Ctrl+Tab tiles
         "Tabs.TabOverviewControl.xaml.cs",  // overview grid
         "Shell.TitleBarCoordinator.cs",     // window title (taskbar, Alt+Tab)

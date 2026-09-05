@@ -1,11 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.System;
+using WinClipboard = Windows.ApplicationModel.DataTransfer.Clipboard;
 
 namespace Ghostty.Tabs;
 
@@ -141,6 +146,55 @@ internal static class TabContextMenuBuilder
         dup.Click += (_, _) => requestDuplicate(tab);
         flyout.Items.Add(dup);
 
+        // The directory the shell reported, in the two forms a person wants
+        // it: on the clipboard, and open in File Explorer. Its own group,
+        // because these are about the shell's directory rather than the
+        // tab. Greyed until the model has one it will act on: reported,
+        // plain text, and a directory the spawn policy accepts, since the
+        // path is bytes off the pty.
+        flyout.Items.Add(new MenuFlyoutSeparator());
+
+        var copyCwd = new MenuFlyoutItem
+        {
+            Text = "Copy Working Directory",
+            IsEnabled = tab.ActionableCwd is not null,
+        };
+        copyCwd.Click += (_, _) =>
+        {
+            if (tab.ActionableCwd is not { } path) return;
+            var package = new DataPackage();
+            package.SetText(path);
+            // Another process can hold the clipboard open. The copy is
+            // then lost, which beats the unhandled exception that would
+            // take the window down.
+            try { WinClipboard.SetContent(package); }
+            catch (COMException) { }
+        };
+        flyout.Items.Add(copyCwd);
+
+        var openCwd = new MenuFlyoutItem
+        {
+            Text = "Open in File Explorer",
+            IsEnabled = tab.ActionableCwd is not null,
+        };
+        openCwd.Click += async (_, _) =>
+        {
+            if (tab.ActionableCwd is not { } path || !Path.IsPathFullyQualified(path)) return;
+            // Off the UI thread: a UNC directory -- a stopped WSL distro,
+            // a dead share -- can make the existence check block for
+            // seconds.
+            var isDirectory = await Task.Run(() => Directory.Exists(path));
+            if (!isDirectory) return;
+            // The folder-only launcher, and only after the directory check:
+            // Explorer handed a file path runs that file's handler. Best
+            // effort beyond that; a launch that fails leaves nothing to
+            // recover, and an exception escaping an async void handler
+            // would take the window down.
+            try { await Launcher.LaunchFolderPathAsync(path); }
+            catch (Exception) { }
+        };
+        flyout.Items.Add(openCwd);
+
         flyout.Items.Add(new MenuFlyoutSeparator());
 
         var detach = new MenuFlyoutItem { Text = "Move Tab to New Window" };
@@ -194,6 +248,11 @@ internal static class TabContextMenuBuilder
             if (moveToZone is not null)
                 moveToZone.IsEnabled = manager.Tabs.Count > 1;
             pin.Text = tab.IsPinned ? "Unpin Tab" : "Pin Tab";
+            // The directory items grey until the tab has one it will act
+            // on, and a shell can report one any time after the flyout was
+            // built.
+            copyCwd.IsEnabled = tab.ActionableCwd is not null;
+            openCwd.IsEnabled = tab.ActionableCwd is not null;
         };
 
         flyout.Items.Add(new MenuFlyoutSeparator());
