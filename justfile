@@ -260,9 +260,19 @@ inc := '(Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path
 # both phases would either serialise every build behind a two-hour fuzz run
 # or run the harness while a build churns next door. So the build takes
 # wintty-build and releases it, and the caller takes wintty-desktop for the
-# harness. RECIPES is what to build, in order. An agent that wraps the whole
-# recipe in `incoda run` on one of these keys is fine: a nested run on a
-# held key passes through.
+# harness. RECIPES is what to build, in order.
+#
+# Do not wrap one of these recipes in `incoda run` on a single key: the two
+# phases take different keys, so whichever phase is on the other key nests
+# where the outer run holds nothing, and an outer wintty-desktop waiting on
+# wintty-build inverts the order the exclusive pair takes, which is a
+# deadlock until both --wait budgets elapse. Call them bare; the one safe
+# wrapper is the exclusive pair, which holds both keys before either phase
+# starts and lets both nested runs pass through.
+#
+# The args reach the desktop phase inside double quotes with every double
+# quote doubled (pwsh's own escape), so a `$` or a backtick is what cannot
+# be passed; a single quote and a double quote both survive.
 [windows]
 _build-in-lane reason +recipes:
     $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --queue wintty-build --reason "{{reason}}: build" -- just {{recipes}}; exit ($LASTEXITCODE ?? 1)
@@ -273,7 +283,7 @@ _build-in-lane reason +recipes:
 # Pass extra args through, e.g. `just splash-race "-SecondaryFeatureOff"`.
 [windows]
 splash-race args="": _no-wintty-running (_build-in-lane "splash-race" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason "splash-race {{args}}" -- just _splash-race-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("splash-race {{replace(args, '"', '""')}}".Trim()) -- just _splash-race-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just splash-race`, inside the lane it took.
 [windows]
@@ -313,7 +323,7 @@ _no-wintty-running:
 # Pass extra args through, e.g. `just search-fuzz "-Seed 99 -Iterations 40"`.
 [windows]
 search-fuzz args="": _no-wintty-running (_build-in-lane "search-fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason "search-fuzz {{args}}" -- just _search-fuzz-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("search-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _search-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just search-fuzz`, inside the lane it took.
 [windows]
@@ -337,7 +347,7 @@ _search-fuzz-in-lane args="":
 # Pass extra args through, e.g. `just shader-notice-fuzz "-Seed 99"`.
 [windows]
 shader-notice-fuzz args="": _no-wintty-running (_build-in-lane "shader-notice-fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason "shader-notice-fuzz {{args}}" -- just _shader-notice-fuzz-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("shader-notice-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _shader-notice-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just shader-notice-fuzz`, inside the lane it took.
 [windows]
@@ -365,7 +375,7 @@ _shader-notice-fuzz-in-lane args="":
 # Pass extra args through, e.g. `just frame-style-fuzz "-Seed 99 -Random 3"`.
 [windows]
 frame-style-fuzz args="": _no-wintty-running (_build-in-lane "frame-style-fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason "frame-style-fuzz {{args}}" -- just _frame-style-fuzz-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("frame-style-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _frame-style-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just frame-style-fuzz`, inside the lane it took.
 [windows]
@@ -396,15 +406,18 @@ _frame-style-fuzz-in-lane args="":
 # commas inside, as in the third line. The recipe body is PowerShell:
 # `"Catppuccin Mocha",Nord` there would be an array that reaches the harness
 # as two arguments, the second of which lands on -Polarity, and a `\"` is
-# not an escape at all. The args cross the lane inside double quotes, so a
-# double quote or a `$` is what cannot be passed.
+# not an escape at all. The args cross the lane inside double quotes with
+# any double quote doubled, so a `$` or a backtick is what cannot be passed.
+# The no-Wintty check runs before the build lane rather than inside the
+# desktop lane, like every other harness: the window check that matters is
+# the harness's own Assert-NoWintty once it holds the desktop.
 #
 # Exit codes: 0 clean, 2 findings, 1 could not run or a surface went unmeasured.
 #
 # Run the theme matrix (#937) under the incoda lanes against the Debug build.
 [windows]
 theme-matrix args="": _no-wintty-running (_build-in-lane "theme matrix (#937)" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason "theme matrix (#937) {{args}}" -- just _theme-matrix-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("theme matrix (#937) {{replace(args, '"', '""')}}".Trim()) -- just _theme-matrix-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just theme-matrix`, inside the lane it took.
 [windows]
@@ -451,7 +464,7 @@ theme-matrix-report run="windows/scripts/theme-matrix":
 # Run every GUI fuzz harness against the Debug build.
 [windows]
 fuzz args="": _no-wintty-running (_build-in-lane "fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason "fuzz {{args}}" -- just _fuzz-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("fuzz {{replace(args, '"', '""')}}".Trim()) -- just _fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just fuzz`, inside the lane it took.
 [windows]

@@ -28,7 +28,7 @@ The loop, per invocation:
      once: incoda run --queue wintty-build --reason "resignoff <sha7>" -- just
      signoff. The worktree hangs off this clone, so the record the run
      writes lands in the same git common dir the gate and this bot read.
-     Nothing but the run holds the lane.
+     Nothing but the run holds the slot.
   5. Green: close the issue, quoting the record path and the per-leg rcs,
      then move to the next older window; when every window is green, all
      close. Red: bisect over the RECORDED squash SHAs between the last
@@ -541,13 +541,14 @@ def lane_busy_with(env, incoda_path, sha):
     """The lane's holder text when a resignoff for THIS sha appears to be in
     flight, else None. A textual match on the --reason this bot uses, on
     purpose: the point is not to double-queue a run that is already running.
-    Any other holder is the lane's normal business (the run then queues
-    behind it, which is what the lane is for). The match can be stale: a
+    Any other holder is the lane's normal business (wintty-build has three
+    slots; the run takes a free one or queues). The match can be stale: a
     finished-but-unreleased holder or an old line in the status pane reads
     the same as a live one, so the skip note surfaces the raw status and
     names the escalation (check `incoda status --queue wintty-build`, clear the
     stale holder or wait) instead of trusting the match silently. A failed
-    status read stays silent: the lane serializes regardless."""
+    status read stays silent: the worktree lock still keeps this bot to one
+    run at a time, so the worst case is one duplicate signoff, not two bots."""
     if env.incoda_status is None:
         return None
     try:
