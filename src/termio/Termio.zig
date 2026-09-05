@@ -65,6 +65,11 @@ size: renderer.Size,
 /// The mailbox implementation to use.
 mailbox: termio.Mailbox,
 
+/// Bounds the data queued to the pty. The backend accounts for its
+/// writes here and the stream handler consults it before queueing a
+/// terminal reply.
+write_limit: termio.WriteLimit = .{},
+
 /// The stream parser. This parses the stream of escape codes and so on
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
@@ -323,6 +328,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .alloc = alloc,
         .osc7 = osc7,
         .termio_mailbox = &self.mailbox,
+        .write_limit = &self.write_limit,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
         .renderer_wakeup = opts.renderer_wakeup,

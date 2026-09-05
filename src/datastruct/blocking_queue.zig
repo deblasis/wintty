@@ -112,29 +112,40 @@ pub fn BlockingQueue(
                     .forever => {
                         self.not_full_waiters += 1;
                         defer self.not_full_waiters -= 1;
-                        self.cond_not_full.waitUncancelable(io, &self.mutex);
+
+                        // Being woken doesn't mean there is a slot for
+                        // us: we have multiple producers, so another one
+                        // can take the freed slot before we reacquire
+                        // the mutex. Wait again instead of dropping the
+                        // value, which callers have no way to notice.
+                        while (self.full()) {
+                            self.cond_not_full.waitUncancelable(io, &self.mutex);
+                        }
                     },
 
                     .ns => |ns| {
                         self.not_full_waiters += 1;
                         defer self.not_full_waiters -= 1;
-                        compat_thread.waitTimeout(
-                            &self.cond_not_full,
-                            io,
-                            &self.mutex,
-                            .{
-                                .duration = .{
-                                    .raw = .fromNanoseconds(ns),
-                                    .clock = .awake,
-                                },
-                            },
-                        ) catch return 0;
+
+                        // Same as above, except we resolve the timeout to
+                        // an absolute deadline first so that waiting
+                        // again can't extend the caller's timeout.
+                        const relative: std.Io.Timeout = .{ .duration = .{
+                            .raw = .fromNanoseconds(ns),
+                            .clock = .awake,
+                        } };
+                        const deadline = relative.toDeadline(io);
+
+                        while (self.full()) {
+                            compat_thread.waitTimeout(
+                                &self.cond_not_full,
+                                io,
+                                &self.mutex,
+                                deadline,
+                            ) catch return 0;
+                        }
                     },
                 }
-
-                // If we're still full, then we failed to write. This can
-                // happen in situations where we are interrupted.
-                if (self.full()) return 0;
             }
 
             // Add our data and update our accounting
@@ -258,4 +269,60 @@ test "timed push" {
 
     // Timed push should fail
     try testing.expectEqual(@as(Q.Size, 0), q.push(io, 2, .{ .ns = 1000 }));
+}
+
+test "BlockingQueue push forever retries when woken with no free slot" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    // Fill the queue so the pusher below has to wait for a slot.
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    const Pusher = struct {
+        q: *Q,
+        result: Q.Size = 0,
+
+        fn run(self: *@This(), thread_io: std.Io) void {
+            self.result = self.q.push(thread_io, 2, .{ .forever = {} });
+        }
+    };
+
+    var pusher: Pusher = .{ .q = q };
+    const thread = try std.Thread.spawn(.{}, Pusher.run, .{ &pusher, io });
+
+    // Wait until the pusher is parked on the condition.
+    while (true) {
+        q.mutex.lockUncancelable(io);
+        const parked = q.not_full_waiters > 0;
+        q.mutex.unlock(io);
+        if (parked) break;
+        std.Thread.yield() catch {};
+    }
+
+    // Wake the pusher while the queue is still full. This is what a
+    // second producer taking the slot first looks like from the woken
+    // pusher's side: there is nothing for it, so it has to keep waiting
+    // instead of dropping the value.
+    for (0..1000) |_| {
+        q.cond_not_full.broadcast(io);
+        std.Thread.yield() catch {};
+    }
+
+    q.mutex.lockUncancelable(io);
+    const still_parked = q.not_full_waiters > 0;
+    q.mutex.unlock(io);
+
+    // Free a slot so the pusher can finish either way, then join before
+    // asserting so a failure doesn't leave the thread behind.
+    try testing.expect(q.pop(io).? == 1);
+    thread.join();
+
+    try testing.expect(still_parked);
+    try testing.expectEqual(@as(Q.Size, 1), pusher.result);
+    try testing.expect(q.pop(io).? == 2);
 }

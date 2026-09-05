@@ -31,6 +31,10 @@ pub const StreamHandler = struct {
     /// Mailbox for data to the termio thread.
     termio_mailbox: *termio.Mailbox,
 
+    /// Bounds the data queued to the pty. Terminal replies are dropped
+    /// while this is at capacity; see termio.WriteLimit.
+    write_limit: *termio.WriteLimit,
+
     /// Mailbox for the surface.
     surface_mailbox: apprt.surface.Mailbox,
 
@@ -185,7 +189,36 @@ pub const StreamHandler = struct {
         }
     }
 
+    /// Send a message to the termio thread. Almost everything this handler
+    /// sends is a reply to output the child produced, so once the pty write
+    /// backlog is at its cap we drop it: a child that isn't draining its
+    /// input isn't reading the replies either. User input doesn't come
+    /// through here.
+    ///
+    /// Use `messageWriterRequired` for a write something is blocked on
+    /// rather than merely informed by.
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
+        if (msg.writesToPty() and self.write_limit.atCapacity()) {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            if (self.write_limit.recordDrop(now.toMilliseconds())) |n| {
+                log.warn(
+                    "pty write backlog full, dropped {} terminal responses",
+                    .{n},
+                );
+            }
+
+            msg.deinit();
+            return;
+        }
+
+        self.messageWriterRequired(msg);
+    }
+
+    /// Send a message the backlog cap must not drop.
+    inline fn messageWriterRequired(
+        self: *StreamHandler,
+        msg: termio.Message,
+    ) void {
         self.termio_mailbox.send(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }
@@ -525,7 +558,12 @@ pub const StreamHandler = struct {
                                 self.alloc,
                                 command,
                             );
-                            self.messageWriter(msg);
+
+                            // Not a reply: this drives the control mode
+                            // session the user asked for, and tmux answers
+                            // every command with a %begin/%end block the
+                            // viewer waits for. Dropping one wedges it.
+                            self.messageWriterRequired(msg);
                         },
 
                         .windows => {
@@ -2216,9 +2254,11 @@ test "kitty clipboard write: oversized text replies EFBIG" {
         .mutex = &mutex,
         .terminal = undefined,
     };
+    var write_limit: termio.WriteLimit = .{};
     var handler: StreamHandler = undefined;
     handler.alloc = testing.allocator;
     handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
     handler.renderer_state = &renderer_state;
     handler.clipboard_write = .allow;
     handler.clipboard_write_limit = 4;
@@ -2259,6 +2299,73 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     // Teardown leaves no transaction that could be committed and
     // forwarded to the macOS clipboard path.
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "tmux control mode commands survive a full pty write backlog" {
+    if (comptime !StreamHandler.tmux_enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+
+    // A backlog that is already at its cap.
+    var write_limit: termio.WriteLimit = .{ .max = 1 };
+    write_limit.queued(1);
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
+    handler.renderer_state = &renderer_state;
+    handler.termio_messaged = false;
+    handler.tmux_viewer = null;
+    defer if (handler.tmux_viewer) |viewer| {
+        viewer.deinit();
+        testing.allocator.destroy(viewer);
+    };
+
+    // A terminal reply is refused at the cap...
+    handler.messageWriter(.{ .write_stable = "\x1B[0n" });
+    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+
+    // ...but a control mode command is not a reply: tmux answers each
+    // one with a %begin/%end block the viewer waits for, so dropping it
+    // wedges a session the user asked for.
+    var enter: terminal.dcs.Command = .{ .tmux = .enter };
+    try handler.dcsCommand(&enter);
+    var block_end: terminal.dcs.Command = .{ .tmux = .{ .block_end = "" } };
+    try handler.dcsCommand(&block_end);
+    var session_changed: terminal.dcs.Command = .{ .tmux = .{ .session_changed = .{
+        .id = 1,
+        .name = "first",
+    } } };
+    try handler.dcsCommand(&session_changed);
+
+    const queued = mailbox.spsc.queue.pop(global.io());
+    try testing.expect(queued != null);
+    const msg = queued.?;
+    defer msg.deinit();
+    const command: termio.Message.WriteReq = switch (msg) {
+        .write_small => |v| .{ .small = v },
+        .write_stable => |v| .{ .stable = v },
+        .write_alloc => |v| .{ .alloc = v },
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(std.mem.startsWith(
+        u8,
+        command.slice(),
+        "display-message",
+    ));
 }
 
 /// Everything a pwd report needs from a `StreamHandler`, and nothing else.
