@@ -189,6 +189,7 @@ pub fn threadEnter(
     td.backend = .{ .exec = .{
         .start = process_start,
         .write_stream = stream,
+        .write_limit = &io.write_limit,
         .process = process,
         .read_thread = read_thread,
         .read_thread_pipe = pipe[1],
@@ -532,6 +533,12 @@ pub fn queueWrite(
 
         //for (slice) |b| log.warn("write: {x}", .{b});
 
+        // Account for the backlog before queueing so that a pty which
+        // has stopped draining is visible to the read thread, which
+        // decides whether terminal replies are still worth queueing.
+        w.len = slice.len;
+        exec.write_limit.queued(slice.len);
+
         exec.write_stream.queueWrite(
             td.loop,
             &exec.write_queue,
@@ -553,6 +560,7 @@ fn ttyWrite(
     r: xev.WriteError!usize,
 ) xev.CallbackAction {
     const w = w_.?;
+    w.td.write_limit.completed(w.len);
     w.td.write_pool.destroy(w);
 
     const d = r catch |err| {
@@ -581,6 +589,10 @@ pub const ThreadData = struct {
 
         /// The buffer for the data being written.
         buf: [64]u8,
+
+        /// How much of `buf` this write covers, so the completion can
+        /// take it back off the outstanding-bytes count.
+        len: usize = 0,
     };
 
     /// Process start time and boolean of whether its already exited.
@@ -589,6 +601,10 @@ pub const ThreadData = struct {
 
     /// The data stream is the main IO for the pty.
     write_stream: xev.Stream,
+
+    /// Bounds the data we have queued to the pty. Owned by the Termio
+    /// so that the read thread can see it too.
+    write_limit: *termio.WriteLimit,
 
     /// The process watcher
     process: ?xev.Process,

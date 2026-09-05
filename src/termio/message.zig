@@ -115,6 +115,21 @@ pub const Message = union(enum) {
         };
     }
 
+    /// Whether handling this message results in a write to the pty.
+    pub fn writesToPty(self: Message) bool {
+        return switch (self) {
+            .color_scheme_report,
+            .visibility_report,
+            .size_report,
+            .write_small,
+            .write_stable,
+            .write_alloc,
+            => true,
+
+            else => false,
+        };
+    }
+
     /// Free resources owned by a message that will not be processed.
     /// The message is invalid after this call.
     pub fn deinit(self: *const Message) void {

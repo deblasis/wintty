@@ -31,6 +31,10 @@ pub const StreamHandler = struct {
     /// Mailbox for data to the termio thread.
     termio_mailbox: *termio.Mailbox,
 
+    /// Bounds the data queued to the pty. Terminal replies are dropped
+    /// while this is at capacity; see termio.WriteLimit.
+    write_limit: *termio.WriteLimit,
+
     /// Mailbox for the surface.
     surface_mailbox: apprt.surface.Mailbox,
 
@@ -186,6 +190,23 @@ pub const StreamHandler = struct {
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
+        // Everything this handler sends is a reply to output the child
+        // produced, so once the pty write backlog is at its cap we can
+        // drop it: a child that isn't draining its input isn't reading
+        // the replies either. User input doesn't come through here.
+        if (msg.writesToPty() and self.write_limit.atCapacity()) {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            if (self.write_limit.recordDrop(now.toMilliseconds())) |n| {
+                log.warn(
+                    "pty write backlog full, dropped {} terminal responses",
+                    .{n},
+                );
+            }
+
+            msg.deinit();
+            return;
+        }
+
         self.termio_mailbox.send(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }
@@ -2216,9 +2237,11 @@ test "kitty clipboard write: oversized text replies EFBIG" {
         .mutex = &mutex,
         .terminal = undefined,
     };
+    var write_limit: termio.WriteLimit = .{};
     var handler: StreamHandler = undefined;
     handler.alloc = testing.allocator;
     handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
     handler.renderer_state = &renderer_state;
     handler.clipboard_write = .allow;
     handler.clipboard_write_limit = 4;
