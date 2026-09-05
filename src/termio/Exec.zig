@@ -741,19 +741,16 @@ const Subprocess = struct {
         //
         // For now, we just look up a bundled dir but in the future we should
         // also load the terminfo database and look for it.
-        if (cfg.resources_dir) |base| {
+        var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (terminfoDir(&terminfo_buf, cfg.resources_dir)) |dir| {
             try env.put("TERM", cfg.term);
             try env.put("COLORTERM", "truecolor");
-
-            // Assume that the resources directory is adjacent to the terminfo
-            // database
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const dir = try std.fmt.bufPrint(&buf, "{s}/terminfo", .{
-                std.fs.path.dirname(base) orelse unreachable,
-            });
             try env.put("TERMINFO", dir);
         } else {
-            if (comptime builtin.target.os.tag.isDarwin()) {
+            if (cfg.resources_dir) |base| {
+                log.warn("no terminfo dir beside the resources dir base={s}", .{base});
+                log.warn("using xterm-256color, check GHOSTTY_RESOURCES_DIR", .{});
+            } else if (comptime builtin.target.os.tag.isDarwin()) {
                 log.warn("ghostty terminfo not found, using xterm-256color", .{});
                 log.warn("the terminfo SHOULD exist on macos, please ensure", .{});
                 log.warn("you're using a valid app bundle.", .{});
@@ -2363,6 +2360,19 @@ fn execCommand(
             break :shell try args.toOwnedSlice(alloc);
         },
     };
+}
+
+/// Derive the TERMINFO directory from the resources directory, which we
+/// assume sits beside the terminfo database.
+///
+/// Returns null when there is no resources directory, or when it has no
+/// parent directory to look beside. The latter happens when
+/// GHOSTTY_RESOURCES_DIR is a bare name, so the caller falls back to a
+/// TERM that needs none of our terminfo.
+fn terminfoDir(buf: []u8, resources_dir: ?[]const u8) ?[]const u8 {
+    const base = resources_dir orelse return null;
+    const parent = std.fs.path.dirname(base) orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/terminfo", .{parent}) catch null;
 }
 
 /// Append a value to an environment variable such as PATH.
@@ -4418,4 +4428,22 @@ test "maybeWrapGitBashWithWinpty windows: absolute bash with adjacent winpty is 
     try testing.expectEqualStrings(winpty, out[0]);
     try testing.expectEqualStrings(bash, out[1]);
     try testing.expectEqualStrings("--login", out[2]);
+}
+
+test "terminfoDir derives the directory beside the resources dir" {
+    const testing = std.testing;
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/usr/share/terminfo",
+        terminfoDir(&buf, "/usr/share/ghostty").?,
+    );
+}
+
+test "terminfoDir has nothing to derive from a bare resources dir" {
+    const testing = std.testing;
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(terminfoDir(&buf, null) == null);
+    try testing.expect(terminfoDir(&buf, "ghostty") == null);
 }

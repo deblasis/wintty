@@ -68,6 +68,7 @@ test {
     _ = edit;
     _ = i18n;
     _ = path;
+    _ = resourcesdir;
     _ = uri;
     _ = shell;
     _ = windows_shell;
