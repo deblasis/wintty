@@ -2104,7 +2104,6 @@ pub const CAPI = struct {
 
             // Clamp our point to the screen bounds.
             const clamped_x = @min(self.x, screen.pages.cols -| 1);
-            const clamped_y = @min(self.y, screen.pages.rows -| 1);
 
             return switch (self.coord_tag) {
                 // Exact coordinates require a specific pin.
@@ -2118,7 +2117,24 @@ pub const CAPI = struct {
                         inline else => |v| @unionInit(
                             terminal.Point,
                             @tagName(v),
-                            .{ .x = pt_x, .y = clamped_y },
+                            .{
+                                .x = pt_x,
+                                // Only the active and viewport spaces are
+                                // bounded by the screen height. Screen and
+                                // history run the full length of the
+                                // pagelist, and PageList.pin already
+                                // rejects a y past its end, so clamping
+                                // them would answer with the wrong row.
+                                .y = switch (v) {
+                                    .active,
+                                    .viewport,
+                                    => @min(self.y, screen.pages.rows -| 1),
+
+                                    .screen,
+                                    .history,
+                                    => self.y,
+                                },
+                            },
                         ),
                     };
 
