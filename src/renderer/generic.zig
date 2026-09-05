@@ -2394,7 +2394,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .awake,
             ).addDuration(device_recovery_retry_delay);
 
-            if (self.api.deviceLost()) try self.api.recoverDevice();
+            // The latch says a draw path saw the loss. The second check
+            // covers a loss that landed while the previous attempt was
+            // rebuilding on a device it had just created: no draw ran,
+            // so nothing latched, and the device would otherwise be
+            // built on forever.
+            if (self.api.deviceLost() or self.api.deviceRemoved()) {
+                try self.api.recoverDevice();
+            }
 
             // From here the device is good; only the rebuild on top of it
             // can still fail, and a retry must start from bare shaders.

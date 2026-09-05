@@ -555,6 +555,11 @@ fn drawNowCallback(
     const t = self_.?;
     t.drawFrame(true);
 
+    // A draw can leave the renderer wanting another wake (a device
+    // rebuild that failed and is due to retry), and this path was the
+    // only draw that did not ask.
+    t.armAnimationTimer();
+
     return .rearm;
 }
 

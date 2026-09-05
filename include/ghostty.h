@@ -1293,7 +1293,9 @@ GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t)
 // cross-device synchronization issues. Returns NULL on non-DX12 builds or if
 // the renderer device is not yet initialized. Device-removed recovery
 // replaces the device: do not cache this pointer across a `version` change
-// in ghostty_surface_shared_texture_s.
+// in ghostty_surface_shared_texture_s. This and the other surface device
+// queries wait for the renderer's draw lock, so they can block for the
+// length of a frame, or of a device rebuild after a TDR.
 GHOSTTY_API void* ghostty_surface_get_d3d12_device(ghostty_surface_t);
 // Returns the DirectComposition surface handle backing this surface's swap
 // chain in SwapChainPanel mode. Bind it to a WinUI 3 SwapChainPanel via

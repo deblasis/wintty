@@ -557,6 +557,11 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
             log.warn("skipping GPU drain before teardown: device removed", .{});
             dev_ptr.retirement.drainAll();
         }
+        // Whatever the wait left behind (a live device whose fence wait
+        // failed) must not keep pointing at the heaps destroyed below.
+        // Slots are dropped; resources keep the leak-rather-than-corrupt
+        // policy Device.deinit applies to them.
+        dev_ptr.retirement.forgetSlots();
 
         // Shared-texture mode: remember where the version got to, so a
         // rebuilt device continues the count instead of restarting at 1
@@ -639,6 +644,16 @@ pub fn deviceLost(self: *const DirectX12) bool {
     return self.device_lost;
 }
 
+/// Whether the device is gone right now, asked of the driver rather than
+/// of the latch. The draw paths set the latch; a loss that lands while
+/// the generic renderer is rebuilding shaders and frames on a device
+/// that was just recreated sets nothing, and this is how that rebuild
+/// learns it has to start over from the device.
+pub fn deviceRemoved(self: *const DirectX12) bool {
+    const dev_ptr = &(self.dev orelse return true);
+    return dev_ptr.removed();
+}
+
 /// Replace a lost device with a new one built for the same surface.
 ///
 /// Everything the generic renderer created on the old device (shaders,
@@ -654,9 +669,10 @@ pub fn deviceLost(self: *const DirectX12) bool {
 /// without being told. Shared-texture mode mints new resource and fence
 /// handles, and says so the documented way: `version` keeps counting up
 /// from where it was, so a consumer re-opens both. Composition mode has
-/// no such channel: the embedder holds a raw pointer to the old swap
-/// chain and nothing here can tell it about the new one, so that mode
-/// comes back blank until a "swap chain changed" notification exists.
+/// no such channel: the embedder holds a raw, un-AddRef'd pointer to the
+/// old swap chain, which this releases, and nothing here can tell it
+/// about the new one. That mode needs a "swap chain changed" notification
+/// before recovery is safe for it.
 pub fn recoverDevice(self: *DirectX12) !void {
     var surface = self.surface orelse return error.NoSurface;
 

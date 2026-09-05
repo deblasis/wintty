@@ -177,6 +177,29 @@ pub const Retirement = struct {
         self.staged.clearRetainingCapacity();
     }
 
+    /// Drop every descriptor-slot retirement without recycling it. For
+    /// the moment right before the heaps themselves are destroyed: a
+    /// slot entry is a pointer into a heap, so once the heaps go it can
+    /// only ever be released into freed memory. Resources are kept; they
+    /// still follow the drain-or-leak rule.
+    pub fn forgetSlots(self: *Self) void {
+        var kept: usize = 0;
+        for (self.pending.items) |entry| {
+            if (entry.item == .slot) continue;
+            self.pending.items[kept] = entry;
+            kept += 1;
+        }
+        self.pending.shrinkRetainingCapacity(kept);
+
+        kept = 0;
+        for (self.staged.items) |item| {
+            if (item == .slot) continue;
+            self.staged.items[kept] = item;
+            kept += 1;
+        }
+        self.staged.shrinkRetainingCapacity(kept);
+    }
+
     fn releaseItem(item: Item) void {
         switch (item) {
             .resource => |resource| _ = resource.Release(),
@@ -402,4 +425,27 @@ test "Retirement: drainAll frees staged slots without a fence" {
 
     const d1 = try heap.allocate();
     try std.testing.expectEqual(@as(u32, 0), d1.index);
+}
+
+test "Retirement: forgetSlots drops slots, staged and sealed, and keeps nothing pointing at a heap" {
+    var q = Retirement.init(std.testing.allocator);
+    defer q.deinit();
+    defer q.drainAll();
+
+    var heap = testHeap(2);
+    const d0 = try heap.allocate();
+    const d1 = try heap.allocate();
+
+    // One sealed, one staged: both kinds have to go.
+    q.retireSlot(&heap, d0.index);
+    q.seal(1);
+    q.retireSlot(&heap, d1.index);
+    try std.testing.expectEqual(@as(usize, 2), q.count());
+
+    q.forgetSlots();
+    try std.testing.expectEqual(@as(usize, 0), q.count());
+
+    // Forgotten means not recycled: the heap still thinks both are taken,
+    // which is the point when the heap is about to be destroyed anyway.
+    try std.testing.expectError(error.DescriptorHeapFull, heap.allocate());
 }
