@@ -33,13 +33,16 @@ public class TabContextMenuCwdTests
 
         Assert.Contains(build.Calls("flyout.Items.Add"), c => c.Arg(0) == local);
 
-        // Greyed from the same property at build and on every Opening.
+        // Hidden, not greyed, unless the tab has a directory to act on --
+        // decided from the same property at build and on every Opening.
         var declared = build.DescendantNodes().OfType<VariableDeclaratorSyntax>()
             .Single(v => v.Identifier.Text == local);
         Assert.Contains(declared.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == "IsEnabled" && a.Right.ToString() == "tab.ActionableCwd is not null");
+            a => a.Left.ToString() == "Visibility" && a.Right.ToString() == "CwdVisibility(tab)");
         Assert.Contains(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == $"{local}.IsEnabled" && a.Right.ToString() == "tab.ActionableCwd is not null");
+            a => a.Left.ToString() == $"{local}.Visibility" && a.Right.ToString() == "CwdVisibility(tab)");
+        Assert.DoesNotContain(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == $"{local}.IsEnabled");
 
         // The click reads ActionableCwd, and nothing else off the tab.
         var click = ClickHandler(build, local);
@@ -48,6 +51,24 @@ public class TabContextMenuCwdTests
             .Select(m => m.Name.Identifier.Text)
             .Distinct().ToList();
         Assert.Equal(["ActionableCwd"], reads);
+    }
+
+    [Fact]
+    public void TheDirectoryGroup_HidesWithItsItems()
+    {
+        // The separator that introduces the group follows the same
+        // visibility, or a bare rule is left behind when the items hide.
+        var menu = ShellSource.Load("Tabs.TabContextMenuBuilder.cs");
+        var build = menu.Method("Build");
+        Assert.Contains(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "cwdRule.Visibility" && a.Right.ToString() == "CwdVisibility(tab)");
+        // Pinned as parsed: inverted, the rule reads the same in substrings
+        // while showing the group exactly when there is nothing to act on.
+        var rule = menu.Method("CwdVisibility");
+        var choice = Assert.IsType<ConditionalExpressionSyntax>(rule.ExpressionBody!.Expression);
+        Assert.Equal("tab.ActionableCwd is not null", choice.Condition.ToString());
+        Assert.Equal("Visibility.Visible", choice.WhenTrue.ToString());
+        Assert.Equal("Visibility.Collapsed", choice.WhenFalse.ToString());
     }
 
     [Fact]

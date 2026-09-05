@@ -21,6 +21,13 @@ public sealed class TabIconViewModel : INotifyPropertyChanged
     private string _profileTooltip;
     private IconSpec? _overrideIcon;
     private string? _overrideTooltip;
+    private bool _settling;
+
+    // What a tab wears while it starts: the app's own icon, the way a
+    // loading tab reads in other terminals, above both the profile slot
+    // and any foreground override.
+    private static readonly IconSpec SettlingIcon = new IconSpec.BundledKey("default");
+    private const string SettlingPrefix = "Starting…";
 
     public TabIconViewModel(IconSpec icon, string tooltipText)
     {
@@ -28,9 +35,28 @@ public sealed class TabIconViewModel : INotifyPropertyChanged
         _profileTooltip = tooltipText;
     }
 
-    public IconSpec Icon => _overrideIcon ?? _profileIcon;
+    public IconSpec Icon => _settling ? SettlingIcon : _overrideIcon ?? _profileIcon;
 
-    public string TooltipText => _overrideTooltip ?? _profileTooltip;
+    // While starting, the word is added above the profile's name rather than
+    // replacing it: the moment a person checks a tab is the moment they want
+    // to know which profile they opened.
+    public string TooltipText => _settling
+        ? SettlingPrefix + "\n" + (_overrideTooltip ?? _profileTooltip)
+        : _overrideTooltip ?? _profileTooltip;
+
+    /// <summary>
+    /// Whether the tab is still starting. While true the resolved icon and
+    /// tooltip are the app's own; the profile and override slots keep their
+    /// values underneath and come back the moment this clears.
+    /// </summary>
+    public void SetSettling(bool settling)
+    {
+        if (_settling == settling) return;
+        var oldIcon = Icon;
+        var oldTooltip = TooltipText;
+        _settling = settling;
+        RaiseIfChanged(oldIcon, oldTooltip);
+    }
 
     public bool IsMdl2Glyph => Icon is IconSpec.Mdl2Token;
 

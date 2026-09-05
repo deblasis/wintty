@@ -57,12 +57,16 @@ public sealed class TabPinZoneChromeWiringTests
             "TabPinBand.ChipSize", width.Initializer!.Value.ToString(),
             StringComparison.Ordinal);
 
-        // The title the square gives up rides the tooltip, composed with
-        // the directory an unpinned tab shows only the leaf of, so every
-        // tab is owed it, pinned or not.
+        // The title the square gives up rides the tooltip in full, because
+        // the square shows no label of its own. An unpinned tab wears its
+        // label, so it gets only what the hover adds.
         var tip = anatomy.Call("ToolTipService.SetToolTip");
         Assert.Equal("item", tip.Arg(0));
-        Assert.Equal("tab.TooltipText", tip.Arg(1));
+        var text = tip.ArgExpression(1);
+        var branch = Assert.IsType<ConditionalExpressionSyntax>(text);
+        Assert.Equal("pinned", branch.Condition.ToString());
+        Assert.Equal("tab.TooltipText", branch.WhenTrue.ToString());
+        Assert.Contains("tab.HoverText", branch.WhenFalse.ToString());
 
         // No close button in a 48px slot. Closing a pinned tab stays a
         // decision the context menu and the keybind take.
@@ -123,17 +127,18 @@ public sealed class TabPinZoneChromeWiringTests
         // the pass reads the icon row back out of _iconRowByModel, so a
         // tab that arrives already pinned has to be findable first.
         //
-        // THREE calls in AddItem, and the count is pinned because each is a
+        // FOUR calls in AddItem, and the count is pinned because each is a
         // different reason: the INPC lambda's title branch, the INPC
         // lambda's IsPinned branch -- both declared early, inside a lambda
-        // that runs much later -- and the build's own, which is the one
-        // that has to follow the registries and so is the last of the
-        // three. The title branch is there because a pinned tab's title
-        // TextBlock is collapsed: the tooltip is the only visible carrier
-        // of the title, and this pass is its only writer.
+        // that runs much later -- the header's trim handler, because the
+        // width the strip shares out changes without the tab changing at
+        // all, and the build's own, which has to follow the registries and
+        // so is the last of the four. The title branch is there because a
+        // pinned tab's title TextBlock is collapsed: the tooltip is the only
+        // visible carrier of the title, and this pass is its only writer.
         var addItem = tabHost.Method("AddItem");
         var takes = addItem.Calls("ApplyPinnedTabAnatomy");
-        Assert.Equal(3, takes.Count);
+        Assert.Equal(4, takes.Count);
         var register = addItem.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left.ToString() == "_iconRowByModel[tab]");
         Assert.True(

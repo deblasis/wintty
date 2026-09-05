@@ -66,6 +66,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // "resting", strong enough to notice in a scan of the strip.
     private const double IdleOpacity = 0.45;
 
+    // Segoe Fluent / MDL2 "Home": drawn in the title's place for a tab
+    // sitting in the user's own directory.
+    private const string HomeGlyph = "\uE80F";
+
     // One chip per group the projection renders as collapsed-without-the-
     // active-tab. A chip is a real TabViewItem occupying a strip slot, so
     // every slot count and every slot index now includes chips; the maps
@@ -182,13 +186,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     /// <summary>
     /// What the horizontal strip is actually showing for <paramref name="tab"/>:
-    /// its header TextBlock and the TabViewItem's own tooltip, both off the
-    /// live tree, so a label assertion can fail even when the model behind
-    /// it is right. Null when the strip has not built its item yet.
+    /// its header TextBlock, the TabViewItem's own tooltip, and whether the
+    /// home glyph stands in the title's place -- all off the live tree, so a
+    /// label assertion can fail even when the model behind it is right. The
+    /// title is empty when something else is drawn in its slot, which is what
+    /// a person sees. Null when the strip has not built its item yet.
     /// </summary>
-    internal (string Title, string? Tooltip)? TestSeamRenderedItem(TabModel tab)
+    internal (string Title, string? Tooltip, bool HomeGlyph)? TestSeamRenderedItem(TabModel tab)
         => _itemByModel.TryGetValue(tab, out var item) && _headerTextByModel.TryGetValue(tab, out var header)
-            ? (header.Text, ToolTipService.GetToolTip(item) as string)
+            ? (header.Visibility == Visibility.Visible ? header.Text : "",
+               ToolTipService.GetToolTip(item) as string,
+               _iconRowByModel.TryGetValue(tab, out var row)
+                   && row.Children.OfType<FontIcon>().Any(f => f.Glyph == HomeGlyph && f.Visibility == Visibility.Visible))
             : null;
 
     /// <summary>
@@ -308,7 +317,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // 2px ProgressBar stacked below. Both update from TabModel's
         // INPC notifications — TabModel raises EffectiveTitle on title
         // changes and Progress on OSC 9;4 state changes.
-        var headerText = new TextBlock { Text = tab.EffectiveTitle };
+        // Trimming is not decoration: the strip shares its width out, so a
+        // header that cannot fit is exactly the case where a hover is owed
+        // the whole title -- and IsTextTrimmed only ever reports true when a
+        // trimming mode is set.
+        var headerText = new TextBlock
+        {
+            Text = tab.EffectiveTitle,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+        };
         // If the shell theme is already active, paint the new tab's
         // title in the cached active-text brush so tabs opened after
         // ApplyShellTheme match the ones that were present at the time.
@@ -352,6 +369,24 @@ internal sealed partial class TabHost : UserControl, ITabHost
         iconHost.Attach(tab.TabIcon);
         iconRow.Children.Add(iconHost);
         iconRow.Children.Add(headerText);
+        // The home glyph, shown instead of the title when the tab sits in
+        // the user's own directory; the anatomy pass toggles the pair.
+        var homeGlyph = new FontIcon
+        {
+            Glyph = HomeGlyph,
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = tab.IsHome ? Visibility.Visible : Visibility.Collapsed,
+        };
+        if (Application.Current.Resources.TryGetValue("SymbolThemeFontFamily", out var homeFont)
+            && homeFont is Microsoft.UI.Xaml.Media.FontFamily homeFamily)
+        {
+            homeGlyph.FontFamily = homeFamily;
+        }
+        // The item is already named "Home"; a named child would say it twice.
+        AutomationProperties.SetAccessibilityView(
+            homeGlyph, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        iconRow.Children.Add(homeGlyph);
 
         // Bell indicator: a Ringer glyph shown after the title while the
         // tab has an unacknowledged bell (bell-features `title`). Collapsed
@@ -489,6 +524,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     ? Visibility.Visible
                     : Visibility.Collapsed;
                 ApplyIdleInk(iconHost, headerText, tab);
+                homeGlyph.Opacity = headerText.Opacity;
+            }
+
+            else if (e.PropertyName == nameof(TabModel.IsSettling))
+            {
+                // The icon carries the start on its own -- the VM swaps it,
+                // and the presenter is already listening. What a listener
+                // gets is the status text, and only this arm writes it.
+                ApplyItemAccessibleText(item, tab);
             }
             else if (e.PropertyName == nameof(TabModel.IsPinned))
             {
@@ -520,6 +564,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         };
         _itemByModel[tab] = item;
         _headerTextByModel[tab] = headerText;
+        // The width the strip shares out changes with the tab count and with
+        // the window, so whether a label is trimmed changes without the tab
+        // changing at all. Only the tooltip re-derives from it.
+        headerText.IsTextTrimmedChanged += (_, _) => ApplyPinnedTabAnatomy(item, tab);
         _iconRowByModel[tab] = iconRow;
         TabViewControl.TabItems.Add(item);
         // After the registries: the anatomy pass reads the icon row back
@@ -2073,10 +2121,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
         item.MinWidth = pinned ? PinnedTabWidth : 0;
         item.MaxWidth = pinned ? PinnedTabWidth : double.PositiveInfinity;
         item.IsClosable = !pinned;
-        // The title the square gives up rides the tooltip, and so does the
-        // directory an unpinned tab shows only the leaf of; the model
-        // composes one text for both, so every tab is owed it.
-        ToolTipService.SetToolTip(item, tab.TooltipText);
+        // The title the square gives up rides the tooltip in full. An
+        // unpinned tab shows its label, so it is owed only what the hover
+        // adds -- the directory, or the whole label when the header has
+        // had to trim it.
+        ToolTipService.SetToolTip(item, pinned
+            ? tab.TooltipText
+            : tab.HoverText ?? (_headerTextByModel.TryGetValue(tab, out var header) && header.IsTextTrimmed
+                ? tab.TooltipText
+                : null));
 
         if (!_iconRowByModel.TryGetValue(tab, out var row)) return;
         // Centred in the square rather than run from the leading edge:
@@ -2090,9 +2143,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
             {
                 case TabIconPresenter icon:
                     icon.Margin = new Thickness(0, 0, pinned ? 0 : 6, 0);
+                    // On the square the presenter is the whole item, and the
+                    // nearest tooltip wins: hand the hover to the item's.
+                    icon.ShowsTooltip = !pinned;
                     break;
                 case TextBlock title:
-                    title.Visibility = pinned ? Visibility.Collapsed : Visibility.Visible;
+                    title.Visibility = pinned || tab.IsHome ? Visibility.Collapsed : Visibility.Visible;
+                    break;
+                case FontIcon home when home.Glyph == HomeGlyph:
+                    home.Visibility = pinned || !tab.IsHome ? Visibility.Collapsed : Visibility.Visible;
                     break;
                 case FontIcon bell:
                     // The bell keeps its badge on a pinned square; what it
@@ -2255,6 +2314,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// created already-idle (a restore landing past the threshold)
     /// starts dimmed instead of flashing bright first.
     /// </summary>
+    /// <summary>
+    /// Paint (or release) the home glyph in the same ink the header text
+    /// takes. A home tab draws no text, so the glyph is the thing an ink
+    /// pass has to reach or the tab keeps the old theme's colour.
+    /// </summary>
+    private static void SetHomeGlyphForeground(StackPanel? iconRow, Brush? ink)
+    {
+        if (iconRow is null) return;
+        foreach (var child in iconRow.Children)
+        {
+            if (child is FontIcon glyph && glyph.Glyph == HomeGlyph)
+            {
+                if (ink is null) glyph.ClearValue(IconElement.ForegroundProperty);
+                else glyph.Foreground = ink;
+                return;
+            }
+        }
+    }
+
     private static void ApplyIdleInk(TabIconPresenter icon, TextBlock title, TabModel tab)
     {
         var opacity = tab.IsIdle ? IdleOpacity : 1.0;
@@ -3728,12 +3806,24 @@ internal sealed partial class TabHost : UserControl, ITabHost
             if (iconRow is not null)
                 ClearHeaderRowForeground(iconRow);
 
+            // The home glyph is a title, not an ornament: it stands where
+            // the text would, so it takes the same ink the text takes.
             if (shell)
-                tb.Foreground = active ? _shellActiveTextBrush! : _shellInactiveTextBrush!;
+            {
+                var ink = active ? _shellActiveTextBrush! : _shellInactiveTextBrush!;
+                tb.Foreground = ink;
+                SetHomeGlyphForeground(iconRow, ink);
+            }
             else if (active && _defaultActiveTextBrush is not null)
+            {
                 tb.Foreground = _defaultActiveTextBrush;
+                SetHomeGlyphForeground(iconRow, _defaultActiveTextBrush);
+            }
             else
+            {
                 tb.ClearValue(TextBlock.ForegroundProperty);
+                SetHomeGlyphForeground(iconRow, null);
+            }
         }
 
         // Chips ride the same ink pass: they never sit on the selected
