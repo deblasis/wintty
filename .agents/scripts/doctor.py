@@ -41,7 +41,7 @@ REQUIRED_TOOLS = ["git", "gh", "just"]
 # absence is a note, not a failure, so non-Windows clones stay quiet.
 OPTIONAL_TOOLS = ["zig", "dotnet", "pwsh"]
 GATE_SCRIPTS = ["pr_gate.py", "workspace_guard.py", "signoff.py", "merge_guard.py",
-                "resignoff_bot.py"]
+                "resignoff_bot.py", "leg_cache.py"]
 
 
 def check(which=shutil.which, settings_path=None, script_dir=SCRIPT_DIR):

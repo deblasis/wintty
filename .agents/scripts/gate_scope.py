@@ -20,6 +20,8 @@ the whole branch, which is unconditional; per-PR signoff answers the
 narrower question of whether THIS change breaks anything.
 """
 
+import re
+
 LEG_FMT = "zig-fmt"
 LEG_ZIG = "zig-tests"
 LEG_WIN = "windows-tests"
@@ -31,6 +33,30 @@ LEG_RELEASE_GATE = "release-gate"
 
 ALL_LEGS = (LEG_FMT, LEG_ZIG, LEG_WIN, LEG_GATES, LEG_RELEASE_GATE)
 ZIG_LEGS = (LEG_FMT, LEG_ZIG)
+
+# What signoff runs for each leg. Here rather than in signoff.py because
+# the command is an input of the leg's content digest (leg_cache.py): a
+# leg whose command changed proves something different, and both sides
+# must read the same table.
+LEG_COMMANDS = {
+    LEG_FMT: ("zig", "fmt", "--check", "src"),
+    LEG_ZIG: ("just", "test"),
+    LEG_WIN: ("just", "test-win"),
+    LEG_GATES: ("just", "gates-selftest"),
+    LEG_RELEASE_GATE: ("just", "release-gate-check"),
+}
+
+# A justfile recipe header, as both parsers of the file must see it:
+# signoff.py maps a changed line to the recipe that owns it, leg_cache.py
+# hashes each recipe's text. Parameters may be bare (`pr-gate pr:`),
+# defaulted (`splash-race args="":`) or variadic (`+args`), and the
+# trailing colon must not be the `:=` of a `set` directive or an
+# assignment. Group 1 is the name, group 3 the dependency list.
+RECIPE_HEADER = re.compile(
+    r"^([a-zA-Z_][\w-]*)"
+    r"((?:\s+[+*]?[\w-]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'))?)*)"
+    r"\s*:(?!=)(.*)$"
+)
 
 # The justfile defines the legs themselves, so editing a recipe a leg runs
 # through invalidates what that leg proves. The mapping is per recipe rather
@@ -135,6 +161,10 @@ EXACT_RULES = {
     # The compiled-result half of the shipping gate. It is #if !DEBUG, so
     # editing it proves nothing until a Release run executes it.
     "windows/Ghostty.Tests/Demo/ShippingBuildGateTests.cs": (LEG_WIN, LEG_RELEASE_GATE),
+    # The gates leg holds the src/ entries above equal to what this project
+    # embeds, so the edit that adds an embed must run that check, not only
+    # the Windows legs the windows/ rules would give it.
+    "windows/Ghostty.Tests/Ghostty.Tests.csproj": (LEG_WIN, LEG_RELEASE_GATE, LEG_GATES),
     # The gates leg runs this script's selftest, which needs no build.
     # Editing it must also run the check itself, and that needs the Zig
     # toolchain, so it rides the Zig leg through `just test`.

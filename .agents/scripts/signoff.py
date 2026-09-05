@@ -17,7 +17,15 @@ the second.
 
 The record is keyed by commit sha, so it survives worktree switches and
 cannot vouch for code that was changed after the run. Rerun after any
-amend or rebase.
+amend or rebase - but the rerun is usually cheap: each leg also has a
+content digest over everything it consumes (leg_cache.py), and a leg
+whose digest already has a green, observed by any earlier run in any
+worktree of this repo, is CARRIED into the new record instead of run.
+An amended message, a rebase onto a base that only moved docs, and a
+branch that carries the same src/ as the nightly's last green all carry
+the Zig leg. A carried step is marked in the record and printed with the
+commit its green was observed at; `--no-cache` runs every leg regardless
+and records what it observes over the greens it did not trust.
 
 Each record also carries `base`, the merge base with origin/windows at
 the time the run was taken. The merge guard (#969) reads it to measure
@@ -27,8 +35,9 @@ of re-gating inline. Records written before this field existed have no
 base; downstream readers must treat that as base-unknown and re-estimate,
 never as "the window did not move".
 
-Usage: just signoff          (scoped to what changed)
+Usage: just signoff          (scoped to what changed, greens carried)
        just signoff-full     (every leg, whatever changed)
+       just signoff-fresh    (scoped, nothing carried)
 """
 
 import datetime
@@ -41,33 +50,13 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gate_scope  # noqa: E402
+import leg_cache  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BASE_REF = "origin/windows"
 
-LEG_COMMANDS = {
-    gate_scope.LEG_FMT: ["zig", "fmt", "--check", "src"],
-    gate_scope.LEG_ZIG: ["just", "test"],
-    gate_scope.LEG_WIN: ["just", "test-win"],
-    gate_scope.LEG_GATES: ["just", "gates-selftest"],
-    gate_scope.LEG_RELEASE_GATE: ["just", "release-gate-check"],
-}
-
-
 def run(cmd, **kw):
-    return subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True, **kw)
-
-
-def resolve_common_dir():
-    """The absolute git common dir, or None if it cannot be trusted (a dying
-    session can kill the git child and leave empty output)."""
-    out = run(["git", "rev-parse", "--git-common-dir"])
-    common = out.stdout.strip()
-    if out.returncode != 0 or not common:
-        return None
-    if not os.path.isabs(common):
-        common = os.path.join(REPO_ROOT, common)
-    return common if os.path.isdir(common) else None
+    return leg_cache.run(REPO_ROOT, *cmd, **kw)
 
 
 def merge_base():
@@ -105,14 +94,7 @@ def _recipe_at(content_lines, lineno):
     idx = lineno - 1
     if idx < 0 or idx >= len(content_lines):
         return None
-    # Parameters may be bare (`pr-gate pr:`), defaulted (`splash-race
-    # args="":`) or variadic (`+args`), and the trailing colon must not be
-    # the `:=` of a `set` directive or an assignment.
-    header = re.compile(
-        r"^([a-zA-Z_][\w-]*)"
-        r"(?:\s+[+*]?[\w-]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'))?)*"
-        r"\s*:(?!=)"
-    )
+    header = gate_scope.RECIPE_HEADER
     line = content_lines[idx]
     if line and not line[0].isspace():
         m = header.match(line)
@@ -215,7 +197,7 @@ def record_payload(head, base, steps, ok, legs, paths, jf, reason, full):
 
 
 def signoff_dir():
-    common = resolve_common_dir()
+    common = leg_cache.common_dir(REPO_ROOT)
     if not common:
         return None
     d = os.path.join(common, "pr-signoff")
@@ -306,9 +288,12 @@ def post_github_status(record):
             return False
         legs = sorted(record["steps"])
         total = round(sum(s["seconds"] for s in record["steps"].values()))
+        carried = sum(1 for s in record["steps"].values() if s.get("carried"))
         if record["pass"]:
             state, desc = "success", (
-                f"PASS {len(legs)} leg(s) in {total}s: {', '.join(legs)}")
+                f"PASS {len(legs)} leg(s) in {total}s"
+                + (f" ({carried} carried)" if carried else "")
+                + f": {', '.join(legs)}")
         else:
             bad = [f"{n} rc={s['rc']}" for n, s in sorted(record["steps"].items())
                    if s["rc"] != 0]
@@ -406,8 +391,75 @@ def report_debt():
         print(f"  {e.get('sha', '?')[:10]}  {e.get('created', '')[:16]}  {e.get('reason', '')}")
 
 
+def carried_step(lp):
+    """The step a carried leg contributes to the record: green, with the
+    provenance of the green it stands on, so a reader can tell a run from a
+    carry and see which commit and which observer produced the evidence."""
+    rec = lp.record or {}
+    return {
+        "rc": 0,
+        # This run spent nothing on the leg; the original cost rides along
+        # so the saving can be read, but the run's own total stays honest.
+        "seconds": 0,
+        "saved_seconds": rec.get("seconds", 0),
+        "carried": True,
+        "digest": lp.digest,
+        "green_at": rec.get("head"),
+        "origin": rec.get("origin"),
+        "recorded_at": rec.get("recorded_at"),
+    }
+
+
+def run_legs(legs, plans, ctx, runner):
+    """Run or carry each leg; returns (results, ok). `plans` maps leg name
+    to its LegPlan (None, or a None `ctx`, disables carrying and
+    recording), `runner(cmd)` returns an exit code. A green run is
+    recorded for its digest through the record-time guards in leg_cache,
+    which refuse when HEAD, the tree or the toolchain moved while the leg
+    ran."""
+    results = {}
+    ok = True
+    if ctx is None:
+        plans = None
+    for name in legs:
+        cmd = list(gate_scope.LEG_COMMANDS[name])
+        lp = plans.get(name) if plans else None
+        if lp is not None and lp.carried:
+            results[name] = carried_step(lp)
+            print(f"signoff: carried {name}: {lp.why}", flush=True)
+            continue
+        print(f"signoff: running {name}: {' '.join(cmd)}"
+              + (f" ({lp.why})" if lp is not None else ""), flush=True)
+        start = time.monotonic()
+        rc = runner(cmd)
+        duration = round(time.monotonic() - start, 1)
+        results[name] = {"rc": rc, "seconds": duration}
+        if lp is not None:
+            results[name]["digest"] = lp.digest
+        print(f"signoff: {name} -> rc={rc} ({duration}s)")
+        if rc != 0:
+            ok = False
+        elif lp is not None:
+            refused = leg_cache.record_green(REPO_ROOT, ctx, lp, " ".join(cmd),
+                                             duration, "observed")
+            if refused:
+                print(f"signoff: {name} green, NOT recorded for reuse: {refused}")
+            else:
+                print(f"signoff: {name} green recorded for reuse (digest {lp.digest[:8]})")
+    return results, ok
+
+
+def _run_command(cmd):
+    try:
+        return subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")).returncode
+    except FileNotFoundError as e:
+        print(f"signoff: could not run {' '.join(cmd)}: {e}")
+        return 127
+
+
 def main(argv):
     full = "--full" in argv
+    no_cache = "--no-cache" in argv
     head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     dirty = run(["git", "status", "--porcelain"]).stdout.strip()
     if dirty:
@@ -419,24 +471,25 @@ def main(argv):
     print(f"signoff: {reason}")
     print(f"signoff: legs: {', '.join(legs) if legs else '(none needed)'}")
 
-    results = {}
-    ok = True
-    for name in legs:
-        cmd = LEG_COMMANDS[name]
-        print(f"signoff: running {name}: {' '.join(cmd)}", flush=True)
-        start = time.monotonic()
+    plans, ctx = None, None
+    if legs:
+        # The cache is an optimisation on top of the ladder; a store or
+        # probe problem must never stop the legs from running. A fresh run
+        # still plans, so that what it observes replaces the green it was
+        # asked not to trust.
         try:
-            rc = subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")).returncode
-        except FileNotFoundError as e:
-            print(f"signoff: {name} could not run: {e}")
-            rc = 127
-        duration = round(time.monotonic() - start, 1)
-        results[name] = {"rc": rc, "seconds": duration}
-        print(f"signoff: {name} -> rc={rc} ({duration}s)")
-        if rc != 0:
-            ok = False
+            ctx = leg_cache.Context(REPO_ROOT, legs=legs)
+            plans = leg_cache.build_plan(REPO_ROOT, legs, ctx)
+            if no_cache:
+                for lp in plans.values():
+                    if lp.carried:
+                        lp.carried, lp.why = False, "fresh run requested; " + lp.why
+        except Exception as e:  # noqa: BLE001 - degrade to no carrying
+            print(f"signoff: leg cache unavailable, every leg runs: {e}")
+            plans, ctx = None, None
+    results, ok = run_legs(legs, plans, ctx, _run_command)
 
-    common = resolve_common_dir()
+    common = leg_cache.common_dir(REPO_ROOT)
     if not common:
         # Fail closed: without a resolvable git dir the record would land in
         # the working tree, dirtying it and hiding the result from the merge
@@ -456,13 +509,44 @@ def main(argv):
     # A green run of every leg is what deferred merges were borrowing
     # against, so it settles the ledger. A scoped run proves nothing about
     # the code those merges carried and settles nothing.
-    if ok and set(legs) == set(gate_scope.ALL_LEGS):
+    why_not = settle_blocker(legs, results, ok, contains_base())
+    if why_not is None:
         entries = gate_scope.load_ledger(outdir)
         if entries:
             settle(f"full ladder green at {head[:10]}")
     else:
+        if ok and set(legs) == set(gate_scope.ALL_LEGS):
+            print(f"signoff: full ladder green but the ledger is not settled: {why_not}")
         report_debt()
     return 0 if ok else 1
+
+
+def contains_base():
+    """True when origin/windows is an ancestor of HEAD, which is where the
+    merges the ledger vouches for live."""
+    return run(["git", "merge-base", "--is-ancestor", BASE_REF, "HEAD"]).returncode == 0
+
+
+def settle_blocker(legs, results, ok, has_base):
+    """Why this run may not settle the deferral ledger, or None when it
+    may. Deferred merges landed on origin/windows, so only a green over
+    every leg on a branch that contains them is evidence about them; a
+    branch behind the base can carry the Zig leg from the nightly and go
+    green in seconds without containing the code that was deferred. A
+    carried leg counts, since its digest names the same inputs, unless
+    the green it stands on was asserted by a person rather than observed
+    by a run."""
+    if not ok:
+        return "the ladder is red"
+    if set(legs) != set(gate_scope.ALL_LEGS):
+        return "not every leg ran"
+    if not has_base:
+        return f"HEAD does not contain {BASE_REF}"
+    asserted = sorted(n for n, s in results.items()
+                      if s.get("carried") and s.get("origin") == "asserted")
+    if asserted:
+        return f"carried on asserted greens: {', '.join(asserted)}"
+    return None
 
 
 def self_test():
@@ -533,6 +617,57 @@ def self_test():
     report("base" in record_payload("a" * 40, None, {}, True, [], None, [], "r", False),
            "record-base-null", "an unknown base is recorded as null, not omitted")
 
+    # run_legs: a carried leg is a green step that names its evidence and
+    # runs nothing; a leg the cache cannot carry runs; a red run stays red
+    # and is never recorded. The runner and the cache are both fakes here,
+    # so this proves the glue, not the legs.
+    calls = []
+
+    def fake_runner(cmd):
+        calls.append(cmd[-1])
+        return 1 if cmd[-1] == "test-win" else 0
+
+    green = leg_cache.LegPlan("zig-tests", "d" * 64, {"leg": "zig-tests"}, True,
+                              "green at abcdef12", {"head": "abcdef12" + "0" * 32,
+                                                    "seconds": 2400, "origin": "observed",
+                                                    "recorded_at": "2026-09-05T00:00:00+00:00"})
+    miss = leg_cache.LegPlan("windows-tests", "e" * 64, {"leg": "windows-tests"}, False,
+                             "no green record")
+    # A stand-in context: the only leg that goes green here has no plan,
+    # so nothing reaches the record path and the store is never touched.
+    import types
+    fake_ctx = types.SimpleNamespace(root=REPO_ROOT, head="0" * 40, env={})
+    results, ok = run_legs(["zig-tests", "windows-tests", "gates-selftest"],
+                           {"zig-tests": green, "windows-tests": miss}, fake_ctx, fake_runner)
+    report(calls == ["test-win", "gates-selftest"], "run-legs-carries-and-runs", str(calls))
+    report(results["zig-tests"].get("carried") is True and results["zig-tests"]["rc"] == 0
+           and results["zig-tests"]["green_at"].startswith("abcdef12")
+           and results["zig-tests"]["seconds"] == 0
+           and results["zig-tests"]["saved_seconds"] == 2400,
+           "run-legs-carried-step-shape", json.dumps(results["zig-tests"]))
+    # The deferral ledger settles only on a full green that contains the
+    # base and stands on observed greens.
+    every = list(gate_scope.ALL_LEGS)
+    green_all = {leg: {"rc": 0} for leg in every}
+    report(settle_blocker(every, green_all, True, True) is None, "settle-full-green")
+    report("red" in settle_blocker(every, green_all, False, True), "settle-refuses-red")
+    report("not every" in settle_blocker(every[:2], green_all, True, True), "settle-refuses-scoped")
+    report("does not contain" in settle_blocker(every, green_all, True, False), "settle-refuses-behind-base")
+    with_asserted = dict(green_all, **{"zig-tests": {"rc": 0, "carried": True, "origin": "asserted"}})
+    report("asserted" in settle_blocker(every, with_asserted, True, True), "settle-refuses-asserted-carry")
+    with_observed = dict(green_all, **{"zig-tests": {"rc": 0, "carried": True, "origin": "observed"}})
+    report(settle_blocker(every, with_observed, True, True) is None, "settle-accepts-observed-carry")
+    report(results["windows-tests"]["rc"] == 1 and not ok
+           and results["windows-tests"].get("digest") == "e" * 64,
+           "run-legs-red-stays-red", json.dumps(results["windows-tests"]))
+    report("carried" not in results["gates-selftest"], "run-legs-uncached-leg-plain")
+    results, ok = run_legs(["zig-tests"], None, None, fake_runner)
+    report(ok and calls[-1] == "test" and "carried" not in results["zig-tests"],
+           "run-legs-no-cache-runs", str(calls))
+    results, ok = run_legs(["zig-tests"], {"zig-tests": green}, None, fake_runner)
+    report(ok and calls[-1] == "test" and "carried" not in results["zig-tests"],
+           "run-legs-plans-without-context-run", str(calls))
+
     # resolve_record: the records dir also holds superseded heads (a stack
     # rebuilt after a fix leaves the old SHAs behind), so a prefix must
     # match exactly one file, ambiguity is an error naming the candidates,
@@ -567,6 +702,12 @@ if __name__ == "__main__":
         print(f"legs:   {', '.join(legs) if legs else '(none needed)'}")
         print(f"paths:  {len(paths) if paths is not None else 'unknown'}")
         print(f"base:   {base or 'unknown'}")
+        if legs and "--no-cache" not in argv:
+            try:
+                ctx = leg_cache.Context(REPO_ROOT, legs=legs)
+                print(leg_cache.render_plan(REPO_ROOT, leg_cache.build_plan(REPO_ROOT, legs, ctx), ctx))
+            except Exception as e:  # noqa: BLE001 - the plan is still the answer
+                print(f"leg cache unavailable, every leg would run: {e}")
         sys.exit(0)
     if "--debt" in argv:
         report_debt()
