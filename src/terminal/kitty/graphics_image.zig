@@ -656,6 +656,78 @@ pub const LoadingImage = struct {
         };
     }
 
+    /// Reads the image dimensions out of a JPEG's frame header, or null if
+    /// the data doesn't begin with one we recognise. Everything ahead of the
+    /// frame header is a chain of marker segments: an 0xFF byte, the marker,
+    /// and for every marker but the standalone ones a big endian u16 length
+    /// that counts itself. A frame header carries a byte of sample precision
+    /// and then the height and width as big endian u16s.
+    fn jpegHeaderDimensions(data: []const u8) ?struct { width: u32, height: u32 } {
+        if (data.len < 4) return null;
+        if (data[0] != 0xFF or data[1] != 0xD8) return null;
+
+        var i: usize = 2;
+        while (i + 1 < data.len) {
+            if (data[i] != 0xFF) return null;
+
+            // Any number of 0xFF bytes may pad the front of a marker.
+            var marker_i = i + 1;
+            while (marker_i < data.len and data[marker_i] == 0xFF) marker_i += 1;
+            if (marker_i >= data.len) return null;
+            const marker = data[marker_i];
+
+            // The markers that carry no payload: TEM, the restart markers,
+            // and a second start of image.
+            if (marker == 0x01 or (marker >= 0xD0 and marker <= 0xD8)) {
+                i = marker_i + 1;
+                continue;
+            }
+
+            const payload_i = marker_i + 1;
+            if (payload_i + 2 > data.len) return null;
+            const len = std.mem.readInt(u16, data[payload_i..][0..2], .big);
+            if (len < 2) return null;
+
+            switch (marker) {
+                // Every flavour of frame header. The ones in the same range
+                // that are not frame headers are the Huffman and arithmetic
+                // coding tables (0xC4, 0xCC) and an extension (0xC8).
+                0xC0...0xC3, 0xC5...0xC7, 0xC9...0xCB, 0xCD...0xCF => {
+                    if (payload_i + 7 > data.len) return null;
+                    return .{
+                        .height = std.mem.readInt(u16, data[payload_i + 3 ..][0..2], .big),
+                        .width = std.mem.readInt(u16, data[payload_i + 5 ..][0..2], .big),
+                    };
+                },
+
+                // The scan is entropy coded rather than a marker chain, and
+                // a well formed file has already given us the frame header.
+                0xDA, 0xD9 => return null,
+
+                else => {},
+            }
+
+            i = payload_i + len;
+        }
+
+        return null;
+    }
+
+    /// Reads the image dimensions out of a GIF header, or null if the data
+    /// doesn't begin with a well formed one. The logical screen descriptor
+    /// follows the six byte signature and opens with the width and height as
+    /// little endian u16s.
+    fn gifHeaderDimensions(data: []const u8) ?struct { width: u32, height: u32 } {
+        if (data.len < 10) return null;
+        if (!std.mem.eql(u8, data[0..3], "GIF")) return null;
+        if (!std.mem.eql(u8, data[3..6], "87a") and
+            !std.mem.eql(u8, data[3..6], "89a")) return null;
+        return .{
+            .width = std.mem.readInt(u16, data[6..8], .little),
+            .height = std.mem.readInt(u16, data[8..10], .little),
+        };
+    }
+
     /// Decode the data as PNG. This will also updated the image dimensions.
     fn decodePng(self: *LoadingImage, alloc: Allocator) !void {
         assert(self.image.format == .png);
@@ -710,16 +782,33 @@ pub const LoadingImage = struct {
     fn decodeJpeg(self: *LoadingImage, alloc: Allocator) !void {
         assert(self.image.format == .jpeg);
 
+        // Same reasoning as the PNG path: the frame header is all a decoder
+        // needs to size its destination buffer, so the dimension check in
+        // `complete` runs long after the allocation it would have prevented.
+        if (jpegHeaderDimensions(self.data.items)) |dimensions| {
+            if (dimensions.width > max_dimension or
+                dimensions.height > max_dimension)
+            {
+                return error.DimensionsTooLarge;
+            }
+        }
+
         const decode_jpeg_fn = sys.decode_jpeg orelse
             return error.UnsupportedFormat;
+
+        var limited: LimitedAllocator = .init(alloc, max_size);
+        const decode_alloc = limited.allocator();
         const result = decode_jpeg_fn(
-            alloc,
+            decode_alloc,
             self.data.items,
         ) catch |err| switch (err) {
             error.InvalidData => return error.InvalidData,
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory => if (limited.limit_exceeded)
+                return error.InvalidData
+            else
+                return error.OutOfMemory,
         };
-        defer alloc.free(result.data);
+        defer decode_alloc.free(result.data);
 
         if (result.data.len > max_size) {
             log.warn("jpeg image too large size={} max_size={}", .{ result.data.len, max_size });
@@ -745,20 +834,37 @@ pub const LoadingImage = struct {
     fn decodeGif(self: *LoadingImage, alloc: Allocator) !void {
         assert(self.image.format == .gif);
 
+        // The logical screen descriptor sizes the canvas every frame is
+        // composed into, so this is the check that has to happen before a
+        // decoder is handed the data, on either path below.
+        if (gifHeaderDimensions(self.data.items)) |dimensions| {
+            if (dimensions.width > max_dimension or
+                dimensions.height > max_dimension)
+            {
+                return error.DimensionsTooLarge;
+            }
+        }
+
         if (sys.decode_gif_frames) |decode_frames_fn| {
             return self.decodeGifFrames(alloc, decode_frames_fn);
         }
 
         const decode_gif_fn = sys.decode_gif orelse
             return error.UnsupportedFormat;
+
+        var limited: LimitedAllocator = .init(alloc, max_size);
+        const decode_alloc = limited.allocator();
         const result = decode_gif_fn(
-            alloc,
+            decode_alloc,
             self.data.items,
         ) catch |err| switch (err) {
             error.InvalidData => return error.InvalidData,
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory => if (limited.limit_exceeded)
+                return error.InvalidData
+            else
+                return error.OutOfMemory,
         };
-        defer alloc.free(result.data);
+        defer decode_alloc.free(result.data);
 
         if (result.data.len > max_size) {
             log.warn("gif image too large size={} max_size={}", .{ result.data.len, max_size });
@@ -782,17 +888,25 @@ pub const LoadingImage = struct {
         alloc: Allocator,
         decode_frames_fn: sys.DecodeGifFramesFn,
     ) !void {
+        // The limiter only ever refuses; it hands frees straight to the child,
+        // so the frames that outlive it are still freed with `alloc` by
+        // whoever ends up owning the animation.
+        var limited: LimitedAllocator = .init(alloc, max_size);
+        const decode_alloc = limited.allocator();
         var result = decode_frames_fn(
-            alloc,
+            decode_alloc,
             self.data.items,
         ) catch |err| switch (err) {
             error.InvalidData => return error.InvalidData,
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory => if (limited.limit_exceeded)
+                return error.InvalidData
+            else
+                return error.OutOfMemory,
         };
         // Ownership moves out at the end, in one infallible step. Until then
         // every early return frees the whole animation.
         var owned = true;
-        defer if (owned) result.deinit(alloc);
+        defer if (owned) result.deinit(decode_alloc);
 
         // decode_gif_frames is a swappable seam, so this is not the local
         // decoder's invariant to rely on.
@@ -823,8 +937,8 @@ pub const LoadingImage = struct {
 
         // Nothing below can fail.
         owned = false;
-        alloc.free(result.frames[0].data);
-        alloc.free(result.frames);
+        decode_alloc.free(result.frames[0].data);
+        decode_alloc.free(result.frames);
 
         self.data.deinit(alloc);
         self.data = data;
@@ -1925,6 +2039,323 @@ test "image load: png rejects oversized header dimensions before decoding" {
 
     var loading: LoadingImage = .{
         .image = .{ .format = .png },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(testing.allocator);
+    try loading.data.appendSlice(testing.allocator, &header);
+
+    try testing.expectError(
+        error.DimensionsTooLarge,
+        loading.complete(failing.allocator()),
+    );
+    try testing.expect(!failing.has_induced_failure);
+}
+
+test "image load: jpeg" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    if (sys.decode_jpeg == null) return error.SkipZigTest;
+
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .jpeg,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/tiny.jpg")),
+    };
+    defer cmd.deinit(alloc);
+
+    var loading = try LoadingImage.init(io, alloc, &cmd, .direct);
+    defer loading.deinit(alloc);
+
+    var img = try loading.complete(alloc);
+    defer img.deinit(alloc);
+
+    try testing.expectEqual(@as(u32, 2), img.width);
+    try testing.expectEqual(@as(u32, 2), img.height);
+    try testing.expect(img.format == .rgba);
+}
+
+test "image load: jpeg rejects oversized decoder allocation" {
+    const testing = std.testing;
+
+    const oversized_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            _: []const u8,
+        ) sys.DecodeError!sys.Image {
+            const data = try alloc.alloc(u8, max_size + 1);
+            return .{
+                .width = 1,
+                .height = 1,
+                .data = data,
+            };
+        }
+    }.decode;
+
+    const original_decode_jpeg = sys.decode_jpeg;
+    defer sys.decode_jpeg = original_decode_jpeg;
+    sys.decode_jpeg = &oversized_decoder;
+
+    // Fail any allocation which reaches the underlying allocator. The size
+    // limiter should reject the decoder's request before it gets that far.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+    const alloc = failing.allocator();
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .jpeg },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(alloc);
+
+    try testing.expectError(error.InvalidData, loading.complete(alloc));
+    try testing.expect(!failing.has_induced_failure);
+}
+
+test "image load: jpeg rejects oversized header dimensions before decoding" {
+    const testing = std.testing;
+
+    // A decoder sizes its destination buffer from the frame header, exactly
+    // as Wuffs does, so reaching it at all means the allocation happens.
+    const header_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            data: []const u8,
+        ) sys.DecodeError!sys.Image {
+            const height = std.mem.readInt(u16, data[7..9], .big);
+            const width = std.mem.readInt(u16, data[9..11], .big);
+            return .{
+                .width = width,
+                .height = height,
+                .data = try alloc.alloc(
+                    u8,
+                    @as(usize, width) * @as(usize, height) * 4,
+                ),
+            };
+        }
+    }.decode;
+
+    const original_decode_jpeg = sys.decode_jpeg;
+    defer sys.decode_jpeg = original_decode_jpeg;
+    sys.decode_jpeg = &header_decoder;
+
+    // Start of image, then a baseline frame header: the segment length, one
+    // byte of sample precision, and the height and width. 10001x10001 is over
+    // the dimension limit but its decoded size is still under max_size, so
+    // the size limiter lets it through.
+    var header: [11]u8 = undefined;
+    @memcpy(header[0..7], "\xff\xd8\xff\xc0\x00\x11\x08");
+    std.mem.writeInt(u16, header[7..9], max_dimension + 1, .big);
+    std.mem.writeInt(u16, header[9..11], max_dimension + 1, .big);
+
+    // Fail any allocation which reaches the underlying allocator. Nothing
+    // should be allocated for an image we already know is too large.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .jpeg },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(testing.allocator);
+    try loading.data.appendSlice(testing.allocator, &header);
+
+    try testing.expectError(
+        error.DimensionsTooLarge,
+        loading.complete(failing.allocator()),
+    );
+    try testing.expect(!failing.has_induced_failure);
+}
+
+test "image load: gif rejects oversized decoder allocation" {
+    const testing = std.testing;
+
+    const oversized_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            _: []const u8,
+        ) sys.DecodeError!sys.Image {
+            const data = try alloc.alloc(u8, max_size + 1);
+            return .{
+                .width = 1,
+                .height = 1,
+                .data = data,
+            };
+        }
+    }.decode;
+
+    // The still path, which is what a build without an animated decoder uses.
+    const original_decode_gif = sys.decode_gif;
+    const original_decode_gif_frames = sys.decode_gif_frames;
+    defer {
+        sys.decode_gif = original_decode_gif;
+        sys.decode_gif_frames = original_decode_gif_frames;
+    }
+    sys.decode_gif = &oversized_decoder;
+    sys.decode_gif_frames = null;
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+    const alloc = failing.allocator();
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .gif },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(alloc);
+
+    try testing.expectError(error.InvalidData, loading.complete(alloc));
+    try testing.expect(!failing.has_induced_failure);
+}
+
+test "image load: gif rejects oversized header dimensions before decoding" {
+    const testing = std.testing;
+
+    const header_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            data: []const u8,
+        ) sys.DecodeError!sys.Image {
+            const width = std.mem.readInt(u16, data[6..8], .little);
+            const height = std.mem.readInt(u16, data[8..10], .little);
+            return .{
+                .width = width,
+                .height = height,
+                .data = try alloc.alloc(
+                    u8,
+                    @as(usize, width) * @as(usize, height) * 4,
+                ),
+            };
+        }
+    }.decode;
+
+    const original_decode_gif = sys.decode_gif;
+    const original_decode_gif_frames = sys.decode_gif_frames;
+    defer {
+        sys.decode_gif = original_decode_gif;
+        sys.decode_gif_frames = original_decode_gif_frames;
+    }
+    sys.decode_gif = &header_decoder;
+    sys.decode_gif_frames = null;
+
+    var header: [10]u8 = undefined;
+    @memcpy(header[0..6], "GIF89a");
+    std.mem.writeInt(u16, header[6..8], max_dimension + 1, .little);
+    std.mem.writeInt(u16, header[8..10], max_dimension + 1, .little);
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .gif },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(testing.allocator);
+    try loading.data.appendSlice(testing.allocator, &header);
+
+    try testing.expectError(
+        error.DimensionsTooLarge,
+        loading.complete(failing.allocator()),
+    );
+    try testing.expect(!failing.has_induced_failure);
+}
+
+test "image load: animated gif rejects oversized decoder allocation" {
+    const testing = std.testing;
+
+    const oversized_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            _: []const u8,
+        ) sys.DecodeError!sys.Animation {
+            // The frame buffer comes first so that the small allocations
+            // around it cannot be what reaches the underlying allocator.
+            const data = try alloc.alloc(u8, max_size + 1);
+            errdefer alloc.free(data);
+            const frames = try alloc.alloc(sys.Animation.Frame, 1);
+            frames[0] = .{ .data = data, .delay_ms = 0 };
+            return .{
+                .width = 1,
+                .height = 1,
+                .frames = frames,
+                .loop_count = 0,
+            };
+        }
+    }.decode;
+
+    const original_decode_gif_frames = sys.decode_gif_frames;
+    defer sys.decode_gif_frames = original_decode_gif_frames;
+    sys.decode_gif_frames = &oversized_decoder;
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+    const alloc = failing.allocator();
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .gif },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(alloc);
+
+    try testing.expectError(error.InvalidData, loading.complete(alloc));
+    try testing.expect(!failing.has_induced_failure);
+}
+
+test "image load: animated gif rejects oversized header dimensions before decoding" {
+    const testing = std.testing;
+
+    const header_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            data: []const u8,
+        ) sys.DecodeError!sys.Animation {
+            const width = std.mem.readInt(u16, data[6..8], .little);
+            const height = std.mem.readInt(u16, data[8..10], .little);
+            const canvas = try alloc.alloc(
+                u8,
+                @as(usize, width) * @as(usize, height) * 4,
+            );
+            errdefer alloc.free(canvas);
+            const frames = try alloc.alloc(sys.Animation.Frame, 1);
+            frames[0] = .{ .data = canvas, .delay_ms = 0 };
+            return .{
+                .width = width,
+                .height = height,
+                .frames = frames,
+                .loop_count = 0,
+            };
+        }
+    }.decode;
+
+    const original_decode_gif_frames = sys.decode_gif_frames;
+    defer sys.decode_gif_frames = original_decode_gif_frames;
+    sys.decode_gif_frames = &header_decoder;
+
+    var header: [10]u8 = undefined;
+    @memcpy(header[0..6], "GIF89a");
+    std.mem.writeInt(u16, header[6..8], max_dimension + 1, .little);
+    std.mem.writeInt(u16, header[8..10], max_dimension + 1, .little);
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .gif },
         .quiet = .no,
         .temporary_directory = null,
     };
