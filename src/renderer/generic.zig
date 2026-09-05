@@ -229,6 +229,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Health of the most recently completed frame.
         health: std.atomic.Value(Health) = .{ .raw = .healthy },
 
+        /// A health change the surface has not been told about yet
+        /// because the mailbox was full at the time. Retried from the
+        /// draw path; the value to send is always the current `health`.
+        health_report_pending: bool = false,
+
         /// True when we have a graphics context that can create GPU
         /// resources. Creating any GPU resource while this is false is invalid.
         display_realized: bool = true,
@@ -1890,6 +1895,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.first_render_sent = true;
             };
 
+            // A health change that found the mailbox full: same instant
+            // push, same retry-next-draw shape as the two above.
+            defer if (self.health_report_pending) {
+                if (self.surface_mailbox.push(
+                    .{ .renderer_health = self.health.load(.seq_cst) },
+                    .instant,
+                ) > 0) self.health_report_pending = false;
+            };
+
             // Emit any pending custom-shader failure on the same mailbox path
             // as `.first_render` above. A defer so it also catches a failure
             // armed by the shader re-init further down this same frame.
@@ -2002,9 +2016,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.reinitialize_shaders = false;
                 self.api.waitGpu();
                 self.shaders.deinit(self.alloc);
-                // Deinit-safe while the rebuild below can still fail
-                // (a device removed mid-reload fails every PSO).
-                self.shaders = .{};
+                // Backends that can be rebuilt after a device loss keep
+                // something deinit-safe here, because that rebuild will
+                // deinit again if the reload below fails (a device
+                // removed mid-reload fails every PSO).
+                if (comptime @hasDecl(Shaders, "empty")) self.shaders = .empty;
                 try self.initShaders(.config_reload);
             }
 
@@ -2324,10 +2340,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.health.store(health, .seq_cst);
 
             // Our health value changed, so we notify the surface so that it
-            // can do something about it.
-            _ = self.surface_mailbox.push(.{
+            // can do something about it. Never block: this runs under the
+            // draw mutex, which the apprt thread takes in the surface
+            // device queries, and the apprt thread is also what drains the
+            // mailbox. A full mailbox is retried from the next draw.
+            self.health_report_pending = self.surface_mailbox.push(.{
                 .renderer_health = health,
-            }, .{ .forever = {} });
+            }, .instant) == 0;
         }
 
         /// How long to leave a device alone after a rebuild fails before
@@ -2375,7 +2394,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.swap_chain) |*sc| sc.deinit();
                 self.swap_chain = null;
                 self.shaders.deinit(self.alloc);
-                self.shaders = .{};
+                self.shaders = .empty;
                 // Kitty and overlay textures alike. The overlay needs no
                 // flag: updateFrame rebuilds it from `self.overlay` on
                 // every pass, and markDirty below forces that pass.
@@ -2412,7 +2431,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try self.initShaders(.device_recovered);
             errdefer {
                 self.shaders.deinit(self.alloc);
-                self.shaders = .{};
+                self.shaders = .empty;
             }
             self.swap_chain = try SwapChain.init(
                 self.alloc,

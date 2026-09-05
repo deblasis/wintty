@@ -399,7 +399,17 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         }
     }
 
-    // Get back buffer resources and create RTVs.
+    // Get back buffer resources and create RTVs. The errdefer goes
+    // before the loop so a failure part way releases what it got: this
+    // runs again on every recovery attempt, and a leak here compounds.
+    errdefer {
+        for (&self.back_buffers) |*bb| {
+            if (bb.*) |r| {
+                _ = r.Release();
+                bb.* = null;
+            }
+        }
+    }
     if (self.swap_chain3) |sc3| {
         for (0..device.Device.frame_count) |i| {
             var resource: ?*d3d12.ID3D12Resource = null;
@@ -436,22 +446,9 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         self.rtv_heap.?.claimFirst(1);
         self.rtv_base = 1;
     }
-    errdefer {
-        for (&self.back_buffers) |*bb| {
-            if (bb.*) |r| {
-                _ = r.Release();
-                bb.* = null;
-            }
-        }
-    }
 
-    // Create per-frame command allocators and command lists.
-    for (&self.gpu_frames) |*gf| {
-        gf.* = Frame.init(dev_ptr.device) catch |err| {
-            log.err("Frame init failed: {}", .{err});
-            return error.FrameInitFailed;
-        };
-    }
+    // Create per-frame command allocators and command lists. Same
+    // errdefer-before-loop shape as the back buffers, for the same reason.
     errdefer {
         for (&self.gpu_frames) |*gf| {
             if (gf.*) |*f| {
@@ -459,6 +456,12 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
                 gf.* = null;
             }
         }
+    }
+    for (&self.gpu_frames) |*gf| {
+        gf.* = Frame.init(dev_ptr.device) catch |err| {
+            log.err("Frame init failed: {}", .{err});
+            return error.FrameInitFailed;
+        };
     }
 
     // Create a one-shot command list for init-time texture work.
@@ -685,15 +688,16 @@ pub fn recoverDevice(self: *DirectX12) !void {
         surface.shared_texture = .{ .width = width, .height = height };
     }
 
-    if (surface == .composition) {
-        log.warn("composition-mode swap chain recreated; the embedder still holds the old one and cannot be told", .{});
-    }
-
-    if (self.dev != null) self.deinitGpu(.keep_surface_handle);
+    // Unconditional: with no device this sweeps whatever a failed
+    // attempt built before it stopped.
+    self.deinitGpu(.keep_surface_handle);
 
     try self.initGpu(surface, width, height);
     self.device_lost = false;
     log.info("DX12 device recreated after loss ({}x{})", .{ width, height });
+    if (surface == .composition) {
+        log.warn("composition-mode swap chain recreated; the embedder still holds the old one and cannot be told", .{});
+    }
 }
 
 /// Execute and release the one-shot init command list.
