@@ -57,6 +57,23 @@ const terminal = struct {
 
 const log = std.log.scoped(.config);
 
+const default_font_size: f32 = switch (builtin.os.tag) {
+    // On macOS we default a little bigger since this tends to look better.
+    // This is purely subjective but this is easy to modify.
+    .macos => 13,
+    else => 12,
+};
+
+/// The range a font size is allowed to be in. The same range is applied
+/// to font size changes at runtime (see the font size keybind actions).
+const min_font_size: f32 = 1;
+const max_font_size: f32 = 255;
+
+/// The largest window size we accept, in cells. The terminal addresses
+/// its grid with a u16, and the value is multiplied by the cell size to
+/// get pixels, so anything larger only overflows.
+const max_window_size_cells: u32 = std.math.maxInt(u16);
+
 /// Used on Unixes for some defaults.
 const c = @cImport({
     @cInclude("unistd.h");
@@ -271,12 +288,7 @@ language: ?[:0]const u8 = null,
 /// On Linux with GTK, font size is scaled according to both display-wide and
 /// text-specific scaling factors, which are often managed by your desktop
 /// environment (e.g. the GNOME display scale and large text settings).
-@"font-size": f32 = switch (builtin.os.tag) {
-    // On macOS we default a little bigger since this tends to look better. This
-    // is purely subjective but this is easy to modify.
-    .macos => 13,
-    else => 12,
-},
+@"font-size": f32 = default_font_size,
 
 /// A repeatable configuration to set one or more font variations values for
 /// a variable font. A variable font is a single font, usually with a filename
@@ -5035,6 +5047,13 @@ pub fn finalize(self: *Config) !void {
     {
         self.@"click-repeat-interval" = internal_os.clickInterval() orelse 500;
     }
+
+    // Clamp our font size. A font size is turned into integer metrics,
+    // so a value that isn't a real number can't be used at all.
+    self.@"font-size" = if (std.math.isNan(self.@"font-size"))
+        default_font_size
+    else
+        std.math.clamp(self.@"font-size", min_font_size, max_font_size);
 
     // Clamp our mouse scroll multiplier
     self.@"mouse-scroll-multiplier".precision = @min(10_000.0, @max(0.01, self.@"mouse-scroll-multiplier".precision));
@@ -11136,6 +11155,52 @@ test "clone default" {
 
     // I want to do this but this doesn't work (the API doesn't work)
     // try testing.expectEqualDeep(dest, source);
+}
+
+test "finalize clamps font-size" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    {
+        var reader: std.Io.Reader = .fixed("font-size = nan\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try testing.expect(std.math.isNan(cfg.@"font-size"));
+
+        try cfg.finalize();
+        try testing.expectEqual(default_font_size, cfg.@"font-size");
+    }
+
+    {
+        var reader: std.Io.Reader = .fixed("font-size = inf\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+        try testing.expectEqual(max_font_size, cfg.@"font-size");
+    }
+
+    {
+        var reader: std.Io.Reader = .fixed("font-size = 0\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+        try testing.expectEqual(min_font_size, cfg.@"font-size");
+    }
 }
 
 test "default mouse-hide-while-typing is true" {
