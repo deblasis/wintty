@@ -73,7 +73,7 @@ human) working in this repo uses the same contract:
   newest window first: a window whose recorded squash already has a green
   record closes on that evidence, an unproven window takes one claim
   marker, one detached worktree at the recorded squash sha and one
-  `incoda run --queue wintty -- just signoff`, and a red window bisects
+  `incoda run --queue wintty-build -- just signoff`, and a red window bisects
   the recorded squash SHAs down to a single culprit issue, which gets the
   `signoff-bisect-culprit` label, the failing legs and the trail, and
   stays open. One instance at a time: a lock beside the worktree refuses a

@@ -282,7 +282,7 @@ $NotInSuite = [ordered]@{
     # wallpaper while it runs, which no other harness here does. Its red run
     # is the expected outcome and the matrix.md it leaves is the deliverable
     # (#937), so aggregating its exit into a suite verdict would say nothing.
-    'theme-matrix.ps1'              = 'hours long by design and it sets the desktop theme and wallpaper; run it on its own through `just theme-matrix`, under the incoda lane, and read its matrix.md (#937)'
+    'theme-matrix.ps1'              = 'hours long by design and it sets the desktop theme and wallpaper; run it on its own through `just theme-matrix`, which takes the build and desktop lanes itself, and read its matrix.md (#937)'
     'theme-matrix-report.ps1'       = 'an analysis tool: it reads a theme-matrix run that has already happened (-RunDir, no -ExePath) and writes matrix.md. Launches nothing and returns no verdict'
 }
 

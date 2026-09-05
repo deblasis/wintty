@@ -197,9 +197,13 @@ build-win:
 build-win-release:
     dotnet build windows/Ghostty.sln /p:Platform=x64 /p:Configuration=Release
 
-# Build the DLL and the shell, then launch it.
+# Build the DLL and the shell under the build lane, then launch it. The
+# launch itself is outside any lane on purpose: pwsh returns as soon as a
+# GUI process is up, so a lane held here would be released while the
+# window is still open. The harnesses' own Assert-NoWintty is what guards
+# the desktop against that window.
 [windows]
-run-win: build-dll build-win
+run-win: (_build-in-lane "run-win" "build-dll" "build-win")
     ./windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe
 
 # Same, optimized on both sides. Startup timings taken from `run-win` are
@@ -207,7 +211,7 @@ run-win: build-dll build-win
 # optimization and libghostty is a Debug build. Use this before concluding
 # anything about how long startup, the launch splash, or a frame takes.
 [windows]
-run-win-release: build-dll-release build-win-release
+run-win-release: (_build-in-lane "run-win-release" "build-dll-release" "build-win-release")
     ./windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/Wintty.exe
 
 # Run the C# test suites. Ghostty.Tests is pure logic and cross-platform;
@@ -241,12 +245,50 @@ test-win:
     dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
     dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
 
+# === Heavy job lanes (AGENTS.md) ===
+#
+# incoda is looked up on PATH and then in its installer's location, because
+# the agent shell this was written under had the latter and not the former.
+# This is the expression, not the path: it is evaluated inside each recipe
+# body's pwsh, so a `just test` on a Linux host never runs it.
+inc := '(Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path $env:LOCALAPPDATA "Programs\incoda\incoda.exe")'
+
+# The build phase of a harness recipe, under the build lane. Every harness
+# recipe depends on this instead of on `build-dll build-win` directly: the
+# lane a build needs (CPU and RAM, three at a time) is not the lane a
+# harness needs (the desktop, alone), and a recipe that held one key across
+# both phases would either serialise every build behind a two-hour fuzz run
+# or run the harness while a build churns next door. So the build takes
+# wintty-build and releases it, and the caller takes wintty-desktop for the
+# harness. RECIPES is what to build, in order.
+#
+# Do not wrap one of these recipes in `incoda run` on a single key: the two
+# phases take different keys, so whichever phase is on the other key nests
+# where the outer run holds nothing, and an outer wintty-desktop waiting on
+# wintty-build inverts the order the exclusive pair takes: against a live
+# exclusive run the two wait on each other until both --wait budgets
+# elapse. Call them bare; the one safe
+# wrapper is the exclusive pair, which holds both keys before either phase
+# starts and lets both nested runs pass through.
+#
+# The args reach the desktop phase inside double quotes with every double
+# quote doubled (pwsh's own escape), so a `$` or a backtick is what cannot
+# be passed; a single quote and a double quote both survive.
+[windows]
+_build-in-lane reason +recipes:
+    $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --queue wintty-build --reason "{{reason}}: build" -- just {{recipes}}; exit ($LASTEXITCODE ?? 1)
+
 # Launch two instances a few hundred ms apart and watch for a launch splash
 # owned by the one that should be forwarding itself to the other. Opens real
 # windows, so it needs an interactive desktop and no Wintty already running.
 # Pass extra args through, e.g. `just splash-race "-SecondaryFeatureOff"`.
 [windows]
-splash-race args="": _no-wintty-running build-win
+splash-race args="": _no-wintty-running (_build-in-lane "splash-race" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("splash-race {{replace(args, '"', '""')}}".Trim()) -- just _splash-race-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+
+# The desktop phase of `just splash-race`, inside the lane it took.
+[windows]
+_splash-race-in-lane args="":
     pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}; exit ($LASTEXITCODE ?? 1)
 
 # Checked before the builds, not after: the harnesses refuse to run while a
@@ -281,7 +323,12 @@ _no-wintty-running:
 #
 # Pass extra args through, e.g. `just search-fuzz "-Seed 99 -Iterations 40"`.
 [windows]
-search-fuzz args="": _no-wintty-running build-dll build-win
+search-fuzz args="": _no-wintty-running (_build-in-lane "search-fuzz" "build-dll" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("search-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _search-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+
+# The desktop phase of `just search-fuzz`, inside the lane it took.
+[windows]
+_search-fuzz-in-lane args="":
     pwsh -NoProfile -File windows/scripts/search-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/search-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -300,7 +347,12 @@ search-fuzz args="": _no-wintty-running build-dll build-win
 #
 # Pass extra args through, e.g. `just shader-notice-fuzz "-Seed 99"`.
 [windows]
-shader-notice-fuzz args="": _no-wintty-running build-dll build-win
+shader-notice-fuzz args="": _no-wintty-running (_build-in-lane "shader-notice-fuzz" "build-dll" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("shader-notice-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _shader-notice-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+
+# The desktop phase of `just shader-notice-fuzz`, inside the lane it took.
+[windows]
+_shader-notice-fuzz-in-lane args="":
     pwsh -NoProfile -File windows/scripts/shader-notice-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/shader-notice-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -323,7 +375,12 @@ shader-notice-fuzz args="": _no-wintty-running build-dll build-win
 #
 # Pass extra args through, e.g. `just frame-style-fuzz "-Seed 99 -Random 3"`.
 [windows]
-frame-style-fuzz args="": _no-wintty-running build-dll build-win
+frame-style-fuzz args="": _no-wintty-running (_build-in-lane "frame-style-fuzz" "build-dll" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("frame-style-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _frame-style-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+
+# The desktop phase of `just frame-style-fuzz`, inside the lane it took.
+[windows]
+_frame-style-fuzz-in-lane args="":
     pwsh -NoProfile -File windows/scripts/frame-style-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/frame-style-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -334,15 +391,12 @@ frame-style-fuzz args="": _no-wintty-running build-dll build-win
 # curated set, a day and more for `-Theme all`; a red run is the expected
 # outcome and windows/scripts/theme-matrix/matrix.md is the deliverable.
 #
-# It goes through the incoda lane, and the lane is taken BEFORE the builds:
-# this harness flips the desktop theme and the wallpaper and puts a topmost
-# stage on screen, so nothing else may own the desktop while it runs, and a
-# build started outside the lane while another lane holder ran would be the
-# collision the lane exists to stop. Hence two recipes: this one only takes
-# the lane, the private one below it does the work inside.
-#
-# incoda is looked up on PATH and then in its installer's location, because
-# the agent shell this was written under had the latter and not the former.
+# It takes the lanes itself, one per phase (see _build-in-lane): the DLL
+# and the shell build under wintty-build, then the harness holds
+# wintty-desktop for the whole run, because it flips the desktop theme and
+# the wallpaper and puts a topmost stage on screen, so nothing else may own
+# the desktop while it runs. Hence two recipes: this one takes the lanes,
+# the private one below it does the work inside the desktop lane.
 #
 # Every axis takes one value, a comma list, or all. Pass args through, e.g.
 #   just theme-matrix "-Theme wintty-dark -Polarity dark -Layout vertical"
@@ -353,18 +407,22 @@ frame-style-fuzz args="": _no-wintty-running build-dll build-win
 # commas inside, as in the third line. The recipe body is PowerShell:
 # `"Catppuccin Mocha",Nord` there would be an array that reaches the harness
 # as two arguments, the second of which lands on -Polarity, and a `\"` is
-# not an escape at all. The args cross the lane inside double quotes, so a
-# double quote or a `$` is what cannot be passed.
+# not an escape at all. The args cross the lane inside double quotes with
+# any double quote doubled, so a `$` or a backtick is what cannot be passed.
+# The no-Wintty check runs before the build lane rather than inside the
+# desktop lane, like every other harness: the window check that matters is
+# the harness's own Assert-NoWintty once it holds the desktop.
 #
 # Exit codes: 0 clean, 2 findings, 1 could not run or a surface went unmeasured.
 #
-# Run the theme matrix (#937) under the incoda lane against the Debug build.
+# Run the theme matrix (#937) under the incoda lanes against the Debug build.
 [windows]
-theme-matrix args="":
-    $inc = (Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path $env:LOCALAPPDATA 'Programs\incoda\incoda.exe'); & $inc run --queue wintty --reason "theme matrix (#937)" -- just _theme-matrix-in-lane "{{args}}"; exit ($LASTEXITCODE ?? 1)
+theme-matrix args="": _no-wintty-running (_build-in-lane "theme matrix (#937)" "build-dll" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("theme matrix (#937) {{replace(args, '"', '""')}}".Trim()) -- just _theme-matrix-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
+# The desktop phase of `just theme-matrix`, inside the lane it took.
 [windows]
-_theme-matrix-in-lane args="": _no-wintty-running build-dll build-win
+_theme-matrix-in-lane args="":
     pwsh -NoProfile -File windows/scripts/theme-matrix.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/theme-matrix {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -406,7 +464,12 @@ theme-matrix-report run="windows/scripts/theme-matrix":
 #
 # Run every GUI fuzz harness against the Debug build.
 [windows]
-fuzz args="": _no-wintty-running build-dll build-win
+fuzz args="": _no-wintty-running (_build-in-lane "fuzz" "build-dll" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("fuzz {{replace(args, '"', '""')}}".Trim()) -- just _fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+
+# The desktop phase of `just fuzz`, inside the lane it took.
+[windows]
+_fuzz-in-lane args="":
     pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe {{args}}; exit ($LASTEXITCODE ?? 1)
 

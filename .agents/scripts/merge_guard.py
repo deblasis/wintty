@@ -434,7 +434,7 @@ def issue_body(pr, rec, rec_path, base, base_estimated, win, squash, delta, risk
         "## Status",
         "",
         f"Resignoff for `{short(squash)}`: not started at filing time. Check "
-        "`incoda status --queue wintty` first; the #969 bot owns this (`just "
+        "`incoda status --queue wintty-build` first; the #969 bot owns this (`just "
         "resignoff-bot`, owner-run): agents do not queue runs for it.",
         f"Squash commit: `{squash}`" + (" (full sha)" if len(squash) == 40 else ""),
     ]
@@ -1099,7 +1099,7 @@ def self_test():
             "## Status\n"
             "\n"
             "Resignoff for `eeeeeeeee`: not started at filing time. Check "
-            "`incoda status --queue wintty` first; the #969 bot owns this (`just "
+            "`incoda status --queue wintty-build` first; the #969 bot owns this (`just "
             "resignoff-bot`, owner-run): agents do not queue runs for it.\n"
             f"Squash commit: `{'e' * 40}` (full sha)\n"
         )
