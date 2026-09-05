@@ -4442,7 +4442,16 @@ pub fn loadCliArgs(self: *Config, alloc_gpa: Allocator) !void {
             }
 
             self.@"_xdg-terminal-exec" = true;
-            self.@"initial-command" = .{ .direct = try builder.toOwnedSlice(arena_alloc) };
+
+            // Invoked with no command at all. Leave the initial command
+            // unset so we start the default shell; an empty argv has no
+            // program to execute.
+            if (builder.items.len > 0) {
+                self.@"initial-command" = .{
+                    .direct = try builder.toOwnedSlice(arena_alloc),
+                };
+            }
+
             return;
         }
     }
