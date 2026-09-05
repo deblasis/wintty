@@ -3134,7 +3134,7 @@ fn maybeHandleBinding(
             // rejects a chain that continues past one, but a keybind set
             // built any other way must not run into freed memory.
             if (action.closesSurface()) {
-                closed = action_performed;
+                closed = performed;
                 break;
             }
         }
