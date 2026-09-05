@@ -789,7 +789,8 @@ public sealed partial class MainWindow : Window
             _tabManager,
             getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
             openProfile: OpenProfile,
-            bindingAction: ExecuteBindingAction);
+            bindingAction: ExecuteBindingAction,
+            getDefaultProfileId: () => App.ProfileRegistry?.DefaultProfileId);
         // One shared sweep per window writes TabModel.IsIdle; both strips
         // render from the property. The sweep must run where the models
         // live (the UI thread), so the timer's fire is marshalled.

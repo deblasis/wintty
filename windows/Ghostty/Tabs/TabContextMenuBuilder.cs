@@ -30,6 +30,15 @@ internal readonly record struct SnapZoneSource(
 /// </summary>
 internal static class TabContextMenuBuilder
 {
+    /// <summary>
+    /// Whether the directory group is on the menu at all: only while the
+    /// tab has a directory it will act on. Hidden rather than greyed, so
+    /// a shell without integration is not offered two items that can
+    /// never do anything.
+    /// </summary>
+    private static Visibility CwdVisibility(TabModel tab)
+        => tab.ActionableCwd is not null ? Visibility.Visible : Visibility.Collapsed;
+
     public static MenuFlyout Build(
         TabManager manager,
         TabModel tab,
@@ -149,15 +158,16 @@ internal static class TabContextMenuBuilder
         // The directory the shell reported, in the two forms a person wants
         // it: on the clipboard, and open in File Explorer. Its own group,
         // because these are about the shell's directory rather than the
-        // tab. Greyed until the model has one it will act on: reported,
-        // plain text, and a directory the spawn policy accepts, since the
-        // path is bytes off the pty.
-        flyout.Items.Add(new MenuFlyoutSeparator());
+        // tab. Hidden, not greyed, until the model has one it will act on:
+        // reported, plain text, and a directory the spawn policy accepts,
+        // since the path is bytes off the pty.
+        var cwdRule = new MenuFlyoutSeparator { Visibility = CwdVisibility(tab) };
+        flyout.Items.Add(cwdRule);
 
         var copyCwd = new MenuFlyoutItem
         {
             Text = "Copy Working Directory",
-            IsEnabled = tab.ActionableCwd is not null,
+            Visibility = CwdVisibility(tab),
         };
         copyCwd.Click += (_, _) =>
         {
@@ -175,7 +185,7 @@ internal static class TabContextMenuBuilder
         var openCwd = new MenuFlyoutItem
         {
             Text = "Open in File Explorer",
-            IsEnabled = tab.ActionableCwd is not null,
+            Visibility = CwdVisibility(tab),
         };
         openCwd.Click += async (_, _) =>
         {
@@ -248,11 +258,12 @@ internal static class TabContextMenuBuilder
             if (moveToZone is not null)
                 moveToZone.IsEnabled = manager.Tabs.Count > 1;
             pin.Text = tab.IsPinned ? "Unpin Tab" : "Pin Tab";
-            // The directory items grey until the tab has one it will act
-            // on, and a shell can report one any time after the flyout was
-            // built.
-            copyCwd.IsEnabled = tab.ActionableCwd is not null;
-            openCwd.IsEnabled = tab.ActionableCwd is not null;
+            // The directory group is absent until the tab has one it will
+            // act on, and a shell can report one any time after the flyout
+            // was built. The rule that introduces the group follows it.
+            cwdRule.Visibility = CwdVisibility(tab);
+            copyCwd.Visibility = CwdVisibility(tab);
+            openCwd.Visibility = CwdVisibility(tab);
         };
 
         flyout.Items.Add(new MenuFlyoutSeparator());

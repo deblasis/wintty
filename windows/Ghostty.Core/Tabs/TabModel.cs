@@ -80,6 +80,7 @@ internal sealed class TabModel : INotifyPropertyChanged
                 _tabIcon = ProfileSnapshot is { } snap
                     ? new TabIconViewModel(snap.Icon, TabLabel.IconTooltip(snap))
                     : new TabIconViewModel(new IconSpec.BundledKey("default"), "Terminal");
+                _tabIcon.SetSettling(IsSettling);
             }
             return _tabIcon;
         }
@@ -93,10 +94,9 @@ internal sealed class TabModel : INotifyPropertyChanged
             if (field == value) return;
             field = value;
             Raise();
-            // EffectiveTitle and TooltipText are computed; classic bindings
+            // EffectiveTitle and the tooltips are computed; classic bindings
             // listen for the exact property name, so raise them explicitly.
-            Raise(nameof(EffectiveTitle));
-            Raise(nameof(TooltipText));
+            RaiseTitleDerived();
         }
     }
 
@@ -108,9 +108,18 @@ internal sealed class TabModel : INotifyPropertyChanged
             if (field == value) return;
             field = value;
             Raise();
-            Raise(nameof(EffectiveTitle));
-            Raise(nameof(TooltipText));
+            RaiseTitleDerived();
+            if (value is not null) Settle();
         }
+    }
+
+    private void RaiseTitleDerived()
+    {
+        Raise(nameof(EffectiveTitle));
+        Raise(nameof(IsHome));
+        Raise(nameof(WordTitle));
+        Raise(nameof(TooltipText));
+        Raise(nameof(HoverText));
     }
 
     /// <summary>
@@ -127,8 +136,8 @@ internal sealed class TabModel : INotifyPropertyChanged
             if (field == value) return;
             field = value;
             Raise();
-            Raise(nameof(EffectiveTitle));
-            Raise(nameof(TooltipText));
+            RaiseTitleDerived();
+            if (value is not null) Settle();
         }
     }
 
@@ -147,8 +156,7 @@ internal sealed class TabModel : INotifyPropertyChanged
             if (field == value) return;
             field = value;
             Raise();
-            Raise(nameof(EffectiveTitle));
-            Raise(nameof(TooltipText));
+            RaiseTitleDerived();
         }
     }
 
@@ -257,10 +265,27 @@ internal sealed class TabModel : INotifyPropertyChanged
     public string EffectiveTitle => Compose(NamedTitle, DisplayCwd);
 
     /// <summary>
+    /// Whether the strips draw the home glyph for this tab: the shell is in
+    /// the user's own directory AND nothing else has named the tab. Read
+    /// from the directory tier rather than from the composed label, because
+    /// a label of "~" can also come from a rename or from a shell that
+    /// titles itself with its prompt -- and such a tab drawn as a bare
+    /// house would be a tab with no name and nothing to hover.
+    /// </summary>
+    public bool IsHome => NamedTitle is null && TabLabel.IsHome(DisplayCwd ?? "");
+
+    /// <summary>
+    /// The label for surfaces that can only print: the window title, the
+    /// taskbar, the palette. "Home" where the strips draw the glyph.
+    /// </summary>
+    public string WordTitle => IsHome ? TabLabel.Word("~") : EffectiveTitle;
+
+    /// <summary>
     /// What a pointer resting on the tab is told: the whole directory (home
     /// written as <c>~</c>), under the rename or shell title when one
     /// outranks it. The label shows the directory's leaf; this is where the
-    /// rest of it lives.
+    /// rest of it lives. Never null: the pinned square, which shows no
+    /// label, always carries it.
     /// </summary>
     public string TooltipText
     {
@@ -271,6 +296,39 @@ internal sealed class TabModel : INotifyPropertyChanged
             return TabLabel.Tooltip(named, cwd, ShellReportedCwd, Compose(named, cwd));
         }
     }
+
+    /// <summary>
+    /// The tooltip for a surface that shows the label: null when the
+    /// tooltip would only say the label again, so a pointer on a plain
+    /// tab is told nothing rather than the same word twice.
+    /// </summary>
+    public string? HoverText
+    {
+        get
+        {
+            var tooltip = TooltipText;
+            return tooltip == EffectiveTitle ? null : tooltip;
+        }
+    }
+
+    /// <summary>
+    /// True from the moment a manager opens the tab until its pane first
+    /// paints or its shell first says anything -- a title or a directory.
+    /// The strips show the app's own icon and dim the label meanwhile, the
+    /// way a loading tab reads in other terminals. Off for a tab built
+    /// directly or adopted from another window: those have already lived.
+    /// </summary>
+    public bool IsSettling
+    {
+        get;
+        private set { if (field != value) { field = value; _tabIcon?.SetSettling(value); Raise(); } }
+    }
+
+    /// <summary>Marks the tab as starting; the manager calls it on every tab it opens.</summary>
+    internal void BeginSettling() => IsSettling = true;
+
+    /// <summary>The pane painted or the shell spoke: the start is over.</summary>
+    internal void Settle() => IsSettling = false;
 
     /// <summary>
     /// The reported directory as something the app may act on -- copy it,

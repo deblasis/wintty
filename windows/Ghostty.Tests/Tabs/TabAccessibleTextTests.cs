@@ -289,7 +289,7 @@ public class TabAccessibleTextTests
     public void VerticalStrip_NamesTheNavItem()
     {
         var strip = Source("VerticalTabStrip.xaml.cs");
-        var apply = MethodBody(strip, "private static void ApplyItemTitleChrome");
+        var apply = MethodBody(strip, "private void ApplyItemTitleChrome");
 
         Assert.Contains("AutomationProperties.SetName(item, TabAccessibleText.Name(", apply);
         Assert.Contains("AutomationProperties.SetItemStatus(item,", apply);

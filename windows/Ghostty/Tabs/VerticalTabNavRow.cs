@@ -16,15 +16,21 @@ internal sealed partial class VerticalTabNavRow : Grid
     // strip's: sleeping is a rest state, not an alert.
     private const string IdleGlyph = "\uE708";
     private const double IdleOpacity = 0.45;
+    // Segoe Fluent / MDL2 "Home": what a tab sitting in the user's own
+    // directory shows in place of a printed tilde.
+    private const string HomeGlyph = "\uE80F";
 
     private readonly TextBlock _title;
+    private readonly FontIcon _home;
     private readonly FontIcon _bell;
     private readonly FontIcon _idle;
     private readonly Button _close;
     private Border? _coDragAccent;
+    private TabModel _tab;
 
     public VerticalTabNavRow(TabModel tab, SolidColorBrush accentBrush, RoutedEventHandler closeClick)
     {
+        _tab = tab;
         ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -35,7 +41,26 @@ internal sealed partial class VerticalTabNavRow : Grid
             Margin = new Thickness(0, 0, 4, 0),
             Text = tab.EffectiveTitle,
         };
-        ToolTipService.SetToolTip(_title, tab.TooltipText);
+        // The home glyph shares the title's column and shows instead of it.
+        _home = new FontIcon
+        {
+            Glyph = HomeGlyph,
+            FontSize = 14,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+        };
+        if (Application.Current.Resources.TryGetValue("SymbolThemeFontFamily", out var symbolFont)
+            && symbolFont is FontFamily symbolFamily)
+            _home.FontFamily = symbolFamily;
+        // The item is already named "Home"; a named child would say it twice.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAccessibilityView(
+            _home, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        // A trimmed label is the one case where hovering a plain tab is
+        // owed its own text; the trim state is the TextBlock's to report.
+        // Only the tooltip re-derives: a full Refresh writes text and
+        // visibility, which invalidates layout and re-raises this event.
+        _title.IsTextTrimmedChanged += (_, _) => ApplyTooltip(_tab);
 
         _bell = new FontIcon
         {
@@ -99,14 +124,17 @@ internal sealed partial class VerticalTabNavRow : Grid
         badges.Children.Add(_idle);
         badges.Children.Add(_bell);
         Grid.SetColumn(_title, 0);
+        Grid.SetColumn(_home, 0);
         Grid.SetColumn(badges, 1);
         textRow.Children.Add(_title);
+        textRow.Children.Add(_home);
         textRow.Children.Add(badges);
 
         Grid.SetColumn(textRow, 0);
         Grid.SetColumn(_close, 1);
         Children.Add(textRow);
         Children.Add(_close);
+        Refresh(tab);
     }
 
     /// <summary>The close glyph's button, for the seam's geometry readout.</summary>
@@ -129,26 +157,49 @@ internal sealed partial class VerticalTabNavRow : Grid
     /// <summary>
     /// The text this row is actually showing. Read by the test seam so a
     /// label assertion sees the rendered TextBlock, not the model property
-    /// that was supposed to reach it.
+    /// that was supposed to reach it. Empty when the row draws the home
+    /// glyph instead, which is what a person sees there.
     /// </summary>
-    internal string TestSeamRenderedTitle => _title.Text;
+    internal string TestSeamRenderedTitle
+        => _title.Visibility == Visibility.Visible ? _title.Text : "";
 
     /// <summary>
-    /// The tooltip the title is actually carrying, for the same reason.
+    /// Whether the row is drawing the home glyph in the title's place.
     /// </summary>
-    internal string? TestSeamRenderedTooltip => ToolTipService.GetToolTip(_title) as string;
+    internal bool TestSeamShowsHomeGlyph => _home.Visibility == Visibility.Visible;
+
+    /// <summary>
+    /// The tooltip the row is actually carrying, for the same reason.
+    /// </summary>
+    internal string? TestSeamRenderedTooltip => ToolTipService.GetToolTip(this) as string;
 
     internal void Refresh(TabModel tab)
     {
+        _tab = tab;
         _title.Text = tab.EffectiveTitle;
-        ToolTipService.SetToolTip(_title, tab.TooltipText);
+        // A home tab draws the glyph where the title would print; the
+        // TextBlock keeps the text so the seam can still read it.
+        _title.Visibility = tab.IsHome ? Visibility.Collapsed : Visibility.Visible;
+        _home.Visibility = tab.IsHome ? Visibility.Visible : Visibility.Collapsed;
+        ApplyTooltip(tab);
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
         _idle.Visibility = IdleBadgeVisible(tab);
         // The idle dim rides the title, not the whole row: close stays
         // full-strength so an idle tab still reads as closable.
         _title.Opacity = tab.IsIdle ? IdleOpacity : 1.0;
+        _home.Opacity = _title.Opacity;
         _close.Tag = tab;
     }
+
+    /// <summary>
+    /// The row's hover text, on the row rather than on the title: a home
+    /// row's title is collapsed, and a tooltip on a collapsed element is a
+    /// tooltip nobody can reach. A label the row has had to trim is the one
+    /// case where a hover that repeats the label still earns its place.
+    /// </summary>
+    private void ApplyTooltip(TabModel tab)
+        => ToolTipService.SetToolTip(
+            this, tab.HoverText ?? (_title.IsTextTrimmed ? tab.TooltipText : null));
 
     /// <summary>
     /// Whether the moon shows right now: idle, and no bell up (the bell
