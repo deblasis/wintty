@@ -80,10 +80,35 @@ fn hasAllowedScheme(url: []const u8, opts: struct { file: bool }) bool {
     const scheme = schemeOf(url) orelse return false;
     for (allowed_schemes) |allowed| {
         if (!opts.file and std.ascii.eqlIgnoreCase(allowed, "file")) continue;
-        if (std.ascii.eqlIgnoreCase(scheme, allowed)) return true;
+        if (std.ascii.eqlIgnoreCase(scheme, allowed)) {
+            if (std.ascii.eqlIgnoreCase(scheme, "file") and !isLocalFileAuthority(url)) {
+                return false;
+            }
+            return true;
+        }
     }
 
     return false;
+}
+
+/// True if a `file:` URL's authority is empty or `localhost`
+/// (case-insensitively). The authority is the text between `file://` and
+/// the next `/` (or the end of the string). A non-local authority is a
+/// remote host name that, on Windows, `rundll32` resolves to a UNC path and
+/// executes the default verb against it, leaking the current user's NTLM
+/// credentials to that host.
+fn isLocalFileAuthority(url: []const u8) bool {
+    const prefix = "file://";
+    if (url.len < prefix.len or !std.ascii.eqlIgnoreCase(url[0..prefix.len], prefix)) {
+        // No `//` authority marker (e.g. `file:relative/path`): there is no
+        // syntax here for a remote host, so there is nothing to refuse.
+        return true;
+    }
+
+    const rest = url[prefix.len..];
+    const authority_end = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    const authority = rest[0..authority_end];
+    return authority.len == 0 or std.ascii.eqlIgnoreCase(authority, "localhost");
 }
 
 /// True if `value` looks like a filesystem path rather than a URL. The link
@@ -110,6 +135,12 @@ fn isFilesystemPath(value: []const u8) bool {
     // Bare relative paths (`src/config/url.zig`) carry no scheme at all.
     // A value that does parse as a scheme is a URL we chose not to allow,
     // not a path, so it must not fall through to here.
+    //
+    // A malformed scheme (one containing a space, say) also lands here as
+    // "no scheme" and gets treated as a path. That is safe only because the
+    // caller already refused leading whitespace: the link regex cannot
+    // produce a space-bearing match that does not already start with `/`,
+    // `./`, `../`, or `~/`, one of the path prefixes handled above.
     return schemeOf(value) == null;
 }
 
@@ -172,6 +203,20 @@ test "url allow-list matches schemes case-insensitively" {
     try testing.expect(isUrlAllowed(.osc8, "HTTPS://example.com"));
     try testing.expect(isUrlAllowed(.unknown, "File:///tmp/notes.md"));
     try testing.expect(!isUrlAllowed(.osc8, "File:///tmp/notes.md"));
+}
+
+test "url allow-list refuses file urls with a remote authority" {
+    const testing = std.testing;
+    try testing.expect(isUrlAllowed(.unknown, "file:///C:/x.txt"));
+    try testing.expect(isUrlAllowed(.unknown, "file:///etc/hosts"));
+    try testing.expect(isUrlAllowed(.unknown, "file://localhost/x"));
+    // A non-empty, non-localhost authority resolves to a UNC path on
+    // Windows and runs the default verb against that host.
+    try testing.expect(!isUrlAllowed(.unknown, "file://evil/share/a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file://evil"));
+    // Scheme case-insensitivity must not open a bypass for the authority
+    // check.
+    try testing.expect(!isUrlAllowed(.unknown, "FILE://EVIL/x"));
 }
 
 test "url allow-list rejects schemes that execute or reconfigure" {
