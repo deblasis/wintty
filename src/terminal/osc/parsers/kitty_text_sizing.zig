@@ -17,9 +17,11 @@ pub const max_payload_length = 4096;
 /// Upper bound on what an OSC 66 capture is allowed to retain: the payload
 /// limit, the parameter section that precedes it, and the NUL `parse`
 /// appends. The parameters are six single-character keys with small numeric
-/// values, so the allowance for them is generous. Bounding the capture is
-/// what keeps a payload that will be rejected for its length from being
-/// buffered in full first.
+/// values, so the ~512-byte allowance for them is generous by design: it is
+/// a deliberate tradeoff of a round, roomy constant over the much tighter
+/// bound the six keys could actually require. Bounding the capture is what
+/// keeps a payload that will be rejected for its length from being buffered
+/// in full first.
 pub const max_capture_length = max_payload_length + 512;
 
 pub const VAlign = lib.Enum(lib.target, &.{

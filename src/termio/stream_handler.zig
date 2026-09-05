@@ -515,8 +515,11 @@ pub const StreamHandler = struct {
                 assert(tmux != .exit);
 
                 const viewer = self.tmux_viewer orelse {
-                    // This can only really happen if we failed to
-                    // initialize the viewer on enter.
+                    // Normal when tmux-control-mode is configured off: dcs.zig
+                    // hooks and parses the tmux DCS stream unconditionally, so
+                    // notifications keep arriving even though .enter above
+                    // never created a viewer for them to land on. Can also
+                    // happen if viewer creation itself failed.
                     log.info(
                         "received tmux control mode command without viewer: {f}",
                         .{tmux},
