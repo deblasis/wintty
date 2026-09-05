@@ -820,37 +820,95 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
     return try allocator.realloc(result, i);
 }
 
-/// Copied from Zig. This function could be made public in child_process.zig instead.
+/// Index of the `/C` or `/K` switch when `argv` is a cmd.exe invocation
+/// with a single script after it, which is the shape a wrapped shell
+/// command has. Returns null for anything else, including an argv that
+/// already carries `/S`: that caller has taken over the quoting.
+fn windowsCmdScriptSwitch(argv: []const []const u8) ?usize {
+    if (argv.len < 3) return null;
+
+    const exe = std.fs.path.basenameWindows(argv[0]);
+    if (!std.ascii.eqlIgnoreCase(exe, "cmd.exe") and
+        !std.ascii.eqlIgnoreCase(exe, "cmd")) return null;
+
+    // The script is the last argument, so the switch is the one before.
+    const i = argv.len - 2;
+    const sw = argv[i];
+    if (sw.len != 2 or sw[0] != '/') return null;
+    switch (std.ascii.toLower(sw[1])) {
+        'c', 'k' => {},
+        else => return null,
+    }
+
+    // Everything between the program and the switch must be another
+    // plain cmd.exe switch for this to be the shape we recognize.
+    for (argv[1..i]) |arg| {
+        if (arg.len != 2 or arg[0] != '/') return null;
+        if (std.ascii.toLower(arg[1]) == 's') return null;
+    }
+
+    return i;
+}
+
+/// Serialize `arg` with the MS C runtime quoting rules, which
+/// CommandLineToArgvW (and so almost every Windows program) reverses.
+fn windowsQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
+    if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
+        try writer.writeAll(arg);
+        return;
+    }
+    try writer.writeByte('"');
+    var backslash_count: usize = 0;
+    for (arg) |byte| {
+        switch (byte) {
+            '\\' => backslash_count += 1,
+            '"' => {
+                try writer.splatByteAll('\\', backslash_count * 2 + 1);
+                try writer.writeByte('"');
+                backslash_count = 0;
+            },
+            else => {
+                try writer.splatByteAll('\\', backslash_count);
+                try writer.writeByte(byte);
+                backslash_count = 0;
+            },
+        }
+    }
+    try writer.splatByteAll('\\', backslash_count * 2);
+    try writer.writeByte('"');
+}
+
+/// Build the `lpCommandLine` for `argv`.
+///
+/// Arguments are quoted with the C runtime rules, except the script of a
+/// cmd.exe `/C` (or `/K`) invocation. cmd.exe parses that tail with its
+/// own rules: it has no `\"` escape, and it removes one leading and one
+/// trailing quote from the line. C runtime quoting therefore reaches the
+/// child as literal backslashes, and, once the escaped quotes make the
+/// outer pair no longer the only pair, a command truncated at the last
+/// quote. Such a script is passed through verbatim inside one quote pair
+/// with `/S`, which is documented to strip exactly that pair and run the
+/// rest as written.
 fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const writer = &buf.writer;
 
+    const cmd_switch = windowsCmdScriptSwitch(argv);
+
     for (argv, 0..) |arg, arg_i| {
         if (arg_i != 0) try writer.writeByte(' ');
-        if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
+
+        if (cmd_switch) |i| if (arg_i == i) {
+            try writer.writeAll("/S ");
             try writer.writeAll(arg);
-            continue;
-        }
-        try writer.writeByte('"');
-        var backslash_count: usize = 0;
-        for (arg) |byte| {
-            switch (byte) {
-                '\\' => backslash_count += 1,
-                '"' => {
-                    try writer.splatByteAll('\\', backslash_count * 2 + 1);
-                    try writer.writeByte('"');
-                    backslash_count = 0;
-                },
-                else => {
-                    try writer.splatByteAll('\\', backslash_count);
-                    try writer.writeByte(byte);
-                    backslash_count = 0;
-                },
-            }
-        }
-        try writer.splatByteAll('\\', backslash_count * 2);
-        try writer.writeByte('"');
+            try writer.writeAll(" \"");
+            try writer.writeAll(argv[i + 1]);
+            try writer.writeByte('"');
+            break;
+        };
+
+        try windowsQuoteArg(writer, arg);
     }
 
     return buf.toOwnedSliceSentinel(0);
@@ -868,6 +926,77 @@ test "windowsStdioMode: a pseudoconsole child takes neither std handles nor inhe
     const explicit = windowsStdioMode(false);
     try testing.expect(explicit.use_std_handles);
     try testing.expect(explicit.inherit_handles);
+}
+
+test "windowsCreateCommandLine: a cmd.exe script keeps its own quoting" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "C:\\Windows\\System32\\cmd.exe",
+        "/c",
+        "chcp 65001 >nul && dir \"C:\\Program Files\"",
+    });
+    defer alloc.free(line);
+
+    try testing.expectEqualStrings(
+        "C:\\Windows\\System32\\cmd.exe /S /c " ++
+            "\"chcp 65001 >nul && dir \"C:\\Program Files\"\"",
+        line,
+    );
+}
+
+test "windowsCreateCommandLine: a cmd.exe script without quotes is unchanged by /S" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/C",
+        "echo hi | more",
+    });
+    defer alloc.free(line);
+
+    try testing.expectEqualStrings("cmd.exe /S /C \"echo hi | more\"", line);
+}
+
+test "windowsCreateCommandLine: a caller supplied /S owns its own quoting" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/s",
+        "/c",
+        "echo hi",
+    });
+    defer alloc.free(line);
+
+    try testing.expectEqualStrings("cmd.exe /s /c \"echo hi\"", line);
+}
+
+test "windowsCreateCommandLine: everything else keeps the C runtime quoting" {
+    const alloc = testing.allocator;
+
+    // pwsh parses its command line with CommandLineToArgvW, so a quote
+    // inside an argument must arrive backslash escaped.
+    const pwsh = try windowsCreateCommandLine(alloc, &.{
+        "pwsh.exe",
+        "-Command",
+        "Get-ChildItem \"C:\\Program Files\"",
+    });
+    defer alloc.free(pwsh);
+    try testing.expectEqualStrings(
+        "pwsh.exe -Command \"Get-ChildItem \\\"C:\\Program Files\\\"\"",
+        pwsh,
+    );
+
+    // A bare cmd.exe with no script is not a `/C` invocation.
+    const bare = try windowsCreateCommandLine(alloc, &.{"cmd.exe"});
+    defer alloc.free(bare);
+    try testing.expectEqualStrings("cmd.exe", bare);
+
+    // Neither is one whose trailing switch is not /C or /K.
+    const query = try windowsCreateCommandLine(alloc, &.{ "cmd.exe", "/q", "arg one" });
+    defer alloc.free(query);
+    try testing.expectEqualStrings("cmd.exe /q \"arg one\"", query);
 }
 
 test "createNullDelimitedEnvMap" {

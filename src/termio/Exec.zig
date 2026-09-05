@@ -2968,17 +2968,12 @@ fn appendSuffix(
 /// only to the quoted (`true`) path.
 ///
 /// Quoted path: the tail is re-serialized with MS-C-runtime quoting
-/// rules (matching `windowsCreateCommandLine` in Command.zig) so args
-/// that originally contained spaces or quotes round-trip correctly:
-/// tokens like `C:\Program Files` are re-wrapped in quotes when joined
-/// back. The resulting command line survives cmd's two-rule `/C`
-/// interaction documented in `cmd /?`: when our wrapped arg contains
-/// any embedded quotes (because we re-quoted a path with spaces),
-/// `lpCommandLine` has inner `"` characters and cmd falls into rule 1
-/// ("preserve quoting as seen"). When it contains none, the outermost
-/// quoting `windowsCreateCommandLine` adds is trivially symmetric and
-/// rule 2 ("strip outer quotes") is safe to apply. Either way cmd sees
-/// the same tokens the user originally wrote.
+/// rules so args that originally contained spaces or quotes round-trip
+/// correctly: tokens like `C:\Program Files` are re-wrapped in quotes
+/// when joined back. cmd.exe re-tokenizes the script itself, so those
+/// quotes have to reach it exactly as written here; that is why
+/// `windowsCreateCommandLine` in Command.zig hands the script to
+/// `cmd /S /C` inside a single quote pair instead of escaping it again.
 ///
 /// When `flag_idx+1 == args.len` (flag is the last arg, so there is
 /// nothing to wrap) we leave argv alone rather than fabricate a bare
