@@ -49,6 +49,13 @@ const FlatpakHostCommand = if (!build_config.flatpak) struct {
 /// The subprocess state for our exec backend.
 subprocess: Subprocess,
 
+/// The shutdown handshake with the Windows reader thread. The reader is
+/// handed a pointer to this before the thread data exists, so it lives
+/// here rather than on the thread data. Unused on POSIX, where the quit
+/// pipe is part of the reader's poll set.
+read_quit: if (builtin.os.tag == .windows) ReadThread.Quit else void =
+    if (builtin.os.tag == .windows) .{} else {},
+
 /// Initialize the exec state. This will NOT start it, this only sets
 /// up the internal state necessary to start it later.
 pub fn init(
@@ -178,11 +185,19 @@ pub fn threadEnter(
     errdefer termios_timer.deinit();
 
     // Start our read thread
-    const read_thread = try std.Thread.spawn(
-        .{},
-        if (builtin.os.tag == .windows) ReadThread.threadMainWindows else ReadThread.threadMainPosix,
-        .{ pty_fds.read, io, pipe[0] },
-    );
+    if (comptime builtin.os.tag == .windows) self.read_quit = .{};
+    const read_thread = if (comptime builtin.os.tag == .windows)
+        try std.Thread.spawn(
+            .{},
+            ReadThread.threadMainWindows,
+            .{ pty_fds.read, io, pipe[0], &self.read_quit },
+        )
+    else
+        try std.Thread.spawn(
+            .{},
+            ReadThread.threadMainPosix,
+            .{ pty_fds.read, io, pipe[0] },
+        );
     read_thread.setName(global.io(), "io-reader") catch {};
 
     // Setup our threadata backend state to be our own
@@ -262,28 +277,45 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    switch (internal_os.writePipeEnd(exec.read_thread_pipe, "x")) {
-        .ok => {},
+    //
+    // Windows cannot poll the pty handle and this pipe together, so the
+    // reader there watches the quit flag below instead and never reads
+    // the pipe. A write would wake nobody.
+    if (comptime builtin.os.tag != .windows) {
+        switch (internal_os.writePipeEnd(exec.read_thread_pipe, "x")) {
+            .ok => {},
 
-        // A broken pipe means our read thread is closed already, which
-        // is completely fine since that is what we were trying to
-        // achieve.
-        .broken_pipe => {},
+            // A broken pipe means our read thread is closed already,
+            // which is completely fine since that is what we were
+            // trying to achieve.
+            .broken_pipe => {},
 
-        .failed => log.warn(
-            "error writing to read thread quit pipe",
-            .{},
-        ),
+            .failed => log.warn(
+                "error writing to read thread quit pipe",
+                .{},
+            ),
+        }
     }
 
     if (comptime builtin.os.tag == .windows) {
-        // Interrupt the blocking read so the thread can see the quit message
-        if (windows.exp.kernel32.CancelIoEx(exec.read_thread_fd, null) == windows.FALSE) {
-            switch (windows.GetLastError()) {
-                .NOT_FOUND => {},
-                else => |err| log.warn("error interrupting read thread err={}", .{err}),
-            }
-        }
+        // Ask the reader to stop, then interrupt its blocking read.
+        //
+        // CancelIoEx only cancels a read that is already pending. If the
+        // reader is inside processOutput when we call it there is nothing
+        // to cancel, and the read it issues next blocks until a writer
+        // goes away, which cannot happen before we return: the
+        // pseudoconsole that owns the write end is closed after this
+        // join. So keep interrupting until the reader acknowledges.
+        self.read_quit.request();
+
+        var cancel: ReadThread.WindowsCancel = .{
+            .fd = exec.read_thread_fd,
+            .quit = &self.read_quit,
+        };
+        if (!ReadThread.cancelUntilAcked(
+            &cancel,
+            ReadThread.cancel_max_attempts,
+        )) log.warn("read thread did not acknowledge the quit request", .{});
     }
 
     exec.read_thread.join();
@@ -2014,9 +2046,231 @@ pub const ReadThread = struct {
         return true;
     }
 
-    fn threadMainWindows(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
+    /// The shutdown handshake between `threadExit` and the Windows
+    /// reader thread. Lives on the Exec (not the thread data) because
+    /// the reader is handed a pointer to it before the thread data
+    /// exists.
+    pub const Quit = struct {
+        /// Set by threadExit to ask the reader to stop.
+        stop: std.atomic.Value(bool) = .init(false),
+
+        /// Set by the reader on its way out, so threadExit knows it no
+        /// longer needs interrupting.
+        done: std.atomic.Value(bool) = .init(false),
+
+        pub fn request(self: *Quit) void {
+            self.stop.store(true, .release);
+        }
+
+        pub fn requested(self: *const Quit) bool {
+            return self.stop.load(.acquire);
+        }
+
+        pub fn ack(self: *Quit) void {
+            self.done.store(true, .release);
+        }
+
+        pub fn acked(self: *const Quit) bool {
+            return self.done.load(.acquire);
+        }
+    };
+
+    /// The outcome of a single read in the Windows reader loop.
+    const WindowsRead = union(enum) {
+        /// Bytes for the terminal.
+        data: []const u8,
+
+        /// The read was interrupted by CancelIoEx, which only
+        /// threadExit calls.
+        aborted,
+
+        /// Every writer closed the pipe.
+        eof,
+
+        /// Unrecoverable read error. Already logged.
+        failed,
+    };
+
+    /// The Windows reader loop. Factored out of `threadMainWindows` so
+    /// the shutdown handshake can be exercised without a real pty;
+    /// `ops` supplies `read`, `process` and `quitRequested`.
+    fn readLoopWindows(ops: anytype) void {
+        while (true) {
+            // A quit request can land while we are in `process`, when
+            // there is no pending read for CancelIoEx to interrupt, so
+            // look for one before every read rather than only after an
+            // interrupted one. Otherwise the read we issue next blocks
+            // until a writer goes away, which cannot happen while
+            // threadExit is waiting on us.
+            if (ops.quitRequested()) {
+                log.info("read thread got quit signal", .{});
+                return;
+            }
+
+            switch (ops.read()) {
+                .data => |d| ops.process(d),
+
+                // Only threadExit interrupts us, so the quit check at
+                // the top of the loop is where this is acted on.
+                .aborted => {},
+
+                .eof, .failed => return,
+            }
+        }
+    }
+
+    /// Interrupt a reader blocked in a read until it acknowledges the
+    /// quit request. Returns false if it never did.
+    fn cancelUntilAcked(ops: anytype, max_attempts: usize) bool {
+        // One interrupt is not enough: CancelIoEx cancels reads that are
+        // already pending, and the reader may be parsing output rather
+        // than reading. Repeat until one of the interrupts lands while it
+        // is blocked, or it finishes on its own.
+        for (0..max_attempts) |attempt| {
+            if (ops.acked()) return true;
+            ops.cancel();
+            if (ops.acked()) return true;
+            ops.wait(attempt);
+        }
+
+        return ops.acked();
+    }
+
+    /// How many interrupt attempts spin before we start sleeping between
+    /// them. The reader normally acknowledges on the first attempt, and
+    /// the case that needs a second one is a batch of output it is a few
+    /// microseconds from finishing, so the first attempts hand the core
+    /// over rather than paying a scheduler round trip.
+    const cancel_yield_attempts = 8;
+
+    /// How long to wait between the remaining interrupt attempts, and how
+    /// many to make before giving up and joining anyway. The interval is
+    /// a floor, not a period: without a raised timer resolution the
+    /// scheduler rounds it up to a tick, so a full budget is on the order
+    /// of seconds rather than the millisecond product. That only ever
+    /// costs anything if the reader is stuck somewhere that is not the
+    /// read, and the join that follows would then hang outright.
+    const cancel_interval_ms = 2;
+    const cancel_max_attempts = 500;
+
+    /// The real read surface for `readLoopWindows`.
+    const WindowsReader = struct {
+        fd: posix.fd_t,
+        io: *termio.Termio,
+        quit: *Quit,
+        buf: [windows_read_capacity]u8 = undefined,
+
+        fn read(self: *WindowsReader) WindowsRead {
+            var n: windows.DWORD = 0;
+            if (windows.exp.kernel32.ReadFile(
+                self.fd,
+                &self.buf,
+                self.buf.len,
+                &n,
+                null,
+            ) == windows.FALSE) {
+                const err = windows.GetLastError();
+                switch (err) {
+                    // CancelIoEx was called (threadExit signaling shutdown)
+                    .OPERATION_ABORTED => return .aborted,
+
+                    // All writers closed the write end of the pipe.
+                    // The child has exited and the PTY output pipe is done.
+                    .BROKEN_PIPE => {
+                        log.info("io reader: pipe EOF (BROKEN_PIPE), child exited", .{});
+                        return .eof;
+                    },
+
+                    else => {
+                        // Any other error is unexpected. Log it and stop
+                        // rather than hitting unreachable (which is UB in
+                        // ReleaseFast and a panic in Debug).
+                        log.err("io reader error err={}", .{err});
+                        return .failed;
+                    },
+                }
+            }
+
+            if (n == 0) {
+                // ReadFile succeeded with zero bytes: all writers have closed.
+                log.info("io reader: zero-byte read, pipe EOF", .{});
+                return .eof;
+            }
+
+            return .{ .data = self.buf[0..n] };
+        }
+
+        fn process(self: *WindowsReader, data: []const u8) void {
+            @call(.always_inline, termio.Termio.processOutput, .{ self.io, data });
+
+            // See threadMainPosix: hand the renderer state mutex
+            // off if the renderer is waiting, since this loop
+            // would otherwise starve it under heavy output.
+            self.io.renderer_state.yieldToDemand(global.io());
+        }
+
+        fn quitRequested(self: *const WindowsReader) bool {
+            return self.quit.requested();
+        }
+    };
+
+    /// The real interrupt surface for `cancelUntilAcked`.
+    const WindowsCancel = struct {
+        fd: posix.fd_t,
+        quit: *const Quit,
+
+        /// A failure that is not NOT_FOUND will repeat on every attempt,
+        /// so report it once instead of hundreds of times.
+        reported: bool = false,
+
+        fn cancel(self: *WindowsCancel) void {
+            if (windows.exp.kernel32.CancelIoEx(self.fd, null) == windows.FALSE) {
+                switch (windows.GetLastError()) {
+                    // Nothing was pending, so the reader is either
+                    // between reads or already done.
+                    .NOT_FOUND => {},
+                    else => |err| {
+                        if (!self.reported) {
+                            self.reported = true;
+                            log.warn("error interrupting read thread err={}", .{err});
+                        }
+                    },
+                }
+            }
+        }
+
+        fn acked(self: *const WindowsCancel) bool {
+            return self.quit.acked();
+        }
+
+        fn wait(_: *WindowsCancel, attempt: usize) void {
+            if (attempt < cancel_yield_attempts) {
+                std.Thread.yield() catch {};
+                return;
+            }
+
+            std.Io.sleep(
+                global.io(),
+                .fromMilliseconds(cancel_interval_ms),
+                .awake,
+            ) catch {};
+        }
+    };
+
+    fn threadMainWindows(
+        fd: posix.fd_t,
+        io: *termio.Termio,
+        quit: posix.fd_t,
+        quit_state: *Quit,
+    ) void {
         // Always close our end of the pipe when we exit.
         defer internal_os.closePipeEnd(quit);
+
+        // Stop threadExit from interrupting a thread that is on its way
+        // out. Registered as a defer so it runs on every return path,
+        // including the error ones, and never leaves threadExit spending
+        // its whole budget on a reader that has already stopped.
+        defer quit_state.ack();
 
         // Setup our crash metadata
         crash.sentry.thread_state = .{
@@ -2025,60 +2279,12 @@ pub const ReadThread = struct {
         };
         defer crash.sentry.thread_state = null;
 
-        var buf: [windows_read_capacity]u8 = undefined;
-        while (true) {
-            while (true) {
-                var n: windows.DWORD = 0;
-                if (windows.exp.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == windows.FALSE) {
-                    const err = windows.GetLastError();
-                    switch (err) {
-                        // CancelIoEx was called (threadExit signaling shutdown)
-                        .OPERATION_ABORTED => break,
-
-                        // All writers closed the write end of the pipe.
-                        // The child has exited and the PTY output pipe is done.
-                        .BROKEN_PIPE => {
-                            log.info("io reader: pipe EOF (BROKEN_PIPE), child exited", .{});
-                            return;
-                        },
-
-                        else => {
-                            // Any other error is unexpected. Log it and return
-                            // rather than hitting unreachable (which is UB in
-                            // ReleaseFast and a panic in Debug).
-                            log.err("io reader error err={}", .{err});
-                            return;
-                        },
-                    }
-                }
-
-                if (n == 0) {
-                    // ReadFile succeeded with zero bytes: all writers have closed.
-                    log.info("io reader: zero-byte read, pipe EOF", .{});
-                    return;
-                }
-
-                @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
-
-                // See threadMainPosix: hand the renderer state mutex
-                // off if the renderer is waiting, since this loop
-                // would otherwise starve it under heavy output.
-                io.renderer_state.yieldToDemand(global.io());
-            }
-
-            var quit_bytes: windows.DWORD = 0;
-            if (windows.exp.kernel32.PeekNamedPipe(quit, null, 0, null, &quit_bytes, null) == windows.FALSE) {
-                const err = windows.GetLastError();
-                log.err("quit pipe reader error err={}", .{err});
-                // Return rather than crash; the loop will clean up via defer.
-                return;
-            }
-
-            if (quit_bytes > 0) {
-                log.info("read thread got quit signal", .{});
-                return;
-            }
-        }
+        var reader: WindowsReader = .{
+            .fd = fd,
+            .io = io,
+            .quit = quit_state,
+        };
+        readLoopWindows(&reader);
     }
 };
 
@@ -2794,17 +3000,12 @@ fn appendSuffix(
 /// only to the quoted (`true`) path.
 ///
 /// Quoted path: the tail is re-serialized with MS-C-runtime quoting
-/// rules (matching `windowsCreateCommandLine` in Command.zig) so args
-/// that originally contained spaces or quotes round-trip correctly:
-/// tokens like `C:\Program Files` are re-wrapped in quotes when joined
-/// back. The resulting command line survives cmd's two-rule `/C`
-/// interaction documented in `cmd /?`: when our wrapped arg contains
-/// any embedded quotes (because we re-quoted a path with spaces),
-/// `lpCommandLine` has inner `"` characters and cmd falls into rule 1
-/// ("preserve quoting as seen"). When it contains none, the outermost
-/// quoting `windowsCreateCommandLine` adds is trivially symmetric and
-/// rule 2 ("strip outer quotes") is safe to apply. Either way cmd sees
-/// the same tokens the user originally wrote.
+/// rules so args that originally contained spaces or quotes round-trip
+/// correctly: tokens like `C:\Program Files` are re-wrapped in quotes
+/// when joined back. cmd.exe re-tokenizes the script itself, so those
+/// quotes have to reach it exactly as written here; that is why
+/// `windowsCreateCommandLine` in Command.zig writes the script verbatim
+/// inside a single quote pair instead of escaping it again.
 ///
 /// When `flag_idx+1 == args.len` (flag is the last arg, so there is
 /// nothing to wrap) we leave argv alone rather than fabricate a bare
@@ -2959,7 +3160,7 @@ fn buildWrappedScript(
 }
 
 /// Serialize `arg` into `writer` using the MS C runtime quoting rules
-/// (CommandLineToArgvW inverse). Matches `windowsCreateCommandLine` in
+/// (CommandLineToArgvW inverse). Matches `windowsQuoteArg` in
 /// Command.zig byte-for-byte; we duplicate here rather than cross-
 /// module to avoid leaking an internal helper, and the per-arg surface
 /// area is small enough that drift is easy to audit.
@@ -4418,4 +4619,211 @@ test "maybeWrapGitBashWithWinpty windows: absolute bash with adjacent winpty is 
     try testing.expectEqualStrings(winpty, out[0]);
     try testing.expectEqualStrings(bash, out[1]);
     try testing.expectEqualStrings("--login", out[2]);
+}
+
+test "ReadThread windows: a quit request during output processing stops the loop" {
+    const testing = std.testing;
+
+    // Models the shutdown race. The reader is inside processOutput when
+    // threadExit asks it to quit, so CancelIoEx finds no pending read to
+    // cancel and the reader is never interrupted. Its next read then has
+    // nothing to return and nothing to break it: the pty write end stays
+    // open until the pseudoconsole is closed, which only happens after
+    // the join this loop is holding up.
+    const Ops = struct {
+        quit: bool = false,
+        reads: usize = 0,
+        processed: usize = 0,
+        blocked: bool = false,
+
+        fn read(self: *@This()) ReadThread.WindowsRead {
+            self.reads += 1;
+            if (self.reads == 1) return .{ .data = "hello" };
+
+            // A read issued after the quit request would block forever.
+            // Record it and unwind so the test can report instead of hang.
+            self.blocked = true;
+            return .failed;
+        }
+
+        fn process(self: *@This(), data: []const u8) void {
+            self.processed += data.len;
+            self.quit = true;
+        }
+
+        fn quitRequested(self: *const @This()) bool {
+            return self.quit;
+        }
+    };
+
+    var ops: Ops = .{};
+    ReadThread.readLoopWindows(&ops);
+
+    try testing.expect(!ops.blocked);
+    try testing.expectEqual(@as(usize, 5), ops.processed);
+    try testing.expectEqual(@as(usize, 1), ops.reads);
+}
+
+test "ReadThread windows: an interrupted read without a quit request keeps reading" {
+    const testing = std.testing;
+
+    // CancelIoEx is only called on shutdown, but a spurious abort must
+    // not silently drop the rest of the child's output.
+    const Ops = struct {
+        reads: usize = 0,
+        processed: usize = 0,
+
+        fn read(self: *@This()) ReadThread.WindowsRead {
+            self.reads += 1;
+            return switch (self.reads) {
+                1 => .aborted,
+                2 => .{ .data = "hi" },
+                else => .eof,
+            };
+        }
+
+        fn process(self: *@This(), data: []const u8) void {
+            self.processed += data.len;
+        }
+
+        fn quitRequested(_: *const @This()) bool {
+            return false;
+        }
+    };
+
+    var ops: Ops = .{};
+    ReadThread.readLoopWindows(&ops);
+
+    try testing.expectEqual(@as(usize, 3), ops.reads);
+    try testing.expectEqual(@as(usize, 2), ops.processed);
+}
+
+test "ReadThread windows: the reader is interrupted until it acknowledges" {
+    const testing = std.testing;
+
+    // The reader only acknowledges once one of the interrupts lands while
+    // it is actually blocked in a read, so a single CancelIoEx is not
+    // enough.
+    const Ops = struct {
+        cancels: usize = 0,
+        waits: usize = 0,
+        ack_after: usize,
+
+        fn cancel(self: *@This()) void {
+            self.cancels += 1;
+        }
+
+        fn acked(self: *const @This()) bool {
+            return self.cancels >= self.ack_after;
+        }
+
+        fn wait(self: *@This(), _: usize) void {
+            self.waits += 1;
+        }
+    };
+
+    var ops: Ops = .{ .ack_after = 3 };
+    try testing.expect(ReadThread.cancelUntilAcked(&ops, 500));
+    try testing.expectEqual(@as(usize, 3), ops.cancels);
+
+    // A reader that never acknowledges must not spin forever.
+    var stuck: Ops = .{ .ack_after = std.math.maxInt(usize) };
+    try testing.expect(!ReadThread.cancelUntilAcked(&stuck, 4));
+    try testing.expectEqual(@as(usize, 4), stuck.cancels);
+}
+
+test "ReadThread windows: a blocked real read is interrupted and decoded" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    // The loops above run on fakes; this runs the two syscall wrappers
+    // they stand in for. An anonymous pipe with an idle writer parks a
+    // reader in ReadFile the same way an idle pty does, so the only way
+    // out is an interrupt from the thread calling threadExit.
+    var read_end: windows.HANDLE = undefined;
+    var write_end: windows.HANDLE = undefined;
+    if (windows.exp.kernel32.CreatePipe(
+        &read_end,
+        &write_end,
+        null,
+        0,
+    ) == windows.FALSE) return error.CreatePipeFailed;
+    defer windows.CloseHandle(read_end);
+    var write_open = true;
+    defer if (write_open) windows.CloseHandle(write_end);
+
+    var quit: ReadThread.Quit = .{};
+
+    // Wraps the real reader so the test can see which outcome each read
+    // decoded, and when the thread is parked in one.
+    const Ops = struct {
+        inner: ReadThread.WindowsReader,
+        in_read: std.atomic.Value(bool) = .init(false),
+        aborts: usize = 0,
+
+        fn threadMain(self: *@This()) void {
+            defer self.inner.quit.ack();
+            ReadThread.readLoopWindows(self);
+        }
+
+        fn read(self: *@This()) ReadThread.WindowsRead {
+            self.in_read.store(true, .release);
+            const result = self.inner.read();
+            switch (result) {
+                .aborted => self.aborts += 1,
+                else => {},
+            }
+            return result;
+        }
+
+        fn process(_: *@This(), _: []const u8) void {
+            // Nobody writes to the pipe, so no read returns data and the
+            // reader's terminal pointer is never followed.
+            unreachable;
+        }
+
+        fn quitRequested(self: *const @This()) bool {
+            return self.inner.quitRequested();
+        }
+    };
+
+    var ops: Ops = .{ .inner = .{
+        .fd = read_end,
+        .io = undefined,
+        .quit = &quit,
+    } };
+
+    var cancel: ReadThread.WindowsCancel = .{
+        .fd = read_end,
+        .quit = &quit,
+    };
+
+    // No read has been issued yet, so this is the NOT_FOUND path. It has
+    // to be swallowed, and must not be mistaken for an acknowledgement.
+    cancel.cancel();
+    try testing.expect(!cancel.acked());
+
+    const thread = try std.Thread.spawn(.{}, Ops.threadMain, .{&ops});
+    while (!ops.in_read.load(.acquire)) std.Thread.yield() catch {};
+
+    quit.request();
+    const acked = ReadThread.cancelUntilAcked(
+        &cancel,
+        ReadThread.cancel_max_attempts,
+    );
+
+    // A failing assertion must not hang the suite in join(), so if the
+    // interrupt never landed give the reader the EOF it would otherwise
+    // wait for forever.
+    if (!acked) {
+        windows.CloseHandle(write_end);
+        write_open = false;
+    }
+    thread.join();
+    try testing.expect(acked);
+
+    // The read that was parked came back as OPERATION_ABORTED rather
+    // than an error or a spurious EOF, and the loop then saw the quit.
+    try testing.expect(ops.aborts >= 1);
 }

@@ -386,6 +386,32 @@ fn winJoinEnv(arena: Allocator, name: []const u8, suffix: []const u16) ![]u16 {
     return out;
 }
 
+/// How a Windows spawn hands standard I/O to the child.
+const WindowsStdioMode = struct {
+    /// Whether `STARTF_USESTDHANDLES` belongs in `STARTUPINFO.dwFlags`.
+    use_std_handles: bool,
+
+    /// The `bInheritHandles` argument to `CreateProcessW`.
+    inherit_handles: bool,
+};
+
+/// A pseudoconsole child takes its standard handles from the console it
+/// is attached to. `STARTF_USESTDHANDLES` would override those with the
+/// three NULL handles that path has, and nothing in it is passed by
+/// inheritance either, so inheriting is only a way to leak whatever
+/// inheritable handles this process happens to hold. The explicit-handle
+/// path needs both: the child sees the three handles we name, and only
+/// because it inherits them (bounded by the handle list attribute).
+fn windowsStdioMode(has_pseudo_console: bool) WindowsStdioMode {
+    return if (has_pseudo_console) .{
+        .use_std_handles = false,
+        .inherit_handles = false,
+    } else .{
+        .use_std_handles = true,
+        .inherit_handles = true,
+    };
+}
+
 fn startWindows(self: *Command, arena: Allocator) !void {
     const cwd_w = if (self.cwd) |cwd| try std.unicode.utf8ToUtf16LeAllocZ(arena, cwd) else null;
 
@@ -550,13 +576,18 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         break :b .{ attribute_list_buf.ptr, stdin, stdout, stderr };
     };
 
+    const stdio_mode = windowsStdioMode(self.pseudo_console != null);
+
     var startup_info_ex = windows.STARTUPINFOEX{
         .StartupInfo = .{
             .cb = @sizeOf(windows.STARTUPINFOEX),
             .hStdError = stderr,
             .hStdOutput = stdout,
             .hStdInput = stdin,
-            .dwFlags = windows.STARTF_USESTDHANDLES,
+            .dwFlags = if (stdio_mode.use_std_handles)
+                windows.STARTF_USESTDHANDLES
+            else
+                0,
             .lpReserved = null,
             .lpDesktop = null,
             .lpTitle = null,
@@ -591,7 +622,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         command_line_w.ptr,
         null,
         null,
-        windows.TRUE,
+        if (stdio_mode.inherit_handles) windows.TRUE else windows.FALSE,
         flags,
         if (env_w) |w| w.ptr else null,
         if (cwd_w) |w| w.ptr else null,
@@ -789,40 +820,209 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
     return try allocator.realloc(result, i);
 }
 
-/// Copied from Zig. This function could be made public in child_process.zig instead.
+/// Index of the `/C` or `/K` switch when `argv` is a cmd.exe invocation
+/// with a single script after it, which is the shape a wrapped shell
+/// command has. Returns null for anything else.
+fn windowsCmdScriptSwitch(argv: []const []const u8) ?usize {
+    if (argv.len < 3) return null;
+
+    const exe = std.fs.path.basenameWindows(argv[0]);
+    if (!std.ascii.eqlIgnoreCase(exe, "cmd.exe") and
+        !std.ascii.eqlIgnoreCase(exe, "cmd")) return null;
+
+    // The script is the last argument, so the switch is the one before.
+    const i = argv.len - 2;
+    const sw = argv[i];
+    if (sw.len != 2 or sw[0] != '/') return null;
+    switch (std.ascii.toLower(sw[1])) {
+        'c', 'k' => {},
+        else => return null,
+    }
+
+    // Everything between the program and the switch must be another
+    // plain cmd.exe switch for this to be the shape we recognize.
+    for (argv[1..i]) |arg| {
+        if (arg.len != 2 or arg[0] != '/') return null;
+    }
+
+    return i;
+}
+
+/// Serialize `arg` with the MS C runtime quoting rules, which
+/// CommandLineToArgvW (and so almost every Windows program) reverses.
+fn windowsQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
+    if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
+        try writer.writeAll(arg);
+        return;
+    }
+    try writer.writeByte('"');
+    var backslash_count: usize = 0;
+    for (arg) |byte| {
+        switch (byte) {
+            '\\' => backslash_count += 1,
+            '"' => {
+                try writer.splatByteAll('\\', backslash_count * 2 + 1);
+                try writer.writeByte('"');
+                backslash_count = 0;
+            },
+            else => {
+                try writer.splatByteAll('\\', backslash_count);
+                try writer.writeByte(byte);
+                backslash_count = 0;
+            },
+        }
+    }
+    try writer.splatByteAll('\\', backslash_count * 2);
+    try writer.writeByte('"');
+}
+
+/// Build the `lpCommandLine` for `argv`.
+///
+/// Arguments are quoted with the C runtime rules, except the script of a
+/// cmd.exe `/C` (or `/K`) invocation. cmd.exe parses that tail with its
+/// own rules and has no `\"` escape, so C runtime quoting reaches the
+/// child as literal backslashes and truncates the command at the last
+/// escaped quote. Such a script is written verbatim inside a single
+/// quote pair instead.
+///
+/// One pair is all cmd needs. It keeps a line's quoting untouched only
+/// when the line holds exactly two quotes, no `&<>()@^|` between them,
+/// and the text between them names an executable; otherwise it strips
+/// the outer pair and runs the rest as written. A script that carries
+/// its own quotes or a metacharacter fails that test and is stripped
+/// back to what the user wrote, and a script that passes it is a bare
+/// quoted program path, which is meant to stay quoted.
 fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const writer = &buf.writer;
 
+    const cmd_switch = windowsCmdScriptSwitch(argv);
+
     for (argv, 0..) |arg, arg_i| {
         if (arg_i != 0) try writer.writeByte(' ');
-        if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
+
+        if (cmd_switch) |i| if (arg_i == i) {
             try writer.writeAll(arg);
-            continue;
-        }
-        try writer.writeByte('"');
-        var backslash_count: usize = 0;
-        for (arg) |byte| {
-            switch (byte) {
-                '\\' => backslash_count += 1,
-                '"' => {
-                    try writer.splatByteAll('\\', backslash_count * 2 + 1);
-                    try writer.writeByte('"');
-                    backslash_count = 0;
-                },
-                else => {
-                    try writer.splatByteAll('\\', backslash_count);
-                    try writer.writeByte(byte);
-                    backslash_count = 0;
-                },
-            }
-        }
-        try writer.splatByteAll('\\', backslash_count * 2);
-        try writer.writeByte('"');
+            try writer.writeAll(" \"");
+            try writer.writeAll(argv[i + 1]);
+            try writer.writeByte('"');
+            break;
+        };
+
+        try windowsQuoteArg(writer, arg);
     }
 
     return buf.toOwnedSliceSentinel(0);
+}
+
+test "windowsStdioMode: a pseudoconsole child takes neither std handles nor inheritance" {
+    // A ConPTY child gets its standard handles from the pseudoconsole it
+    // is attached to, and nothing in that spawn is passed by inheritance.
+    const conpty = windowsStdioMode(true);
+    try testing.expect(!conpty.use_std_handles);
+    try testing.expect(!conpty.inherit_handles);
+
+    // The explicit-handle spawn is the opposite: the child only sees the
+    // three handles we name, and only if it inherits them.
+    const explicit = windowsStdioMode(false);
+    try testing.expect(explicit.use_std_handles);
+    try testing.expect(explicit.inherit_handles);
+}
+
+test "windowsCreateCommandLine: a cmd.exe script keeps its own quoting" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "C:\\Windows\\System32\\cmd.exe",
+        "/c",
+        "chcp 65001 >nul && dir \"C:\\Program Files\"",
+    });
+    defer alloc.free(line);
+
+    // Four quotes, so cmd strips the outer pair and hands the rest to
+    // its own tokenizer exactly as the user wrote it.
+    try testing.expectEqualStrings(
+        "C:\\Windows\\System32\\cmd.exe /c " ++
+            "\"chcp 65001 >nul && dir \"C:\\Program Files\"\"",
+        line,
+    );
+}
+
+test "windowsCreateCommandLine: a cmd.exe script without quotes gets one pair" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/C",
+        "echo hi | more",
+    });
+    defer alloc.free(line);
+
+    // Two quotes, but the pipe between them is a cmd metacharacter, so
+    // the pair is stripped and the script runs as written.
+    try testing.expectEqualStrings("cmd.exe /C \"echo hi | more\"", line);
+}
+
+test "windowsCreateCommandLine: a bare quoted program path stays quoted" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/c",
+        "C:\\Program Files\\app.exe",
+    });
+    defer alloc.free(line);
+
+    // The one case where cmd preserves the quoting instead of stripping
+    // it, which is what a program path with a space needs.
+    try testing.expectEqualStrings("cmd.exe /c \"C:\\Program Files\\app.exe\"", line);
+}
+
+test "windowsCreateCommandLine: a caller supplied /S still gets the verbatim script" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/s",
+        "/c",
+        "dir \"C:\\Program Files\"",
+    });
+    defer alloc.free(line);
+
+    // `/S` only makes the outer-pair strip unconditional, which is what
+    // the verbatim script already relies on.
+    try testing.expectEqualStrings(
+        "cmd.exe /s /c \"dir \"C:\\Program Files\"\"",
+        line,
+    );
+}
+
+test "windowsCreateCommandLine: everything else keeps the C runtime quoting" {
+    const alloc = testing.allocator;
+
+    // pwsh parses its command line with CommandLineToArgvW, so a quote
+    // inside an argument must arrive backslash escaped.
+    const pwsh = try windowsCreateCommandLine(alloc, &.{
+        "pwsh.exe",
+        "-Command",
+        "Get-ChildItem \"C:\\Program Files\"",
+    });
+    defer alloc.free(pwsh);
+    try testing.expectEqualStrings(
+        "pwsh.exe -Command \"Get-ChildItem \\\"C:\\Program Files\\\"\"",
+        pwsh,
+    );
+
+    // A bare cmd.exe with no script is not a `/C` invocation.
+    const bare = try windowsCreateCommandLine(alloc, &.{"cmd.exe"});
+    defer alloc.free(bare);
+    try testing.expectEqualStrings("cmd.exe", bare);
+
+    // Neither is one whose trailing switch is not /C or /K.
+    const query = try windowsCreateCommandLine(alloc, &.{ "cmd.exe", "/q", "arg one" });
+    defer alloc.free(query);
+    try testing.expectEqualStrings("cmd.exe /q \"arg one\"", query);
 }
 
 test "createNullDelimitedEnvMap" {
