@@ -364,6 +364,14 @@ public partial class App : Application
             RequestedTheme = ApplicationTheme.Dark;
         }
 
+        // Native stderr -> file (#1034): libghostty's Zig panics print
+        // to a stderr the GUI process does not have; without this the
+        // only evidence of a native abort is the exit code. Must run
+        // before any libghostty initialization so early writes are
+        // captured too. Refuses politely when a real console is
+        // attached (terminal launches keep their console output).
+        Diagnostics.NativeStderrCapture.Install();
+
         InitializeComponent();
 
         // Surface unhandled exceptions to stderr AND to a file under
@@ -457,6 +465,13 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // UI-thread stall watchdog (#1033): a hang writes no exception
+        // anywhere, so this records it -- a crash.log entry plus a full
+        // minidump of the still-hung process under
+        // %LOCALAPPDATA%\Wintty\hangs\. First thing in the launch: the
+        // #1036 class of hang existed from the first frame.
+        Diagnostics.HangWatchdog.Start(DispatcherQueue.GetForCurrentThread());
+
         // Set the explicit AppUserModelID. This MUST happen before
         // any shell interop call (jump list registration, taskbar
         // icon operations, toast notifications).
