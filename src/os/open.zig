@@ -98,7 +98,8 @@ fn hasAllowedScheme(url: []const u8, opts: struct { file: bool }) bool {
 /// on where the authority starts: reading "the text up to the first slash"
 /// makes `file:////evil/share` look like an empty authority while the OS
 /// still finds the host. Counting the separators instead is what tells the
-/// two apart.
+/// two apart, and the count has to be taken after decoding, since the
+/// canonicalizer decodes `%2f` and `%5c` before it splits the URL.
 ///
 /// `url` is known to begin with the `file:` scheme, matched case
 /// insensitively.
@@ -108,29 +109,46 @@ fn isLocalFileUrl(url: []const u8) bool {
         std.ascii.eqlIgnoreCase(url[0..scheme.len], scheme));
     const rest = url[scheme.len..];
 
-    // Backslashes are separators on Windows, so `file:\\evil\share` names
-    // the same host as `file://evil/share` and is counted the same way.
-    const separators = "/\\";
-    const first_sep = std.mem.indexOfAny(u8, rest, separators) orelse rest.len;
+    // Walk the leading separator run, consuming a literal separator or one
+    // percent escape that decodes to a separator per step. The run ends at
+    // the first byte that is neither, so an encoded separator further along
+    // (`file:///tmp/a%2Fb.md`) stays ordinary path data.
+    var i: usize = 0;
+    var separator_count: usize = 0;
+    var has_backslash = false;
+    while (i < rest.len) {
+        switch (rest[i]) {
+            '/' => i += 1,
+            '\\' => {
+                has_backslash = true;
+                i += 1;
+            },
+            '%' => {
+                if (i + 3 > rest.len) break;
+                const escape = rest[i..][0..3];
+                if (std.ascii.eqlIgnoreCase(escape, "%5c")) {
+                    has_backslash = true;
+                } else if (!std.ascii.eqlIgnoreCase(escape, "%2f")) break;
+                i += 3;
+            },
+            else => break,
+        }
 
-    // Percent-encoded separators are not decoded by the count below but are
-    // decoded before the target is resolved, so `file:%2f%2fevil/share`
-    // would otherwise be read here as a plain relative path. Refuse them in
-    // the authority position rather than decoding: nothing we want to open
-    // needs an encoded separator before the path begins.
-    if (hasEncodedSeparator(rest[0..first_sep])) return false;
+        separator_count += 1;
+    }
 
-    const separator_count = rest.len - std.mem.trimStart(u8, rest, separators).len;
+    const after_run = rest[i..];
     return switch (separator_count) {
         // `file:notes.md`, `file:/etc/hosts` and `file:///etc/hosts` have no
-        // authority component at all.
-        0, 1, 3 => true,
+        // authority component at all. A backslash in the run means Windows
+        // reads it as a UNC path instead, and nothing here proves the
+        // canonicalizer folds the two spellings together.
+        0, 1, 3 => !has_backslash,
 
         // `file://<authority>/path`: the only spelling with a host in it.
         2 => authority: {
-            const after = rest[2..];
-            const end = std.mem.indexOfAny(u8, after, separators) orelse after.len;
-            const authority = after[0..end];
+            const end = std.mem.indexOfAny(u8, after_run, "/\\") orelse after_run.len;
+            const authority = after_run[0..end];
             break :authority authority.len == 0 or
                 std.ascii.eqlIgnoreCase(authority, "localhost");
         },
@@ -139,20 +157,6 @@ fn isLocalFileUrl(url: []const u8) bool {
         // the OS. Nothing legitimate spells a local file this way.
         else => false,
     };
-}
-
-/// True if `text` contains a percent-encoded `/` or `\`.
-fn hasEncodedSeparator(text: []const u8) bool {
-    var i: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, text, i, '%')) |at| {
-        if (at + 3 > text.len) return false;
-        const escape = text[at .. at + 3];
-        if (std.ascii.eqlIgnoreCase(escape, "%2f") or
-            std.ascii.eqlIgnoreCase(escape, "%5c")) return true;
-        i = at + 1;
-    }
-
-    return false;
 }
 
 /// True if `value` looks like a filesystem path rather than a URL. The link
@@ -286,6 +290,36 @@ test "url allow-list refuses file urls that hide a remote authority" {
     try testing.expect(isUrlAllowed(.unknown, "file:///etc/hosts"));
     // An encoded separator further along is ordinary path data.
     try testing.expect(isUrlAllowed(.unknown, "file:///tmp/a%2Fb.md"));
+}
+
+test "url allow-list counts encoded separators toward the leading run" {
+    const testing = std.testing;
+    // An encoded separator that continues the leading run is decoded before
+    // the target is resolved, so it lengthens the run exactly as a literal
+    // one does: these all reach the OS as four separators, a UNC host.
+    try testing.expect(!isUrlAllowed(.unknown, "file:///%2fevil/share/a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:///%5cevil/share/a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:///%2Fevil/share/a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:///%5Cevil/share/a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:/%2f%2f%2fevil/share/a.exe"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:/%2F%2F%2Fevil/share/a.exe"));
+    // The run ends at the first byte that is not a separator, so an encoded
+    // separator after it is ordinary path data.
+    try testing.expect(isUrlAllowed(.unknown, "file:///tmp/a%2Fb.md"));
+    try testing.expect(isUrlAllowed(.unknown, "file:///tmp/a%5Cb.md"));
+}
+
+test "url allow-list refuses a backslash in a file url with no authority" {
+    const testing = std.testing;
+    // Without an authority component the run has to be all forward slashes.
+    // A backslash in it is how Windows spells a UNC path, and we have no
+    // evidence that the canonicalizer treats the two the same here.
+    try testing.expect(!isUrlAllowed(.unknown, "file://\\evil/share"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:\\\\\\evil\\share"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:/%5cevil/share"));
+    // Two separators still name an authority, whichever way they lean.
+    try testing.expect(!isUrlAllowed(.unknown, "file:\\\\evil\\share"));
+    try testing.expect(isUrlAllowed(.unknown, "file:\\\\localhost\\share"));
 }
 
 test "url allow-list rejects schemes that execute or reconfigure" {
