@@ -98,8 +98,17 @@ fn hasAllowedScheme(url: []const u8, opts: struct { file: bool }) bool {
 /// on where the authority starts: reading "the text up to the first slash"
 /// makes `file:////evil/share` look like an empty authority while the OS
 /// still finds the host. Counting the separators instead is what tells the
-/// two apart, and the count has to be taken after decoding, since the
-/// canonicalizer decodes `%2f` and `%5c` before it splits the URL.
+/// two apart.
+///
+/// That count is only meaningful if the run is spelled literally. A `%2f`
+/// or `%5c` in it lands in a different place depending on whether the
+/// canonicalizer decodes before or after it splits the URL, and we have no
+/// evidence either way, so any encoded separator in the run is refused
+/// outright: under one reading it is part of a longer run, under the other
+/// it is part of a host name, and both are remote. An escape that decodes
+/// to a blank or a control is refused for the same reason, since an opener
+/// that trims a leading blank turns `file:%20//evil/x` back into a UNC
+/// path.
 ///
 /// `url` is known to begin with the `file:` scheme, matched case
 /// insensitively.
@@ -116,6 +125,7 @@ fn isLocalFileUrl(url: []const u8) bool {
     var i: usize = 0;
     var separator_count: usize = 0;
     var has_backslash = false;
+    var has_encoded = false;
     while (i < rest.len) {
         switch (rest[i]) {
             '/' => i += 1,
@@ -126,16 +136,26 @@ fn isLocalFileUrl(url: []const u8) bool {
             '%' => {
                 if (i + 3 > rest.len) break;
                 const escape = rest[i..][0..3];
-                if (std.ascii.eqlIgnoreCase(escape, "%5c")) {
-                    has_backslash = true;
-                } else if (!std.ascii.eqlIgnoreCase(escape, "%2f")) break;
-                i += 3;
+                if (std.ascii.eqlIgnoreCase(escape, "%2f") or
+                    std.ascii.eqlIgnoreCase(escape, "%5c"))
+                {
+                    has_encoded = true;
+                    i += 3;
+                } else {
+                    const byte = decodeEscape(escape) orelse break;
+                    if (byte <= ' ' or byte == 0x7f) return false;
+                    break;
+                }
             },
             else => break,
         }
 
         separator_count += 1;
     }
+
+    // The run is only readable as a separator count if every step of it was
+    // literal; see the note above on the decode order.
+    if (has_encoded) return false;
 
     const after_run = rest[i..];
     return switch (separator_count) {
@@ -221,6 +241,15 @@ fn hasControlChars(url: []const u8) bool {
     return false;
 }
 
+/// The byte a three-character percent escape stands for, or null if the two
+/// characters after the `%` are not hex digits.
+fn decodeEscape(escape: *const [3]u8) ?u8 {
+    std.debug.assert(escape[0] == '%');
+    const high = std.fmt.charToDigit(escape[1], 16) catch return null;
+    const low = std.fmt.charToDigit(escape[2], 16) catch return null;
+    return high * 16 + low;
+}
+
 test "url allow-list accepts every scheme the link regex detects" {
     // Spelled out rather than looped over `allowed_schemes` so that a
     // scheme dropped from the list fails here instead of silently agreeing
@@ -292,11 +321,12 @@ test "url allow-list refuses file urls that hide a remote authority" {
     try testing.expect(isUrlAllowed(.unknown, "file:///tmp/a%2Fb.md"));
 }
 
-test "url allow-list counts encoded separators toward the leading run" {
+test "url allow-list refuses an encoded separator in the leading run" {
     const testing = std.testing;
-    // An encoded separator that continues the leading run is decoded before
-    // the target is resolved, so it lengthens the run exactly as a literal
-    // one does: these all reach the OS as four separators, a UNC host.
+    // Whether the canonicalizer decodes before or after it splits the URL
+    // decides where the authority of these starts, so both readings are
+    // refused rather than picked between: one of them is always remote.
+    try testing.expect(!isUrlAllowed(.unknown, "file://%2fevil/x"));
     try testing.expect(!isUrlAllowed(.unknown, "file:///%2fevil/share/a.exe"));
     try testing.expect(!isUrlAllowed(.unknown, "file:///%5cevil/share/a.exe"));
     try testing.expect(!isUrlAllowed(.unknown, "file:///%2Fevil/share/a.exe"));
@@ -320,6 +350,34 @@ test "url allow-list refuses a backslash in a file url with no authority" {
     // Two separators still name an authority, whichever way they lean.
     try testing.expect(!isUrlAllowed(.unknown, "file:\\\\evil\\share"));
     try testing.expect(isUrlAllowed(.unknown, "file:\\\\localhost\\share"));
+}
+
+test "url allow-list refuses an encoded blank before a file url's path" {
+    const testing = std.testing;
+    // Decoded these read as a blank followed by `//evil/x`, and an opener
+    // that trims the blank before resolving is left with a UNC path.
+    try testing.expect(!isUrlAllowed(.unknown, "file:%20//evil/x"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:%09//evil/x"));
+    try testing.expect(!isUrlAllowed(.unknown, "file:%0a//evil/x"));
+    // A NUL truncates the target wherever it is honoured.
+    try testing.expect(!isUrlAllowed(.unknown, "file:%00//evil/x"));
+    // Past the leading run an encoded blank is ordinary data: a file name
+    // with a space in it is perfectly normal, and so is a query string.
+    try testing.expect(isUrlAllowed(.unknown, "file:///tmp/a%20b.txt"));
+    try testing.expect(isUrlAllowed(.osc8, "https://example.com/a%20b"));
+    try testing.expect(isUrlAllowed(.unknown, "https://example.com/a%20b"));
+}
+
+test "url allow-list ends a file url's separator run at the first other byte" {
+    const testing = std.testing;
+    // `%2e` decodes to `.`, so the run stops there and this is the local
+    // path `/../evil` rather than anything with an authority.
+    try testing.expect(isUrlAllowed(.unknown, "file:///%2e%2e/evil"));
+    // A truncated escape ends the run too. Three separators means no
+    // authority component; two makes `%` the authority, which is neither
+    // empty nor localhost.
+    try testing.expect(isUrlAllowed(.unknown, "file:///%2"));
+    try testing.expect(!isUrlAllowed(.unknown, "file://%"));
 }
 
 test "url allow-list rejects schemes that execute or reconfigure" {
