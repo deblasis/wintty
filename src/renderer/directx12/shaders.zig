@@ -353,6 +353,13 @@ comptime {
 }
 
 pub const Shaders = struct {
+    /// What the generic renderer holds between deiniting a set and
+    /// building the next one, so a failure in between leaves something
+    /// safe to deinit again rather than `undefined`. Defunct, so a draw
+    /// that reaches it is caught by the same assert a failed reinit
+    /// always tripped.
+    pub const empty: Shaders = .{ .defunct = true };
+
     /// Shared root signature owned by this struct. Pipelines reference it
     /// for draw-time binding but do not own it -- deinit releases it here.
     root_signature: ?*d3d12.ID3D12RootSignature = null,

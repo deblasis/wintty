@@ -85,12 +85,14 @@ pub const SharedTextureState = struct {
     /// Device. Closed and reborn on resize.
     resource_handle: std.os.windows.HANDLE,
     /// NT HANDLE from CreateSharedHandle on the Device's fence. Owned
-    /// by Device. Stable for the surface lifetime.
+    /// by Device. Survives resize; a device-removed recovery replaces
+    /// the fence and so this handle too, under a bumped `version`.
     fence_handle: std.os.windows.HANDLE,
     /// Pixel dimensions of `resource`.
     width: u32,
     height: u32,
-    /// Monotonically increasing; bumped by recreateSharedTexture.
+    /// Monotonically increasing; bumped by recreateSharedTexture and
+    /// carried across a device recreation so it never goes backwards.
     version: u64,
 
     /// Create a shared committed ID3D12Resource and NT handles for both
@@ -204,6 +206,13 @@ pub const InitOptions = struct {
     width: u32 = 800,
     /// Initial back buffer height. Ignored for SharedTexture (uses its own size).
     height: u32 = 600,
+    /// SwapChainPanel mode only: bind the new swap chain to this existing
+    /// DirectComposition surface handle instead of minting one. The handle
+    /// outlives the D3D12 device that presented into it, so a device
+    /// recreated after a TDR can keep presenting into the surface the
+    /// embedder already bound with SetSwapChainHandle, and the panel never
+    /// has to be told. Ownership transfers to the Device on success.
+    surface_handle: ?std.os.windows.HANDLE = null,
 };
 
 pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device {
@@ -363,6 +372,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
                 command_queue.?,
                 opts.width,
                 opts.height,
+                opts.surface_handle,
             );
             swap_chain = result.swap_chain;
             swap_chain_surface_handle = result.handle;
@@ -399,7 +409,8 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     // errdefer is a no-op for the other surface variants.
     errdefer if (swap_chain_surface_handle) |h| {
         _ = swap_chain.?.Release();
-        _ = d3d12.CloseHandle(h);
+        // A handle the caller passed in stays the caller's to close.
+        if (opts.surface_handle == null) _ = d3d12.CloseHandle(h);
     };
     errdefer if (result_shared_texture) |st| {
         _ = d3d12.CloseHandle(st.fence_handle);
@@ -443,24 +454,34 @@ pub fn deinit(self: *Device) void {
     // reading anything) from a live device whose fence we failed to
     // signal. What the retirement queue holds DOES have an alternative;
     // see below.
+    //
+    // A removed device is the benign case made explicit: its queue can no
+    // longer signal, so the wait cannot succeed, but nothing on it is
+    // executing either, so there is nothing left to drain and every
+    // release below is safe. This is the path a device-loss recovery
+    // takes, once per lost device, so it must not leak.
     var drained = true;
-    self.waitForGpu() catch |err| {
+    if (self.removed()) {
+        log.warn(
+            "device removed (reason 0x{x}); tearing down without a GPU drain",
+            .{@as(u32, @bitCast(self.device.GetDeviceRemovedReason()))},
+        );
+    } else self.waitForGpu() catch |err| {
         drained = false;
-        const reason = self.device.GetDeviceRemovedReason();
         log.err(
-            "waitForGpu before device teardown failed: {}, device removed reason 0x{x}; releasing GPU resources without a drain, and leaking {d} retired resource(s) rather than freeing them under a live GPU",
-            .{ err, @as(u32, @bitCast(reason)), self.retirement.count() },
+            "waitForGpu before device teardown failed: {}; releasing GPU resources without a drain, and leaking {d} retired resource(s) rather than freeing them under a live GPU",
+            .{ err, self.retirement.count() },
         );
     };
 
     // Free anything the retirement queue is still holding -- but only when
-    // the drain above actually succeeded. Device.deinit runs per surface,
-    // on every tab and split close, in a process that keeps running, so
-    // "the process is going away" is not available as a justification. On
-    // a failed wait the GPU may still be reading these, and leaking them
-    // is strictly safer than releasing them; the back-buffer and frame
-    // releases below have no such option, which is why the asymmetry is
-    // worth taking here.
+    // the drain above actually succeeded or was unnecessary. Device.deinit
+    // runs per surface, on every tab and split close, in a process that
+    // keeps running, so "the process is going away" is not available as a
+    // justification. On a failed wait against a live device the GPU may
+    // still be reading these, and leaking them is strictly safer than
+    // releasing them; the back-buffer and frame releases below have no
+    // such option, which is why the asymmetry is worth taking here.
     if (drained) self.retirement.drainAll();
     self.retirement.deinit();
     std.heap.c_allocator.destroy(self.retirement);
@@ -487,6 +508,12 @@ pub fn deinit(self: *Device) void {
     _ = self.device.Release();
 
     self.* = undefined;
+}
+
+/// Whether the device has been removed (TDR, driver upgrade, adapter
+/// gone). Cheap: no GPU round trip, just the driver's recorded reason.
+pub fn removed(self: *const Device) bool {
+    return FAILED(self.device.GetDeviceRemovedReason());
 }
 
 /// Signal the fence from the command queue and block until the GPU catches up.
@@ -665,21 +692,24 @@ const SurfaceHandleSwapChain = struct {
     handle: std.os.windows.HANDLE,
 };
 
-/// Create a DirectComposition surface handle and a composition swap chain
-/// bound to it. The caller owns both: Release the swap chain and
-/// CloseHandle the handle. Used by SwapChainPanel mode so the embedder
-/// can bind the handle via ISwapChainPanelNative2::SetSwapChainHandle.
+/// Create a composition swap chain bound to a DirectComposition surface
+/// handle, minting the handle unless the caller passes one in. The caller
+/// owns both on return: Release the swap chain and CloseHandle the handle.
+/// Used by SwapChainPanel mode so the embedder can bind the handle via
+/// ISwapChainPanelNative2::SetSwapChainHandle.
 ///
-/// Each call mints a fresh surface handle. The embedder binds the handle
-/// to the panel exactly once after surface creation, so any future
-/// device-removed (TDR) recovery that recreates the swap chain must also
-/// mint a new handle here AND have the embedder re-bind it via
-/// SetSwapChainHandle, or the panel would composite a dead handle.
+/// The embedder binds the handle to the panel exactly once after surface
+/// creation, and the handle is a composition primitive that does not
+/// belong to any D3D12 device. That is what lets a device recreated after
+/// a TDR present into the panel without the embedder rebinding: it passes
+/// the old handle in `existing` and gets a new swap chain on the same
+/// surface. On failure a passed-in handle stays the caller's to close.
 fn createSurfaceHandleSwapChain(
     factory: *dxgi.IDXGIFactory2,
     queue: *d3d12.ID3D12CommandQueue,
     width: u32,
     height: u32,
+    existing: ?std.os.windows.HANDLE,
 ) !SurfaceHandleSwapChain {
     // The composition-surface-handle entry point lives on IDXGIFactoryMedia,
     // which the factory we already created supports via QueryInterface.
@@ -697,19 +727,23 @@ fn createSurfaceHandleSwapChain(
     }
     defer _ = media.?.Release();
 
-    var handle: std.os.windows.HANDLE = undefined;
-    {
+    const handle: std.os.windows.HANDLE = existing orelse minted: {
+        var fresh: std.os.windows.HANDLE = undefined;
         const hr = dcomp.DCompositionCreateSurfaceHandle(
             dcomp.COMPOSITIONOBJECT_ALL_ACCESS,
             null,
-            &handle,
+            &fresh,
         );
         if (FAILED(hr)) {
             log.err("DCompositionCreateSurfaceHandle failed: 0x{x}", .{@as(u32, @bitCast(hr))});
             return error.SurfaceHandleCreationFailed;
         }
-    }
-    errdefer _ = d3d12.CloseHandle(handle);
+        break :minted fresh;
+    };
+    // Only a handle minted here is ours to close on failure.
+    errdefer if (existing == null) {
+        _ = d3d12.CloseHandle(handle);
+    };
 
     const desc = compositionSwapChainDesc(width, height);
 

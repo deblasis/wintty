@@ -1291,7 +1291,11 @@ GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t)
 // Returns the ID3D12Device* used by this surface's renderer. Shared texture
 // consumers should call OpenSharedResource1 on this device to avoid
 // cross-device synchronization issues. Returns NULL on non-DX12 builds or if
-// the renderer device is not yet initialized.
+// the renderer device is not yet initialized. Device-removed recovery
+// replaces the device: do not cache this pointer across a `version` change
+// in ghostty_surface_shared_texture_s. This and the other surface device
+// queries wait for the renderer's draw lock, so they can block for the
+// length of a frame, or of a device rebuild after a TDR.
 GHOSTTY_API void* ghostty_surface_get_d3d12_device(ghostty_surface_t);
 // Returns the DirectComposition surface handle backing this surface's swap
 // chain in SwapChainPanel mode. Bind it to a WinUI 3 SwapChainPanel via
@@ -1308,20 +1312,22 @@ GHOSTTY_API void* ghostty_surface_get_swap_chain_handle(ghostty_surface_t);
 // surface lifetime -- do NOT CloseHandle either of them. The
 // ID3D12Resource and ID3D12Fence returned by OpenSharedHandle on the
 // consumer's device ARE owned by the consumer; Release() them when
-// done, and re-open the resource whenever `version` changes.
+// done, and re-open both handles whenever `version` changes.
 typedef struct {
   // NT HANDLE from CreateSharedHandle on the underlying ID3D12Resource.
   // Consumers open via ID3D12Device::OpenSharedHandle on their own
   // device (cross-device) or on ghostty's device (same-device).
   void* resource_handle;
 
-  // NT HANDLE from CreateSharedHandle on ghostty's ID3D12Fence. Stable
-  // for the surface lifetime (does not change on resize).
+  // NT HANDLE from CreateSharedHandle on ghostty's ID3D12Fence. Does not
+  // change on resize; it does change on device-removed recovery, which
+  // also bumps `version`, so re-open it alongside the resource then.
   void* fence_handle;
 
   // Fence value ghostty will signal after completing the most recently
   // submitted frame. Consumers Wait for this value on their own
-  // command queue before sampling the resource.
+  // command queue before sampling the resource. Restarts from zero on
+  // device-removed recovery, together with the new `fence_handle`.
   uint64_t fence_value;
 
   // Pixel dimensions of the shared resource. These match the size the
@@ -1340,6 +1346,8 @@ typedef struct {
 // Returns true on success, false if the surface is not in shared
 // texture mode (in which case `out` is left untouched). The read is
 // atomic -- all fields correspond to the same renderer state snapshot.
+// False is also what a surface returns while its device is being
+// rebuilt after a TDR, so treat it as "poll again", not as a mode change.
 GHOSTTY_API bool ghostty_surface_shared_texture(
     ghostty_surface_t,
     ghostty_surface_shared_texture_s* out);
