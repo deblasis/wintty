@@ -4537,6 +4537,23 @@ fn openUrl(
     // URL opener. We log a warning because we want well-behaved
     // apprts to handle this themselves.
     log.warn("apprt did not handle open URL action, falling back to default opener", .{});
+
+    // The fallback opener runs the target's default verb, which executes a
+    // local file, so filter it here. This deliberately sits after the apprt
+    // declined: an apprt that handles the action owns its own policy, and
+    // macOS in particular offers a graded allow/confirm/block prompt that an
+    // unconditional deny further up would pre-empt. Filesystem paths are
+    // accepted for `.unknown` because that target is derived from the text
+    // the user saw, while an OSC 8 target is arbitrary terminal output and
+    // is held to the scheme list alone.
+    if (!internal_os.isUrlAllowed(action.kind, action.url)) {
+        log.warn("refusing to open untrusted url kind={t} url={s}", .{
+            action.kind,
+            action.url,
+        });
+        return;
+    }
+
     try internal_os.open(
         action.kind,
         action.url,

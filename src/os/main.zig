@@ -53,6 +53,7 @@ pub const ensureLocale = locale.ensureLocale;
 pub const clickInterval = mouse.clickInterval;
 pub const open = openpkg.open;
 pub const OpenType = openpkg.Type;
+pub const isUrlAllowed = openpkg.isUrlAllowed;
 pub const pipe = pipepkg.pipe;
 pub const closePipeEnd = pipepkg.closeEnd;
 pub const writePipeEnd = pipepkg.writeEnd;
@@ -64,6 +65,7 @@ pub const getConfigEditCommand = edit.getConfigEditCommand;
 
 test {
     _ = file;
+    _ = openpkg;
     _ = stderr;
     _ = edit;
     _ = i18n;
