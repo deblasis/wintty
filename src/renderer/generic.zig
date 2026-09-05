@@ -2119,6 +2119,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // If our font atlas changed, sync the texture data.
             // Placed after beginFrame so the DX12 command list is available.
+            //
+            // The counter is advanced only once the upload has returned. We
+            // now ship the dirty region rather than the whole atlas, so a
+            // sync that never happened is not made good by the next one: it
+            // would carry only what went dirty after it, leaving the dropped
+            // rows stale for as long as the frame state lives. Leaving the
+            // counter where it was is what makes the next frame try again.
             texture: {
                 const atlas = &self.font_grid.atlas_grayscale;
                 const modified = atlas.modified.load(.monotonic);
@@ -2126,8 +2133,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
                 const dirty = atlas.dirtySince(frame.grayscale_modified);
-                frame.grayscale_modified = atlas.modified.load(.monotonic);
+                const synced = atlas.modified.load(.monotonic);
                 try self.syncAtlasTexture(atlas, &frame.grayscale, dirty);
+                frame.grayscale_modified = synced;
             }
             texture: {
                 const atlas = &self.font_grid.atlas_color;
@@ -2136,8 +2144,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
                 const dirty = atlas.dirtySince(frame.color_modified);
-                frame.color_modified = atlas.modified.load(.monotonic);
+                const synced = atlas.modified.load(.monotonic);
                 try self.syncAtlasTexture(atlas, &frame.color, dirty);
+                frame.color_modified = synced;
             }
 
             // Determine if we can use the custom shader path.  All post-process
