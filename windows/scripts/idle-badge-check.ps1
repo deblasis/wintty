@@ -16,9 +16,9 @@
       - geometry: `header-rect` part "idle" returns the moon's screen
         rect only when the glyph is laid out, so hidden <=> no rect is a
         real signal in the horizontal strip;
-      - pixels: the moon's rect is cropped from a settled screenshot and
-        must hold glyph ink when idle and none when awake; the title
-        rect's mean luminance must drop when the row dims.
+      - pixels: the moon's rect is cropped from a screenshot and must
+        hold glyph ink while idle (awake there is no rect to sample); the
+        title rect's luminance spread must compress when the row dims.
 
     The vertical strips have no header-rect equivalent for the moon, so
     their legs capture settled screenshots for image analysis and keep
