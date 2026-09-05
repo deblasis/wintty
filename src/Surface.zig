@@ -3091,10 +3091,23 @@ fn maybeHandleBinding(
         leaf.flags,
         actions,
     });
+    // Set if we ran an action that closes the surface. Our "self" pointer
+    // and the action slice (owned by the keybind set) are both dead after
+    // that, so nothing may touch either of them.
+    var closed: bool = false;
     const performed = performed: {
         // If this is a global or all action, then we perform it on
         // the app and it applies to every surface.
         if (leaf.flags.global or leaf.flags.all) {
+            // These run on every surface, ours included, so decide before
+            // performing whether we are about to lose it.
+            for (actions) |action| {
+                if (action.closesSurface()) {
+                    closed = true;
+                    break;
+                }
+            }
+
             self.app.performAllChainedAction(
                 self.rt_app,
                 actions,
@@ -3108,28 +3121,33 @@ fn maybeHandleBinding(
         // actions perform.
         var performed: bool = false;
         for (actions) |action| {
-            if (self.performBindingAction(action)) |v| {
-                performed = performed or v;
-            } else |err| {
+            const action_performed = self.performBindingAction(action) catch |err| act: {
                 log.info(
                     "key binding action failed action={t} err={}",
                     .{ action, err },
                 );
+                break :act false;
+            };
+            performed = performed or action_performed;
+
+            // Stop the chain at a closing action. The config parser
+            // rejects a chain that continues past one, but a keybind set
+            // built any other way must not run into freed memory.
+            if (action.closesSurface()) {
+                closed = action_performed;
+                break;
             }
         }
 
         break :performed performed;
     };
 
-    if (performed) {
-        // If we performed an action and it was a closing action,
-        // our "self" pointer is not safe to use anymore so we need to
-        // just exit immediately.
-        for (actions) |action| if (closingAction(action)) {
-            log.debug("key binding is a closing binding, halting key event processing", .{});
-            return .closed;
-        };
+    if (closed) {
+        log.debug("key binding is a closing binding, halting key event processing", .{});
+        return .closed;
+    }
 
+    if (performed) {
         // If our action was "ignore" then we return the special input
         // effect of "ignored".
         for (actions) |action| if (action == .ignore) {
@@ -5799,20 +5817,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
     }
 
     return true;
-}
-
-/// Returns true if performing the given action result in closing
-/// the surface. This is used to determine if our self pointer is
-/// still valid after performing some binding action.
-fn closingAction(action: input.Binding.Action) bool {
-    return switch (action) {
-        .close_surface,
-        .close_window,
-        .close_tab,
-        => true,
-
-        else => false,
-    };
 }
 
 /// The portion of the screen to write for writeScreenFile.
