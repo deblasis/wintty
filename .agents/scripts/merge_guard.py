@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""The merge guard: squash-merge a PR and file the resignoff ceremony.
+"""The merge guard: squash-merge a PR on a signoff taken against the
+`windows` it lands on.
 
-Policy (issue #969, decided 2026-09-03): a green signoff does not block on
-head movement. When `windows` moved after the record was taken, merge
-anyway and carry the risk explicitly in a `resignoff-required` issue
-instead of re-gating inline. The guard is that ceremony: it refuses on a
-missing or bad record, measures what the branch gained since the record's
-base, merges, and files the issue with the delta and the risks in words.
+Policy (decided 2026-09-05, superseding #969's default): a green signoff
+vouches for a head against the `windows` it was taken on. When `windows`
+moved after the record was taken, the guard refuses and names the fix:
+rebase onto the current `windows`, run `just signoff` again, merge. That
+second signoff is cheap now - a leg whose inputs the rebase did not move
+carries its earlier green in seconds (leg_cache.py) - which is what made
+the #969 trade obsolete: when re-gating cost an hour, merging on the old
+green and carrying the risk in a `resignoff-required` issue was the
+lesser evil; when it costs a minute, the issue is debt for nothing. That
+ceremony survives only as an explicit override, `--carry-risk`, for an
+owner who has decided the debt is worth it this once; the guard then
+measures what the branch gained since the record's base, merges, and
+files the issue with the delta and the risks in words, exactly as before.
 
 Why a script and not a rule: enforcement has to work the way the
 signoff-per-head rule works. Agents read AGENTS.md and follow it because a
@@ -32,16 +40,18 @@ possibly-stale, which is printed loudly and carried into the filed issue.
 Refusals (nothing is mutated when one fires): no local record for the PR
 head, a red record, a deferred record the ledger no longer permits, a
 record whose file set or legs no longer match the PR (the same
-revalidation the hook does: window movement is forgiven, a record that no
-longer describes this PR is not), a checkout that is not this fork, a PR
-that is not open and mergeable or that does not target `windows`, and a
-window that cannot be measured. The policy forgives head movement only;
-it never forgives a bad or absent run.
+revalidation the hook does), a moved window without `--carry-risk`, a
+checkout that is not this fork, a PR that is not open and mergeable or
+that does not target `windows`, and a window that cannot be measured.
+Nothing forgives a bad or absent run.
 
 Modes:
-  <pr>             validate, squash-merge, read back the squash sha, verify
-                   it against a second fetch, file the resignoff-required
-                   issue when the window moved.
+  <pr>             validate, refuse a moved window, squash-merge, read
+                   back the squash sha, verify it against a second fetch.
+  --carry-risk <pr> the same, but a moved window merges anyway and files
+                   the resignoff-required issue with the delta (the #969
+                   ceremony); the owner's override, never an agent's
+                   default.
   --dry-run <pr>   print the resolved inputs, the delta, the risks and the
                    would-be issue body; mutate nothing. Also the recovery
                    preview for a PR that already merged (it accepts MERGED
@@ -459,10 +469,10 @@ def refusals(pr, rec, ledger, mode="merge"):
     (code, message) pairs. All of them are reported together, so one run
     tells the agent everything to fix rather than only the first thing.
     The scope revalidation is the hook's own two checks: a record whose
-    file set or legs no longer match the PR must be re-taken even though
-    the window policy forgives movement. The recovery modes forgive the
-    closed-state checks instead, because their whole point is a PR that
-    already merged."""
+    file set or legs no longer match the PR must be re-taken. The window
+    itself is judged by the caller once the delta is measured. The
+    recovery modes forgive the closed-state checks instead, because their
+    whole point is a PR that already merged."""
     out = []
     head = pr.get("headRefOid", "?")
     n = pr.get("number", "?")
@@ -477,8 +487,8 @@ def refusals(pr, rec, ledger, mode="merge"):
             failed = [k for k, v in (rec.get("steps") or {}).items() if v.get("rc") != 0]
             out.append(("signoff-red",
                         f"the signoff for {head[:10]} is red (failed: "
-                        f"{', '.join(failed) or 'unknown'}). The window policy forgives head "
-                        "movement, never a bad run; fix and rerun 'just signoff'."))
+                        f"{', '.join(failed) or 'unknown'}). Nothing forgives a bad run; "
+                        "fix and rerun 'just signoff'."))
         if rec.get("deferred"):
             blockers = gate_scope.ledger_blockers(ledger)
             if blockers:
@@ -495,8 +505,8 @@ def refusals(pr, rec, ledger, mode="merge"):
                 out.append(("signoff-stale",
                             f"the signoff for {head[:10]} was computed over a different file "
                             f"set than this PR reports ({len(rec_paths)} vs {len(pr_paths)} "
-                            "paths). Re-run 'just signoff'; the guard files the delta for "
-                            "branch movement, never for a PR that changed under its record."))
+                            "paths). Re-run 'just signoff'; a record must describe the PR "
+                            "it vouches for."))
             else:
                 required = set(gate_scope.required_legs(
                     pr_paths, justfile_legs=scope.get("justfile_legs")))
@@ -578,9 +588,18 @@ def file_issue(pr, rec, head, base, base_estimated, win, squash, delta, risks, n
     return 0
 
 
-def merge_flow(number, mode="merge", gh=None, git=None, sleep=time.sleep):
+def rebase_advice(number):
+    return (f"rebase onto {BASE_REF}, run 'just signoff' (a leg whose inputs the rebase "
+            f"did not move carries its green in seconds), then `just merge-checked {number}` "
+            f"again. To merge on the old green anyway and file the risk as debt, the "
+            f"owner's override is `just merge-checked {number} --carry-risk`.")
+
+
+def merge_flow(number, mode="merge", gh=None, git=None, sleep=time.sleep,
+               carry_risk=False):
     """The whole sequence: fetch, validate, measure, merge, read back,
-    verify, file. mode is "merge", "dry-run" or "file-only". Returns the
+    verify, file. mode is "merge", "dry-run" or "file-only"; carry_risk
+    lets a moved window merge and file instead of refusing. Returns the
     process exit code (see the module docstring). gh, git and sleep are
     injectable so the self-test can replay whole sessions without touching
     GitHub or the clock."""
@@ -683,6 +702,11 @@ def merge_flow(number, mode="merge", gh=None, git=None, sleep=time.sleep):
         if pr.get("state") == "MERGED":
             print("merge-guard: this PR is already MERGED; the body below is the recovery "
                   "body (file it with `--file-only`).")
+        elif not carry_risk:
+            print(f"merge-guard: the window has moved, so `just merge-checked {number}` would "
+                  f"REFUSE: {rebase_advice(number)}")
+            print("merge-guard: with --carry-risk it would merge with: gh pr merge "
+                  f"{number} --repo {REPO} --squash")
         else:
             print("merge-guard: would merge with: gh pr merge "
                   f"{number} --repo {REPO} --squash")
@@ -709,8 +733,19 @@ def merge_flow(number, mode="merge", gh=None, git=None, sleep=time.sleep):
         return file_issue(pr, rec, head, base, estimated, win, squash, delta, risks,
                           notes, gh)
 
-    # mode == "merge": the real thing. From here on a failure is a 1, not
-    # a 2, because the merge may already have landed.
+    # mode == "merge": the real thing. A moved window is refused here,
+    # after the delta is measured, so the refusal can say what moved.
+    if moved and not carry_risk:
+        print("merge-guard: refusing (nothing was mutated):")
+        print(f"merge-guard:   [window-moved] {len(delta['commits'])} commit(s) landed on "
+              f"{BASE_REF} since the record's base{est}, touching {len(delta['files'])} "
+              f"file(s); the green for {head[:10]} was taken against an older `windows`. "
+              + rebase_advice(number))
+        for c in delta["commits"]:
+            print(f"merge-guard:   {short(c['sha'])} {c['subject']} [{len(c['files'])} file(s)]")
+        return 2
+    # From here on a failure is a 1, not a 2, because the merge may
+    # already have landed.
     out = gh(["pr", "merge", str(number), "--repo", REPO, "--squash"])
     if out.returncode != 0:
         print(f"merge-guard: the merge command failed (rc={out.returncode}): "
@@ -968,7 +1003,7 @@ def self_test():
             fgh = FakeGh(pr)
             fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                            merge_base=base, commits=commits, all_files=all_files)
-            rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+            rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
             report(rc == 2 and not merged_calls(fgh) and f"[{label}]" in out,
                    "refuse-" + label, f"rc={rc}, merged={merged_calls(fgh)}")
 
@@ -979,7 +1014,7 @@ def self_test():
         fgh = FakeGh(make_pr(700, head))
         fgit = FakeGit(td, win, remote="https://github.com/other/fork.git",
                        merge_base=base, commits=commits, all_files=all_files)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         report(rc == 2 and not fgh.calls and "wrong-repo" in out
                and "clone deblasis/wintty" in out.lower(),
                "refuse-wrong-repo", f"rc={rc}, gh calls={len(fgh.calls)}")
@@ -990,7 +1025,7 @@ def self_test():
         fgh = FakeGh(make_pr(700, head, files=files_ok))
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=None, commits=commits, all_files=all_files)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         report(rc == 2 and not merged_calls(fgh) and not filed_calls(fgh)
                and "window-unknown" in out,
                "refuse-window-unknown", f"rc={rc}")
@@ -1000,7 +1035,7 @@ def self_test():
         td = tempfile.mkdtemp(dir=tmp)
         write_record(td, head, green)
         fgh = FakeGh(make_pr(700, head), merge_rc=0, fail_view=True)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=FakeGit(
+        rc, out = run_capture(merge_flow, 700, carry_risk=True, gh=fgh, git=FakeGit(
             td, win, remote="https://github.com/deblasis/wintty.git",
             merge_base=base, commits=commits, all_files=all_files))
         report(rc == 2 and not merged_calls(fgh) and not filed_calls(fgh),
@@ -1012,7 +1047,7 @@ def self_test():
         fgh = FakeGh(make_pr(700, head, files=files_ok))
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=win, commits=[], all_files=[])
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         report(rc == 0 and merged_calls(fgh) and not filed_calls(fgh)
                and "nothing to file" in out,
                "same-window", f"rc={rc}, merged={merged_calls(fgh)}, "
@@ -1024,7 +1059,7 @@ def self_test():
         fgh = FakeGh(make_pr(700, head, files=files_ok))
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=base, commits=commits, all_files=all_files)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         bodies = bodies_of(fgh)
         golden = (
             "Filed by the merge guard (issue #969): this PR merged on a green signoff whose "
@@ -1078,6 +1113,25 @@ def self_test():
         report(bool(filed) and "--label" in filed[0] and LABEL in filed[0],
                "issue-labelled", f"filed={len(filed)}")
 
+        # --- the same moved window WITHOUT --carry-risk: refused, nothing
+        #     merged, nothing filed, and the refusal names the rebase path
+        #     and the override.
+        td = tempfile.mkdtemp(dir=tmp)
+        write_record(td, head, green)
+        fgh = FakeGh(make_pr(700, head, files=files_ok))
+        fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
+                       merge_base=base, commits=commits, all_files=all_files)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        report(rc == 2 and not merged_calls(fgh) and not filed_calls(fgh)
+               and "[window-moved]" in out and "rebase onto" in out
+               and "--carry-risk" in out and "2 commit(s)" in out,
+               "moved-window-refused-by-default",
+               f"rc={rc}, merged={bool(merged_calls(fgh))}, filed={bool(filed_calls(fgh))}")
+        rc, out = run_capture(merge_flow, 700, mode="dry-run", gh=fgh, git=fgit)
+        report(rc == 0 and not merged_calls(fgh) and not filed_calls(fgh)
+               and "would REFUSE" in out and "with --carry-risk it would merge" in out,
+               "dry-run-moved-says-it-would-refuse", f"rc={rc}")
+
         # The backlog line is one list call before the create, and names
         # the oldest issue the filer saw (this one is not yet among them).
         fgh2 = FakeGh(make_pr(700, head, files=files_ok), backlog=[
@@ -1085,7 +1139,7 @@ def self_test():
             {"number": 965, "createdAt": "2026-09-01T10:00:00Z"}])
         fgit2 = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                         merge_base=base, commits=commits, all_files=all_files)
-        rc, _ = run_capture(merge_flow, 701, gh=fgh2, git=fgit2)
+        rc, _ = run_capture(merge_flow, 701, gh=fgh2, git=fgit2, carry_risk=True)
         bodies2 = bodies_of(fgh2)
         lists = [c for c in fgh2.calls if c[:2] == ["issue", "list"]]
         report(rc == 0 and len(lists) == 1 and bodies2
@@ -1154,7 +1208,7 @@ def self_test():
         fgh = FakeGh(make_pr(700, head, files=files_ok))
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=base, commits=commits, all_files=all_files)
-        rc, _ = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, _ = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         bodies = bodies_of(fgh)
         report(rc == 0 and bodies and "estimated at merge time" in bodies[0],
                "legacy-base-estimated", f"rc={rc}, filed={bool(bodies)}")
@@ -1174,7 +1228,7 @@ def self_test():
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=base, commits=commits, all_files=all_files,
                        fetch_ok=False)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         bodies = bodies_of(fgh)
         report(rc == 0 and "possibly stale" in out and bodies
                and "## Notes" in bodies[0] and "possibly stale" in bodies[0],
@@ -1188,7 +1242,7 @@ def self_test():
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=base, commits=commits, all_files=all_files,
                        squash_parent="f" * 40)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         bodies = bodies_of(fgh)
         report(rc == 0 and "moved in flight" in out and bodies
                and "moved in flight" in bodies[0],
@@ -1201,7 +1255,7 @@ def self_test():
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=base, commits=commits, all_files=all_files,
                        ancestor_ok=False)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         bodies = bodies_of(fgh)
         report(rc == 0 and "not an ancestor" in out and bodies
                and "not an ancestor" in bodies[0],
@@ -1218,7 +1272,7 @@ def self_test():
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=base, commits=many,
                        all_files=[f for c in many for f in c["files"]])
-        rc, _ = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, _ = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         bodies = bodies_of(fgh)
         bullets = [ln for ln in (bodies[0].splitlines() if bodies else [])
                    if ln.startswith("- `") and " change " in ln]
@@ -1294,7 +1348,7 @@ def self_test():
         fgh = FakeGh(make_pr(700, head, files=files_ok), merge_rc=1)
         fgit = FakeGit(td, win, remote="https://github.com/deblasis/wintty.git",
                        merge_base=base, commits=commits, all_files=all_files)
-        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit)
+        rc, out = run_capture(merge_flow, 700, gh=fgh, git=fgit, carry_risk=True)
         report(rc == 1 and not filed_calls(fgh) and "failed" in out,
                "merge-fails-loud", f"rc={rc}")
 
@@ -1335,7 +1389,7 @@ def main(argv):
     if len(positional) != 1 or not positional[0].isdigit():
         print(__doc__)
         return 2
-    return merge_flow(int(positional[0]), mode=mode)
+    return merge_flow(int(positional[0]), mode=mode, carry_risk="--carry-risk" in argv)
 
 
 if __name__ == "__main__":
