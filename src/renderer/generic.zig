@@ -1878,8 +1878,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
                 if (overlay_changed) self.cells_rebuilt = true;
 
-                // Update custom shader uniforms that depend on terminal state.
-                self.updateCustomShaderUniformsFromState();
+                // Update custom shader uniforms that depend on terminal
+                // state. These live in their own struct, outside the
+                // comparison above, so they report their own changes.
+                if (self.updateCustomShaderUniformsFromState()) {
+                    self.cells_rebuilt = true;
+                }
             }
 
             // Start the display link now that the rebuilt frame is ready.
@@ -2668,13 +2672,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Update custom shader uniforms that depend on terminal state.
         ///
         /// This should be called in `updateFrame` when terminal state changes.
-        fn updateCustomShaderUniformsFromState(self: *Self) void {
+        ///
+        /// Returns true if any of them moved. A shader with
+        /// `custom-shader-animation = false` has no animation wake to fall
+        /// back on, so a shader that draws from these would otherwise sit on
+        /// a stale frame until something else asked for a draw.
+        fn updateCustomShaderUniformsFromState(self: *Self) bool {
             // We only need to do this if we have custom shaders.
-            if (!self.has_custom_shaders) return;
+            if (!self.has_custom_shaders) return false;
 
             // Only update when terminal state is dirty.
-            if (self.terminal_state.dirty == .false) return;
+            if (self.terminal_state.dirty == .false) return false;
 
+            const before = self.custom_shader_uniforms;
             const uniforms: *shadertoy.Uniforms = &self.custom_shader_uniforms;
             const colors: *const terminal.RenderState.Colors = &self.terminal_state.colors;
 
@@ -2755,6 +2765,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
             uniforms.previous_cursor_style = uniforms.current_cursor_style;
             uniforms.current_cursor_style = @as(i32, @intFromEnum(cursor_style));
+
+            return !std.meta.eql(before, uniforms.*);
         }
 
         /// Update per-frame custom shader uniforms.
