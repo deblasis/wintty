@@ -464,17 +464,26 @@ pub fn renderGlyph(
                 // The atlas is as large as the GPU can hold, so growing
                 // it any further would only produce a texture that fails
                 // to upload from now on. Start over with an empty atlas
-                // instead. Every cached render points into the old
-                // layout, so the cache goes with it; users of the atlas
-                // watch its generation to drop their own caches.
+                // instead. Every render cached in it points into the old
+                // layout, so those go with it; users of the atlas watch
+                // its generation to drop their own caches.
                 error.AtlasTooLarge => {
                     log.warn(
                         "atlas full at its maximum size, resetting size={} max={}",
                         .{ atlas.size, atlas.max_size },
                     );
                     atlas.reset();
+
+                    // Our own slot goes first: its value is still
+                    // undefined, so the sweep below must not read it.
+                    self.glyphs.removeByPtr(gop.key_ptr);
                     slot_valid = false;
-                    self.glyphs.clearRetainingCapacity();
+
+                    // The other atlas was not reset, so its renders stay
+                    // valid. If we cannot afford the list of keys to drop
+                    // we drop everything, which is correct, just wasteful.
+                    self.dropRenders(alloc, p) catch
+                        self.glyphs.clearRetainingCapacity();
                 },
 
                 else => |e| return e,
@@ -506,6 +515,29 @@ pub fn renderGlyph(
 
     gop.value_ptr.* = render;
     return gop.value_ptr.*;
+}
+
+/// Drop every cached render that lives in the atlas for presentation `p`.
+///
+/// Removing an entry can move a later one into a slot the iterator has
+/// already passed, so the keys are collected before any of them is removed.
+///
+/// Caller must hold the write lock.
+fn dropRenders(
+    self: *SharedGrid,
+    alloc: Allocator,
+    p: Presentation,
+) Allocator.Error!void {
+    var stale: std.ArrayList(GlyphKey) = .empty;
+    defer stale.deinit(alloc);
+
+    var it = self.glyphs.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.presentation != p) continue;
+        try stale.append(alloc, entry.key_ptr.*);
+    }
+
+    for (stale.items) |stale_key| _ = self.glyphs.remove(stale_key);
 }
 
 const CodepointKey = struct {
@@ -684,6 +716,19 @@ test "renderGlyph resets the Atlas when it can no longer grow" {
 
     const render_opts: RenderOptions = .{ .grid_metrics = grid.metrics };
 
+    // A cached render that lives in the color atlas, which the grayscale
+    // reset must not touch. Faked so this doesn't depend on an emoji font
+    // being installed.
+    const color_key: GlyphKey = .{
+        .index = (try grid.getIndex(alloc, 'A', .regular, null)).?,
+        .glyph = std.math.maxInt(u32),
+        .opts = render_opts,
+    };
+    try grid.glyphs.put(alloc, color_key, .{
+        .glyph = std.mem.zeroes(Glyph),
+        .presentation = .emoji,
+    });
+
     // Render visible ASCII. Each render must succeed: once the atlas fills up
     // it is emptied and started over rather than failing from here on.
     var rendered: usize = 0;
@@ -703,6 +748,9 @@ test "renderGlyph resets the Atlas when it can no longer grow" {
     // The atlas was emptied at least once and the stale renders went with it.
     try testing.expect(grid.atlas_grayscale.generation.load(.monotonic) > 0);
     try testing.expect(grid.glyphs.count() < rendered);
+
+    // The color atlas never reset, so its render is still cached.
+    try testing.expect(grid.glyphs.get(color_key) != null);
 }
 
 test "init error" {
