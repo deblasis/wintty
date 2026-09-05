@@ -895,6 +895,47 @@ inline fn surfaceMailbox(self: *Surface) Mailbox {
     };
 }
 
+/// Push a message to this surface's renderer mailbox, bounded.
+///
+/// Every historical push here used `.forever`, which trusts that the
+/// renderer thread always drains its mailbox. On the IOCP backend that
+/// trust has a hole (#1036): the Async wake can be lost in the window
+/// between a completion firing and its re-arm, and once the renderer is
+/// asleep with a full mailbox (64 messages, reached in practice by a
+/// hidden surface whose termio-driven wakes are gated) the pushing
+/// thread parks forever in the queue's not-full condition -- observed
+/// as the UI thread hanging inside `ghostty_surface_set_occlusion`.
+///
+/// The bounded retry closes the hole from the producer side: a timed-out
+/// push re-issues the wake (`queueRender`) before trying again, so a
+/// single lost notify costs one `renderer_push_timeout` stall and a
+/// retry, never a hang. `error.Timeout` callers keep the old
+/// fail-and-drop behavior for the one genuinely fatal case (the
+/// renderer thread is gone), which a `.forever` push would have turned
+/// into a deadlock anyway.
+const renderer_push_timeout_ns: u64 = 250 * std.time.ns_per_ms;
+
+fn pushRendererMailbox(self: *Surface, msg: rendererpkg.Message) rendererpkg.Thread.Mailbox.Size {
+    var attempts: usize = 0;
+    while (true) {
+        const size = self.renderer_thread.mailbox.push(
+            global.io(),
+            msg,
+            .{ .ns = renderer_push_timeout_ns },
+        );
+        if (size > 0) return size;
+
+        // The push timed out: the mailbox is full and the renderer has
+        // not drained it within the window, so assume the wake was lost
+        // and issue a fresh one before retrying. The notify below is
+        // also the recovery when the renderer is merely busy.
+        self.queueRender() catch {};
+
+        attempts += 1;
+        if (attempts >= 240) return 0; // ~1 minute: treat as dead consumer
+    }
+}
+
 /// Queue a message for the IO thread, taking ownership of `msg`.
 ///
 /// We centralize all our logic into this spot so we can intercept
@@ -980,7 +1021,7 @@ pub fn activateInspector(self: *Surface) !void {
     }
 
     // Notify our components we have an inspector active
-    _ = self.renderer_thread.mailbox.push(global.io(), .{ .inspector = true }, .{ .forever = {} });
+    _ = self.pushRendererMailbox(.{ .inspector = true });
     self.queueIo(.{ .inspector = true }, .unlocked);
 }
 
@@ -997,7 +1038,7 @@ pub fn deactivateInspector(self: *Surface) void {
     }
 
     // Notify our components we have deactivated inspector
-    _ = self.renderer_thread.mailbox.push(global.io(), .{ .inspector = false }, .{ .forever = {} });
+    _ = self.pushRendererMailbox(.{ .inspector = false });
     self.queueIo(.{ .inspector = false }, .unlocked);
 
     // Deinit the inspector
@@ -1550,14 +1591,10 @@ fn searchCallback_(
             const matches = try alloc.dupe(terminal.highlight.Flattened, matches_unowned);
             for (matches) |*m| m.* = try m.clone(alloc);
 
-            _ = self.renderer_thread.mailbox.push(
-                global.io(),
-                .{ .search_viewport_matches = .{
-                    .arena = arena,
-                    .matches = matches,
-                } },
-                .forever,
-            );
+            _ = self.pushRendererMailbox(.{ .search_viewport_matches = .{
+                .arena = arena,
+                .matches = matches,
+            } });
             try self.renderer_thread.wakeup.notify();
         },
 
@@ -1569,14 +1606,10 @@ fn searchCallback_(
                 const alloc = arena.allocator();
                 const match = try sel.highlight.clone(alloc);
 
-                _ = self.renderer_thread.mailbox.push(
-                    global.io(),
-                    .{ .search_selected_match = .{
-                        .arena = arena,
-                        .match = match,
-                    } },
-                    .forever,
-                );
+                _ = self.pushRendererMailbox(.{ .search_selected_match = .{
+                    .arena = arena,
+                    .match = match,
+                } });
 
                 // Send the selected index to the surface mailbox
                 _ = self.surfaceMailbox().push(
@@ -1585,11 +1618,7 @@ fn searchCallback_(
                 );
             } else {
                 // Reset our selected match
-                _ = self.renderer_thread.mailbox.push(
-                    global.io(),
-                    .{ .search_selected_match = null },
-                    .forever,
-                );
+                _ = self.pushRendererMailbox(.{ .search_selected_match = null });
 
                 // Reset the selected index
                 _ = self.surfaceMailbox().push(
@@ -1610,19 +1639,11 @@ fn searchCallback_(
 
         // When we quit, tell our renderer to reset any search state.
         .quit => {
-            _ = self.renderer_thread.mailbox.push(
-                global.io(),
-                .{ .search_selected_match = null },
-                .forever,
-            );
-            _ = self.renderer_thread.mailbox.push(
-                global.io(),
-                .{ .search_viewport_matches = .{
-                    .arena = .init(self.alloc),
-                    .matches = &.{},
-                } },
-                .forever,
-            );
+            _ = self.pushRendererMailbox(.{ .search_selected_match = null });
+            _ = self.pushRendererMailbox(.{ .search_viewport_matches = .{
+                .arena = .init(self.alloc),
+                .matches = &.{},
+            } });
             try self.renderer_thread.wakeup.notify();
 
             // Reset search totals in the surface
@@ -1906,7 +1927,7 @@ pub fn updateConfig(
     termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
     errdefer termio_config_ptr.deinit();
 
-    _ = self.renderer_thread.mailbox.push(global.io(), renderer_message, .{ .forever = {} });
+    _ = self.pushRendererMailbox(renderer_message);
     self.queueIo(.{
         .change_config = .{
             .alloc = self.alloc,
@@ -2543,14 +2564,14 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
 
     // Notify our render thread of the new font stack. The renderer
     // MUST accept the new font grid and deref the old.
-    _ = self.renderer_thread.mailbox.push(global.io(), .{
+    _ = self.pushRendererMailbox(.{
         .font_grid = .{
             .grid = font_grid,
             .set = &self.app.font_grid_set,
             .old_key = self.font_grid_key,
             .new_key = font_grid_key,
         },
-    }, .{ .forever = {} });
+    });
 
     // Once we've sent the key we can replace our key
     self.font_grid_key = font_grid_key;
@@ -3417,9 +3438,9 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
         } }, .unlocked);
     }
 
-    _ = self.renderer_thread.mailbox.push(global.io(), .{
+    _ = self.pushRendererMailbox(.{
         .visible = visible,
-    }, .{ .forever = {} });
+    });
 
     try self.queueRender();
 }
@@ -3438,9 +3459,9 @@ pub fn focusCallback(self: *Surface, focused: bool) !void {
     self.focused = focused;
 
     // Notify our render thread of the new state
-    _ = self.renderer_thread.mailbox.push(global.io(), .{
+    _ = self.pushRendererMailbox(.{
         .focus = focused,
-    }, .{ .forever = {} });
+    });
 
     if (!focused) unfocused: {
         // If we lost focus and we have a keypress, then we want to send a key
@@ -5734,7 +5755,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             .main => @panic("crash binding action, crashing intentionally"),
 
             .render => {
-                _ = self.renderer_thread.mailbox.push(global.io(), .{ .crash = {} }, .{ .forever = {} });
+                _ = self.pushRendererMailbox(.{ .crash = {} });
                 self.queueRender() catch |err| {
                     // Not a big deal if this fails.
                     log.warn("failed to notify renderer of crash message err={}", .{err});

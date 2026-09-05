@@ -64,6 +64,20 @@ cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
 cursor_c_cancel: xev.Completion = .{},
 
+/// Safety-net drain while the surface is not visible. Producers push
+/// to this thread's mailbox and then notify `wakeup`; on the IOCP
+/// backend that notify can be lost in the window between a completion
+/// firing and its re-arm (#1036), and while hidden nothing else ticks
+/// this loop (focus loss already canceled the cursor timer, and the
+/// termio's output-driven wakes are gated), so the mailbox can sit
+/// full with this thread asleep. This timer drains it every few
+/// seconds regardless of wakes, bounding any lost-notify stall. It is
+/// armed on the `.visible = false` transition and canceled on
+/// `.visible = true`.
+hidden_drain_h: xev.Timer,
+hidden_drain_c: xev.Completion = .{},
+hidden_drain_c_cancel: xev.Completion = .{},
+
 /// Incremental scrollback compression scheduling.
 compression: Compression = undefined,
 
@@ -156,6 +170,10 @@ pub fn init(
     var cursor_timer = try xev.Timer.init();
     errdefer cursor_timer.deinit();
 
+    // The safety-net drain for hidden surfaces (see hidden_drain_h).
+    var hidden_drain_timer = try xev.Timer.init();
+    errdefer hidden_drain_timer.deinit();
+
     // The mailbox for messaging this thread
     var mailbox = try Mailbox.create(alloc);
     errdefer mailbox.destroy(alloc);
@@ -169,6 +187,7 @@ pub fn init(
         .render_h = render_h,
         .draw_now = draw_now,
         .cursor_h = cursor_timer,
+        .hidden_drain_h = hidden_drain_timer,
         .surface = surface,
         .renderer = renderer_impl,
         .state = state,
@@ -193,6 +212,7 @@ pub fn deinit(self: *Thread) void {
     self.render_h.deinit();
     self.draw_now.deinit();
     self.cursor_h.deinit();
+    self.hidden_drain_h.deinit();
     if (comptime terminalpkg.compression_enabled)
         self.compression.deinit();
     self.loop.deinit();
@@ -351,6 +371,18 @@ fn drainMailbox(self: *Thread) !void {
                 // The wake is debounced by its own idle interval and
                 // no-ops when nothing changed.
                 self.compression.wake(self);
+
+                // The safety-net drain: while hidden, nothing else ticks
+                // this loop, so a lost wakeup notify (see hidden_drain_h)
+                // would leave producers blocked on a full mailbox. Arm
+                // the slow drain on the way in, cancel it on the way out
+                // -- the loop is properly awake again by the time a
+                // visible transition is processed.
+                if (v) {
+                    self.cancelHiddenDrain();
+                } else {
+                    self.armHiddenDrain();
+                }
 
                 // Note that we're explicitly today not stopping any
                 // cursor timers, draw timers, etc. These things have very
@@ -627,6 +659,78 @@ fn renderCallback(
 /// regain). Resetting a pending timer is always safe: every call
 /// recomputes the wake, so the deadline only ever moves toward the
 /// actual next wake.
+/// How often the hidden-surface safety-net drain fires. Slow on
+/// purpose: it exists to bound a lost-notify stall (#1036), not to do
+/// work -- anything real still arrives through the wakeup async, and
+/// the cost of a false alarm is one mailbox drain of an empty queue.
+const hidden_drain_interval_ms: u64 = 2_000;
+
+/// Arm the safety-net drain (idempotent): a repeating timer whose
+/// callback drains the mailbox and re-arms itself while the surface
+/// stays hidden. Called on the `.visible = false` transition.
+fn armHiddenDrain(self: *Thread) void {
+    if (self.hidden_drain_c.state() == .active) return;
+    self.hidden_drain_h.run(
+        &self.loop,
+        &self.hidden_drain_c,
+        hidden_drain_interval_ms,
+        Thread,
+        self,
+        hiddenDrainCallback,
+    );
+}
+
+/// Cancel an armed safety-net drain. Called on `.visible = true`; also
+/// safe on the teardown path where the loop is about to stop anyway
+/// (the timer deinit after thread join handles that case).
+fn cancelHiddenDrain(self: *Thread) void {
+    if (self.hidden_drain_c.state() != .active) return;
+    if (self.hidden_drain_c_cancel.state() == .active) return;
+    self.hidden_drain_h.cancel(
+        &self.loop,
+        &self.hidden_drain_c,
+        &self.hidden_drain_c_cancel,
+        Thread,
+        self,
+        hiddenDrainCancelCallback,
+    );
+}
+
+fn hiddenDrainCallback(
+    self_: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch |err| switch (err) {
+        // A reset supersedes this run; the replacing timer carries on.
+        error.Canceled => return .disarm,
+        else => unreachable,
+    };
+    const t = self_ orelse return .disarm;
+
+    // The drain itself. Whatever pushed messages our way gets them
+    // processed on this tick even if their notify was the one that got
+    // lost; the not-full condition signal inside the drain wakes any
+    // blocked producer immediately.
+    t.drainMailbox() catch |err|
+        log.err("error draining mailbox (hidden safety net) err={}", .{err});
+
+    // Stay armed while hidden; the .visible = true transition cancels.
+    if (!t.flags.visible) return .rearm;
+    return .disarm;
+}
+
+fn hiddenDrainCancelCallback(
+    _: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.CancelError!void,
+) xev.CallbackAction {
+    _ = r catch {};
+    return .disarm;
+}
+
 fn armAnimationTimer(self: *Thread) void {
     const wake = self.renderer.animationWake() orelse return;
     self.animation_wake = wake.kind;
