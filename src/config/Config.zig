@@ -5065,9 +5065,17 @@ pub fn finalize(self: *Config) !void {
     // Clamp our contrast
     self.@"minimum-contrast" = @min(21, @max(1, self.@"minimum-contrast"));
 
-    // Minimum window size
-    if (self.@"window-width" > 0) self.@"window-width" = @max(10, self.@"window-width");
-    if (self.@"window-height" > 0) self.@"window-height" = @max(4, self.@"window-height");
+    // Window size, in cells
+    if (self.@"window-width" > 0) self.@"window-width" = std.math.clamp(
+        self.@"window-width",
+        10,
+        max_window_size_cells,
+    );
+    if (self.@"window-height" > 0) self.@"window-height" = std.math.clamp(
+        self.@"window-height",
+        4,
+        max_window_size_cells,
+    );
 
     // When link-url-style = always, switch the default URL matcher's
     // highlight to .always so the URL matcher behaves like the OSC 8
@@ -11211,6 +11219,28 @@ test "default mouse-hide-while-typing is true" {
     defer cfg.deinit();
 
     try testing.expectEqual(true, cfg.@"mouse-hide-while-typing");
+}
+
+test "finalize clamps window size" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var reader: std.Io.Reader = .fixed(
+        \\window-width = 4000000000
+        \\window-height = 1
+        \\
+    );
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(
+        alloc,
+        &reader,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+    try cfg.finalize();
+
+    try testing.expectEqual(max_window_size_cells, cfg.@"window-width");
+    try testing.expectEqual(4, cfg.@"window-height");
 }
 
 test "clone preserves conditional state" {
