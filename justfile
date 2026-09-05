@@ -42,14 +42,6 @@ TEST_VERSION := "0.0.0-test"
 #   $env:WINTTY_TEST_SEED = '0x1234'; just test
 TEST_SEED := env_var_or_default("WINTTY_TEST_SEED", "0x2a")
 
-# The quotes around the version argument are load-bearing on Windows:
-# the recipe body runs under `pwsh -Command`, whose parser splits an
-# unquoted `-Dversion-string=0.0.0-test` at the first dot into
-# `-Dversion-string=0` and `.0.0-test`, and build.zig then fails with
-# InvalidVersion before compiling anything. `-Dapp-runtime=none` survives
-# only because it has no dot. test_reachability's self-test checks the
-# quotes are still there.
-
 # Run all Zig tests
 test: test-configure test-lib-vt test-full test-pkg test-reachability
 
@@ -65,6 +57,14 @@ test: test-configure test-lib-vt test-full test-pkg test-reachability
 test-configure:
     zig build --list-steps -Dapp-runtime=none
 
+# The quotes around the version argument are load-bearing on Windows:
+# the recipe body runs under `pwsh -Command`, whose parser splits an
+# unquoted `-Dversion-string=0.0.0-test` at the first dot into
+# `-Dversion-string=0` and `.0.0-test`, and build.zig then fails with
+# InvalidVersion before compiling anything. `-Dapp-runtime=none` survives
+# only because it has no dot. test_reachability's self-test checks the
+# quotes are still there.
+#
 # Test libghostty-vt (fastest feedback loop)
 test-lib-vt:
     zig build test-lib-vt "-Dversion-string={{TEST_VERSION}}" --seed {{TEST_SEED}} --summary all
@@ -1561,16 +1561,43 @@ gallery-lint:
 # and record a signoff for the current HEAD. The pr-gate merge hook requires
 # a green signoff for a PR's head commit before a merge is allowed, so local
 # runners are the merge authority while CI is unavailable.
+#
+# A leg whose inputs (its source trees, its recipes, its toolchain) already
+# have a green, observed by an earlier run in any worktree of this repo, is
+# carried into the record instead of run; the line says which commit that
+# green was observed at. `just leg-cache plan` shows the digests.
 signoff:
     python .agents/scripts/signoff.py
 
-# Show which legs a signoff would run for the current branch, and why.
+# Show which legs a signoff would run for the current branch, and why,
+# and which of them would be carried from an earlier green.
 signoff-plan:
     python .agents/scripts/signoff.py --plan
 
 # Run every leg regardless of what changed, and settle any deferred debt.
+# Legs still carry here; the debt settles only when HEAD contains
+# origin/windows (where the deferred merges live) and no carried green
+# was asserted rather than observed. For a full ladder that must execute
+# everything, see signoff-fresh.
 signoff-full:
     python .agents/scripts/signoff.py --full
+
+# Scoped like signoff, but nothing is carried: every selected leg runs,
+# and what it observes is recorded over the green it did not trust. For
+# a leg you suspect is flaky, or a green you no longer believe. Add
+# --full through the script for the fresh full ladder:
+#   python .agents/scripts/signoff.py --full --no-cache
+signoff-fresh:
+    python .agents/scripts/signoff.py --no-cache
+
+# The content-keyed green store behind signoff's carrying: `plan` (which
+# leg would carry, which input moved), `check` (exit 1 while any leg
+# would run), `snapshot FILE` (the toolchain identity, taken before a
+# long run), `record LEG --from-sha HEAD [--env-snapshot FILE]` (assert a
+# green you saw at exactly HEAD), `gc`. The args cross pwsh unquoted, so
+# a path with a space needs its own quotes inside: '"C:\a b\x.json"'.
+leg-cache *args:
+    python .agents/scripts/leg_cache.py {{args}}
 
 # Merge without running the legs, on the record. For batching a run of small
 # PRs behind one later ladder: the motivation is stored, the debt is capped,
@@ -1658,6 +1685,7 @@ gates-selftest: gitversion-selftest
     python .agents/scripts/workspace_guard.py --self-test
     python .agents/scripts/doctor.py --self-test
     python .agents/scripts/test_reachability.py --self-test
+    python .agents/scripts/leg_cache.py --self-test
     pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
 
