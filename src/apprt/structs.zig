@@ -65,7 +65,10 @@ pub const ClipboardContent = struct {
     data: [:0]const u8,
 };
 
-pub const ClipboardRequestType = enum(u8) {
+/// This is passed by value across the C ABI to the confirm_read_clipboard
+/// callback, where the embedder reads it as ghostty_clipboard_request_e.
+/// A plain C enum is int sized, so the tag type has to be too.
+pub const ClipboardRequestType = enum(c_int) {
     paste,
     osc_52_read,
     osc_52_write,
@@ -73,6 +76,12 @@ pub const ClipboardRequestType = enum(u8) {
     kitty_write,
     list,
 };
+
+comptime {
+    // The width has to hold in every build, not just the ones that run
+    // tests, because the callback signature is shared with C.
+    std.debug.assert(@sizeOf(ClipboardRequestType) == @sizeOf(c_int));
+}
 
 /// The result of starting a clipboard read request. This only reports
 /// facts about the clipboard; how each state is answered on the wire
@@ -243,3 +252,10 @@ pub const Selection = struct {
     offset_start: u32,
     offset_len: u32,
 };
+
+test "ClipboardRequestType matches the C enum width" {
+    try std.testing.expectEqual(
+        @sizeOf(c_int),
+        @sizeOf(ClipboardRequestType),
+    );
+}

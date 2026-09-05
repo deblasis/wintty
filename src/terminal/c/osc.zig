@@ -99,22 +99,24 @@ pub fn commandData(
         };
     }
 
+    const command = command_ orelse return false;
+    const out_ptr = out orelse return false;
+
     return switch (data) {
         .invalid => false,
         inline else => |comptime_data| commandDataTyped(
-            command_,
+            command,
             comptime_data,
-            @ptrCast(@alignCast(out)),
+            @ptrCast(@alignCast(out_ptr)),
         ),
     };
 }
 
 fn commandDataTyped(
-    command_: Command,
+    command: *osc.Command,
     comptime data: CommandData,
     out: *data.OutType(),
 ) bool {
-    const command = command_.?;
     switch (data) {
         .invalid => return false,
         .change_window_title_str => switch (command.*) {
@@ -222,4 +224,23 @@ test "prompt report" {
 
     var shell: [*:0]const u8 = undefined;
     try testing.expect(!commandData(cmd, .prompt_report_shell_str, @ptrCast(&shell)));
+}
+
+test "commandData rejects null arguments" {
+    const testing = std.testing;
+    var p: Parser = undefined;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &p,
+    ));
+    defer free(p);
+
+    next(p, '0');
+    next(p, ';');
+    next(p, 'a');
+    const cmd = end(p, 0);
+
+    var title: [*:0]const u8 = undefined;
+    try testing.expect(!commandData(cmd, .change_window_title_str, null));
+    try testing.expect(!commandData(null, .change_window_title_str, @ptrCast(&title)));
 }
