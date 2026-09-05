@@ -380,6 +380,14 @@ pub inline fn imageTextureOptions(
     };
 }
 
+/// The largest atlas texture this device can hold, in either dimension.
+///
+/// The atlas is an ordinary 2D texture here, so this is the device's 2D
+/// texture limit, already queried at init (see `queryMaxTextureSize`).
+pub fn maxTextureSize(self: *const Metal) u32 {
+    return self.max_texture_size;
+}
+
 /// Initializes a Texture suitable for the provided font atlas.
 pub fn initAtlasTexture(
     self: *const Metal,

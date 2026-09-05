@@ -95,10 +95,6 @@ const dirty_restart_rows_divisor = 4;
 /// (GL_MAX_RECTANGLE_TEXTURE_SIZE) and can be lower than the ordinary 2D
 /// texture limit. Starting here means no device ever gets an atlas it cannot
 /// hold, even before a renderer has attached.
-///
-/// Metal never calls `setMaxSize`: it cannot be built on the machine this
-/// branch is developed on, and 8192 is already its worst case, so it keeps
-/// the default until someone can compile and test the call.
 pub const default_max_size: u32 = 8192;
 
 pub const Format = enum(u8) {
