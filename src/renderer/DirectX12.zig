@@ -964,6 +964,13 @@ pub inline fn beginFrame(
 ///
 /// Nothing needs the repeat anyway: the frame we last presented stays
 /// composited by DWM until we present another one.
+///
+/// What is lost with it: that Present was the only thing checking for
+/// DXGI_ERROR_DEVICE_REMOVED on a surface with nothing to draw, so a TDR
+/// while the terminal sits idle is now noticed on the first frame after
+/// it rather than within a draw interval of the reset. Every path that
+/// touches the GPU still checks, so nothing is drawn against a lost
+/// device; the loss is only in how early we hear about it.
 pub fn presentLastTarget(self: *DirectX12) !void {
     _ = self;
 }
