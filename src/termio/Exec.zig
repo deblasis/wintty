@@ -4699,3 +4699,99 @@ test "ReadThread windows: the reader is interrupted until it acknowledges" {
     try testing.expect(!ReadThread.cancelUntilAcked(&stuck, 4));
     try testing.expectEqual(@as(usize, 4), stuck.cancels);
 }
+
+test "ReadThread windows: a blocked real read is interrupted and decoded" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    // The loops above run on fakes; this runs the two syscall wrappers
+    // they stand in for. An anonymous pipe with an idle writer parks a
+    // reader in ReadFile the same way an idle pty does, so the only way
+    // out is an interrupt from the thread calling threadExit.
+    var read_end: windows.HANDLE = undefined;
+    var write_end: windows.HANDLE = undefined;
+    if (windows.exp.kernel32.CreatePipe(
+        &read_end,
+        &write_end,
+        null,
+        0,
+    ) == windows.FALSE) return error.CreatePipeFailed;
+    defer windows.CloseHandle(read_end);
+    var write_open = true;
+    defer if (write_open) windows.CloseHandle(write_end);
+
+    var quit: ReadThread.Quit = .{};
+
+    // Wraps the real reader so the test can see which outcome each read
+    // decoded, and when the thread is parked in one.
+    const Ops = struct {
+        inner: ReadThread.WindowsReader,
+        in_read: std.atomic.Value(bool) = .init(false),
+        aborts: usize = 0,
+
+        fn threadMain(self: *@This()) void {
+            defer self.inner.quit.ack();
+            ReadThread.readLoopWindows(self);
+        }
+
+        fn read(self: *@This()) ReadThread.WindowsRead {
+            self.in_read.store(true, .release);
+            const result = self.inner.read();
+            switch (result) {
+                .aborted => self.aborts += 1,
+                else => {},
+            }
+            return result;
+        }
+
+        fn process(_: *@This(), _: []const u8) void {
+            // Nobody writes to the pipe, so no read returns data and the
+            // reader's terminal pointer is never followed.
+            unreachable;
+        }
+
+        fn quitRequested(self: *const @This()) bool {
+            return self.inner.quitRequested();
+        }
+    };
+
+    var ops: Ops = .{ .inner = .{
+        .fd = read_end,
+        .io = undefined,
+        .quit = &quit,
+    } };
+
+    var cancel: ReadThread.WindowsCancel = .{
+        .fd = read_end,
+        .quit = &quit,
+    };
+
+    // No read has been issued yet, so this is the NOT_FOUND path. It has
+    // to be swallowed, and must not be mistaken for an acknowledgement.
+    cancel.cancel();
+    try testing.expect(!cancel.acked());
+
+    const thread = try std.Thread.spawn(.{}, Ops.threadMain, .{&ops});
+    while (!ops.in_read.load(.acquire)) std.Thread.yield() catch {};
+
+    quit.request();
+    const acked = ReadThread.cancelUntilAcked(
+        &cancel,
+        ReadThread.cancel_max_attempts,
+    );
+
+    // A failing assertion must not hang the suite in join(), so if the
+    // interrupt never landed give the reader the EOF it would otherwise
+    // wait for forever.
+    if (!acked) {
+        windows.CloseHandle(write_end);
+        write_open = false;
+    }
+    thread.join();
+    try testing.expect(acked);
+
+    // The read that was parked came back as OPERATION_ABORTED rather
+    // than an error or a spurious EOF, and the loop then saw the quit.
+    try testing.expect(ops.aborts >= 1);
+}
