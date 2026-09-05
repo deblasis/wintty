@@ -1803,11 +1803,13 @@ pub const StreamHandler = struct {
         // return early if there is nothing to do
         if (requests.count() == 0) return;
 
-        var buffer: [1024]u8 = undefined;
-        var fba: std.heap.FixedBufferAllocator = .init(&buffer);
-        const alloc = fba.allocator();
-
-        var response: std.Io.Writer.Allocating = .init(alloc);
+        // One OSC can carry an unbounded number of queries, and each one
+        // adds around thirty bytes of reply. A fixed reply buffer meant a
+        // long enough burst of queries failed the whole sequence partway
+        // through: no reply at all, after any sets in the same OSC had
+        // already been applied.
+        var response: std.Io.Writer.Allocating = .init(self.alloc);
+        defer response.deinit();
 
         var it = requests.constIterator(0);
         while (it.next()) |req| {
@@ -2430,4 +2432,56 @@ test "pwd: the first report of a session is not swallowed by the spawn cwd" {
     const counts = h.drain();
     try testing.expectEqual(@as(usize, 1), counts.pwd);
     try testing.expectEqual(@as(usize, 1), counts.title);
+}
+
+test "color operation: every query in one OSC is answered" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var term = try terminal.Terminal.init(global.io(), testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(testing.allocator);
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.terminal = &term;
+    handler.termio_mailbox = &mailbox;
+    handler.renderer_state = &renderer_state;
+    handler.osc_color_report_format = .@"16-bit";
+
+    // Enough replies to overflow any fixed reply buffer. A program can
+    // legitimately query the whole palette in one sequence.
+    const count = 100;
+    var requests: terminal.osc.color.List = .{};
+    defer requests.deinit(testing.allocator);
+    for (0..count) |i| try requests.append(testing.allocator, .{
+        .query = .{ .palette = @intCast(i) },
+    });
+
+    try handler.colorOperation(.osc_4, &requests, .st);
+
+    const response = mailbox.spsc.queue.pop(global.io());
+    try testing.expect(response != null);
+    const msg = response.?;
+    defer msg.deinit();
+    switch (msg) {
+        .write_alloc => |v| try testing.expectEqual(
+            @as(usize, count),
+            std.mem.count(u8, v.data, "\x1b]4;"),
+        ),
+        else => try testing.expect(false),
+    }
 }
