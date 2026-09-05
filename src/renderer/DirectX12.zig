@@ -6,6 +6,7 @@ pub const DirectX12 = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const configpkg = @import("../config.zig");
@@ -96,6 +97,12 @@ surface: ?Surface = null,
 /// which hands it to the new Device; `deinit` closes it if a rebuild
 /// never succeeds.
 reserved_surface_handle: ?std.os.windows.HANDLE = null,
+
+/// Shared-texture mode: the version the last device published, latched
+/// at teardown so the replacement continues counting from it. Survives
+/// failed rebuild attempts, unlike anything on the device itself. Zero
+/// means no device has published one yet.
+shared_texture_version: u64 = 0,
 
 /// DX12 device owning command queue, fence, and swap chain.
 dev: ?device.Device = null,
@@ -271,7 +278,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
 pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !void {
     self.surface = surface;
 
-    self.dev = device.Device.init(surface, .{
+    var dev = device.Device.init(surface, .{
         .width = width,
         .height = height,
         .surface_handle = self.reserved_surface_handle,
@@ -279,6 +286,13 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         log.err("DX12 device init failed: {}", .{err});
         return error.DeviceInitFailed;
     };
+    // Continue the shared-texture version count from the device this one
+    // replaces, before anyone can snapshot it. No lock: the device is not
+    // published yet.
+    if (dev.shared_texture) |*st| {
+        if (self.shared_texture_version != 0) st.version = self.shared_texture_version + 1;
+    }
+    self.dev = dev;
     errdefer {
         // A reused surface handle stays ours until this whole build
         // lands: take it back before Device.deinit would close it, or a
@@ -309,6 +323,7 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
     }
     errdefer if (self.swap_chain3) |sc3| {
         _ = sc3.Release();
+        self.swap_chain3 = null;
     };
 
     // Create RTV descriptor heap for back buffers plus custom shader
@@ -439,7 +454,10 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
     }
     errdefer {
         for (&self.gpu_frames) |*gf| {
-            if (gf.*) |*f| f.deinit();
+            if (gf.*) |*f| {
+                f.deinit();
+                gf.* = null;
+            }
         }
     }
 
@@ -509,12 +527,10 @@ const SurfaceHandleDisposition = enum {
 /// stays usable afterwards (unlike `deinit`) so `recoverDevice` can build
 /// again into it.
 fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
-    // Take the device out of the struct first, so the apprt-thread
-    // exports that read `dev` (swap chain, surface handle, shared-texture
-    // snapshot) see "no device" for the whole teardown instead of a
-    // Device that is being released under them.
-    var dev_opt = self.dev;
-    self.dev = null;
+    // The apprt-thread exports that read `dev` (device, swap chain,
+    // surface handle, shared-texture snapshot) take the renderer's draw
+    // mutex, and every caller of this function holds it, so nothing
+    // observes the Device while it is being released.
 
     // Wait for GPU to finish before releasing anything. Everything below
     // final-releases resources directly rather than retiring them, so a
@@ -527,15 +543,27 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
     // retirement queue still has to be emptied HERE, before the heaps
     // below are destroyed: retired descriptor slots point at those heaps,
     // and Device.deinit would otherwise release them into freed memory.
-    if (dev_opt) |*dev_ptr| {
-        if (dev_ptr.removed()) {
-            log.warn("skipping GPU drain before teardown: device removed", .{});
-            dev_ptr.retirement.drainAll();
-        } else {
+    // Whether the device is gone is decided once, AFTER the wait: a TDR
+    // that lands during the wait makes the Signal fail and leaves the
+    // queue full, and the same removal check inside Device.deinit would
+    // then drain it against heaps this function has already freed.
+    if (self.dev) |*dev_ptr| {
+        if (!dev_ptr.removed()) {
             dev_ptr.waitForGpu() catch |err| {
                 log.err("waitForGpu before renderer teardown failed: {}", .{err});
             };
         }
+        if (dev_ptr.removed()) {
+            log.warn("skipping GPU drain before teardown: device removed", .{});
+            dev_ptr.retirement.drainAll();
+        }
+
+        // Shared-texture mode: remember where the version got to, so a
+        // rebuilt device continues the count instead of restarting at 1
+        // (which a consumer keyed on "higher than last" would ignore).
+        dev_ptr.shared_texture_mutex.lockUncancelable(global.io());
+        defer dev_ptr.shared_texture_mutex.unlock(global.io());
+        if (dev_ptr.shared_texture) |st| self.shared_texture_version = st.version;
     }
 
     // Release init command list if never flushed (error during init).
@@ -548,7 +576,10 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
         self.init_command_allocator = null;
     }
     self.pending_command_list = null;
-    self.pending_complete = null;
+    // A deferred frameCompleted owes the swap chain a semaphore permit;
+    // dropping one here would deadlock the next SwapChain.deinit. It is
+    // always consumed by drawFrameEnd before anyone can reach this.
+    assert(self.pending_complete == null);
     self.pending_frame_index = 0;
 
     for (&self.gpu_frames) |*gf| {
@@ -564,7 +595,7 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
             bb.* = null;
         }
     }
-    self.rtv_handles = .{ .{ .ptr = 0 }, .{ .ptr = 0 }, .{ .ptr = 0 } };
+    self.rtv_handles = @splat(.{ .ptr = 0 });
     self.shared_rtv = null;
     self.rtv_base = 0;
 
@@ -591,12 +622,13 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
         self.swap_chain3 = null;
     }
 
-    if (dev_opt) |*dev_ptr| {
+    if (self.dev) |*dev_ptr| {
         if (handle == .keep_surface_handle) {
             self.reserved_surface_handle = dev_ptr.swap_chain_surface_handle;
             dev_ptr.swap_chain_surface_handle = null;
         }
         dev_ptr.deinit();
+        self.dev = null;
     }
 }
 
@@ -637,23 +669,13 @@ pub fn recoverDevice(self: *DirectX12) !void {
         surface.shared_texture = .{ .width = width, .height = height };
     }
 
-    // Carry the shared-texture version across the rebuild: a fresh Device
-    // starts it at 1, and a consumer that only re-opens on a higher number
-    // would keep the dead handles forever.
-    const last_version: u64 = if (self.dev) |*dev_ptr| version: {
-        const st = dev_ptr.shared_texture orelse break :version 0;
-        break :version st.version;
-    } else 0;
+    if (surface == .composition) {
+        log.warn("composition-mode swap chain recreated; the embedder still holds the old one and cannot be told", .{});
+    }
 
     if (self.dev != null) self.deinitGpu(.keep_surface_handle);
 
     try self.initGpu(surface, width, height);
-    if (last_version != 0) {
-        const dev_ptr = &self.dev.?;
-        dev_ptr.shared_texture_mutex.lockUncancelable(global.io());
-        defer dev_ptr.shared_texture_mutex.unlock(global.io());
-        if (dev_ptr.shared_texture) |*st| st.version = last_version + 1;
-    }
     self.device_lost = false;
     log.info("DX12 device recreated after loss ({}x{})", .{ width, height });
 }
@@ -706,6 +728,9 @@ pub fn flushInitCommands(self: *DirectX12) void {
 /// and every frame's resources at teardown.
 pub fn waitGpu(self: *DirectX12) void {
     if (self.dev) |*dev_ptr| {
+        // A removed device cannot signal and is not executing anything;
+        // the caller is about to rebuild it.
+        if (dev_ptr.removed()) return;
         dev_ptr.waitForGpu() catch |err| {
             log.err("waitForGpu failed: {}; GPU state may still be in use", .{err});
         };
@@ -1010,7 +1035,11 @@ pub inline fn beginFrame(
             // counter so consumers re-open their handle.
             dev_ptr.recreateSharedTexture(want.width, want.height) catch |err| {
                 log.err("recreateSharedTexture failed: {}", .{err});
-                api.device_lost = true;
+                // Only a removed device earns the recovery path: it tears
+                // down without a GPU drain, which is wrong for a live
+                // device that merely failed to allocate. That one just
+                // retries the resize next frame.
+                if (dev_ptr.removed()) api.handleDeviceRemoved();
                 return error.ResizeFailed;
             };
             // Refresh the single RTV to point at the new resource.

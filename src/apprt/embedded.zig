@@ -2750,10 +2750,14 @@ pub const CAPI = struct {
     /// null on non-DX12 builds or before the device finishes init.
     export fn ghostty_surface_get_d3d12_device(surface: *Surface) ?*anyopaque {
         if (comptime builtin.os.tag != .windows) return null;
-        const api = surface.core_surface.renderer.api;
+        const r = &surface.core_surface.renderer;
         // Only the DX12 renderer has a `dev` field holding an ID3D12Device.
-        if (comptime !@hasField(@TypeOf(api), "dev")) return null;
-        const dev = api.dev orelse return null;
+        if (comptime !@hasField(@TypeOf(r.api), "dev")) return null;
+        // Device-loss recovery replaces `dev` on the renderer thread under
+        // the draw mutex; reading it anywhere else needs the same lock.
+        r.draw_mutex.lockUncancelable(global.io());
+        defer r.draw_mutex.unlock(global.io());
+        const dev = r.api.dev orelse return null;
         return @ptrCast(dev.device);
     }
 
@@ -2763,9 +2767,12 @@ pub const CAPI = struct {
     /// Returns null on non-DX12 or before the swap chain is created.
     export fn ghostty_surface_get_swap_chain(surface: *Surface) ?*anyopaque {
         if (comptime builtin.os.tag != .windows) return null;
-        const api = surface.core_surface.renderer.api;
-        if (comptime !@hasField(@TypeOf(api), "dev")) return null;
-        const dev = api.dev orelse return null;
+        const r = &surface.core_surface.renderer;
+        if (comptime !@hasField(@TypeOf(r.api), "dev")) return null;
+        // See ghostty_surface_get_d3d12_device for why the lock.
+        r.draw_mutex.lockUncancelable(global.io());
+        defer r.draw_mutex.unlock(global.io());
+        const dev = r.api.dev orelse return null;
         const sc = dev.swap_chain orelse return null;
         return @ptrCast(sc);
     }
@@ -2777,9 +2784,12 @@ pub const CAPI = struct {
     /// SwapChainPanel mode.
     export fn ghostty_surface_get_swap_chain_handle(surface: *Surface) ?*anyopaque {
         if (comptime builtin.os.tag != .windows) return null;
-        const api = surface.core_surface.renderer.api;
-        if (comptime !@hasField(@TypeOf(api), "dev")) return null;
-        const dev = api.dev orelse return null;
+        const r = &surface.core_surface.renderer;
+        if (comptime !@hasField(@TypeOf(r.api), "dev")) return null;
+        // See ghostty_surface_get_d3d12_device for why the lock.
+        r.draw_mutex.lockUncancelable(global.io());
+        defer r.draw_mutex.unlock(global.io());
+        const dev = r.api.dev orelse return null;
         return @ptrCast(dev.swap_chain_surface_handle orelse return null);
     }
 
@@ -2801,10 +2811,15 @@ pub const CAPI = struct {
         out: *SharedTextureSnapshotC,
     ) bool {
         if (comptime builtin.os.tag != .windows) return false;
-        const api_ptr = &surface.core_surface.renderer.api;
-        if (comptime @TypeOf(api_ptr.*) != renderer.DirectX12) return false;
-        if (api_ptr.dev == null) return false;
-        const dev = &api_ptr.dev.?;
+        const r = &surface.core_surface.renderer;
+        if (comptime @TypeOf(r.api) != renderer.DirectX12) return false;
+        // See ghostty_surface_get_d3d12_device for why the lock. It also
+        // means "false" here can mean "the device is being rebuilt": poll
+        // again rather than treating it as a mode change.
+        r.draw_mutex.lockUncancelable(global.io());
+        defer r.draw_mutex.unlock(global.io());
+        if (r.api.dev == null) return false;
+        const dev = &r.api.dev.?;
 
         dev.shared_texture_mutex.lockUncancelable(global.io());
         defer dev.shared_texture_mutex.unlock(global.io());

@@ -1744,7 +1744,7 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
 }
 
 test "DirectX12: rebuilds every device-bound object after the device is removed" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const DirectX12 = @import("../DirectX12.zig");
 

@@ -1981,6 +1981,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.reinitialize_shaders = false;
                 self.api.waitGpu();
                 self.shaders.deinit(self.alloc);
+                // Deinit-safe while the rebuild below can still fail
+                // (a device removed mid-reload fails every PSO).
+                self.shaders = .{};
                 try self.initShaders(.config_reload);
             }
 
@@ -2309,9 +2312,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// How long to leave a device alone after a rebuild fails before
         /// trying again. A driver upgrade takes seconds to install; a
         /// retry per draw would only fill the log.
-        const device_recovery_retry_delay: std.Io.Duration = .fromNanoseconds(
-            std.time.ns_per_s,
-        );
+        const device_recovery_retry_delay: std.Io.Duration = .fromSeconds(1);
 
         /// Rebuild everything on a replacement GPU device after the old
         /// one was lost. Caller holds the draw mutex.
@@ -2345,6 +2346,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // into a queue the device owns. Each field is left in a
                 // state that is safe to deinit again, because a tab can
                 // close while the rebuild is still failing.
+                //
+                // The drain is a no-op on a removed device. It is here for
+                // a backend that flagged the device lost while it was
+                // still executing: shaders are not retired, only released.
+                self.api.waitGpu();
                 if (self.swap_chain) |*sc| sc.deinit();
                 self.swap_chain = null;
                 self.shaders.deinit(self.alloc);
@@ -2371,6 +2377,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // From here the device is good; only the rebuild on top of it
             // can still fail, and a retry must start from bare shaders.
+            // A failed rebuild retires the descriptor slots of whatever
+            // it did build; on a live device only a drain hands them
+            // back, and without it each retry eats another six.
+            errdefer self.api.waitGpu();
             try self.initShaders(.device_recovered);
             errdefer {
                 self.shaders.deinit(self.alloc);

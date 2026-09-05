@@ -1291,7 +1291,9 @@ GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t)
 // Returns the ID3D12Device* used by this surface's renderer. Shared texture
 // consumers should call OpenSharedResource1 on this device to avoid
 // cross-device synchronization issues. Returns NULL on non-DX12 builds or if
-// the renderer device is not yet initialized.
+// the renderer device is not yet initialized. Device-removed recovery
+// replaces the device: do not cache this pointer across a `version` change
+// in ghostty_surface_shared_texture_s.
 GHOSTTY_API void* ghostty_surface_get_d3d12_device(ghostty_surface_t);
 // Returns the DirectComposition surface handle backing this surface's swap
 // chain in SwapChainPanel mode. Bind it to a WinUI 3 SwapChainPanel via
@@ -1322,7 +1324,8 @@ typedef struct {
 
   // Fence value ghostty will signal after completing the most recently
   // submitted frame. Consumers Wait for this value on their own
-  // command queue before sampling the resource.
+  // command queue before sampling the resource. Restarts from zero on
+  // device-removed recovery, together with the new `fence_handle`.
   uint64_t fence_value;
 
   // Pixel dimensions of the shared resource. These match the size the
