@@ -1755,6 +1755,7 @@ test "DirectX12: rebuilds every device-bound object after the device is removed"
         return error.SkipZigTest;
     defer api.deinit();
     api.flushInitCommands();
+    const version_before = api.dev.?.shared_texture.?.version;
 
     try removeDevice(api.dev.?.device);
     // What handleDeviceRemoved records when Present or Signal reports it.
@@ -1766,7 +1767,10 @@ test "DirectX12: rebuilds every device-bound object after the device is removed"
     try std.testing.expect(!api.deviceLost());
     const dev = &(api.dev orelse return error.NoDevice);
     try std.testing.expect(!dev.removed());
-    try std.testing.expect(dev.shared_texture != null);
+    // A consumer re-opens the shared handles on a version it has not
+    // seen; a fresh device would have restarted the count at 1.
+    const st = dev.shared_texture orelse return error.NoSharedTexture;
+    try std.testing.expectEqual(version_before + 1, st.version);
     try std.testing.expect(api.srv_heap != null);
     try std.testing.expect(api.rtv_heap != null);
     try std.testing.expect(api.sampler_heap != null);

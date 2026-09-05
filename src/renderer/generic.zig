@@ -1236,6 +1236,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Must be called on the render thread.
         pub fn animationWake(self: *const Self) ?AnimationWake {
+            // A device rebuild that failed is retried from a draw, and
+            // nothing else guarantees one on an idle surface. Until the
+            // retry lands no other wake can paint anything, so it wins
+            // outright. An update wake, so the pass that re-uploads the
+            // images dropped with the device runs on the same tick.
+            if (self.device_recovery_retry_at) |at| {
+                const now: std.Io.Timestamp = .now(global.io(), .awake);
+                const remaining_ns = now.durationTo(at).nanoseconds;
+                const remaining_ms: u64 = if (remaining_ns > 0)
+                    @intCast(@divTrunc(remaining_ns, std.time.ns_per_ms))
+                else
+                    0;
+                return .{
+                    .delay_ms = @max(remaining_ms, draw_interval_ms),
+                    .kind = .update,
+                };
+            }
+            if (self.images_lost) {
+                return .{ .delay_ms = draw_interval_ms, .kind = .update };
+            }
+
             // Custom shaders animate by redrawing on a fixed cadence,
             // gated by configuration and focus.
             const shader_delay: ?u64 = shader: {
@@ -2402,6 +2423,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.device_recovery_pending = false;
             self.device_recovery_retry_at = null;
+            // The shaders were just built from the current config; a
+            // reload queued before the loss has nothing left to redo.
+            self.reinitialize_shaders = false;
             // New frame states start with 1x1 targets and empty buffers;
             // the draw path below resizes and resyncs them, but nothing
             // in it forces a draw when the cells are unchanged, and
