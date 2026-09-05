@@ -950,22 +950,29 @@ pub inline fn beginFrame(
     return frame;
 }
 
+/// Show the last frame again, for a wakeup that produced nothing new.
+/// Nothing to do here, the same as Metal.
+///
+/// Presenting without rendering does not repeat the last frame. `Present`
+/// on a flip-model chain queues the *current back buffer*, which with three
+/// buffers is the one last written three presents ago, so the screen jumps
+/// back to a stale frame (or to whatever an untouched buffer holds, early
+/// on). It also advances the swap chain's back buffer index without the
+/// renderer advancing its own frame state, which leaves the two paired up
+/// differently from then on -- see the note in directx12/Texture.zig about
+/// staging buffers outliving the wait that was supposed to cover them.
+///
+/// Nothing needs the repeat anyway: the frame we last presented stays
+/// composited by DWM until we present another one.
+///
+/// What is lost with it: that Present was the only thing checking for
+/// DXGI_ERROR_DEVICE_REMOVED on a surface with nothing to draw, so a TDR
+/// while the terminal sits idle is now noticed on the first frame after
+/// it rather than within a draw interval of the reset. Every path that
+/// touches the GPU still checks, so nothing is drawn against a lost
+/// device; the loss is only in how early we hear about it.
 pub fn presentLastTarget(self: *DirectX12) !void {
-    // Called when no redraw is needed -- re-present the current frame.
-    // No new GPU work is submitted, so the existing fence values remain
-    // valid and the next beginFrame will wait correctly.
-    if (self.swap_chain3) |sc3| {
-        // Sync interval 1: see drawFrameEnd for the rationale.
-        const hr = sc3.Present(1, 0);
-        if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
-            self.handleDeviceRemoved();
-            return error.PresentFailed;
-        }
-        if (com.FAILED(hr)) {
-            log.err("presentLastTarget failed: 0x{x}", .{@as(u32, @bitCast(hr))});
-            return error.PresentFailed;
-        }
-    }
+    _ = self;
 }
 
 fn handleDeviceRemoved(self: *DirectX12) void {

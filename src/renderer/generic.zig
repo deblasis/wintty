@@ -152,9 +152,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells goes into a separate shader.
         cells: cellpkg.Contents,
 
-        /// Set to true after rebuildCells is called. This can be used
-        /// to determine if any possible changes have been made to the
-        /// cells for the draw call.
+        /// Set when an update produced something the last drawn frame does
+        /// not already show: a rebuilt row, a different cursor glyph, or a
+        /// changed uniform. Cleared by the draw that consumes it. An update
+        /// that finds none of that leaves it alone, which is what lets a
+        /// wakeup with no work skip its frame.
         cells_rebuilt: bool = false,
 
         /// The atlas generations we last built cells against. A generation
@@ -192,6 +194,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         custom_shader_failure: ?renderer.CustomShaderFailure = null,
 
         /// The current GPU uniform values.
+        ///
+        /// `updateFrame` snapshots these around its critical section and
+        /// asks for a draw if anything moved, so a write from inside there
+        /// takes care of itself. A write from anywhere else must be paired
+        /// with `markDirty()` (or happen on a frame that resizes, which
+        /// draws regardless), or the new value will sit in this struct with
+        /// nothing on screen to show for it. The current outside writers are
+        /// `changeConfig` and `setFontGrid` (both call `markDirty`) and
+        /// `setScreenSize` plus `drawFrame`'s own resize branch (both only
+        /// run for a geometry change, which draws anyway).
         uniforms: shaderpkg.Uniforms,
 
         /// Custom shader uniform values.
@@ -1600,6 +1612,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // kitty state on every frame because any cell change can move
                 // an image.
                 if (self.images.kittyRequiresUpdate(state.terminal)) {
+                    // The image state is a channel to the renderer of its
+                    // own: it is not part of grid or screen dirtiness, and
+                    // the placements are only drawn on a frame we decide to
+                    // draw. A client that replaces an image in place with
+                    // the cursor hidden dirties no row and moves no uniform,
+                    // so if we don't ask for the frame here nobody will and
+                    // the new image never appears. `kittyUpdate` clears the
+                    // flag, so read it first.
+                    //
+                    // Virtual references alone are not a change: they only
+                    // move when a cell moves, and that dirties the rows that
+                    // carry them.
+                    const changed = state.terminal.screens.active.kitty_images.dirty;
+
                     // We need to grab the draw mutex since this updates
                     // our image state that drawFrame uses.
                     self.draw_mutex.lockUncancelable(global.io());
@@ -1612,6 +1638,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             .height = self.grid_metrics.cell_height,
                         },
                     );
+                    if (changed) self.cells_rebuilt = true;
                 }
 
                 // Determine which OSC 8 hyperlink cells should be
@@ -1758,6 +1785,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
 
+                // The uniforms are as much of the frame as the cells are,
+                // and some of them change without any row going dirty: OSC
+                // 11 moves the background color, the cursor moves within an
+                // otherwise unchanged screen. Whatever this block leaves
+                // different has to be drawn, so hold on to what we had.
+                const uniforms_before = self.uniforms;
+                defer if (!std.meta.eql(uniforms_before, self.uniforms)) {
+                    self.cells_rebuilt = true;
+                };
+
                 // If an atlas was emptied between frames because it hit its
                 // maximum size, the rows we still hold point into the old
                 // layout and would draw garbage. Rebuild everything, the
@@ -1837,15 +1874,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
                 // state that survives frames.
-                self.images.overlayUpdate(
+                //
+                // Like the kitty state above, the overlay reaches the frame
+                // through the image path rather than through any row, so it
+                // has to ask for the draw itself. On an error nothing was
+                // changed and the overlay is rebuilt next frame anyway.
+                const overlay_changed = self.images.overlayUpdate(
                     self.alloc,
                     self.overlay,
-                ) catch |err| {
+                ) catch |err| overlay: {
                     log.warn("error updating overlay images err={}", .{err});
+                    break :overlay false;
                 };
+                if (overlay_changed) self.cells_rebuilt = true;
 
-                // Update custom shader uniforms that depend on terminal state.
-                self.updateCustomShaderUniformsFromState();
+                // Update custom shader uniforms that depend on terminal
+                // state. These live in their own struct, outside the
+                // comparison above, so they report their own changes.
+                if (self.updateCustomShaderUniformsFromState()) {
+                    self.cells_rebuilt = true;
+                }
             }
 
             // Start the display link now that the rebuilt frame is ready.
@@ -2085,21 +2133,34 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // If our font atlas changed, sync the texture data.
             // Placed after beginFrame so the DX12 command list is available.
+            //
+            // The counter is advanced only once the upload has returned. We
+            // now ship the dirty region rather than the whole atlas, so a
+            // sync that never happened is not made good by the next one: it
+            // would carry only what went dirty after it, leaving the dropped
+            // rows stale for as long as the frame state lives. Leaving the
+            // counter where it was is what makes the next frame try again.
             texture: {
-                const modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
+                const atlas = &self.font_grid.atlas_grayscale;
+                const modified = atlas.modified.load(.monotonic);
                 if (modified <= frame.grayscale_modified) break :texture;
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
-                frame.grayscale_modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
-                try self.syncAtlasTexture(&self.font_grid.atlas_grayscale, &frame.grayscale);
+                const dirty = atlas.dirtySince(frame.grayscale_modified);
+                const synced = atlas.modified.load(.monotonic);
+                try self.syncAtlasTexture(atlas, &frame.grayscale, dirty);
+                frame.grayscale_modified = synced;
             }
             texture: {
-                const modified = self.font_grid.atlas_color.modified.load(.monotonic);
+                const atlas = &self.font_grid.atlas_color;
+                const modified = atlas.modified.load(.monotonic);
                 if (modified <= frame.color_modified) break :texture;
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
-                frame.color_modified = self.font_grid.atlas_color.modified.load(.monotonic);
-                try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
+                const dirty = atlas.dirtySince(frame.color_modified);
+                const synced = atlas.modified.load(.monotonic);
+                try self.syncAtlasTexture(atlas, &frame.color, dirty);
+                frame.color_modified = synced;
             }
 
             // Determine if we can use the custom shader path.  All post-process
@@ -2621,13 +2682,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Update custom shader uniforms that depend on terminal state.
         ///
         /// This should be called in `updateFrame` when terminal state changes.
-        fn updateCustomShaderUniformsFromState(self: *Self) void {
+        ///
+        /// Returns true if any of them moved. A shader with
+        /// `custom-shader-animation = false` has no animation wake to fall
+        /// back on, so a shader that draws from these would otherwise sit on
+        /// a stale frame until something else asked for a draw.
+        fn updateCustomShaderUniformsFromState(self: *Self) bool {
             // We only need to do this if we have custom shaders.
-            if (!self.has_custom_shaders) return;
+            if (!self.has_custom_shaders) return false;
 
             // Only update when terminal state is dirty.
-            if (self.terminal_state.dirty == .false) return;
+            if (self.terminal_state.dirty == .false) return false;
 
+            const before = self.custom_shader_uniforms;
             const uniforms: *shadertoy.Uniforms = &self.custom_shader_uniforms;
             const colors: *const terminal.RenderState.Colors = &self.terminal_state.colors;
 
@@ -2708,6 +2775,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
             uniforms.previous_cursor_style = uniforms.current_cursor_style;
             uniforms.current_cursor_style = @as(i32, @intFromEnum(cursor_style));
+
+            return !std.meta.eql(before, uniforms.*);
         }
 
         /// Update per-frame custom shader uniforms.
@@ -2916,6 +2985,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ) Allocator.Error!void {
             const state: *terminal.RenderState = &self.terminal_state;
 
+            // The cursor glyph coming in. Taken before anything below can
+            // disturb the cell contents, and compared at the end: a blink
+            // or a style change replaces this glyph without dirtying any
+            // row, and it is not covered by the uniforms our caller
+            // watches. Where the cursor is and what color it is are.
+            const cursor_glyph_before = self.cells.getCursorGlyph();
+
             const grid_size_diff =
                 self.cells.size.rows != state.rows or
                 self.cells.size.columns != state.cols;
@@ -2932,6 +3008,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             const rebuild = state.dirty == .full or grid_size_diff;
+
+            // Whether anything about the cells themselves changed. The
+            // cursor is handled separately, at the end.
+            var cells_changed = rebuild;
+
             if (rebuild) {
                 // If we are doing a full rebuild, then we clear the entire cell buffer.
                 self.cells.reset();
@@ -3019,6 +3100,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Unmark the dirty state in our render state.
                 dirty.* = false;
+                cells_changed = true;
 
                 self.rebuildRow(
                     y,
@@ -3194,8 +3276,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            // Update that our cells rebuilt
-            self.cells_rebuilt = true;
+            // Report the rebuild only if it produced something new. A
+            // wakeup that finds no dirty row and leaves the cursor alone
+            // would otherwise draw and present a frame identical to the one
+            // already on screen, and keep the display link running for it.
+            // The flag is only ever raised, never cleared, because a second
+            // rebuild in the same frame must not take back what the first
+            // one found, and because our caller raises it too.
+            if (cells_changed or
+                !std.meta.eql(cursor_glyph_before, self.cells.getCursorGlyph()))
+            {
+                self.cells_rebuilt = true;
+            }
 
             // Log some things
             // log.debug("rebuildCells complete cached_runs={}", .{
@@ -3948,13 +4040,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
-        /// Sync the atlas data to the given texture. This copies the bytes
-        /// associated with the atlas to the given texture. If the atlas no
-        /// longer fits into the texture, the texture will be resized.
+        /// Sync the atlas data to the given texture. If the atlas no longer
+        /// fits into the texture, the texture is reallocated and the whole
+        /// atlas copied into it; otherwise only `dirty` is copied.
+        ///
+        /// `dirty` is what this texture is missing, from
+        /// `font.Atlas.dirtySince`; null means it is missing nothing.
+        ///
+        /// Caller must hold the font grid's read lock.
         fn syncAtlasTexture(
             self: *const Self,
             atlas: *const font.Atlas,
             texture: *Texture,
+            dirty: ?font.Atlas.Region,
         ) !void {
             // DX12 rotates command lists across triple-buffered frames.
             // Update the texture to use the current frame's command list
@@ -3968,11 +4066,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Free our old texture
                 texture.*.deinit();
 
-                // Reallocate
+                // Reallocate. The new texture is empty, so it needs the
+                // whole atlas no matter how little the caller asked for.
                 texture.* = try self.api.initAtlasTexture(atlas);
+                try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
+                return;
             }
 
-            try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
+            const region = dirty orelse return;
+
+            // `replaceRegion` takes tightly packed rows and has no source
+            // stride, so the narrowest thing we can hand it without copying
+            // the region out first is the full-width band of rows the dirty
+            // box spans, which is already a slice of the atlas data. The
+            // columns outside the box come along for the ride; they hold
+            // what the texture holds, so re-uploading them changes nothing.
+            const stride: usize = @as(usize, atlas.size) * atlas.format.depth();
+            const start: usize = @as(usize, region.y) * stride;
+            const len: usize = @as(usize, region.height) * stride;
+            try texture.replaceRegion(
+                0,
+                region.y,
+                atlas.size,
+                region.height,
+                atlas.data[start..][0..len],
+            );
         }
     };
 }

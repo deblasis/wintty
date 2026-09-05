@@ -269,7 +269,7 @@ pub inline fn present(self: *Metal, target: Target, sync: bool) !void {
 }
 
 /// Present the last presented target again. (noop for Metal)
-pub inline fn presentLastTarget(self: *Metal) !void {
+pub fn presentLastTarget(self: *Metal) !void {
     _ = self;
 }
 
@@ -378,6 +378,14 @@ pub inline fn imageTextureOptions(
             .shader_read = true,
         },
     };
+}
+
+/// The largest atlas texture this device can hold, in either dimension.
+///
+/// The atlas is an ordinary 2D texture here, so this is the device's 2D
+/// texture limit, already queried at init (see `queryMaxTextureSize`).
+pub fn maxTextureSize(self: *const Metal) u32 {
+    return self.max_texture_size;
 }
 
 /// Initializes a Texture suitable for the provided font atlas.
