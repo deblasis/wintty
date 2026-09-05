@@ -1728,13 +1728,17 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
     first.deinit();
     first_alive = false;
     // Ours until the second device takes it.
-    errdefer _ = d3d12.CloseHandle(handle);
+    var handle_owned = true;
+    errdefer if (handle_owned) {
+        _ = d3d12.CloseHandle(handle);
+    };
 
     var second = try Device.init(.swap_chain_panel, .{
         .width = 64,
         .height = 64,
         .surface_handle = handle,
     });
+    handle_owned = false;
     defer second.deinit();
 
     try std.testing.expectEqual(handle, second.swap_chain_surface_handle.?);

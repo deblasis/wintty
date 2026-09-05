@@ -232,7 +232,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// A health change the surface has not been told about yet
         /// because the mailbox was full at the time. Retried from the
         /// draw path; the value to send is always the current `health`.
-        health_report_pending: bool = false,
+        /// Atomic because Metal reports health from its completion
+        /// thread, not the renderer thread.
+        health_report_pending: std.atomic.Value(bool) = .{ .raw = false },
 
         /// True when we have a graphics context that can create GPU
         /// resources. Creating any GPU resource while this is false is invalid.
@@ -1919,11 +1921,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // A health change that found the mailbox full: same instant
             // push, same retry-next-draw shape as the two above.
-            defer if (self.health_report_pending) {
+            defer if (self.health_report_pending.load(.acquire)) {
                 if (self.surface_mailbox.push(
                     .{ .renderer_health = self.health.load(.seq_cst) },
                     .instant,
-                ) > 0) self.health_report_pending = false;
+                ) > 0) self.health_report_pending.store(false, .release);
             };
 
             // Emit any pending custom-shader failure on the same mailbox path
@@ -2366,9 +2368,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // draw mutex, which the apprt thread takes in the surface
             // device queries, and the apprt thread is also what drains the
             // mailbox. A full mailbox is retried from the next draw.
-            self.health_report_pending = self.surface_mailbox.push(.{
+            const delivered = self.surface_mailbox.push(.{
                 .renderer_health = health,
-            }, .instant) == 0;
+            }, .instant) > 0;
+            self.health_report_pending.store(!delivered, .release);
         }
 
         /// How long to leave a device alone after a rebuild fails before
