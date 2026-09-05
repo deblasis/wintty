@@ -158,7 +158,7 @@ pub fn CircBuf(comptime T: type, comptime default: T) type {
             // Grow geometrically. Our callers append in small increments
             // (the search sliding window adds a row at a time), and
             // resizing to exactly what was asked for makes that quadratic.
-            try self.resize(alloc, @max(new_cap, self.capacity() * 2));
+            try self.resize(alloc, @max(new_cap, self.capacity() *| 2));
         }
 
         /// Resize the buffer to the given size (larger or smaller).
