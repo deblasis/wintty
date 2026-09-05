@@ -2,6 +2,14 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const size = @import("../size.zig");
+
+/// The largest width or height a node may claim. Every pane becomes a
+/// terminal of the node's size, and a terminal addresses its cells with
+/// `size.CellCountInt`, so anything outside this range has no terminal
+/// that could represent it. Real tmux never sends one, but the layout
+/// string arrives over the pty like any other untrusted input.
+const max_dimension = std.math.maxInt(size.CellCountInt);
 
 /// A tmux layout.
 ///
@@ -116,6 +124,11 @@ pub const Layout = struct {
                 10,
             ) catch return error.SyntaxError;
         } else return error.SyntaxError;
+
+        // Reject dimensions no terminal could be built for before we go
+        // any further, so the pane setup that follows can cast them.
+        if (width < 1 or width > max_dimension) return error.SyntaxError;
+        if (height < 1 or height > max_dimension) return error.SyntaxError;
 
         // Find X
         const x: usize = if (std.mem.indexOfScalar(
@@ -635,4 +648,36 @@ test "checksum known tmux layout bb62" {
     // The checksum "bb62" corresponds to the layout "159x48,0,0{79x48,0,0,79x48,80,0}"
     const checksum = Checksum.calculate("159x48,0,0{79x48,0,0,79x48,80,0}");
     try testing.expectEqualStrings("bb62", &checksum.asString());
+}
+
+test "syntax error zero dimensions" {
+    var arena: ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    try testing.expectError(error.SyntaxError, Layout.parse(arena.allocator(), "0x0,0,0,1"));
+    try testing.expectError(error.SyntaxError, Layout.parse(arena.allocator(), "80x0,0,0,1"));
+    try testing.expectError(error.SyntaxError, Layout.parse(arena.allocator(), "0x24,0,0,1"));
+}
+
+test "syntax error dimensions beyond a terminal" {
+    var arena: ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    try testing.expectError(error.SyntaxError, Layout.parse(arena.allocator(), "65536x24,0,0,1"));
+    try testing.expectError(error.SyntaxError, Layout.parse(arena.allocator(), "80x65536,0,0,1"));
+
+    // The largest a terminal can represent is still accepted.
+    const layout: Layout = try .parse(arena.allocator(), "65535x65535,0,0,1");
+    try testing.expectEqual(@as(usize, 65535), layout.width);
+    try testing.expectEqual(@as(usize, 65535), layout.height);
+}
+
+test "syntax error child with zero dimensions" {
+    var arena: ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    try testing.expectError(error.SyntaxError, Layout.parse(
+        arena.allocator(),
+        "80x24,0,0{0x24,0,0,1,40x24,40,0,2}",
+    ));
 }
