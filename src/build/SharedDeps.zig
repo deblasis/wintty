@@ -545,15 +545,24 @@ pub fn add(
     // C files
     step.root_module.link_libc = true;
     step.root_module.addIncludePath(b.path("src/stb"));
-    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
-    // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
-    // the static archive is consumed by an external linker.
+    // stb decodes untrusted image bytes, so it gets a stack protector
+    // wherever the runtime is guaranteed to be there. Not on the msvc ABI:
+    // the vt static library turns stack-protector generation off for msvc so
+    // its consumers don't need BufferOverflowU, and a per-file flag is
+    // appended after the module-level setting, so it would quietly bring
+    // back the __security_cookie references that decision exists to avoid.
+    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled on
+    // Windows (LNK4229), leaving __ubsan_handle_* unresolved when the
+    // static archive is consumed by an external linker.
     step.root_module.addCSourceFiles(.{
         .files = &.{"src/stb/stb.c"},
         .flags = if (step.rootModuleTarget().abi == .msvc)
-            &.{ "-fno-sanitize=undefined", "-fno-sanitize-trap=undefined" }
+            &.{
+                "-fno-sanitize=undefined",
+                "-fno-sanitize-trap=undefined",
+            }
         else
-            &.{},
+            &.{"-fstack-protector-strong"},
     });
     if (step.rootModuleTarget().os.tag == .linux) {
         step.root_module.addIncludePath(b.path("src/apprt/gtk"));
@@ -774,7 +783,7 @@ pub fn add(
         step.root_module.addIncludePath(b.path("vendor/glad/include/"));
         step.root_module.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
-            .flags = &.{},
+            .flags = &.{"-fstack-protector-strong"},
         });
 
         // When we're targeting flatpak we ALWAYS link GTK so we
@@ -1095,6 +1104,17 @@ pub fn addSimd(
         try flags.append(
             b.allocator,
             "-std=c++17",
+        );
+
+        // These read terminal bytes straight off the wire, so they get a
+        // stack protector wherever the runtime is guaranteed to be there.
+        // Not on the msvc ABI: these objects sit in the root module of the
+        // vt static library, which turns stack-protector generation off for
+        // msvc so its consumers don't need BufferOverflowU, and a per-file
+        // flag is appended after the module-level setting, so it would win.
+        if (!is_msvc) try flags.append(
+            b.allocator,
+            "-fstack-protector-strong",
         );
 
         // Keep our SIMD sources in the same Highway header mode as the
