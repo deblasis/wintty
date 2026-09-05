@@ -253,6 +253,19 @@ test-win:
 # body's pwsh, so a `just test` on a Linux host never runs it.
 inc := '(Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path $env:LOCALAPPDATA "Programs\incoda\incoda.exe")'
 
+# Apply the lane configuration AGENTS.md promises (slots, descriptions, the
+# --reason requirement, the retired `wintty` key closed) from
+# .agents/scripts/lanes.ps1, the one record of it in the repo; only a lane
+# that drifted is touched. `just doctor` runs the same script's -Check.
+#
+# [windows] like every other lane recipe: it writes machine-global state
+# through an incoda whose fallback location is under %LOCALAPPDATA%, which
+# exists nowhere else. The script's own -SelfTest needs neither and runs
+# cross-platform in `gates-selftest`.
+[windows]
+lanes:
+    pwsh -NoProfile -File .agents/scripts/lanes.ps1
+
 # The build phase of a harness recipe, under the build lane. Every harness
 # recipe depends on this instead of on `build-dll build-win` directly: the
 # lane a build needs (CPU and RAM, three at a time) is not the lane a
@@ -1709,7 +1722,9 @@ resignoff-bot *args:
 
 # Check that everything the gates depend on is present and wired: tools on
 # PATH, scripts where the hooks point, settings parseable, nightly task
-# registration. A SessionStart hook runs the fast subset automatically.
+# registration, and where incoda is present, that the heavy job lanes match
+# .agents/scripts/lanes.ps1. A SessionStart hook runs the fast subset
+# automatically.
 doctor:
     python .agents/scripts/doctor.py
 
@@ -1739,8 +1754,9 @@ gitversion-selftest:
     pwsh -NoProfile -File .agents/scripts/gitversion_selftest.ps1
 
 # Recorded-PR replays, matcher escapes, exemption anchoring, the merge
-# guard's refusal matrix and golden issue body, and the nightly scripts'
-# helpers roundtripping. `gitversion-selftest` runs first.
+# guard's refusal matrix and golden issue body, the nightly scripts'
+# helpers roundtripping, and the lane table's drift and apply argv.
+# `gitversion-selftest` runs first.
 #
 # Prove the gates still catch what they exist for.
 gates-selftest: gitversion-selftest
@@ -1754,6 +1770,7 @@ gates-selftest: gitversion-selftest
     python .agents/scripts/leg_cache.py --self-test
     pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
+    pwsh -NoProfile -File .agents/scripts/lanes.ps1 -SelfTest
 
 # Prove the shipping-build gate refuses a leak in a real Release evaluation (#929)
 [windows]

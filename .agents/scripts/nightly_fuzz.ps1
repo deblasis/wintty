@@ -27,6 +27,15 @@
 # infra-titled issue instead of masquerading as product breaks, and the
 # script exits nonzero when any leg failed.
 #
+# The test legs run under the wintty-build lane (AGENTS.md, heavy job
+# lanes): `just test` and `just test-win` are single-class recipes that stay
+# lane-free inside so they run on any host, so their caller wraps them, and
+# the nightly is a caller like any other. `just fuzz` takes its own two
+# lanes per phase and is called bare. incoda is therefore preflighted with
+# the rest: an unlaned nightly would drop a full zig build and a dotnet test
+# run next to whatever a session is already building, which is the collision
+# the lanes exist to prevent.
+#
 # Hibernate only happens for scheduled runs (or -HibernateAfter), only when
 # the saved config allows it, and only after the same continuous-idle check,
 # so the machine is never hibernated under someone using it.
@@ -146,6 +155,134 @@ function Get-FuzzOutcome {
     }
 }
 
+# incoda's lookup, the justfile's: PATH, then the installer's location. The
+# agent shell this was written under had the latter and not the former.
+function Get-IncodaPath {
+    $found = (Get-Command incoda -ErrorAction SilentlyContinue)?.Source
+    if ($found) { return $found }
+    $installed = Join-Path $env:LOCALAPPDATA 'Programs\incoda\incoda.exe'
+    if (Test-Path $installed) { return $installed }
+    return $null
+}
+
+# The argv for one laned test leg. Built here rather than inline so the
+# self-test can assert the wrap is actually there: a leg that quietly lost
+# its `incoda run` prefix would still pass every other check in this file
+# and only show up as a machine falling over at 23:00.
+function Get-LegArgs([string]$Recipe, [string]$Reason, [string]$Justfile, [string]$WorkTree) {
+    # --wait 2h, spelled out rather than left to incoda's 30-minute default.
+    # The build lane runs three at a time and a busy evening queues deep:
+    # measured with 3 holders and 8 waiters, tickets that had waited 34, 27
+    # and 26 minutes were still acquiring normally. At the default those
+    # legs would have timed out and filed an infra issue against a machine
+    # that was working exactly as designed. Not a negative wait (incoda's
+    # "wait forever"): a nightly that hangs on the queue into the working
+    # day never reaches the code that files the issue saying it could not
+    # run, so it fails silently and steals the desktop besides. A finite
+    # wait plus the could-not-run classification below is the honest pair.
+    @('run', '--queue', 'wintty-build', '--wait', '2h', '--reason', $Reason, '--',
+      'just', '--justfile', $Justfile, '--working-directory', $WorkTree, $Recipe)
+}
+
+# Running one leg, separated from deciding what to run so the self-test can
+# exercise each half. This half is where a leg's own output has to go
+# somewhere other than the return value: a native command inside a function
+# sends its stdout to the caller, so without Out-Host the "exit code" would
+# come back as an array of every line the build printed with the status
+# tacked on the end, and every comparison against it would be nonsense.
+# Out-Host is also what Start-Transcript records, so the log tail an issue
+# quotes is unchanged. stderr is merged in for the same reason: incoda says
+# who killed a run and why on stderr, and the 124 note below sends the
+# reader to a transcript that would not otherwise contain it. Merging
+# cannot pollute the return value, because Out-Host consumes both streams.
+$script:LegRunner = {
+    param($exe, $argv)
+    $global:LASTEXITCODE = $null
+    & $exe @argv 2>&1 | Out-Host
+    $LASTEXITCODE ?? 1
+}
+
+# One leg, wrapped. Both call sites go through here so the self-test can run
+# a leg with an injected runner and see the argv that would have been
+# executed: asserting Get-LegArgs alone proved only that a builder nobody
+# had to call built the right list, and a call site reverted to a bare
+# `just` would have kept every assertion green.
+function Invoke-Leg {
+    param(
+        [string]$Recipe,
+        [string]$Reason,
+        [string]$Justfile,
+        [string]$WorkTree,
+        [scriptblock]$Runner
+    )
+    $legArgs = Get-LegArgs $Recipe $Reason $Justfile $WorkTree
+    [int](& ($Runner ?? $script:LegRunner) $script:incoda $legArgs)
+}
+
+# incoda's own exit codes, from its `--help` table and AGENTS.md ("heavy
+# job lanes"). `run` passes the child's status through unchanged, so any
+# code NOT in this list is `just`'s own and means the recipe ran and
+# reached a verdict. Every code in it means the opposite: the recipe never
+# started, or was stopped from outside, so nothing about the product was
+# measured. Filing one of these as a red test suite puts a product title on
+# a scheduling problem - the same mistake, the other way round, that
+# Get-FuzzOutcome exists to prevent, and until this list existed only 121
+# was spared: a lane kill (124) or a run refused by a closed queue (120)
+# was filed as "the test suite failed".
+#   120 usage error: a closed queue, a missing --reason, a bad flag
+#   121 --wait elapsed while still queued
+#   122 the state dir or its file locking is unusable
+#   123 the lane was acquired but the command could not be started
+#   124 the run was killed through the lane (incoda kill)
+#   125 a kill went unacknowledged
+#   130 incoda was interrupted while queueing
+# The overlap is real and deliberate: a `just` recipe could in principle
+# exit 124 itself. Reading the ambiguous codes as could-not-run files an
+# infra issue for something that might have been a product break, which is
+# the safe direction - it never invents a product bug, and the issue it
+# does file names the exit code.
+$script:LaneExitCodes = @(120, 121, 122, 123, 124, 125, 130)
+
+# What a laned test leg's exit code means. A function so the self-test
+# asserts against THIS mapping, not a copy of it.
+function Get-LegOutcome {
+    param($Code)
+    # $null explicitly: an exit code that was never collected means the leg
+    # was not observed, not that it passed.
+    if ($null -eq $Code) { return 'could-not-run' }
+    $c = [int]$Code
+    if ($c -eq 0) { return 'pass' }
+    if ($script:LaneExitCodes -contains $c) { return 'could-not-run' }
+    'fail'
+}
+
+# The sentence a could-not-run leg's issue carries. Per code, because "the
+# lane was never granted within the wait" is simply untrue of a job someone
+# killed, and an issue that misdescribes what happened sends whoever reads
+# it looking at the queue depth instead of at the kill reason on stderr.
+function Get-LegNote {
+    param($Code)
+    if ($null -eq $Code) { return 'No exit code was collected, so the leg was never observed and nothing was judged.' }
+    $tail = 'This is a runner problem, not a product break: nothing was judged.'
+    switch ([int]$Code) {
+        121 { "The wintty-build lane was not granted within incoda's wait, so the recipe never started. $tail" }
+        124 { "The run was killed through the lane (incoda kill); the reason is on its stderr. $tail" }
+        120 { "incoda refused the run (a closed queue, a missing --reason, or a bad flag), so the recipe never started. $tail" }
+        123 { "The lane was acquired but the command could not be started. $tail" }
+        default { "incoda could not carry the run (see its exit-code table), so the recipe never reached a verdict. $tail" }
+    }
+}
+
+# Whether the branch went unverified. A leg that could not run is no more a
+# green than a red one, so both keep the deferred ledger unsettled. The
+# fuzz leg is the odd one: a skip records a string ('skipped-locked'), not
+# an int, and a skip is not a failure - hence the [int] test rather than a
+# bare -ne 0. A function so the self-test can state that directly.
+function Test-LegFailed {
+    param($TestRc, $TestWinRc, $FuzzRc)
+    ($TestRc -ne 0) -or ($TestWinRc -ne 0) -or ($FuzzRc -is [int] -and $FuzzRc -ne 0)
+}
+
 if ($SelfTest) {
     $failed = $false
     $idle = [NightlyIdleProbe]::MinutesIdle()
@@ -181,6 +318,146 @@ if ($SelfTest) {
     # never collected must not coerce to 0 and pass as a clean night.
     if ((Get-FuzzOutcome $null) -ne 'harness') { Write-Host 'SELF-TEST FAILED: an uncollected exit code must not read as a clean run'; $failed = $true }
 
+    # The test legs' lane wrap and its exit codes. The wrap is asserted
+    # twice over: once as the argv a leg actually executes, and once
+    # against this file's own source at both call sites, because argv from
+    # a builder nobody is obliged to call is not evidence that the shipped
+    # legs are wrapped.
+    $legArgs = @(Get-LegArgs 'test' 'nightly zig tests' 'C:\wt\justfile' 'C:\wt')
+    $sep = [array]::IndexOf($legArgs, '--')
+    $waitIdx = [array]::IndexOf($legArgs, '--wait')
+    $reasonIdx = [array]::IndexOf($legArgs, '--reason')
+    if ($legArgs[0] -ne 'run' -or $legArgs[1] -ne '--queue' -or $legArgs[2] -ne 'wintty-build') {
+        Write-Host "SELF-TEST FAILED: a test leg must run under the wintty-build lane, got '$($legArgs -join ' ')'"; $failed = $true
+    }
+    if ($reasonIdx -lt 0 -or -not $legArgs[$reasonIdx + 1]) {
+        Write-Host 'SELF-TEST FAILED: the lane refuses a run without --reason, so the leg must carry one'; $failed = $true
+    }
+    if ($sep -lt 0 -or $legArgs[$sep + 1] -ne 'just' -or $legArgs[-1] -ne 'test') {
+        Write-Host "SELF-TEST FAILED: the wrapped command must be the just recipe, got '$($legArgs -join ' ')'"; $failed = $true
+    }
+    # The wait is stated, longer than incoda's 30-minute default, and
+    # finite. A negative wait is incoda's "wait forever": the nightly would
+    # hang on the queue into the working day and never reach the code that
+    # files the issue saying it could not run.
+    if ($waitIdx -lt 0 -or $waitIdx -gt $sep) {
+        Write-Host 'SELF-TEST FAILED: a test leg must state its own --wait, not inherit incoda''s 30-minute default'; $failed = $true
+    } elseif ($legArgs[$waitIdx + 1] -notmatch '^\d+(\.\d+)?[hm]?$' -or [double]($legArgs[$waitIdx + 1] -replace '[hm]$','') -le 0) {
+        Write-Host "SELF-TEST FAILED: --wait must be a positive finite duration, got '$($legArgs[$waitIdx + 1])' (negative means wait forever)"; $failed = $true
+    }
+
+    # Both legs, as they are actually invoked. The runner stands in for
+    # incoda and reports what it was handed, so a call site that lost its
+    # wrap fails here rather than at 23:00 on a machine nobody is watching.
+    foreach ($leg in @(
+        @{ recipe = 'test';     reason = 'nightly zig tests' }
+        @{ recipe = 'test-win'; reason = 'nightly windows tests' }
+    )) {
+        $seen = $null
+        $rc = Invoke-Leg -Recipe $leg.recipe -Reason $leg.reason -Justfile 'C:\wt\justfile' -WorkTree 'C:\wt' -Runner {
+            param($exe, $argv) $script:seen = $argv; 121
+        }
+        $seen = @($seen)
+        if ($rc -ne 121) { Write-Host "SELF-TEST FAILED: a leg must report the status of the run it made, got $rc"; $failed = $true }
+        if ($seen[0] -ne 'run' -or $seen[2] -ne 'wintty-build' -or $seen[-1] -ne $leg.recipe) {
+            Write-Host "SELF-TEST FAILED: the $($leg.recipe) leg must execute a wintty-build run of that recipe, got '$($seen -join ' ')'"; $failed = $true
+        }
+    }
+    # The runner the legs actually use, against a real child that prints
+    # and then fails. A leg's status has to come back as one integer: a
+    # native command inside a function writes its stdout to the caller, so
+    # a runner that let it would return the whole build log with the code
+    # at the end, and `$testRc -ne 0` on an array is not the question
+    # anyone meant to ask.
+    $realRc = & $script:LegRunner 'pwsh' @('-NoProfile', '-Command', "'self-test: a leg''s output belongs in the transcript, not in its exit code'; exit 7")
+    if (@($realRc).Count -ne 1 -or $realRc -ne 7) {
+        Write-Host "SELF-TEST FAILED: a leg must report one exit code and let its output go to the transcript, got '$($realRc -join ', ')'"; $failed = $true
+    }
+
+    # And that this file's two shipped call sites really are those legs. A
+    # leg reverted to a bare `just --justfile ... test` would satisfy every
+    # assertion above, which is precisely the failure the wrap exists for.
+    $src = Get-Content $PSCommandPath -Raw
+    foreach ($recipe in @('test', 'test-win')) {
+        if ($src -notmatch [regex]::Escape("Invoke-Leg -Recipe '$recipe'")) {
+            Write-Host "SELF-TEST FAILED: the $recipe leg must be invoked through Invoke-Leg, so it cannot lose its lane"; $failed = $true
+        }
+    }
+    if ($src -match '(?m)^\s*(just|& \$incoda)\s.*--working-directory\s+\$wt\s+test(-win)?\s*$') {
+        Write-Host 'SELF-TEST FAILED: a test leg is running outside Invoke-Leg, so its lane wrap is not guarded'; $failed = $true
+    }
+    # The issue-filing arms, likewise: an `if ($testRc -ne 0)` in place of
+    # the switch would file every lane-level code as a red test suite.
+    # Assembled rather than written out, for the same reason as $arm below:
+    # spelled literally, the assertion would find itself and pass over a
+    # call site that no longer consults Get-LegOutcome at all.
+    foreach ($v in @('testRc', 'testWinRc')) {
+        $needle = 'switch (Get-LegOutcome $' + $v + ')'
+        if ($src -notmatch [regex]::Escape($needle)) {
+            Write-Host "SELF-TEST FAILED: missing '$needle'; both legs must decide what to file through Get-LegOutcome"; $failed = $true
+        }
+    }
+    # Built from two pieces so this line is not itself a third match: the
+    # source being counted is this same file.
+    $arm = "'could-not-run'" + ' { File-Issue'
+    if (([regex]::Matches($src, [regex]::Escape($arm))).Count -ne 2) {
+        Write-Host 'SELF-TEST FAILED: both legs must file an infra issue for a run that never happened, not a red test suite'; $failed = $true
+    }
+
+    # incoda's exit codes, one at a time. Every one of them means the
+    # recipe never reached a verdict; before this, only 121 was spared and
+    # a lane kill was filed as "the test suite failed".
+    foreach ($c in @(
+        @{ code = 0;   want = 'pass';          why = '0 is a green leg' }
+        @{ code = 1;   want = 'fail';          why = 'the child ran and failed' }
+        @{ code = 2;   want = 'fail';          why = 'a child status incoda passed through is the recipe''s verdict' }
+        @{ code = 120; want = 'could-not-run'; why = 'incoda 120 is a usage error: a closed queue or a missing --reason, so the recipe never started' }
+        @{ code = 121; want = 'could-not-run'; why = 'incoda 121 means the lane was never granted, so the recipe never started' }
+        @{ code = 122; want = 'could-not-run'; why = 'incoda 122 means the state dir is unusable, so nothing was queued' }
+        @{ code = 123; want = 'could-not-run'; why = 'incoda 123 means the lane was taken but the command never started' }
+        @{ code = 124; want = 'could-not-run'; why = 'incoda 124 means someone killed the run through the lane' }
+        @{ code = 125; want = 'could-not-run'; why = 'incoda 125 is an unacknowledged kill, not a product break' }
+        @{ code = 130; want = 'could-not-run'; why = 'incoda 130 means it was interrupted while queueing' }
+    )) {
+        $got = Get-LegOutcome $c.code
+        if ($got -ne $c.want) {
+            Write-Host "SELF-TEST FAILED: leg exit $($c.code) mapped to '$got', expected '$($c.want)' ($($c.why))"
+            $failed = $true
+        }
+    }
+    if ((Get-LegOutcome $null) -ne 'could-not-run') { Write-Host 'SELF-TEST FAILED: an uncollected leg exit code must not read as a pass'; $failed = $true }
+    # A killed run and a queue that never came free are different events,
+    # and an issue that describes one as the other sends its reader to the
+    # wrong place.
+    if ((Get-LegNote 124) -notmatch 'killed') { Write-Host 'SELF-TEST FAILED: a killed leg must say so, not report a queue timeout'; $failed = $true }
+    if ((Get-LegNote 121) -notmatch 'never granted|not granted') { Write-Host 'SELF-TEST FAILED: a timed-out leg must say the lane was never granted'; $failed = $true }
+    if ((Get-LegNote 124) -eq (Get-LegNote 121)) { Write-Host 'SELF-TEST FAILED: a kill and a queue timeout must not carry the same note'; $failed = $true }
+    foreach ($c in @(120, 121, 122, 123, 124, 125, 130, $null)) {
+        if ((Get-LegNote $c) -notmatch 'not a product break|nothing was judged') {
+            Write-Host "SELF-TEST FAILED: the note for exit $c must say nothing about the product was judged"; $failed = $true
+        }
+    }
+
+    # The roll-up into the exit status and the deferred ledger. A leg that
+    # could not run leaves the branch just as unverified as a red one, and
+    # a fuzz leg that was skipped records a string, not a failure.
+    foreach ($c in @(
+        @{ t = 0;   w = 0; f = 0;     want = $false; why = 'three greens settle the ledger' }
+        @{ t = 1;   w = 0; f = 0;     want = $true;  why = 'a red zig leg is a failure' }
+        @{ t = 0;   w = 1; f = 0;     want = $true;  why = 'a red windows leg is a failure' }
+        @{ t = 0;   w = 0; f = 2;     want = $true;  why = 'fuzz findings are a failure' }
+        @{ t = 121; w = 0; f = 0;     want = $true;  why = 'a leg that never ran verified nothing, so the ledger stays unsettled' }
+        @{ t = 124; w = 0; f = 0;     want = $true;  why = 'a killed leg verified nothing either' }
+        @{ t = 0;   w = 0; f = $null; want = $false; why = 'a fuzz leg that never ran is a skip, and the tests still passed' }
+        @{ t = 0;   w = 0; f = 'skipped-locked'; want = $false; why = 'a recorded skip is a string, not a nonzero status' }
+    )) {
+        $got = Test-LegFailed $c.t $c.w $c.f
+        if ($got -ne $c.want) {
+            Write-Host "SELF-TEST FAILED: legs ($($c.t), $($c.w), $($c.f ?? 'null')) read as failed=$got, expected $($c.want) ($($c.why))"
+            $failed = $true
+        }
+    }
+
     # The self-test dir must be disjoint from the real logs, or a run of the
     # self-test would wipe the user's saved options.
     if ($logDir -eq (Join-Path $repoRoot '.agents\nightly-logs')) { Write-Host 'SELF-TEST FAILED: not sandboxed'; $failed = $true }
@@ -197,6 +474,20 @@ $missing = @('git', 'gh', 'just', 'pwsh') | Where-Object { -not (Get-Command $_ 
 if ($missing) {
     Write-Status 'aborted-missing-tools'
     Add-Content $log "nightly: aborting, tools not on PATH in this session: $($missing -join ', ')"
+    exit 1
+}
+
+# incoda is required for the same reason: the test legs must hold the
+# wintty-build lane, and a leg that cannot take it must refuse rather than
+# run unlaned next to a session's build. Not in $missing above because the
+# lookup is not just PATH.
+# $script: explicitly, because Invoke-Leg reads it by that name: an
+# unqualified assignment here would work by accident of top-level scope and
+# break silently the moment this moved inside anything.
+$script:incoda = Get-IncodaPath
+if (-not $script:incoda) {
+    Write-Status 'aborted-missing-tools'
+    Add-Content $log 'nightly: aborting, incoda is not on PATH or in Programs\incoda; the test legs run under the wintty-build lane and must not run unlaned (AGENTS.md, heavy job lanes; https://github.com/deblasis/incoda)'
     exit 1
 }
 
@@ -321,8 +612,11 @@ $legClock = [System.Diagnostics.Stopwatch]::StartNew()
 # reproduced from the report.
 $env:WINTTY_TEST_SEED = '0x{0:x}' -f (Get-Random -Minimum 1 -Maximum 2147483647)
 Write-Host "nightly: WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED"
-just --justfile (Join-Path $wt 'justfile') --working-directory $wt test
-$testRc = $LASTEXITCODE ?? 1
+$testRc = Invoke-Leg -Recipe 'test' -Reason 'nightly zig tests' -Justfile (Join-Path $wt 'justfile') -WorkTree $wt
+# Wall time around the whole wrapped leg, so on a busy box it carries the
+# queue wait as well as the run. The record calls it observed seconds and
+# nothing reads it as a budget, but do not quote it as how long the leg
+# takes.
 $testSeconds = [int]$legClock.Elapsed.TotalSeconds
 $script:status.results['zig-tests'] = $testRc
 Write-Host "nightly: zig tests rc=$testRc"
@@ -330,8 +624,7 @@ Write-Host "nightly: zig tests rc=$testRc"
 Write-Status 'windows-tests'
 $global:LASTEXITCODE = $null
 $legClock.Restart()
-just --justfile (Join-Path $wt 'justfile') --working-directory $wt test-win
-$testWinRc = $LASTEXITCODE ?? 1
+$testWinRc = Invoke-Leg -Recipe 'test-win' -Reason 'nightly windows tests' -Justfile (Join-Path $wt 'justfile') -WorkTree $wt
 $testWinSeconds = [int]$legClock.Elapsed.TotalSeconds
 $script:status.results['windows-tests'] = $testWinRc
 Write-Host "nightly: windows tests rc=$testWinRc"
@@ -351,8 +644,14 @@ if ((Test-Path $legCache) -and $script:sha -and (Test-Path $envSnapshot)) {
     }
 }
 
-if ($testRc -ne 0) { File-Issue '[nightly] zig test suite failed on windows branch' "``just test`` exited $testRc (WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED)." }
-if ($testWinRc -ne 0) { File-Issue '[nightly] Windows test suite failed on windows branch' "``just test-win`` exited $testWinRc." }
+switch (Get-LegOutcome $testRc) {
+    'fail'          { File-Issue '[nightly] zig test suite failed on windows branch' "``just test`` exited $testRc (WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED)." }
+    'could-not-run' { File-Issue '[nightly] infra: the zig test leg never ran' "incoda exited $testRc. $(Get-LegNote $testRc)" }
+}
+switch (Get-LegOutcome $testWinRc) {
+    'fail'          { File-Issue '[nightly] Windows test suite failed on windows branch' "``just test-win`` exited $testWinRc." }
+    'could-not-run' { File-Issue '[nightly] infra: the Windows test leg never ran' "incoda exited $testWinRc. $(Get-LegNote $testWinRc)" }
+}
 
 $wakeLockNote = 'If this machine wakes from hibernation to the lock screen every night (sign-in on wake), the fuzz leg can never run; the appliance flow needs sign-in on wake disabled to get fuzz coverage.'
 
@@ -394,7 +693,7 @@ if (-not $lastSuccess -or ((Get-Date) - $lastSuccess).TotalDays -gt 7) {
     File-Issue '[nightly] fuzz starvation: no successful fuzz run in 7 days' "The GUI fuzz leg has been skipped or failing for over a week; fuzz coverage is effectively off. $wakeLockNote"
 }
 
-$legFailed = ($testRc -ne 0) -or ($testWinRc -ne 0) -or ($fuzzRc -is [int] -and $fuzzRc -ne 0)
+$legFailed = Test-LegFailed $testRc $testWinRc $fuzzRc
 
 # Deferred signoffs are merges made on credit against exactly this run. A
 # green pass over the whole branch is what they were borrowing, so it settles

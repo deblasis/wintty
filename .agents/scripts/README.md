@@ -84,9 +84,17 @@ human) working in this repo uses the same contract:
   decisions and exact commands while mutating nothing.
 - `just doctor` - verify everything the gates depend on: required tools on
   PATH, scripts where the hook wiring points, settings parseable, nightly
-  task registration. A Claude Code SessionStart hook runs the fast subset
-  at the start of every session, so a broken gate environment is loud
-  instead of silently absent.
+  task registration, and, where incoda is present, that the heavy job lanes
+  are configured the way `lanes.ps1` records. A Claude Code SessionStart
+  hook runs the fast subset at the start of every session, so a broken gate
+  environment is loud instead of silently absent.
+- `just lanes` - apply the heavy job lanes' configuration (`lanes.ps1`):
+  `wintty-build` with three slots, `wintty-desktop` and `wintty-publish`
+  with one, all three refusing a run without `--reason`, and the retired
+  `wintty` key closed with a message naming its replacements. incoda keeps
+  that state in its own directory where nothing in the repo could see it,
+  so the script is the record: apply touches only a lane that drifted, and
+  `-Check` (what `just doctor` runs) reports each drift and changes nothing.
 - `just gates-selftest` - prove the gates still catch what they exist for
   (recorded-PR replays, matcher escapes, exemption anchoring, the merge
   guard's refusal matrix and golden issue body) and that the nightly
@@ -122,7 +130,21 @@ human) working in this repo uses the same contract:
 - `nightly_fuzz.ps1` / `nightly_control.ps1` / `register_nightly_fuzz.ps1` -
   the 23:00 nightly run (tests + fuzz in a dedicated worktree, deduped P1
   issues on breaks, optional hibernate-after) and its control panel.
-  Register once per build machine from the main checkout.
+  Register once per build machine from the main checkout. The test legs
+  run under the `wintty-build` lane like any other caller of `just test`
+  and `just test-win`, so a missing incoda aborts the run instead of
+  landing a nightly build on top of a session's; a lane that never came
+  free files an infra issue, not a red test suite, and so does every other
+  way incoda can end a run without one (refused, unstartable, killed). The
+  legs wait two hours for the lane rather than incoda's default thirty
+  minutes, because a busy evening queues deeper than that and a timeout
+  would file an infra issue against a machine working as designed.
+- `lanes.ps1` - the heavy job lanes' configuration (AGENTS.md), applied by
+  `just lanes` and checked by `just doctor`. incoda keeps queue config in
+  its own state dir where the repo cannot see it, so this table is the
+  record; the descriptions are shared verbatim with `wintty-release`. Its
+  `-SelfTest` covers the drift rules and the apply argv without touching a
+  machine, and runs in `gates-selftest`.
 
 Enforcement wiring is host-specific and lives with each host. For Claude
 Code, `.claude/settings.json` hooks call `pr_gate.py --hook` and
