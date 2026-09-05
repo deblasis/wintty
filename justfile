@@ -265,8 +265,9 @@ inc := '(Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path
 # Do not wrap one of these recipes in `incoda run` on a single key: the two
 # phases take different keys, so whichever phase is on the other key nests
 # where the outer run holds nothing, and an outer wintty-desktop waiting on
-# wintty-build inverts the order the exclusive pair takes, which is a
-# deadlock until both --wait budgets elapse. Call them bare; the one safe
+# wintty-build inverts the order the exclusive pair takes: against a live
+# exclusive run the two wait on each other until both --wait budgets
+# elapse. Call them bare; the one safe
 # wrapper is the exclusive pair, which holds both keys before either phase
 # starts and lets both nested runs pass through.
 #

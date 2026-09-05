@@ -90,7 +90,7 @@ same thing under the same three names:
 
 | key | slots | guards | what goes there |
 | --- | --- | --- | --- |
-| `wintty-build` | 3 | CPU and RAM | `zig build` in any form (`just build-dll`, `build-dll-release`, every `test-*` recipe), `just test-win` and any `dotnet build` or `dotnet test` of the solutions, `just signoff` and its whole ladder |
+| `wintty-build` | 3 | CPU and RAM | `zig build` in any form (`just build-dll`, `build-dll-release`, `just test` and the `test-*` recipes it runs), `just test-win` and any `dotnet build` or `dotnet test` of the solutions, `just signoff` and its whole ladder |
 | `wintty-desktop` | 1 | the interactive desktop: focus, the foreground window, pixel capture, the env guard's theme flips, the shared Wintty state | every GUI harness under `windows/scripts/`, `just splash-race` |
 | `wintty-publish` | 1 | release channels, signing, the installed app | nothing in this repo; `wintty-release` cuts and uploads under it |
 
@@ -122,13 +122,15 @@ Who takes which lane:
   in `run` on a single key is wrong either way: the two phases take
   different keys, so whichever phase is on the other key nests where the
   outer run holds nothing, and an outer `wintty-desktop` waiting on
-  `wintty-build` inverts the order the exclusive pair takes, which is a
-  deadlock until both `--wait` budgets elapse. The one safe wrapper is the
-  exclusive pair, which holds both keys before either phase starts.
+  `wintty-build` inverts the order the exclusive pair takes: against a
+  live exclusive run the two wait on each other until both `--wait`
+  budgets elapse. The one safe wrapper is the exclusive pair, which holds
+  both keys before either phase starts.
 - `just run-win` builds under `wintty-build` and launches outside any lane,
   because the window outlives the recipe: pwsh returns as soon as the
-  process is up. That window is a hazard no lane covers; each harness's own
-  `Assert-NoWintty` is the guard, so close it before queueing a harness.
+  process is up. That window is a hazard no lane covers: the justfile
+  harnesses check for it before building, and most harnesses refuse to
+  start beside it, so close it before queueing one.
 - The harness recipes and `run-win` refuse to run without incoda on PATH or
   in its installer's location (`%LOCALAPPDATA%\Programs\incoda`), naming
   the install. On this machine that is not optional.
