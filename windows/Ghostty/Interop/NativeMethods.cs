@@ -593,6 +593,39 @@ internal static partial class NativeMethods
     internal static void SurfaceSetVisible(GhosttySurface surface, bool visible)
         => SurfaceSetOcclusionNative(surface, visible ? (byte)1 : (byte)0);
 
+    /// <summary>Scrollback compression counters for one surface's primary
+    /// screen, read from the page list under the renderer state mutex.
+    /// Observes the idle shed as a terminal fact rather than a
+    /// process-wide memory delta that every other allocation also
+    /// moves. ActivitySerial is the scheduler's arming input: compression
+    /// runs only once it stops moving.</summary>
+    internal readonly record struct SurfaceMemoryStats(
+        ulong TotalPages,
+        ulong CompressedPages,
+        ulong ResidentRawBytes,
+        ulong DecommittedRawBytes,
+        ulong EncodedBytes,
+        ulong ActivitySerial);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_memory_stats")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial void SurfaceMemoryStatsNative(
+        GhosttySurface surface,
+        out ulong totalPages,
+        out ulong compressedPages,
+        out ulong residentRawBytes,
+        out ulong decommittedRawBytes,
+        out ulong encodedBytes,
+        out ulong activitySerial);
+
+    internal static SurfaceMemoryStats GetSurfaceMemoryStats(GhosttySurface surface)
+    {
+        SurfaceMemoryStatsNative(surface,
+            out var total, out var compressed, out var resident,
+            out var decommitted, out var encoded, out var activity);
+        return new SurfaceMemoryStats(total, compressed, resident, decommitted, encoded, activity);
+    }
+
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_size")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttySurfaceSize SurfaceSize(GhosttySurface surface);
