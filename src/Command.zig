@@ -386,6 +386,32 @@ fn winJoinEnv(arena: Allocator, name: []const u8, suffix: []const u16) ![]u16 {
     return out;
 }
 
+/// How a Windows spawn hands standard I/O to the child.
+const WindowsStdioMode = struct {
+    /// Whether `STARTF_USESTDHANDLES` belongs in `STARTUPINFO.dwFlags`.
+    use_std_handles: bool,
+
+    /// The `bInheritHandles` argument to `CreateProcessW`.
+    inherit_handles: bool,
+};
+
+/// A pseudoconsole child takes its standard handles from the console it
+/// is attached to. `STARTF_USESTDHANDLES` would override those with the
+/// three NULL handles that path has, and nothing in it is passed by
+/// inheritance either, so inheriting is only a way to leak whatever
+/// inheritable handles this process happens to hold. The explicit-handle
+/// path needs both: the child sees the three handles we name, and only
+/// because it inherits them (bounded by the handle list attribute).
+fn windowsStdioMode(has_pseudo_console: bool) WindowsStdioMode {
+    return if (has_pseudo_console) .{
+        .use_std_handles = false,
+        .inherit_handles = false,
+    } else .{
+        .use_std_handles = true,
+        .inherit_handles = true,
+    };
+}
+
 fn startWindows(self: *Command, arena: Allocator) !void {
     const cwd_w = if (self.cwd) |cwd| try std.unicode.utf8ToUtf16LeAllocZ(arena, cwd) else null;
 
@@ -550,13 +576,18 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         break :b .{ attribute_list_buf.ptr, stdin, stdout, stderr };
     };
 
+    const stdio_mode = windowsStdioMode(self.pseudo_console != null);
+
     var startup_info_ex = windows.STARTUPINFOEX{
         .StartupInfo = .{
             .cb = @sizeOf(windows.STARTUPINFOEX),
             .hStdError = stderr,
             .hStdOutput = stdout,
             .hStdInput = stdin,
-            .dwFlags = windows.STARTF_USESTDHANDLES,
+            .dwFlags = if (stdio_mode.use_std_handles)
+                windows.STARTF_USESTDHANDLES
+            else
+                0,
             .lpReserved = null,
             .lpDesktop = null,
             .lpTitle = null,
@@ -591,7 +622,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         command_line_w.ptr,
         null,
         null,
-        windows.TRUE,
+        if (stdio_mode.inherit_handles) windows.TRUE else windows.FALSE,
         flags,
         if (env_w) |w| w.ptr else null,
         if (cwd_w) |w| w.ptr else null,
@@ -823,6 +854,20 @@ fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) 
     }
 
     return buf.toOwnedSliceSentinel(0);
+}
+
+test "windowsStdioMode: a pseudoconsole child takes neither std handles nor inheritance" {
+    // A ConPTY child gets its standard handles from the pseudoconsole it
+    // is attached to, and nothing in that spawn is passed by inheritance.
+    const conpty = windowsStdioMode(true);
+    try testing.expect(!conpty.use_std_handles);
+    try testing.expect(!conpty.inherit_handles);
+
+    // The explicit-handle spawn is the opposite: the child only sees the
+    // three handles we name, and only if it inherits them.
+    const explicit = windowsStdioMode(false);
+    try testing.expect(explicit.use_std_handles);
+    try testing.expect(explicit.inherit_handles);
 }
 
 test "createNullDelimitedEnvMap" {
