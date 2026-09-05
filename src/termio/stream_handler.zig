@@ -74,6 +74,10 @@ pub const StreamHandler = struct {
     /// (OSC 5522) write transaction; exceeding it aborts with EFBIG.
     clipboard_write_limit: usize,
 
+    /// Whether a program running in the terminal is allowed to put it
+    /// into tmux control mode.
+    tmux_control_mode: bool,
+
     //---------------------------------------------------------------
     // Internal state
 
@@ -173,6 +177,7 @@ pub const StreamHandler = struct {
         self.osc_color_report_format = config.osc_color_report_format;
         self.clipboard_write = config.clipboard_write;
         self.clipboard_write_limit = config.clipboard_write_limit;
+        self.tmux_control_mode = config.tmux_control_mode;
         self.enquiry_response = config.enquiry_response;
         self.terminal.setDefaultCursorStyle(config.cursor_style);
         self.terminal.setDefaultCursorBlink(config.cursor_blink);
@@ -509,6 +514,18 @@ pub const StreamHandler = struct {
 
                 switch (tmux) {
                     .enter => {
+                        // Control mode hands the session over to us: we
+                        // start writing tmux commands into the pty on our
+                        // own initiative. Nothing in the sequence proves
+                        // tmux sent it, so it stays off until asked for.
+                        if (!self.tmux_control_mode) {
+                            log.info(
+                                "tmux control mode is disabled by configuration, ignoring",
+                                .{},
+                            );
+                            break :tmux;
+                        }
+
                         // Setup our viewer state
                         assert(self.tmux_viewer == null);
                         const viewer = try self.alloc.create(terminal.tmux.Viewer);
@@ -2408,6 +2425,10 @@ test "tmux control mode commands survive a full pty write backlog" {
     handler.renderer_state = &renderer_state;
     handler.termio_messaged = false;
     handler.tmux_viewer = null;
+    // Control mode is opt-in now, and this test's subject is the write
+    // backlog, not the gate: it asks what happens to a command inside a
+    // session the user did ask for. The gate has its own test below.
+    handler.tmux_control_mode = true;
     defer if (handler.tmux_viewer) |viewer| {
         viewer.deinit();
         testing.allocator.destroy(viewer);
@@ -2790,4 +2811,28 @@ test "color operation: every query in one OSC is answered" {
         ),
         else => try testing.expect(false),
     }
+}
+
+test "tmux control mode: a program cannot enter it unless configured" {
+    if (comptime !StreamHandler.tmux_enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.tmux_viewer = null;
+    handler.tmux_control_mode = false;
+
+    var enter: terminal.dcs.Command = .{ .tmux = .enter };
+    try handler.dcsCommand(&enter);
+    try testing.expect(handler.tmux_viewer == null);
+
+    // With the option on, the existing behaviour is unchanged.
+    handler.tmux_control_mode = true;
+    try handler.dcsCommand(&enter);
+    try testing.expect(handler.tmux_viewer != null);
+
+    var exit: terminal.dcs.Command = .{ .tmux = .exit };
+    try handler.dcsCommand(&exit);
+    try testing.expect(handler.tmux_viewer == null);
 }
