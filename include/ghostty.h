@@ -1279,8 +1279,9 @@ GHOSTTY_API void ghostty_surface_free(ghostty_surface_t);
 GHOSTTY_API void* ghostty_surface_userdata(ghostty_surface_t);
 GHOSTTY_API ghostty_app_t ghostty_surface_app(ghostty_surface_t);
 // The working_directory of the returned config is owned by the surface and
-// stays valid only until the next call for that surface, so copy it before
-// calling again. There is no free for it.
+// stays valid only until the next call for that surface or until the surface
+// is freed, whichever comes first, so copy it before either happens. There is
+// no free for it.
 GHOSTTY_API ghostty_surface_config_s ghostty_surface_inherited_config(ghostty_surface_t, ghostty_surface_context_e);
 GHOSTTY_API void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
 GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
