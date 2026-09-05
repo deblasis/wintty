@@ -2086,20 +2086,24 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // If our font atlas changed, sync the texture data.
             // Placed after beginFrame so the DX12 command list is available.
             texture: {
-                const modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
+                const atlas = &self.font_grid.atlas_grayscale;
+                const modified = atlas.modified.load(.monotonic);
                 if (modified <= frame.grayscale_modified) break :texture;
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
-                frame.grayscale_modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
-                try self.syncAtlasTexture(&self.font_grid.atlas_grayscale, &frame.grayscale);
+                const dirty = atlas.dirtySince(frame.grayscale_modified);
+                frame.grayscale_modified = atlas.modified.load(.monotonic);
+                try self.syncAtlasTexture(atlas, &frame.grayscale, dirty);
             }
             texture: {
-                const modified = self.font_grid.atlas_color.modified.load(.monotonic);
+                const atlas = &self.font_grid.atlas_color;
+                const modified = atlas.modified.load(.monotonic);
                 if (modified <= frame.color_modified) break :texture;
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
-                frame.color_modified = self.font_grid.atlas_color.modified.load(.monotonic);
-                try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
+                const dirty = atlas.dirtySince(frame.color_modified);
+                frame.color_modified = atlas.modified.load(.monotonic);
+                try self.syncAtlasTexture(atlas, &frame.color, dirty);
             }
 
             // Determine if we can use the custom shader path.  All post-process
@@ -3948,13 +3952,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
-        /// Sync the atlas data to the given texture. This copies the bytes
-        /// associated with the atlas to the given texture. If the atlas no
-        /// longer fits into the texture, the texture will be resized.
+        /// Sync the atlas data to the given texture. If the atlas no longer
+        /// fits into the texture, the texture is reallocated and the whole
+        /// atlas copied into it; otherwise only `dirty` is copied.
+        ///
+        /// `dirty` is what this texture is missing, from
+        /// `font.Atlas.dirtySince`; null means it is missing nothing.
+        ///
+        /// Caller must hold the font grid's read lock.
         fn syncAtlasTexture(
             self: *const Self,
             atlas: *const font.Atlas,
             texture: *Texture,
+            dirty: ?font.Atlas.Region,
         ) !void {
             // DX12 rotates command lists across triple-buffered frames.
             // Update the texture to use the current frame's command list
@@ -3968,11 +3978,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Free our old texture
                 texture.*.deinit();
 
-                // Reallocate
+                // Reallocate. The new texture is empty, so it needs the
+                // whole atlas no matter how little the caller asked for.
                 texture.* = try self.api.initAtlasTexture(atlas);
+                try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
+                return;
             }
 
-            try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
+            const region = dirty orelse return;
+
+            // `replaceRegion` takes tightly packed rows and has no source
+            // stride, so the narrowest thing we can hand it without copying
+            // the region out first is the full-width band of rows the dirty
+            // box spans, which is already a slice of the atlas data. The
+            // columns outside the box come along for the ride; they hold
+            // what the texture holds, so re-uploading them changes nothing.
+            const stride: usize = @as(usize, atlas.size) * atlas.format.depth();
+            const start: usize = @as(usize, region.y) * stride;
+            const len: usize = @as(usize, region.height) * stride;
+            try texture.replaceRegion(
+                0,
+                region.y,
+                atlas.size,
+                region.height,
+                atlas.data[start..][0..len],
+            );
         }
     };
 }
