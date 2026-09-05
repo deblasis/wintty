@@ -27,6 +27,15 @@
 # infra-titled issue instead of masquerading as product breaks, and the
 # script exits nonzero when any leg failed.
 #
+# The test legs run under the wintty-build lane (AGENTS.md, heavy job
+# lanes): `just test` and `just test-win` are single-class recipes that stay
+# lane-free inside so they run on any host, so their caller wraps them, and
+# the nightly is a caller like any other. `just fuzz` takes its own two
+# lanes per phase and is called bare. incoda is therefore preflighted with
+# the rest: an unlaned nightly would drop a full zig build and a dotnet test
+# run next to whatever a session is already building, which is the collision
+# the lanes exist to prevent.
+#
 # Hibernate only happens for scheduled runs (or -HibernateAfter), only when
 # the saved config allows it, and only after the same continuous-idle check,
 # so the machine is never hibernated under someone using it.
@@ -146,6 +155,45 @@ function Get-FuzzOutcome {
     }
 }
 
+# incoda's lookup, the justfile's: PATH, then the installer's location. The
+# agent shell this was written under had the latter and not the former.
+function Get-IncodaPath {
+    $found = (Get-Command incoda -ErrorAction SilentlyContinue)?.Source
+    if ($found) { return $found }
+    $installed = Join-Path $env:LOCALAPPDATA 'Programs\incoda\incoda.exe'
+    if (Test-Path $installed) { return $installed }
+    return $null
+}
+
+# The argv for one laned test leg. Built here rather than inline so the
+# self-test can assert the wrap is actually there: a leg that quietly lost
+# its `incoda run` prefix would still pass every other check in this file
+# and only show up as a machine falling over at 23:00.
+function Get-LegArgs([string]$Recipe, [string]$Reason, [string]$Justfile, [string]$WorkTree) {
+    @('run', '--queue', 'wintty-build', '--reason', $Reason, '--',
+      'just', '--justfile', $Justfile, '--working-directory', $WorkTree, $Recipe)
+}
+
+# What a laned test leg's exit code means. incoda passes the child's own
+# status through unchanged, so every code here is `just`'s except 121:
+# --wait elapsed while the run was still queued, which means the lane was
+# never granted and the recipe never started. Filing that as a red test
+# suite would put a product title on a scheduling problem - the same
+# mistake, the other way round, that Get-FuzzOutcome exists to prevent.
+# A function for the same reason: the self-test asserts against THIS
+# mapping, not a copy of it.
+function Get-LegOutcome {
+    param($Code)
+    # $null explicitly: an exit code that was never collected means the leg
+    # was not observed, not that it passed.
+    if ($null -eq $Code) { return 'could-not-run' }
+    switch ([int]$Code) {
+        0       { 'pass' }
+        121     { 'could-not-run' }
+        default { 'fail' }
+    }
+}
+
 if ($SelfTest) {
     $failed = $false
     $idle = [NightlyIdleProbe]::MinutesIdle()
@@ -181,6 +229,33 @@ if ($SelfTest) {
     # never collected must not coerce to 0 and pass as a clean night.
     if ((Get-FuzzOutcome $null) -ne 'harness') { Write-Host 'SELF-TEST FAILED: an uncollected exit code must not read as a clean run'; $failed = $true }
 
+    # The test legs' lane wrap and its exit codes. The wrap is asserted as
+    # argv because that is what silently goes missing; the mapping is
+    # asserted one code at a time, for the same reason as the fuzz table.
+    $legArgs = @(Get-LegArgs 'test' 'nightly zig tests' 'C:\wt\justfile' 'C:\wt')
+    $sep = [array]::IndexOf($legArgs, '--')
+    if ($legArgs[0] -ne 'run' -or $legArgs[1] -ne '--queue' -or $legArgs[2] -ne 'wintty-build') {
+        Write-Host "SELF-TEST FAILED: a test leg must run under the wintty-build lane, got '$($legArgs -join ' ')'"; $failed = $true
+    }
+    if ($legArgs[3] -ne '--reason' -or -not $legArgs[4]) {
+        Write-Host 'SELF-TEST FAILED: the lane refuses a run without --reason, so the leg must carry one'; $failed = $true
+    }
+    if ($sep -lt 0 -or $legArgs[$sep + 1] -ne 'just' -or $legArgs[-1] -ne 'test') {
+        Write-Host "SELF-TEST FAILED: the wrapped command must be the just recipe, got '$($legArgs -join ' ')'"; $failed = $true
+    }
+    foreach ($c in @(
+        @{ code = 0;   want = 'pass';          why = '0 is a green leg' }
+        @{ code = 1;   want = 'fail';          why = 'the child ran and failed' }
+        @{ code = 121; want = 'could-not-run'; why = 'incoda 121 means the lane was never granted, so the recipe never started' }
+    )) {
+        $got = Get-LegOutcome $c.code
+        if ($got -ne $c.want) {
+            Write-Host "SELF-TEST FAILED: leg exit $($c.code) mapped to '$got', expected '$($c.want)' ($($c.why))"
+            $failed = $true
+        }
+    }
+    if ((Get-LegOutcome $null) -ne 'could-not-run') { Write-Host 'SELF-TEST FAILED: an uncollected leg exit code must not read as a pass'; $failed = $true }
+
     # The self-test dir must be disjoint from the real logs, or a run of the
     # self-test would wipe the user's saved options.
     if ($logDir -eq (Join-Path $repoRoot '.agents\nightly-logs')) { Write-Host 'SELF-TEST FAILED: not sandboxed'; $failed = $true }
@@ -197,6 +272,17 @@ $missing = @('git', 'gh', 'just', 'pwsh') | Where-Object { -not (Get-Command $_ 
 if ($missing) {
     Write-Status 'aborted-missing-tools'
     Add-Content $log "nightly: aborting, tools not on PATH in this session: $($missing -join ', ')"
+    exit 1
+}
+
+# incoda is required for the same reason: the test legs must hold the
+# wintty-build lane, and a leg that cannot take it must refuse rather than
+# run unlaned next to a session's build. Not in $missing above because the
+# lookup is not just PATH.
+$incoda = Get-IncodaPath
+if (-not $incoda) {
+    Write-Status 'aborted-missing-tools'
+    Add-Content $log 'nightly: aborting, incoda is not on PATH or in Programs\incoda; the test legs run under the wintty-build lane and must not run unlaned (AGENTS.md, heavy job lanes; https://github.com/deblasis/incoda)'
     exit 1
 }
 
@@ -321,7 +407,7 @@ $legClock = [System.Diagnostics.Stopwatch]::StartNew()
 # reproduced from the report.
 $env:WINTTY_TEST_SEED = '0x{0:x}' -f (Get-Random -Minimum 1 -Maximum 2147483647)
 Write-Host "nightly: WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED"
-just --justfile (Join-Path $wt 'justfile') --working-directory $wt test
+& $incoda @(Get-LegArgs 'test' 'nightly zig tests' (Join-Path $wt 'justfile') $wt)
 $testRc = $LASTEXITCODE ?? 1
 $testSeconds = [int]$legClock.Elapsed.TotalSeconds
 $script:status.results['zig-tests'] = $testRc
@@ -330,7 +416,7 @@ Write-Host "nightly: zig tests rc=$testRc"
 Write-Status 'windows-tests'
 $global:LASTEXITCODE = $null
 $legClock.Restart()
-just --justfile (Join-Path $wt 'justfile') --working-directory $wt test-win
+& $incoda @(Get-LegArgs 'test-win' 'nightly windows tests' (Join-Path $wt 'justfile') $wt)
 $testWinRc = $LASTEXITCODE ?? 1
 $testWinSeconds = [int]$legClock.Elapsed.TotalSeconds
 $script:status.results['windows-tests'] = $testWinRc
@@ -351,8 +437,15 @@ if ((Test-Path $legCache) -and $script:sha -and (Test-Path $envSnapshot)) {
     }
 }
 
-if ($testRc -ne 0) { File-Issue '[nightly] zig test suite failed on windows branch' "``just test`` exited $testRc (WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED)." }
-if ($testWinRc -ne 0) { File-Issue '[nightly] Windows test suite failed on windows branch' "``just test-win`` exited $testWinRc." }
+$laneNote = 'The wintty-build lane was not granted within incoda''s wait, so the recipe never started. This is a runner problem, not a product break: nothing was judged.'
+switch (Get-LegOutcome $testRc) {
+    'fail'          { File-Issue '[nightly] zig test suite failed on windows branch' "``just test`` exited $testRc (WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED)." }
+    'could-not-run' { File-Issue '[nightly] infra: the zig test leg never ran' "incoda exited $testRc. $laneNote" }
+}
+switch (Get-LegOutcome $testWinRc) {
+    'fail'          { File-Issue '[nightly] Windows test suite failed on windows branch' "``just test-win`` exited $testWinRc." }
+    'could-not-run' { File-Issue '[nightly] infra: the Windows test leg never ran' "incoda exited $testWinRc. $laneNote" }
+}
 
 $wakeLockNote = 'If this machine wakes from hibernation to the lock screen every night (sign-in on wake), the fuzz leg can never run; the appliance flow needs sign-in on wake disabled to get fuzz coverage.'
 
@@ -394,6 +487,8 @@ if (-not $lastSuccess -or ((Get-Date) - $lastSuccess).TotalDays -gt 7) {
     File-Issue '[nightly] fuzz starvation: no successful fuzz run in 7 days' "The GUI fuzz leg has been skipped or failing for over a week; fuzz coverage is effectively off. $wakeLockNote"
 }
 
+# A leg that could not run is no more a green than a red one: the branch
+# went unverified either way, so it keeps the deferred ledger unsettled.
 $legFailed = ($testRc -ne 0) -or ($testWinRc -ne 0) -or ($fuzzRc -is [int] -and $fuzzRc -ne 0)
 
 # Deferred signoffs are merges made on credit against exactly this run. A

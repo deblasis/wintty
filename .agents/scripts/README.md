@@ -130,7 +130,11 @@ human) working in this repo uses the same contract:
 - `nightly_fuzz.ps1` / `nightly_control.ps1` / `register_nightly_fuzz.ps1` -
   the 23:00 nightly run (tests + fuzz in a dedicated worktree, deduped P1
   issues on breaks, optional hibernate-after) and its control panel.
-  Register once per build machine from the main checkout.
+  Register once per build machine from the main checkout. The test legs
+  run under the `wintty-build` lane like any other caller of `just test`
+  and `just test-win`, so a missing incoda aborts the run instead of
+  landing a nightly build on top of a session's; a lane that never came
+  free files an infra issue, not a red test suite.
 
 Enforcement wiring is host-specific and lives with each host. For Claude
 Code, `.claude/settings.json` hooks call `pr_gate.py --hook` and
