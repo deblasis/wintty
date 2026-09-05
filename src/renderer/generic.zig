@@ -1165,6 +1165,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.terminal_state.dirty = .full;
         }
 
+        /// Whether either atlas was emptied since we last looked, syncing
+        /// our record of both generations while we're here.
+        ///
+        /// An emptied atlas invalidates every coordinate we hold, so a true
+        /// return means everything we have built has to be built again.
+        fn atlasGenerationsChanged(self: *Self) bool {
+            const grayscale = self.font_grid.atlas_grayscale.generation.load(.monotonic);
+            const color = self.font_grid.atlas_color.generation.load(.monotonic);
+            if (grayscale == self.atlas_generation_grayscale and
+                color == self.atlas_generation_color) return false;
+
+            self.atlas_generation_grayscale = grayscale;
+            self.atlas_generation_color = color;
+            return true;
+        }
+
         /// Called when we get an updated display ID for our display link.
         pub fn setMacOSDisplayID(
             self: *Self,
@@ -1732,36 +1748,54 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
 
-                // If an atlas was emptied because it hit its maximum size,
-                // rows we already built still point into the old layout and
-                // would draw garbage. Rebuild everything, the same way a font
-                // grid change does.
-                atlas: {
-                    const grayscale = self.font_grid.atlas_grayscale.generation.load(.monotonic);
-                    const color = self.font_grid.atlas_color.generation.load(.monotonic);
-                    if (grayscale == self.atlas_generation_grayscale and
-                        color == self.atlas_generation_color) break :atlas;
-                    self.atlas_generation_grayscale = grayscale;
-                    self.atlas_generation_color = color;
+                // If an atlas was emptied between frames because it hit its
+                // maximum size, the rows we still hold point into the old
+                // layout and would draw garbage. Rebuild everything, the
+                // same way a font grid change does.
+                if (self.atlasGenerationsChanged()) self.markDirty();
+
+                // Build our GPU cells.
+                //
+                // An atlas can also be emptied from inside this call, because
+                // rendering a glyph is what fills it up. Rows built before
+                // that point keep their old coordinates, and this same frame
+                // uploads the emptied atlas over them, so we check again
+                // afterwards and build the whole thing over. Once we start
+                // over into an empty atlas a second reset needs a full atlas
+                // worth of glyphs in one frame, which is why one retry is
+                // enough; if it somehow happens anyway we draw the frame we
+                // have and say so rather than looping.
+                var attempts: usize = 0;
+                while (true) {
+                    self.rebuildCells(
+                        critical.preedit,
+                        renderer.cursorStyle(&self.terminal_state, .{
+                            .preedit = critical.preedit != null,
+                            .focused = self.focused,
+                            .blink_visible = cursor_blink_visible,
+                        }),
+                        &critical.links,
+                    ) catch |err| {
+                        // This means we weren't able to allocate our buffer
+                        // to update the cells. In this case, we continue with
+                        // our old buffer (frozen contents) and log it.
+                        comptime assert(@TypeOf(err) == error{OutOfMemory});
+                        log.warn("error rebuilding GPU cells err={}", .{err});
+                    };
+
+                    if (!self.atlasGenerationsChanged()) break;
+
+                    attempts += 1;
+                    if (attempts > 1) {
+                        log.warn(
+                            "atlas emptied repeatedly while building cells, frame may be incorrect",
+                            .{},
+                        );
+                        break;
+                    }
+
                     self.markDirty();
                 }
-
-                // Build our GPU cells
-                self.rebuildCells(
-                    critical.preedit,
-                    renderer.cursorStyle(&self.terminal_state, .{
-                        .preedit = critical.preedit != null,
-                        .focused = self.focused,
-                        .blink_visible = cursor_blink_visible,
-                    }),
-                    &critical.links,
-                ) catch |err| {
-                    // This means we weren't able to allocate our buffer
-                    // to update the cells. In this case, we continue with
-                    // our old buffer (frozen contents) and log it.
-                    comptime assert(@TypeOf(err) == error{OutOfMemory});
-                    log.warn("error rebuilding GPU cells err={}", .{err});
-                };
 
                 // The scrollbar is only emitted during draws so we also
                 // check the scrollbar cache here and update if needed.
