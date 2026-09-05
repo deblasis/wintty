@@ -157,6 +157,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells for the draw call.
         cells_rebuilt: bool = false,
 
+        /// The atlas generations we last built cells against. A generation
+        /// change means the atlas was emptied because it could not grow any
+        /// further, so every glyph position we cached is stale.
+        atlas_generation_grayscale: usize = 0,
+        atlas_generation_color: usize = 0,
+
         /// Latched copy of `renderer.State.first_content`, captured under
         /// the render state mutex in `updateFrame`. Lets `drawFrame` tell
         /// whether the terminal has produced content without re-taking the
@@ -1725,6 +1731,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
+
+                // If an atlas was emptied because it hit its maximum size,
+                // rows we already built still point into the old layout and
+                // would draw garbage. Rebuild everything, the same way a font
+                // grid change does.
+                atlas: {
+                    const grayscale = self.font_grid.atlas_grayscale.generation.load(.monotonic);
+                    const color = self.font_grid.atlas_color.generation.load(.monotonic);
+                    if (grayscale == self.atlas_generation_grayscale and
+                        color == self.atlas_generation_color) break :atlas;
+                    self.atlas_generation_grayscale = grayscale;
+                    self.atlas_generation_color = color;
+                    self.markDirty();
+                }
 
                 // Build our GPU cells
                 self.rebuildCells(

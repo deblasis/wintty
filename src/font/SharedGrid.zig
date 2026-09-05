@@ -403,7 +403,11 @@ pub fn renderGlyph(
 
     const gop = try self.glyphs.getOrPut(alloc, key);
     if (gop.found_existing) return gop.value_ptr.*;
-    errdefer self.glyphs.removeByPtr(gop.key_ptr);
+
+    // Cleared when the atlas reset below drops the whole cache, taking our
+    // reserved slot with it. After that `gop` dangles and must not be used.
+    var slot_valid = true;
+    errdefer if (slot_valid) self.glyphs.removeByPtr(gop.key_ptr);
 
     // Get the presentation to determine what atlas to use
     try tw.check(.get_presentation);
@@ -441,9 +445,28 @@ pub fn renderGlyph(
         glyph_index,
         render_opts,
     ) catch |err| switch (err) {
-        // If the atlas is full, we resize it
+        // If the atlas is full, we make room and try once more.
         error.AtlasFull => blk: {
-            try atlas.grow(alloc, atlas.size * 2);
+            atlas.grow(alloc, atlas.size * 2) catch |grow_err| switch (grow_err) {
+                // The atlas is as large as the GPU can hold, so growing
+                // it any further would only produce a texture that fails
+                // to upload from now on. Start over with an empty atlas
+                // instead. Every cached render points into the old
+                // layout, so the cache goes with it; users of the atlas
+                // watch its generation to drop their own caches.
+                error.AtlasTooLarge => {
+                    log.warn(
+                        "atlas full at its maximum size, resetting size={} max={}",
+                        .{ atlas.size, atlas.max_size },
+                    );
+                    atlas.reset();
+                    slot_valid = false;
+                    self.glyphs.clearRetainingCapacity();
+                },
+
+                else => |e| return e,
+            };
+
             break :blk try self.resolver.renderGlyph(
                 alloc,
                 atlas,
@@ -456,12 +479,19 @@ pub fn renderGlyph(
         else => return err,
     };
 
-    // Cache and return
-    gop.value_ptr.* = .{
+    const render: Render = .{
         .glyph = glyph,
         .presentation = p,
     };
 
+    // Cache and return. A reset above invalidated our reserved slot, so
+    // in that case we insert into the now empty cache from scratch.
+    if (!slot_valid) {
+        try self.glyphs.put(alloc, key, render);
+        return render;
+    }
+
+    gop.value_ptr.* = render;
     return gop.value_ptr.*;
 }
 
@@ -621,6 +651,45 @@ test "renderGlyph error after cache insert rolls back cache entry" {
     // The errdefer should have removed the cache entry, leaving the cache clean.
     // Without the errdefer fix, this would contain garbage/uninitialized data.
     try testing.expect(grid.glyphs.get(key) == null);
+}
+
+test "renderGlyph resets the Atlas when it can no longer grow" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var grid = try testGrid(.normal, alloc, lib);
+    defer grid.deinit(alloc);
+
+    // Swap in a tiny grayscale atlas that is already at its maximum size, so
+    // it fills up quickly and has nowhere to grow into.
+    grid.atlas_grayscale.deinit(alloc);
+    grid.atlas_grayscale = try Atlas.init(alloc, 64, .grayscale);
+    grid.atlas_grayscale.max_size = 64;
+
+    const render_opts: RenderOptions = .{ .grid_metrics = grid.metrics };
+
+    // Render visible ASCII. Each render must succeed: once the atlas fills up
+    // it is emptied and started over rather than failing from here on.
+    var rendered: usize = 0;
+    for (32..127) |i| {
+        const cp: u21 = @intCast(i);
+        const idx = (try grid.getIndex(alloc, cp, .regular, null)).?;
+        const glyph_index = glyph_index: {
+            grid.lock.lockSharedUncancelable(testing.io);
+            defer grid.lock.unlockShared(testing.io);
+            const face = try grid.resolver.collection.getFace(idx);
+            break :glyph_index face.glyphIndex(cp) orelse continue;
+        };
+        _ = try grid.renderGlyph(alloc, idx, glyph_index, render_opts);
+        rendered += 1;
+    }
+
+    // The atlas was emptied at least once and the stale renders went with it.
+    try testing.expect(grid.atlas_grayscale.generation.load(.monotonic) > 0);
+    try testing.expect(grid.glyphs.count() < rendered);
 }
 
 test "init error" {
