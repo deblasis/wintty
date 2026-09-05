@@ -77,6 +77,12 @@ pub const ClipboardRequestType = enum(c_int) {
     list,
 };
 
+comptime {
+    // The width has to hold in every build, not just the ones that run
+    // tests, because the callback signature is shared with C.
+    std.debug.assert(@sizeOf(ClipboardRequestType) == @sizeOf(c_int));
+}
+
 /// The result of starting a clipboard read request. This only reports
 /// facts about the clipboard; how each state is answered on the wire
 /// (if at all) is up to the protocol handling of the requester.
