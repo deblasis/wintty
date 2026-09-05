@@ -822,8 +822,7 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
 
 /// Index of the `/C` or `/K` switch when `argv` is a cmd.exe invocation
 /// with a single script after it, which is the shape a wrapped shell
-/// command has. Returns null for anything else, including an argv that
-/// already carries `/S`: that caller has taken over the quoting.
+/// command has. Returns null for anything else.
 fn windowsCmdScriptSwitch(argv: []const []const u8) ?usize {
     if (argv.len < 3) return null;
 
@@ -844,7 +843,6 @@ fn windowsCmdScriptSwitch(argv: []const []const u8) ?usize {
     // plain cmd.exe switch for this to be the shape we recognize.
     for (argv[1..i]) |arg| {
         if (arg.len != 2 or arg[0] != '/') return null;
-        if (std.ascii.toLower(arg[1]) == 's') return null;
     }
 
     return i;
@@ -882,13 +880,18 @@ fn windowsQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
 ///
 /// Arguments are quoted with the C runtime rules, except the script of a
 /// cmd.exe `/C` (or `/K`) invocation. cmd.exe parses that tail with its
-/// own rules: it has no `\"` escape, and it removes one leading and one
-/// trailing quote from the line. C runtime quoting therefore reaches the
-/// child as literal backslashes, and, once the escaped quotes make the
-/// outer pair no longer the only pair, a command truncated at the last
-/// quote. Such a script is passed through verbatim inside one quote pair
-/// with `/S`, which is documented to strip exactly that pair and run the
-/// rest as written.
+/// own rules and has no `\"` escape, so C runtime quoting reaches the
+/// child as literal backslashes and truncates the command at the last
+/// escaped quote. Such a script is written verbatim inside a single
+/// quote pair instead.
+///
+/// One pair is all cmd needs. It keeps a line's quoting untouched only
+/// when the line holds exactly two quotes, no `&<>()@^|` between them,
+/// and the text between them names an executable; otherwise it strips
+/// the outer pair and runs the rest as written. A script that carries
+/// its own quotes or a metacharacter fails that test and is stripped
+/// back to what the user wrote, and a script that passes it is a bare
+/// quoted program path, which is meant to stay quoted.
 fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
@@ -900,7 +903,6 @@ fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) 
         if (arg_i != 0) try writer.writeByte(' ');
 
         if (cmd_switch) |i| if (arg_i == i) {
-            try writer.writeAll("/S ");
             try writer.writeAll(arg);
             try writer.writeAll(" \"");
             try writer.writeAll(argv[i + 1]);
@@ -938,14 +940,16 @@ test "windowsCreateCommandLine: a cmd.exe script keeps its own quoting" {
     });
     defer alloc.free(line);
 
+    // Four quotes, so cmd strips the outer pair and hands the rest to
+    // its own tokenizer exactly as the user wrote it.
     try testing.expectEqualStrings(
-        "C:\\Windows\\System32\\cmd.exe /S /c " ++
+        "C:\\Windows\\System32\\cmd.exe /c " ++
             "\"chcp 65001 >nul && dir \"C:\\Program Files\"\"",
         line,
     );
 }
 
-test "windowsCreateCommandLine: a cmd.exe script without quotes is unchanged by /S" {
+test "windowsCreateCommandLine: a cmd.exe script without quotes gets one pair" {
     const alloc = testing.allocator;
 
     const line = try windowsCreateCommandLine(alloc, &.{
@@ -955,21 +959,43 @@ test "windowsCreateCommandLine: a cmd.exe script without quotes is unchanged by 
     });
     defer alloc.free(line);
 
-    try testing.expectEqualStrings("cmd.exe /S /C \"echo hi | more\"", line);
+    // Two quotes, but the pipe between them is a cmd metacharacter, so
+    // the pair is stripped and the script runs as written.
+    try testing.expectEqualStrings("cmd.exe /C \"echo hi | more\"", line);
 }
 
-test "windowsCreateCommandLine: a caller supplied /S owns its own quoting" {
+test "windowsCreateCommandLine: a bare quoted program path stays quoted" {
+    const alloc = testing.allocator;
+
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/c",
+        "C:\\Program Files\\app.exe",
+    });
+    defer alloc.free(line);
+
+    // The one case where cmd preserves the quoting instead of stripping
+    // it, which is what a program path with a space needs.
+    try testing.expectEqualStrings("cmd.exe /c \"C:\\Program Files\\app.exe\"", line);
+}
+
+test "windowsCreateCommandLine: a caller supplied /S still gets the verbatim script" {
     const alloc = testing.allocator;
 
     const line = try windowsCreateCommandLine(alloc, &.{
         "cmd.exe",
         "/s",
         "/c",
-        "echo hi",
+        "dir \"C:\\Program Files\"",
     });
     defer alloc.free(line);
 
-    try testing.expectEqualStrings("cmd.exe /s /c \"echo hi\"", line);
+    // `/S` only makes the outer-pair strip unconditional, which is what
+    // the verbatim script already relies on.
+    try testing.expectEqualStrings(
+        "cmd.exe /s /c \"dir \"C:\\Program Files\"\"",
+        line,
+    );
 }
 
 test "windowsCreateCommandLine: everything else keeps the C runtime quoting" {

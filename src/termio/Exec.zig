@@ -2972,8 +2972,8 @@ fn appendSuffix(
 /// correctly: tokens like `C:\Program Files` are re-wrapped in quotes
 /// when joined back. cmd.exe re-tokenizes the script itself, so those
 /// quotes have to reach it exactly as written here; that is why
-/// `windowsCreateCommandLine` in Command.zig hands the script to
-/// `cmd /S /C` inside a single quote pair instead of escaping it again.
+/// `windowsCreateCommandLine` in Command.zig writes the script verbatim
+/// inside a single quote pair instead of escaping it again.
 ///
 /// When `flag_idx+1 == args.len` (flag is the last arg, so there is
 /// nothing to wrap) we leave argv alone rather than fabricate a bare
