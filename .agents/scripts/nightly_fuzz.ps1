@@ -303,6 +303,12 @@ Write-Host "nightly: running against origin/windows @ $script:sha"
 # counts as a failure, never as a stale green.
 Write-Status 'zig-tests'
 $global:LASTEXITCODE = $null
+# The justfile pins the test seed so signoff runs can hit zig's run cache;
+# the nightly is the run that wants fresh randomness, so it draws one. It
+# rides in the failure issue too, or a seed-dependent red could not be
+# reproduced from the report.
+$env:WINTTY_TEST_SEED = '0x{0:x}' -f (Get-Random -Minimum 1 -Maximum 2147483647)
+Write-Host "nightly: WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED"
 just --justfile (Join-Path $wt 'justfile') --working-directory $wt test
 $testRc = $LASTEXITCODE ?? 1
 $script:status.results['zig-tests'] = $testRc
@@ -315,7 +321,7 @@ $testWinRc = $LASTEXITCODE ?? 1
 $script:status.results['windows-tests'] = $testWinRc
 Write-Host "nightly: windows tests rc=$testWinRc"
 
-if ($testRc -ne 0) { File-Issue '[nightly] zig test suite failed on windows branch' "``just test`` exited $testRc." }
+if ($testRc -ne 0) { File-Issue '[nightly] zig test suite failed on windows branch' "``just test`` exited $testRc (WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED)." }
 if ($testWinRc -ne 0) { File-Issue '[nightly] Windows test suite failed on windows branch' "``just test-win`` exited $testWinRc." }
 
 $wakeLockNote = 'If this machine wakes from hibernation to the lock screen every night (sign-in on wake), the fuzz leg can never run; the appliance flow needs sign-in on wake disabled to get fuzz coverage.'

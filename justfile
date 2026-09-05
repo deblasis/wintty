@@ -18,16 +18,60 @@ default: test build-dll
 
 # === Testing ===
 
+# The version the Zig test steps compile with, in place of the one git
+# would report. Without it every test binary carries the branch name and
+# short hash in build_options, which every module imports, so any new
+# commit (an amend, a rebase, a docs-only merge) recompiles every test
+# binary and re-runs every test even though no Zig source moved. Zig
+# already caches a test run against the binary's own hash; a fixed
+# version is what lets that cache see two commits as the same input, and
+# it is also what lets worktrees on different branches share the central
+# cache for src/. Only the test steps use it: the DLL keeps its real
+# version. .agents/scripts/test_reachability.py compiles the same
+# binaries and must pass the same string, or the reachability build is a
+# second cold compile of everything - `gates-selftest` holds them equal.
+TEST_VERSION := "0.0.0-test"
+
+# The seed the test steps run with. `zig build` draws a random one per
+# invocation and hands it to every test binary as `--seed=0x...`, and
+# that argument is part of the run step's cache manifest: measured on
+# this machine, a second `zig build test-lib-vt` at the same commit
+# compiled nothing and still ran both binaries for sixteen minutes. A
+# fixed seed is what makes an unchanged binary's run a cache hit.
+# Override it for a run that wants fresh randomness (the nightly does):
+#   $env:WINTTY_TEST_SEED = '0x1234'; just test
+TEST_SEED := env_var_or_default("WINTTY_TEST_SEED", "0x2a")
+
+# The quotes around the version argument are load-bearing on Windows:
+# the recipe body runs under `pwsh -Command`, whose parser splits an
+# unquoted `-Dversion-string=0.0.0-test` at the first dot into
+# `-Dversion-string=0` and `.0.0-test`, and build.zig then fails with
+# InvalidVersion before compiling anything. `-Dapp-runtime=none` survives
+# only because it has no dot. test_reachability's self-test checks the
+# quotes are still there.
+
 # Run all Zig tests
-test: test-lib-vt test-full test-pkg test-reachability
+test: test-configure test-lib-vt test-full test-pkg test-reachability
+
+# With every test step on the fixed version, nothing in the ladder runs
+# build.zig's own version detection any more, and that path has broken
+# before: Config.init panics on a tag it does not recognise, which is
+# what `gitversion-selftest` guards from the git side. This runs the
+# configure phase alone, with the real git lookup, so a build.zig that
+# cannot configure still fails the Zig leg. Listing the steps is the
+# cheapest thing that forces build() to run to completion.
+#
+# Prove build.zig configures with git version detection.
+test-configure:
+    zig build --list-steps -Dapp-runtime=none
 
 # Test libghostty-vt (fastest feedback loop)
 test-lib-vt:
-    zig build test-lib-vt --summary all
+    zig build test-lib-vt "-Dversion-string={{TEST_VERSION}}" --seed {{TEST_SEED}} --summary all
 
 # Full Zig test suite
 test-full:
-    zig build test -Dapp-runtime=none --summary all
+    zig build test -Dapp-runtime=none "-Dversion-string={{TEST_VERSION}}" --seed {{TEST_SEED}} --summary all
 
 # Tests that live in the vendored packages rather than in src/.
 #
@@ -41,7 +85,7 @@ test-full:
 # under pkg/ carry test blocks; why CI covers just this one is that job's
 # business, and duplicating a different list here would leave two to maintain.
 test-pkg:
-    cd pkg/wuffs && zig build test --summary all
+    cd pkg/wuffs && zig build test --seed {{TEST_SEED}} --summary all
 
 # Zig collects `test` blocks from the files a test binary's own test and
 # comptime blocks reach, so a file can carry assertions that no test step has
@@ -62,7 +106,7 @@ test-pkg:
 #
 # Prove that no file's test blocks are dead.
 test-reachability:
-    python .agents/scripts/test_reachability.py
+    python .agents/scripts/test_reachability.py --version-string {{TEST_VERSION}}
 
 # Cross-platform sanity check (on demand)
 # Uses the cross-platform-test Claude Code skill for native SSH-based testing.
