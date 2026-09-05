@@ -3045,6 +3045,41 @@ test "Page clone graphemes" {
     }
 }
 
+test "Page style ref count can cover every cell of an oversized page" {
+    // A page that is wider than our standard capacity keeps the standard
+    // row count instead of shrinking it, so its cell count is far more than
+    // a CellCountInt can hold. Every one of those cells may reference the
+    // same style, so the ref count has to be wider than a cell count.
+    //
+    // We only compute the capacity here; actually allocating a page that
+    // wide would cost tens of megabytes for no extra coverage.
+    var wide = std_capacity;
+    wide.cols = std_capacity.maxCols().? + 1;
+    const cells: usize = @as(usize, wide.cols) * @as(usize, wide.rows);
+    try testing.expect(cells > std.math.maxInt(size.CellCountInt));
+
+    var page = try Page.init(.{
+        .cols = 10,
+        .rows = 10,
+        .styles = 8,
+    });
+    defer page.deinit();
+
+    const id = try page.styles.add(page.memory, .{ .flags = .{
+        .bold = true,
+    } });
+    page.styles.useMultiple(page.memory, id, @intCast(cells - 1));
+    try testing.expectEqual(cells, @as(usize, page.styles.refCount(page.memory, id)));
+
+    // Releasing a single cell must not drop the style.
+    page.styles.release(page.memory, id);
+    try testing.expectEqual(cells - 1, @as(usize, page.styles.refCount(page.memory, id)));
+    try testing.expectEqual(@as(usize, 1), page.styles.count());
+
+    page.styles.releaseMultiple(page.memory, id, @intCast(cells - 1));
+    try testing.expectEqual(@as(usize, 0), page.styles.count());
+}
+
 test "Page clone styles" {
     var page = try Page.init(.{
         .cols = 10,
