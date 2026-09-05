@@ -84,9 +84,17 @@ human) working in this repo uses the same contract:
   decisions and exact commands while mutating nothing.
 - `just doctor` - verify everything the gates depend on: required tools on
   PATH, scripts where the hook wiring points, settings parseable, nightly
-  task registration. A Claude Code SessionStart hook runs the fast subset
-  at the start of every session, so a broken gate environment is loud
-  instead of silently absent.
+  task registration, and, where incoda is present, that the heavy job lanes
+  are configured the way `lanes.ps1` records. A Claude Code SessionStart
+  hook runs the fast subset at the start of every session, so a broken gate
+  environment is loud instead of silently absent.
+- `just lanes` - apply the heavy job lanes' configuration (`lanes.ps1`):
+  `wintty-build` with three slots, `wintty-desktop` and `wintty-publish`
+  with one, all three refusing a run without `--reason`, and the retired
+  `wintty` key closed with a message naming its replacements. incoda keeps
+  that state in its own directory where nothing in the repo could see it,
+  so the script is the record: apply touches only a lane that drifted, and
+  `-Check` (what `just doctor` runs) reports each drift and changes nothing.
 - `just gates-selftest` - prove the gates still catch what they exist for
   (recorded-PR replays, matcher escapes, exemption anchoring, the merge
   guard's refusal matrix and golden issue body) and that the nightly

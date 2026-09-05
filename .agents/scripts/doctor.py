@@ -19,8 +19,9 @@ Modes:
                tools are suppressed so cross-platform clones do not get
                nagged about Windows-only legs.
   (default)    full human-readable report, including the optional tools
-               (signoff ladder, nightly) and, on Windows, whether the
-               nightly scheduled task is registered.
+               (signoff ladder, nightly), on Windows whether the nightly
+               scheduled task is registered, and where incoda is present
+               whether the heavy job lanes match what lanes.ps1 records.
   --self-test  exercise the check logic with injected resolvers.
 
 Run with: just doctor
@@ -96,6 +97,64 @@ def nightly_task_registered():
         return None
 
 
+def incoda_path(which=shutil.which, environ=os.environ):
+    """The justfile's lookup: PATH, then the installer's location."""
+    found = which("incoda")
+    if found:
+        return found
+    local = environ.get("LOCALAPPDATA")
+    if local:
+        candidate = os.path.join(local, "Programs", "incoda", "incoda.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def lane_config(run=subprocess.run, which=shutil.which, environ=os.environ):
+    """Returns (problems, notes) for the heavy job lanes (AGENTS.md).
+
+    incoda's queue configuration lives in its own state dir, where nothing
+    in the repo can see it, so a lane that quietly lost its slots or its
+    close would otherwise stay wrong until a collision found it. lanes.ps1
+    is the record; its -Check exits 1 with one line per drift, 2 when it
+    could not read the machine. A missing incoda is a note, like the other
+    optional tools, so a clone that is not the development machine stays
+    quiet; drift where incoda is present is a problem."""
+    problems, notes = [], []
+    inc = incoda_path(which, environ)
+    if not inc:
+        notes.append("optional tool missing (heavy job lanes need it): incoda")
+        return problems, notes
+    try:
+        version = run([inc, "version"], capture_output=True, text=True, timeout=15)
+        first = (version.stdout or "").strip().splitlines()
+        notes.append(f"{first[0] if first else 'incoda (version unknown)'} at {inc}")
+    except Exception as e:
+        problems.append(f"incoda at {inc} could not report its version: {e}")
+        return problems, notes
+    if not which("pwsh"):
+        notes.append("lane config not checked: pwsh missing, lanes.ps1 needs it")
+        return problems, notes
+    try:
+        out = run(["pwsh", "-NoProfile", "-File", os.path.join(SCRIPT_DIR, "lanes.ps1"), "-Check"],
+                  capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        problems.append(f"lane config could not be checked: {e}")
+        return problems, notes
+    lines = [l.strip() for l in (out.stdout or "").splitlines() if l.strip()]
+    if out.returncode == 0:
+        notes.append("lanes match .agents/scripts/lanes.ps1")
+    elif out.returncode == 1:
+        drift = [l for l in lines if l.startswith("drift ")]
+        for l in drift:
+            problems.append(f"lane config {l} (just lanes)")
+        if not drift:
+            problems.append("lane config drifted from .agents/scripts/lanes.ps1 (just lanes)")
+    else:
+        problems.append("lane config could not be checked: " + (" ".join(lines) or f"lanes.ps1 exited {out.returncode}"))
+    return problems, notes
+
+
 def deferred_debt():
     """Outstanding deferred signoffs. Reported at session start because a
     skip nobody is reminded of is indistinguishable from a pass."""
@@ -148,6 +207,12 @@ def full_main():
         print("ok   nightly task registered")
     elif reg is False:
         print("warn nightly task not registered on this machine (pwsh .agents/scripts/register_nightly_fuzz.ps1 from the main checkout)")
+    lane_problems, lane_notes = lane_config()
+    for n in lane_notes:
+        print(f"{'warn' if ('missing' in n or 'not checked' in n) else 'ok  '} {n}")
+    for p in lane_problems:
+        print(f"FAIL {p}")
+    problems += lane_problems
     if not problems:
         print("ok   gates wired and required tools present")
     sys.exit(1 if problems else 0)
@@ -192,6 +257,33 @@ def self_test():
 
         problems, _ = check(which=all_present, settings_path=good, script_dir=td)
         report(any("gate script missing" in p for p in problems), "missing gate script is a problem")
+
+    # The lane check, with lanes.ps1 and incoda stood in for: what the
+    # doctor makes of each exit code is the contract, since a drift that
+    # lands as a note instead of a problem keeps `just doctor` green.
+    def fake_run(rc, stdout):
+        def run(argv, **kw):
+            if argv[1:] == ["version"]:
+                return subprocess.CompletedProcess(argv, 0, stdout="incoda vX.Y.Z\ncommit: none\n", stderr="")
+            return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr="")
+        return run
+
+    problems, notes = lane_config(run=fake_run(0, "ok   lanes match\n"), which=all_present)
+    report(not problems and any("lanes match" in n for n in notes) and any("incoda vX.Y.Z" in n for n in notes),
+           "matching lanes are a note carrying incoda's version")
+
+    problems, _ = lane_config(run=fake_run(1, "drift wintty-build: slots 2, want 3\ndrift wintty: not closed\nrun 'just lanes'\n"),
+                              which=all_present)
+    report(len(problems) == 2 and all("drift" in p and "just lanes" in p for p in problems),
+           "each drift line is its own problem naming the fix")
+
+    problems, _ = lane_config(run=fake_run(2, "incoda status --all --json exited 3: boom\n"), which=all_present)
+    report(len(problems) == 1 and "could not be checked" in problems[0],
+           "an unreadable machine is a problem, not a pass")
+
+    no_incoda = lambda name: None if name == "incoda" else "/usr/bin/" + name
+    problems, notes = lane_config(run=fake_run(0, ""), which=no_incoda, environ={})
+    report(not problems and any("incoda" in n for n in notes), "missing incoda is a note, not a problem")
 
     print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
     sys.exit(1 if failed else 0)
