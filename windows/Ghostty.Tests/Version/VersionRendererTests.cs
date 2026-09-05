@@ -30,7 +30,7 @@ public sealed class VersionRendererTests
     public void RenderPlain_OssFixture_MatchesExpected()
     {
         var expected =
-            "Wintty 1.2.0-tip+abc1234\n" +
+            $"{Ghostty.Core.AppIdentity.ProductName} w1.2.0 (tip) on libghostty v1.2.0\n" +
             "  https://github.com/deblasis/wintty/commit/abc1234\n" +
             "\n" +
             "Version\n" +
@@ -62,7 +62,7 @@ public sealed class VersionRendererTests
         };
 
         var output = VersionRenderer.RenderPlain(info);
-        Assert.StartsWith("Wintty 1.2.0-tip+unknown\n\n", output);
+        Assert.StartsWith($"{Ghostty.Core.AppIdentity.ProductName} w1.2.0 (tip) on libghostty v1.2.0\n\n", output);
         Assert.DoesNotContain("github.com/deblasis/wintty/commit", output);
     }
 
@@ -71,7 +71,7 @@ public sealed class VersionRendererTests
     {
         var output = VersionRenderer.RenderAnsi(Sample());
         Assert.Contains(
-            "\x1b]8;;https://github.com/deblasis/wintty/commit/abc1234\x1b\\Wintty 1.2.0-tip+abc1234\x1b]8;;\x1b\\",
+            $"\x1b]8;;https://github.com/deblasis/wintty/commit/abc1234\x1b\\{Ghostty.Core.AppIdentity.ProductName} w1.2.0 (tip) on libghostty v1.2.0\x1b]8;;\x1b\\",
             output);
     }
 

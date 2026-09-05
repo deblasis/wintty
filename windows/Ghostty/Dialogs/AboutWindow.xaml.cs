@@ -69,16 +69,14 @@ internal sealed partial class AboutWindow : Window
         CopyrightText.Text = AboutContent.Copyright;
 
         var info = VersionRenderer.Build();
-        VersionValue.Text = info.WinttyVersion;
+        // Both versions, each under its own prefix, the way `+version` opens.
+        // The product name is already the heading above, so only the version
+        // half goes in the row.
+        VersionValue.Text = VersionHeader.ComposeVersion(info);
 
-        // The Version row already carries the semantic version, so the Build
-        // row surfaces the distribution identity instead: edition, plus the
-        // libghostty channel (tip/stable) when reported. Mirrors the split in
-        // `wintty +version`.
-        var edition = EditionLabel.Format(info.Edition);
-        BuildValue.Text = string.IsNullOrEmpty(info.LibGhostty.Channel)
-            ? edition
-            : $"{edition} ({info.LibGhostty.Channel})";
+        // The Version row now carries the cadence too, so the Build row is
+        // the edition alone; repeating the channel here read as a duplicate.
+        BuildValue.Text = EditionLabel.Format(info.Edition);
 
         // Free-form build identifier. Empty by default, in which case the row
         // collapses (both cells hidden) just like the Commit row below.

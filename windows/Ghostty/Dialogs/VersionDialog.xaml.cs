@@ -26,14 +26,15 @@ internal sealed partial class VersionDialog : ContentDialog
         // bug-report use case still has everything when pasted elsewhere.
         _output = VersionRenderer.RenderPlain(info);
         // The dialog itself shows the body without the header/URL line --
-        // the title bar carries "Wintty <version>" and the URL is rendered
+        // the title bar carries the one-line header and the URL is rendered
         // as a clickable HyperlinkButton above the body.
         VersionText.Text = VersionRenderer.RenderPlainBody(info);
 
-        // Title bar: app icon + "Wintty <version>". Icon URI is the
-        // canonical AppIconSource so packaging changes propagate here.
+        // Title bar: app icon + the same one-line identity `+version` prints
+        // first. Icon URI is the canonical AppIconSource so packaging changes
+        // propagate here.
         TitleIcon.Source = new BitmapImage(AppIconSource.Current);
-        TitleText.Text = $"{Ghostty.Core.AppIdentity.ProductName} {info.WinttyVersionString}";
+        TitleText.Text = VersionHeader.Compose(info);
 
         var commitUrl = VersionRenderer.CommitUrl(info);
         if (commitUrl is null)
