@@ -46,8 +46,8 @@ pub fn setup() void {
         font_config.FontDataOwnedByAtlas = false;
         _ = cimgui.c.ImFontAtlas_AddFontFromMemoryTTF(
             io.Fonts,
-            @ptrCast(@constCast(font.embedded.regular.ptr)),
-            @intCast(font.embedded.regular.len),
+            @ptrCast(@constCast(font.embedded.variable.ptr)),
+            @intCast(font.embedded.variable.len),
             font_size,
             &font_config,
             null,
