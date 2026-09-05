@@ -1620,14 +1620,17 @@ signoff-post sha:
 pr-gate pr:
     python .agents/scripts/pr_gate.py --check-pr {{pr}}
 
-# Squash-merge a PR through the merge guard (#969): the record is validated,
-# the delta between its base and origin/windows is measured, and a
-# resignoff-required issue is filed when the window moved. Raw `gh pr merge`
-# of a moved-window PR is denied by the pr_gate hook, which names this
-# recipe. `--dry-run` shows the inputs, delta, risks and issue body without
-# touching anything: python .agents/scripts/merge_guard.py --dry-run <pr>.
-merge-checked pr:
-    python .agents/scripts/merge_guard.py {{pr}}
+# Squash-merge a PR through the merge guard: the record is validated, the
+# delta between its base and origin/windows is measured, and a moved
+# window is REFUSED with the fix named (rebase, `just signoff` again, which
+# carries every leg the rebase did not touch, merge). Raw `gh pr merge` of a
+# moved-window PR is denied by the pr_gate hook the same way. The owner's
+# override `--carry-risk` merges on the old green anyway and files the
+# resignoff-required issue with the delta (#969's ceremony). `--dry-run`
+# shows the inputs, delta, risks and the would-be verdict without touching
+# anything: python .agents/scripts/merge_guard.py --dry-run <pr>.
+merge-checked pr *args:
+    python .agents/scripts/merge_guard.py {{pr}} {{args}}
 
 # Work the resignoff-required pile the merge guard files (#969 phase 2): an
 # operator loop, not a merge step. Each invocation spends at most --max

@@ -29,13 +29,12 @@ endpoint) unless the PR passes:
                   expensive one.
   window          a raw merge of a PR whose signoff window has moved (commits
                   landed on origin/windows after the record's base) is denied
-                  and pointed at `just merge-checked <pr>`: per #969 the
-                  merge itself is allowed, but the resignoff issue the guard
-                  files is not optional, and a raw merge skips it. A
-                  same-window merge (delta empty) stays allowed raw, but
-                  note the hook is fast and local on purpose: it judges the
-                  window against the local origin/windows, which is only as
-                  fresh as the last fetch.
+                  and pointed at the fix: rebase, `just signoff` again (a
+                  minute, since unmoved legs carry their green), then
+                  `just merge-checked <pr>`. A same-window merge (delta
+                  empty) stays allowed raw, but note the hook is fast and
+                  local on purpose: it judges the window against the local
+                  origin/windows, which is only as fresh as the last fetch.
 
 The size thresholds fit this repository's merge history: focused
 single-concern PRs stay comfortably under the block line, and the warn line
@@ -422,7 +421,8 @@ def policy_deny(pr, lookup, cwd, run=None):
     if rec is None:
         return None
     number = pr.get("number", "?")
-    guard = f"Merge through the guard instead: `just merge-checked {number}`."
+    guard = (f"Rebase onto {BASE_REF}, run 'just signoff' (unmoved legs carry their green "
+             f"in seconds), then merge through the guard: `just merge-checked {number}`.")
     win = windows_head(cwd, run)
     if not win:
         return (f"pr-gate: the signoff window cannot be measured - {BASE_REF} does not "
@@ -438,8 +438,8 @@ def policy_deny(pr, lookup, cwd, run=None):
     est = " (re-estimated at merge time from a legacy record)" if estimated else ""
     return (
         f"pr-gate: this PR's signoff window has moved{est} - {n} commit(s) landed on "
-        f"{BASE_REF} since the record's base, and a raw merge would skip the resignoff "
-        f"ceremony. {guard}"
+        f"{BASE_REF} since the record's base, so the green vouches for an older "
+        f"`windows`. {guard}"
     )
 
 
