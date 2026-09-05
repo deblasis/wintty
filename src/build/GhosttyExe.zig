@@ -16,7 +16,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = cfg.target,
-            .optimize = cfg.optimize,
+            .optimize = cfg.zigOptimize(),
             .strip = cfg.strip,
             .omit_frame_pointer = cfg.omitFramePointer(),
             .unwind_tables = if (cfg.strip) .none else .sync,

@@ -236,9 +236,15 @@ pub fn add(
     const b = step.step.owner;
 
     // We could use our config.target/optimize fields here but its more
-    // correct to always match our step.
+    // correct to always match our step. The exception is -Dvt-safe, which
+    // raises only our own Zig code: vendored dependencies keep following
+    // -Doptimize so that a safety measurement does not also recompile
+    // simdutf and highway in a different mode.
     const target = step.root_module.resolved_target.?;
-    const optimize = step.root_module.optimize.?;
+    const optimize = if (self.config.vt_safe)
+        self.config.optimize
+    else
+        step.root_module.optimize.?;
 
     // We maintain a list of our static libraries and return it so that
     // we can build a single fat static library for the final app.
@@ -262,7 +268,10 @@ pub fn add(
     step.root_module.addOptions("build_options", self.options);
 
     // Every exe needs the terminal options
-    self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);
+    self.config.terminalOptions(
+        .ghostty,
+        step.root_module.optimize.?,
+    ).add(b, step.root_module);
 
     // Every exe needs the uucode module
     step.root_module.addImport("uucode", self.uucode_mod);
@@ -503,6 +512,7 @@ pub fn add(
     if (self.config.simd) try addSimd(
         b,
         step.root_module,
+        optimize,
         &static_libs,
     );
 
@@ -535,15 +545,24 @@ pub fn add(
     // C files
     step.root_module.link_libc = true;
     step.root_module.addIncludePath(b.path("src/stb"));
-    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
-    // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
-    // the static archive is consumed by an external linker.
+    // stb decodes untrusted image bytes, so it gets a stack protector
+    // wherever the runtime is guaranteed to be there. Not on the msvc ABI:
+    // the vt static library turns stack-protector generation off for msvc so
+    // its consumers don't need BufferOverflowU, and a per-file flag is
+    // appended after the module-level setting, so it would quietly bring
+    // back the __security_cookie references that decision exists to avoid.
+    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled on
+    // Windows (LNK4229), leaving __ubsan_handle_* unresolved when the
+    // static archive is consumed by an external linker.
     step.root_module.addCSourceFiles(.{
         .files = &.{"src/stb/stb.c"},
         .flags = if (step.rootModuleTarget().abi == .msvc)
-            &.{ "-fno-sanitize=undefined", "-fno-sanitize-trap=undefined" }
+            &.{
+                "-fno-sanitize=undefined",
+                "-fno-sanitize-trap=undefined",
+            }
         else
-            &.{},
+            &.{"-fstack-protector-strong"},
     });
     if (step.rootModuleTarget().os.tag == .linux) {
         step.root_module.addIncludePath(b.path("src/apprt/gtk"));
@@ -764,7 +783,7 @@ pub fn add(
         step.root_module.addIncludePath(b.path("vendor/glad/include/"));
         step.root_module.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
-            .flags = &.{},
+            .flags = &.{"-fstack-protector-strong"},
         });
 
         // When we're targeting flatpak we ALWAYS link GTK so we
@@ -814,7 +833,10 @@ fn addGtkNg(
 ) !void {
     const b = step.step.owner;
     const target = step.root_module.resolved_target.?;
-    const optimize = step.root_module.optimize.?;
+    const optimize = if (self.config.vt_safe)
+        self.config.optimize
+    else
+        step.root_module.optimize.?;
 
     const gobject_ = b.lazyDependency("gobject", .{
         .target = target,
@@ -1004,10 +1026,10 @@ fn addGtkNg(
 pub fn addSimd(
     b: *std.Build,
     m: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
     static_libs: ?*LazyPathList,
 ) !void {
     const target = m.resolved_target.?;
-    const optimize = m.optimize.?;
     const system_highway = b.systemIntegrationOption("highway", .{ .default = false });
 
     // MSVC's C++ static-init pass populates simdutf's implementation
@@ -1082,6 +1104,17 @@ pub fn addSimd(
         try flags.append(
             b.allocator,
             "-std=c++17",
+        );
+
+        // These read terminal bytes straight off the wire, so they get a
+        // stack protector wherever the runtime is guaranteed to be there.
+        // Not on the msvc ABI: these objects sit in the root module of the
+        // vt static library, which turns stack-protector generation off for
+        // msvc so its consumers don't need BufferOverflowU, and a per-file
+        // flag is appended after the module-level setting, so it would win.
+        if (!is_msvc) try flags.append(
+            b.allocator,
+            "-fstack-protector-strong",
         );
 
         // Keep our SIMD sources in the same Highway header mode as the

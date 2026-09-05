@@ -37,8 +37,15 @@ pub fn init(
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main_bench.zig"),
                 .target = deps.config.target,
-                // We always want our benchmarks to be in release mode.
-                .optimize = .ReleaseFast,
+                // We always want our benchmarks to be in release mode,
+                // regardless of -Doptimize, so that timings are
+                // comparable. -Dvt-safe is the exception: measuring what
+                // runtime safety costs the VT hot path is the reason that
+                // option exists.
+                .optimize = if (deps.config.vt_safe)
+                    .ReleaseSafe
+                else
+                    .ReleaseFast,
                 .link_libc = true,
             }),
         });

@@ -45,6 +45,11 @@ pie: bool = false,
 strip: bool = false,
 patchelf: ?PatchElf = null,
 
+/// Build Ghostty's own Zig code with runtime safety checks even when
+/// the requested optimize mode is a fast release. See `-Dvt-safe` and
+/// `zigOptimize`.
+vt_safe: bool = false,
+
 /// Artifacts
 flatpak: bool = false,
 snap: bool = false,
@@ -409,6 +414,16 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         }
     }
 
+    config.vt_safe = b.option(
+        bool,
+        "vt-safe",
+        "Compile Ghostty's Zig code with runtime safety checks (bounds, " ++
+            "overflow, unreachable) even in a fast release build. The " ++
+            "terminal and VT parser are part of the same Zig module as the " ++
+            "rest of the application, so this raises all of it; vendored C " ++
+            "dependencies keep following -Doptimize.",
+    ) orelse false;
+
     config.pie = b.option(
         bool,
         "pie",
@@ -701,6 +716,22 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
             break :channel .tip;
         },
     );
+}
+
+/// The optimize mode for Ghostty's own Zig code.
+///
+/// This is `optimize` unless `-Dvt-safe` was passed, which raises the
+/// unsafe release modes to ReleaseSafe so that the VT parser and terminal
+/// keep their runtime safety checks while consuming attacker-controlled
+/// bytes. Vendored dependencies deliberately keep `optimize`: they are
+/// built from the same C sources either way and raising them would change
+/// their sanitizer flags too.
+pub fn zigOptimize(self: *const Config) std.builtin.OptimizeMode {
+    if (!self.vt_safe) return self.optimize;
+    return switch (self.optimize) {
+        .Debug, .ReleaseSafe => self.optimize,
+        .ReleaseFast, .ReleaseSmall => .ReleaseSafe,
+    };
 }
 
 /// Returns the build options for the terminal module. This assumes a
