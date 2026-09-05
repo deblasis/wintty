@@ -517,6 +517,11 @@ pub const Surface = struct {
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
 
+    /// The working directory last handed out by newSurfaceOptions. The
+    /// C API returns that struct by value and has no matching free, so
+    /// the surface keeps ownership of the string.
+    inherited_pwd: ?[:0]const u8 = null,
+
     /// Windows buffers WM_KEYDOWN here so a following WM_CHAR can
     /// attach text before dispatching through key encoding.
     pending_key: if (builtin.os.tag == .windows)
@@ -784,6 +789,7 @@ pub const Surface = struct {
 
         // Free our title
         if (self.title) |v| self.app.core_app.alloc.free(v);
+        if (self.inherited_pwd) |v| self.app.core_app.alloc.free(v);
 
         // Remove ourselves from the list of known surfaces in the app.
         self.app.core_app.deleteSurface(self);
@@ -1361,7 +1367,7 @@ pub const Surface = struct {
         };
     }
 
-    pub fn newSurfaceOptions(self: *const Surface, context: apprt.surface.NewSurfaceContext) apprt.Surface.Options {
+    pub fn newSurfaceOptions(self: *Surface, context: apprt.surface.NewSurfaceContext) apprt.Surface.Options {
         const font_size: f32 = font_size: {
             if (!self.app.config.@"window-inherit-font-size") break :font_size 0;
             break :font_size self.core_surface.font_size.points;
@@ -1369,9 +1375,17 @@ pub const Surface = struct {
 
         const working_directory: ?[*:0]const u8 = wd: {
             if (!apprt.surface.shouldInheritWorkingDirectory(context, &self.app.config)) break :wd null;
-            const cwd = self.core_surface.pwd(self.app.core_app.alloc) catch null orelse break :wd null;
-            defer self.app.core_app.alloc.free(cwd);
-            break :wd self.app.core_app.alloc.dupeZ(u8, cwd) catch null;
+            const alloc = self.app.core_app.alloc;
+            const cwd = self.core_surface.pwd(alloc) catch null orelse break :wd null;
+            defer alloc.free(cwd);
+
+            // The caller only borrows this. Embedders copy the string out
+            // during the call, so we hold on to it until the next one
+            // rather than leaking a fresh copy on every call.
+            const dup = alloc.dupeZ(u8, cwd) catch break :wd null;
+            if (self.inherited_pwd) |old| alloc.free(old);
+            self.inherited_pwd = dup;
+            break :wd dup.ptr;
         };
 
         return .{
