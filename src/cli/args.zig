@@ -61,6 +61,11 @@ pub fn parse(
     const info = @typeInfo(T);
     assert(info == .@"struct");
 
+    const Iter = switch (@typeInfo(@TypeOf(iter))) {
+        .pointer => |v| v.child,
+        else => @TypeOf(iter),
+    };
+
     // Make an arena for all our allocations if we support it. Otherwise,
     // use an allocator that always fails. If the arena is already set on
     // the config, then we reuse that. See memory note in parse docs.
@@ -85,7 +90,20 @@ pub fn parse(
         dst._arena = null;
     };
 
-    while (iter.next()) |arg| {
+    while (true) {
+        const next_ = iter.next();
+
+        // An iterator can drop an input it couldn't read, such as a
+        // config line that is too long. Report those alongside the
+        // errors from the args we did get.
+        if (comptime canTrackDiags(T) and @hasDecl(Iter, "skippedDiagnostic")) {
+            if (try iter.skippedDiagnostic(arena_alloc)) |d| {
+                try dst._diagnostics.append(arena_alloc, d);
+            }
+        }
+
+        const arg = next_ orelse break;
+
         // Do manual parsing if we have a hook for it.
         if (@hasDecl(T, "parseManuallyHook")) {
             if (!try dst.parseManuallyHook(
@@ -1526,6 +1544,12 @@ pub const LineIterator = struct {
     /// is formatted to be compatible with the parse function.
     entry: [MAX_LINE_SIZE]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 2)),
 
+    /// The line number of a line we skipped because it was too long to
+    /// fit in `entry`. Read (and cleared) by `skippedDiagnostic` so that
+    /// the parser can report it. Every skip is also logged, so nothing is
+    /// lost if several lines are skipped before it is read.
+    skipped_line: ?usize = null,
+
     pub fn init(reader: *std.Io.Reader) Self {
         return .{ .r = reader };
     }
@@ -1551,9 +1575,30 @@ pub const LineIterator = struct {
             // Reset write head
             writer.end = 0;
 
-            _ = self.r.streamDelimiterEnding(&writer, '\n') catch |e| {
-                log.warn("cannot read from \"{s}\": {}", .{ self.filepath, e });
-                return null;
+            _ = self.r.streamDelimiterEnding(&writer, '\n') catch |e| switch (e) {
+                // The line doesn't fit in our entry buffer so it can't be
+                // a valid argument. Skip past it and keep reading: treating
+                // this as end of input would silently drop the rest of the
+                // file.
+                error.WriteFailed => {
+                    self.line += 1;
+                    self.skipped_line = self.line;
+                    log.warn(
+                        "{s}:{}: line exceeds the {} byte maximum, ignoring",
+                        .{ self.filepath, self.line, MAX_LINE_SIZE },
+                    );
+
+                    _ = self.r.discardDelimiterInclusive('\n') catch {};
+                    if (self.r.seek == self.r.end) {
+                        self.r.fillMore() catch {};
+                    }
+                    continue;
+                },
+
+                else => {
+                    log.warn("cannot read from \"{s}\": {}", .{ self.filepath, e });
+                    return null;
+                },
             };
             _ = self.r.discardDelimiterInclusive('\n') catch {};
 
@@ -1624,6 +1669,25 @@ pub const LineIterator = struct {
             .path = try alloc.dupe(u8, self.filepath),
             .line = self.line,
         } };
+    }
+
+    /// Returns a diagnostic for a line that was skipped since the last
+    /// call, if there was one. `parse` calls this so that a skipped line
+    /// is reported to the user and not just to the log.
+    pub fn skippedDiagnostic(
+        self: *Self,
+        alloc: Allocator,
+    ) Allocator.Error!?diags.Diagnostic {
+        const line = self.skipped_line orelse return null;
+        self.skipped_line = null;
+
+        return .{
+            .message = "line exceeds the maximum length and was ignored",
+            .location = if (self.filepath.len == 0) .none else .{ .file = .{
+                .path = try alloc.dupe(u8, self.filepath),
+                .line = line,
+            } },
+        };
     }
 };
 
@@ -1777,6 +1841,31 @@ test "LineIterator with buffered and primed reader" {
     try testing.expectEqualStrings("--B=C", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator skips a line that is too long" {
+    const testing = std.testing;
+
+    const long = "A=" ++ ("x" ** LineIterator.MAX_LINE_SIZE);
+
+    // Over-long line in the middle of the file.
+    {
+        var reader: std.Io.Reader = .fixed("A\n" ++ long ++ "\nB=42\n");
+        var iter: LineIterator = .{ .r = &reader, .filepath = "test" };
+        try testing.expectEqualStrings("--A", iter.next().?);
+        try testing.expectEqualStrings("--B=42", iter.next().?);
+        try testing.expectEqual(@as(?usize, 2), iter.skipped_line);
+        try testing.expectEqual(@as(?[]const u8, null), iter.next());
+    }
+
+    // Over-long line at the end of the file, with no trailing newline.
+    {
+        var reader: std.Io.Reader = .fixed("A\n" ++ long);
+        var iter: LineIterator = .{ .r = &reader, .filepath = "test" };
+        try testing.expectEqualStrings("--A", iter.next().?);
+        try testing.expectEqual(@as(?[]const u8, null), iter.next());
+        try testing.expectEqual(@as(?usize, 2), iter.skipped_line);
+    }
 }
 
 test "LineIterator refills after ignored line at buffer boundary" {

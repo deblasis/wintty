@@ -4211,6 +4211,32 @@ test "handle bom in config files" {
     }
 }
 
+test "config file with an over-long line keeps reading" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const data = "title = " ++
+        ("x" ** cli.args.LineIterator.MAX_LINE_SIZE) ++
+        "\nfont-size = 20\n";
+    var reader: std.Io.Reader = .fixed(data);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(
+        alloc,
+        &reader,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+
+    // The rest of the file is still applied and the user is told about
+    // the line we dropped.
+    try testing.expectEqual(20, cfg.@"font-size");
+    try testing.expectEqual(1, cfg._diagnostics.items().len);
+    try testing.expectEqual(
+        @as(usize, 1),
+        cfg._diagnostics.items()[0].location.file.line,
+    );
+}
+
 pub const OptionalFileAction = enum { loaded, not_found, @"error" };
 
 /// Load optional configuration file from `path`. All errors are ignored.
