@@ -149,7 +149,15 @@ def lane_config(run=subprocess.run, which=shutil.which, environ=os.environ):
         for l in drift:
             problems.append(f"lane config {l} (just lanes)")
         if not drift:
-            problems.append("lane config drifted from .agents/scripts/lanes.ps1 (just lanes)")
+            # lanes.ps1 exits 1 for drift, but so does any unhandled error in
+            # it, and that one prints nothing on stdout: the reason is on
+            # stderr, which nothing here used to read. "lane config drifted"
+            # is then the wrong diagnosis for a machine that was never read
+            # at all, and it sends the reader to `just lanes`, which fails
+            # the same way.
+            said = " ".join((out.stderr or "").split()) or " ".join(lines)
+            problems.append("lane config drifted from .agents/scripts/lanes.ps1 (just lanes)"
+                            + (f"; lanes.ps1 said: {said}" if said else ""))
     else:
         problems.append("lane config could not be checked: " + (" ".join(lines) or f"lanes.ps1 exited {out.returncode}"))
     return problems, notes
@@ -190,24 +198,29 @@ def session_main():
     sys.exit(0)
 
 
-def full_main():
-    problems, notes = check()
+# The dependencies are injectable so the self-test can drive the whole
+# report: the roll-up below is a line of its own, and without it doctor
+# prints FAIL for a lane problem and still exits 0, which is a green gate
+# over a red machine.
+def full_main(checker=check, lanes=lane_config, debt_source=deferred_debt,
+              nightly=nightly_task_registered):
+    problems, notes = checker()
     for p in problems:
         print(f"FAIL {p}")
     for n in notes:
         print(f"warn {n}")
     try:
-        debt = deferred_debt()
+        debt = debt_source()
     except Exception:
         debt = []
     for e in debt:
         print(f"warn deferred signoff outstanding: {e.get('sha', '?')[:10]}  {e.get('reason', '')}")
-    reg = nightly_task_registered()
+    reg = nightly()
     if reg is True:
         print("ok   nightly task registered")
     elif reg is False:
         print("warn nightly task not registered on this machine (pwsh .agents/scripts/register_nightly_fuzz.ps1 from the main checkout)")
-    lane_problems, lane_notes = lane_config()
+    lane_problems, lane_notes = lanes()
     for n in lane_notes:
         print(f"{'warn' if ('missing' in n or 'not checked' in n) else 'ok  '} {n}")
     for p in lane_problems:
@@ -261,11 +274,11 @@ def self_test():
     # The lane check, with lanes.ps1 and incoda stood in for: what the
     # doctor makes of each exit code is the contract, since a drift that
     # lands as a note instead of a problem keeps `just doctor` green.
-    def fake_run(rc, stdout):
+    def fake_run(rc, stdout, stderr=""):
         def run(argv, **kw):
             if argv[1:] == ["version"]:
                 return subprocess.CompletedProcess(argv, 0, stdout="incoda vX.Y.Z\ncommit: none\n", stderr="")
-            return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
         return run
 
     problems, notes = lane_config(run=fake_run(0, "ok   lanes match\n"), which=all_present)
@@ -281,9 +294,40 @@ def self_test():
     report(len(problems) == 1 and "could not be checked" in problems[0],
            "an unreadable machine is a problem, not a pass")
 
+    # lanes.ps1 exits 1 for drift AND for any unhandled error in itself, and
+    # the second kind prints nothing on stdout. Reported as bare drift it
+    # sends the reader to `just lanes`, which dies the same way; the reason
+    # was on stderr the whole time.
+    problems, _ = lane_config(run=fake_run(1, "", "lanes.ps1: Index operation failed; the array index evaluated to null.\n"),
+                              which=all_present)
+    report(len(problems) == 1 and "array index evaluated to null" in problems[0],
+           "exit 1 with no drift lines carries lanes.ps1's stderr, not a bare 'drifted'")
+
     no_incoda = lambda name: None if name == "incoda" else "/usr/bin/" + name
     problems, notes = lane_config(run=fake_run(0, ""), which=no_incoda, environ={})
     report(not problems and any("incoda" in n for n in notes), "missing incoda is a note, not a problem")
+
+    # The whole report, not just check(): the lane problems are collected in
+    # their own list and rolled into the exit status by one line, and
+    # dropping that line leaves doctor printing FAIL and exiting 0 - a gate
+    # that is green over a machine it just called broken.
+    import contextlib
+    import io
+
+    def run_full(lane_result):
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                full_main(checker=lambda: ([], []), lanes=lambda: lane_result,
+                          debt_source=lambda: [], nightly=lambda: None)
+        except SystemExit as e:
+            return e.code, buf.getvalue()
+        return None, buf.getvalue()
+
+    code, out = run_full((["lane config drift wintty: not closed (just lanes)"], []))
+    report(code == 1 and "FAIL" in out, "a lane problem alone makes `just doctor` exit nonzero")
+    code, out = run_full(([], ["lanes match .agents/scripts/lanes.ps1"]))
+    report(code == 0 and "FAIL" not in out, "a healthy machine still exits 0")
 
     print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
     sys.exit(1 if failed else 0)

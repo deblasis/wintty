@@ -257,6 +257,12 @@ inc := '(Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path
 # --reason requirement, the retired `wintty` key closed) from
 # .agents/scripts/lanes.ps1, the one record of it in the repo; only a lane
 # that drifted is touched. `just doctor` runs the same script's -Check.
+#
+# [windows] like every other lane recipe: it writes machine-global state
+# through an incoda whose fallback location is under %LOCALAPPDATA%, which
+# exists nowhere else. The script's own -SelfTest needs neither and runs
+# cross-platform in `gates-selftest`.
+[windows]
 lanes:
     pwsh -NoProfile -File .agents/scripts/lanes.ps1
 
@@ -1748,8 +1754,9 @@ gitversion-selftest:
     pwsh -NoProfile -File .agents/scripts/gitversion_selftest.ps1
 
 # Recorded-PR replays, matcher escapes, exemption anchoring, the merge
-# guard's refusal matrix and golden issue body, and the nightly scripts'
-# helpers roundtripping. `gitversion-selftest` runs first.
+# guard's refusal matrix and golden issue body, the nightly scripts'
+# helpers roundtripping, and the lane table's drift and apply argv.
+# `gitversion-selftest` runs first.
 #
 # Prove the gates still catch what they exist for.
 gates-selftest: gitversion-selftest
@@ -1763,6 +1770,7 @@ gates-selftest: gitversion-selftest
     python .agents/scripts/leg_cache.py --self-test
     pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
+    pwsh -NoProfile -File .agents/scripts/lanes.ps1 -SelfTest
 
 # Prove the shipping-build gate refuses a leak in a real Release evaluation (#929)
 [windows]

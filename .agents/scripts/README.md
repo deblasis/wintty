@@ -134,7 +134,17 @@ human) working in this repo uses the same contract:
   run under the `wintty-build` lane like any other caller of `just test`
   and `just test-win`, so a missing incoda aborts the run instead of
   landing a nightly build on top of a session's; a lane that never came
-  free files an infra issue, not a red test suite.
+  free files an infra issue, not a red test suite, and so does every other
+  way incoda can end a run without one (refused, unstartable, killed). The
+  legs wait two hours for the lane rather than incoda's default thirty
+  minutes, because a busy evening queues deeper than that and a timeout
+  would file an infra issue against a machine working as designed.
+- `lanes.ps1` - the heavy job lanes' configuration (AGENTS.md), applied by
+  `just lanes` and checked by `just doctor`. incoda keeps queue config in
+  its own state dir where the repo cannot see it, so this table is the
+  record; the descriptions are shared verbatim with `wintty-release`. Its
+  `-SelfTest` covers the drift rules and the apply argv without touching a
+  machine, and runs in `gates-selftest`.
 
 Enforcement wiring is host-specific and lives with each host. For Claude
 Code, `.claude/settings.json` hooks call `pr_gate.py --hook` and
