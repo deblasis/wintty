@@ -54,20 +54,25 @@ exists on GitHub. If the order ever inverts anyway, `just signoff-post
 <sha>` re-advertises the recorded run without re-running anything. A raw
 `gh pr merge` is tolerated only for a provably same-window merge, and your
 view of `windows` is only as fresh as your last fetch. The `pr_gate` hook refuses
-a merge without that signoff, and it also refuses a raw merge whose
-signoff window has moved (commits landed on `windows` after the record's
-base): per #969 the merge itself is then still allowed, but it goes
-through the guard, which files the `resignoff-required` issue carrying
-the delta and the risks instead of re-gating inline. The one deliberate
-exception is `just sync-publish`, which lands the upstream snapshot merge
-without a PR; in exchange it runs its own assertions at publish time:
-nothing windows merged may be missing from the replay, and work no PR
-reviewed may ride along unnamed or unacknowledged.
+a merge without that signoff, and both the hook and the guard refuse a
+merge whose signoff window has moved (commits landed on `windows` after
+the record's base): the green vouches for an older `windows`, so rebase
+onto the current one, run `just signoff` again, and merge. That second
+run is cheap by design: a leg whose inputs the rebase did not move
+carries its earlier green in seconds (`just leg-cache plan` shows which),
+so a rebase costs a signoff of about a minute, never the ladder. Merging
+on the old green and filing the risk as a `resignoff-required` issue is
+no longer the default; it is the owner's override, `just merge-checked
+<pr> --carry-risk`, and an agent does not reach for it. The one
+deliberate exception is `just sync-publish`, which lands the upstream
+snapshot merge without a PR; in exchange it runs its own assertions at
+publish time: nothing windows merged may be missing from the replay, and
+work no PR reviewed may ride along unnamed or unacknowledged.
 
-The `resignoff-required` issues the guard files are debt, not blockers:
-they are designed to sit until worked, and working them is the owner's
-loop (`just resignoff-bot`), not an agent's merge step. Never run the bot
-as part of merging; each run is an hour of lane time and the pile is meant
+The `resignoff-required` issues that exist are debt, not blockers: they
+are designed to sit until worked, and working them is the owner's loop
+(`just resignoff-bot`), not an agent's merge step. Never run the bot as
+part of merging; each run is an hour of lane time and the pile is meant
 to wait for it.
 
 Always pass `--repo deblasis/wintty`. Never open anything against
