@@ -1467,6 +1467,43 @@ pub const ID3D12Device = extern struct {
     }
 };
 
+/// ID3D12Device5, bound only for RemoveDevice: the documented way to put
+/// a device into the removed state on demand, so device-loss recovery can
+/// be exercised by a test instead of waiting for a real TDR. Every other
+/// slot is reserved; the renderer talks to the device through ID3D12Device.
+pub const ID3D12Device5 = extern struct {
+    vtable: *const VTable,
+    pub const IID = GUID{
+        .data1 = 0x8b4f173b,
+        .data2 = 0x2fea,
+        .data3 = 0x4b80,
+        .data4 = .{ 0x8f, 0x58, 0x43, 0x07, 0x19, 0x1a, 0xb9, 0x5d },
+    };
+
+    pub const VTable = extern struct {
+        /// IUnknown (3) + ID3D12Object (4) + ID3D12Device (37) +
+        /// ID3D12Device1 (3) + ID3D12Device2 (1) + ID3D12Device3 (3) +
+        /// ID3D12Device4 (6) + ID3D12Device5.CreateLifetimeTracker (1).
+        /// RemoveDevice is the second ID3D12Device5 method. Counting the
+        /// SDK header is a trap: the four struct-returning methods are
+        /// declared twice there, once per ABI, and only one of each is
+        /// a slot.
+        base: [58]Reserved,
+        RemoveDevice: *const fn (*ID3D12Device5) callconv(.winapi) void,
+        /// EnumerateMetaCommands through CheckDriverMatchingIdentifier.
+        tail: [6]Reserved,
+    };
+
+    pub inline fn RemoveDevice(self: *ID3D12Device5) void {
+        self.vtable.RemoveDevice(self);
+    }
+
+    pub inline fn Release(self: *ID3D12Device5) u32 {
+        const unknown: *IUnknown = @ptrCast(self);
+        return unknown.vtable.Release(unknown);
+    }
+};
+
 // --- Extern functions ---
 
 pub extern "d3d12" fn D3D12CreateDevice(
@@ -1923,6 +1960,19 @@ test "DxcBuffer is extern struct with expected field order" {
 test "DXC_OUT_KIND has OBJECT and ERRORS variants" {
     try std.testing.expectEqual(@as(u32, 1), @intFromEnum(DXC_OUT_KIND.OBJECT));
     try std.testing.expectEqual(@as(u32, 2), @intFromEnum(DXC_OUT_KIND.ERRORS));
+}
+
+test "ID3D12Device5 RemoveDevice sits at slot 58 of 65" {
+    // Counted from ID3D12Device5Vtbl in the Windows SDK d3d12.h (minus its
+    // per-ABI duplicate declarations): the slot has to match or
+    // RemoveDevice would call CreateLifetimeTracker or CreateStateObject
+    // instead, and the first symptom of that was a fast-fail crash.
+    try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(ID3D12Device5));
+    try std.testing.expectEqual(65 * @sizeOf(*anyopaque), @sizeOf(ID3D12Device5.VTable));
+    try std.testing.expectEqual(58 * @sizeOf(*anyopaque), @offsetOf(ID3D12Device5.VTable, "RemoveDevice"));
+    // ID3D12Device5 extends ID3D12Device, so the shared prefix must agree.
+    try std.testing.expectEqual(44 * @sizeOf(*anyopaque), @sizeOf(ID3D12Device.VTable));
+    try std.testing.expectEqual(37 * @sizeOf(*anyopaque), @offsetOf(ID3D12Device.VTable, "GetDeviceRemovedReason"));
 }
 
 test "IDxcBlobUtf8 has expected vtable field count" {

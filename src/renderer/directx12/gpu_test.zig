@@ -1693,3 +1693,103 @@ test "Texture: deinit recycles its SRV slot" {
     defer tex2.deinit();
     try std.testing.expectEqual(@as(u32, 0), tex2.srv.index);
 }
+
+// ---- Device-loss recovery ----
+
+/// Put a live device into the removed state, the way a TDR or a driver
+/// upgrade would, without waiting for either. Needs ID3D12Device5
+/// (Windows 10 1809+); skips where the runtime cannot hand it out.
+fn removeDevice(dev: *d3d12.ID3D12Device) !void {
+    var dev5: ?*d3d12.ID3D12Device5 = null;
+    const hr = dev.vtable.QueryInterface(dev, &d3d12.ID3D12Device5.IID, @ptrCast(&dev5));
+    if (com.FAILED(hr) or dev5 == null) return error.SkipZigTest;
+    defer _ = dev5.?.Release();
+    dev5.?.RemoveDevice();
+    if (!com.FAILED(dev.GetDeviceRemovedReason())) return error.DeviceNotRemoved;
+}
+
+test "Device: SwapChainPanel surface handle outlives the device that presented into it" {
+    // The WinUI shell binds the DirectComposition surface handle to its
+    // SwapChainPanel exactly once. A device recreated after a TDR must
+    // present into that same surface, or the panel keeps compositing a
+    // handle nothing writes to.
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
+
+    var first = Device.init(.swap_chain_panel, .{ .width = 64, .height = 64 }) catch
+        return error.SkipZigTest;
+    var first_alive = true;
+    errdefer if (first_alive) first.deinit();
+    const handle = first.swap_chain_surface_handle orelse return error.NoSurfaceHandle;
+
+    try removeDevice(first.device);
+
+    // Keep the handle across the teardown; the renderer does the same.
+    first.swap_chain_surface_handle = null;
+    first.deinit();
+    first_alive = false;
+    // Ours until the second device takes it.
+    var handle_owned = true;
+    errdefer if (handle_owned) {
+        _ = d3d12.CloseHandle(handle);
+    };
+
+    var second = try Device.init(.swap_chain_panel, .{
+        .width = 64,
+        .height = 64,
+        .surface_handle = handle,
+    });
+    handle_owned = false;
+    defer second.deinit();
+
+    try std.testing.expectEqual(handle, second.swap_chain_surface_handle.?);
+    try std.testing.expect(!com.FAILED(second.device.GetDeviceRemovedReason()));
+
+    // The proof is a Present into the reused surface from the new device.
+    const sc = second.swap_chain orelse return error.NoSwapChain;
+    try std.testing.expect(!com.FAILED(sc.Present(0, 0)));
+}
+
+test "DirectX12: rebuilds every device-bound object after the device is removed" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const DirectX12 = @import("../DirectX12.zig");
+
+    // Shared-texture mode: a real device and command queue with no window
+    // or swap chain, so this runs headless.
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+    api.flushInitCommands();
+    const version_before = api.dev.?.shared_texture.?.version;
+
+    try removeDevice(api.dev.?.device);
+    // What handleDeviceRemoved records when Present or Signal reports it.
+    api.device_lost = true;
+    try std.testing.expect(api.deviceLost());
+
+    try api.recoverDevice();
+
+    try std.testing.expect(!api.deviceLost());
+    const dev = &(api.dev orelse return error.NoDevice);
+    try std.testing.expect(!dev.removed());
+    // A consumer re-opens the shared handles on a version it has not
+    // seen; a fresh device would have restarted the count at 1.
+    const st = dev.shared_texture orelse return error.NoSharedTexture;
+    try std.testing.expectEqual(version_before + 1, st.version);
+    try std.testing.expect(api.srv_heap != null);
+    try std.testing.expect(api.rtv_heap != null);
+    try std.testing.expect(api.sampler_heap != null);
+    try std.testing.expect(api.shared_rtv != null);
+    for (api.gpu_frames) |gf| try std.testing.expect(gf != null);
+    try std.testing.expectEqual(@as(u32, 64), api.applied_width);
+    try std.testing.expectEqual(@as(u32, 64), api.applied_height);
+
+    // The rebuilt queue accepts and completes work: the fresh init
+    // command list goes through Close, ExecuteCommandLists and a fence
+    // wait, none of which the old device could do.
+    try std.testing.expect(api.init_command_list != null);
+    api.flushInitCommands();
+    try std.testing.expect(api.init_command_list == null);
+    try dev.waitForGpu();
+}
