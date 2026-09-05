@@ -264,3 +264,125 @@ test "mainActionImpl accepts --duration-ms alongside action-specific flags" {
         .{ .string = "--terminal-rows=4 --terminal-cols=4 --duration-ms=1" },
     );
 }
+
+// The tests below drive `mainAction` end to end against a real file on
+// disk: argv collection, the `RunOptions`/`Options` split, `create`,
+// `setup`, `step` and `teardown`. Every other test for the preload fix
+// (in CodepointWidth.zig, GraphemeBreak.zig, OscParser.zig and
+// TerminalStream.zig) sets `self.data` by hand and calls `step`
+// directly, which proves `step` can consume preloaded data but never
+// proves `setup` actually preloads it -- `options.dataFile` and
+// `compat_file.readToEndAlloc` are never reached that way. These do
+// reach them: a real temp file is opened by `setup`, so the preload
+// path we fixed is what's under test, not assumed.
+
+/// Writes `contents` to a file named "data" inside `tmp` and returns
+/// its path, valid for the lifetime of `buf`. Used to hand `mainAction`
+/// a `--data=<path>` argument that points at a real file.
+fn writeTmpDataFile(
+    tmp: *std.testing.TmpDir,
+    contents: []const u8,
+    buf: []u8,
+) ![]const u8 {
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "data", .data = contents });
+    const n = try tmp.dir.realPathFile(io, "data", buf);
+    return buf[0..n];
+}
+
+test "mainAction preloads a real codepoint-width corpus through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "hello world", &path_buf);
+
+    const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"codepoint-width", .{ .string = args });
+}
+
+test "mainAction preloads a real grapheme-break corpus through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "e\u{301} world", &path_buf);
+
+    const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"grapheme-break", .{ .string = args });
+}
+
+test "mainAction preloads a real osc-parser corpus through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Matches OscParser's corpus format: a `@sizeOf(usize)`-byte
+    // little-endian length prefix followed by that many bytes of OSC
+    // payload (see the `data` field doc comment in OscParser.zig).
+    const payload = "0;hello";
+    const record_len_size = @sizeOf(usize);
+    var record: [record_len_size + payload.len]u8 = undefined;
+    std.mem.writeInt(usize, record[0..record_len_size], payload.len, .little);
+    @memcpy(record[record_len_size..], payload);
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, &record, &path_buf);
+
+    const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"osc-parser", .{ .string = args });
+}
+
+test "mainAction preloads a real terminal-stream corpus through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "hello\r\nworld", &path_buf);
+
+    const args = try std.fmt.allocPrint(
+        alloc,
+        "--terminal-rows=4 --terminal-cols=10 --data={s}",
+        .{path},
+    );
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"terminal-stream", .{ .string = args });
+}
+
+test "mainAction opens a real data file for screen-clone through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "hello\r\nworld", &path_buf);
+
+    const args = try std.fmt.allocPrint(
+        alloc,
+        "--terminal-rows=4 --terminal-cols=10 --data={s}",
+        .{path},
+    );
+    defer alloc.free(args);
+
+    // screen-clone's `setup` doesn't preload into a `data` field like
+    // the others -- it streams the file straight into the terminal
+    // before the timed clone loop -- but it still opens a real file via
+    // `options.dataFile`, which is what this proves actually happens.
+    try mainAction(alloc, .@"screen-clone", .{ .string = args });
+}

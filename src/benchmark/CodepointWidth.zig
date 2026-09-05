@@ -47,6 +47,17 @@ pub const Options = struct {
     /// use stdin by default but I find that a hanging CLI command
     /// with no interaction is a bit annoying.
     data: ?[]const u8 = null,
+
+    /// `cli.args.parse` allocates `[]const u8` fields (like `data`
+    /// above) out of this arena when present; without it, allocations
+    /// go through an internal allocator that's never freed. See
+    /// `deinit`.
+    _arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: *Options) void {
+        if (self._arena) |arena| arena.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const Mode = enum {
@@ -132,7 +143,9 @@ fn teardown(ptr: *anyopaque) void {
         f.close(global.io());
         self.data_f = null;
     }
-    if (self.data.len > 0) self.alloc.free(self.data);
+    // `Allocator.free` is a no-op on a zero-length slice, so this is
+    // safe even for the `simd` mode, which never populates `data`.
+    self.alloc.free(self.data);
     self.data = &.{};
 }
 

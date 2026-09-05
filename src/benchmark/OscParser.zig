@@ -38,6 +38,17 @@ pub const Options = struct {
     /// use stdin by default but I find that a hanging CLI command
     /// with no interaction is a bit annoying.
     data: ?[]const u8 = null,
+
+    /// `cli.args.parse` allocates `[]const u8` fields (like `data`
+    /// above) out of this arena when present; without it, allocations
+    /// go through an internal allocator that's never freed. See
+    /// `deinit`.
+    _arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: *Options) void {
+        if (self._arena) |arena| arena.deinit();
+        self.* = undefined;
+    }
 };
 
 /// Create a new terminal stream handler for the given arguments.
@@ -93,7 +104,9 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
 
 fn teardown(ptr: *anyopaque) void {
     const self: *OscParser = @ptrCast(@alignCast(ptr));
-    if (self.data.len > 0) self.alloc.free(self.data);
+    // `Allocator.free` is a no-op on a zero-length slice, so this is
+    // safe even when `setup` never populated `data`.
+    self.alloc.free(self.data);
     self.data = &.{};
 }
 
@@ -109,6 +122,13 @@ fn step(ptr: *anyopaque) Benchmark.Error!void {
         );
         offset += record_len_size;
 
+        // Before the corpus was preloaded into `data`, this bounds
+        // check guarded a fixed on-stack read buffer, rejecting any
+        // record that claimed to be larger than that buffer. Now that
+        // the whole corpus lives in memory, the same check instead
+        // validates the length prefix against what's actually left in
+        // the corpus -- a different guarantee (a well-formed record
+        // stream) rather than a fixed per-record size cap.
         if (len > self.data.len - offset) return error.BenchmarkFailed;
         const record = self.data[offset .. offset + len];
         offset += len;
