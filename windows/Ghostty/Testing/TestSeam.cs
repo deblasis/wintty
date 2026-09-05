@@ -988,6 +988,7 @@ internal static class TestSeam
                     json.WriteNumber("residentRawBytes", s.ResidentRawBytes);
                     json.WriteNumber("decommittedRawBytes", s.DecommittedRawBytes);
                     json.WriteNumber("encodedBytes", s.EncodedBytes);
+                    json.WriteNumber("activitySerial", s.ActivitySerial);
                     json.WriteEndObject();
                 });
             }

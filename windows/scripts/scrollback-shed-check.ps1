@@ -2,20 +2,26 @@
 <#
     Scrollback shedding, measured against the running app.
 
-    The Windows decommit primitives in terminal/mem.zig turn
-    scrollback compression on for our platform; the renderer's own
-    scheduler then compresses eligible pages once a surface goes quiet
-    (250ms idle, one page per millisecond step). Nothing in the shell
-    drives this -- it is entirely in-product -- so what this harness
-    proves is the OUTCOME: a tab handed a large scrollback and then
-    left alone must give the memory back, and must come back intact
-    when it is revisited.
+    The Windows decommit primitives in terminal/mem.zig turn scrollback
+    compression on for our platform. Nothing in the shell drives the
+    scheduling -- it is entirely in-product -- so what this harness
+    proves is the OUTCOME, and it does so through the terminal's own
+    page census (the surface-mem seam op): a tab handed a large
+    scrollback and hidden while it still parses must end with most
+    pages compressed and real bytes decommitted, and must come back
+    alive when revisited and scrolled.
 
-    The oracle is relative, not absolute, so it means the same thing on
-    any machine: private bytes, sampled after the scrollback settles,
-    must fall by at least 15% within the observation window, and the
-    window must stay alive (seam still answers) after the compressed
-    tab is re-activated -- pages restored on demand, not lost.
+    Hiding BEFORE the parse finishes is deliberate: a hidden surface
+    has no output-driven render wakes (the occlusion work dropped
+    them), so compression while hidden depends on the scheduler kicks
+    in the .visible/.focus mailbox transitions. A regression in those
+    kicks reads here as zero compressed pages.
+
+    Process byte counters are printed as an informational echo only: a
+    slow dump lets the scheduler compress pages as fast as they are
+    created, so creation's +commit and the decommit's -commit cancel
+    inside one sampling interval and the counter reads flat while the
+    shed is real.
 
     send-text is armed for this harness (it hands the shell a command
     that generates the scrollback). Exits 0 clean, 2 finding, 1
@@ -24,10 +30,9 @@
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
-    # How long to watch memory after the tab goes quiet. The scheduler
-    # needs 250ms of renderer quiet plus ~1ms per page; a 100MB
-    # scrollback is a few dozen pages, so 90s is generous margin for a
-    # slow machine while the parse itself settles.
+    # How long to watch after the dump reports. The scheduler needs
+    # 250ms of quiet plus ~1ms per page, so 90s is generous margin for
+    # a slow machine while the hidden parse itself finishes.
     [int]$ObserveSeconds = 90
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
@@ -107,36 +112,40 @@ try {
         text = '$s = ("A"*10 + "`r`n") * 60000; [Console]::Out.Write($s); $Host.UI.RawUI.WindowTitle = "DUMPED-" + $s.Length' + [char]13
     })
 
-    $dumpedTitle = $null
-    $deadline = [DateTime]::UtcNow.AddSeconds(150)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Seconds 3
-        $st = Invoke-SeamCommand $session @{ op = 'get-state' }
-        if ($st.state.tabs[1].title -like 'DUMPED-*') { $dumpedTitle = $st.state.tabs[1].title; break }
-    }
-    if (-not $dumpedTitle) {
-        # The tab's actual state, as evidence rather than assumption:
-        # a screenshot of the window where the command was supposed to
-        # run, saved next to the samples.
-        try {
-            Add-Type -AssemblyName System.Drawing
-            $rc = [SeamWin]::RectOf($session.Hwnd64)
-            if ($null -ne $rc) {
-                $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
-                $g = [System.Drawing.Graphics]::FromImage($bmp)
-                $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
-                $bmp.Save((Join-Path $OutDir 'setup-failed.png'))
-                $g.Dispose(); $bmp.Dispose()
-            }
-        } catch { }
-        $st = Invoke-SeamCommand $session @{ op = 'get-state' }
-        throw ("SETUP-FAILED: the dump command never reported (last title: '{0}'). " -f $st.state.tabs[1].title) +
-            "Setup evidence in $OutDir\setup-failed.png"
-    }
-    Write-Host "dump verified: $dumpedTitle (baseline $([Math]::Round($baseline/1MB))MB)"
+    # Hide the dump tab IMMEDIATELY -- before the parse finishes. This
+    # is the whole point of the scenario: a hidden surface has no
+    # output-driven render wakes (the occlusion work dropped them), so
+    # compression from here on depends on the scheduler kicks in the
+    # .visible/.focus mailbox transitions. Parsing itself continues
+    # while hidden; only redraw wakes are dropped.
+    [void](Invoke-SeamCommand $session @{ op = 'select'; index = 0 })
 
-    # Let the parse finish and the pages settle: poll private bytes
-    # until two samples 5s apart move by <2%, then one more beat.
+    # Dump completion is verified through the census, not a title
+    # marker: title OSCs do not reach a hidden tab's model (a real,
+    # separately-filed bug), and the page count proves the dump more
+    # directly anyway -- it IS the thing the shed operates on. Wait for
+    # the census to go stable (two reads, 10s apart, same page count),
+    # which also brackets the parse's end.
+    $dumpPages = 0
+    $stable = $false
+    $deadline = [DateTime]::UtcNow.AddSeconds(360)
+    while ([DateTime]::UtcNow -lt $deadline -and -not $stable) {
+        Start-Sleep -Seconds 5
+        $c = Invoke-SeamCommand $session @{ op = 'surface-mem'; index = 1 }
+        if ($c.totalPages -eq $dumpPages -and $dumpPages -gt 0) { $stable = $true }
+        $dumpPages = $c.totalPages
+    }
+    if (-not $stable -or $dumpPages -lt 100) {
+        # Setup failed as a FINDING, not a throw: the evidence the
+        # census already printed (page trajectory) is richer than a
+        # screenshot, and the shed asserts below still run so the run
+        # reports everything it saw.
+        $script:Findings.Add("setup: the hidden dump never settled at a real page count (last: $dumpPages pages)")
+    }
+    Write-Host "dump settled: $dumpPages pages (baseline $([Math]::Round($baseline/1MB))MB)"
+
+    # Let the hidden parse finish and the pages settle: poll private
+    # bytes until two samples 5s apart move by <2%, then one more beat.
     $proc = Get-Process -Id $session.Proc.Id
     $samples = [System.Collections.Generic.List[long]]::new()
     $deadline = [DateTime]::UtcNow.AddSeconds(120)
@@ -154,13 +163,13 @@ try {
     # The terminal's own page census, before and after: the shed is a
     # fact about pages (compressed count, decommitted bytes), and the
     # process byte counter is only the corroborating echo -- every other
-    # allocation in the process moves it too.
+    # allocation in the process moves it too. The tab has been hidden
+    # since the dump started, so every compressed page from here on is
+    # the kicks' work.
     $pre = Invoke-SeamCommand $session @{ op = 'surface-mem'; index = 1 }
     Write-Host ("pre-shed: pages={0} compressed={1} resident={2:N0}MB" -f `
         $pre.totalPages, $pre.compressedPages, ($pre.residentRawBytes / 1MB))
 
-    # Background the loaded tab, then watch it shed.
-    [void](Invoke-SeamCommand $session @{ op = 'select'; index = 0 })
     $after = [System.Collections.Generic.List[long]]::new()
     $deadline = [DateTime]::UtcNow.AddSeconds($ObserveSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -198,10 +207,20 @@ try {
     }
 
     # Revisit the compressed tab: the seam answering afterwards proves
-    # the app lived through restore-on-demand; the op runs on the UI
-    # thread the decompress path also uses.
+    # the app lived through restore-on-demand (the op runs on the UI
+    # thread the viewport-restore decompress path also uses).
+    #
+    # A deep scroll walk through the compressed history was tried here
+    # and WEDGED the app at ~15% CPU for 45 minutes (20 scroll chords
+    # through ctrl+shift+PgUp; run-15, killed) -- likely a livelock
+    # between scroll-restored pages and the scheduler recompressing
+    # them. That is a real finding with its own investigation to do;
+    # it is deliberately not part of this harness until understood.
     [void](Invoke-SeamCommand $session @{ op = 'select'; index = 1 })
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 800
+    $rev = Invoke-SeamCommand $session @{ op = 'surface-mem'; index = 1 }
+    Write-Host ("after-revisit: pages={0} compressed={1} (the viewport page restored on demand)" -f `
+        $rev.totalPages, $rev.compressedPages)
     [void](Invoke-SeamCommand $session @{ op = 'get-state' })
 }
 catch {

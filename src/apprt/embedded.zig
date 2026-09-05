@@ -2918,13 +2918,14 @@ pub const CAPI = struct {
         out_resident_raw_bytes: *u64,
         out_decommitted_raw_bytes: *u64,
         out_encoded_bytes: *u64,
+        out_activity_serial: *u64,
     ) void {
         const core_surface = &surface.core_surface;
         core_surface.renderer_state.mutex.lockUncancelable(global.io());
         defer core_surface.renderer_state.mutex.unlock(global.io());
 
-        const pages = &core_surface.renderer_state.terminal
-            .screens.get(.primary).?.pages;
+        const term = core_surface.renderer_state.terminal;
+        const pages = &term.screens.get(.primary).?.pages;
         const stats = pages.memoryStats();
 
         out_total_pages.* = @intCast(stats.resident_pages + stats.compressed_pages);
@@ -2932,6 +2933,10 @@ pub const CAPI = struct {
         out_resident_raw_bytes.* = @intCast(stats.resident_raw_bytes);
         out_decommitted_raw_bytes.* = @intCast(stats.decommitted_raw_bytes);
         out_encoded_bytes.* = @intCast(stats.encoded_bytes);
+        // The scheduler's arming input: it compresses only when this
+        // serial stops moving, so a harness watching the census can see
+        // whether an idle surface is actually idle.
+        out_activity_serial.* = term.compressionActivity();
     }
 
     /// Filter the mods if necessary. This handles settings such as

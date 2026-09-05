@@ -258,8 +258,13 @@ const Node = struct {
         };
 
         // Decommit only discarded the physical pages. Recommit prepares the
-        // still-reserved mapping for decoding or reuse by the caller.
-        terminal_mem.recommit(compressed.page.memory);
+        // still-reserved mapping for decoding or reuse by the caller. On
+        // Windows a refused commit leaves the range unreadable, and the
+        // encoded block is the only remaining copy of these contents --
+        // there is nowhere else to put them -- so like the decode-failure
+        // path below, this is unrecoverable in place.
+        if (!terminal_mem.recommit(compressed.page.memory))
+            @panic("failed to recommit a compressed terminal page");
 
         const restored = switch (mode) {
             .preserve => compressed.restore() catch |err| {
@@ -719,7 +724,10 @@ fn initPages(
         const page_buf = if (pooled) buf: {
             try tw.check(.page_buf_std);
             const buf = try pool.pages.create();
-            terminal_mem.recommit(buf);
+            // A refused recommit leaves the pooled item unreadable; the
+            // caller is about to write the page into it.
+            if (!terminal_mem.recommit(buf))
+                @panic("failed to recommit a pooled page buffer");
             break :buf buf;
         } else buf: {
             try tw.check(.page_buf_non_std);
@@ -4518,7 +4526,10 @@ inline fn createPageExt(
     // dispenses. Otherwise, we use the heap allocator to allocate.
     const page_buf = if (pooled) buf: {
         const buf = try pool.pages.create();
-        terminal_mem.recommit(buf);
+        // A refused recommit leaves the pooled item unreadable; the
+        // caller is about to write the page into it.
+        if (!terminal_mem.recommit(buf))
+            @panic("failed to recommit a pooled page buffer");
         break :buf buf;
     } else try page_alloc.alignedAlloc(
         u8,
@@ -4576,7 +4587,10 @@ const CompressionScratch = union(enum) {
 
         if (required <= std_size) {
             const memory = try pool.pages.create();
-            terminal_mem.recommit(memory);
+            // A refused recommit leaves the pooled item unreadable; the
+            // codec is about to write the scratch into it.
+            if (!terminal_mem.recommit(memory))
+                @panic("failed to recommit a pooled scratch buffer");
             return .{ .pooled = memory };
         }
 

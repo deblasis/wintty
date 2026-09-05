@@ -198,17 +198,21 @@ pub fn decommit(
 /// Prepare a mapping previously passed to decommit for reuse.
 ///
 /// Linux and test builds need no explicit operation. Darwin pairs
-/// FREE_REUSABLE with FREE_REUSE so pages touched by the caller are accounted
-/// to the process again. Windows commits the still-reserved range, faulting
-/// the discarded pages back in zeroed. Failure does not invalidate the
-/// retained mapping, so reuse can continue after logging the accounting
-/// failure.
-pub fn recommit(memory: []align(std.heap.page_size_min) u8) void {
+/// FREE_REUSABLE with FREE_REUSE so pages touched by the caller are
+/// accounted to the process again (a failure there is accounting-only
+/// and the mapping stays readable, reported as success). Windows
+/// commits the still-reserved range, faulting the discarded pages back
+/// in zeroed -- and on Windows a refused commit leaves the range
+/// decommitted and UNREADABLE, so failure is reported to the caller
+/// and must not be followed by any access to the mapping.
+///
+/// Returns whether the mapping is readable and writable on return.
+pub fn recommit(memory: []align(std.heap.page_size_min) u8) bool {
     assert(memory.len > 0);
     assert(@intFromPtr(memory.ptr) % std.heap.page_size_min == 0);
     assert(memory.len % std.heap.page_size_min == 0);
 
-    if (comptime builtin.is_test) return;
+    if (comptime builtin.is_test) return true;
     if (comptime builtin.os.tag == .windows) {
         const windows = @import("../os/windows.zig");
         const addr: windows.LPVOID = @ptrCast(memory.ptr);
@@ -219,12 +223,13 @@ pub fn recommit(memory: []align(std.heap.page_size_min) u8) void {
             windows.PAGE_READWRITE,
         ) == null) {
             // The reservation is intact; the pages are simply still
-            // decommitted. A later recommit can succeed (a commit-charge
-            // refusal is usually pressure, not permanence), so log and
-            // leave the range for that retry.
+            // decommitted. A retry can succeed (a commit-charge refusal
+            // is usually pressure, not permanence), but the caller must
+            // treat this mapping as untouchable until one does.
             log.warn("VirtualAlloc(MEM_COMMIT) recommit failed", .{});
+            return false;
         }
-        return;
+        return true;
     }
     if (comptime builtin.os.tag.isDarwin()) {
         std.posix.madvise(
@@ -235,6 +240,7 @@ pub fn recommit(memory: []align(std.heap.page_size_min) u8) void {
             log.warn("madvise(FREE_REUSE) failed err={}", .{err});
         };
     }
+    return true;
 }
 
 test "decommit with zero fallback clears the dirty prefix" {
@@ -276,7 +282,7 @@ test "strict decommit retains the mapping for recommit" {
     try testing.expectEqual(original_len, memory.len);
     try testing.expect(std.mem.allEqual(u8, memory, 0));
 
-    recommit(memory);
+    _ = recommit(memory);
     @memset(memory, 0xBB);
     try testing.expect(std.mem.allEqual(u8, memory, 0xBB));
 }

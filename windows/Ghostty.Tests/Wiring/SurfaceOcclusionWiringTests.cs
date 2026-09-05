@@ -102,8 +102,12 @@ public class SurfaceOcclusionWiringTests
             .Where(i => i.Condition.ToString() == "_surfaceVisibility == false")
             .ToList();
         Assert.Single(reapply);
-        Assert.Contains(
-            reapply[0].DescendantNodes().OfType<InvocationExpressionSyntax>(),
-            i => i.CalleeText() == "SetSurfaceVisibility");
+        // The re-apply's argument is the polarity: hidden is what a
+        // late spawn missed, and true would both invert the fix and
+        // flip the recorded field so later spawns skip entirely.
+        var call = Assert.Single(
+            reapply[0].DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Where(i => i.CalleeText() == "SetSurfaceVisibility"));
+        Assert.Equal("false", call.Arg(0));
     }
 }

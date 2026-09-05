@@ -597,13 +597,15 @@ internal static partial class NativeMethods
     /// screen, read from the page list under the renderer state mutex.
     /// Observes the idle shed as a terminal fact rather than a
     /// process-wide memory delta that every other allocation also
-    /// moves.</summary>
+    /// moves. ActivitySerial is the scheduler's arming input: compression
+    /// runs only once it stops moving.</summary>
     internal readonly record struct SurfaceMemoryStats(
         ulong TotalPages,
         ulong CompressedPages,
         ulong ResidentRawBytes,
         ulong DecommittedRawBytes,
-        ulong EncodedBytes);
+        ulong EncodedBytes,
+        ulong ActivitySerial);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_memory_stats")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -613,14 +615,15 @@ internal static partial class NativeMethods
         out ulong compressedPages,
         out ulong residentRawBytes,
         out ulong decommittedRawBytes,
-        out ulong encodedBytes);
+        out ulong encodedBytes,
+        out ulong activitySerial);
 
     internal static SurfaceMemoryStats GetSurfaceMemoryStats(GhosttySurface surface)
     {
         SurfaceMemoryStatsNative(surface,
             out var total, out var compressed, out var resident,
-            out var decommitted, out var encoded);
-        return new SurfaceMemoryStats(total, compressed, resident, decommitted, encoded);
+            out var decommitted, out var encoded, out var activity);
+        return new SurfaceMemoryStats(total, compressed, resident, decommitted, encoded, activity);
     }
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_size")]

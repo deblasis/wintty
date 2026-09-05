@@ -1137,15 +1137,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // already hold the state (libghostty dedups a no-change write).
         if (_surfaceVisibility == false) SetSurfaceVisibility(false);
 
-        // A surface that spawns while this host is hidden missed the
-        // native call: SwapActivePane ran during the restore, before any
-        // surface existed, and the zero-handle guard skipped every leaf.
-        // Without this re-apply, a restored background tab presents into
-        // nothing until the first real tab switch happens to flip it.
-        // Re-calling SetSurfaceVisibility is idempotent for leaves that
-        // already hold the state (libghostty dedups a no-change write).
-
-
         if (!_startupGlowEnabled) return;
         // One glow per control. SurfaceSpawned fires once per control, so
         // this is only a guard against a future second raise landing here.

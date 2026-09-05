@@ -1288,16 +1288,19 @@ GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, do
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 // Scrollback compression statistics for the surface's primary screen:
-// total pages, how many are compressed, and the raw/encoded byte split.
-// Observes the idle shed as a terminal fact rather than a process-wide
-// memory delta. All five out parameters are written on return.
+// total pages, how many are compressed, the raw/encoded byte split, and
+// the compression activity serial (the scheduler's arming input: it
+// compresses only when the serial stops moving). Observes the idle shed
+// as a terminal fact rather than a process-wide memory delta. All six
+// out parameters are written on return.
 GHOSTTY_API void ghostty_surface_memory_stats(
     ghostty_surface_t,
     uint64_t* out_total_pages,
     uint64_t* out_compressed_pages,
     uint64_t* out_resident_raw_bytes,
     uint64_t* out_decommitted_raw_bytes,
-    uint64_t* out_encoded_bytes);
+    uint64_t* out_encoded_bytes,
+    uint64_t* out_activity_serial);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 // Returns the ID3D12Device* used by this surface's renderer. Shared texture
 // consumers should call OpenSharedResource1 on this device to avoid
