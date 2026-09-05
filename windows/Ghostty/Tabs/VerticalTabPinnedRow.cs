@@ -199,7 +199,7 @@ internal sealed partial class VerticalTabPinnedRow : Grid
     /// </summary>
     public void Refresh(TabModel tab)
     {
-        ToolTipService.SetToolTip(this, tab.EffectiveTitle);
+        ToolTipService.SetToolTip(this, tab.TooltipText);
         AutomationProperties.SetName(this, TabAccessibleText.Name(tab));
         AutomationProperties.SetItemStatus(this, TabAccessibleText.Status(tab));
         // The initial follows the title too. It was written only by SetIcon,

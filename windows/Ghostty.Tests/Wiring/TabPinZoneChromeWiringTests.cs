@@ -57,11 +57,12 @@ public sealed class TabPinZoneChromeWiringTests
             "TabPinBand.ChipSize", width.Initializer!.Value.ToString(),
             StringComparison.Ordinal);
 
-        // The title the square gives up rides the tooltip, and only while
-        // pinned: an unpinned tab wears its title and is owed nothing.
+        // The title the square gives up rides the tooltip, composed with
+        // the directory an unpinned tab shows only the leaf of, so every
+        // tab is owed it, pinned or not.
         var tip = anatomy.Call("ToolTipService.SetToolTip");
         Assert.Equal("item", tip.Arg(0));
-        Assert.Equal("pinned ? tab.EffectiveTitle : null", tip.Arg(1));
+        Assert.Equal("tab.TooltipText", tip.Arg(1));
 
         // No close button in a 48px slot. Closing a pinned tab stays a
         // decision the context menu and the keybind take.

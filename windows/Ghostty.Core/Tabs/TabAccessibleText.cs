@@ -27,11 +27,13 @@ internal static class TabAccessibleText
 
     /// <summary>
     /// Accessible name for the tab whose title is
-    /// <paramref name="effectiveTitle"/>.
+    /// <paramref name="effectiveTitle"/>. A tab sitting in the user's own
+    /// directory is labelled <c>~</c>, which a screen reader speaks as
+    /// "tilde"; the name says what the glyph means.
     /// </summary>
     internal static string Name(string? effectiveTitle)
-        => string.IsNullOrWhiteSpace(effectiveTitle)
-            ? AppIdentity.ProductName
+        => string.IsNullOrWhiteSpace(effectiveTitle) ? AppIdentity.ProductName
+            : effectiveTitle == "~" ? "Home"
             : effectiveTitle;
 
     /// <summary>Transient state for <paramref name="tab"/>.</summary>
