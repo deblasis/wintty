@@ -234,8 +234,9 @@ puts everything back in its `finally`: the wallpaper through the API that
 applies one, the polarity through the broadcast, then the env guard's
 restore and read-back. A restore that fails is the run's exit code (1),
 whatever it measured. That is why it is not in the suite and why
-`just theme-matrix` takes the incoda lane before it builds. `-NoFlip` keeps
-the read-only policy every other harness has.
+`just theme-matrix` holds the desktop lane (`wintty-desktop`) for the whole
+run, after building under `wintty-build`. `-NoFlip` keeps the read-only
+policy every other harness has.
 
 After a hard kill (a `taskkill`, the lane's own timeout) the `finally`
 never ran, and the manual recovery is: end `BackdropStage.exe` if it is
