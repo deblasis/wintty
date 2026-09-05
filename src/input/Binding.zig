@@ -1367,6 +1367,21 @@ pub const Action = union(enum) {
         return Error.InvalidAction;
     }
 
+    /// Returns true if performing this action can close the surface it
+    /// was performed on. The surface (and anything owned by it, such as
+    /// the keybind set an action chain lives in) is gone once one of
+    /// these is performed, so nothing may run after it.
+    pub fn closesSurface(self: Action) bool {
+        return switch (self) {
+            .close_surface,
+            .close_window,
+            .close_tab,
+            => true,
+
+            else => false,
+        };
+    }
+
     /// The scope of an action. The scope is the context in which an action
     /// must be executed.
     pub const Scope = enum {
@@ -2714,12 +2729,13 @@ pub const Set = struct {
 
     /// Append a chained action to the prior set action.
     ///
-    /// It is an error if there is no valid prior chain parent.
+    /// It is an error if there is no valid prior chain parent or if the
+    /// prior action closes the surface, since nothing can run after that.
     pub fn appendChain(
         self: *Set,
         alloc: Allocator,
         action: Action,
-    ) (Allocator.Error || error{NoChainParent})!void {
+    ) (Allocator.Error || error{ NoChainParent, InvalidChainAction })!void {
         // Unbind is not a valid chain action; callers must check this.
         assert(action != .unbind);
 
@@ -2731,16 +2747,23 @@ pub const Set = struct {
 
             // If it is already a chained action, we just append the
             // action. Easy!
-            .leaf_chained => |*leaf| try leaf.actions.append(
-                alloc,
-                action,
-            ),
+            .leaf_chained => |*leaf| {
+                if (leaf.actions.getLast().closesSurface()) {
+                    return error.InvalidChainAction;
+                }
+
+                try leaf.actions.append(alloc, action);
+            },
 
             // If it is a leaf, we need to convert it to a leaf_chained.
             // We also need to be careful to remove any prior reverse
             // mappings for this action since chained actions are not
             // part of the reverse mapping.
             .leaf => |leaf| {
+                if (leaf.action.closesSurface()) {
+                    return error.InvalidChainAction;
+                }
+
                 // Setup our failable actions list first.
                 var actions: std.ArrayList(Action) = .empty;
                 try actions.ensureTotalCapacity(alloc, 2);
@@ -4837,6 +4860,60 @@ test "set: appendChain multiple times" {
     try testing.expect(chained.actions.items[2] == .close_surface);
 }
 
+test "set: appendChain after a closing leaf is an error" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.put(alloc, .{ .key = .{ .unicode = 'a' } }, .{ .close_surface = {} });
+    try testing.expectError(
+        error.InvalidChainAction,
+        s.appendChain(alloc, .{ .new_tab = {} }),
+    );
+
+    // The binding is left as it was.
+    const entry = s.get(.{ .key = .{ .unicode = 'a' } }).?;
+    try testing.expect(entry.value_ptr.* == .leaf);
+    try testing.expect(entry.value_ptr.*.leaf.action == .close_surface);
+}
+
+test "set: appendChain after a closing action in a chain is an error" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.put(alloc, .{ .key = .{ .unicode = 'a' } }, .{ .new_window = {} });
+    try s.appendChain(alloc, .{ .close_tab = .this });
+    try testing.expectError(
+        error.InvalidChainAction,
+        s.appendChain(alloc, .{ .new_tab = {} }),
+    );
+
+    const chained = s.get(.{ .key = .{ .unicode = 'a' } }).?.value_ptr.*.leaf_chained;
+    try testing.expectEqual(@as(usize, 2), chained.actions.items.len);
+}
+
+test "set: parseAndPut chain after a closing action is invalid" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "a=close_surface");
+    try testing.expectError(
+        error.InvalidFormat,
+        s.parseAndPut(alloc, "chain=new_tab"),
+    );
+
+    const entry = s.get(.{ .key = .{ .unicode = 'a' } }).?;
+    try testing.expect(entry.value_ptr.* == .leaf);
+}
+
 test "set: appendChain removes reverse mapping" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -4871,12 +4948,12 @@ test "set: appendChain with performable does not affect reverse mapping" {
     try s.putFlags(
         alloc,
         .{ .key = .{ .unicode = 'a' } },
-        .{ .close_surface = {} },
+        .{ .reset = {} },
         .{ .performable = true },
     );
 
-    // close_surface was performable, so not in reverse map
-    try testing.expect(s.getTrigger(.{ .close_surface = {} }) == null);
+    // reset was performable, so not in reverse map
+    try testing.expect(s.getTrigger(.{ .reset = {} }) == null);
 
     // Chaining the performable binding should not crash or affect anything
     try s.appendChain(alloc, .{ .new_tab = {} });

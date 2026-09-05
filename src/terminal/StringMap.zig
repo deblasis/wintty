@@ -11,11 +11,12 @@ const Selection = @import("Selection.zig");
 const Screen = @import("Screen.zig");
 const Allocator = std.mem.Allocator;
 
-// Retry budget for StringMap regex searches.
-//
-// Units are Oniguruma retry steps (internal backtracking/retry counter),
-// not bytes/characters/time.
-const oni_search_retry_limit = 100_000;
+/// Retry budget for regex searches over terminal contents. Shared with
+/// the renderer's link matcher so both paths bound the same work.
+///
+/// Units are Oniguruma retry steps (internal backtracking/retry counter),
+/// not bytes/characters/time.
+pub const oni_search_retry_limit = 100_000;
 
 string: [:0]const u8,
 

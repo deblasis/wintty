@@ -493,6 +493,11 @@ pub fn performAllChainedAction(
                 err,
             });
         };
+
+        // This slice is owned by the keybind set of the surface the
+        // binding came from, and that surface is now gone, so there is
+        // nothing left to read.
+        if (action.closesSurface()) break;
     }
 }
 

@@ -2110,6 +2110,20 @@ fn execCommand(
     /// blocks.
     utf8_console: configpkg.Config.Utf8Console,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
+    // A direct command with no arguments has no program to execute and
+    // every consumer of the result indexes argv[0]. Nothing should hand
+    // us one, but we'd rather start a shell than spawn nothing.
+    if (command == .direct and command.direct.len == 0) {
+        log.warn("command has no arguments, falling back to basic shell", .{});
+
+        // The comptime here is important to ensure the full slice
+        // is put into the binary data and not the stack.
+        return comptime switch (builtin.os.tag) {
+            .windows => &.{"cmd.exe"},
+            else => &.{"/bin/sh"},
+        };
+    }
+
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set, a login shell, and proper
     // hushlogin behavior.
@@ -3166,6 +3180,31 @@ test "execCommand darwin: direct command" {
     try testing.expectEqualStrings(result[2], "testuser");
     try testing.expectEqualStrings(result[3], "foo");
     try testing.expectEqualStrings(result[4], "bar baz");
+}
+
+test "execCommand: empty direct command" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try execCommand(
+        alloc,
+        .{ .direct = &.{} },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{ .name = "testuser" };
+            }
+        },
+        .auto,
+    );
+
+    // Never empty: argv[0] is always read by the caller.
+    try testing.expectEqual(1, result.len);
+    try testing.expectEqualStrings(
+        if (comptime builtin.os.tag == .windows) "cmd.exe" else "/bin/sh",
+        result[0],
+    );
 }
 
 test "execCommand: shell command, empty passwd" {
