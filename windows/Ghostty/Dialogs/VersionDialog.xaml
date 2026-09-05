@@ -13,6 +13,8 @@
                    Height="40"
                    VerticalAlignment="Center"/>
             <TextBlock x:Name="TitleText"
+                       TextWrapping="Wrap"
+                       MaxWidth="440"
                        VerticalAlignment="Center"/>
         </StackPanel>
     </ContentDialog.Title>

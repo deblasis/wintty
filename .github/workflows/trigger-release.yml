@@ -1,16 +1,35 @@
-# On tag push (v*), fires a repository_dispatch at deblasis/wintty-release so
-# the private release repo can build, pack, and upload without R2 or signing
-# credentials living in this public repo.
+# On a Wintty release tag push, fires a repository_dispatch at
+# deblasis/wintty-release so the private release repo can build, pack, and
+# upload without R2 or signing credentials living in this public repo.
 #
-# Dormant until vars.ENABLE_WINTTY_RELEASE_DISPATCH == 'true', so it stays
-# quiet before the private repo + dispatch PAT are provisioned.
+# Wintty tags are `w<version>`, never `v*`. This fork inherits ghostty's own
+# `v*` tags with every upstream sync, so that namespace names ghostty
+# commits and a `v*` trigger would release one of them under ghostty's
+# version number. The `w` is the same letter `wintty +version` prints in
+# front of the Wintty half of its header
+# (windows/Ghostty.Core/Version/VersionHeader.cs), and the fork's own
+# version detection (src/build/GitVersion.zig) matches `v*` and `tip` only,
+# so a `w*` tag on HEAD never reaches libghostty's version.
+#
+# Accepted shapes, and where they go:
+#   w1.0.0        -> stable (GA)
+#   w1.0.0-rc.2   -> tip    (an RC never reaches stable)
+# Anything else under w* fails the run rather than dispatching a guess.
+# Sandbox rehearsals (-sandbox.N) are deliberately not tags: they go through
+# the private repo's workflow_dispatch and local scripts.
+#
+# Push a release tag on its own. GitHub emits no push event when more than
+# three tags land in one push, so a `w*` tag pushed together with a batch
+# of synced upstream tags never dispatches.
+#
+# Dormant until vars.ENABLE_WINTTY_RELEASE_DISPATCH == 'true'.
 
 name: trigger-release
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'w[0-9]*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,20 +40,36 @@ jobs:
     if: vars.ENABLE_WINTTY_RELEASE_DISPATCH == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Derive channel from ref
+      - name: Derive version and channel from the tag
         id: chan
         shell: bash
         run: |
-          case "${{ github.ref }}" in
-            refs/tags/v*) echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
-            *)            echo "channel=tip"    >> "$GITHUB_OUTPUT" ;;
-          esac
+          set -euo pipefail
+          # Components reject leading zeros: vpk and SemVer 2 do too.
+          n='(0|[1-9][0-9]*)'
+          if [[ "$GITHUB_REF" =~ ^refs/tags/w(${n}\.${n}\.${n})$ ]]; then
+            channel=stable
+          elif [[ "$GITHUB_REF" =~ ^refs/tags/w(${n}\.${n}\.${n}-rc\.${n})$ ]]; then
+            channel=tip
+          else
+            echo "::error::$GITHUB_REF is not wX.Y.Z or wX.Y.Z-rc.N; refusing to dispatch"
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
+      # The receiver builds from its own pinned wintty commit, not from
+      # this ref. The sha travels along so it can refuse a cut whose pin
+      # is not the commit that was tagged.
       - name: Dispatch release event to deblasis/wintty-release
         env:
           GH_TOKEN: ${{ secrets.WINTTY_RELEASE_DISPATCH_PAT }}
+          CHANNEL: ${{ steps.chan.outputs.channel }}
+          VERSION: ${{ steps.chan.outputs.version }}
         run: |
           gh api /repos/deblasis/wintty-release/dispatches \
             -f event_type=release \
-            -f "client_payload[channel]=${{ steps.chan.outputs.channel }}" \
-            -f "client_payload[ref]=${{ github.ref }}"
+            -f "client_payload[channel]=$CHANNEL" \
+            -f "client_payload[version]=$VERSION" \
+            -f "client_payload[ref]=$GITHUB_REF" \
+            -f "client_payload[sha]=$GITHUB_SHA"

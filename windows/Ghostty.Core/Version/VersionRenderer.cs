@@ -52,9 +52,10 @@ public static class VersionRenderer
 
     /// <summary>Plain rendering of just the Version + Build Config blocks
     /// (no header, no commit URL line). The dialog uses this because the
-    /// dialog's title bar already shows "Wintty &lt;version&gt;" and the
-    /// commit URL is rendered as a clickable HyperlinkButton above the text,
-    /// making the header redundant.</summary>
+    /// dialog's title bar already shows the one-line header
+    /// (<see cref="VersionHeader.Compose"/>) and the commit URL is rendered
+    /// as a clickable HyperlinkButton above the text, making the header
+    /// redundant.</summary>
     public static string RenderPlainBody(VersionInfo info)
     {
         var sb = new StringBuilder();
@@ -85,16 +86,20 @@ public static class VersionRenderer
     private static void AppendHeader(StringBuilder sb, VersionInfo info, bool ansi)
     {
         var hasCommit = !string.IsNullOrEmpty(info.WinttyCommit) && info.WinttyCommit != "unknown";
+        // Both halves of the identity on the first line, each under its own
+        // prefix (see VersionHeader). One commit line serves both, because
+        // libghostty is built from this same tree.
+        var header = VersionHeader.Compose(info);
         if (ansi && hasCommit)
         {
             sb.Append(Osc8Open).Append(CommitUrlPrefix).Append(info.WinttyCommit).Append(St);
-            sb.Append(AppIdentity.ProductName).Append(' ').Append(info.WinttyVersionString);
+            sb.Append(header);
             sb.Append(Osc8Close);
             sb.Append('\n');
         }
         else
         {
-            sb.Append(AppIdentity.ProductName).Append(' ').Append(info.WinttyVersionString).Append('\n');
+            sb.Append(header).Append('\n');
         }
         if (hasCommit)
         {
