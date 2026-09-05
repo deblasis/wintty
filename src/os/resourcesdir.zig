@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const global = @import("../global.zig");
 
+const log = std.log.scoped(.resources_dir);
+
 pub const ResourcesDir = struct {
     /// Avoid accessing these directly, use the app() and host() methods instead.
     app_path: ?[]const u8 = null,
@@ -54,7 +56,13 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
             else => return err,
         };
 
-        if (dir.len > 0) return .{ .app_path = dir };
+        if (validResourcesDir(dir)) return .{ .app_path = dir };
+
+        log.warn(
+            "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
+            .{dir},
+        );
+        alloc.free(dir);
     }
 
     // This is the sentinel value we look for in the path to know
@@ -112,7 +120,13 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     // fallback and use the provided resources dir.
     if (comptime builtin.mode == .Debug) {
         if (global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
-            if (dir.len > 0) return .{ .app_path = dir };
+            if (validResourcesDir(dir)) return .{ .app_path = dir };
+
+            log.warn(
+                "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
+                .{dir},
+            );
+            alloc.free(dir);
         } else |err| switch (err) {
             error.InvalidWtf8, error.EnvironmentVariableMissing => {},
             else => return err,
@@ -120,6 +134,23 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     }
 
     return .{};
+}
+
+/// Returns true if a GHOSTTY_RESOURCES_DIR value is usable as the resources
+/// directory.
+///
+/// Everything derived from this value assumes a full path to a real
+/// directory: the terminfo database is looked for beside it, and the man
+/// pages and shell integration scripts are looked for inside it. A relative
+/// or missing path produces a broken child environment rather than an
+/// error, so we reject it here and fall back to detection.
+fn validResourcesDir(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (!std.fs.path.isAbsolute(path)) return false;
+
+    var dir = std.Io.Dir.cwd().openDir(global.io(), path, .{}) catch return false;
+    dir.close(global.io());
+    return true;
 }
 
 /// Little helper to check if the "base/sub/suffix" directory exists and
@@ -145,4 +176,35 @@ pub fn maybeDir(
     }
 
     return null;
+}
+
+test "validResourcesDir rejects a path with no directory component" {
+    const testing = std.testing;
+
+    try testing.expect(!validResourcesDir(""));
+    try testing.expect(!validResourcesDir("ghostty"));
+    try testing.expect(!validResourcesDir("share/ghostty"));
+}
+
+test "validResourcesDir rejects an absolute path that does not exist" {
+    const testing = std.testing;
+
+    const missing = if (comptime builtin.os.tag == .windows)
+        "C:/ghostty-does-not-exist/share/ghostty"
+    else
+        "/ghostty-does-not-exist/share/ghostty";
+
+    try testing.expect(!validResourcesDir(missing));
+}
+
+test "validResourcesDir accepts an existing absolute directory" {
+    const testing = std.testing;
+    const TempDir = @import("TempDir.zig");
+
+    var td = try TempDir.init();
+    defer td.deinit();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try td.dir.realPath(testing.io, &buf);
+    try testing.expect(validResourcesDir(buf[0..len]));
 }
