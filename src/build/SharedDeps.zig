@@ -549,15 +549,31 @@ pub fn add(
     // C files
     step.root_module.link_libc = true;
     step.root_module.addIncludePath(b.path("src/stb"));
-    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
-    // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
-    // the static archive is consumed by an external linker.
+    // stb decodes untrusted image bytes, so it gets a stack protector
+    // wherever the runtime is guaranteed to be there. Not on the msvc ABI:
+    // this function is what puts stb.c into ghostty-static.lib
+    // (GhosttyLib.initStatic), and that archive is handed to MSVC link.exe
+    // for the NativeAOT image. A per-file flag is appended after the
+    // module-level setting, so it would win, and __security_cookie
+    // references would reach an external linker that Zig never drives.
+    // pkg/sentry/build.zig documents the same trap costing a release: no
+    // zig build and no dotnet build reaches link.exe, so the gate stays
+    // green. Note the archive at risk is not ghostty-vt: GhosttyLibVt never
+    // calls this function, it reaches addSimd directly, so stb.c cannot
+    // land there and narrowing this gate to ghostty-vt would re-open the
+    // failure on ghostty-static.lib.
+    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled on
+    // Windows (LNK4229), leaving __ubsan_handle_* unresolved when the
+    // static archive is consumed by an external linker.
     step.root_module.addCSourceFiles(.{
         .files = &.{"src/stb/stb.c"},
         .flags = if (step.rootModuleTarget().abi == .msvc)
-            &.{ "-fno-sanitize=undefined", "-fno-sanitize-trap=undefined" }
+            &.{
+                "-fno-sanitize=undefined",
+                "-fno-sanitize-trap=undefined",
+            }
         else
-            &.{},
+            &.{"-fstack-protector-strong"},
     });
     if (step.rootModuleTarget().os.tag == .linux) {
         step.root_module.addIncludePath(b.path("src/apprt/gtk"));
@@ -766,7 +782,7 @@ pub fn add(
         step.root_module.addIncludePath(b.path("vendor/glad/include/"));
         step.root_module.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
-            .flags = &.{},
+            .flags = &.{"-fstack-protector-strong"},
         });
 
         // When we're targeting flatpak we ALWAYS link GTK so we
@@ -1087,6 +1103,17 @@ pub fn addSimd(
         try flags.append(
             b.allocator,
             "-std=c++17",
+        );
+
+        // These read terminal bytes straight off the wire, so they get a
+        // stack protector wherever the runtime is guaranteed to be there.
+        // Not on the msvc ABI: these objects sit in the root module of the
+        // vt static library, which turns stack-protector generation off for
+        // msvc so its consumers don't need BufferOverflowU, and a per-file
+        // flag is appended after the module-level setting, so it would win.
+        if (!is_msvc) try flags.append(
+            b.allocator,
+            "-fstack-protector-strong",
         );
 
         // Keep our SIMD sources in the same Highway header mode as the
