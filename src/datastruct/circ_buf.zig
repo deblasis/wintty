@@ -154,7 +154,11 @@ pub fn CircBuf(comptime T: type, comptime default: T) type {
         ) Allocator.Error!void {
             const new_cap = self.len() + amount;
             if (new_cap <= self.capacity()) return;
-            try self.resize(alloc, new_cap);
+
+            // Grow geometrically. Our callers append in small increments
+            // (the search sliding window adds a row at a time), and
+            // resizing to exactly what was asked for makes that quadratic.
+            try self.resize(alloc, @max(new_cap, self.capacity() * 2));
         }
 
         /// Resize the buffer to the given size (larger or smaller).
@@ -918,4 +922,23 @@ test "CircBuf deleteOldest zero" {
     // Verify data is unchanged
     var it = buf.iterator(.forward);
     try testing.expectEqual(@as(u8, 'h'), it.next().?.*);
+}
+
+test "CircBuf ensureUnusedCapacity grows geometrically" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Buf = CircBuf(u8, 0);
+
+    var buf = try Buf.init(alloc, 4);
+    defer buf.deinit(alloc);
+    for (0..4) |_| try buf.append(1);
+
+    // Growing by one has to leave room for more than one, otherwise
+    // appending n items in a row costs n reallocations and n copies.
+    try buf.ensureUnusedCapacity(alloc, 1);
+    try testing.expectEqual(@as(usize, 8), buf.capacity());
+
+    // ...and the next append is then free.
+    try buf.ensureUnusedCapacity(alloc, 1);
+    try testing.expectEqual(@as(usize, 8), buf.capacity());
 }
