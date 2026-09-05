@@ -2127,7 +2127,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private static void ApplyItemTitleChrome(NavigationViewItem item, TabModel tab)
     {
-        ToolTipService.SetToolTip(item, tab.EffectiveTitle);
+        ToolTipService.SetToolTip(item, tab.TooltipText);
         AutomationProperties.SetName(item, TabAccessibleText.Name(tab));
         AutomationProperties.SetItemStatus(item, tab.Group is { } group
             ? TabAccessibleText.Status(tab.IsPinned, tab.BellRinging, group.Title, group.IsCollapsed)
@@ -5489,10 +5489,10 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// body row (it lives in the pinned prefix, or the strip has not built
     /// its item yet).
     /// </summary>
-    internal (string Title, IconElement? Icon)? TestSeamRenderedRow(TabModel tab)
+    internal (string Title, string? Tooltip, IconElement? Icon)? TestSeamRenderedRow(TabModel tab)
         => _items.TryGetValue(tab, out var item)
            && item.Content is VerticalTabNavRow row
-            ? (row.TestSeamRenderedTitle, item.Icon)
+            ? (row.TestSeamRenderedTitle, row.TestSeamRenderedTooltip, item.Icon)
             : null;
 
 

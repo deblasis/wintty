@@ -71,7 +71,7 @@ public static class ProcessIconTable
     /// <c>-d &lt;name&gt;</c>. Returns empty string if no flag is present;
     /// the resolver treats that as "use the legacy wsl bundle."
     /// </summary>
-    private static string ParseWslDistro(string? commandLine)
+    internal static string ParseWslDistro(string? commandLine)
     {
         if (string.IsNullOrEmpty(commandLine)) return string.Empty;
 

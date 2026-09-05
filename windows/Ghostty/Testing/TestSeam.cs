@@ -837,6 +837,9 @@ internal static class TestSeam
                         json.WriteStartObject();
                         json.WriteNumber("index", i);
                         json.WriteString("title", tab.EffectiveTitle);
+                        json.WriteString("tooltip", tab.TooltipText);
+                        json.WriteString("iconTooltip", tab.TabIcon.TooltipText);
+                        json.WriteString("profile", tab.ProfileSnapshot?.DisplayName ?? "");
                         if (tab.PaneHost.ActiveLeaf.LastCwd is { } cwd)
                             json.WriteString("cwd", cwd);
                         if (tab.ShellReportedTitle is { } shell)
@@ -845,7 +848,18 @@ internal static class TestSeam
                         if (strip?.TestSeamRenderedRow(tab) is { } row)
                         {
                             json.WriteString("rendered", row.Title);
+                            if (row.Tooltip is { } tip) json.WriteString("renderedTooltip", tip);
+                            else json.WriteNull("renderedTooltip");
                             json.WriteString("renderedIcon", RenderedIcon(row.Icon));
+                        }
+                        // The other layout's surface, present only while the
+                        // horizontal strip is the one on screen: the header
+                        // TextBlock and the TabViewItem's own tooltip.
+                        if (window.TestSeamTabHost?.TestSeamRenderedItem(tab) is { } item)
+                        {
+                            json.WriteString("renderedH", item.Title);
+                            if (item.Tooltip is { } tipH) json.WriteString("renderedTooltipH", tipH);
+                            else json.WriteNull("renderedTooltipH");
                         }
                         json.WriteEndObject();
                     }

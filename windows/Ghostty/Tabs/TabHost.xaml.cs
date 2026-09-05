@@ -181,6 +181,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
     }
 
     /// <summary>
+    /// What the horizontal strip is actually showing for <paramref name="tab"/>:
+    /// its header TextBlock and the TabViewItem's own tooltip, both off the
+    /// live tree, so a label assertion can fail even when the model behind
+    /// it is right. Null when the strip has not built its item yet.
+    /// </summary>
+    internal (string Title, string? Tooltip)? TestSeamRenderedItem(TabModel tab)
+        => _itemByModel.TryGetValue(tab, out var item) && _headerTextByModel.TryGetValue(tab, out var header)
+            ? (header.Text, ToolTipService.GetToolTip(item) as string)
+            : null;
+
+    /// <summary>
     /// The foreground the ink pass hands a colour-tagged tab's header row,
     /// as 0x00RRGGBB, or null when the tab carries no tag. The expectation
     /// a pixel harness measures against -- and, on its own, worth nothing:
@@ -2062,10 +2073,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         item.MinWidth = pinned ? PinnedTabWidth : 0;
         item.MaxWidth = pinned ? PinnedTabWidth : double.PositiveInfinity;
         item.IsClosable = !pinned;
-        // The title the square gives up rides the tooltip, and owes it:
-        // two shells of the same kind draw the same icon. An unpinned tab
-        // wears its title, so it is not owed one.
-        ToolTipService.SetToolTip(item, pinned ? tab.EffectiveTitle : null);
+        // The title the square gives up rides the tooltip, and so does the
+        // directory an unpinned tab shows only the leaf of; the model
+        // composes one text for both, so every tab is owed it.
+        ToolTipService.SetToolTip(item, tab.TooltipText);
 
         if (!_iconRowByModel.TryGetValue(tab, out var row)) return;
         // Centred in the square rather than run from the leading edge:

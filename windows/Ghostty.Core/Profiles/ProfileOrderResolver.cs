@@ -114,7 +114,7 @@ public static class ProfileOrderResolver
     {
         if (def.Icon is not null) return def.Icon;
 
-        var basename = TryGetCommandBasename(def.Command);
+        var basename = CommandBasename(def.Command);
         if (basename is not null)
         {
             var mapped = ProcessIconTable.TryMap(basename, def.Command);
@@ -126,7 +126,12 @@ public static class ProfileOrderResolver
     // Hoisted so each call doesn't allocate a fresh char[] for IndexOfAny.
     private static readonly char[] s_whitespace = [' ', '\t'];
 
-    private static string? TryGetCommandBasename(string? command)
+    /// <summary>
+    /// The exe basename of a profile command's first token, with
+    /// <c>.exe</c> supplied when the command spells it bare. Null when
+    /// there is no token to name.
+    /// </summary>
+    internal static string? CommandBasename(string? command)
     {
         if (string.IsNullOrWhiteSpace(command)) return null;
         // Strip leading whitespace + outer quotes; take the first token.

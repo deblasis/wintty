@@ -78,6 +78,23 @@ function Get-UiaRowNames {
     return @($names)
 }
 
+# The horizontal strip's tabs by name, off the automation tree: TabView
+# publishes each TabViewItem as a TabItem, named from the same accessible
+# text the vertical rows carry.
+function Get-UiaTabNames {
+    $root = $UIA::FromHandle([SeamWin]::P($script:MainHwnd64))
+    if ($null -eq $root) { throw 'HARVEST_MISS: no UIA root for the main window' }
+    $byType = New-Object System.Windows.Automation.PropertyCondition(
+        $UIA::ControlTypeProperty, $CTRL::TabItem)
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($el in $root.FindAll($TREE, $byType)) {
+        $r = $el.Current.BoundingRectangle
+        if ($r.Width -le 0 -or $r.Height -le 0) { continue }
+        $names.Add($el.Current.Name)
+    }
+    return @($names)
+}
+
 # The seam's per-tab label readout, polled until $Until says the app has
 # settled. Shell startup is not instant and neither is a cd: a deadline is
 # the honest way to wait for a shell, and the failure carries the last
@@ -130,35 +147,49 @@ $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 
 
-function New-ProbeDir([string]$Leaf) {
+function New-ProbeDir([string]$Leaf, [string]$Root = $OutDir) {
     # A folder name nothing else in the product could produce, so a label that
     # reads it can only have come from the cd. Rooted at $OutDir rather than
     # $TEMP because $env:TEMP is handed to us in 8.3 form
     # (C:\Users\ALESSA~1\...) while a shell reports the long form, and the
-    # assert compares the reported directory to this one literally.
-    $path = Join-Path $OutDir "wintty-cwd-probe-$Leaf"
+    # assert compares the reported directory to this one literally. A scenario
+    # that wants the ~ collapse roots its probe under the profile instead.
+    $path = Join-Path $Root "wintty-cwd-probe-$Leaf"
     New-Item -ItemType Directory -Force -Path $path | Out-Null
     return $path
 }
 
+# The directory the product writes as ~. The known-folder API rather than
+# $env:USERPROFILE, because that is what TabManager reads, and the two can
+# disagree on a redirected profile.
+$ProfileDir = [Environment]::GetFolderPath('UserProfile').TrimEnd('\')
+
 function Invoke-Scenario(
-    [string]$Name, [string]$Profile, [string]$WantIcon, [scriptblock]$Body) {
-    $probe = New-ProbeDir $Name
+    [string]$Name, [string]$Profile, [string]$WantIcon, [string]$WantIconTooltip, [scriptblock]$Body,
+    [string]$ProbeRoot = $OutDir, [string]$ConfigExtra = '') {
+    $probe = New-ProbeDir $Name $ProbeRoot
     $folder = Split-Path -Leaf $probe
+    # The tooltip is the whole directory with the user's home written as ~,
+    # so the expectation collapses the same prefix the product does: a probe
+    # under the profile wants the ~ form, one outside it the path itself.
+    $wantTip = if ($probe.StartsWith("$ProfileDir\", [StringComparison]::OrdinalIgnoreCase)) {
+        '~' + $probe.Substring($ProfileDir.Length)
+    } else { $probe }
     # default-profile is the only way to pin the first tab's shell: the
     # top-level `command` key loses to whatever profile discovery ranks first
-    # (ordinal, so "cmd" wins). We name a DISCOVERED profile rather than
-    # declaring one, so the tab carries the probe's own interpreter icon --
-    # the thing the icon assert is about.
+    # (ordinal, so "cmd" wins). The shell scenarios name a DISCOVERED profile,
+    # so the tab carries the probe's own interpreter icon -- the thing the
+    # icon assert is about; a scenario may declare its own through $ConfigExtra.
     $config = @"
 windows-single-instance = true
 window-save-state = never
 vertical-tabs = true
 vertical-tabs-hover-expand = false
 default-profile = $Profile
+$ConfigExtra
 "@
     $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-    $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; icon = '' }
+    $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; renderedH = ''; tooltip = ''; iconTooltip = ''; icon = '' }
     $s = $null
     Write-Host "=== scenario $Name (profile $Profile) ==="
     try {
@@ -197,12 +228,48 @@ default-profile = $Profile
         }
         $entry.rendered = $label.rendered
 
+        # (iii) the tooltip the row's TextBlock is carrying: the whole
+        # directory, where the label shows only its leaf.
+        if ($label.renderedTooltip -ne $wantTip) {
+            throw ("PRODUCT_FAIL: {0}: the row's tooltip is '{1}', wanted '{2}'" -f
+                $Name, $label.renderedTooltip, $wantTip)
+        }
+        $entry.tooltip = $label.renderedTooltip
+
+        # (iv) the icon's tooltip, exactly. A discovered profile is named after
+        # its shell, so there the tooltip says the shell once and this cannot
+        # tell shell from profile; the declared-profile scenario is the one
+        # that can, and it wants the shell on its own line above the name.
+        if ("$($label.iconTooltip)" -notlike $WantIconTooltip) {
+            throw ("PRODUCT_FAIL: {0}: the icon's tooltip is '{1}', wanted '{2}'" -f
+                $Name, ($label.iconTooltip -replace "`n", '\n'), ($WantIconTooltip -replace "`n", '\n'))
+        }
+        $entry.iconTooltip = $label.iconTooltip
+
         # ... and again through UIA, which shares no code with the readout
         # above.
         $names = Get-UiaRowNames
         if (@($names | Where-Object { $_ -like "*$folder*" }).Count -eq 0) {
             throw ("PRODUCT_FAIL: {0}: no rendered row names the folder '{1}'; rows are [{2}]" -f
                 $Name, $folder, ($names -join ', '))
+        }
+
+        # (v) the same label and tooltip on the HORIZONTAL strip. The layout
+        # flips the way the chord flips it, and the readout is the
+        # TabViewItem's header TextBlock and its own tooltip -- a surface
+        # that shares no code with the vertical row.
+        [void](Invoke-SeamCommandQuiet $s @{ op = 'toggle-layout' })
+        $flat = Wait-Label $s { param($l) $l.renderedH -eq $folder } `
+            "${Name}: after the layout switch the horizontal strip never rendered '$folder'"
+        if ($flat.renderedTooltipH -ne $wantTip) {
+            throw ("PRODUCT_FAIL: {0}: the horizontal item's tooltip is '{1}', wanted '{2}'" -f
+                $Name, $flat.renderedTooltipH, $wantTip)
+        }
+        $entry.renderedH = $flat.renderedH
+        $tabNames = Get-UiaTabNames
+        if (@($tabNames | Where-Object { $_ -like "*$folder*" }).Count -eq 0) {
+            throw ("PRODUCT_FAIL: {0}: no horizontal tab names the folder '{1}'; tabs are [{2}]" -f
+                $Name, $folder, ($tabNames -join ', '))
         }
 
         # The interpreter icon: a decoded image on the row, and a key that
@@ -217,8 +284,9 @@ default-profile = $Profile
             throw ("APP_EXIT: the app exited during '{0}' (code {1})" -f $Name, $s.Proc.ExitCode)
         }
         $entry.ok = $true
-        Write-Host ("PASS {0}: cwd='{1}' label='{2}' icon='{3}'" -f
-            $Name, $entry.cwd, $entry.rendered, $entry.icon) -ForegroundColor Green
+        Write-Host ("PASS {0}: cwd='{1}' label='{2}' (horizontal '{6}') tooltip='{3}' icon='{4}' ({5})" -f
+            $Name, $entry.cwd, $entry.rendered, $entry.tooltip, $entry.icon,
+            ($entry.iconTooltip -replace "`n", ' / '), $entry.renderedH) -ForegroundColor Green
     } catch {
         $msg = "$($_.Exception.Message)"
         $entry.error = $msg
@@ -283,12 +351,14 @@ vertical-tabs-hover-expand = false
 default-profile = pwsh-7
 "@
     $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-    $entry = [ordered]@{ name = $name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; icon = '' }
+    $entry = [ordered]@{ name = $name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; tooltip = ''; iconTooltip = ''; icon = '' }
     $s = $null
     Write-Host "=== scenario $name ==="
     try {
         Assert-NoWintty -Context "The cwd label scenario '$name'"
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config
+        # -AllowInput for the same reason as the label scenarios: this one
+        # types the prompt replacement and the injected reports into the shell.
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -AllowInput
         $script:MainHwnd64 = $s.Hwnd64
 
         $first = Wait-Label $s { param($l) $null -ne $l.cwd } `
@@ -353,17 +423,27 @@ default-profile = pwsh-7
 # quoted because it may hold a space.
 #
 # pwsh drives the OSC 7 arm: its integration sends a `file://HOST/c:/dir` URL
-# at every prompt, so a plain `cd` covers a shape cmd can never produce.
+# at every prompt, so a plain `cd` covers a shape cmd can never produce. Its
+# probe sits under the profile, so this is also the leg that sees the ~ form
+# in the rendered tooltip while the reported directory stays absolute.
+#
+# The third shell scenario declares a profile whose name says nothing about
+# its shell, which is the only way to watch the icon's tooltip put the shell
+# above the profile name rather than repeat the profile.
 $staged = Enter-StagedResources
 try {
-    Invoke-Scenario 'cmd' 'cmd' 'bundled:cmd' {
+    Invoke-Scenario 'cmd' 'cmd' 'bundled:cmd' 'Command Prompt' {
         param($s, $probe)
         [void](Invoke-SeamCommand $s @{ op = 'send-text'; text = "cd /d `"$probe`"`r" })
     }
-    Invoke-Scenario 'pwsh' 'pwsh-7' 'bundled:pwsh' {
+    Invoke-Scenario 'pwsh' 'pwsh-7' 'bundled:pwsh' 'PowerShell*' {
         param($s, $probe)
         [void](Invoke-SeamCommand $s @{ op = 'send-text'; text = "cd `"$probe`"`r" })
-    }
+    } -ProbeRoot $ProfileDir
+    Invoke-Scenario 'declared' 'probe' 'brand:pwsh' "PowerShell`nProbe" {
+        param($s, $probe)
+        [void](Invoke-SeamCommand $s @{ op = 'send-text'; text = "cd `"$probe`"`r" })
+    } -ConfigExtra "profile.probe.name = Probe`nprofile.probe.command = pwsh.exe"
     Invoke-UncRefusedScenario
 } finally { Exit-StagedResources $staged }
 

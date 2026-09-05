@@ -1078,6 +1078,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             ToggleSplitZoom();
         }
 
+        // The active leaf was reassigned above, before focus lands on it,
+        // so OnTerminalGotFocus sees a leaf that is already active and
+        // raises nothing. Raise it here: the tab's title, directory,
+        // progress and bell all rebind on this event, and without it the
+        // tab kept naming the pane that just closed until the survivor's
+        // next prompt.
+        LeafFocused?.Invoke(this, _activeLeaf);
         RaiseLayoutChanged();
     }
 

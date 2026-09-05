@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Profiles;
+using Ghostty.Core.Session;
 
 namespace Ghostty.Core.Tabs;
 
@@ -54,7 +55,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         // attaches; cheaper than tearing down and rebuilding the VM, and
         // future-proofs the hot-apply path that lands when this guard
         // becomes a no-op.
-        _tabIcon?.SetIcon(snapshot.Icon, snapshot.DisplayName);
+        _tabIcon?.SetIcon(snapshot.Icon, TabLabel.IconTooltip(snapshot));
     }
 
     private TabIconViewModel? _tabIcon;
@@ -77,7 +78,7 @@ internal sealed class TabModel : INotifyPropertyChanged
             if (_tabIcon is null)
             {
                 _tabIcon = ProfileSnapshot is { } snap
-                    ? new TabIconViewModel(snap.Icon, snap.DisplayName)
+                    ? new TabIconViewModel(snap.Icon, TabLabel.IconTooltip(snap))
                     : new TabIconViewModel(new IconSpec.BundledKey("default"), "Terminal");
             }
             return _tabIcon;
@@ -92,9 +93,10 @@ internal sealed class TabModel : INotifyPropertyChanged
             if (field == value) return;
             field = value;
             Raise();
-            // EffectiveTitle is computed; classic bindings listen for
-            // the exact property name, so raise it explicitly.
+            // EffectiveTitle and TooltipText are computed; classic bindings
+            // listen for the exact property name, so raise them explicitly.
             Raise(nameof(EffectiveTitle));
+            Raise(nameof(TooltipText));
         }
     }
 
@@ -107,6 +109,7 @@ internal sealed class TabModel : INotifyPropertyChanged
             field = value;
             Raise();
             Raise(nameof(EffectiveTitle));
+            Raise(nameof(TooltipText));
         }
     }
 
@@ -125,6 +128,27 @@ internal sealed class TabModel : INotifyPropertyChanged
             field = value;
             Raise();
             Raise(nameof(EffectiveTitle));
+            Raise(nameof(TooltipText));
+        }
+    }
+
+    /// <summary>
+    /// The directory that reads as <c>~</c> on this tab's surfaces, handed
+    /// down by <see cref="TabManager"/> from the user's profile. Null
+    /// collapses nothing. Only the label and the tooltip read it: the
+    /// directory a tab respawns in is <see cref="ShellReportedCwd"/>,
+    /// untouched.
+    /// </summary>
+    public string? HomeDirectory
+    {
+        get;
+        set
+        {
+            if (field == value) return;
+            field = value;
+            Raise();
+            Raise(nameof(EffectiveTitle));
+            Raise(nameof(TooltipText));
         }
     }
 
@@ -230,12 +254,48 @@ internal sealed class TabModel : INotifyPropertyChanged
     // '\033]2;\007'` does it), and that arrives here as a non-null empty
     // string, which would otherwise win the precedence chain and leave
     // the tab with a blank label and a blank name.
-    public string EffectiveTitle =>
-        Titled(UserOverrideTitle)
-        ?? Titled(TabLabel.Meaningful(ShellReportedTitle))
-        ?? Titled(TabLabel.FolderName(ShellReportedCwd))
+    public string EffectiveTitle => Compose(NamedTitle, DisplayCwd);
+
+    /// <summary>
+    /// What a pointer resting on the tab is told: the whole directory (home
+    /// written as <c>~</c>), under the rename or shell title when one
+    /// outranks it. The label shows the directory's leaf; this is where the
+    /// rest of it lives.
+    /// </summary>
+    public string TooltipText
+    {
+        get
+        {
+            var named = NamedTitle;
+            var cwd = DisplayCwd;
+            return TabLabel.Tooltip(named, cwd, ShellReportedCwd, Compose(named, cwd));
+        }
+    }
+
+    /// <summary>
+    /// The reported directory as something the app may act on -- copy it,
+    /// open it -- or null. Reported at all, plain text (no control or bidi
+    /// characters a program could smuggle onto the clipboard), and a
+    /// directory the spawn policy would accept: the same verdict Duplicate
+    /// Tab and restore live by, so the menu cannot reach a host they refuse.
+    /// </summary>
+    public string? ActionableCwd =>
+        ShellReportedCwd is { } cwd && TabLabel.IsPlain(cwd) && SpawnCwdPolicy.MaySpawnAt(cwd)
+            ? cwd
+            : null;
+
+    private string Compose(string? named, string? displayCwd) =>
+        named
+        ?? Titled(TabLabel.FolderName(displayCwd))
         ?? Titled(ProfileSnapshot?.DisplayName)
         ?? AppIdentity.ProductName;
+
+    // The two tiers above the folder, as one: what the tab is called when
+    // someone -- the user or the shell -- has actually named it.
+    private string? NamedTitle =>
+        Titled(UserOverrideTitle) ?? Titled(TabLabel.Meaningful(ShellReportedTitle));
+
+    private string? DisplayCwd => TabLabel.Collapse(ShellReportedCwd, HomeDirectory);
 
     private static string? Titled(string? title)
         => string.IsNullOrWhiteSpace(title) ? null : title;
@@ -271,34 +331,33 @@ internal sealed class TabModel : INotifyPropertyChanged
             return;
         }
 
-        var mapped = exeBasename is null
-            ? null
-            : ProcessIconTable.TryMap(exeBasename, commandLine);
-
         // Touching the TabIcon getter lazily constructs the VM from the
         // profile snapshot before we install or clear any override.
         var vm = TabIcon;
 
-        if (mapped is null)
+        if (exeBasename is null || ProcessIconTable.TryMap(exeBasename, commandLine) is not { } mapped)
         {
             vm.RevertToProfile();
             return;
         }
 
-        // Suppress when the mapped spec equals the profile spec: steady
-        // state at the launch shell's prompt produces zero visual change
-        // and the tooltip stays as the profile's display name.
+        // Suppress when the foreground IS the launch shell: steady state at
+        // its prompt produces zero visual change and the tooltip stays the
+        // shell's name. Two ways to know: the mapped spec equals the
+        // profile's, or the exe is the one the profile's command launches.
+        // The second matters because discovered profiles carry a bundled
+        // icon while the table maps a brand icon, so the specs differ for
+        // the very same pwsh.exe.
         var profileIcon = ProfileSnapshot?.Icon;
-        if (profileIcon is not null && Equals(mapped, profileIcon))
+        var launchExe = ProfileOrderResolver.CommandBasename(ProfileSnapshot?.ResolvedCommand);
+        if ((profileIcon is not null && Equals(mapped, profileIcon))
+            || string.Equals(launchExe, exeBasename, StringComparison.OrdinalIgnoreCase))
         {
             vm.RevertToProfile();
             return;
         }
 
-        // Tooltip is the exe basename without extension: matches how the
-        // user thinks about the running command ("vim", not "vim.exe").
-        var tooltip = System.IO.Path.GetFileNameWithoutExtension(exeBasename) ?? string.Empty;
-        vm.SetOverride(mapped, tooltip);
+        vm.SetOverride(mapped, TabLabel.ForegroundTooltip(exeBasename, commandLine, ProfileSnapshot));
     }
 
     /// <summary>

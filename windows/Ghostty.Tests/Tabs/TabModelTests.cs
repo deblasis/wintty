@@ -23,7 +23,7 @@ public class TabModelTests
 
         var brand = Assert.IsType<IconSpec.BrandKey>(tab.TabIcon.Icon);
         Assert.Equal("vim", brand.Key);
-        Assert.Equal("vim", tab.TabIcon.TooltipText);
+        Assert.Equal("Vim in PowerShell", tab.TabIcon.TooltipText);
     }
 
     [Fact]
@@ -68,7 +68,7 @@ public class TabModelTests
         var tab = new TabModel(new FakePaneHost());
         var snapshot = ProfileSnapshotStore.From(
             new ResolvedProfile(
-                Id: "test", Name: profileTooltip, Command: "cmd.exe",
+                Id: "test", Name: profileTooltip, Command: "pwsh.exe",
                 WorkingDirectory: null, Icon: profileIcon,
                 TabTitle: profileTooltip, Visuals: EffectiveVisualOverrides.Empty,
                 ProbeId: null, OrderIndex: 0, IsDefault: true,
