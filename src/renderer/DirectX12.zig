@@ -567,6 +567,16 @@ pub fn waitGpu(self: *DirectX12) void {
     }
 }
 
+/// The largest 2D texture this device can hold, in either dimension.
+///
+/// D3D12 makes this a property of the feature level rather than something
+/// to ask the device, and we create ours at 12_0 (see `device.zig`), which
+/// guarantees 16384.
+pub fn maxTextureSize(self: *const DirectX12) u32 {
+    _ = self;
+    return 16384;
+}
+
 pub fn drawFrameStart(self: *DirectX12) void {
     _ = self;
     // RTV heap slots are per-frame and stable. No reset needed; each frame's

@@ -147,6 +147,19 @@ pub fn cellSize(self: *SharedGrid) renderer.CellSize {
     };
 }
 
+/// Set the size both atlases refuse to grow past, for a renderer that has
+/// attached to this grid and knows what its device can hold.
+///
+/// The atlases are built before any renderer exists, so they start at a
+/// ceiling low enough for every device we support. A backend that can ask
+/// its device raises or lowers that here.
+pub fn setMaxAtlasSize(self: *SharedGrid, size_max: u32) void {
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
+    self.atlas_grayscale.setMaxSize(size_max);
+    self.atlas_color.setMaxSize(size_max);
+}
+
 /// Get the font index for a given codepoint. This is cached.
 ///
 /// This always forces loading any deferred fonts since we assume that if

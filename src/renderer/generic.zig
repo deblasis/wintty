@@ -163,6 +163,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         atlas_generation_grayscale: usize = 0,
         atlas_generation_color: usize = 0,
 
+        /// Whether we have told the font grid what this device can hold.
+        /// Done once per grid, from `drawFrame`, because that is where the
+        /// graphics API is guaranteed to be usable (OpenGL needs a current
+        /// context to be asked anything).
+        atlas_max_size_synced: bool = false,
+
         /// Latched copy of `renderer.State.first_content`, captured under
         /// the render state mutex in `updateFrame`. Lets `drawFrame` tell
         /// whether the terminal has produced content without re-taking the
@@ -1400,6 +1406,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Update our grid
             self.font_grid = grid;
 
+            // The new grid's atlases start at the conservative default
+            // ceiling, so it has to be told what this device can hold.
+            self.atlas_max_size_synced = false;
+
             // Update all our textures so that they sync on the next frame.
             // We can modify this without a lock because the GPU does not
             // touch this data. A released swap chain is rebuilt with
@@ -1915,6 +1925,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // only the case while unrealized (GTK); displayRealized
             // rebuilds the swap chain.
             if (!self.display_realized) return;
+
+            // Tell the font grid how large a texture this device can hold,
+            // now that we're somewhere the graphics API can be asked. The
+            // atlases are built before any renderer exists so they start at
+            // a ceiling that holds everywhere; this is what lets a device
+            // that can do better actually use it. Backends that can't
+            // report a limit keep the conservative default.
+            if (comptime @hasDecl(GraphicsAPI, "maxTextureSize")) {
+                if (!self.atlas_max_size_synced) {
+                    self.atlas_max_size_synced = true;
+                    self.font_grid.setMaxAtlasSize(self.api.maxTextureSize());
+                }
+            }
 
             // Get our swap chain, rebuilding it if it was released
             // while we were hidden. Rebuilding is deferred to draw

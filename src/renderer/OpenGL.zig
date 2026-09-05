@@ -292,6 +292,25 @@ pub fn surfaceSize(self: *const OpenGL) !struct { width: u32, height: u32 } {
     };
 }
 
+/// The largest atlas texture this device can hold, in either dimension.
+///
+/// The atlases are rectangle textures (see `initAtlasTexture`), which have
+/// their own limit, separate from and possibly lower than the one for
+/// ordinary 2D textures.
+///
+/// Requires a current GL context, so this is only safe to call from the
+/// draw path.
+pub fn maxTextureSize(self: *const OpenGL) u32 {
+    _ = self;
+    var size: gl.c.GLint = 0;
+    gl.glad.context.GetIntegerv.?(gl.c.GL_MAX_RECTANGLE_TEXTURE_SIZE, &size);
+
+    // A driver that answers with nonsense (or not at all) leaves us with
+    // the size we already know every device we support can hold.
+    if (size <= 0) return font.Atlas.default_max_size;
+    return @intCast(size);
+}
+
 /// Initialize a new render target which can be presented by this API.
 pub fn initTarget(self: *const OpenGL, width: usize, height: usize) !Target {
     return Target.init(.{
