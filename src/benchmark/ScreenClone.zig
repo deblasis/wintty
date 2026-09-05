@@ -42,6 +42,17 @@ pub const Options = struct {
     /// cloning. This data can switch to alt screen if it wants. The time
     /// to read this is not part of the benchmark.
     data: ?[]const u8 = null,
+
+    /// `cli.args.parse` allocates `[]const u8` fields (like `data`
+    /// above) out of this arena when present; without it, allocations
+    /// go through an internal allocator that's never freed. See
+    /// `deinit`.
+    _arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: *Options) void {
+        if (self._arena) |arena| arena.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const Mode = enum {
