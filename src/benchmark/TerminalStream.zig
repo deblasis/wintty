@@ -17,18 +17,32 @@ const Allocator = std.mem.Allocator;
 const terminalpkg = @import("../terminal/main.zig");
 const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
+const compat_file = @import("../lib/compat/file.zig");
 const Terminal = terminalpkg.Terminal;
 const Stream = terminalpkg.TerminalStream;
 const global = @import("../global.zig");
 
 const log = std.log.scoped(.@"terminal-stream-bench");
 
+/// Prevent a malformed or accidentally enormous corpus from consuming
+/// unbounded memory during benchmark setup.
+const max_data_size = 64 * 1024 * 1024;
+
+/// Chunk size used to feed the stream in `step`. This matches the read
+/// buffer size used by the real IO thread (see termio Exec.zig
+/// buffer_capacity) so that the benchmark exercises the stream with
+/// realistic chunk sizes, even though the data itself is preloaded (see
+/// `setup`) instead of read from disk during the timed step.
+const step_chunk_size = 64 * 1024;
+
 opts: Options,
 terminal: Terminal,
 stream: Stream,
+alloc: Allocator,
 
-/// The file, opened in the setup function.
-data_f: ?std.Io.File = null,
+/// Complete contents of the input corpus, read once in `setup` so the
+/// timed step measures stream throughput rather than file IO.
+data: []u8 = &.{},
 
 pub const Options = struct {
     /// The size of the terminal. This affects benchmarking when
@@ -61,6 +75,7 @@ pub fn create(
 
     ptr.* = .{
         .opts = opts,
+        .alloc = alloc,
         .terminal = try .init(global.io(), alloc, .{
             .rows = opts.@"terminal-rows",
             .cols = opts.@"terminal-cols",
@@ -100,50 +115,39 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
     // Always reset our terminal state
     self.terminal.fullReset();
 
-    // Open our data file to prepare for reading. We can do more validation
-    // here eventually.
-    assert(self.data_f == null);
-    self.data_f = options.dataFile(self.opts.data) catch |err| {
+    // Preload the entire data file into memory so the timed step below
+    // measures stream throughput, not file IO.
+    assert(self.data.len == 0);
+    const f = (options.dataFile(self.opts.data) catch |err| {
         log.warn("error opening data file err={}", .{err});
+        return error.BenchmarkFailed;
+    }) orelse return;
+    defer f.close(global.io());
+
+    self.data = compat_file.readToEndAlloc(
+        f,
+        self.alloc,
+        max_data_size,
+    ) catch |err| {
+        log.warn("error reading data file err={}", .{err});
         return error.BenchmarkFailed;
     };
 }
 
 fn teardown(ptr: *anyopaque) void {
     const self: *TerminalStream = @ptrCast(@alignCast(ptr));
-    if (self.data_f) |f| {
-        f.close(global.io());
-        self.data_f = null;
-    }
+    if (self.data.len > 0) self.alloc.free(self.data);
+    self.data = &.{};
 }
 
 fn step(ptr: *anyopaque) Benchmark.Error!void {
     const self: *TerminalStream = @ptrCast(@alignCast(ptr));
 
-    // Get our buffered reader so we're not predominantly
-    // waiting on file IO. It'd be better to move this fully into
-    // memory. If we're IO bound though that should show up on
-    // the benchmark results and... I know writing this that we
-    // aren't currently IO bound.
-    const f = self.data_f orelse return;
-
-    // Unbuffered: readSliceShort below reads directly into `buf`,
-    // avoiding a per-chunk memcpy through an intermediate reader
-    // buffer that would pollute the measurement.
-    var f_reader = f.reader(global.io(), &.{});
-    const r = &f_reader.interface;
-
-    // This buffer size matches the read buffer size used by the
-    // real IO thread (see termio Exec.zig buffer_capacity) so that
-    // the benchmark exercises the stream with realistic chunk sizes.
-    var buf: [64 * 1024]u8 = undefined;
-    while (true) {
-        const n = r.readSliceShort(&buf) catch {
-            log.warn("error reading data file err={?}", .{f_reader.err});
-            return error.BenchmarkFailed;
-        };
-        if (n == 0) break; // EOF reached
-        self.stream.nextSlice(buf[0..n]);
+    var offset: usize = 0;
+    while (offset < self.data.len) {
+        const end = @min(offset + step_chunk_size, self.data.len);
+        self.stream.nextSlice(self.data[offset..end]);
+        offset = end;
     }
 }
 
@@ -164,4 +168,27 @@ test TerminalStream {
 
     const tracked_bench = tracked.benchmark();
     _ = try tracked_bench.run(.once);
+}
+
+test "TerminalStream step consumes preloaded data without touching the file" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const impl: *TerminalStream = try .create(alloc, .{});
+    defer impl.destroy(alloc);
+
+    // `step` must work entirely off `self.data`. There's no `data_f`
+    // field to read from anymore, so this only compiles and passes if
+    // `setup`'s preload contract holds: the corpus is fully in memory
+    // before the timed step runs.
+    impl.data = try alloc.dupe(u8, "hello\r\nworld");
+    try step(impl);
+
+    // The stream moved the cursor to the second row, proving the
+    // in-memory data was actually parsed.
+    try testing.expect(impl.terminal.screens.active.cursor.y > 0);
+
+    // teardown is what actually frees `self.data` normally; call it
+    // directly here since we bypassed `setup`.
+    teardown(impl);
 }

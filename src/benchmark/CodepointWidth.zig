@@ -11,6 +11,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
+const compat_file = @import("../lib/compat/file.zig");
 const UTF8Decoder = @import("../terminal/UTF8Decoder.zig");
 const simd = @import("../simd/main.zig");
 const table = @import("../unicode/main.zig").table;
@@ -18,10 +19,23 @@ const global = @import("../global.zig");
 
 const log = std.log.scoped(.@"terminal-stream-bench");
 
-opts: Options,
+/// Prevent a malformed or accidentally enormous corpus from consuming
+/// unbounded memory during benchmark setup.
+const max_data_size = 64 * 1024 * 1024;
 
-/// The file, opened in the setup function.
+opts: Options,
+alloc: Allocator,
+
+/// The file, opened in the setup function. Used only by the `simd`
+/// mode's step, which reads directly from disk on every call. That
+/// mode measures a dead code path scheduled for removal separately, so
+/// it's left untouched here rather than folded into the preload below.
 data_f: ?std.Io.File = null,
+
+/// Complete contents of the input corpus for the `noop`, `wcwidth` and
+/// `table` modes, read once in `setup` so the timed step measures
+/// codepoint-width throughput rather than file IO.
+data: []u8 = &.{},
 
 pub const Options = struct {
     /// The type of codepoint width calculation to use.
@@ -58,7 +72,7 @@ pub fn create(
 ) !*CodepointWidth {
     const ptr = try alloc.create(CodepointWidth);
     errdefer alloc.destroy(ptr);
-    ptr.* = .{ .opts = opts };
+    ptr.* = .{ .opts = opts, .alloc = alloc };
     return ptr;
 }
 
@@ -82,13 +96,34 @@ pub fn benchmark(self: *CodepointWidth) Benchmark {
 fn setup(ptr: *anyopaque) Benchmark.Error!void {
     const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
 
-    // Open our data file to prepare for reading. We can do more
-    // validation here eventually.
-    assert(self.data_f == null);
-    self.data_f = options.dataFile(self.opts.data) catch |err| {
-        log.warn("error opening data file err={}", .{err});
-        return error.BenchmarkFailed;
-    };
+    switch (self.opts.mode) {
+        // Unchanged: this mode reads from `data_f` directly inside its
+        // step. See the field doc comment for why.
+        .simd => {
+            assert(self.data_f == null);
+            self.data_f = options.dataFile(self.opts.data) catch |err| {
+                log.warn("error opening data file err={}", .{err});
+                return error.BenchmarkFailed;
+            };
+        },
+        .noop, .wcwidth, .table => {
+            assert(self.data.len == 0);
+            const f = (options.dataFile(self.opts.data) catch |err| {
+                log.warn("error opening data file err={}", .{err});
+                return error.BenchmarkFailed;
+            }) orelse return;
+            defer f.close(global.io());
+
+            self.data = compat_file.readToEndAlloc(
+                f,
+                self.alloc,
+                max_data_size,
+            ) catch |err| {
+                log.warn("error reading data file err={}", .{err});
+                return error.BenchmarkFailed;
+            };
+        },
+    }
 }
 
 fn teardown(ptr: *anyopaque) void {
@@ -97,6 +132,8 @@ fn teardown(ptr: *anyopaque) void {
         f.close(global.io());
         self.data_f = null;
     }
+    if (self.data.len > 0) self.alloc.free(self.data);
+    self.data = &.{};
 }
 
 fn stepNoop(ptr: *anyopaque) Benchmark.Error!void {
@@ -113,26 +150,12 @@ fn stepWcwidth(ptr: *anyopaque) Benchmark.Error!void {
 
     const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
 
-    const f = self.data_f orelse return;
-    var read_buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    var f_reader = f.reader(global.io(), &read_buf);
-    var r = &f_reader.interface;
-
     var d: UTF8Decoder = .{};
-    var buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    while (true) {
-        const n = r.readSliceShort(&buf) catch {
-            log.warn("error reading data file err={?}", .{f_reader.err});
-            return error.BenchmarkFailed;
-        };
-        if (n == 0) break; // EOF reached
-
-        for (buf[0..n]) |c| {
-            const cp_, const consumed = d.next(c);
-            assert(consumed);
-            if (cp_) |cp| {
-                std.mem.doNotOptimizeAway(wcwidth(cp));
-            }
+    for (self.data) |c| {
+        const cp_, const consumed = d.next(c);
+        assert(consumed);
+        if (cp_) |cp| {
+            std.mem.doNotOptimizeAway(wcwidth(cp));
         }
     }
 }
@@ -140,31 +163,17 @@ fn stepWcwidth(ptr: *anyopaque) Benchmark.Error!void {
 fn stepTable(ptr: *anyopaque) Benchmark.Error!void {
     const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
 
-    const f = self.data_f orelse return;
-    var read_buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    var f_reader = f.reader(global.io(), &read_buf);
-    var r = &f_reader.interface;
-
     var d: UTF8Decoder = .{};
-    var buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    while (true) {
-        const n = r.readSliceShort(&buf) catch {
-            log.warn("error reading data file err={?}", .{f_reader.err});
-            return error.BenchmarkFailed;
-        };
-        if (n == 0) break; // EOF reached
-
-        for (buf[0..n]) |c| {
-            const cp_, const consumed = d.next(c);
-            assert(consumed);
-            if (cp_) |cp| {
-                // This is the same trick we do in terminal.zig so we
-                // keep it here.
-                std.mem.doNotOptimizeAway(if (cp <= 0xFF)
-                    1
-                else
-                    table.get(@intCast(cp)).width);
-            }
+    for (self.data) |c| {
+        const cp_, const consumed = d.next(c);
+        assert(consumed);
+        if (cp_) |cp| {
+            // This is the same trick we do in terminal.zig so we
+            // keep it here.
+            std.mem.doNotOptimizeAway(if (cp <= 0xFF)
+                1
+            else
+                table.get(@intCast(cp)).width);
         }
     }
 }
@@ -205,4 +214,19 @@ test CodepointWidth {
 
     const bench = impl.benchmark();
     _ = try bench.run(.once);
+}
+
+test "CodepointWidth stepTable consumes preloaded data without a file" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const impl: *CodepointWidth = try .create(alloc, .{ .mode = .table });
+    defer impl.destroy(alloc);
+
+    // `stepTable` must work entirely off `self.data`; `data_f` stays
+    // null for this mode. This only passes if `setup`'s preload
+    // contract holds for non-simd modes.
+    impl.data = try alloc.dupe(u8, "hello");
+    try stepTable(impl);
+    teardown(impl);
 }

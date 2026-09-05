@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
+const compat_file = @import("../lib/compat/file.zig");
 const UTF8Decoder = @import("../terminal/UTF8Decoder.zig");
 const unicode = @import("../unicode/main.zig");
 const uucode = @import("uucode");
@@ -15,10 +16,16 @@ const global = @import("../global.zig");
 
 const log = std.log.scoped(.@"terminal-stream-bench");
 
-opts: Options,
+/// Prevent a malformed or accidentally enormous corpus from consuming
+/// unbounded memory during benchmark setup.
+const max_data_size = 64 * 1024 * 1024;
 
-/// The file, opened in the setup function.
-data_f: ?std.Io.File = null,
+opts: Options,
+alloc: Allocator,
+
+/// Complete contents of the input corpus, read once in `setup` so the
+/// timed step measures grapheme-break throughput rather than file IO.
+data: []u8 = &.{},
 
 pub const Options = struct {
     /// The type of codepoint width calculation to use.
@@ -49,7 +56,7 @@ pub fn create(
 ) !*GraphemeBreak {
     const ptr = try alloc.create(GraphemeBreak);
     errdefer alloc.destroy(ptr);
-    ptr.* = .{ .opts = opts };
+    ptr.* = .{ .opts = opts, .alloc = alloc };
     return ptr;
 }
 
@@ -71,72 +78,52 @@ pub fn benchmark(self: *GraphemeBreak) Benchmark {
 fn setup(ptr: *anyopaque) Benchmark.Error!void {
     const self: *GraphemeBreak = @ptrCast(@alignCast(ptr));
 
-    // Open our data file to prepare for reading. We can do more
-    // validation here eventually.
-    assert(self.data_f == null);
-    self.data_f = options.dataFile(self.opts.data) catch |err| {
+    // Preload the entire data file into memory so the timed step
+    // below measures grapheme-break throughput, not file IO.
+    assert(self.data.len == 0);
+    const f = (options.dataFile(self.opts.data) catch |err| {
         log.warn("error opening data file err={}", .{err});
+        return error.BenchmarkFailed;
+    }) orelse return;
+    defer f.close(global.io());
+
+    self.data = compat_file.readToEndAlloc(
+        f,
+        self.alloc,
+        max_data_size,
+    ) catch |err| {
+        log.warn("error reading data file err={}", .{err});
         return error.BenchmarkFailed;
     };
 }
 
 fn teardown(ptr: *anyopaque) void {
     const self: *GraphemeBreak = @ptrCast(@alignCast(ptr));
-    if (self.data_f) |f| {
-        f.close(global.io());
-        self.data_f = null;
-    }
+    if (self.data.len > 0) self.alloc.free(self.data);
+    self.data = &.{};
 }
 
 fn stepNoop(ptr: *anyopaque) Benchmark.Error!void {
     const self: *GraphemeBreak = @ptrCast(@alignCast(ptr));
 
-    const f = self.data_f orelse return;
-    var read_buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    var f_reader = f.reader(global.io(), &read_buf);
-    var r = &f_reader.interface;
-
     var d: UTF8Decoder = .{};
-    var buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    while (true) {
-        const n = r.readSliceShort(&buf) catch {
-            log.warn("error reading data file err={?}", .{f_reader.err});
-            return error.BenchmarkFailed;
-        };
-        if (n == 0) break; // EOF reached
-
-        for (buf[0..n]) |c| {
-            _ = d.next(c);
-        }
+    for (self.data) |c| {
+        _ = d.next(c);
     }
 }
 
 fn stepTable(ptr: *anyopaque) Benchmark.Error!void {
     const self: *GraphemeBreak = @ptrCast(@alignCast(ptr));
 
-    const f = self.data_f orelse return;
-    var read_buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    var f_reader = f.reader(global.io(), &read_buf);
-    var r = &f_reader.interface;
-
     var d: UTF8Decoder = .{};
     var state: uucode.grapheme.BreakState = .default;
     var cp1: u21 = 0;
-    var buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    while (true) {
-        const n = r.readSliceShort(&buf) catch {
-            log.warn("error reading data file err={?}", .{f_reader.err});
-            return error.BenchmarkFailed;
-        };
-        if (n == 0) break; // EOF reached
-
-        for (buf[0..n]) |c| {
-            const cp_, const consumed = d.next(c);
-            assert(consumed);
-            if (cp_) |cp2| {
-                std.mem.doNotOptimizeAway(unicode.graphemeBreak(cp1, @intCast(cp2), &state));
-                cp1 = cp2;
-            }
+    for (self.data) |c| {
+        const cp_, const consumed = d.next(c);
+        assert(consumed);
+        if (cp_) |cp2| {
+            std.mem.doNotOptimizeAway(unicode.graphemeBreak(cp1, @intCast(cp2), &state));
+            cp1 = cp2;
         }
     }
 }
@@ -150,4 +137,20 @@ test GraphemeBreak {
 
     const bench = impl.benchmark();
     _ = try bench.run(.once);
+}
+
+test "GraphemeBreak stepTable consumes preloaded data without a file" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const impl: *GraphemeBreak = try .create(alloc, .{ .mode = .table });
+    defer impl.destroy(alloc);
+
+    // `stepTable` must work entirely off `self.data`. There's no
+    // `data_f` to read from anymore, so this only passes if `setup`'s
+    // preload contract holds: the corpus is fully in memory before the
+    // timed step runs.
+    impl.data = try alloc.dupe(u8, "e\u{301}"); // e + combining acute accent
+    try stepTable(impl);
+    teardown(impl);
 }
