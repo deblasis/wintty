@@ -725,10 +725,12 @@ pub const Surface = struct {
             }
         }
 
-        // Apply any environment variables that were requested.
-        if (opts.env_var_count > 0) {
+        // Apply any environment variables that were requested. A null
+        // pointer with a non-zero count is a caller bug; read it as "none"
+        // rather than dereferencing the null.
+        if (opts.env_vars) |env_vars| {
             const alloc = config.arenaAlloc();
-            for (opts.env_vars.?[0..opts.env_var_count]) |env_var| {
+            for (env_vars[0..opts.env_var_count]) |env_var| {
                 const key = std.mem.sliceTo(env_var.key, 0);
                 const value = std.mem.sliceTo(env_var.value, 0);
                 try config.env.map.put(
