@@ -310,9 +310,15 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// soon-released resource (harmless). For replaceRegion the destination
 /// survives, so a multi-band atlas update could leave the texture with
 /// the leading bands of the new content and the trailing rows of the
-/// previous content. Acceptable for atlases (next replaceRegion fixes
-/// it) but worth knowing if anyone calls replaceRegion on a multi-band
-/// region of a user-visible texture.
+/// previous content.
+///
+/// A later call does NOT necessarily repair that. The renderer uploads the
+/// atlas region that went dirty since this texture's last sync, so once
+/// this swallow reports success for bytes that were never copied, the
+/// dropped rows stay stale until something dirties them again or the atlas
+/// is grown or reset. Anything that needs a guaranteed-correct texture has
+/// to notice the failure some other way, which today means not going
+/// through this function.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
     // Retire the staging buffers from the previous upload. They are the
     // source of CopyTextureRegion calls that may still be executing, so
