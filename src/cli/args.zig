@@ -96,7 +96,10 @@ pub fn parse(
         // An iterator can drop an input it couldn't read, such as a
         // config line that is too long. Report those alongside the
         // errors from the args we did get.
-        if (comptime canTrackDiags(T) and @hasDecl(Iter, "skippedDiagnostic")) {
+        if (comptime canTrackDiags(T) and
+            @typeInfo(Iter) == .@"struct" and
+            @hasDecl(Iter, "skippedDiagnostic"))
+        {
             if (try iter.skippedDiagnostic(arena_alloc)) |d| {
                 try dst._diagnostics.append(arena_alloc, d);
             }
