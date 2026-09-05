@@ -191,11 +191,14 @@ function Get-LegArgs([string]$Recipe, [string]$Reason, [string]$Justfile, [strin
 # come back as an array of every line the build printed with the status
 # tacked on the end, and every comparison against it would be nonsense.
 # Out-Host is also what Start-Transcript records, so the log tail an issue
-# quotes is unchanged.
+# quotes is unchanged. stderr is merged in for the same reason: incoda says
+# who killed a run and why on stderr, and the 124 note below sends the
+# reader to a transcript that would not otherwise contain it. Merging
+# cannot pollute the return value, because Out-Host consumes both streams.
 $script:LegRunner = {
     param($exe, $argv)
     $global:LASTEXITCODE = $null
-    & $exe @argv | Out-Host
+    & $exe @argv 2>&1 | Out-Host
     $LASTEXITCODE ?? 1
 }
 
@@ -610,6 +613,10 @@ $legClock = [System.Diagnostics.Stopwatch]::StartNew()
 $env:WINTTY_TEST_SEED = '0x{0:x}' -f (Get-Random -Minimum 1 -Maximum 2147483647)
 Write-Host "nightly: WINTTY_TEST_SEED=$env:WINTTY_TEST_SEED"
 $testRc = Invoke-Leg -Recipe 'test' -Reason 'nightly zig tests' -Justfile (Join-Path $wt 'justfile') -WorkTree $wt
+# Wall time around the whole wrapped leg, so on a busy box it carries the
+# queue wait as well as the run. The record calls it observed seconds and
+# nothing reads it as a budget, but do not quote it as how long the leg
+# takes.
 $testSeconds = [int]$legClock.Elapsed.TotalSeconds
 $script:status.results['zig-tests'] = $testRc
 Write-Host "nightly: zig tests rc=$testRc"
