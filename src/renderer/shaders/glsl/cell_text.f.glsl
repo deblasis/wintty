@@ -33,8 +33,10 @@ void main() {
             //
             // Since the alpha is premultiplied, we need to divide
             // it out before unlinearizing and re-multiply it after.
+            // A fully transparent texel is all zeroes, so the divisor is
+            // clamped away from zero to keep 0/0 NaNs out of the blender.
             if (!use_linear_blending) {
-                color.rgb /= vec3(color.a);
+                color.rgb /= vec3(max(color.a, 1e-6));
                 color = unlinearize(color);
                 color.rgb *= vec3(color.a);
             }
@@ -89,7 +91,9 @@ void main() {
 
             // Otherwise we need to unlinearize the color. Since the alpha is
             // premultiplied, we need to divide it out before unlinearizing.
-            color.rgb /= vec3(color.a);
+            // A fully transparent texel is all zeroes, so the divisor is
+            // clamped away from zero to keep 0/0 NaNs out of the blender.
+            color.rgb /= vec3(max(color.a, 1e-6));
             color = unlinearize(color);
             color.rgb *= vec3(color.a);
 
