@@ -2022,7 +2022,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle),
         nameof(TabModel.BellRinging),
-        nameof(TabModel.IsIdle));
+        nameof(TabModel.IsIdle),
+        nameof(TabModel.IsSettling));
 
         var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
             nameof(TabModel.Color));
@@ -2084,7 +2085,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle),
         nameof(TabModel.BellRinging),
-        nameof(TabModel.IsIdle));
+        nameof(TabModel.IsIdle),
+        nameof(TabModel.IsSettling));
 
         var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
             nameof(TabModel.Color));
@@ -2125,9 +2127,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// name has to sit on the item, which is the ListItem in the
     /// automation tree.
     /// </summary>
-    private static void ApplyItemTitleChrome(NavigationViewItem item, TabModel tab)
+    private void ApplyItemTitleChrome(NavigationViewItem item, TabModel tab)
     {
-        ToolTipService.SetToolTip(item, tab.TooltipText);
+        // In the collapsed rail the row's content is laid out past the
+        // rail's edge and clipped away, so the item is an unlabelled icon
+        // and its tooltip is the only thing carrying the tab's identity --
+        // the same reason the pinned square keeps the whole text. Expanded,
+        // the row wears its label and the item owes only what a hover adds.
+        ToolTipService.SetToolTip(
+            item, NavView.IsPaneOpen ? tab.HoverText : tab.TooltipText);
         AutomationProperties.SetName(item, TabAccessibleText.Name(tab));
         AutomationProperties.SetItemStatus(item, tab.Group is { } group
             ? TabAccessibleText.Status(tab.IsPinned, tab.BellRinging, group.Title, group.IsCollapsed)
@@ -5489,10 +5497,10 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// body row (it lives in the pinned prefix, or the strip has not built
     /// its item yet).
     /// </summary>
-    internal (string Title, string? Tooltip, IconElement? Icon)? TestSeamRenderedRow(TabModel tab)
+    internal (string Title, string? Tooltip, IconElement? Icon, bool HomeGlyph)? TestSeamRenderedRow(TabModel tab)
         => _items.TryGetValue(tab, out var item)
            && item.Content is VerticalTabNavRow row
-            ? (row.TestSeamRenderedTitle, row.TestSeamRenderedTooltip, item.Icon)
+            ? (row.TestSeamRenderedTitle, row.TestSeamRenderedTooltip, item.Icon, row.TestSeamShowsHomeGlyph)
             : null;
 
 

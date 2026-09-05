@@ -779,6 +779,9 @@ internal sealed class TabManager
     {
         var host = _paneHostFactory(snapshot);
         var tab = new TabModel(host) { HomeDirectory = HomeDirectory };
+        // A tab the manager opens is starting: it wears the app icon and a
+        // dimmed label until its pane paints or its shell speaks.
+        tab.BeginSettling();
         host.LeafFocused += OnLeafFocused;
         // Forward the active-leaf's progress onto the tab model. The
         // handler is captured as a local so CloseTab can unsubscribe
@@ -788,6 +791,8 @@ internal sealed class TabManager
         // The directory the tab names, from whichever pane is focused.
         EventHandler<string?> cwdHandler = (_, cwd) => tab.ShellReportedCwd = cwd;
         host.CwdChanged += cwdHandler;
+        EventHandler renderedHandler = (_, _) => tab.Settle();
+        host.FirstRendered += renderedHandler;
         // Forward the active-leaf bell to the window level (taskbar badge)
         // and, when bell-features includes `title`, mark the tab indicator.
         // Captured as locals so CloseTab can unsubscribe alongside progress.
@@ -813,6 +818,7 @@ internal sealed class TabManager
         {
             host.ProgressChanged -= progressHandler;
             host.CwdChanged -= cwdHandler;
+            host.FirstRendered -= renderedHandler;
             host.BellRang -= bellRangHandler;
             host.BellAcknowledged -= bellAckHandler;
             host.LastLeafClosed -= lastLeafHandler;
@@ -939,6 +945,11 @@ internal sealed class TabManager
         tab.PaneHost.ProgressChanged += progressHandler;
         EventHandler<string?> cwdHandler = (_, cwd) => tab.ShellReportedCwd = cwd;
         tab.PaneHost.CwdChanged += cwdHandler;
+        // An adopted tab is not restarted, so nothing begins settling here;
+        // the bridge is wired all the same so a tab that arrives mid-start
+        // (a restore) settles when its pane paints.
+        EventHandler renderedHandler = (_, _) => tab.Settle();
+        tab.PaneHost.FirstRendered += renderedHandler;
         EventHandler<Ghostty.Core.Bell.BellFeatures> bellRangHandler = (_, features) =>
         {
             BellRang?.Invoke(this, features);
@@ -962,6 +973,7 @@ internal sealed class TabManager
         {
             tab.PaneHost.ProgressChanged -= progressHandler;
             tab.PaneHost.CwdChanged -= cwdHandler;
+            tab.PaneHost.FirstRendered -= renderedHandler;
             tab.PaneHost.BellRang -= bellRangHandler;
             tab.PaneHost.BellAcknowledged -= bellAckHandler;
             tab.PaneHost.LastLeafClosed -= lastLeafHandler;

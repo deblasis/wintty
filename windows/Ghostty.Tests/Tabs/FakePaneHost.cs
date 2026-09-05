@@ -54,6 +54,10 @@ internal sealed class FakePaneHost : IPaneHost
 
     public void RaiseCwdChanged(string? cwd) => CwdChanged?.Invoke(this, cwd);
 
+    public event EventHandler? FirstRendered;
+
+    public void RaiseFirstRendered() => FirstRendered?.Invoke(this, EventArgs.Empty);
+
     public event EventHandler<Ghostty.Core.Bell.BellFeatures>? BellRang;
     public event EventHandler? BellAcknowledged;
 

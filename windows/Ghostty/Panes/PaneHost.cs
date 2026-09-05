@@ -698,6 +698,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
                     null,
                     TimeSpan.FromSeconds(1),
                     TimeSpan.FromSeconds(1));
+            // The floor under the tab's starting state, in case no surface
+            // ever paints. One shot; the raise disposes it.
+            _settleCapTimer ??= _time.CreateTimer(
+                _ => DispatcherQueue.TryEnqueue(RaiseFirstRendered),
+                null,
+                GlowCapDuration,
+                System.Threading.Timeout.InfiniteTimeSpan);
         };
         // Rebind progress and bell whenever the active leaf changes later,
         // and hand the tab the newly active leaf's directory.
@@ -933,6 +940,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // so we never double-dispose a leaf the walk above already freed.
         _pruneTimer?.Dispose();
         _pruneTimer = null;
+        _settleCapTimer?.Dispose();
+        _settleCapTimer = null;
         var liveLeaves = Core.Panes.PaneTree.Leaves(_root).ToHashSet();
         foreach (var leaf in _history.Clear())
         {
@@ -1167,7 +1176,30 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // thread, and the state machine is thread-safe regardless.
         if (_glowStates.TryGetValue(terminal, out var state))
             state.NotifyReady();
+        // The same sign tells the tab it is no longer starting. Raised
+        // outside the glow lookup: a pane too small to glow still paints,
+        // and a tab stuck reading as "starting" is worse than a missing glow.
+        RaiseFirstRendered();
     }
+
+    // A surface that never paints -- a command that fails to spawn, a
+    // renderer that faults -- would otherwise leave its tab wearing the
+    // app's icon for the life of the window. The same cap the glow uses,
+    // for the same reason, and once raised the tab never re-enters the
+    // state so the signal is one-shot.
+    private System.Threading.ITimer? _settleCapTimer;
+    private bool _firstRenderedRaised;
+
+    private void RaiseFirstRendered()
+    {
+        if (_firstRenderedRaised) return;
+        _firstRenderedRaised = true;
+        _settleCapTimer?.Dispose();
+        _settleCapTimer = null;
+        FirstRendered?.Invoke(this, EventArgs.Empty);
+    }
+
+    public event EventHandler? FirstRendered;
 
     private void OnGlowPhase(TerminalControl terminal, Core.Panes.PaneStartupGlowState.Phase phase)
     {
