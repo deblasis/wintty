@@ -463,7 +463,22 @@ fn transmitAnimationFrame(
         // Not the first frame, so continue loading similar to transmit
         // but this is for a subsequent frame.
         var result = loading.response;
+
+        // A payload that has already outgrown everything storage could ever
+        // hold can only fail at the end, so stop accumulating it now.
+        if (loading.data.items.len +| cmd.data.len > storage.total_limit) {
+            loading.destroy(alloc);
+            storage.loading = null;
+            encodeError(&result, error.OutOfMemory);
+            return result;
+        }
+
         loading.addData(alloc, cmd.data) catch |err| {
+            // A rejected chunk ends the transmission: every later chunk
+            // fails the same way, so the buffered payload would stay
+            // resident until the client happened to send a delete.
+            loading.destroy(alloc);
+            storage.loading = null;
             encodeError(&result, err);
             return result;
         };
@@ -999,9 +1014,24 @@ fn loadAndAddImage(
 
     // Determine our image. This also handles chunking and early exit.
     var loading: LoadingImage = if (storage.loading) |loading| loading: {
+        // A payload that has already outgrown everything storage could ever
+        // hold can only fail at the end, so stop accumulating it now.
+        if (loading.data.items.len +| cmd.data.len > storage.total_limit) {
+            loading.destroy(alloc);
+            storage.loading = null;
+            return error.OutOfMemory;
+        }
+
         // Note: we do NOT want to call "cmd.toOwnedData" here because
         // we're _copying_ the data. We want the command data to be freed.
-        try loading.addData(alloc, cmd.data);
+        loading.addData(alloc, cmd.data) catch |err| {
+            // A rejected chunk ends the transmission: every later chunk
+            // fails the same way, so the buffered payload would stay
+            // resident until the client happened to send a delete.
+            loading.destroy(alloc);
+            storage.loading = null;
+            return err;
+        };
 
         // If we have more then we're done
         if (t.more_chunks) return .{ .image = loading.image, .more = true };
@@ -1741,6 +1771,84 @@ test "kittygfx more chunks with chunk increasing q" {
         const resp = execute(io, alloc, &t, &cmd);
         try testing.expect(resp == null);
     }
+}
+
+test "kittygfx rejected chunk drops the partial image load" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // A storage budget smaller than the payload. The upload can never
+    // complete, so the chunk that passes the budget is rejected.
+    storage.total_limit = 8;
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=4,v=1,i=1,m=1;AAAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd) == null);
+    }
+    try testing.expect(storage.loading != null);
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,m=1;AAAAAAAAAAAA",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(io, alloc, &t, &cmd);
+        try testing.expect(resp != null and !resp.?.ok());
+    }
+    try testing.expect(storage.loading == null);
+}
+
+test "kittygfx rejected animation frame chunk drops the partial load" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // A 2x1 RGB white image to hang the animation frames off of.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=2,v=1,i=1;////////",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
+    }
+
+    storage.total_limit = 8;
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=f,i=1,f=24,s=2,v=1,m=1;/wAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd) == null);
+    }
+    try testing.expect(storage.loading != null);
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=f,m=1;AAAAAAAAAAAA",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(io, alloc, &t, &cmd);
+        try testing.expect(resp != null and !resp.?.ok());
+    }
+    try testing.expect(storage.loading == null);
 }
 
 test "kittygfx delete aborts chunked image load" {

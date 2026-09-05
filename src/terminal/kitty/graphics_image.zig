@@ -640,9 +640,37 @@ pub const LoadingImage = struct {
         self.image.compression = .none;
     }
 
+    /// Reads the image dimensions out of a PNG header, or null if the data
+    /// doesn't begin with a well formed header. The dimensions live in the
+    /// IHDR chunk, which the format requires to come first: an 8 byte
+    /// signature, a 4 byte chunk length, the 4 byte chunk type, and then
+    /// the width and height as big endian u32s.
+    fn pngHeaderDimensions(data: []const u8) ?struct { width: u32, height: u32 } {
+        const signature = "\x89PNG\r\n\x1a\n";
+        if (data.len < 24) return null;
+        if (!std.mem.eql(u8, data[0..signature.len], signature)) return null;
+        if (!std.mem.eql(u8, data[12..16], "IHDR")) return null;
+        return .{
+            .width = std.mem.readInt(u32, data[16..20], .big),
+            .height = std.mem.readInt(u32, data[20..24], .big),
+        };
+    }
+
     /// Decode the data as PNG. This will also updated the image dimensions.
     fn decodePng(self: *LoadingImage, alloc: Allocator) !void {
         assert(self.image.format == .png);
+
+        // Decoders size their destination buffer from the header before
+        // they inflate a single pixel, so a couple dozen header bytes are
+        // enough to make one allocate hundreds of megabytes. `complete`
+        // rejects these dimensions too, but only once that has happened.
+        if (pngHeaderDimensions(self.data.items)) |dimensions| {
+            if (dimensions.width > max_dimension or
+                dimensions.height > max_dimension)
+            {
+                return error.DimensionsTooLarge;
+            }
+        }
 
         const decode_png_fn = sys.decode_png orelse
             return error.UnsupportedFormat;
@@ -1835,8 +1863,8 @@ test "image load: png rejects oversized Wuffs image before allocation" {
     const alloc = testing.allocator;
 
     // Turn the small test PNG into a 32768x32767 image. Its decoded RGBA
-    // size is just under Wuffs' 4 GiB package limit but over Kitty's 400 MiB
-    // limit, which previously allowed the large allocation to happen first.
+    // size is just under Wuffs' 4 GiB package limit, so nothing inside the
+    // decoder stops it; the header dimensions are what reject it.
     var data = @embedFile("testdata/image-png-none-50x76-2147483647-raw.data").*;
     std.mem.writeInt(u32, data[16..20], 32768, .big);
     std.mem.writeInt(u32, data[20..24], 32767, .big);
@@ -1852,7 +1880,62 @@ test "image load: png rejects oversized Wuffs image before allocation" {
     var loading = try LoadingImage.init(testing.io, alloc, &cmd, .direct);
     defer loading.deinit(alloc);
 
-    try testing.expectError(error.InvalidData, loading.complete(alloc));
+    try testing.expectError(error.DimensionsTooLarge, loading.complete(alloc));
+}
+
+test "image load: png rejects oversized header dimensions before decoding" {
+    const testing = std.testing;
+
+    // A decoder sizes its destination buffer from the header, exactly as
+    // Wuffs does, so reaching it at all means the allocation happens.
+    const header_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            data: []const u8,
+        ) sys.DecodeError!sys.Image {
+            const width = std.mem.readInt(u32, data[16..20], .big);
+            const height = std.mem.readInt(u32, data[20..24], .big);
+            return .{
+                .width = width,
+                .height = height,
+                .data = try alloc.alloc(
+                    u8,
+                    @as(usize, width) * @as(usize, height) * 4,
+                ),
+            };
+        }
+    }.decode;
+
+    const original_decode_png = sys.decode_png;
+    defer sys.decode_png = original_decode_png;
+    sys.decode_png = &header_decoder;
+
+    // 10001x10001 is over the dimension limit but its decoded size is
+    // still under max_size, so the size limiter lets it through.
+    var header: [24]u8 = undefined;
+    @memcpy(header[0..16], "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR");
+    std.mem.writeInt(u32, header[16..20], max_dimension + 1, .big);
+    std.mem.writeInt(u32, header[20..24], max_dimension + 1, .big);
+
+    // Fail any allocation which reaches the underlying allocator. Nothing
+    // should be allocated for an image we already know is too large.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .png },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(testing.allocator);
+    try loading.data.appendSlice(testing.allocator, &header);
+
+    try testing.expectError(
+        error.DimensionsTooLarge,
+        loading.complete(failing.allocator()),
+    );
+    try testing.expect(!failing.has_induced_failure);
 }
 
 test "limits: direct medium always allowed" {
