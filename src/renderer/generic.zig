@@ -152,9 +152,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells goes into a separate shader.
         cells: cellpkg.Contents,
 
-        /// Set to true after rebuildCells is called. This can be used
-        /// to determine if any possible changes have been made to the
-        /// cells for the draw call.
+        /// Set when an update produced something the last drawn frame does
+        /// not already show: a rebuilt row, a different cursor glyph, or a
+        /// changed uniform. Cleared by the draw that consumes it. An update
+        /// that finds none of that leaves it alone, which is what lets a
+        /// wakeup with no work skip its frame.
         cells_rebuilt: bool = false,
 
         /// The atlas generations we last built cells against. A generation
@@ -1758,6 +1760,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
 
+                // The uniforms are as much of the frame as the cells are,
+                // and some of them change without any row going dirty: OSC
+                // 11 moves the background color, the cursor moves within an
+                // otherwise unchanged screen. Whatever this block leaves
+                // different has to be drawn, so hold on to what we had.
+                const uniforms_before = self.uniforms;
+                defer if (!std.meta.eql(uniforms_before, self.uniforms)) {
+                    self.cells_rebuilt = true;
+                };
+
                 // If an atlas was emptied between frames because it hit its
                 // maximum size, the rows we still hold point into the old
                 // layout and would draw garbage. Rebuild everything, the
@@ -2920,6 +2932,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ) Allocator.Error!void {
             const state: *terminal.RenderState = &self.terminal_state;
 
+            // The cursor glyph coming in. Taken before anything below can
+            // disturb the cell contents, and compared at the end: a blink
+            // or a style change replaces this glyph without dirtying any
+            // row, and it is not covered by the uniforms our caller
+            // watches. Where the cursor is and what color it is are.
+            const cursor_glyph_before = self.cells.getCursorGlyph();
+
             const grid_size_diff =
                 self.cells.size.rows != state.rows or
                 self.cells.size.columns != state.cols;
@@ -2936,6 +2955,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             const rebuild = state.dirty == .full or grid_size_diff;
+
+            // Whether anything about the cells themselves changed. The
+            // cursor is handled separately, at the end.
+            var cells_changed = rebuild;
+
             if (rebuild) {
                 // If we are doing a full rebuild, then we clear the entire cell buffer.
                 self.cells.reset();
@@ -3023,6 +3047,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Unmark the dirty state in our render state.
                 dirty.* = false;
+                cells_changed = true;
 
                 self.rebuildRow(
                     y,
@@ -3198,8 +3223,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            // Update that our cells rebuilt
-            self.cells_rebuilt = true;
+            // Report the rebuild only if it produced something new. A
+            // wakeup that finds no dirty row and leaves the cursor alone
+            // would otherwise draw and present a frame identical to the one
+            // already on screen, and keep the display link running for it.
+            // The flag is only ever raised, never cleared, because a second
+            // rebuild in the same frame must not take back what the first
+            // one found, and because our caller raises it too.
+            if (cells_changed or
+                !std.meta.eql(cursor_glyph_before, self.cells.getCursorGlyph()))
+            {
+                self.cells_rebuilt = true;
+            }
 
             // Log some things
             // log.debug("rebuildCells complete cached_runs={}", .{
