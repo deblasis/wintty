@@ -1727,6 +1727,8 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
     first.swap_chain_surface_handle = null;
     first.deinit();
     first_alive = false;
+    // Ours until the second device takes it.
+    errdefer _ = d3d12.CloseHandle(handle);
 
     var second = try Device.init(.swap_chain_panel, .{
         .width = 64,

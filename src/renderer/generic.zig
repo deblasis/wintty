@@ -265,6 +265,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// hammered at the draw rate.
         device_recovery_retry_at: ?std.Io.Timestamp = null,
 
+        /// The backend said this surface cannot be rebuilt (it has no
+        /// way to hand the embedder a new swap chain). The surface stays
+        /// dark and unhealthy, as it always did, and nothing retries.
+        device_recovery_abandoned: bool = false,
+
         /// The kitty image textures went down with a lost device and
         /// must be rebuilt from the terminal's image storage on the next
         /// update, whether or not that storage thinks anything changed.
@@ -1248,19 +1253,28 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Must be called on the render thread.
         pub fn animationWake(self: *const Self) ?AnimationWake {
-            // A device rebuild that failed is retried from a draw, and
-            // nothing else guarantees one on an idle surface. Until the
-            // retry lands no other wake can paint anything, so it wins
-            // outright. An update wake, so the pass that re-uploads the
-            // images dropped with the device runs on the same tick.
-            if (self.device_recovery_retry_at) |at| {
-                const now: std.Io.Timestamp = .now(global.io(), .awake);
-                const remaining_ms = now.durationTo(at).toMilliseconds();
-                const due: u64 = if (remaining_ms > 0) @intCast(remaining_ms) else 0;
-                return .{
-                    .delay_ms = @max(due, draw_interval_ms),
-                    .kind = .update,
-                };
+            // A device rebuild runs from a draw, and nothing else
+            // guarantees one on an idle surface: the draw that saw the
+            // loss returns normally, and a rebuild that failed only arms
+            // a deadline. Until the rebuild lands no other wake can paint
+            // anything, so these win outright. Update wakes, so the pass
+            // that re-uploads the images dropped with the device runs on
+            // the same tick.
+            if (comptime @hasDecl(GraphicsAPI, "recoverDevice")) {
+                if (!self.device_recovery_abandoned) {
+                    if (self.device_recovery_retry_at) |at| {
+                        const now: std.Io.Timestamp = .now(global.io(), .awake);
+                        const remaining_ms = now.durationTo(at).toMilliseconds();
+                        const due: u64 = if (remaining_ms > 0) @intCast(remaining_ms) else 0;
+                        return .{
+                            .delay_ms = @max(due, draw_interval_ms),
+                            .kind = .update,
+                        };
+                    }
+                    if (self.api.deviceLost() or self.device_recovery_pending) {
+                        return .{ .delay_ms = draw_interval_ms, .kind = .update };
+                    }
+                }
             }
             if (self.images_wake_pending) {
                 return .{ .delay_ms = draw_interval_ms, .kind = .update };
@@ -2378,6 +2392,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// the attempt's own error when one fails, which the renderer
         /// thread logs like any other failed draw.
         fn recoverDevice(self: *Self) !void {
+            if (self.device_recovery_abandoned) return error.DeviceRecoveryPending;
             if (self.device_recovery_retry_at) |at| {
                 const now: std.Io.Timestamp = .now(global.io(), .awake);
                 if (now.durationTo(at).nanoseconds > 0) return error.DeviceRecoveryPending;
@@ -2427,7 +2442,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // no latch (no draw ran), and that attempt's init command
             // list still holds barriers naming textures it has since
             // released; rebuilding the device discards both.
-            try self.api.recoverDevice();
+            self.api.recoverDevice() catch |err| switch (err) {
+                error.DeviceUnrecoverable => {
+                    log.warn("GPU device lost and this surface cannot be rebuilt; it stays dark", .{});
+                    self.device_recovery_abandoned = true;
+                    return error.DeviceRecoveryPending;
+                },
+                else => return err,
+            };
 
             // From here the device is good; only the rebuild on top of it
             // can still fail, and a retry must start from bare shaders.

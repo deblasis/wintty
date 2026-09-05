@@ -665,11 +665,17 @@ pub fn deviceLost(self: *const DirectX12) bool {
 /// handles, and says so the documented way: `version` keeps counting up
 /// from where it was, so a consumer re-opens both. Composition mode has
 /// no such channel: the embedder holds a raw, un-AddRef'd pointer to the
-/// old swap chain, which this releases, and nothing here can tell it
-/// about the new one. That mode needs a "swap chain changed" notification
-/// before recovery is safe for it.
+/// old swap chain and nothing here can tell it about a new one, so that
+/// mode refuses to recover until a "swap chain changed" notification
+/// exists.
 pub fn recoverDevice(self: *DirectX12) !void {
     var surface = self.surface orelse return error.NoSurface;
+
+    // Composition mode cannot be recovered without a way to hand the
+    // embedder the new swap chain; releasing the one it points at would
+    // turn a frozen surface into a dangling pointer. The caller stops
+    // trying on this error and the surface stays latched, as before.
+    if (surface == .composition) return error.DeviceUnrecoverable;
 
     // The apprt may have resized while the device was down; rebuild at
     // the newest size so the first frame is not immediately a resize.
@@ -687,9 +693,6 @@ pub fn recoverDevice(self: *DirectX12) !void {
     try self.initGpu(surface, width, height);
     self.device_lost = false;
     log.info("DX12 device recreated after loss ({}x{})", .{ width, height });
-    if (surface == .composition) {
-        log.warn("composition-mode swap chain recreated; the embedder still holds the old one and cannot be told", .{});
-    }
 }
 
 /// Execute and release the one-shot init command list.
