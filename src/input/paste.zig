@@ -164,6 +164,10 @@ pub fn encodeWriter(
 /// unsafe if it contains any of the following:
 ///
 /// - `\n`: Newlines can be used to inject commands.
+/// - `\r`: Line editors accept the current line on carriage return, so
+///   it injects commands the same way a newline does. `encode` also
+///   turns every newline into one for an unbracketed paste.
+/// - U+0085 (NEL): Some programs treat it as a line break.
 /// - `\x1b[201~`: This is the end of a bracketed paste. This cane be used
 ///   to exit a bracketed paste and inject commands.
 ///
@@ -173,7 +177,8 @@ pub fn encodeWriter(
 /// should raise suspicion that the producer of the paste data is
 /// acting strangely.
 pub fn isSafe(data: []const u8) bool {
-    return std.mem.indexOf(u8, data, "\n") == null and
+    return std.mem.indexOfAny(u8, data, "\n\r") == null and
+        std.mem.indexOf(u8, data, "\u{0085}") == null and
         std.mem.indexOf(u8, data, "\x1b[201~") == null;
 }
 
@@ -199,6 +204,15 @@ test isSafe {
     try testing.expect(!isSafe("hello\n"));
     try testing.expect(!isSafe("hello\nworld"));
     try testing.expect(!isSafe("he\x1b[201~llo"));
+
+    // A carriage return accepts the line just like a newline does.
+    try testing.expect(!isSafe("hello\r"));
+    try testing.expect(!isSafe("hello\rworld"));
+    try testing.expect(!isSafe("hello\r\nworld"));
+    try testing.expect(!isSafe("hello\u{0085}world"));
+
+    // A codepoint that merely contains the NEL continuation byte is fine.
+    try testing.expect(isSafe("hello \u{2745} world"));
 }
 
 test isSafeWith {
@@ -207,12 +221,14 @@ test isSafeWith {
     // Bracketed: newlines are fine, the frame terminator is not.
     try testing.expect(isSafeWith("hello", .{ .bracketed = true }));
     try testing.expect(isSafeWith("hello\nworld", .{ .bracketed = true }));
+    try testing.expect(isSafeWith("hello\rworld", .{ .bracketed = true }));
     try testing.expect(!isSafeWith("he\x1b[201~llo", .{ .bracketed = true }));
     try testing.expect(!isSafeWith("hello\n\x1b[201~", .{ .bracketed = true }));
 
     // Unbracketed: the conservative rule.
     try testing.expect(isSafeWith("hello", .{ .bracketed = false }));
     try testing.expect(!isSafeWith("hello\nworld", .{ .bracketed = false }));
+    try testing.expect(!isSafeWith("hello\rworld", .{ .bracketed = false }));
     try testing.expect(!isSafeWith("he\x1b[201~llo", .{ .bracketed = false }));
 }
 
