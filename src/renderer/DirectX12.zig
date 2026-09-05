@@ -31,6 +31,7 @@ pub const Buffer = bufferpkg.Buffer;
 pub const shaders = @import("directx12/shaders.zig");
 
 const DescriptorHeap = @import("directx12/descriptor_heap.zig").DescriptorHeap;
+const Surface = @import("directx12/surface.zig").Surface;
 
 // --- Sub-module re-exports: low-level D3D12/DXGI/COM bindings ---
 
@@ -80,8 +81,20 @@ blending: configpkg.Config.AlphaBlending = .native,
 
 /// Set to true when a device-loss error is detected (DEVICE_REMOVED,
 /// DEVICE_HUNG, or DEVICE_RESET). Prevents further GPU submissions
-/// until device recovery.
+/// until `recoverDevice` has built a replacement, which is the only
+/// thing that clears it.
 device_lost: bool = false,
+
+/// What `init` built the device for, kept so `recoverDevice` can build
+/// the same thing again after a TDR or a driver upgrade takes it away.
+surface: ?Surface = null,
+
+/// SwapChainPanel mode: the DirectComposition surface handle carried
+/// from a torn-down device to its replacement. Owned here only between
+/// `deinitGpu(.keep_surface_handle)` and the next successful `initGpu`,
+/// which hands it to the new Device; `deinit` closes it if a rebuild
+/// never succeeds.
+reserved_surface_handle: ?std.os.windows.HANDLE = null,
 
 /// DX12 device owning command queue, fence, and swap chain.
 dev: ?device.Device = null,
@@ -208,10 +221,9 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         return result;
     }
 
-    const surface_pkg = @import("directx12/surface.zig");
     const w = opts.rt_surface.platform.windows;
 
-    const surface: surface_pkg.Surface = if (w.hwnd) |hwnd|
+    const surface: Surface = if (w.hwnd) |hwnd|
         .{ .hwnd = hwnd }
     else if (w.swap_chain_panel != null)
         // Presence of the panel pointer selects SwapChainPanel mode. The
@@ -232,20 +244,49 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         break :comp .composition;
     };
 
+    // For shared-texture mode, use the texture dimensions as the initial
+    // applied size so beginFrame doesn't trigger a redundant recreate on
+    // the first frame. For swap-chain modes, use the screen size.
     const size = opts.size.screen;
-    result.dev = device.Device.init(surface, .{
-        .width = size.width,
-        .height = size.height,
+    const init_width = if (w.shared_texture.enabled) w.shared_texture.width else size.width;
+    const init_height = if (w.shared_texture.enabled) w.shared_texture.height else size.height;
+
+    try result.initGpu(surface, init_width, init_height);
+    result.desired_size.store(packSize(init_width, init_height), .monotonic);
+
+    return result;
+}
+
+/// Build the device and everything that lives on it: swap chain, heaps,
+/// back buffers, per-frame command lists, and the one-shot init command
+/// list. Shared by `init` and `recoverDevice`, which is why it takes the
+/// surface and size explicitly rather than reading them off the options.
+/// Public so the GPU tests can build a headless instance without a
+/// renderer.Options.
+///
+/// Leaves `pending_command_list` pointing at the init command list so the
+/// generic renderer's atlas placeholders can record their barriers; the
+/// caller runs `flushInitCommands` once those exist.
+pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !void {
+    self.surface = surface;
+
+    self.dev = device.Device.init(surface, .{
+        .width = width,
+        .height = height,
+        .surface_handle = self.reserved_surface_handle,
     }) catch |err| {
         log.err("DX12 device init failed: {}", .{err});
         return error.DeviceInitFailed;
     };
+    // The device owns the surface handle from here; if anything below
+    // fails, the errdefer's Device.deinit closes it with the rest.
+    self.reserved_surface_handle = null;
     errdefer {
-        result.dev.?.deinit();
-        result.dev = null;
+        self.dev.?.deinit();
+        self.dev = null;
     }
 
-    const dev_ptr = &result.dev.?;
+    const dev_ptr = &self.dev.?;
 
     // Get SwapChain3 for GetCurrentBackBufferIndex.
     if (dev_ptr.swap_chain) |sc| {
@@ -259,9 +300,9 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             log.err("QueryInterface for IDXGISwapChain3 failed: 0x{x}", .{@as(u32, @bitCast(hr))});
             return error.SwapChain3QueryFailed;
         }
-        result.swap_chain3 = sc3;
+        self.swap_chain3 = sc3;
     }
-    errdefer if (result.swap_chain3) |sc3| {
+    errdefer if (self.swap_chain3) |sc3| {
         _ = sc3.Release();
     };
 
@@ -271,8 +312,8 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
     //   frame_count (swap chain) + frame_count * 2 (custom shader)
     const rtv_heap_capacity = device.Device.frame_count + device.Device.frame_count * 2;
     {
-        const ptr = try alloc.create(DescriptorHeap);
-        errdefer alloc.destroy(ptr);
+        const ptr = try self.allocator.create(DescriptorHeap);
+        errdefer self.allocator.destroy(ptr);
         ptr.* = DescriptorHeap.init(
             dev_ptr.device,
             .RTV,
@@ -282,20 +323,20 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             log.err("RTV descriptor heap creation failed: {}", .{err});
             return error.DescriptorHeapCreationFailed;
         };
-        result.rtv_heap = ptr;
+        self.rtv_heap = ptr;
     }
     errdefer {
-        if (result.rtv_heap) |h| {
+        if (self.rtv_heap) |h| {
             h.deinit();
-            alloc.destroy(h);
-            result.rtv_heap = null;
+            self.allocator.destroy(h);
+            self.rtv_heap = null;
         }
     }
 
     // Shader-visible CBV/SRV/UAV heap for texture SRVs.
     {
-        const ptr = try alloc.create(DescriptorHeap);
-        errdefer alloc.destroy(ptr);
+        const ptr = try self.allocator.create(DescriptorHeap);
+        errdefer self.allocator.destroy(ptr);
         ptr.* = DescriptorHeap.init(
             dev_ptr.device,
             .CBV_SRV_UAV,
@@ -305,20 +346,20 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             log.err("SRV descriptor heap creation failed: {}", .{err});
             return error.DescriptorHeapCreationFailed;
         };
-        result.srv_heap = ptr;
+        self.srv_heap = ptr;
     }
     errdefer {
-        if (result.srv_heap) |h| {
+        if (self.srv_heap) |h| {
             h.deinit();
-            alloc.destroy(h);
-            result.srv_heap = null;
+            self.allocator.destroy(h);
+            self.srv_heap = null;
         }
     }
 
     // Shader-visible sampler heap for texture sampling.
     {
-        const ptr = try alloc.create(DescriptorHeap);
-        errdefer alloc.destroy(ptr);
+        const ptr = try self.allocator.create(DescriptorHeap);
+        errdefer self.allocator.destroy(ptr);
         ptr.* = DescriptorHeap.init(
             dev_ptr.device,
             .SAMPLER,
@@ -328,18 +369,18 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             log.err("Sampler descriptor heap creation failed: {}", .{err});
             return error.DescriptorHeapCreationFailed;
         };
-        result.sampler_heap = ptr;
+        self.sampler_heap = ptr;
     }
     errdefer {
-        if (result.sampler_heap) |h| {
+        if (self.sampler_heap) |h| {
             h.deinit();
-            alloc.destroy(h);
-            result.sampler_heap = null;
+            self.allocator.destroy(h);
+            self.sampler_heap = null;
         }
     }
 
     // Get back buffer resources and create RTVs.
-    if (result.swap_chain3) |sc3| {
+    if (self.swap_chain3) |sc3| {
         for (0..device.Device.frame_count) |i| {
             var resource: ?*d3d12.ID3D12Resource = null;
             const hr = sc3.GetBuffer(
@@ -351,32 +392,32 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
                 log.err("GetBuffer({}) failed: 0x{x}", .{ i, @as(u32, @bitCast(hr)) });
                 return error.GetBufferFailed;
             }
-            result.back_buffers[i] = resource;
+            self.back_buffers[i] = resource;
 
-            const rtv_handle = result.rtv_heap.?.cpuHandle(@intCast(i));
+            const rtv_handle = self.rtv_heap.?.cpuHandle(@intCast(i));
             dev_ptr.device.CreateRenderTargetView(resource, null, rtv_handle);
-            result.rtv_handles[i] = rtv_handle;
+            self.rtv_handles[i] = rtv_handle;
         }
         // Advance the allocator past the swap chain slots so custom
         // shader textures get their own RTV descriptors. claimFirst (not
         // a raw allocated write) so the free mask agrees and recycling
         // cannot hand these slots out again.
-        result.rtv_heap.?.claimFirst(device.Device.frame_count);
-        result.rtv_base = result.rtv_heap.?.allocated;
+        self.rtv_heap.?.claimFirst(device.Device.frame_count);
+        self.rtv_base = self.rtv_heap.?.allocated;
     } else if (dev_ptr.shared_texture != null) {
         // Shared-texture mode: one RTV pointing at the shared resource.
         // Use RTV heap slot 0 -- we only ever need one slot because
         // the shared resource is the sole render target and is never
         // rotated with a back-buffer cycle.
         const st = &dev_ptr.shared_texture.?;
-        const rtv_handle = result.rtv_heap.?.cpuHandle(0);
+        const rtv_handle = self.rtv_heap.?.cpuHandle(0);
         dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
-        result.shared_rtv = rtv_handle;
-        result.rtv_heap.?.claimFirst(1);
-        result.rtv_base = 1;
+        self.shared_rtv = rtv_handle;
+        self.rtv_heap.?.claimFirst(1);
+        self.rtv_base = 1;
     }
     errdefer {
-        for (&result.back_buffers) |*bb| {
+        for (&self.back_buffers) |*bb| {
             if (bb.*) |r| {
                 _ = r.Release();
                 bb.* = null;
@@ -385,14 +426,14 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
     }
 
     // Create per-frame command allocators and command lists.
-    for (&result.gpu_frames) |*gf| {
+    for (&self.gpu_frames) |*gf| {
         gf.* = Frame.init(dev_ptr.device) catch |err| {
             log.err("Frame init failed: {}", .{err});
             return error.FrameInitFailed;
         };
     }
     errdefer {
-        for (&result.gpu_frames) |*gf| {
+        for (&self.gpu_frames) |*gf| {
             if (gf.*) |*f| f.deinit();
         }
     }
@@ -430,32 +471,53 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         }
         errdefer _ = init_cl.?.Release();
 
-        result.init_command_allocator = init_alloc;
-        result.init_command_list = init_cl;
-        result.pending_command_list = init_cl;
+        self.init_command_allocator = init_alloc;
+        self.init_command_list = init_cl;
+        self.pending_command_list = init_cl;
     }
 
-    // For shared-texture mode, use the texture dimensions as the initial
-    // applied size so beginFrame doesn't trigger a redundant recreate on
-    // the first frame. For swap-chain modes, use the screen size.
-    const init_width = if (w.shared_texture.enabled) w.shared_texture.width else size.width;
-    const init_height = if (w.shared_texture.enabled) w.shared_texture.height else size.height;
-    result.desired_size.store(packSize(init_width, init_height), .monotonic);
-    result.applied_width = init_width;
-    result.applied_height = init_height;
-
-    return result;
+    self.applied_width = width;
+    self.applied_height = height;
 }
 
 pub fn deinit(self: *DirectX12) void {
+    self.deinitGpu(.close_surface_handle);
+    if (self.reserved_surface_handle) |h| {
+        _ = d3d12.CloseHandle(h);
+        self.reserved_surface_handle = null;
+    }
+    self.* = undefined;
+}
+
+const SurfaceHandleDisposition = enum {
+    /// Let Device.deinit close the DirectComposition surface handle.
+    close_surface_handle,
+    /// Move the handle into `reserved_surface_handle` so the next
+    /// `initGpu` binds a new swap chain to the surface the embedder
+    /// already composites.
+    keep_surface_handle,
+};
+
+/// Release everything `initGpu` built, in dependency order. The struct
+/// stays usable afterwards (unlike `deinit`) so `recoverDevice` can build
+/// again into it.
+fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
     // Wait for GPU to finish before releasing anything. Everything below
     // final-releases resources directly rather than retiring them, so a
     // failed drain has to be visible: it means the back buffers and frame
     // command allocators go away while the GPU may still be using them.
+    //
+    // A removed device is the one case where skipping the wait is right
+    // rather than merely tolerated: its queue cannot signal a fence, and
+    // nothing on it is executing, so there is nothing to drain.
     if (self.dev) |*dev_ptr| {
-        dev_ptr.waitForGpu() catch |err| {
-            log.err("waitForGpu before renderer teardown failed: {}", .{err});
-        };
+        if (dev_ptr.removed()) {
+            log.warn("skipping GPU drain before teardown: device removed", .{});
+        } else {
+            dev_ptr.waitForGpu() catch |err| {
+                log.err("waitForGpu before renderer teardown failed: {}", .{err});
+            };
+        }
     }
 
     // Release init command list if never flushed (error during init).
@@ -467,6 +529,9 @@ pub fn deinit(self: *DirectX12) void {
         _ = alloc.Release();
         self.init_command_allocator = null;
     }
+    self.pending_command_list = null;
+    self.pending_complete = null;
+    self.pending_frame_index = 0;
 
     for (&self.gpu_frames) |*gf| {
         if (gf.*) |*f| {
@@ -481,6 +546,9 @@ pub fn deinit(self: *DirectX12) void {
             bb.* = null;
         }
     }
+    self.rtv_handles = .{ .{ .ptr = 0 }, .{ .ptr = 0 }, .{ .ptr = 0 } };
+    self.shared_rtv = null;
+    self.rtv_base = 0;
 
     if (self.sampler_heap) |h| {
         h.deinit();
@@ -506,11 +574,53 @@ pub fn deinit(self: *DirectX12) void {
     }
 
     if (self.dev) |*dev_ptr| {
+        if (handle == .keep_surface_handle) {
+            self.reserved_surface_handle = dev_ptr.swap_chain_surface_handle;
+            dev_ptr.swap_chain_surface_handle = null;
+        }
         dev_ptr.deinit();
         self.dev = null;
     }
+}
 
-    self.* = undefined;
+/// Whether a device-loss error has been seen and not yet recovered from.
+/// The generic renderer polls this at the top of every draw and calls
+/// `recoverDevice` when it is set.
+pub fn deviceLost(self: *const DirectX12) bool {
+    return self.device_lost;
+}
+
+/// Replace a lost device with a new one built for the same surface.
+///
+/// Everything the generic renderer created on the old device (shaders,
+/// frame buffers, textures, samplers) is dead and must be gone before this
+/// runs, because their retirement queue is destroyed with the device. The
+/// caller rebuilds them afterwards. `device_lost` clears only on success:
+/// a failure (a driver still installing, no adapter yet) leaves the
+/// struct torn down with the flag set, and the next call tries again.
+///
+/// SwapChainPanel mode keeps its DirectComposition surface handle across
+/// the swap, so the panel the embedder bound once keeps compositing the
+/// new swap chain without being told. Shared-texture mode cannot do the
+/// same: its resource and fence handles are minted by the device, so the
+/// consumer sees a new snapshot with `version` back at 1.
+pub fn recoverDevice(self: *DirectX12) !void {
+    var surface = self.surface orelse return error.NoSurface;
+
+    // The apprt may have resized while the device was down; rebuild at
+    // the newest size so the first frame is not immediately a resize.
+    const want = unpackSize(self.desired_size.load(.monotonic));
+    const width = if (want.width != 0) want.width else self.applied_width;
+    const height = if (want.height != 0) want.height else self.applied_height;
+    if (surface == .shared_texture) {
+        surface.shared_texture = .{ .width = width, .height = height };
+    }
+
+    if (self.dev != null) self.deinitGpu(.keep_surface_handle);
+
+    try self.initGpu(surface, width, height);
+    self.device_lost = false;
+    log.info("DX12 device recreated after loss ({}x{})", .{ width, height });
 }
 
 /// Execute and release the one-shot init command list.

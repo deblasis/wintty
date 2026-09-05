@@ -247,6 +247,24 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// this is set to true so that we can do that whenever possible.
         reinitialize_shaders: bool = false,
 
+        /// Set once `recoverDevice` has torn down the state that died
+        /// with a lost GPU device, and cleared when the rebuild lands.
+        /// A rebuild that fails (a driver still installing) is retried
+        /// on a later frame, and this is what stops the retry tearing
+        /// down twice. Only backends with a `recoverDevice` decl set it.
+        device_recovery_pending: bool = false,
+
+        /// Earliest time the next device rebuild may be attempted after
+        /// a failed one. Draws before then return without touching the
+        /// GPU, so a driver that needs a few seconds to come back is not
+        /// hammered at the draw rate.
+        device_recovery_retry_at: ?std.Io.Timestamp = null,
+
+        /// The kitty image textures went down with a lost device and
+        /// must be rebuilt from the terminal's image storage on the next
+        /// update, whether or not that storage thinks anything changed.
+        images_lost: bool = false,
+
         /// Whether or not we have custom shaders.
         has_custom_shaders: bool = false,
 
@@ -956,10 +974,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// Why shaders are being (re)built. Only `startup` and
         /// `config_reload` arm the user-facing custom-shader notice: a
-        /// display realize rebuilds GPU resources for something the user did
-        /// not ask for, and must not re-raise a failure they have already
-        /// been told about.
-        const ShaderInitCause = enum { startup, config_reload, display_realized };
+        /// display realize or a device recovery rebuilds GPU resources for
+        /// something the user did not ask for, and must not re-raise a
+        /// failure they have already been told about.
+        const ShaderInitCause = enum {
+            startup,
+            config_reload,
+            display_realized,
+            device_recovered,
+
+            fn armsNotice(self: ShaderInitCause) bool {
+                return switch (self) {
+                    .startup, .config_reload => true,
+                    .display_realized, .device_recovered => false,
+                };
+            }
+        };
 
         fn initShaders(self: *Self, cause: ShaderInitCause) !void {
             var arena = ArenaAllocator.init(self.alloc);
@@ -998,7 +1028,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // translation above failing, and the backend building zero post
             // pipelines. Both leave the terminal rendering normally, so a
             // `log.warn` nobody reads is otherwise the only trace.
-            if (cause != .display_realized and configured) {
+            if (cause.armsNotice() and configured) {
                 if (!has_custom_shaders) {
                     self.custom_shader_failure = .load_failed;
                 } else if (shaders.post_pipelines.len == 0) {
@@ -1567,11 +1597,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // If we have any virtual references, we must also rebuild our
                 // kitty state on every frame because any cell change can move
                 // an image.
-                if (self.images.kittyRequiresUpdate(state.terminal)) {
+                if (self.images_lost or self.images.kittyRequiresUpdate(state.terminal)) {
                     // We need to grab the draw mutex since this updates
                     // our image state that drawFrame uses.
                     self.draw_mutex.lockUncancelable(global.io());
                     defer self.draw_mutex.unlock(global.io());
+                    self.images_lost = false;
                     self.images.kittyUpdate(
                         self.alloc,
                         state.terminal,
@@ -1861,6 +1892,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // only the case while unrealized (GTK); displayRealized
             // rebuilds the swap chain.
             if (!self.display_realized) return;
+
+            // A lost GPU device (TDR, driver upgrade) takes every
+            // resource built on it down with it. Rebuild before touching
+            // the swap chain below; a device that cannot be rebuilt yet
+            // leaves us here until the next attempt is due.
+            if (comptime @hasDecl(GraphicsAPI, "recoverDevice")) {
+                if (self.api.deviceLost() or self.device_recovery_pending) {
+                    try self.recoverDevice();
+                }
+            }
 
             // Get our swap chain, rebuilding it if it was released
             // while we were hidden. Rebuilding is deferred to draw
@@ -2226,23 +2267,114 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             health: Health,
         ) void {
-            // If our health value hasn't changed, then we do nothing. We don't
-            // do a cmpxchg here because strict atomicity isn't important.
-            if (self.health.load(.seq_cst) != health) {
-                self.health.store(health, .seq_cst);
-
-                // Our health value changed, so we notify the surface so that it
-                // can do something about it.
-                _ = self.surface_mailbox.push(.{
-                    .renderer_health = health,
-                }, .{ .forever = {} });
-            }
+            self.reportHealth(health);
 
             // Always release our semaphore. The swap chain is
             // guaranteed to exist here: it is only torn down after
             // waiting for all in-flight frames to complete, and this
             // callback is what signals that completion.
             self.swap_chain.?.releaseFrame();
+        }
+
+        /// Record the renderer's health and tell the surface when it
+        /// changes. Also reached from device recovery, which reports
+        /// unhealthy the moment the device is found gone (a frame that
+        /// cannot begin never reaches `frameCompleted`) and healthy again
+        /// once the rebuild lands.
+        fn reportHealth(self: *Self, health: Health) void {
+            // If our health value hasn't changed, then we do nothing. We don't
+            // do a cmpxchg here because strict atomicity isn't important.
+            if (self.health.load(.seq_cst) == health) return;
+            self.health.store(health, .seq_cst);
+
+            // Our health value changed, so we notify the surface so that it
+            // can do something about it.
+            _ = self.surface_mailbox.push(.{
+                .renderer_health = health,
+            }, .{ .forever = {} });
+        }
+
+        /// How long to leave a device alone after a rebuild fails before
+        /// trying again. A driver upgrade takes seconds to install; a
+        /// retry per draw would only fill the log.
+        const device_recovery_retry_delay: std.Io.Duration = .fromNanoseconds(
+            std.time.ns_per_s,
+        );
+
+        /// Rebuild everything on a replacement GPU device after the old
+        /// one was lost. Caller holds the draw mutex.
+        ///
+        /// Two halves, so that a failure in the second can be retried
+        /// without repeating the first: tear down all state that lived on
+        /// the dead device (once, guarded by `device_recovery_pending`),
+        /// then rebuild the device, the shaders, the swap chain and the
+        /// background image. Kitty images are not rebuilt here; they are
+        /// dropped and `images_lost` makes the next update re-upload them
+        /// from the terminal's storage.
+        ///
+        /// Returns `error.DeviceLost` while the device stays gone, which
+        /// the renderer thread logs like any other failed draw.
+        fn recoverDevice(self: *Self) !void {
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
+            if (self.device_recovery_retry_at) |at| {
+                if (now.durationTo(at).nanoseconds > 0) return error.DeviceLost;
+            }
+
+            if (!self.device_recovery_pending) {
+                self.device_recovery_pending = true;
+                log.warn("GPU device lost; rebuilding renderer state", .{});
+                self.reportHealth(.unhealthy);
+
+                // Everything below was created on the dead device. The
+                // order matters only in that the backend's device goes
+                // last, inside `api.recoverDevice`: these objects retire
+                // into a queue the device owns.
+                if (self.swap_chain) |*sc| sc.deinit();
+                self.swap_chain = null;
+                self.shaders.deinit(self.alloc);
+                const upload_budget = self.images.upload_budget_bytes;
+                self.images.deinit(self.alloc);
+                self.images = .empty;
+                self.images.upload_budget_bytes = upload_budget;
+                self.images_lost = true;
+                if (self.bg_image) |img| img.deinit(self.alloc);
+                self.bg_image = null;
+            }
+
+            errdefer self.device_recovery_retry_at = now.addDuration(
+                device_recovery_retry_delay,
+            );
+
+            if (self.api.deviceLost()) try self.api.recoverDevice();
+
+            // From here the device is good; only the rebuild on top of it
+            // can still fail, and a retry must start from bare shaders.
+            try self.initShaders(.device_recovered);
+            errdefer self.shaders.deinit(self.alloc);
+            self.swap_chain = try SwapChain.init(
+                self.alloc,
+                self.api,
+                self.has_custom_shaders,
+            );
+            if (@hasDecl(GraphicsAPI, "flushInitCommands")) {
+                self.api.flushInitCommands();
+            }
+            self.prepBackgroundImage() catch |err| {
+                // Not worth failing the recovery over: the terminal
+                // comes back without its wallpaper, same as at startup.
+                log.warn("background image not restored after device recovery: {}", .{err});
+            };
+
+            self.device_recovery_pending = false;
+            self.device_recovery_retry_at = null;
+            // New frame states start with 1x1 targets and empty buffers;
+            // the draw path below resizes and resyncs them, but nothing
+            // in it forces a draw when the cells are unchanged, and
+            // presenting a never-drawn back buffer would flash black.
+            self.cells_rebuilt = true;
+            self.markDirty();
+            self.reportHealth(.healthy);
+            log.info("GPU device recovered; renderer state rebuilt", .{});
         }
 
         /// Call this any time the background image path changes.
