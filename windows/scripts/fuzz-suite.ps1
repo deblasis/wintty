@@ -1375,9 +1375,13 @@ $dupRoot = $PSScriptRoot
 # tracked is ever written there, so the check loses no reach. Both the
 # default root and whatever -OutRoot was pointed at are skipped: a caller who
 # moves it inside this directory would otherwise walk straight back in.
+# Resolved through the session state, not [IO.Path]::GetFullPath: .NET
+# resolves a relative path against the PROCESS working directory, which in
+# PowerShell is not the session's location, so a relative -OutRoot would
+# produce a prefix that matches nothing and silently skip nothing.
 $dupSkip = @((Join-Path $dupRoot 'fuzz-out'), $OutRoot) | ForEach-Object {
-    [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar) +
-        [IO.Path]::DirectorySeparatorChar
+    $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($_).
+        TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 }
 $dupScanFiles = @(Get-ChildItem -LiteralPath $dupRoot -Filter '*.ps1' -File -Recurse |
     Where-Object {
