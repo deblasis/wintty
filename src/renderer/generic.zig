@@ -194,6 +194,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         custom_shader_failure: ?renderer.CustomShaderFailure = null,
 
         /// The current GPU uniform values.
+        ///
+        /// `updateFrame` snapshots these around its critical section and
+        /// asks for a draw if anything moved, so a write from inside there
+        /// takes care of itself. A write from anywhere else must be paired
+        /// with `markDirty()` (or happen on a frame that resizes, which
+        /// draws regardless), or the new value will sit in this struct with
+        /// nothing on screen to show for it. The current outside writers are
+        /// `changeConfig` and `setFontGrid` (both call `markDirty`) and
+        /// `setScreenSize` plus `drawFrame`'s own resize branch (both only
+        /// run for a geometry change, which draws anyway).
         uniforms: shaderpkg.Uniforms,
 
         /// Custom shader uniform values.

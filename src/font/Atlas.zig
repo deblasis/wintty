@@ -407,6 +407,11 @@ fn markDirtyAll(self: *Atlas) void {
 /// The box is a bounding box over regions that may be far apart, so it can
 /// cover bytes the consumer already has. Uploading those again is wasted
 /// work, never wrong.
+///
+/// The dirty fields are plain, not atomic: they only mean anything read
+/// together. A caller must hold at least the shared lock that guards
+/// `data` (for the renderer, `font.SharedGrid.lock`) across this call and
+/// the upload it describes, the same discipline reading `data` needs.
 pub fn dirtySince(self: *const Atlas, modified_last: usize) ?Region {
     if (modified_last >= self.modified.load(.monotonic)) return null;
 
