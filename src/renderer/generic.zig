@@ -325,9 +325,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             ) !SwapChain {
                 var result: SwapChain = .{ .frames = undefined };
 
-                // Initialize all of our frame state.
+                // Initialize all of our frame state. A failure part way
+                // through must release the frames already built: this
+                // runs again after a device recovery, where one frame
+                // failing and the next attempt succeeding is the
+                // expected shape.
+                var built: usize = 0;
+                errdefer for (result.frames[0..built]) |*frame| frame.deinit();
                 for (&result.frames) |*frame| {
                     frame.* = try FrameState.init(alloc, api, custom_shaders);
+                    built += 1;
                 }
 
                 return result;
@@ -1899,7 +1906,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // leaves us here until the next attempt is due.
             if (comptime @hasDecl(GraphicsAPI, "recoverDevice")) {
                 if (self.api.deviceLost() or self.device_recovery_pending) {
-                    try self.recoverDevice();
+                    self.recoverDevice() catch |err| switch (err) {
+                        // Between attempts there is nothing to draw and
+                        // nothing new to say; the failed attempt logged.
+                        error.DeviceRecoveryPending => return,
+                        else => return err,
+                    };
                 }
             }
 
@@ -2312,12 +2324,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// dropped and `images_lost` makes the next update re-upload them
         /// from the terminal's storage.
         ///
-        /// Returns `error.DeviceLost` while the device stays gone, which
-        /// the renderer thread logs like any other failed draw.
+        /// Fails with `error.DeviceRecoveryPending` while a retry is not
+        /// yet due (the caller draws nothing and says nothing), and with
+        /// the attempt's own error when one fails, which the renderer
+        /// thread logs like any other failed draw.
         fn recoverDevice(self: *Self) !void {
-            const now: std.Io.Timestamp = .now(global.io(), .awake);
             if (self.device_recovery_retry_at) |at| {
-                if (now.durationTo(at).nanoseconds > 0) return error.DeviceLost;
+                const now: std.Io.Timestamp = .now(global.io(), .awake);
+                if (now.durationTo(at).nanoseconds > 0) return error.DeviceRecoveryPending;
             }
 
             if (!self.device_recovery_pending) {
@@ -2328,29 +2342,40 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Everything below was created on the dead device. The
                 // order matters only in that the backend's device goes
                 // last, inside `api.recoverDevice`: these objects retire
-                // into a queue the device owns.
+                // into a queue the device owns. Each field is left in a
+                // state that is safe to deinit again, because a tab can
+                // close while the rebuild is still failing.
                 if (self.swap_chain) |*sc| sc.deinit();
                 self.swap_chain = null;
                 self.shaders.deinit(self.alloc);
-                const upload_budget = self.images.upload_budget_bytes;
+                self.shaders = .{};
+                // Kitty and overlay textures alike. The overlay needs no
+                // flag: updateFrame rebuilds it from `self.overlay` on
+                // every pass, and markDirty below forces that pass.
                 self.images.deinit(self.alloc);
                 self.images = .empty;
-                self.images.upload_budget_bytes = upload_budget;
+                self.images.upload_budget_bytes = self.config.image_upload_budget_bytes;
                 self.images_lost = true;
                 if (self.bg_image) |img| img.deinit(self.alloc);
                 self.bg_image = null;
             }
 
-            errdefer self.device_recovery_retry_at = now.addDuration(
-                device_recovery_retry_delay,
-            );
+            // Measured from the end of the attempt: creating a device on
+            // an adapter mid driver-install can itself take seconds.
+            errdefer self.device_recovery_retry_at = std.Io.Timestamp.now(
+                global.io(),
+                .awake,
+            ).addDuration(device_recovery_retry_delay);
 
             if (self.api.deviceLost()) try self.api.recoverDevice();
 
             // From here the device is good; only the rebuild on top of it
             // can still fail, and a retry must start from bare shaders.
             try self.initShaders(.device_recovered);
-            errdefer self.shaders.deinit(self.alloc);
+            errdefer {
+                self.shaders.deinit(self.alloc);
+                self.shaders = .{};
+            }
             self.swap_chain = try SwapChain.init(
                 self.alloc,
                 self.api,

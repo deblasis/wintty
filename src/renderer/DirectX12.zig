@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 
 const configpkg = @import("../config.zig");
 const font = @import("../font/main.zig");
+const global = @import("../global.zig");
 const rendererpkg = @import("../renderer.zig");
 const Renderer = rendererpkg.GenericRenderer(DirectX12);
 const shadertoy = @import("shadertoy.zig");
@@ -278,10 +279,14 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         log.err("DX12 device init failed: {}", .{err});
         return error.DeviceInitFailed;
     };
-    // The device owns the surface handle from here; if anything below
-    // fails, the errdefer's Device.deinit closes it with the rest.
-    self.reserved_surface_handle = null;
     errdefer {
+        // A reused surface handle stays ours until this whole build
+        // lands: take it back before Device.deinit would close it, or a
+        // failure below would cost the panel the surface it is bound to
+        // and the next attempt would mint one nothing composites.
+        if (self.reserved_surface_handle != null) {
+            self.dev.?.swap_chain_surface_handle = null;
+        }
         self.dev.?.deinit();
         self.dev = null;
     }
@@ -478,6 +483,8 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
 
     self.applied_width = width;
     self.applied_height = height;
+    // Only now does the device own a reused surface handle.
+    self.reserved_surface_handle = null;
 }
 
 pub fn deinit(self: *DirectX12) void {
@@ -502,6 +509,13 @@ const SurfaceHandleDisposition = enum {
 /// stays usable afterwards (unlike `deinit`) so `recoverDevice` can build
 /// again into it.
 fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
+    // Take the device out of the struct first, so the apprt-thread
+    // exports that read `dev` (swap chain, surface handle, shared-texture
+    // snapshot) see "no device" for the whole teardown instead of a
+    // Device that is being released under them.
+    var dev_opt = self.dev;
+    self.dev = null;
+
     // Wait for GPU to finish before releasing anything. Everything below
     // final-releases resources directly rather than retiring them, so a
     // failed drain has to be visible: it means the back buffers and frame
@@ -509,10 +523,14 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
     //
     // A removed device is the one case where skipping the wait is right
     // rather than merely tolerated: its queue cannot signal a fence, and
-    // nothing on it is executing, so there is nothing to drain.
-    if (self.dev) |*dev_ptr| {
+    // nothing on it is executing, so there is nothing to wait for. The
+    // retirement queue still has to be emptied HERE, before the heaps
+    // below are destroyed: retired descriptor slots point at those heaps,
+    // and Device.deinit would otherwise release them into freed memory.
+    if (dev_opt) |*dev_ptr| {
         if (dev_ptr.removed()) {
             log.warn("skipping GPU drain before teardown: device removed", .{});
+            dev_ptr.retirement.drainAll();
         } else {
             dev_ptr.waitForGpu() catch |err| {
                 log.err("waitForGpu before renderer teardown failed: {}", .{err});
@@ -573,13 +591,12 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
         self.swap_chain3 = null;
     }
 
-    if (self.dev) |*dev_ptr| {
+    if (dev_opt) |*dev_ptr| {
         if (handle == .keep_surface_handle) {
             self.reserved_surface_handle = dev_ptr.swap_chain_surface_handle;
             dev_ptr.swap_chain_surface_handle = null;
         }
         dev_ptr.deinit();
-        self.dev = null;
     }
 }
 
@@ -599,11 +616,15 @@ pub fn deviceLost(self: *const DirectX12) bool {
 /// a failure (a driver still installing, no adapter yet) leaves the
 /// struct torn down with the flag set, and the next call tries again.
 ///
-/// SwapChainPanel mode keeps its DirectComposition surface handle across
-/// the swap, so the panel the embedder bound once keeps compositing the
-/// new swap chain without being told. Shared-texture mode cannot do the
-/// same: its resource and fence handles are minted by the device, so the
-/// consumer sees a new snapshot with `version` back at 1.
+/// What the embedder sees depends on the surface mode. SwapChainPanel
+/// keeps its DirectComposition surface handle across the swap, so the
+/// panel the embedder bound once keeps compositing the new swap chain
+/// without being told. Shared-texture mode mints new resource and fence
+/// handles, and says so the documented way: `version` keeps counting up
+/// from where it was, so a consumer re-opens both. Composition mode has
+/// no such channel: the embedder holds a raw pointer to the old swap
+/// chain and nothing here can tell it about the new one, so that mode
+/// comes back blank until a "swap chain changed" notification exists.
 pub fn recoverDevice(self: *DirectX12) !void {
     var surface = self.surface orelse return error.NoSurface;
 
@@ -616,9 +637,23 @@ pub fn recoverDevice(self: *DirectX12) !void {
         surface.shared_texture = .{ .width = width, .height = height };
     }
 
+    // Carry the shared-texture version across the rebuild: a fresh Device
+    // starts it at 1, and a consumer that only re-opens on a higher number
+    // would keep the dead handles forever.
+    const last_version: u64 = if (self.dev) |*dev_ptr| version: {
+        const st = dev_ptr.shared_texture orelse break :version 0;
+        break :version st.version;
+    } else 0;
+
     if (self.dev != null) self.deinitGpu(.keep_surface_handle);
 
     try self.initGpu(surface, width, height);
+    if (last_version != 0) {
+        const dev_ptr = &self.dev.?;
+        dev_ptr.shared_texture_mutex.lockUncancelable(global.io());
+        defer dev_ptr.shared_texture_mutex.unlock(global.io());
+        if (dev_ptr.shared_texture) |*st| st.version = last_version + 1;
+    }
     self.device_lost = false;
     log.info("DX12 device recreated after loss ({}x{})", .{ width, height });
 }
@@ -703,6 +738,11 @@ pub fn drawFrameEnd(self: *DirectX12) void {
 
     const dev_ptr = &(self.dev orelse return);
     const cl = self.pending_command_list orelse return;
+    // The init command list is still recording until flushInitCommands
+    // closes it. A draw that fails between a device rebuild and that
+    // flush lands here with it pending; executing an open list is an
+    // invalid call that would remove the device all over again.
+    if (cl == self.init_command_list) return;
     self.pending_command_list = null;
 
     // Execute the command list.

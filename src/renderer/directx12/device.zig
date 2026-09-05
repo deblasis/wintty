@@ -85,12 +85,14 @@ pub const SharedTextureState = struct {
     /// Device. Closed and reborn on resize.
     resource_handle: std.os.windows.HANDLE,
     /// NT HANDLE from CreateSharedHandle on the Device's fence. Owned
-    /// by Device. Stable for the surface lifetime.
+    /// by Device. Survives resize; a device-removed recovery replaces
+    /// the fence and so this handle too, under a bumped `version`.
     fence_handle: std.os.windows.HANDLE,
     /// Pixel dimensions of `resource`.
     width: u32,
     height: u32,
-    /// Monotonically increasing; bumped by recreateSharedTexture.
+    /// Monotonically increasing; bumped by recreateSharedTexture and
+    /// carried across a device recreation so it never goes backwards.
     version: u64,
 
     /// Create a shared committed ID3D12Resource and NT handles for both

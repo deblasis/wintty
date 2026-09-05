@@ -1717,6 +1717,8 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
 
     var first = Device.init(.swap_chain_panel, .{ .width = 64, .height = 64 }) catch
         return error.SkipZigTest;
+    var first_alive = true;
+    errdefer if (first_alive) first.deinit();
     const handle = first.swap_chain_surface_handle orelse return error.NoSurfaceHandle;
 
     try removeDevice(first.device);
@@ -1724,6 +1726,7 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
     // Keep the handle across the teardown; the renderer does the same.
     first.swap_chain_surface_handle = null;
     first.deinit();
+    first_alive = false;
 
     var second = try Device.init(.swap_chain_panel, .{
         .width = 64,

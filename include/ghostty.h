@@ -1308,15 +1308,16 @@ GHOSTTY_API void* ghostty_surface_get_swap_chain_handle(ghostty_surface_t);
 // surface lifetime -- do NOT CloseHandle either of them. The
 // ID3D12Resource and ID3D12Fence returned by OpenSharedHandle on the
 // consumer's device ARE owned by the consumer; Release() them when
-// done, and re-open the resource whenever `version` changes.
+// done, and re-open both handles whenever `version` changes.
 typedef struct {
   // NT HANDLE from CreateSharedHandle on the underlying ID3D12Resource.
   // Consumers open via ID3D12Device::OpenSharedHandle on their own
   // device (cross-device) or on ghostty's device (same-device).
   void* resource_handle;
 
-  // NT HANDLE from CreateSharedHandle on ghostty's ID3D12Fence. Stable
-  // for the surface lifetime (does not change on resize).
+  // NT HANDLE from CreateSharedHandle on ghostty's ID3D12Fence. Does not
+  // change on resize; it does change on device-removed recovery, which
+  // also bumps `version`, so re-open it alongside the resource then.
   void* fence_handle;
 
   // Fence value ghostty will signal after completing the most recently
