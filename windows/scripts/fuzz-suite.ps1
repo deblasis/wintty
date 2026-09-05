@@ -1363,7 +1363,27 @@ $dupRoot = $PSScriptRoot
 # under it and missed lib/fuzz-selftest/ entirely -- which is where the guards
 # for the other five checks live, and which dot-sources back into a scanned
 # lib, so the blind spot ran in both directions.
-$dupScanFiles = @(Get-ChildItem -LiteralPath $dupRoot -Filter '*.ps1' -File -Recurse)
+#
+# Run output is skipped, because it is not source. This script writes every
+# run under fuzz-out/ (-OutRoot's default), and -SelfTest stages a whole
+# second copy of the suite there to drive the tier-layer cases: a run in
+# flight therefore puts a duplicate of every scanned file INSIDE the scanned
+# tree. A concurrent -List then read the copy as a genuine redefinition --
+# lib/wintty-process.ps1 shadowing itself, once per function it defines --
+# and a fixture deleted between the enumeration and the parse came back as
+# "does not parse". Neither is a defect in anything tracked, and nothing
+# tracked is ever written there, so the check loses no reach. Both the
+# default root and whatever -OutRoot was pointed at are skipped: a caller who
+# moves it inside this directory would otherwise walk straight back in.
+$dupSkip = @((Join-Path $dupRoot 'fuzz-out'), $OutRoot) | ForEach-Object {
+    [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar) +
+        [IO.Path]::DirectorySeparatorChar
+}
+$dupScanFiles = @(Get-ChildItem -LiteralPath $dupRoot -Filter '*.ps1' -File -Recurse |
+    Where-Object {
+        $path = $_.FullName
+        @($dupSkip).Where({ $path.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0
+    })
 
 # Keyed by path relative to this directory, because recursion makes a leaf
 # ambiguous: lib/pro/x.ps1 and x.ps1 are two files with one leaf.
