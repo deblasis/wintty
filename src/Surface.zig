@@ -392,7 +392,11 @@ const DerivedConfig = struct {
             .cursor_click_to_move = config.@"cursor-click-to-move",
             .desktop_notifications = config.@"desktop-notifications",
             .font = try font.SharedGridSet.DerivedConfig.init(alloc, config),
-            .mouse_interval = config.@"click-repeat-interval" * 1_000_000, // 500ms
+            // Widened before the multiply: the config value is in
+            // milliseconds and anything over ~4.3s overflows a u32 of
+            // nanoseconds.
+            .mouse_interval = @as(u64, config.@"click-repeat-interval") *
+                std.time.ns_per_ms,
             .mouse_hide_while_typing = config.@"mouse-hide-while-typing",
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
@@ -6655,6 +6659,25 @@ fn presentSurface(self: *Surface) !void {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Surface, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.io.getProcessInfo(info);
+}
+
+test "DerivedConfig: a long click-repeat-interval does not overflow" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    try oni.testing.ensureInit();
+
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    config.@"click-repeat-interval" = 5000;
+
+    var derived = try DerivedConfig.init(alloc, &config);
+    defer derived.deinit();
+
+    try testing.expectEqual(
+        @as(u64, 5000 * std.time.ns_per_ms),
+        derived.mouse_interval,
+    );
 }
 
 test "queueIo frees allocated writes in readonly mode" {
