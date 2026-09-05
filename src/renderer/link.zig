@@ -120,15 +120,23 @@ pub const Set = struct {
                     .{},
                     &match_param,
                 ) catch |err| switch (err) {
-                    // A budget overrun is treated the same as no match:
-                    // we stop looking at the rest of the viewport for
-                    // this link.
-                    error.Mismatch,
+                    error.Mismatch => break,
+
+                    // We ran out of budget somewhere in the rest of the
+                    // viewport, and Oniguruma doesn't tell us which start
+                    // position was expensive. Skip a single codepoint and
+                    // keep scanning so one pathological position doesn't
+                    // hide every link after it.
                     error.RetryLimitInMatchOver,
                     error.RetryLimitInSearchOver,
                     error.MatchStackLimitOver,
                     error.SubexpCallLimitInSearchOver,
-                    => break,
+                    => {
+                        offset += std.unicode.utf8ByteSequenceLength(
+                            str[offset],
+                        ) catch 1;
+                        continue;
+                    },
 
                     else => return err,
                 };
@@ -224,18 +232,19 @@ test "renderCellMap bounds regex backtracking" {
     // URL regex has to consider every way of splitting that run between
     // its repeated groups, which is exponential work, so this only
     // finishes because the search has a retry budget.
-    const url = "https://x.com/";
-    const trailing = "." ** 40;
+    const pathological = "https://x.com/" ++ ("." ** 40);
+    const trailing_url = "https://b.com";
+    const row = pathological ++ " " ++ trailing_url;
 
     var t: terminal.Terminal = try .init(testing.io, alloc, .{
-        .cols = url.len + trailing.len,
+        .cols = row.len,
         .rows = 2,
     });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
     defer s.deinit();
-    s.nextSlice("https://a.com\r\n" ++ url ++ trailing);
+    s.nextSlice("https://a.com\r\n" ++ row);
 
     var state: terminal.RenderState = .empty;
     defer state.deinit(alloc);
@@ -258,9 +267,41 @@ test "renderCellMap bounds regex backtracking" {
         .{},
     );
 
-    // The ordinary URL on the first row is still matched.
+    // The ordinary URL before the pathological one is still matched.
     try testing.expect(result.contains(.{ .x = 0, .y = 0 }));
     try testing.expect(result.contains(.{ .x = 12, .y = 0 }));
+
+    // The pathological URL only highlights in part. Every search that
+    // starts on its scheme exhausts the retry budget, so those start
+    // positions are skipped and "https://" stays unhighlighted. The first
+    // position that does match is the host, which the regex's path branch
+    // matches linearly. Highlighting the whole thing would mean letting
+    // the regex run unbounded, so the lost scheme is the price of the
+    // budget.
+    const host = std.mem.indexOf(u8, pathological, "x.com").?;
+    for (0..host) |x| {
+        try testing.expect(!result.contains(.{ .x = @intCast(x), .y = 1 }));
+    }
+    for (host..pathological.len) |x| {
+        try testing.expect(result.contains(.{ .x = @intCast(x), .y = 1 }));
+    }
+
+    // The space between the two links belongs to neither.
+    try testing.expect(!result.contains(.{
+        .x = pathological.len,
+        .y = 1,
+    }));
+
+    // The link after it on the same row is still matched, because a budget
+    // overrun skips one position instead of abandoning the rest of the scan.
+    try testing.expect(result.contains(.{
+        .x = pathological.len + 1,
+        .y = 1,
+    }));
+    try testing.expect(result.contains(.{
+        .x = row.len - 1,
+        .y = 1,
+    }));
 }
 
 test "renderCellMap hover links" {
