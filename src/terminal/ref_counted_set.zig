@@ -430,7 +430,7 @@ pub fn RefCountedSet(
         /// Release a specified number of references to an item by its ID.
         ///
         /// Asserts that the item's reference count is at least `n`.
-        pub fn releaseMultiple(self: *Self, base: anytype, id: Id, n: Id) void {
+        pub fn releaseMultiple(self: *Self, base: anytype, id: Id, n: RefCountInt) void {
             assert(id > 0);
             assert(id < self.layout.cap);
 

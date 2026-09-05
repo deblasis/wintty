@@ -31,6 +31,14 @@ pub const CellCountInt = u16;
 pub const StyleCountInt = CellCountInt;
 pub const HyperlinkCountInt = CellCountInt;
 
+// The int type used for the reference counts in a page's ref-counted sets
+// (styles and hyperlinks). This is deliberately wider than CellCountInt: a
+// page wider than our standard capacity keeps the standard row count rather
+// than shrinking it, so a single page can hold far more than
+// maxInt(CellCountInt) cells and every one of them can reference the same
+// style or hyperlink.
+pub const RefCountInt = u32;
+
 // Total number of bytes that can be taken up by grapheme data and string
 // data. Both of these technically unlimited with malicious input, but
 // we choose a reasonable limit of 2^32 (4GB) per.
