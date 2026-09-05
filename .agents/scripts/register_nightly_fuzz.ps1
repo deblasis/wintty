@@ -13,11 +13,16 @@ if (-not (Test-Path $target)) { throw "nightly_fuzz.ps1 not found next to this s
 
 $action = New-ScheduledTaskAction -Execute 'pwsh.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$target`" -Scheduled"
-# The limit must clear the worst case: up to 3h of idle-wait plus the full
-# ladder, the fuzz suite's own idle-wait, and the hibernate wait.
+# The limit must clear the worst case: up to 3h of idle-wait, then up to 2h
+# of incoda queue wait per wrapped test leg (two of them), then the full
+# ladder, the fuzz suite's own idle-wait, and the hibernate wait. The two
+# waits correlate: a box busy enough to keep the user active is a box with
+# a deep build lane. Task Scheduler ends an overrun by killing the process
+# tree, which is a nightly that dies filing nothing, so this budget is
+# deliberately loose rather than tight.
 $trigger = New-ScheduledTaskTrigger -Daily -At 23:00
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 6) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 10) `
     -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskName 'wintty-nightly-quality' `

@@ -99,7 +99,8 @@ desktop lanes together and alone, `incoda run --queue
 wintty-build,wintty-desktop --exclusive -- <cmd...>`: it waits for every
 holder to leave and keeps the machine to itself while it runs. The old
 `wintty` key is retired: closed on the box, it refuses every run with a
-message naming these.
+message naming these. This configuration is applied from the repo by `just
+lanes` (`.agents/scripts/lanes.ps1`) and verified by `just doctor`.
 
 ```
 incoda run --queue wintty-build --reason "what this is" -- <cmd...>
