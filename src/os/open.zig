@@ -143,7 +143,7 @@ fn isLocalFileUrl(url: []const u8) bool {
                     i += 3;
                 } else {
                     const byte = decodeEscape(escape) orelse break;
-                    if (byte <= ' ' or byte == 0x7f) return false;
+                    if (byte < '!' or byte >= 0x7f) return false;
                     break;
                 }
             },
@@ -361,6 +361,11 @@ test "url allow-list refuses an encoded blank before a file url's path" {
     try testing.expect(!isUrlAllowed(.unknown, "file:%0a//evil/x"));
     // A NUL truncates the target wherever it is honoured.
     try testing.expect(!isUrlAllowed(.unknown, "file:%00//evil/x"));
+    // `%A0` decodes to U+00A0 (non-breaking space) on the wide-char path.
+    // If the opener's leading-blank trim is `iswspace`-based rather than
+    // `" \t"`-based, this collapses to a UNC path by the same mechanism as
+    // the plain-space case above.
+    try testing.expect(!isUrlAllowed(.unknown, "file:%A0//evil/x"));
     // Past the leading run an encoded blank is ordinary data: a file name
     // with a space in it is perfectly normal, and so is a query string.
     try testing.expect(isUrlAllowed(.unknown, "file:///tmp/a%20b.txt"));
