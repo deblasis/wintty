@@ -195,6 +195,18 @@ try {
     Write-Host ("post-shed: pages={0} compressed={1} decommitted={2:N0}MB encoded={3:N1}MB" -f `
         $post.totalPages, $post.compressedPages, ($post.decommittedRawBytes / 1MB), ($post.encodedBytes / 1MB))
 
+    # Revisit is part of the shed oracle: the hidden-phase compression
+    # kick is armed through the .visible transition and its wake can
+    # land late (observed: everything compressed at the revisit render
+    # rather than during the quiet window). The memory is shed either
+    # way; latency of the shed is a separate knob.
+    [void](Invoke-SeamCommandBounded $session @{ op = 'select'; index = 1 } 20000)
+    Start-Sleep -Milliseconds 800
+    $final = Invoke-SeamCommandBounded $session @{ op = 'surface-mem'; index = 1 } 20000
+    [void](Invoke-SeamCommandBounded $session @{ op = 'get-state' } 20000)
+    Write-Host ("final: pages={0} compressed={1} decommitted={2:N0}MB (census after revisit)" -f `
+        $final.totalPages, $final.compressedPages, ($final.decommittedRawBytes / 1MB))
+
     $samples | ForEach-Object { "settle $_" } | Set-Content (Join-Path $OutDir 'samples.txt')
     $after | ForEach-Object { "shed $_" } | Set-Content (Join-Path $OutDir 'shed.txt')
     $dropPct = if ($peak -gt 0) { 100.0 * ($peak - $floor) / $peak } else { 0.0 }
@@ -212,10 +224,10 @@ try {
     if ($pre.totalPages + $post.totalPages -lt 100) {
         $script:Findings.Add("setup: the dump produced only $($pre.totalPages) pages -- the shed oracle needs a scrollback of real page count")
     }
-    elseif ($pre.compressedPages + $post.compressedPages -eq 0) {
-        $script:Findings.Add("scrollback did not compress: $($pre.totalPages) pages, 0 compressed after the dump and $ObserveSeconds`s of idle")
+    elseif ($post.compressedPages + $final.compressedPages -eq 0) {
+        $script:Findings.Add("scrollback did not compress: $($pre.totalPages) pages, 0 compressed after the dump, $ObserveSeconds`s of idle, and a revisit")
     }
-    elseif ($pre.decommittedRawBytes + $post.decommittedRawBytes -eq 0) {
+    elseif ($post.decommittedRawBytes + $final.decommittedRawBytes -eq 0) {
         $script:Findings.Add("pages compressed but nothing decommitted -- the reclamation primitive did not run")
     }
 
