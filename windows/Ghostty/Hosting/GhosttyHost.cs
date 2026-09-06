@@ -168,6 +168,12 @@ internal sealed partial class GhosttyHost : IDisposable
     // lambda below, and every window in this app shares that thread.
     private static readonly Ghostty.Core.Renderer.CustomShaderNoticeSource _customShaderNotices = new();
 
+    // Which surfaces the renderer has stopped painting, and the banner that
+    // says so. Static for the same reason as the gate above: a host is
+    // per-window, but a GPU device is lost adapter-wide, so the panes reporting
+    // in are spread across every window and only one banner should result.
+    private static readonly Ghostty.Core.Renderer.RendererHealthNoticeSource _rendererHealthNotices = new();
+
     public GhosttyApp App => _app;
 
     /// <summary>
@@ -309,6 +315,34 @@ internal sealed partial class GhosttyHost : IDisposable
         if (surface.Handle == IntPtr.Zero) return;
         _surfaces.TryRemove(surface.Handle, out _);
         Ghostty.App.UnregisterSurfaceRoute(surface.Handle, this);
+
+        // A pane closed while its renderer was down will never report itself
+        // healthy again, so without this the banner outlives the problem.
+        // Deliberately not in Detach: that moves a surface between windows and
+        // the renderer's state travels with it.
+        //
+        // Enqueued, not called here, even though this already runs on the UI
+        // thread. OnAction decodes on libghostty's thread and enqueues its
+        // Update, so a close racing a device loss can reach this first: the
+        // synchronous Forget would find an empty set, and the Update behind it
+        // would then add a surface that no longer exists. Nothing would ever
+        // clear it, and because one banner suppresses the next, every later
+        // loss would be silent too. Going through the same queue restores the
+        // order. It also keeps the handle safe to use as a key after
+        // SurfaceFree below: a reused address can only be added by a later
+        // Update, which is queued behind this.
+        var handle = surface.Handle;
+        _dispatcher.TryEnqueue(() =>
+        {
+            // Forget first, then guard -- the opposite order to the action
+            // case, deliberately. There the guard comes first so the set is
+            // never mutated without the change being applied; here the surface
+            // is gone whether or not there is anywhere to show it, and a
+            // missing service means shutdown, when no banner matters anyway.
+            var change = _rendererHealthNotices.Forget(handle);
+            if (Ghostty.App.NotificationService is not { } notifications) return;
+            if (change.Dismiss is { } dismiss) notifications.Dismiss(dismiss);
+        });
     }
 
     /// <summary>
@@ -1000,6 +1034,33 @@ internal sealed partial class GhosttyHost : IDisposable
                         if (Ghostty.App.NotificationService is not { } notifications) return;
                         if (_customShaderNotices.Resolve(failure) is { } notice)
                             notifications.Show(notice);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.RendererHealth:
+                {
+                    // The renderer stopped or resumed painting this surface.
+                    // On Windows the only cause is a lost GPU device, and the
+                    // pane keeps showing the last frame it managed to draw --
+                    // so a frozen terminal is indistinguishable from an idle
+                    // one unless we say something.
+                    //
+                    // A preview surface is skipped for the same reason the
+                    // shader notice skips it: a gallery preview owns its own
+                    // device, so its loss says nothing about the terminal the
+                    // user is working in, and the copy would send them looking
+                    // for a problem in the wrong place.
+                    if (control.IsPreviewSurface) return 1;
+
+                    var health = (Ghostty.Core.Renderer.RendererHealth)
+                        Marshal.ReadInt32(actionPtr, 8);
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (Ghostty.App.NotificationService is not { } notifications) return;
+                        var change = _rendererHealthNotices.Update(surfaceHandle, health);
+                        if (change.Show is { } show) notifications.Show(show);
+                        if (change.Dismiss is { } dismiss) notifications.Dismiss(dismiss);
                     });
                     return 1;
                 }

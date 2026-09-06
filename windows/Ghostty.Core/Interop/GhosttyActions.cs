@@ -62,6 +62,9 @@ internal enum GhosttyActionTag
     MouseShape = 38,
     MouseVisibility = 39,
     MouseOverLink = 40,
+    // The renderer started or stopped painting this surface. On Windows the
+    // only thing that raises it is a lost GPU device and the rebuild after it.
+    RendererHealth = 41,
     OpenConfig = 42,
     FloatWindow = 44,
     ReloadConfig = 49,
