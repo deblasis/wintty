@@ -2691,6 +2691,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.images_lost = true;
                 if (self.bg_image) |img| img.deinit(self.alloc);
                 self.bg_image = null;
+                // The atlas ceiling came from the device that has just
+                // gone, so the replacement gets asked for its own. Here
+                // rather than after the rebuild because this is the block
+                // that runs exactly once per loss, however many attempts
+                // the rebuild takes.
+                //
+                // Latent on DirectX12, the only backend that recovers at
+                // all: its limit is a feature-level constant, so the
+                // answer cannot change. It stops being latent the moment
+                // that becomes a real device query.
+                //
+                // Above the loss spend below, which can return early on the
+                // abandon path: this belongs with the other releases of
+                // state the dead device owned.
+                self.atlas_max_size_synced = false;
 
                 // Spend the loss last, so everything above is released
                 // even by a surface that has run out of budget. What that
