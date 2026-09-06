@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -429,6 +430,63 @@ public class TabAccessibleTextTests
         var host = Source("TabHost.xaml.cs");
         var groupArm = Between(host, "nameof(TabModel.Group)", "_itemByModel[tab] = item");
         Assert.Contains("ApplyItemAccessibleText(item, tab)", groupArm);
+    }
+
+    /// <summary>
+    /// A restore is the one moment the strip fills with tabs the user did
+    /// not open one at a time, and nothing else tells a listener it
+    /// happened. One tab is a window reopening on its own and needs no
+    /// telling; null rather than empty so the caller has one thing to test.
+    /// </summary>
+    [Theory]
+    [InlineData(0, null)]
+    [InlineData(1, null)]
+    [InlineData(2, "Session restored, 2 tabs, src")]
+    [InlineData(17, "Session restored, 17 tabs, src")]
+    public void TheRestoreAnnouncement_CountsTheTabs_AndStaysQuietForOne(int count, string? expected)
+    {
+        var active = new TabModel(new FakePaneHost()) { ShellReportedCwd = @"C:\Users\alex\src" };
+        Assert.Equal(expected, TabAccessibleText.SessionRestoredAnnouncement(active, count));
+    }
+
+    /// <summary>
+    /// It names the tab the restore landed on, like every other
+    /// announcement in this file. Restoring several WINDOWS raises one per
+    /// window, and without a name that is the same sentence twice with
+    /// nothing to tell them apart.
+    /// </summary>
+    [Fact]
+    public void TheRestoreAnnouncement_NamesWhereTheRestoreLanded()
+    {
+        var home = new TabModel(new FakePaneHost())
+        {
+            HomeDirectory = @"C:\Users\alex",
+            ShellReportedCwd = @"C:\Users\alex",
+        };
+        Assert.Equal("Session restored, 3 tabs, Home",
+            TabAccessibleText.SessionRestoredAnnouncement(home, 3));
+    }
+
+    /// <summary>
+    /// The accessible name follows the shell's reported directory, through
+    /// the EffectiveTitle raise that the directory setter fans out to. Both
+    /// strips now name the directory in their own subscription lists, but
+    /// this is the fan-out underneath them: narrow it and every tab's name
+    /// freezes at its birth value.
+    /// </summary>
+    [Fact]
+    public void TheAccessibleName_FollowsTheReportedDirectory()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        var raised = new List<string?>();
+        tab.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        Assert.Equal(AppIdentity.ProductName, TabAccessibleText.Name(tab));
+
+        tab.ShellReportedCwd = @"C:\Users\alex\src";
+
+        Assert.Equal("src", TabAccessibleText.Name(tab));
+        Assert.Contains(nameof(TabModel.EffectiveTitle), raised);
     }
 
     /// <summary>
