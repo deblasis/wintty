@@ -404,6 +404,11 @@ pub fn keyEvent(
     // be processed by Surface.keyEvent. For chained actions, all
     // actions must be app-scoped.
     for (actions) |action| if (action.scoped(.app) == null) return false;
+
+    // Unlike performAllChainedAction this loop has no endsChain break.
+    // It does not need one: appendChain refuses to append after an action
+    // that ends the chain, so an action that frees this slice is always
+    // the last one and the loop stops without reading the slice again.
     for (actions) |action| {
         self.performAction(
             rt_app,
