@@ -267,10 +267,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// hammered at the draw rate.
         device_recovery_retry_at: ?std.Io.Timestamp = null,
 
-        /// The backend said this surface cannot be rebuilt (it has no
-        /// way to hand the embedder a new swap chain). The surface stays
-        /// dark and unhealthy, as it always did, and nothing retries.
+        /// Nothing will rebuild this surface's device again: either the
+        /// backend cannot (it has no way to hand the embedder a new swap
+        /// chain) or it has been rebuilt too many times to be worth
+        /// trying. The surface stays dark and unhealthy, as it always
+        /// did before any of this existed.
         device_recovery_abandoned: bool = false,
+
+        /// What is left of this surface's allowance for rebuilding its
+        /// device. See `RecoveryBudget`.
+        recovery_budget: RecoveryBudget = .{},
+
+        /// When the current device finished being rebuilt, so the budget
+        /// can measure how long each rebuild actually bought. Null while
+        /// the device is down, and before the first recovery: the device
+        /// built at startup is not a rebuild and has nothing to judge.
+        device_up_since: ?std.Io.Timestamp = null,
 
         /// The kitty image textures went down with a lost device and
         /// must be rebuilt from the terminal's image storage on the next
@@ -1287,19 +1299,24 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // that re-uploads the images dropped with the device runs on
             // the same tick.
             if (comptime @hasDecl(GraphicsAPI, "recoverDevice")) {
-                if (!self.device_recovery_abandoned) {
-                    if (self.device_recovery_retry_at) |at| {
-                        const now: std.Io.Timestamp = .now(global.io(), .awake);
-                        const remaining_ms = now.durationTo(at).toMilliseconds();
-                        const due: u64 = if (remaining_ms > 0) @intCast(remaining_ms) else 0;
-                        return .{
-                            .delay_ms = @max(due, draw_interval_ms),
-                            .kind = .update,
-                        };
-                    }
-                    if (self.api.deviceLost() or self.device_recovery_pending) {
-                        return .{ .delay_ms = draw_interval_ms, .kind = .update };
-                    }
+                // Nothing will paint this surface again, so nothing below
+                // is worth waking for either. The custom-shader animation
+                // in particular would otherwise redraw a dead surface at
+                // the animation rate for the life of the tab -- and a
+                // custom shader is exactly what tends to get a surface
+                // abandoned in the first place.
+                if (self.device_recovery_abandoned) return null;
+                if (self.device_recovery_retry_at) |at| {
+                    const now: std.Io.Timestamp = .now(global.io(), recovery_clock);
+                    const remaining_ms = now.durationTo(at).toMilliseconds();
+                    const due: u64 = if (remaining_ms > 0) @intCast(remaining_ms) else 0;
+                    return .{
+                        .delay_ms = @max(due, draw_interval_ms),
+                        .kind = .update,
+                    };
+                }
+                if (self.api.deviceLost() or self.device_recovery_pending) {
+                    return .{ .delay_ms = draw_interval_ms, .kind = .update };
                 }
             }
             if (self.images_wake_pending) {
@@ -2423,10 +2440,43 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.health_report_pending.store(!delivered, .release);
         }
 
-        /// How long to leave a device alone after a rebuild fails before
-        /// trying again. A driver upgrade takes seconds to install; a
-        /// retry per draw would only fill the log.
-        const device_recovery_retry_delay: std.Io.Duration = .fromSeconds(1);
+        /// Which clock the recovery deadlines are measured on. `.boot`
+        /// rather than `.awake` because the thresholds are written in
+        /// wall-clock terms ("one TDR an hour"): on `.awake`, a laptop
+        /// that loses its device on each of three resumes would see three
+        /// losses seconds apart and give up on a machine that was fine.
+        /// Every recovery timestamp must use this one -- `std.Io.Timestamp`
+        /// carries no clock tag, so two clocks would compare silently.
+        const recovery_clock: std.Io.Clock = .boot;
+
+        /// Stop rebuilding this surface's device. It stays dark and
+        /// unhealthy until the tab is closed, because every remaining
+        /// option is worse: a rebuild loop burns a core and fills the log
+        /// forever, and there is nothing else here that can fix a GPU.
+        fn abandonRecovery(self: *Self, reason: AbandonReason) void {
+            // Idempotent, so the first reason recorded is the true one.
+            // An abandon on one path can be followed by the errdefer
+            // below reaching for a second, and two contradictory log
+            // lines are worse than one.
+            if (self.device_recovery_abandoned) return;
+            self.device_recovery_abandoned = true;
+            self.reportHealth(.unhealthy);
+
+            // Only blame a shader that was actually built and bound, and
+            // only for the reason it could plausibly have caused. See
+            // `AbandonReason.blamesShader`.
+            if (reason.blamesShader() and self.has_custom_shaders) {
+                log.warn(
+                    "giving up on this surface's GPU device: {s}. A custom-shader is loaded; if the terminal survives without it, that shader is why",
+                    .{reason.text()},
+                );
+            } else {
+                log.warn(
+                    "giving up on this surface's GPU device: {s}",
+                    .{reason.text()},
+                );
+            }
+        }
 
         /// Rebuild everything on a replacement GPU device after the old
         /// one was lost. Caller holds the draw mutex.
@@ -2439,14 +2489,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// dropped and `images_lost` makes the next update re-upload them
         /// from the terminal's storage.
         ///
-        /// Fails with `error.DeviceRecoveryPending` while a retry is not
-        /// yet due (the caller draws nothing and says nothing), and with
+        /// Both halves are on a budget (`RecoveryBudget`): a device that
+        /// cannot be rebuilt, or that comes back only to die again, is
+        /// eventually given up on rather than retried for as long as the
+        /// tab is open.
+        ///
+        /// Fails with `error.DeviceRecoveryPending` when the caller should
+        /// draw nothing and say nothing: a retry that is not yet due, and
+        /// also a surface that has been given up on for good. Fails with
         /// the attempt's own error when one fails, which the renderer
         /// thread logs like any other failed draw.
         fn recoverDevice(self: *Self) !void {
             if (self.device_recovery_abandoned) return error.DeviceRecoveryPending;
             if (self.device_recovery_retry_at) |at| {
-                const now: std.Io.Timestamp = .now(global.io(), .awake);
+                const now: std.Io.Timestamp = .now(global.io(), recovery_clock);
                 if (now.durationTo(at).nanoseconds > 0) return error.DeviceRecoveryPending;
             }
 
@@ -2479,14 +2535,40 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.images_lost = true;
                 if (self.bg_image) |img| img.deinit(self.alloc);
                 self.bg_image = null;
+
+                // Spend the loss last, so everything above is released
+                // even by a surface that has run out of budget. What that
+                // does not cover is the backend's own device: it is
+                // released inside `api.recoverDevice`, which the abandon
+                // below returns before reaching, so a removed device and
+                // the objects it owns stay allocated until the tab closes.
+                // The driver has already reclaimed the VRAM behind them,
+                // and `deinit` sweeps the rest.
+                const now: std.Io.Timestamp = .now(global.io(), recovery_clock);
+                const uptime: ?std.Io.Duration = if (self.device_up_since) |up|
+                    up.durationTo(now)
+                else
+                    null;
+                self.device_up_since = null;
+                if (!self.recovery_budget.recordLoss(uptime)) {
+                    self.abandonRecovery(.lost_repeatedly);
+                    return error.DeviceRecoveryPending;
+                }
             }
 
             // Measured from the end of the attempt: creating a device on
-            // an adapter mid driver-install can itself take seconds.
-            errdefer self.device_recovery_retry_at = std.Io.Timestamp.now(
-                global.io(),
-                .awake,
-            ).addDuration(device_recovery_retry_delay);
+            // an adapter mid driver-install can itself take seconds. Only
+            // arm a deadline if there is another attempt to arm it for.
+            errdefer {
+                if (self.recovery_budget.attemptFailed()) {
+                    self.device_recovery_retry_at = std.Io.Timestamp.now(
+                        global.io(),
+                        recovery_clock,
+                    ).addDuration(self.recovery_budget.retryDelay());
+                } else {
+                    self.abandonRecovery(.rebuild_failed);
+                }
+            }
 
             // Every attempt rebuilds the device, not only the first. A
             // loss that lands while the previous attempt was building
@@ -2496,8 +2578,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // released; rebuilding the device discards both.
             self.api.recoverDevice() catch |err| switch (err) {
                 error.DeviceUnrecoverable => {
-                    log.warn("GPU device lost and this surface cannot be rebuilt; it stays dark", .{});
-                    self.device_recovery_abandoned = true;
+                    self.abandonRecovery(.unrecoverable_surface);
                     return error.DeviceRecoveryPending;
                 },
                 else => return err,
@@ -2526,6 +2607,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.device_recovery_pending = false;
             self.device_recovery_retry_at = null;
+            // The clock the budget judges this rebuild by starts here.
+            self.device_up_since = .now(global.io(), recovery_clock);
             self.images_wake_pending = true;
             // The shaders were just built from the current config; a
             // reload queued before the loss has nothing left to redo.
@@ -4224,6 +4307,288 @@ fn customShaderUsable(
     if (!has_state) return false;
     if (post_pipeline_count == 0) return false;
     return resources_valid;
+}
+
+/// Why a surface's GPU device will never be rebuilt again.
+///
+/// An enum rather than a string because one caller has to ask which
+/// reason this is, not just print it: only a run of losses can plausibly
+/// be a custom shader's doing.
+const AbandonReason = enum {
+    /// The device kept dying, faster than `RecoveryBudget` allows.
+    lost_repeatedly,
+    /// A replacement device could not be built, attempt after attempt.
+    rebuild_failed,
+    /// The backend has no way to hand the embedder a new swap chain, so
+    /// there was never an attempt to make.
+    unrecoverable_surface,
+
+    /// Completes "giving up on this surface's GPU device: ...".
+    fn text(self: AbandonReason) []const u8 {
+        return switch (self) {
+            .lost_repeatedly => "it has been lost too many times in a row",
+            .rebuild_failed => "it could not be rebuilt",
+            .unrecoverable_surface => "this surface has no way to be handed a new one",
+        };
+    }
+
+    /// Whether a loaded custom shader is a plausible cause worth naming.
+    ///
+    /// Only for a run of losses: a shader with an unbounded loop hangs
+    /// the GPU, gets the device removed, and hangs the rebuilt one the
+    /// same way. The other two cannot be its doing -- a driver that will
+    /// not create a device never ran the shader, and an unrecoverable
+    /// surface is decided from the surface's mode before any GPU work.
+    /// Blaming a shader there sends the user down a dead end.
+    fn blamesShader(self: AbandonReason) bool {
+        return switch (self) {
+            .lost_repeatedly => true,
+            .rebuild_failed, .unrecoverable_surface => false,
+        };
+    }
+};
+
+/// What is left of a surface's allowance for rebuilding a GPU device that
+/// will not stay up.
+///
+/// Two different runaways to stop, which is why there are two counters.
+/// A driver that refuses to give us a device fails every attempt, so
+/// attempts are capped per loss. A device that comes back and dies again
+/// -- the shape a custom shader that hangs the GPU produces -- succeeds
+/// every attempt and is visible only in how little the rebuild bought, so
+/// losses are capped by how long the rebuilt device survived. Without
+/// both, a surface rebuilds forever for as long as the tab is open.
+///
+/// The second counter deliberately does not measure how often the device
+/// dies. Hardware that drops out every half minute and recovers cleanly
+/// is being helped by the rebuild, and giving up on it would turn a
+/// terminal the user is working in into a dead one.
+///
+/// At file scope, and taking durations rather than reading a clock, so
+/// the thresholds can be tested without a GPU or a real second passing.
+const RecoveryBudget = struct {
+    /// Rebuild attempts that have failed since the current loss.
+    attempts: u8 = 0,
+
+    /// Consecutive rebuilds that bought no useful uptime.
+    losses: u8 = 0,
+
+    /// Rebuild attempts one loss gets. With the doubling delay below,
+    /// ten of them span about three minutes -- comfortably longer than a
+    /// driver upgrade leaves the machine with no adapter to enumerate,
+    /// which is the one thing that legitimately fails every attempt for a
+    /// long time.
+    const attempt_cap: u8 = 10;
+
+    /// Rebuilds that bought nothing before we stop making them.
+    const loss_cap: u8 = 3;
+
+    /// How long a rebuilt device has to survive for the rebuild to have
+    /// been worth making. Longer than this and the run resets.
+    ///
+    /// This is the whole judgement, so it is worth being precise about
+    /// what is being stopped. A device that comes back and keeps working
+    /// is being helped by the rebuild, however often it dies -- flaky
+    /// hardware that drops out every half minute and recovers cleanly
+    /// leaves the user working through brief flickers, and abandoning
+    /// that surface would turn a working terminal into a dead one. What
+    /// cannot be helped is a device that dies again immediately, every
+    /// time, which is the shape a shader that hangs the GPU produces: the
+    /// rebuilt device runs the same shader and hangs on its first frame.
+    /// Ten seconds is far longer than that takes and far shorter than any
+    /// interval a user would call working.
+    const min_useful_uptime: std.Io.Duration = .fromSeconds(10);
+
+    /// Seconds before the first retry. Later ones double.
+    const first_retry_seconds: i64 = 1;
+
+    /// How far the doubling goes: 1, 2, 4, 8, 16, then 32 for the rest.
+    /// Capped so a device that comes back late is still picked up
+    /// reasonably soon rather than after a quarter of an hour asleep.
+    const max_retry_doublings: u6 = 5;
+
+    /// Record a fresh device loss. `uptime` is how long the last rebuilt
+    /// device survived, or null when no rebuild preceded this loss (the
+    /// first one, and any loss after a rebuild that never landed).
+    /// Returns false when rebuilding has stopped being worth it.
+    fn recordLoss(self: *RecoveryBudget, uptime: ?std.Io.Duration) bool {
+        self.attempts = 0;
+        // `Duration.nanoseconds` is signed, and a negative uptime would
+        // mean the clock ran backwards. `recovery_clock` is documented
+        // monotonic so this cannot happen; if it ever did, counting it as
+        // a wasted rebuild errs towards giving up, which is the safe
+        // direction when the alternative is an unbounded rebuild loop.
+        //
+        // A null uptime is not counted as wasted. No rebuild has been
+        // proved useless yet, so the run starts fresh.
+        const wasted = if (uptime) |d|
+            d.nanoseconds < min_useful_uptime.nanoseconds
+        else
+            false;
+        self.losses = if (wasted) self.losses +| 1 else 1;
+        return self.losses <= loss_cap;
+    }
+
+    /// Record a rebuild attempt that failed. Returns false when this loss
+    /// has used up its attempts.
+    fn attemptFailed(self: *RecoveryBudget) bool {
+        self.attempts +|= 1;
+        return self.attempts < attempt_cap;
+    }
+
+    /// How long to wait before the next attempt, given how many have
+    /// already failed.
+    ///
+    /// Doubling rather than fixed because the thing most likely to fail
+    /// every attempt is a driver install, which routinely leaves no
+    /// adapter for tens of seconds. A flat one-second retry would spend
+    /// the whole allowance inside the first ten of them and give up on a
+    /// GPU that was about to come back.
+    fn retryDelay(self: RecoveryBudget) std.Io.Duration {
+        const failed = self.attempts -| 1;
+        const doublings: u6 = @intCast(@min(failed, max_retry_doublings));
+        return .fromSeconds(first_retry_seconds << doublings);
+    }
+};
+
+test "RecoveryBudget: a first loss is always worth rebuilding" {
+    var budget: RecoveryBudget = .{};
+    try std.testing.expect(budget.recordLoss(null));
+}
+
+test "RecoveryBudget: rebuilds that buy nothing run out" {
+    var budget: RecoveryBudget = .{};
+    const wasted: std.Io.Duration = .fromSeconds(1);
+    try std.testing.expect(budget.recordLoss(null));
+    try std.testing.expect(budget.recordLoss(wasted));
+    try std.testing.expect(budget.recordLoss(wasted));
+    // The fourth is one past the cap. Three rebuilds that each died within
+    // a second are not going to be followed by one that does not.
+    try std.testing.expect(!budget.recordLoss(wasted));
+}
+
+test "RecoveryBudget: a device that keeps working is never abandoned" {
+    // The case a loss-frequency rule gets wrong. Hardware that drops out
+    // every half minute and recovers cleanly leaves the user working
+    // through brief flickers; giving up would turn that into a dead pane.
+    var budget: RecoveryBudget = .{};
+    const working: std.Io.Duration = .fromSeconds(30);
+    try std.testing.expect(budget.recordLoss(null));
+    for (0..20) |_| {
+        try std.testing.expect(budget.recordLoss(working));
+    }
+}
+
+test "RecoveryBudget: one good rebuild clears a run of wasted ones" {
+    var budget: RecoveryBudget = .{};
+    const wasted: std.Io.Duration = .fromSeconds(1);
+    const working: std.Io.Duration = .fromSeconds(30);
+    try std.testing.expect(budget.recordLoss(null));
+    try std.testing.expect(budget.recordLoss(wasted));
+    try std.testing.expect(budget.recordLoss(wasted));
+    // A rebuild that held up says the surface is recoverable after all,
+    // and it gets its full allowance back rather than one last chance.
+    try std.testing.expect(budget.recordLoss(working));
+    try std.testing.expect(budget.recordLoss(wasted));
+    try std.testing.expect(budget.recordLoss(wasted));
+    try std.testing.expect(!budget.recordLoss(wasted));
+}
+
+test "RecoveryBudget: failed attempts run out inside one loss" {
+    var budget: RecoveryBudget = .{};
+    try std.testing.expect(budget.recordLoss(null));
+    for (0..RecoveryBudget.attempt_cap - 1) |_| {
+        try std.testing.expect(budget.attemptFailed());
+    }
+    try std.testing.expect(!budget.attemptFailed());
+}
+
+test "RecoveryBudget: a new loss restores the attempt allowance" {
+    var budget: RecoveryBudget = .{};
+    try std.testing.expect(budget.recordLoss(null));
+    for (0..RecoveryBudget.attempt_cap - 1) |_| {
+        try std.testing.expect(budget.attemptFailed());
+    }
+    try std.testing.expect(!budget.attemptFailed());
+
+    // The rebuild eventually landed and the device died again. That is a
+    // new problem and gets its own attempts, or a device that takes two
+    // goes to rebuild would be abandoned on its second loss forever.
+    try std.testing.expect(budget.recordLoss(.fromSeconds(1)));
+    try std.testing.expect(budget.attemptFailed());
+}
+
+test "RecoveryBudget: the uptime boundary is exclusive" {
+    // Surviving exactly `min_useful_uptime` counts as useful. Pinned
+    // because the comparison is the whole rule, and an off-by-one here
+    // shows up only as a surface abandoned slightly too eagerly.
+    var budget: RecoveryBudget = .{};
+    try std.testing.expect(budget.recordLoss(null));
+    try std.testing.expect(budget.recordLoss(RecoveryBudget.min_useful_uptime));
+    try std.testing.expectEqual(@as(u8, 1), budget.losses);
+
+    var thrash: RecoveryBudget = .{};
+    try std.testing.expect(thrash.recordLoss(null));
+    try std.testing.expect(thrash.recordLoss(.{
+        .nanoseconds = RecoveryBudget.min_useful_uptime.nanoseconds - 1,
+    }));
+    try std.testing.expectEqual(@as(u8, 2), thrash.losses);
+}
+
+test "RecoveryBudget: a backwards uptime counts as wasted" {
+    // Cannot happen on a monotonic clock; pinned because the comment
+    // claims a direction and this is the only thing that holds it to it.
+    var budget: RecoveryBudget = .{};
+    try std.testing.expect(budget.recordLoss(null));
+    try std.testing.expect(budget.recordLoss(.{ .nanoseconds = -1 }));
+    try std.testing.expectEqual(@as(u8, 2), budget.losses);
+}
+
+test "RecoveryBudget: a rebuild that never landed does not count against the run" {
+    // Null uptime means no rebuild completed, so nothing has been proved
+    // useless. The attempt cap is what bounds that case, not this counter.
+    var budget: RecoveryBudget = .{};
+    const wasted: std.Io.Duration = .fromSeconds(1);
+    try std.testing.expect(budget.recordLoss(null));
+    try std.testing.expect(budget.recordLoss(wasted));
+    try std.testing.expect(budget.recordLoss(null));
+    try std.testing.expectEqual(@as(u8, 1), budget.losses);
+}
+
+test "RecoveryBudget: the retry delay doubles and then holds" {
+    var budget: RecoveryBudget = .{};
+    try std.testing.expect(budget.recordLoss(null));
+
+    // One second before the first retry, doubling to the cap, then flat.
+    const want = [_]i64{ 1, 2, 4, 8, 16, 32, 32, 32, 32 };
+    for (want) |seconds| {
+        try std.testing.expect(budget.attemptFailed());
+        try std.testing.expectEqual(
+            std.Io.Duration.fromSeconds(seconds).nanoseconds,
+            budget.retryDelay().nanoseconds,
+        );
+    }
+
+    // The whole allowance has to outlast a driver install, which is the
+    // one thing that legitimately fails every attempt for a long time.
+    var total: i64 = 0;
+    for (want) |seconds| total += seconds;
+    try std.testing.expect(total > 120);
+}
+
+test "AbandonReason: only a run of losses blames a shader" {
+    // A driver that will not create a device never ran the shader, and an
+    // unrecoverable surface is decided before any GPU work, so naming a
+    // shader there sends the user down a dead end.
+    try std.testing.expect(AbandonReason.lost_repeatedly.blamesShader());
+    try std.testing.expect(!AbandonReason.rebuild_failed.blamesShader());
+    try std.testing.expect(!AbandonReason.unrecoverable_surface.blamesShader());
+}
+
+test "AbandonReason: every reason completes the log sentence" {
+    for (std.enums.values(AbandonReason)) |reason| {
+        try std.testing.expect(reason.text().len > 0);
+    }
 }
 
 test "customShaderUsable: no custom shader state means no custom shader path" {
