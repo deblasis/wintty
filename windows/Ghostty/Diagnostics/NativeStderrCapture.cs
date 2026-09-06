@@ -58,12 +58,18 @@ internal static partial class NativeStderrCapture
             var path = LogPath;
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
-            // Rotate at the cap: truncate rather than rename -- simpler
-            // than rename racing a concurrent writer, and the
-            // interesting content (the panic) is always at the tail,
-            // which truncation preserves.
+            // Rotate at the cap: keep the newest half. A rename would
+            // race any concurrent writer, and emptying would discard
+            // exactly the panic text the file exists to keep -- the
+            // evidence is always at the tail.
             if (File.Exists(path) && new FileInfo(path).Length > MaxBytes)
-                File.WriteAllText(path, string.Empty);
+            {
+                try
+                {
+                    KeepTail(path, MaxBytes / 2);
+                }
+                catch { /* rotation is best-effort; the append below still happens */ }
+            }
 
             // FileShare.ReadWrite so a concurrently-running second
             // window of the same process does not open-exclusively us.
@@ -81,6 +87,25 @@ internal static partial class NativeStderrCapture
         {
             // Best-effort by contract: silent on failure.
         }
+    }
+
+    /// <summary>
+    /// Rewrite <paramref name="path"/> holding only its last
+    /// <paramref name="keepBytes"/> bytes. ReadWrite sharing because a
+    /// concurrently-running second instance may hold the file open for
+    /// appending; if that same instance then blocks the rewrite, the
+    /// caller treats rotation as failed and keeps appending.
+    /// </summary>
+    private static void KeepTail(string path, long keepBytes)
+    {
+        using var src = new FileStream(
+            path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (src.Length <= keepBytes) return;
+        src.Seek(-keepBytes, SeekOrigin.End);
+        using var tail = new MemoryStream((int)keepBytes);
+        src.CopyTo(tail);
+        File.WriteAllBytes(path, tail.ToArray());
     }
 
     private const int StdErrorHandle = -12; // STD_ERROR_HANDLE

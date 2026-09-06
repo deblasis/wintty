@@ -16,6 +16,9 @@ step: *std.Build.Step,
 output: std.Build.LazyPath,
 /// The import library for DLL builds on Windows (.lib), null otherwise.
 implib: ?std.Build.LazyPath = null,
+/// The MSVC PDB for DLL builds on Windows, null otherwise. User minidumps
+/// captured by the app are only symbolizable against this file.
+pdb: ?std.Build.LazyPath = null,
 dsym: ?std.Build.LazyPath,
 pkg_config: ?std.Build.LazyPath,
 pkg_config_static: ?std.Build.LazyPath,
@@ -94,6 +97,14 @@ pub fn initShared(
         .search_strategy = .mode_first,
     };
 
+    // Stripping a Windows MSVC DLL saves no bytes: the debug info lives in
+    // the .pdb beside the PE, not inside it. Honoring -Dstrip here would
+    // ship releases whose user minidumps can never be symbolized, so the
+    // strip default keeps applying to every other artifact and target.
+    const strip = deps.config.strip and
+        !(deps.config.target.result.os.tag == .windows and
+            deps.config.target.result.abi == .msvc);
+
     const lib = b.addLibrary(.{
         .name = "ghostty",
         .linkage = .dynamic,
@@ -101,9 +112,9 @@ pub fn initShared(
             .root_source_file = b.path("src/main_c.zig"),
             .target = deps.config.target,
             .optimize = deps.config.optimize,
-            .strip = deps.config.strip,
+            .strip = strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
-            .unwind_tables = if (deps.config.strip) .none else .sync,
+            .unwind_tables = if (strip) .none else .sync,
         }),
 
         // Fails on self-hosted x86_64
@@ -186,6 +197,11 @@ pub fn initShared(
             lib.getEmittedImplib()
         else
             null,
+        .pdb = if (deps.config.target.result.os.tag == .windows and
+            deps.config.target.result.abi == .msvc)
+            lib.getEmittedPdb()
+        else
+            null,
         .dsym = dsymutil,
         .pkg_config = pcs.shared,
         .pkg_config_static = pcs.static,
@@ -229,6 +245,11 @@ pub fn install(self: *const GhosttyLib, name: []const u8) void {
     const step = b.getInstallStep();
     const lib_install = b.addInstallLibFile(self.output, name);
     step.dependOn(&lib_install.step);
+
+    if (self.pdb) |pdb| {
+        const pdb_install = b.addInstallLibFile(pdb, "ghostty.pdb");
+        step.dependOn(&pdb_install.step);
+    }
 
     if (self.pkg_config) |pc| {
         step.dependOn(&b.addInstallFileWithDir(

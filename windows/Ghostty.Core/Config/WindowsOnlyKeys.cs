@@ -75,6 +75,8 @@ public static class WindowsOnlyKeys
             "Minimum severity written to the app log: trace, debug, info (default), warn, error, or off. An unrecognized value falls back to info silently."),
         new("log-filter",
             "Comma-separated CATEGORY=LEVEL pairs overriding log-level per component (longest matching category prefix wins). Malformed pairs and unknown levels are skipped silently."),
+        new("hang-dump",
+            "Capture scope of the hang watchdog's dump when the UI thread stalls: triage (default, stacks and locks only) or full (all process memory, which can include terminal output and secrets)."),
     ];
 
     public static readonly FrozenSet<string> Set =

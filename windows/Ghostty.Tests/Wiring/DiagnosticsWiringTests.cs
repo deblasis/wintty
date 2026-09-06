@@ -60,6 +60,53 @@ public class DiagnosticsWiringTests
         // early step would not have started at all.
         Assert.Equal(0, arm.Index);
     }
+
+    [Fact]
+    public void OnLaunchedSeedsTheHangWatchdogDumpModeOnceConfigExists()
+    {
+        var method = App().Method("OnLaunched");
+        var config = method.Body!.Statements
+            .Select((s, i) => (Statement: s, Index: i))
+            .Single(t => t.Statement is ExpressionStatementSyntax e &&
+                         e.Expression is AssignmentExpressionSyntax a &&
+                         a.Right is ObjectCreationExpressionSyntax c &&
+                         c.Type.ToString() == "ConfigService");
+        var seed = method.Body.Statements
+            .Select((s, i) => (Statement: s, Index: i))
+            .Single(t => t.Statement is ExpressionStatementSyntax e &&
+                         e.Expression is InvocationExpressionSyntax i &&
+                         i.CalleeText() == "Diagnostics.HangWatchdog.ConfigureDumpMode");
+
+        // The watchdog arms before the config service can exist, so the
+        // hang-dump scope reaches it only through this seed. It has to
+        // follow the construction, and a stall in the window before it
+        // captures the triage default, which is the safe direction.
+        Assert.True(config.Index < seed.Index,
+            "the hang dump mode must be seeded after the config service is constructed");
+    }
+
+    [Fact]
+    public void OnLaunchedShowsTheHangNoticeAfterTheNotificationServiceExists()
+    {
+        var method = App().Method("OnLaunched");
+        var service = method.Body!.Statements
+            .Select((s, i) => (Statement: s, Index: i))
+            .Single(t => t.Statement is ExpressionStatementSyntax e &&
+                         e.Expression is AssignmentExpressionSyntax a &&
+                         a.Right is ObjectCreationExpressionSyntax c &&
+                         c.Type.ToString() == "Ghostty.Core.Notifications.NotificationService");
+        var evaluate = method.Body.Statements
+            .Select((s, i) => (Statement: s, Index: i))
+            .Single(t => t.Statement is ExpressionStatementSyntax e &&
+                         e.Expression is InvocationExpressionSyntax i &&
+                         i.CalleeText() == "ShowPreviousSessionHangNotice");
+
+        // The evaluation's only output is a notice on the service; run
+        // before it exists, the evidence would be read and the marker
+        // written while the notice itself is dropped on the floor.
+        Assert.True(service.Index < evaluate.Index,
+            "the hang-evidence evaluation must run after the notification service is constructed");
+    }
 }
 
 file static class DiagnosticsSyntaxQueries

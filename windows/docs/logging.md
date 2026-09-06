@@ -3,6 +3,10 @@
 Ghostty's Windows shell emits diagnostics through `Microsoft.Extensions.Logging`
 with two sinks wired at startup.
 
+Crash dumps, hang dumps, and the other on-disk diagnostic artifacts
+outside this logging pipeline are covered in
+[diagnostics.md](diagnostics.md).
+
 ## Sinks
 
 ### ETW (EventSource)

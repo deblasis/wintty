@@ -463,13 +463,136 @@ public partial class App : Application
 
     private static readonly object _crashLogLock = new();
 
+    // Enough of crash.log to hold every entry that could postdate the
+    // previous launch; the file itself is unbounded.
+    private const long CrashLogTailBytes = 64 * 1024;
+
+    /// <summary>
+    /// Show the one-per-stall notice for hang evidence a previous
+    /// session left in crash.log (#1046). Best-effort by contract: any
+    /// I/O failure gives up on the notice, never on the launch.
+    /// </summary>
+    private void ShowPreviousSessionHangNotice()
+    {
+        // The launch instant, captured before any evaluation I/O: a
+        // stall in the moments between the two must still count as new
+        // next launch, so the marker cannot say "now at write time".
+        var launchedAt = DateTimeOffset.UtcNow;
+        try
+        {
+            var root = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Ghostty.Core.AppIdentity.StateDirName);
+            var markerPath = Path.Combine(root, "last-launch");
+
+            // A missing or unparseable marker means "nothing has been
+            // reported yet", so any stall entry in the log is news.
+            var lastLaunch = DateTimeOffset.MinValue;
+            if (File.Exists(markerPath))
+            {
+                if (!DateTimeOffset.TryParseExact(
+                        File.ReadAllText(markerPath).Trim(),
+                        "O",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind,
+                        out lastLaunch))
+                {
+                    lastLaunch = DateTimeOffset.MinValue;
+                }
+            }
+
+            var outcome = Ghostty.Core.Diagnostics.HangEvidenceStartup.Resolve(
+                ReadCrashLogTail(Path.Combine(root, "crash.log")),
+                lastLaunch);
+
+            // Written after the evaluation and whether or not a notice
+            // follows: the next launch compares against THIS one, so a
+            // stall logged later in this session still reads as new
+            // then. A failed write means the notice may repeat next
+            // launch; losing it entirely would be worse.
+            File.WriteAllText(markerPath, $"{launchedAt:O}");
+
+            if (!outcome.Notify) return;
+
+            var hangsDir = Path.Combine(root, "hangs");
+            // Null-conditional out of parity with the field's declared
+            // nullability, not out of doubt: the wiring pin holds this
+            // call after the service's construction.
+            _notificationService?.Show(new Ghostty.Core.Notifications.Notice
+            {
+                Title = "Wintty froze and captured evidence",
+                Message = "Wintty froze in a previous session and captured a hang dump in "
+                    + hangsDir + ", which may contain sensitive terminal content.",
+                Severity = Ghostty.Core.Notifications.NoticeSeverity.Informational,
+                IsClosable = true,
+                DedupKey = "hang-evidence",
+                Actions = new Ghostty.Core.Notifications.NoticeAction[]
+                {
+                    // Shell-executing a directory opens it in Explorer,
+                    // the same open pattern the config file uses.
+                    new(
+                        "Open folder",
+                        () =>
+                        {
+                            try
+                            {
+                                System.Diagnostics.Process.Start(
+                                    new System.Diagnostics.ProcessStartInfo
+                                    {
+                                        FileName = hangsDir,
+                                        UseShellExecute = true,
+                                    });
+                            }
+                            catch { /* a folder that will not open must not take the app down */ }
+                        },
+                        IsPrimary: true),
+                    // SetContent races the clipboard broker and can throw
+                    // COMException; the path is in the message either way.
+                    new(
+                        "Copy path",
+                        () =>
+                        {
+                            try
+                            {
+                                var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                                data.SetText(hangsDir);
+                                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
+                            }
+                            catch { /* clipboard busy; the path is one glance away */ }
+                        }),
+                },
+            });
+        }
+        catch
+        {
+            // Deliberately bare: a notice about evidence is the
+            // definition of not worth blocking the launch for.
+        }
+    }
+
+    private static string? ReadCrashLogTail(string path)
+    {
+        if (!File.Exists(path)) return null;
+
+        // ReadWrite sharing like ConfigIniFile: another instance of the
+        // app may hold the log open for appending.
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length > CrashLogTailBytes)
+            stream.Seek(-CrashLogTailBytes, SeekOrigin.End);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         // UI-thread stall watchdog (#1033): a hang writes no exception
-        // anywhere, so this records it -- a crash.log entry plus a full
-        // minidump of the still-hung process under
-        // %LOCALAPPDATA%\Wintty\hangs\. First thing in the launch: the
-        // #1036 class of hang existed from the first frame.
+        // anywhere, so this records it -- a crash.log entry plus a
+        // minidump of the still-hung process (triage scope by default,
+        // full via hang-dump) under %LOCALAPPDATA%\Wintty\hangs\. First
+        // thing in the launch: the #1036 class of hang existed from the
+        // first frame.
         Diagnostics.HangWatchdog.Start(DispatcherQueue.GetForCurrentThread());
 
         // Set the explicit AppUserModelID. This MUST happen before
@@ -561,6 +684,12 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
+        // The watchdog armed above, before the config service could
+        // exist; hand it the hang-dump scope now, still well inside the
+        // first stall window. Until this line a stall captures the
+        // triage default.
+        Diagnostics.HangWatchdog.ConfigureDumpMode(_configService.HangDump);
+
         // build the factory from Ghostty config before any other service constructs an
         // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Wintty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
@@ -645,6 +774,14 @@ public partial class App : Application
                 persistMode: PersistNoColorMode);
             if (noColorNotice is not null) _notificationService.Show(noColorNotice);
         }
+
+        // Hang evidence from a previous session (#1046): the watchdog
+        // logged a stall while the UI thread was hung, and a hung UI
+        // thread cannot show anything, so this launch is the first
+        // moment the user can be told. One notice per stall event; the
+        // last-launch marker inside keeps later launches quiet unless a
+        // newer stall lands.
+        ShowPreviousSessionHangNotice();
 
         // Single-instance gate. Acted on here -- after the logger factory
         // exists (so failures are visible in Release), but before the
