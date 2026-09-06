@@ -1305,7 +1305,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // the animation rate for the life of the tab -- and a
                 // custom shader is exactly what tends to get a surface
                 // abandoned in the first place.
-                if (self.device_recovery_abandoned) return null;
+                //
+                // One exception: a health report we still owe. The push is
+                // best-effort against a full mailbox and only retries from
+                // a draw, and an abandoned surface has no other draw source
+                // once its shell goes quiet -- so without this a pane the
+                // embedder has been told to stop watching could stay
+                // silently dark with nothing left to say so.
+                if (self.device_recovery_abandoned) {
+                    if (!self.health_report_pending.load(.acquire)) return null;
+                    return .{ .delay_ms = draw_interval_ms, .kind = .draw };
+                }
                 if (self.device_recovery_retry_at) |at| {
                     const now: std.Io.Timestamp = .now(global.io(), recovery_clock);
                     const remaining_ms = now.durationTo(at).toMilliseconds();
@@ -1392,6 +1402,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pub fn setVisible(self: *Self, visible: bool) void {
             self.visible = visible;
             self.syncDisplayLink(null, null);
+
+            // Coming back into view, re-send the health we last reported
+            // even though it has not changed. Health is edge-triggered,
+            // and a surface that went unhealthy and was then hidden has
+            // no edge left to send: an embedder that stopped counting a
+            // pane it could not show the user has no other way to learn
+            // what it is looking at now. The push itself rides the retry
+            // in `drawFrame`, which runs on the draw the visible
+            // transition already forces.
+            if (visible) self.health_report_pending.store(true, .release);
 
             // When we're hidden, release our GPU resources if GPU
             // operations are allowed from this thread. Apprts where
@@ -2500,10 +2520,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// carries no clock tag, so two clocks would compare silently.
         const recovery_clock: std.Io.Clock = .boot;
 
-        /// Stop rebuilding this surface's device. It stays dark and
-        /// unhealthy until the tab is closed, because every remaining
-        /// option is worse: a rebuild loop burns a core and fills the log
-        /// forever, and there is nothing else here that can fix a GPU.
+        /// Stop rebuilding this surface's device. It stays dark until the
+        /// tab is closed, because every remaining option is worse: a
+        /// rebuild loop burns a core and fills the log forever, and there
+        /// is nothing else here that can fix a GPU. The surface reports
+        /// `.abandoned` so the embedder can say that rather than leave
+        /// the user waiting on a rebuild that is not coming.
         fn abandonRecovery(self: *Self, reason: AbandonReason) void {
             // Idempotent, so the first reason recorded is the true one.
             // An abandon on one path can be followed by the errdefer
@@ -2511,7 +2533,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // lines are worse than one.
             if (self.device_recovery_abandoned) return;
             self.device_recovery_abandoned = true;
-            self.reportHealth(.unhealthy);
+            // `.abandoned`, not `.unhealthy`. The surface is already
+            // unhealthy by the time anything gives up on it, and
+            // `reportHealth` drops a report that repeats the current
+            // value -- so reporting unhealthy here told nobody anything,
+            // and an embedder had no way to tell a rebuild in progress
+            // from one that will never come.
+            self.reportHealth(.abandoned);
 
             // Only blame a shader that was actually built and bound, and
             // only for the reason it could plausibly have caused. See

@@ -332,17 +332,53 @@ internal sealed partial class GhosttyHost : IDisposable
         // SurfaceFree below: a reused address can only be added by a later
         // Update, which is queued behind this.
         var handle = surface.Handle;
-        _dispatcher.TryEnqueue(() =>
-        {
-            // Forget first, then guard -- the opposite order to the action
-            // case, deliberately. There the guard comes first so the set is
-            // never mutated without the change being applied; here the surface
-            // is gone whether or not there is anywhere to show it, and a
-            // missing service means shutdown, when no banner matters anyway.
-            var change = _rendererHealthNotices.Forget(handle);
-            if (Ghostty.App.NotificationService is not { } notifications) return;
-            if (change.Dismiss is { } dismiss) notifications.Dismiss(dismiss);
-        });
+        _dispatcher.TryEnqueue(() => ApplyRendererHealth(
+            // Forget unconditionally: the surface is gone whether or not there
+            // is anywhere left to show a banner, and ApplyRendererHealth is
+            // what tolerates the service being absent during shutdown.
+            _rendererHealthNotices.Forget(handle)));
+    }
+
+    /// <summary>
+    /// Stop counting a surface towards the renderer-health banner because it
+    /// has gone off screen, and apply whatever that does to the banner.
+    /// </summary>
+    /// <remarks>
+    /// A hidden pane cannot recover: recovery runs from a draw, and a hidden
+    /// surface does not draw. So a pane that went dark and was then switched
+    /// away from would hold the banner up over a window where everything the
+    /// user can see is fine, until they happened to return to that tab.
+    ///
+    /// Safe to drop because the renderer re-sends its health when a surface
+    /// becomes visible again, precisely so this can forget one meanwhile. UI
+    /// thread only, like everything else touching the source.
+    /// </remarks>
+    internal void ForgetRendererHealth(IntPtr surfaceHandle)
+    {
+        if (surfaceHandle == IntPtr.Zero) return;
+
+        // Enqueued for ordering, not for thread affinity: this already runs
+        // on the UI thread. OnAction decodes off-thread and enqueues its
+        // Update, so a tab switch racing a device loss can arrive here first,
+        // find an empty set, and let the Update behind it add a surface that
+        // is now off screen and will never draw or report again. Going
+        // through the same queue puts this behind that Update. Same reason as
+        // Unregister above.
+        _dispatcher.TryEnqueue(() => ApplyRendererHealth(
+            _rendererHealthNotices.Forget(surfaceHandle)));
+    }
+
+    // Both halves, always. A change can carry a Dismiss and a Show together
+    // when one banner replaces another, and dropping the Show there leaves
+    // panes that are still broken with no banner at all.
+    private static void ApplyRendererHealth(
+        Ghostty.Core.Renderer.RendererHealthNoticeChange change)
+    {
+        if (Ghostty.App.NotificationService is not { } notifications) return;
+        // Dismiss first: the two banners share a DedupKey, so showing before
+        // the old one comes down makes the replacement a no-op.
+        if (change.Dismiss is { } dismiss) notifications.Dismiss(dismiss);
+        if (change.Show is { } show) notifications.Show(show);
     }
 
     /// <summary>
@@ -1057,10 +1093,8 @@ internal sealed partial class GhosttyHost : IDisposable
                         Marshal.ReadInt32(actionPtr, 8);
                     _dispatcher.TryEnqueue(() =>
                     {
-                        if (Ghostty.App.NotificationService is not { } notifications) return;
-                        var change = _rendererHealthNotices.Update(surfaceHandle, health);
-                        if (change.Show is { } show) notifications.Show(show);
-                        if (change.Dismiss is { } dismiss) notifications.Dismiss(dismiss);
+                        ApplyRendererHealth(
+                            _rendererHealthNotices.Update(surfaceHandle, health));
                     });
                     return 1;
                 }

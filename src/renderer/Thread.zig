@@ -352,15 +352,19 @@ fn drainMailbox(self: *Thread) !void {
                 // Visibility affects our QoS class
                 self.setQosClass();
 
+                // Notify the renderer so it can update any state. Before the
+                // forced draw below, not after: becoming visible arms a
+                // health re-report that the next draw carries, and arming it
+                // afterwards would leave that to whatever draw happened to
+                // come next.
+                self.renderer.setVisible(v);
+
                 // If we became visible then we immediately rebuild cells
                 // (renderCallback skips updateFrame while invisible) and
                 // draw. Going through renderCallback also reschedules
                 // any Kitty graphics animation wakeup that lapsed
                 // while we were invisible.
                 if (v) _ = renderCallback(self, undefined, undefined, {});
-
-                // Notify the renderer so it can update any state.
-                self.renderer.setVisible(v);
 
                 // Hiding is the strongest "activity stopped" signal a
                 // surface gets, and it is also the moment this thread's

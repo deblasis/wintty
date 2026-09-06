@@ -868,6 +868,7 @@ typedef struct {
 typedef enum {
   GHOSTTY_RENDERER_HEALTH_HEALTHY,
   GHOSTTY_RENDERER_HEALTH_UNHEALTHY,
+  GHOSTTY_RENDERER_HEALTH_ABANDONED,
 } ghostty_action_renderer_health_e;
 
 // renderer.CustomShaderFailure
