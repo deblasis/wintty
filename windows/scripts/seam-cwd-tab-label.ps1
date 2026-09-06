@@ -189,7 +189,7 @@ default-profile = $Profile
 $ConfigExtra
 "@
     $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-    $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; renderedH = ''; tooltip = ''; iconTooltip = ''; icon = '' }
+    $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; renderedH = ''; tooltip = ''; iconTooltip = ''; icon = ''; homeGlyph = $false; sawStarting = $false }
     $s = $null
     Write-Host "=== scenario $Name (profile $Profile) ==="
     try {
@@ -200,19 +200,75 @@ $ConfigExtra
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -AllowInput
         $script:MainHwnd64 = $s.Hwnd64
 
+        # Every field this scenario reads has to be one the seam still
+        # writes: absent, a boolean reads as $false and every assertion
+        # below it passes on silence.
+        $probeLabel = (Invoke-SeamCommandQuiet $s @{ op = 'tab-labels' }).labels[0]
+        foreach ($field in 'settling', 'home', 'hover', 'renderedHomeGlyph') {
+            if ($null -eq $probeLabel.PSObject.Properties[$field]) {
+                throw "HARNESS: the seam no longer reports '$field'; assertions on it would be dead"
+            }
+        }
+
+        # A tab wears the app's own icon while it starts. Catching that state
+        # is what makes the settled assertion below mean something: without
+        # it, a build that never starts a tab passes every line that follows.
+        # A machine fast enough to have finished already is a miss, not a
+        # product finding -- said out loud rather than silently skipped.
+        if ($probeLabel.settling) {
+            if ($probeLabel.iconKey -ne 'bundled:default') {
+                throw ("PRODUCT_FAIL: {0}: a starting tab wears '{1}', wanted the app's own icon" -f
+                    $Name, $probeLabel.iconKey)
+            }
+            $entry.sawStarting = $true
+        } else {
+            Write-Host ("  note: {0} had already started when first polled; the starting state was not observed" -f $Name)
+        }
+
+        # The profile's icon is only the tab's answer once the start is over,
+        # so waiting is what makes the next assert about the profile rather
+        # than about a race -- and it is the check that the borrowed icon is
+        # handed back.
+        $opened = Wait-Label $s { param($l) -not $l.settling } `
+            "$Name never finished starting (no first render and no report from its shell)"
+
         # The right shell has to be the one under test. The profile's icon
         # names the interpreter, so this doubles as the "did default-profile
         # take" check -- an unresolvable id silently falls through to the
         # first discovered profile, which would test cmd twice.
-        $opened = Invoke-SeamCommandQuiet $s @{ op = 'tab-labels' }
-        if ($opened.labels[0].iconKey -ne $WantIcon) {
+        if ($opened.iconKey -ne $WantIcon) {
             throw ("PRODUCT_FAIL: {0}: the tab opened on '{1}', wanted the '{2}' profile" -f
-                $Name, $opened.labels[0].iconKey, $WantIcon)
+                $Name, $opened.iconKey, $WantIcon)
         }
 
         # The shell has to reach a prompt before it can report anything.
-        [void](Wait-Label $s { param($l) $null -ne $l.cwd } `
-            "$Name never reported a directory at its first prompt (the native OSC 7 / OSC 9;9 arms are dead)")
+        $first = Wait-Label $s { param($l) $null -ne $l.cwd } `
+            "$Name never reported a directory at its first prompt (the native OSC 7 / OSC 9;9 arms are dead)"
+
+        # A shell that starts in the user's own directory is the one tab that
+        # draws the home glyph instead of printing a name. Both branches
+        # assert: the harness decides for itself whether the reported
+        # directory IS the profile directory, requires the product to agree,
+        # and then requires the drawing to match. A skip would otherwise read
+        # as a pass on a machine whose shells start somewhere else.
+        $atHome = $first.cwd.TrimEnd('\', '/') -eq $ProfileDir
+        if ($first.home -ne $atHome) {
+            throw ("PRODUCT_FAIL: {0}: the tab says home={1} for '{2}' while the profile directory is '{3}'" -f
+                $Name, $first.home, $first.cwd, $ProfileDir)
+        }
+        if ($atHome) {
+            if (-not $first.renderedHomeGlyph -or $first.rendered -ne '') {
+                throw ("PRODUCT_FAIL: {0}: at home the row should draw the glyph and print nothing; glyph={1} rendered='{2}'" -f
+                    $Name, $first.renderedHomeGlyph, $first.rendered)
+            }
+            $entry.homeGlyph = $true
+        } else {
+            if ($first.renderedHomeGlyph -or $first.rendered -eq '') {
+                throw ("PRODUCT_FAIL: {0}: away from home the row should print its name; glyph={1} rendered='{2}' cwd='{3}'" -f
+                    $Name, $first.renderedHomeGlyph, $first.rendered, $first.cwd)
+            }
+            $entry.homeGlyph = 'not exercised: the shell did not start at the profile directory'
+        }
 
         # The scenario's own way of putting the shell in $probe.
         & $Body $s $probe
@@ -221,10 +277,11 @@ $ConfigExtra
             "$Name did not report '$probe'"
         $entry.cwd = $label.cwd
 
-        # (ii) the strip's own text, from the row's TextBlock.
-        if ($label.rendered -ne $folder) {
-            throw ("PRODUCT_FAIL: {0}: the strip renders '{1}', the folder is '{2}' (cwd='{3}')" -f
-                $Name, $label.rendered, $folder, $label.cwd)
+        # (ii) the strip's own text, from the row's TextBlock. Away from home
+        # the glyph is down and the name is printed again.
+        if ($label.rendered -ne $folder -or $label.renderedHomeGlyph) {
+            throw ("PRODUCT_FAIL: {0}: the strip renders '{1}' (glyph={4}), the folder is '{2}' (cwd='{3}')" -f
+                $Name, $label.rendered, $folder, $label.cwd, $label.renderedHomeGlyph)
         }
         $entry.rendered = $label.rendered
 
@@ -235,6 +292,14 @@ $ConfigExtra
                 $Name, $label.renderedTooltip, $wantTip)
         }
         $entry.tooltip = $label.renderedTooltip
+
+        # A tab with a directory is owed a hover, and it is the same text:
+        # the null case (a hover that would only repeat the label) is what
+        # the model tests carry, since a shell that reports cannot produce it.
+        if ($label.hover -ne $label.tooltip) {
+            throw ("PRODUCT_FAIL: {0}: the hover is '{1}' while the tooltip is '{2}'" -f
+                $Name, $label.hover, $label.tooltip)
+        }
 
         # (iv) the icon's tooltip, exactly. A discovered profile is named after
         # its shell, so there the tooltip says the shell once and this cannot
@@ -265,6 +330,10 @@ $ConfigExtra
             throw ("PRODUCT_FAIL: {0}: the horizontal item's tooltip is '{1}', wanted '{2}'" -f
                 $Name, $flat.renderedTooltipH, $wantTip)
         }
+        if ($flat.renderedHomeGlyphH) {
+            throw ("PRODUCT_FAIL: {0}: the horizontal tab draws the home glyph while sitting in '{1}'" -f
+                $Name, $flat.cwd)
+        }
         $entry.renderedH = $flat.renderedH
         $tabNames = Get-UiaTabNames
         if (@($tabNames | Where-Object { $_ -like "*$folder*" }).Count -eq 0) {
@@ -284,9 +353,10 @@ $ConfigExtra
             throw ("APP_EXIT: the app exited during '{0}' (code {1})" -f $Name, $s.Proc.ExitCode)
         }
         $entry.ok = $true
-        Write-Host ("PASS {0}: cwd='{1}' label='{2}' (horizontal '{6}') tooltip='{3}' icon='{4}' ({5})" -f
+        Write-Host ("PASS {0}: cwd='{1}' label='{2}' (horizontal '{6}') tooltip='{3}' icon='{4}' ({5}) homeGlyph={7} sawStarting={8}" -f
             $Name, $entry.cwd, $entry.rendered, $entry.tooltip, $entry.icon,
-            ($entry.iconTooltip -replace "`n", ' / '), $entry.renderedH) -ForegroundColor Green
+            ($entry.iconTooltip -replace "`n", ' / '), $entry.renderedH, $entry.homeGlyph,
+            $entry.sawStarting) -ForegroundColor Green
     } catch {
         $msg = "$($_.Exception.Message)"
         $entry.error = $msg

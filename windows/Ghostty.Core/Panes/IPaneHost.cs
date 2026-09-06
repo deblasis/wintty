@@ -71,6 +71,15 @@ internal interface IPaneHost
     event EventHandler? LayoutChanged;
 
     /// <summary>
+    /// Raised when a leaf's surface produces renderable content for the
+    /// first time -- the shell-agnostic sign that a pane is alive, the same
+    /// one that ends the startup glow. The tab uses it to stop reading as
+    /// "starting". May be raised once per leaf; consumers treat repeats as
+    /// no-ops.
+    /// </summary>
+    event EventHandler? FirstRendered;
+
+    /// <summary>
     /// The newest activity stamp across every leaf's surface, in
     /// <see cref="System.Environment.TickCount64"/> milliseconds (0
     /// until some leaf has loaded). Read by the idle tracker's sweep --

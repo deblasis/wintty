@@ -28,12 +28,33 @@ internal sealed partial class TabIconPresenter : ContentControl
 {
     private TabIconViewModel? _vm;
     private PropertyChangedEventHandler? _handler;
+    private bool _showsTooltip = true;
 
     public TabIconPresenter()
     {
         IsTabStop = false;
         Unloaded += (_, _) => Detach();
     }
+
+    /// <summary>
+    /// Whether the presenter carries the icon's own tooltip (the shell).
+    /// Off on a pinned square: there the presenter is the whole item, the
+    /// nearest tooltip wins, and the item's -- the tab's title and
+    /// directory -- is the one a pointer needs to tell two pins apart.
+    /// </summary>
+    public bool ShowsTooltip
+    {
+        get => _showsTooltip;
+        set
+        {
+            if (_showsTooltip == value) return;
+            _showsTooltip = value;
+            ApplyTooltip();
+        }
+    }
+
+    private void ApplyTooltip()
+        => ToolTipService.SetToolTip(this, _showsTooltip ? _vm?.TooltipText : null);
 
     /// <summary>
     /// Bind this presenter to <paramref name="vm"/>. Any prior VM is
@@ -65,12 +86,12 @@ internal sealed partial class TabIconPresenter : ContentControl
             if (e.PropertyName is null
                 || e.PropertyName == nameof(TabIconViewModel.TooltipText))
             {
-                ToolTipService.SetToolTip(this, _vm?.TooltipText);
+                ApplyTooltip();
             }
         };
         vm.PropertyChanged += _handler;
         Rebuild();
-        ToolTipService.SetToolTip(this, vm.TooltipText);
+        ApplyTooltip();
     }
 
     private void Detach()

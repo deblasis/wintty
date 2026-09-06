@@ -88,7 +88,9 @@ internal sealed class TitleBarCoordinator
         // Tab/title plumbing.
         _tabs.ActiveTabChanged += (_, _) => RebindVerticalTitle();
         _tabs.ActiveTabChanged += (_, _) => HookActiveTabTitle();
-        _tabs.WindowTitleChanged += (_, _) => _window.Title = _tabs.ActiveTab.EffectiveTitle;
+        // WordTitle, not EffectiveTitle: the window title is words only, so
+        // the home glyph the strips draw reads "Home" here.
+        _tabs.WindowTitleChanged += (_, _) => _window.Title = _tabs.ActiveTab.WordTitle;
 
         RebindVerticalTitle();
         HookActiveTabTitle();
@@ -186,7 +188,7 @@ internal sealed class TitleBarCoordinator
     }
 
     private void UpdateVerticalTitleText()
-        => _verticalTitleText.Text = _boundTab?.EffectiveTitle ?? AppIdentity.ProductName;
+        => _verticalTitleText.Text = _boundTab?.WordTitle ?? AppIdentity.ProductName;
 
     /// <summary>
     /// Subscribe the active tab's active leaf to live title-change
@@ -209,7 +211,7 @@ internal sealed class TitleBarCoordinator
         _activeLeaf = leaf;
         leaf.Terminal().TitleChanged += OnLiveTitleChanged;
         tab.ShellReportedTitle = leaf.Terminal().CurrentTitle;
-        _window.Title = tab.EffectiveTitle;
+        _window.Title = tab.WordTitle;
 
         tab.PaneHost.LeafFocused += OnActiveTabLeafFocused;
     }

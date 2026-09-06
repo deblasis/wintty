@@ -148,5 +148,13 @@ public class TabLabelHomeTests
 
     [Fact]
     public void AssistiveClients_HearHome_NotTilde()
-        => Assert.Equal("Home", TabAccessibleText.Name("~"));
+    {
+        // The judgement is the model's: a tab drawn as the home glyph is
+        // named for what the glyph means, while a tab merely titled "~" by
+        // its shell keeps the name it gave itself.
+        var tab = new TabModel(new FakePaneHost()) { HomeDirectory = Home };
+        tab.ShellReportedCwd = Home;
+        Assert.Equal("Home", TabAccessibleText.Name(tab));
+        Assert.Equal("~", TabAccessibleText.Name("~"));
+    }
 }

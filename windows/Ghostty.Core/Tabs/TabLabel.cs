@@ -117,14 +117,91 @@ internal static class TabLabel
     /// The text a pointer resting on the tab is told: the whole directory,
     /// under whatever title outranks it. At home the collapsed form is the
     /// one glyph the label already shows, so the tooltip is where the real
-    /// directory belongs. When no directory is known the tooltip is the
-    /// label itself, which is what it always said.
+    /// directory belongs. A long directory keeps its root and its tail
+    /// (<see cref="Abbreviate"/>); the title line is never cut. When no
+    /// directory is known the tooltip is the label itself.
     /// </summary>
     internal static string Tooltip(string? title, string? displayCwd, string? cwd, string effectiveTitle)
     {
-        if (displayCwd is null) return effectiveTitle;
+        if (displayCwd is null) return Clamp(effectiveTitle);
         var path = displayCwd == "~" && cwd is not null ? StripExtendedPrefix(cwd.Trim()) : displayCwd;
-        return title is null ? path : title + "\n" + path;
+        path = Abbreviate(path, TooltipPathBudget);
+        return title is null ? path : Clamp(title) + "\n" + path;
+    }
+
+    /// <summary>
+    /// A title line long enough to be a paragraph is one a program wrote:
+    /// a shell can title a tab with anything it likes, and a tooltip is not
+    /// the place to render all of it.
+    /// </summary>
+    private static string Clamp(string title)
+        => title.Length <= TitleBudget ? title : title[..TitleBudget] + "…";
+
+    /// <summary>
+    /// Whether a label is the home glyph. The one title the strips draw
+    /// rather than print, and the one word-only surfaces spell out.
+    /// </summary>
+    internal static bool IsHome(string title) => title == "~";
+
+    /// <summary>
+    /// The label as a word, for the window title, the taskbar and the
+    /// palette, none of which can draw a glyph: <c>~</c> becomes "Home",
+    /// everything else is itself.
+    /// </summary>
+    internal static string Word(string title) => IsHome(title) ? "Home" : title;
+
+    /// <summary>
+    /// Characters of directory a tooltip line gets before the middle goes.
+    /// </summary>
+    internal const int TooltipPathBudget = 60;
+
+    /// <summary>
+    /// Characters of shell-supplied title a tooltip line gets.
+    /// </summary>
+    internal const int TitleBudget = 80;
+
+    /// <summary>
+    /// A long path with its middle elided: the root stays (<c>~</c>,
+    /// <c>C:</c>, <c>\\server\share</c>), then <c>…</c>, then as many
+    /// trailing segments as fit the budget, never fewer than the last one.
+    /// The tail is what a person recognises a directory by; the head is
+    /// what they already know. Never applied to a path that is acted on --
+    /// the clipboard and the launcher get the whole thing.
+    /// </summary>
+    internal static string Abbreviate(string path, int max)
+    {
+        // `\\?\UNC\server\share` is `\\server\share` wearing a prefix that
+        // says "do not normalise me"; split as written and the root would be
+        // the prefix rather than the server.
+        if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+            path = @"\\" + path[@"\\?\UNC\".Length..];
+        // A trailing separator names no segment, and counting it against the
+        // budget would abbreviate a path that fits.
+        path = path.TrimEnd('\\', '/');
+        if (path.Length <= max) return path;
+        var sep = path.Contains('/') && !path.Contains('\\') ? '/' : '\\';
+        var parts = path.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
+        var unc = path.StartsWith(@"\\", StringComparison.Ordinal)
+                  || path.StartsWith("//", StringComparison.Ordinal);
+        // The root token: `~`, a drive, or `\\server\share` (two segments).
+        var rootCount = unc ? 2 : 1;
+        if (parts.Length <= rootCount + 1) return path;
+        // A rooted POSIX path (`/home/alex`) has no root segment of its own:
+        // its leading separator is the root, and dropping it would render an
+        // absolute path as a relative one.
+        var lead = !unc && (path[0] is '\\' or '/') ? sep.ToString() : "";
+        var root = unc
+            ? new string(sep, 2) + string.Join(sep, parts[..2])
+            : lead + parts[0];
+        var ellipsis = "…";
+
+        for (var keep = parts.Length - rootCount - 1; keep >= 1; keep--)
+        {
+            var tail = string.Join(sep, parts[^keep..]);
+            var candidate = root + sep + ellipsis + sep + tail;
+            if (candidate.Length <= max || keep == 1) return candidate;
+        }
+        return path;
     }
 
     /// <summary>

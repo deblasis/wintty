@@ -838,6 +838,10 @@ internal static class TestSeam
                         json.WriteNumber("index", i);
                         json.WriteString("title", tab.EffectiveTitle);
                         json.WriteString("tooltip", tab.TooltipText);
+                        if (tab.HoverText is { } hover) json.WriteString("hover", hover);
+                        else json.WriteNull("hover");
+                        json.WriteBoolean("settling", tab.IsSettling);
+                        json.WriteBoolean("home", tab.IsHome);
                         json.WriteString("iconTooltip", tab.TabIcon.TooltipText);
                         json.WriteString("profile", tab.ProfileSnapshot?.DisplayName ?? "");
                         if (tab.PaneHost.ActiveLeaf.LastCwd is { } cwd)
@@ -851,6 +855,7 @@ internal static class TestSeam
                             if (row.Tooltip is { } tip) json.WriteString("renderedTooltip", tip);
                             else json.WriteNull("renderedTooltip");
                             json.WriteString("renderedIcon", RenderedIcon(row.Icon));
+                            json.WriteBoolean("renderedHomeGlyph", row.HomeGlyph);
                         }
                         // The other layout's surface, present only while the
                         // horizontal strip is the one on screen: the header
@@ -860,6 +865,7 @@ internal static class TestSeam
                             json.WriteString("renderedH", item.Title);
                             if (item.Tooltip is { } tipH) json.WriteString("renderedTooltipH", tipH);
                             else json.WriteNull("renderedTooltipH");
+                            json.WriteBoolean("renderedHomeGlyphH", item.HomeGlyph);
                         }
                         json.WriteEndObject();
                     }

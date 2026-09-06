@@ -215,7 +215,8 @@ internal sealed partial class TabOverviewControl : UserControl
 
         var title = new TextBlock
         {
-            Text = tab.EffectiveTitle,
+            // The grid prints; it draws no glyph, so a home tab is spelled.
+            Text = tab.WordTitle,
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
             FontSize = titleFontSize,

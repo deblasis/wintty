@@ -32,6 +32,7 @@ internal sealed class PaneActionRouter
     private readonly Func<IReadOnlyList<ResolvedProfile>>? _getProfiles = null;
     private readonly Action<string, ProfileLaunchTarget>? _openProfile = null;
     private readonly Action<string>? _bindingAction = null;
+    private readonly Func<string?>? _getDefaultProfileId = null;
 
     public PaneActionRouter(TabManager tabs)
     {
@@ -42,12 +43,14 @@ internal sealed class PaneActionRouter
         TabManager tabs,
         Func<IReadOnlyList<ResolvedProfile>>? getProfiles,
         Action<string, ProfileLaunchTarget>? openProfile,
-        Action<string>? bindingAction = null)
+        Action<string>? bindingAction = null,
+        Func<string?>? getDefaultProfileId = null)
         : this(tabs)
     {
         _getProfiles = getProfiles;
         _openProfile = openProfile;
         _bindingAction = bindingAction;
+        _getDefaultProfileId = getDefaultProfileId;
     }
 
     public TabManager Tabs => _tabs;
@@ -302,7 +305,7 @@ internal sealed class PaneActionRouter
             case PaneAction.Redo:            concrete.Redo(); break;
 
             // Tabs
-            case PaneAction.NewTab: _tabs.NewTab(); break;
+            case PaneAction.NewTab: OpenDefaultProfileTab(); break;
             case PaneAction.CloseActiveProgressive: HandleProgressiveClose(); break;
             case PaneAction.NextTab: _tabs.Next(); break;
             case PaneAction.PrevTab: _tabs.Prev(); break;
@@ -705,5 +708,23 @@ internal sealed class PaneActionRouter
         var id = ProfileSlotResolver.Resolve(_getProfiles(), slot);
         if (id is null) return;
         _openProfile(id, ProfileLaunchTarget.NewTab);
+    }
+
+    /// <summary>
+    /// The new-tab chord opens what the + button opens: the default
+    /// profile, through the window's funnel. It used to open a bare tab
+    /// with no profile at all, which wore the generic icon and read as the
+    /// product name until its shell spoke. The bare tab stays as the
+    /// fallback for a registry with no default.
+    /// </summary>
+    private void OpenDefaultProfileTab()
+    {
+        // The registry's own answer, the same one the new-tab button asks
+        // for. Deriving it a second time here is how the two drift.
+        var defaultId = _getDefaultProfileId?.Invoke();
+        if (defaultId is not null && _openProfile is not null)
+            _openProfile(defaultId, ProfileLaunchTarget.NewTab);
+        else
+            _tabs.NewTab();
     }
 }

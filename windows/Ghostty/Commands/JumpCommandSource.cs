@@ -40,7 +40,7 @@ internal sealed class JumpCommandSource : ICommandSource
                 commands.Add(new CommandItem
                 {
                     Id = $"jump:tab{tabIdx}",
-                    Title = $"Focus: {tab.EffectiveTitle}",
+                    Title = $"Focus: {tab.WordTitle}",
                     Description = $"Switch to tab {tabIdx + 1}",
                     Category = CommandCategory.Navigation,
                     LeadingIcon = "\uE737",
@@ -56,7 +56,7 @@ internal sealed class JumpCommandSource : ICommandSource
                     commands.Add(new CommandItem
                     {
                         Id = $"jump:tab{tabIdx}:pane{paneIdx}",
-                        Title = $"Focus: {tab.EffectiveTitle} \u2014 pane {paneIdx + 1}",
+                        Title = $"Focus: {tab.WordTitle} \u2014 pane {paneIdx + 1}",
                         Description = $"Switch to tab {tabIdx + 1}, pane {paneIdx + 1}",
                         Category = CommandCategory.Navigation,
                         LeadingIcon = "\uE737",
