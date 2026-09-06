@@ -5183,26 +5183,29 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 break :search;
             }
 
-            _ = s.state.mailbox.push(
-                global.io(),
+            // This runs on the UI thread and the search thread drains
+            // only when it is woken, so the push must not be able to
+            // park; it takes ownership of the needle either way.
+            _ = terminal.search.Thread.pushMailbox(
+                s.state.mailbox,
+                &s.state.wakeup,
                 .{ .change_needle = try .init(
                     self.alloc,
                     text,
                 ) },
-                .forever,
             );
             s.state.wakeup.notify() catch {};
         },
 
         .navigate_search => |nav| {
             const s: *Search = if (self.search) |*s| s else return false;
-            _ = s.state.mailbox.push(
-                global.io(),
+            _ = terminal.search.Thread.pushMailbox(
+                s.state.mailbox,
+                &s.state.wakeup,
                 .{ .select = switch (nav) {
                     .next => .next,
                     .previous => .prev,
                 } },
-                .forever,
             );
             s.state.wakeup.notify() catch {};
         },

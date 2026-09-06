@@ -523,6 +523,61 @@ pub const EventCallback = *const fn (event: Event, userdata: ?*anyopaque) void;
 /// The type used for sending messages to the thread.
 pub const Mailbox = BlockingQueue(Message, 64);
 
+/// Push a message to a search thread's mailbox, re-issuing the thread's
+/// wake between attempts, and give up rather than parking.
+///
+/// This thread drains its mailbox in exactly one place, the `wakeup`
+/// callback; the refresh timer does not drain. The wake is therefore the
+/// only thing that can free a slot, so a producer that waits inside the
+/// queue withholds it. That matters most because the producer is the UI
+/// thread: a push that parks here is a frozen window, the same failure
+/// #1036 was.
+///
+/// Takes ownership of `msg`. It is either queued or released, so giving
+/// up cannot leak the needle's payload.
+pub fn pushMailbox(
+    mailbox: *Mailbox,
+    wakeup: *xev.Async,
+    msg: Message,
+) Mailbox.Size {
+    return pushMailboxBounded(
+        mailbox,
+        wakeup,
+        msg,
+        Mailbox.wake_retry_timeout_ns,
+        Mailbox.wake_retry_attempts,
+    );
+}
+
+fn pushMailboxBounded(
+    mailbox: *Mailbox,
+    wakeup: *xev.Async,
+    msg: Message,
+    timeout_ns: u64,
+    max_attempts: usize,
+) Mailbox.Size {
+    const size = mailbox.pushWake(
+        global.io(),
+        msg,
+        wakeup,
+        notifyWake,
+        timeout_ns,
+        max_attempts,
+    );
+    if (size == 0) {
+        log.warn("search mailbox full, message dropped", .{});
+        msg.deinit();
+    }
+
+    return size;
+}
+
+/// The `pushWake` wake for an `xev.Async`. A notify that fails means the
+/// loop is gone, which the retry budget already gives up on.
+fn notifyWake(wakeup: *xev.Async) void {
+    wakeup.notify() catch {};
+}
+
 /// The messages that can be sent to the thread.
 pub const Message = union(enum) {
     /// Represents a write request. Magic number comes from the max size
@@ -536,6 +591,16 @@ pub const Message = union(enum) {
 
     /// Select a search result.
     select: ScreenSearch.Select,
+
+    /// Release anything the message owns. The mailbox push calls this
+    /// when it has to give the message up, so a variant that starts
+    /// owning memory has to free it here or it leaks on that path.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .change_needle => |v| v.deinit(),
+            .select => {},
+        }
+    }
 };
 
 /// Events that can be emitted from the search thread. The caller
@@ -678,4 +743,40 @@ test {
             .y = 0,
         } }, t.screens.active.pages.pointFromPin(.screen, sel.end).?);
     }
+}
+
+test "search mailbox push frees the needle it has to give up" {
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    const mailbox = try Mailbox.create(alloc);
+    defer mailbox.destroy(alloc);
+
+    var wakeup: xev.Async = try .init();
+    defer wakeup.deinit();
+
+    // Fill the mailbox and never drain it. That is what a search thread
+    // asleep on a lost wake looks like from the UI thread's side. These
+    // fillers own nothing, so only the needle below can leak.
+    while (mailbox.push(io, .{ .select = .next }, .{ .instant = {} }) > 0) {}
+
+    // Long enough that MessageData has to allocate rather than inline it.
+    const needle: [300]u8 = @splat('a');
+
+    // A tiny budget so the test finishes; production uses the mailbox's
+    // wake_retry_* defaults.
+    const result = pushMailboxBounded(
+        mailbox,
+        &wakeup,
+        .{ .change_needle = try .init(alloc, @as([]const u8, &needle)) },
+        1 * std.time.ns_per_ms,
+        3,
+    );
+
+    // It gave up rather than parking the UI thread, and the testing
+    // allocator fails the test if the refused needle was not freed.
+    try testing.expectEqual(@as(Mailbox.Size, 0), result);
+
+    // Nothing was taken from the queue on the way.
+    try testing.expect(mailbox.pop(io) != null);
 }
