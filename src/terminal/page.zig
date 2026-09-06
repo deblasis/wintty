@@ -1027,9 +1027,15 @@ pub const Page = struct {
         }
 
         // If we are growing columns, then we need to ensure spacer heads
-        // are cleared.
-        if (self.size.cols > other.size.cols) {
-            const last = &cells[other.size.cols - 1];
+        // are cleared. A spacer head only ever sits in the last column of
+        // the source row, so this only applies to a copy that reaches it.
+        // The column is absolute, so it has to be indexed off the row and
+        // not off `cells`, which only covers the copied range.
+        if (self.size.cols > other.size.cols and
+            x_start < x_end and
+            x_end == other.size.cols)
+        {
+            const last = &dst_row.cells.ptr(self.memory)[x_end - 1];
             if (last.wide == .spacer_head) {
                 last.wide = .narrow;
             }
@@ -3659,6 +3665,51 @@ test "Page cloneRowFrom partial hyperlink in same page omit" {
         }
     }
     try testing.expectEqual(@as(usize, 1), page.hyperlinkCount());
+}
+
+test "Page clonePartialRowFrom spacer head into wider page from x_start" {
+    var src = try Page.init(.{ .cols = 5, .rows = 2 });
+    defer src.deinit();
+    var dst = try Page.init(.{ .cols = 8, .rows = 2 });
+    defer dst.deinit();
+
+    // Write a soft-wrapped row that ends with a spacer head, which is
+    // what a wide character that didn't fit leaves behind.
+    {
+        for (0..src.size.cols - 1) |x| {
+            const rac = src.getRowAndCell(x, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = @intCast(x + 1) } },
+            };
+        }
+
+        const rac = src.getRowAndCell(src.size.cols - 1, 0);
+        rac.row.wrap = true;
+        rac.cell.wide = .spacer_head;
+    }
+
+    // Clone the tail of the row, including the spacer head.
+    try dst.clonePartialRowFrom(
+        &src,
+        dst.getRow(0),
+        src.getRow(0),
+        2,
+        dst.size.cols,
+    );
+
+    for (2..src.size.cols - 1) |x| {
+        const rac = dst.getRowAndCell(x, 0);
+        try testing.expectEqual(
+            @as(u21, @intCast(x + 1)),
+            rac.cell.content.codepoint.data,
+        );
+    }
+
+    // The spacer head is meaningless in the wider page so it must be
+    // cleared, otherwise it is a spacer head in the middle of a row.
+    const rac = dst.getRowAndCell(src.size.cols - 1, 0);
+    try testing.expectEqual(Cell.Wide.narrow, rac.cell.wide);
 }
 
 test "Page moveCells text-only" {
