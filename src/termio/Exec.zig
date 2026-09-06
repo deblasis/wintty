@@ -177,6 +177,15 @@ pub fn threadEnter(
     var termios_timer = try xev.Timer.init();
     errdefer termios_timer.deinit();
 
+    // The write accounting outlives a backend run: it lives on the
+    // Termio, not on this thread data, and a run that ends with writes
+    // still queued never sees their completions. Start every run from
+    // zero so leftovers can't hold us at the cap forever. This has to
+    // happen before the read thread exists, because the reader is what
+    // observes the cap and would otherwise refuse replies against a
+    // previous run's backlog.
+    io.write_limit.reset();
+
     // Start our read thread
     const read_thread = try std.Thread.spawn(
         .{},
@@ -184,12 +193,6 @@ pub fn threadEnter(
         .{ pty_fds.read, io, pipe[0] },
     );
     read_thread.setName(global.io(), "io-reader") catch {};
-
-    // The write accounting outlives a backend run: it lives on the
-    // Termio, not on this thread data, and a run that ends with writes
-    // still queued never sees their completions. Start every run from
-    // zero so leftovers can't hold us at the cap forever.
-    io.write_limit.reset();
 
     // Setup our threadata backend state to be our own
     td.backend = .{ .exec = .{
