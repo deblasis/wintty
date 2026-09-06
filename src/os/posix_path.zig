@@ -740,6 +740,16 @@ test "posix_path: a remote working directory keeps its own links" {
         try std.testing.expect(pathHostUnchanged(c.pwd, resolved));
     }
 
+    // Windows host names are case-insensitive, so a host that differs only in
+    // case has not moved. No resolve produces that on its own -- `resolveWindows`
+    // copies the pwd's root through verbatim, which is why the mixed-case row
+    // above compares equal byte for byte -- so this assertion is the only thing
+    // holding the compare to host semantics instead of plain equality.
+    try std.testing.expect(pathHostUnchanged(
+        "\\\\FileServer\\projects",
+        "\\\\fileserver\\projects\\notes.md",
+    ));
+
     // The extended spelling of the same remote share is where the host can
     // still be popped, and it is refused whether or not the pwd was local.
     {
@@ -765,6 +775,22 @@ test "posix_path: a remote working directory keeps its own links" {
         defer alloc.free(resolved);
         try std.testing.expectEqualStrings("\\\\?\\UNC\\evil.example.com\\share\\x", resolved);
         try std.testing.expect(!pathHostUnchanged("\\\\?\\C:\\Users\\me", resolved));
+    }
+
+    // ...and the reverse: a pwd that names a host holds the result to it, so a
+    // resolve that walks out of the UNC root and lands on an ordinary drive is
+    // refused too. That direction refuses something *local*, which is the one
+    // shape where "did the host change" is stricter than "is the result local",
+    // and it is the arm nothing else here exercises.
+    {
+        const resolved = try std.fs.path.resolveWindows(alloc, &.{
+            "\\\\?\\UNC\\localhost\\C$\\Users\\me",
+            "..\\..\\..\\..\\..\\C:\\x",
+        });
+        defer alloc.free(resolved);
+        try std.testing.expectEqualStrings("\\\\?\\C:\\x", resolved);
+        try std.testing.expect(pathIsLocal(resolved));
+        try std.testing.expect(!pathHostUnchanged("\\\\?\\UNC\\localhost\\C$\\Users\\me", resolved));
     }
 
     // Neither side is compared when its leading separator run is one Windows
