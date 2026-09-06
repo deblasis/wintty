@@ -86,4 +86,55 @@ public class SpawnCwdPolicyTests
     [InlineData(@"\\\share")]
     public void APathNamingNoHost_MayNotSpawn(string cwd)
         => Assert.False(SpawnCwdPolicy.MaySpawnAt(cwd));
+
+    /// <summary>
+    /// The spawn funnel demands plain text as well as an acceptable host.
+    ///
+    /// The terminal core refuses a path carrying control characters at the
+    /// source now, but this path reaches further back than the core can: a
+    /// restored session was written by whatever build recorded it, and
+    /// builds before that guard had no such check. Testing only the host
+    /// here meant a directory refused for the clipboard, for Explorer, for
+    /// the label and for the tooltip was still handed to CreateProcess.
+    /// </summary>
+    [Theory]
+    [InlineData("C:\\Users\\alex\nevil")]
+    [InlineData("C:\\Users\\alex\u202Eevil")]
+    [InlineData("C:\\Users\\alex\u2028evil")]
+    [InlineData("C:\\Users\\alex\u007Fevil")]
+    public void ADirectoryThatIsNotPlainText_IsNotSpawnedInto(string cwd)
+    {
+        // The host itself is fine -- it is the bytes that are not, which is
+        // why checking the host alone let these through.
+        Assert.True(SpawnCwdPolicy.MaySpawnAt(cwd));
+
+        var resolved = SessionProfileResolver.ResolveLeaf(
+            registry: null,
+            new LeafDto
+            {
+                ProfileId = null,
+                Fallback = new LeafCommand { ResolvedCommand = "pwsh.exe", DisplayName = "p" },
+                Cwd = cwd,
+            });
+
+        Assert.NotNull(resolved);
+        // The profile's own directory stands; the reported one is dropped.
+        Assert.Null(resolved!.WorkingDirectory);
+    }
+
+    /// <summary>The same funnel still honours a directory that IS plain.</summary>
+    [Fact]
+    public void APlainLocalDirectory_IsSpawnedInto()
+    {
+        var resolved = SessionProfileResolver.ResolveLeaf(
+            registry: null,
+            new LeafDto
+            {
+                ProfileId = null,
+                Fallback = new LeafCommand { ResolvedCommand = "pwsh.exe", DisplayName = "p" },
+                Cwd = @"C:\Users\alex\src",
+            });
+
+        Assert.Equal(@"C:\Users\alex\src", resolved!.WorkingDirectory);
+    }
 }
