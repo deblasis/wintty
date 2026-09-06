@@ -2202,6 +2202,31 @@ fn resolvePathForOpening(
 
         const resolved = try std.fs.path.resolve(self.alloc, &.{ terminal_pwd, path });
 
+        // The pwd was cleared as local when it was adopted, but that says
+        // nothing about where resolving against it lands. On Windows
+        // `std.fs.path.resolve` roots an extended-length UNC pwd at `\\?\UNC`
+        // rather than at `\\?\UNC\host`, so the host is an ordinary component
+        // and a `../` in the link pops it: an adopted `\\?\UNC\localhost\C$`
+        // plus a perfectly ordinary relative link yields
+        // `\\?\UNC\<attacker>\share\...`. The `accessAbsolute` below is
+        // already the damage -- it hands the current user's credentials to
+        // whatever is in the host slot -- so the question has to be asked
+        // again here, about the path that actually came out, and answered by
+        // the same predicate that admitted the pwd.
+        //
+        // A resolve that produced no absolute path at all (`C:foo` against a
+        // UNC pwd keeps its drive-relative form) is refused with it: nothing
+        // downstream can place it, and `accessAbsolute` asserts on it.
+        if (comptime builtin.os.tag == .windows) {
+            if (!std.fs.path.isAbsolute(resolved) or
+                !internal_os.posix_path.pathIsLocal(resolved))
+            {
+                log.warn("refusing link that does not resolve to a local path", .{});
+                self.alloc.free(resolved);
+                return null;
+            }
+        }
+
         std.Io.Dir.accessAbsolute(global.io(), resolved, .{}) catch {
             self.alloc.free(resolved);
             return null;
