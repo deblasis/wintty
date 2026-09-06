@@ -85,12 +85,14 @@ pub fn build(b: *std.Build) !void {
         "-fno-vectorize",
     });
 
-    // Only Debug asks Clang for the calls into Zig's UBSan runtime, and
-    // those are what leave __ubsan_handle_* unresolved when someone links
-    // our static archive with their own linker. ReleaseSafe compiles the
-    // same checks down to traps, which need no runtime, and the release
-    // modes emit no checks at all.
-    if (optimize == .Debug) try flags.appendSlice(b.allocator, &.{
+    // Undefined behaviour checks stay off in every mode. Only Debug can
+    // leave __ubsan_handle_* unresolved for someone linking our archive,
+    // which is the reason this flag was originally given, but ReleaseSafe
+    // turns the same checks into traps and a trap is a crash. The macOS
+    // app ships ReleaseSafe (.github/workflows/release-tip.yml), and no
+    // one has run this code with traps armed, so scoping the flag to
+    // Debug would ship crash risk nobody has measured.
+    try flags.appendSlice(b.allocator, &.{
         "-fno-sanitize=undefined",
         "-fno-sanitize-trap=undefined",
     });
