@@ -177,16 +177,46 @@ pub const Message = union(enum) {
     /// including the struct itself -- with nothing registered anywhere
     /// else that a destroy could dangle.
     ///
-    /// `change_config` is deliberately not listed: nothing pushes it onto
-    /// a mailbox. `App.updateConfig` hands it straight to
+    /// `change_config` frees nothing here on purpose: nothing pushes it
+    /// onto a mailbox. `App.updateConfig` hands it straight to
     /// `Surface.handleMessage`, so this layer never owns one.
+    ///
+    /// Exhaustive on purpose, matching `App.Message.deinit`: a variant
+    /// that starts owning memory is then a compile error here rather
+    /// than a silent leak on every drop. The field-count test below is
+    /// the weaker guard this replaces -- it fires only if this file is
+    /// in the running build graph, and only at test time.
     pub fn deinit(self: Message) void {
         switch (self) {
             .clipboard_write => |v| v.req.deinit(),
             .pwd_change => |v| v.deinit(),
             .kitty_clipboard_read => |v| v.destroy(),
             .kitty_clipboard_write => |v| v.destroy(),
-            else => {},
+
+            .set_title,
+            .report_title,
+            .set_mouse_shape,
+            .clipboard_read,
+            .change_config,
+            .close,
+            .child_exited,
+            .desktop_notification,
+            .renderer_health,
+            .present_surface,
+            .password_input,
+            .color_change,
+            .selection_scroll_tick,
+            .ring_bell,
+            .progress_report,
+            .start_command,
+            .stop_command,
+            .prompt_input,
+            .first_render,
+            .custom_shader_failed,
+            .scrollbar,
+            .search_total,
+            .search_selected,
+            => {},
         }
     }
 

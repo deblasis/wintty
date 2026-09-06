@@ -1048,12 +1048,37 @@ const Compression = struct {
 /// at all -- the one genuinely fatal case (the renderer thread is gone),
 /// which an unbounded push would have turned into a deadlock anyway.
 ///
-/// This keeps the background budget even though most producers are
-/// UI-thread input handlers, where a minute-long wait is a window the
-/// user is told to kill. Moving it to the UI budget has to wait for
-/// `rendererpkg.Message.deinit` to cover `search_viewport_matches` and
-/// `search_selected_match`: both carry an arena, this give-up path frees
-/// nothing, and a shorter budget would trade a freeze for a leak.
+/// This keeps the background budget, and `.persist` with it, even though
+/// seven of its `Surface.zig` producers are on the UI thread, where a
+/// minute-long wait is a window the user is told to kill. Both stay until
+/// this give-up path frees what it gives up, because it frees nothing
+/// today and a cheaper give-up would trade a freeze for a leak.
+///
+/// The list to cover before moving it, which is larger than round 3
+/// claimed:
+///
+///   - `.change_config` (`Surface.zig:1903`), the largest: a
+///     `renderer.Thread.DerivedConfig` and a renderer `DerivedConfig`
+///     that itself owns allocations. `rendererpkg.Message.deinit`
+///     ALREADY handles this variant, so one call would cover it -- but
+///     read the ownership note below before adding that call.
+///   - `.font_grid` (`Surface.zig:2540`), a refcount pair rather than
+///     memory: a give-up leaks the new grid's ref and strands the old
+///     key's. No `deinit` arm covers it.
+///   - `.search_viewport_matches` and `.search_selected_match`
+///     (`Surface.zig:1560-1585`), each carrying an arena moved into the
+///     message. No `deinit` arm covers these either.
+///
+/// Ownership note, and why this is not a drive-by fix: adding
+/// `msg.deinit()` below is a use-after-free until `Surface.updateConfig`
+/// is restructured. Its three `errdefer`s (`Surface.zig:1897`, `:1899`,
+/// `:1901`) are still live at the `try performAction` calls on `:1918`
+/// and `:1925`, after `:1903` has already handed the message to this
+/// thread. Fix `updateConfig`'s ownership first.
+///
+/// All of this is pre-existing on merge base `218b8243db`, which had the
+/// same constants and the same absent ownership handling hand-rolled in
+/// `Surface.zig`. Moving the loop here did not introduce it.
 pub fn pushMailbox(
     mailbox: *Mailbox,
     wakeup: *xev.Async,
@@ -1082,6 +1107,11 @@ fn pushMailboxBounded(
         notifyWake,
         timeout_ns,
         max_attempts,
+        // Deliberately NOT `.fail_fast`: this give-up path frees
+        // nothing, so making give-ups cheaper here would make the
+        // pre-existing leak above cheaper to reach. It stays `.persist`
+        // until that path frees what it gives up.
+        .persist,
     );
 }
 

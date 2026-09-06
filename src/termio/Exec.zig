@@ -446,7 +446,6 @@ fn termiosTimer(
     // If the mode changed, then we process it.
     if (!std.meta.eql(mode, exec.termios_mode)) mode_change: {
         log.debug("termios change mode={}", .{mode});
-        exec.termios_mode = mode;
 
         // We assume we're in some sort of password input if we're
         // in canonical mode and not echoing. This is a heuristic.
@@ -466,16 +465,39 @@ fn termiosTimer(
             }
             const t = td.renderer_state.terminal;
             if (t.flags.password_input == password_input) {
+                exec.termios_mode = mode;
                 break :mode_change;
             }
         }
 
-        // We have to notify the surface that we're in password input.
-        // We must block on this because the balanced true/false state
-        // of this is critical to apprt behavior.
-        _ = td.surface_mailbox.push(.{
+        // Notify the surface that we're in password input. The balanced
+        // true/false state of this is critical to apprt behavior: on
+        // macOS the `false` turns `EnableSecureEventInput` back off, a
+        // mode with effects outside this process, and `passwordInput`'s
+        // own `if (old == v) return` means a later duplicate re-arms
+        // nothing. A dropped `false` therefore sticks the surface in
+        // secure input for as long as it lives.
+        //
+        // We do not block to prevent that, because a producer that waits
+        // without a limit on a wedged app thread does not deliver the
+        // message either. We commit the observed mode only once the
+        // message is actually queued: a give-up leaves `termios_mode`
+        // where it was, so the next poll sees the same change again and
+        // re-sends. The guard above reads the terminal flag the consumer
+        // itself sets, so the retry stops exactly when the surface has
+        // caught up -- and if the mode has flipped back by then, the
+        // guard commits without a send. The state is balanced by
+        // re-deriving it every poll rather than by never dropping it.
+        if (td.surface_mailbox.push(.{
             .password_input = password_input,
-        }, .{ .forever = {} });
+        }, .{ .forever = {} }) > 0) {
+            exec.termios_mode = mode;
+        } else {
+            log.warn(
+                "password input notification dropped, retrying next poll",
+                .{},
+            );
+        }
     }
 
     // Repeat the timer

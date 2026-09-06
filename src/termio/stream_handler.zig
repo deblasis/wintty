@@ -220,11 +220,15 @@ pub const StreamHandler = struct {
     }
 
     /// Send a message the backlog cap must not drop.
+    ///
+    /// This runs on the pty read thread, never the UI thread, so it takes
+    /// the required budget rather than the droppable one: the cost of
+    /// waiting here is a stalled child, not a frozen window.
     inline fn messageWriterRequired(
         self: *StreamHandler,
         msg: termio.Message,
     ) void {
-        self.termio_mailbox.send(msg, self.renderer_state.mutex);
+        self.termio_mailbox.sendRequired(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }
 
@@ -535,7 +539,19 @@ pub const StreamHandler = struct {
                             // Not a reply: this drives the control mode
                             // session the user asked for, and tmux answers
                             // every command with a %begin/%end block the
-                            // viewer waits for. Dropping one wedges it.
+                            // viewer waits for, so dropping one wedges the
+                            // viewer.
+                            //
+                            // That is why this bypasses the pty write
+                            // backlog cap, which drops replies freely. It
+                            // is not an absolute guarantee and cannot be:
+                            // waiting on the writer thread without a limit
+                            // would stop this thread reading the pty, and a
+                            // tmux session whose output is no longer read
+                            // is wedged either way. So the command gets the
+                            // required budget -- roughly a minute, and
+                            // unaffected by another producer's give-up --
+                            // and past that it is dropped and logged.
                             self.messageWriterRequired(msg);
                         },
 

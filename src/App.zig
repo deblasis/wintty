@@ -690,6 +690,12 @@ pub const Mailbox = struct {
             wakeApp,
             timeout_ns,
             max_attempts,
+            // The search thread emits match batches per tick and the pty
+            // reader emits per OSC, so this queue's producers do arrive
+            // in streams. Spending the budget once per stall rather than
+            // once per message is what keeps a wedged app thread from
+            // stalling them for as long as it is wedged.
+            .fail_fast,
         );
         if (size == 0) {
             log.warn("app mailbox full, message dropped", .{});

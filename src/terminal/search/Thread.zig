@@ -568,6 +568,10 @@ fn pushMailboxBounded(
         notifyWake,
         timeout_ns,
         max_attempts,
+        // One `change_needle` per keystroke against a wedged search
+        // thread is the textbook stream: without this the search box
+        // costs the whole budget on every character typed into it.
+        .fail_fast,
     );
     if (size == 0) {
         log.warn("search mailbox full, message dropped", .{});
