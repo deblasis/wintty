@@ -3144,10 +3144,11 @@ fn appendSuffix(
 /// only to the quoted (`true`) path.
 ///
 /// Quoted path: the tail is re-serialized with MS-C-runtime quoting
-/// rules so args that originally contained spaces or quotes round-trip
-/// correctly: tokens like `C:\Program Files` are re-wrapped in quotes
-/// when joined back. cmd.exe re-tokenizes the script itself, so those
-/// quotes have to reach it exactly as written here; that is why
+/// rules, so a token that contains whitespace is re-wrapped in quotes
+/// when joined back and `C:\Program Files` survives the round trip. A
+/// token containing a literal double quote does not: see the limits on
+/// `writeQuotedArg`. Whatever we write, cmd.exe re-tokenizes the script
+/// itself, so it has to reach cmd byte for byte; that is why
 /// `windowsCreateCommandLine` in Command.zig writes the script verbatim
 /// inside a single quote pair instead of escaping it again.
 ///
@@ -3310,11 +3311,18 @@ fn buildWrappedScript(
 /// area is small enough that drift is easy to audit.
 ///
 /// Note cmd.exe uses its OWN parser for `/C` tokenization (special
-/// chars `& | < > ^ ( )`, not CRT-style backslash escaping). The round
-/// trip works here because each individual arg survives both parsers
-/// identically: our quoted output has no unescaped cmd metacharacters,
-/// and cmd's rules don't consume backslashes. Do not extend this to
-/// emit cmd-specific escape sequences without adding tests.
+/// chars `& | < > ^ ( )`, not CRT-style backslash escaping), so only
+/// part of this survives a trip through cmd. A whitespace-bearing token
+/// does: the quotes we add are the ones cmd wants, our output has no
+/// unescaped cmd metacharacters, and cmd does not consume backslashes.
+/// A token containing a literal double quote does NOT: we escape it as
+/// `\"`, cmd has no backslash escape and toggles quoting on the quote
+/// itself, so the token is mangled and the quote state is inverted for
+/// everything after it, which can flip whether a later `&` or `|`
+/// separates commands. Fixing that means a second serializer using
+/// cmd's own rules (a doubled `""`) for the cmd path only. Do not
+/// extend this to emit cmd-specific escape sequences without adding
+/// tests.
 fn writeQuotedArg(writer: *std.Io.Writer, arg: []const u8) !void {
     if (std.mem.indexOfAny(u8, arg, " \t\n\"") == null) {
         try writer.writeAll(arg);
@@ -4295,7 +4303,9 @@ test "writeQuotedArg: MS C runtime quoting edge cases" {
         .{ .in = "C:\\Program Files", .out = "\"C:\\Program Files\"" },
         // Embedded tab/newline: still quotes.
         .{ .in = "a\tb", .out = "\"a\tb\"" },
-        // Embedded quote: escape as \", no outer backslash needed.
+        // Embedded quote: escape as \", no outer backslash needed. This
+        // is correct for CommandLineToArgvW and wrong for cmd.exe, which
+        // has no backslash escape; see the limits on writeQuotedArg.
         .{ .in = "a\"b", .out = "\"a\\\"b\"" },
         // Trailing backslash in a quoted arg: double the backslash run
         // so the closing quote isn't escaped.
