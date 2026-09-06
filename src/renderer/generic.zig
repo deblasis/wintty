@@ -4546,8 +4546,10 @@ fn takeAtlasUploadDropped(texture: anytype) bool {
 /// into the texture, the texture is reallocated and the whole atlas copied
 /// into it; otherwise only `dirty` is copied.
 ///
-/// `dirty` is what this texture is missing, from `font.Atlas.dirtySince`;
-/// null means it is missing nothing.
+/// `dirty` is what the atlas says this texture is missing, from
+/// `font.Atlas.dirtySince`; null means the atlas has nothing to offer it.
+/// That is not the same as the texture holding everything -- a sync that
+/// dropped an upload lost rows the atlas has already handed over.
 ///
 /// Returns whether the texture now holds everything it was given. A false
 /// return means the caller must not advance its upload counter: the atlas
@@ -4581,8 +4583,9 @@ fn syncAtlasTexture(
     }
 
     // Clear whatever the last sync left behind, so that what this one
-    // reports describes this one.
-    _ = takeAtlasUploadDropped(texture);
+    // reports describes this one. The record is still worth keeping: it
+    // says this texture is missing rows nobody has re-offered yet.
+    const dropped_before = takeAtlasUploadDropped(texture);
 
     if (atlas.size > texture.width) {
         // A grown texture is empty, so it needs the whole atlas no matter
@@ -4592,7 +4595,20 @@ fn syncAtlasTexture(
         return !atlasUploadDropped(texture);
     }
 
-    const region = dirty orelse return true;
+    // Nothing dirty means the atlas has nothing this texture is missing --
+    // unless the last sync dropped an upload, in which case it is missing
+    // exactly what that one lost and the atlas has not been asked for it
+    // again. Reporting synced would advance the caller's counter over
+    // those rows, which is the one thing this function exists to prevent.
+    // Reporting not-synced keeps the counter back, so the next change to
+    // the atlas hands `dirtySince` a consumer that is behind and it
+    // re-offers them.
+    //
+    // Today's callers never reach this with a standing record: they only
+    // call in when `atlas.modified` is ahead of their counter, and
+    // `dirtySince` is null only when it is not. That is their invariant,
+    // not one this function can see, so it does not lean on it.
+    const region = dirty orelse return !dropped_before;
 
     // `replaceRegion` takes tightly packed rows and has no source
     // stride, so the narrowest thing we can hand it without copying
@@ -5216,6 +5232,31 @@ test "syncAtlasTexture: nothing dirty means no upload at all" {
 
     try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, null));
     try std.testing.expectEqual(@as(usize, 0), store.uploads);
+}
+
+test "syncAtlasTexture: nothing dirty after a dropped upload is not synced" {
+    // The early return for a null `dirty` used to answer "synced" without
+    // looking at what the previous sync left on the texture, so a standing
+    // drop record was taken, thrown away, and reported as success -- the
+    // caller would then advance its counter over rows that never arrived.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 1,
+    }));
+
+    // The record from that sync is still standing, and the atlas is now
+    // offering nothing. The texture is still short those rows.
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, null));
+    try std.testing.expectEqual(@as(usize, 1), store.uploads);
 }
 
 test "syncAtlasTexture: a grow ships the whole atlas into the new texture" {
