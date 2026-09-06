@@ -3090,6 +3090,15 @@ fn maybeHandleBinding(
     // Setup our actions
     const actions = leaf.actionsSlice();
 
+    // Only a chain reads its actions out of the keybind set; a single
+    // action was copied into `leaf`, which is ours, so nothing an action
+    // does can take it away.
+    const borrowed = leaf.actionsBorrowed();
+
+    // Anything we need to know about the actions themselves has to be
+    // decided now, while they are certainly still there.
+    const ignored = leaf.hasIgnore();
+
     // Attempt to perform the action
     log.debug("key event binding flags={} action={any}", .{
         leaf.flags,
@@ -3099,11 +3108,11 @@ fn maybeHandleBinding(
     // is dead after that, so nothing may touch it.
     var closed: bool = false;
 
-    // Set if we ran an action that frees the keybind set. That is a
-    // larger set of actions than the ones that close us, because a config
-    // reload replaces the set while leaving the surface alive, and the
-    // action slice lives in the set, so nothing may read it afterwards.
-    var chain_ended: bool = false;
+    // Set if we ran an action that freed the actions we are iterating.
+    // That is a larger set of actions than the ones that close us,
+    // because a config reload replaces the keybind set while leaving the
+    // surface alive.
+    var actions_freed: bool = false;
     const performed = performed: {
         // If this is a global or all action, then we perform it on
         // the app and it applies to every surface.
@@ -3112,7 +3121,7 @@ fn maybeHandleBinding(
             // performing what we are about to lose.
             for (actions) |action| {
                 if (action.closesSurface()) closed = true;
-                if (action.endsChain()) chain_ended = true;
+                if (borrowed and action.endsChain()) actions_freed = true;
             }
 
             self.app.performAllChainedAction(
@@ -3143,7 +3152,7 @@ fn maybeHandleBinding(
             // must not run into freed memory.
             if (action.endsChain()) {
                 if (action.closesSurface()) closed = performed;
-                chain_ended = true;
+                if (borrowed) actions_freed = true;
                 break;
             }
         }
@@ -3156,17 +3165,13 @@ fn maybeHandleBinding(
         return .closed;
     }
 
-    // Everything below reads the action slice again, so it is only safe
-    // while the keybind set that owns it is still alive.
-    if (performed and !chain_ended) {
-        // If our action was "ignore" then we return the special input
-        // effect of "ignored".
-        for (actions) |action| if (action == .ignore) {
-            // If we're in a sequence, clear it.
-            self.endKeySequence(.drop, .retain);
+    // If our action was "ignore" then we return the special input
+    // effect of "ignored".
+    if (performed and ignored) {
+        // If we're in a sequence, clear it.
+        self.endKeySequence(.drop, .retain);
 
-            return .ignored;
-        };
+        return .ignored;
     }
 
     // If we have the performable flag and the action was not performed,
@@ -3190,7 +3195,9 @@ fn maybeHandleBinding(
         // Store our last trigger so we don't encode the release event
         self.keyboard.last_trigger = event.bindingHash();
 
-        if (!chain_ended) if (insp_ev) |ev| {
+        // The inspector wants the actions themselves, so it only gets
+        // them while they are still there to copy.
+        if (!actions_freed) if (insp_ev) |ev| {
             ev.binding = self.alloc.dupe(
                 input.Binding.Action,
                 actions,
