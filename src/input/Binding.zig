@@ -4947,13 +4947,14 @@ test "set: appendChain after an action that frees the set is an error" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // None of these close the surface, but each one can replace or tear
-    // down the config that owns this set, which frees the action slice a
-    // chain is read from.
+    // Each one can replace or tear down the config that owns this set,
+    // which frees the action slice a chain is read from.
     const actions: []const Action = &.{
         .{ .reload_config = {} },
         .{ .close_all_windows = {} },
         .{ .quit = {} },
+        .{ .undo = {} },
+        .{ .redo = {} },
     };
 
     for (actions) |action| {
