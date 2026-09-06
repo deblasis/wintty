@@ -408,14 +408,13 @@ fn collection(
     // empty. Segoe UI Emoji can be missing from a stripped Windows image
     // and DirectWrite can fail to enumerate it, and without this the
     // collection would carry no emoji face at all.
-    if (comptime embed_emoji) {
-        if (!system_emoji_found) try addEmbeddedEmoji(
-            self.alloc,
-            self.font_lib,
-            &c,
-            load_options,
-        );
-    }
+    if (comptime embed_emoji) try addEmbeddedEmojiFallback(
+        self.alloc,
+        self.font_lib,
+        &c,
+        load_options,
+        system_emoji_found,
+    );
 
     return c;
 }
@@ -426,21 +425,32 @@ fn collection(
 /// be removed, so discovery always finds it and the embedded faces would
 /// never be used. Excluding them at compile time keeps roughly 11MB of
 /// font data out of the binary, since Zig only embeds what is referenced.
-/// `-Dembed-emoji-font=false` excludes them everywhere, which buys that
-/// space back at the cost of boxes on a system with no emoji font.
+/// `-Dembed-emoji-font` says whether to embed them elsewhere; it is off by
+/// default on Windows, where Segoe UI Emoji ships with the OS, and on
+/// means the fallback below is armed at the cost of that 11MB.
 const embed_emoji: bool = build_config.embed_emoji_font and
     !(builtin.target.os.tag.isDarwin() and Discover != void);
 
-/// Add the embedded Noto emoji faces to a fallback collection. Both are
-/// needed: NotoColorEmoji covers the emoji presentation and NotoEmoji the
-/// text presentation, and a codepoint requested with an explicit
-/// presentation only matches a face that provides it.
-fn addEmbeddedEmoji(
+/// Add the embedded Noto emoji faces to a fallback collection, unless
+/// font discovery already found a system emoji font.
+///
+/// The system font wins when there is one: it is what the rest of the
+/// platform draws and it tracks OS updates. The embedded faces are what is
+/// left when the search finds nothing, so that a machine without a system
+/// emoji font still draws emoji instead of boxes.
+///
+/// Both faces are needed: NotoColorEmoji covers the emoji presentation and
+/// NotoEmoji the text presentation, and a codepoint requested with an
+/// explicit presentation only matches a face that provides it.
+fn addEmbeddedEmojiFallback(
     alloc: Allocator,
     lib: Library,
     c: *Collection,
     load_options: Collection.LoadOptions,
+    system_emoji_found: bool,
 ) !void {
+    if (system_emoji_found) return;
+
     _ = try c.add(
         alloc,
         try .init(
@@ -915,7 +925,7 @@ test SharedGridSet {
     try testing.expectEqual(@as(usize, 0), set.count());
 }
 
-test addEmbeddedEmoji {
+test "addEmbeddedEmojiFallback adds both faces when discovery found none" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -930,11 +940,35 @@ test addEmbeddedEmoji {
     };
     c.load_options = load_options;
 
-    try addEmbeddedEmoji(alloc, lib, &c, load_options);
+    try addEmbeddedEmojiFallback(alloc, lib, &c, load_options, false);
 
     // The whole point of the fallback is that it renders emoji. Adding
     // faces that cannot cover both presentations would leave the user
     // looking at boxes, which is what this fallback exists to prevent.
     try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .emoji }) != null);
     try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .text }) != null);
+}
+
+test "addEmbeddedEmojiFallback adds nothing when discovery found a face" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib: Library = try .init(alloc);
+    defer lib.deinit();
+
+    var c = Collection.init();
+    defer c.deinit(alloc);
+    const load_options: Collection.LoadOptions = .{
+        .library = lib,
+        .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 },
+    };
+    c.load_options = load_options;
+
+    try addEmbeddedEmojiFallback(alloc, lib, &c, load_options, true);
+
+    // A system emoji font was already added by the caller, so adding the
+    // embedded copies on top would shadow it with a face that does not
+    // track OS updates. The collection stays as the caller left it.
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .emoji }) == null);
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .text }) == null);
 }
