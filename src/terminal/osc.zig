@@ -861,8 +861,23 @@ pub const Parser = struct {
         self: *Parser,
         comptime mode: Capture.Mode,
     ) void {
+        self.captureTrailingMax(mode, self.max_allocating_bytes);
+    }
+
+    /// `captureTrailing` for a key whose own payload limit is below the
+    /// parser's general ceiling. The capture is bounded by whichever of
+    /// the two budgets is smaller, so a payload the key is going to
+    /// reject for its length is never buffered in full first.
+    inline fn captureTrailingMax(
+        self: *Parser,
+        comptime mode: Capture.Mode,
+        max_bytes: usize,
+    ) void {
         assert(self.capture == null);
         switch (mode) {
+            // max_bytes doesn't apply here: the fixed buffer is already the
+            // bound (self.buffer's own size), and there is no allocator to
+            // enforce a smaller one against.
             .fixed => Capture.fixed(
                 &self.capture,
                 &self.buffer,
@@ -872,7 +887,7 @@ pub const Parser = struct {
                 const alloc = self.alloc orelse {
                     // We don't have an allocator - fall back to a fixed buffer and hope
                     // that it's big enough.
-                    self.captureTrailing(.fixed);
+                    self.captureTrailingMax(.fixed, max_bytes);
                     return;
                 };
 
@@ -880,7 +895,7 @@ pub const Parser = struct {
                     &self.capture,
                     alloc,
                     &self.buffer,
-                    self.max_allocating_bytes,
+                    @min(self.max_allocating_bytes, max_bytes),
                 );
             },
         }
@@ -1069,10 +1084,20 @@ pub const Parser = struct {
                 else => self.state = .invalid,
             },
 
-            .@"52",
-            .@"66",
-            => switch (c) {
+            .@"52" => switch (c) {
                 ';' => self.captureTrailing(.allocating),
+                else => self.state = .invalid,
+            },
+
+            // OSC 66 has a payload limit of its own that is well under the
+            // general ceiling, so cap the capture there. Checking it only
+            // once the sequence ended meant a payload that was always
+            // going to be rejected still got buffered in full.
+            .@"66" => switch (c) {
+                ';' => self.captureTrailingMax(
+                    .allocating,
+                    parsers.kitty_text_sizing.max_capture_length,
+                ),
                 else => self.state = .invalid,
             },
 
