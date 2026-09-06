@@ -3129,10 +3129,18 @@ fn resizeWithoutReflowGrowCols(
     errdefer comptime unreachable;
 
     // Hand over the tracked pins for the rows we backfilled into the
-    // previous page. This is deliberately last: the rows below were also
-    // moved out of this page, but they went to pages that only exist if we
-    // got here, whereas the backfill destination survives a failure and
-    // would be left holding pins for rows it no longer has.
+    // previous page. This is deliberately last: the backfill destination
+    // survives a failure, so remapping onto it any earlier would leave it
+    // holding pins for rows it no longer has.
+    //
+    // The new-page loop above remaps its own pins inline and is NOT safe in
+    // the same way. Its pages do not survive a failure, but the pins moved
+    // onto them are not put back either: if one iteration remaps pins and a
+    // later one fails at createPage, the errdefer destroys the node it
+    // already inserted, and destroyNode zeroes and decommits that page's
+    // memory back to the pool while those pins still point into it. That is
+    // pre-existing, needs two or more new pages plus an allocation failure
+    // to reach, and is tracked separately.
     if (backfill) |bf| {
         const pin_keys = self.tracked_pins.keys();
         for (pin_keys) |p| {
