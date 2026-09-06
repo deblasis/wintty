@@ -498,6 +498,14 @@ pub fn threadExit(self: *Termio, data: *ThreadData) void {
 /// This will also notify the mailbox thread to process the message. If
 /// you're sending a lot of messages, it may be more efficient to use
 /// the mailbox directly and then call notify separately.
+///
+/// Every message through here takes `termio.Mailbox.Budget.droppable`,
+/// because this is `Surface.queueIo`'s tail and that is a UI-thread
+/// producer. This function is a shared tail and hands its policy to its
+/// callers without their asking: read `Budget.droppable`'s comment before
+/// adding a call site, because three of the ones already here are state
+/// or user data rather than events, and a fourth would be missed the same
+/// way.
 pub fn queueMessage(
     self: *Termio,
     msg: termio.Message,

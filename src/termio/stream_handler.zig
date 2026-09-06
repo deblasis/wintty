@@ -181,6 +181,25 @@ pub const StreamHandler = struct {
         self.messageWriter(.{ .color_scheme_report = .{ .force = false } });
     }
 
+    /// Send a surface message on behalf of the child's output.
+    ///
+    /// This is a shared tail, so name what it hands its callers: all 22
+    /// call sites in this file get `App.Mailbox.push`'s `.fail_fast`, on
+    /// the pty read thread. That is right for them -- they are produced
+    /// per OSC by whatever the child emits, so they arrive in exactly the
+    /// stream the latch exists to stop paying for, and every one of them
+    /// is either advisory or re-derivable by the next escape sequence.
+    ///
+    /// It is right for them *by that argument*, not because a wrapper
+    /// happened to pass it. Two are worth knowing about before adding a
+    /// third: a lost `.stop_command` leaves a shell-integration mark
+    /// showing a command still running until the next prompt, and a lost
+    /// `.clipboard_read` / `.kitty_clipboard_read` drops an OSC 52 reply
+    /// the child may be waiting on. Both need a wedged app thread first,
+    /// and both are recoverable by the user. A message that is neither --
+    /// one shot, and nothing re-derives it -- must use
+    /// `apprt.surface.Mailbox.pushRequired` instead; `.child_exited` in
+    /// `termio/Exec.zig` is the one message in the tree that qualifies.
     inline fn surfaceMessageWriter(
         self: *StreamHandler,
         msg: apprt.surface.Message,

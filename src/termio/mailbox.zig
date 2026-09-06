@@ -128,9 +128,42 @@ pub const Mailbox = union(enum) {
         attempts: usize,
         wedge: Queue.Wedge,
 
-        /// One event, whose producer can be the UI thread. Short budget,
-        /// and it fails fast while the consumer is latched wedged so a
-        /// stream of events costs one budget rather than one apiece.
+        /// The default, for a producer that can be the UI thread. Short
+        /// budget, and it fails fast while the consumer is latched wedged
+        /// so a stream of messages costs one budget rather than one
+        /// apiece.
+        ///
+        /// Do not read this as "one advisory event". `send` is the tail
+        /// of `Termio.queueMessage`, which is the tail of
+        /// `Surface.queueIo`, so this budget is what 45 UI-thread call
+        /// sites in `Surface.zig` get without naming it. Most of them
+        /// really are events -- keystrokes, mouse reports, scroll
+        /// sequences, selection-scroll ticks, focus and visibility
+        /// reports -- but three are not, and a reader deciding a new call
+        /// site's policy needs to know that:
+        ///
+        ///   * `.resize` (`Surface.zig:2499`, `:2602`) is state, and its
+        ///     loss is silent AND permanent. `Surface.sizeCallback`
+        ///     early-returns when `self.size.screen` already equals the
+        ///     new size, and `resize` assigns that field before it
+        ///     queues, so a dropped resize leaves the renderer on the new
+        ///     size and the child on the old one until the user resizes
+        ///     again. Nothing re-derives it.
+        ///   * `.change_config` (`Surface.zig:1904`) is state. It is
+        ///     freed on the give-up path -- `termio.Message.deinit`
+        ///     covers it -- so it does not leak, but the io thread keeps
+        ///     the old config until the next config change.
+        ///   * `.paste` / `write_alloc` (`Surface.zig:5944`, `:6311`,
+        ///     `:6368`, `:6414`) is user data. It vanishes with a
+        ///     `log.warn` the user never sees.
+        ///
+        /// They stay droppable deliberately: their producer *is* the UI
+        /// thread, and `required` would hand it a 60s `.persist` wait,
+        /// which is the frozen window this whole budget split exists to
+        /// remove. Making the loss self-correcting -- the move
+        /// `password_input` makes in `termio/Exec.zig` -- is the fix
+        /// those three want, and it is a change to `Surface`, not to a
+        /// budget constant.
         pub const droppable: Budget = .{
             .timeout_ns = Queue.wake_retry_timeout_ns_ui,
             .attempts = Queue.wake_retry_attempts_ui,
@@ -140,6 +173,16 @@ pub const Mailbox = union(enum) {
         /// State the consumer has to observe, from a background
         /// producer. Long budget, and it ignores the latch: a droppable
         /// send losing its budget must not decide this one's fate.
+        ///
+        /// The reverse of that is true too and is the price of it: a
+        /// `required` send that spends its whole budget without landing
+        /// latches the queue like any other, so it fails the *next*
+        /// droppable send fast. On this mailbox -- the only one with both
+        /// kinds -- a tmux command's give-up therefore costs the
+        /// following keystroke, paste or resize its wait. That is the
+        /// intended direction (the consumer really is wedged), but it is
+        /// not symmetric with the sentence above, so do not read that
+        /// sentence as saying the latch is invisible to `droppable`.
         pub const required: Budget = .{
             .timeout_ns = Queue.wake_retry_timeout_ns,
             .attempts = Queue.wake_retry_attempts,
