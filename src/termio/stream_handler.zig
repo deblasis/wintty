@@ -216,14 +216,22 @@ pub const StreamHandler = struct {
             return;
         }
 
-        self.messageWriterRequired(msg);
+        // Deliberately NOT routed through `messageWriterRequired`. A
+        // child that spams cursor-position queries produces a stream of
+        // these, and the required budget would spend up to a minute on
+        // each one while ignoring the wedge latch -- stalling the pty
+        // read thread per reply, which is the per-message-not-per-stall
+        // trap one level down. These are advisory; they are droppable.
+        self.termio_mailbox.send(msg, self.renderer_state.mutex);
+        self.termio_messaged = true;
     }
 
     /// Send a message the backlog cap must not drop.
     ///
     /// This runs on the pty read thread, never the UI thread, so it takes
     /// the required budget rather than the droppable one: the cost of
-    /// waiting here is a stalled child, not a frozen window.
+    /// waiting here is a stalled child, not a frozen window. It has one
+    /// caller, the tmux control-mode command path.
     inline fn messageWriterRequired(
         self: *StreamHandler,
         msg: termio.Message,
