@@ -180,6 +180,16 @@ test "io message variants are all accounted for by the push give-up path" {
     // failed-notify branch, its give-up branch, and the teardown drain.
     // Adding a variant is a decision: does it own memory? Make it, then
     // bump this count.
+    //
+    // `deep_idle` and `go_dormant` are the two most recent, and both
+    // answer no: they are `void`, so `deinit`'s `else` and
+    // `writesToPty`'s `else` are both right for them. Their delivery
+    // policy is the other half of the decision and is settled in
+    // `Mailbox.Budget.droppable`, which is what they inherit through
+    // `Surface.queueIo`: losing either defers a memory reclaim to the
+    // next idle transition or leaves the surface live, which is the
+    // conservative direction and re-derivable from the state that asked
+    // for it. Neither is a one-shot the way `.child_exited` is.
     const fields = @typeInfo(Message).@"union".fields;
-    try std.testing.expectEqual(@as(usize, 19), fields.len);
+    try std.testing.expectEqual(@as(usize, 21), fields.len);
 }

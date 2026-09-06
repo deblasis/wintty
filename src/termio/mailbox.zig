@@ -135,7 +135,7 @@ pub const Mailbox = union(enum) {
         ///
         /// Do not read this as "one advisory event". `send` is the tail
         /// of `Termio.queueMessage`, which is the tail of
-        /// `Surface.queueIo`, so this budget is what 45 UI-thread call
+        /// `Surface.queueIo`, so this budget is what 47 UI-thread call
         /// sites in `Surface.zig` get without naming it. Most of them
         /// really are events -- keystrokes, mouse reports, scroll
         /// sequences, selection-scroll ticks, focus and visibility
@@ -177,6 +177,27 @@ pub const Mailbox = union(enum) {
         /// -- is the fix those three want, and it is a change to
         /// `Surface`'s size and config invariants, not to a budget
         /// constant. Filed separately; `.resize` first.
+        ///
+        /// The two newest call sites are the footprint ones, and both
+        /// are events rather than state, so this budget is right for
+        /// them and they are named here only so the next reader does not
+        /// have to re-derive it:
+        ///
+        ///   * `.deep_idle` (`Surface.idleCallback`) asks the io thread
+        ///     to trim what a live surface does not need. Dropping it
+        ///     defers the reclaim to the next idle transition; nothing
+        ///     is lost but memory, and briefly.
+        ///   * `.go_dormant` (`Surface.goDormantCallback`) asks for the
+        ///     terminal to be torn down into its snapshot. Its own
+        ///     handler already re-checks eligibility and the caller
+        ///     learns the outcome by reading `Surface.isDormant` rather
+        ///     than by the send succeeding, so a drop is a request that
+        ///     did not happen -- the surface stays live, which is the
+        ///     conservative direction.
+        ///
+        /// Neither is one-shot: losing them costs footprint, not
+        /// correctness, which is exactly the line `.child_exited` is on
+        /// the other side of.
         pub const droppable: Budget = .{
             .timeout_ns = Queue.wake_retry_timeout_ns_ui,
             .attempts = Queue.wake_retry_attempts_ui,
