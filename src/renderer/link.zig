@@ -10,6 +10,16 @@ const Terminal = terminal.Terminal;
 
 const log = std.log.scoped(.renderer_link);
 
+/// How many regex retry budget overruns a single link scan tolerates
+/// before it stops scanning.
+///
+/// Oniguruma's retry limit is per search call, so a scan that restarts a
+/// search at every start position also restarts the budget, and the total
+/// work becomes the budget times the viewport size. Counting overruns for
+/// the whole scan puts a ceiling on that total while still letting the
+/// scan step over a few expensive positions.
+const scan_overrun_budget: usize = 3;
+
 /// The link configuration needed for renderers.
 pub const Link = struct {
     /// The regular expression to match the link against.
@@ -109,6 +119,10 @@ pub const Set = struct {
             terminal.StringMap.oni_search_retry_limit,
         );
 
+        // Overruns are counted for the whole scan so that the budget above
+        // bounds the total work, not the work at one start position.
+        var overruns_left: usize = scan_overrun_budget;
+
         // Go through each link and see if we have any matches.
         for (self.links) |*link| {
             if (!link.active(mouse_viewport, mouse_mods)) continue;
@@ -124,17 +138,18 @@ pub const Set = struct {
 
                     // We ran out of budget somewhere in the rest of the
                     // viewport, and Oniguruma doesn't tell us which start
-                    // position was expensive. Skip a single codepoint and
-                    // keep scanning so one pathological position doesn't
-                    // hide every link after it.
+                    // position was expensive. Skip the run of text we are
+                    // sitting on and keep scanning, so one pathological
+                    // position doesn't hide every link after it, but stop
+                    // once the scan has spent its overrun budget.
                     error.RetryLimitInMatchOver,
                     error.RetryLimitInSearchOver,
                     error.MatchStackLimitOver,
                     error.SubexpCallLimitInSearchOver,
                     => {
-                        offset += std.unicode.utf8ByteSequenceLength(
-                            str[offset],
-                        ) catch 1;
+                        if (overruns_left == 0) break;
+                        overruns_left -= 1;
+                        offset = skipRun(str, offset);
                         continue;
                     },
 
@@ -168,6 +183,31 @@ pub const Set = struct {
                 }
             }
         }
+    }
+
+    /// The offset just past the whitespace-delimited run of text at
+    /// `offset`, used to step over a search that blew its retry budget.
+    ///
+    /// A single codepoint would be enough to make progress, but the next
+    /// search then re-reads the same expensive text and spends a fresh
+    /// budget on it, once per byte, which is how a per-search budget
+    /// turns back into unbounded work. A whitespace-delimited run is the
+    /// smallest unit that gets us past the candidate we could not match,
+    /// and a search that overran found no match before it, so nothing
+    /// that would have been highlighted is lost except a match starting
+    /// inside that run. The default path patterns can match a single
+    /// space, so such a match is possible; giving it up on pathological
+    /// input is the price of the budget.
+    ///
+    /// Always advances by at least one byte when `offset < str.len`.
+    fn skipRun(str: []const u8, offset: usize) usize {
+        const whitespace = " \t\r\n";
+        var i: usize = offset;
+        while (i < str.len and
+            std.mem.indexOfScalar(u8, whitespace, str[i]) != null) i += 1;
+        while (i < str.len and
+            std.mem.indexOfScalar(u8, whitespace, str[i]) == null) i += 1;
+        return i;
     }
 };
 
@@ -271,19 +311,12 @@ test "renderCellMap bounds regex backtracking" {
     try testing.expect(result.contains(.{ .x = 0, .y = 0 }));
     try testing.expect(result.contains(.{ .x = 12, .y = 0 }));
 
-    // The pathological URL only highlights in part. Every search that
-    // starts on its scheme exhausts the retry budget, so those start
-    // positions are skipped and "https://" stays unhighlighted. The first
-    // position that does match is the host, which the regex's path branch
-    // matches linearly. Highlighting the whole thing would mean letting
-    // the regex run unbounded, so the lost scheme is the price of the
-    // budget.
-    const host = std.mem.indexOf(u8, pathological, "x.com").?;
-    for (0..host) |x| {
+    // The pathological URL is not highlighted at all. A budget overrun
+    // skips the whole whitespace-delimited run it happened on, because
+    // retrying it one codepoint at a time would spend a fresh budget on
+    // the same expensive text once per byte.
+    for (0..pathological.len) |x| {
         try testing.expect(!result.contains(.{ .x = @intCast(x), .y = 1 }));
-    }
-    for (host..pathological.len) |x| {
-        try testing.expect(result.contains(.{ .x = @intCast(x), .y = 1 }));
     }
 
     // The space between the two links belongs to neither.
@@ -292,8 +325,9 @@ test "renderCellMap bounds regex backtracking" {
         .y = 1,
     }));
 
-    // The link after it on the same row is still matched, because a budget
-    // overrun skips one position instead of abandoning the rest of the scan.
+    // The link after it on the same row is still matched, because an
+    // overrun skips the run it happened on instead of abandoning the rest
+    // of the scan.
     try testing.expect(result.contains(.{
         .x = pathological.len + 1,
         .y = 1,
@@ -301,6 +335,62 @@ test "renderCellMap bounds regex backtracking" {
     try testing.expect(result.contains(.{
         .x = row.len - 1,
         .y = 1,
+    }));
+}
+
+test "renderCellMap gives up after repeated regex budget overruns" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Each of these rows costs a full retry budget to give up on. The
+    // budget is shared by the whole scan, so once enough rows have burned
+    // it the scan stops and the ordinary link on the last row is never
+    // reached. Without a shared budget the scan would keep paying a fresh
+    // budget for every row, which is how a viewport of this text turns a
+    // bounded search into unbounded work per frame.
+    const pathological = "https://x.com/" ++ ("." ** 40);
+    const rows = scan_overrun_budget + 1;
+
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
+        .cols = pathological.len,
+        .rows = @intCast(rows + 2),
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("https://a.com\r\n");
+    for (0..rows) |_| s.nextSlice(pathological ++ "\r\n");
+    s.nextSlice("https://b.com");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var set = try Set.fromConfig(alloc, &.{.{
+        .regex = @import("../config/url.zig").regex,
+        .action = .{ .open = {} },
+        .highlight = .{ .always = {} },
+    }});
+    defer set.deinit(alloc);
+
+    var result: terminal.RenderState.CellSet = .empty;
+    defer result.deinit(alloc);
+    try set.renderCellMap(
+        alloc,
+        &result,
+        &state,
+        null,
+        .{},
+    );
+
+    // The link before the pathological rows is matched.
+    try testing.expect(result.contains(.{ .x = 0, .y = 0 }));
+
+    // The link after them is not: the scan ran out of budget first.
+    try testing.expect(!result.contains(.{
+        .x = 0,
+        .y = @intCast(rows + 1),
     }));
 }
 
