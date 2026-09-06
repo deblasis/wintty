@@ -123,6 +123,14 @@ pub const StreamHandler = struct {
     /// reporting" edge would never see it.
     pwd_reported: bool = false,
 
+    /// Whether a report has already been refused as implausible. The dedupe
+    /// that keeps a repeated directory quiet cannot help here: a refused
+    /// path never becomes the known one, so it never matches, and a shell
+    /// emitting one does so at every prompt for the life of the session.
+    /// One warning per surface is enough to say the reports are being
+    /// ignored.
+    pwd_refused: bool = false,
+
     pub const Stream = terminal.Stream(StreamHandler);
 
     /// True if we have tmux control mode built in.
@@ -1737,11 +1745,68 @@ pub const StreamHandler = struct {
         };
     }
 
+    /// Whether `path` can be a directory name at all, as opposed to bytes a
+    /// program wrote to the pty hoping we would render them.
+    ///
+    /// Three rules, and they are not the same rule:
+    ///
+    /// NUL is refused everywhere. No filesystem admits it, and it is the one
+    /// byte that makes the two sides of the C ABI disagree: the slice keeps
+    /// its full length while `[*:0]const u8` truncates, so the app runtime
+    /// acts on a prefix of what the terminal believes.
+    ///
+    /// Invalid UTF-8 is refused everywhere. An unpaired surrogate or a stray
+    /// C1 byte survives to the ABI and comes back as U+FFFD on the other
+    /// side -- the same two-readings-of-one-value problem as NUL, arriving
+    /// by a different road. This is the half that makes the claim of parity
+    /// with the OSC 7777 parser true: that parser validates UTF-8 too.
+    ///
+    /// The remaining C0 and DEL are refused ONLY on Windows, where Win32
+    /// cannot create such a directory, so a report containing one is
+    /// necessarily a fabrication. On a POSIX filesystem every byte but NUL
+    /// and `/` is a legal filename character: refusing `/tmp/a<TAB>b` there
+    /// would discard a real directory and -- worse -- leave the terminal
+    /// confidently holding the PREVIOUS one, which then seeds new tabs and
+    /// resolves relative paths. A hostile newline on POSIX is a real but
+    /// lesser problem, and it belongs to whatever renders the value, not to
+    /// the record of where the shell is.
+    fn isPlausiblePwd(path: []const u8) bool {
+        if (!std.unicode.utf8ValidateSlice(path)) return false;
+        for (path) |b| {
+            if (b == 0) return false;
+            if (comptime builtin.os.tag == .windows) {
+                if (b < 0x20 or b == 0x7f) return false;
+            }
+        }
+        return true;
+    }
+
     /// Commit a fully-resolved pwd: the terminal's own state, the surface
     /// notification, and the title when no shell has claimed one. Shared by
     /// every arm of `reportPwd` so a raw Windows path and a translated URL
     /// land identically.
     fn setPwdReported(self: *StreamHandler, reported: []const u8) !void {
+        // A directory is bytes off the pty, and nothing upstream of here
+        // filters them. The VT parser drops raw C0, but an OSC 7 URL is
+        // percent-decoded AFTER that, so `%0A`, `%1B` and `%07` arrive as
+        // real bytes; the parse table admits DEL and C1 as payload, so an
+        // OSC 9;9 path needs no encoding trick at all. This is the one
+        // funnel every reporting arm reaches -- the raw Windows path, the
+        // translated URL and OSC 7777 -- so the rule lands on all of them.
+        //
+        // Checked BEFORE the debug log, so the bytes this refuses are not
+        // the ones written to a log sink.
+        if (!isPlausiblePwd(reported)) {
+            // Once per surface: the dedupe below cannot suppress this,
+            // because a refused path never becomes the known one, and a
+            // shell that reports one does so at every prompt forever.
+            if (!self.pwd_refused) {
+                self.pwd_refused = true;
+                log.warn("ignoring reported pwd: not a plausible directory name", .{});
+            }
+            return;
+        }
+
         log.debug("terminal pwd: {s}", .{reported});
 
         // One prompt reports its directory three times: OSC 7 and OSC 9;9
@@ -2381,6 +2446,82 @@ test "pwd: one prompt's OSC 7, 9;9 and 7777 burst reports once" {
     const moved = h.drain();
     try testing.expectEqual(@as(usize, 1), moved.pwd);
     try testing.expectEqual(@as(usize, 1), moved.title);
+    try testing.expectEqualStrings("C:\\Users\\me\\src", h.handler.terminal.getPwd().?);
+}
+
+test "pwd: what counts as a plausible directory name" {
+    // Runs on every platform, unlike the end-to-end test below, which needs
+    // the Windows raw-path arm. The defect this guards is NOT Windows-only:
+    // an OSC 7 URL is percent-decoded on every platform, so `%00` reached
+    // the pwd everywhere.
+    const testing = std.testing;
+
+    // Always fine, whatever the host.
+    try testing.expect(StreamHandler.isPlausiblePwd("C:\\Users\\me"));
+    try testing.expect(StreamHandler.isPlausiblePwd("/home/me/src"));
+    // High bytes are UTF-8 continuations, not controls.
+    try testing.expect(StreamHandler.isPlausiblePwd("/home/me/\u{00e9}t\u{00e9}"));
+    try testing.expect(StreamHandler.isPlausiblePwd("/home/me/\u{1f600}"));
+
+    // Refused everywhere: NUL truncates at the C ABI, so the two sides of
+    // the boundary would hold different paths...
+    try testing.expect(!StreamHandler.isPlausiblePwd("/home/me\x00evil"));
+    // ...and invalid UTF-8 comes back as U+FFFD on the far side, which is
+    // the same disagreement arriving by another road. An unpaired
+    // surrogate, and a stray C1 byte:
+    try testing.expect(!StreamHandler.isPlausiblePwd("/home/me/\xed\xa0\x80"));
+    try testing.expect(!StreamHandler.isPlausiblePwd("/home/me/\x9b"));
+
+    // The rest of C0 and DEL are a Windows rule, because Win32 cannot
+    // create such a directory -- so a report carrying one is necessarily a
+    // fabrication. On POSIX they are legal filename bytes, and refusing
+    // them would drop a real directory AND leave the previous one standing.
+    const legal_on_posix = [_][]const u8{ "/home/me/a\tb", "/home/me/a\nb", "/home/me/a\x1bb", "/home/me/a\x7fb" };
+    for (legal_on_posix) |path| {
+        try testing.expectEqual(
+            comptime builtin.os.tag != .windows,
+            StreamHandler.isPlausiblePwd(path),
+        );
+    }
+}
+
+test "pwd: a reported directory carrying control characters is refused" {
+    // The VT parser drops raw C0 before an OSC string is assembled, which is
+    // why this went unnoticed: OSC 7 percent-decodes AFTER that, so `%0A`,
+    // `%1B` and `%07` travel as ordinary ASCII and become real control bytes
+    // in the path. OSC 9;9 needs no trick -- the parse table admits DEL as
+    // payload. Either way the surface must keep the directory it had.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var h: PwdTestHarness = undefined;
+    try h.init(testing.allocator);
+    defer h.deinit(testing.allocator);
+
+    // A good directory first, so a refusal has something it must not replace
+    // -- and so this cannot pass merely because nothing was ever set.
+    h.feed("\x1b]9;9;C:\\Users\\me\x07");
+    _ = h.drain();
+    try testing.expectEqualStrings("C:\\Users\\me", h.handler.terminal.getPwd().?);
+
+    // A newline, an ESC and a BEL -- all reached through percent-decoding,
+    // all past the parser's C0 filter. The decoded ESC never re-enters the
+    // parser; it lands in the pwd, and from there in the title buffer.
+    h.feed("\x1b]7;file://MYPC/c:/Users/me%0A%1B]0;X%07evil\x07");
+    // A raw DEL, which the parse table hands through as payload.
+    h.feed("\x1b]9;9;C:\\Users\\me\x7fevil\x07");
+    // And a NUL, which is legal in the slice but truncates at the C ABI, so
+    // the two sides of the boundary would disagree about the path.
+    h.feed("\x1b]7;file://MYPC/c:/Users/me%00evil\x07");
+
+    const refused = h.drain();
+    try testing.expectEqual(@as(usize, 0), refused.pwd);
+    try testing.expectEqual(@as(usize, 0), refused.title);
+    try testing.expectEqualStrings("C:\\Users\\me", h.handler.terminal.getPwd().?);
+
+    // The guard refuses those bytes, not every path after them.
+    h.feed("\x1b]9;9;C:\\Users\\me\\src\x07");
+    try testing.expectEqual(@as(usize, 1), h.drain().pwd);
     try testing.expectEqualStrings("C:\\Users\\me\\src", h.handler.terminal.getPwd().?);
 }
 

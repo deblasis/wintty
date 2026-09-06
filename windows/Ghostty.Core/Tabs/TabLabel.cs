@@ -100,9 +100,15 @@ internal static class TabLabel
     /// The VT parser drops C0 bytes, but an OSC 7 URL is percent-decoded
     /// after that, and OSC 9;9 admits any UTF-8, so a program in the pane
     /// can put a newline or a right-to-left override into what it reports.
-    /// NTFS cannot hold a control character in a name, so nothing real is
-    /// lost; only the bidi controls are refused among the format
-    /// characters, since joiners appear in legitimate emoji folder names.
+    /// Only the bidi controls are refused among the format characters,
+    /// since joiners appear in legitimate emoji folder names.
+    ///
+    /// This is not free, and the cost used to be stated here as nothing.
+    /// NTFS refuses C0, but a directory named with a C1 character, U+2028
+    /// or U+2029 can be created and does exist; such a folder loses its
+    /// label and the tab falls to a lower tier. That is the trade taken --
+    /// those characters are far likelier to be an injection than a folder
+    /// name, and something still names the tab.
     /// </summary>
     internal static bool IsPlain(string s)
     {
