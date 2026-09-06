@@ -199,6 +199,38 @@ fn hostOf(s: []const u8) error{InvalidPath}!PathHost {
     return .{ .server = s[0..end] };
 }
 
+/// Whether `c` separates path components. Windows accepts either character
+/// anywhere a separator can appear, the leading run included.
+fn isSeparator(c: u8) bool {
+    return c == '\\' or c == '/';
+}
+
+/// `pathHost`, for a path that did not arrive through `isWindowsAbsolute`.
+///
+/// `pathHost` parses the one UNC spelling a reported pwd can have, a literal
+/// `\\`, because that is the only one its caller can be handed. Windows is
+/// looser: any two leading separators start a UNC root, so `//host/share`,
+/// `///host/share`, `/\host\share` and `\/host/share` all reach the SMB
+/// redirector, while `pathHost` reads every one of them as an ordinary rooted
+/// local path.
+///
+/// Teaching the pwd parser spellings a pwd cannot have would only give it more
+/// ways to disagree with Windows, and two parsers disagreeing about where a
+/// separator run ends is exactly what the earlier holes here were. So a
+/// leading separator run that is not exactly `\\` is refused outright instead:
+/// nothing local needs to be spelled that way.
+fn hostOfAnyPath(path: []const u8) error{InvalidPath}!PathHost {
+    if (path.len >= 2 and
+        isSeparator(path[0]) and
+        isSeparator(path[1]) and
+        !(path[0] == '\\' and path[1] == '\\'))
+    {
+        return error.InvalidPath;
+    }
+
+    return pathHost(path);
+}
+
 /// Whether `host` is a Windows share host that resolves without leaving this
 /// machine, and so can never carry a credential off it.
 ///
@@ -252,11 +284,12 @@ pub fn hostIsLocal(host: []const u8) bool {
 /// host slot of the result is what Windows will authenticate to, so the
 /// result is what has to be asked about.
 ///
-/// A `\\` form that names no directory we will place (`error.InvalidPath`,
-/// which is where those popped-apart shapes land) is not local: nothing
-/// legitimate spells a local path that way.
+/// A form that names no directory we will place (`error.InvalidPath`, which
+/// is where those popped-apart shapes land, and where a leading separator run
+/// only Windows reads as UNC lands too) is not local: nothing legitimate
+/// spells a local path that way.
 pub fn pathIsLocal(path: []const u8) bool {
-    const host = pathHost(path) catch return false;
+    const host = hostOfAnyPath(path) catch return false;
     return switch (host) {
         .local => true,
         .server => |name| hostIsLocal(name),
@@ -533,6 +566,36 @@ test "posix_path: pathIsLocal answers for the whole path" {
     // A `\\` form naming no directory we can place is not local either.
     try std.testing.expect(!pathIsLocal("\\\\"));
     try std.testing.expect(!pathIsLocal("\\\\?\\evil.example.com\\share"));
+}
+
+test "posix_path: pathIsLocal refuses a UNC root spelled with any separators" {
+    // Windows starts a UNC root on any two leading separators, and every one
+    // of these reaches the SMB redirector. Reading them as rooted local paths
+    // is how a path parser and Windows come to disagree.
+    try std.testing.expect(!pathIsLocal("//evil.example.com/share/x"));
+    try std.testing.expect(!pathIsLocal("///evil.example.com/share/x"));
+    try std.testing.expect(!pathIsLocal("/\\evil.example.com\\share\\x"));
+    try std.testing.expect(!pathIsLocal("\\/evil.example.com/share/x"));
+    try std.testing.expect(!pathIsLocal("\\\\/evil.example.com/share/x"));
+    try std.testing.expect(!pathIsLocal("/\\/evil.example.com/share/x"));
+    // The host is not consulted: these spellings are not parsed at all, so a
+    // local-looking one is refused with the rest.
+    try std.testing.expect(!pathIsLocal("//localhost/C$/x"));
+    try std.testing.expect(!pathIsLocal("/\\wsl.localhost\\Ubuntu\\home"));
+    // A bare run names nothing.
+    try std.testing.expect(!pathIsLocal("//"));
+    try std.testing.expect(!pathIsLocal("/\\"));
+    try std.testing.expect(!pathIsLocal("\\/"));
+
+    // One leading separator is a path rooted on the current drive, which is
+    // this machine by construction. Only a run of two starts a host.
+    try std.testing.expect(pathIsLocal("/etc/hosts"));
+    try std.testing.expect(pathIsLocal("\\Users\\me"));
+    try std.testing.expect(pathIsLocal("/"));
+    try std.testing.expect(pathIsLocal("\\"));
+    // ...and the literal `\\` spelling still parses as it always did.
+    try std.testing.expect(pathIsLocal("\\\\localhost\\C$\\x"));
+    try std.testing.expect(pathIsLocal("\\\\?\\UNC\\localhost\\C$"));
 }
 
 // The link-open path resolves a clicked relative link against the reported
