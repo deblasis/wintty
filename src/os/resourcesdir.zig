@@ -144,6 +144,15 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
 /// pages and shell integration scripts are looked for inside it. A relative
 /// or missing path produces a broken child environment rather than an
 /// error, so we reject it here and fall back to detection.
+///
+/// This gate applies in release builds too, where the environment value is
+/// otherwise taken on trust. The tradeoff is deliberate and it is not free:
+/// a directory that exists but that we cannot open at startup, such as a
+/// permission-denied or not-yet-mounted share, or on Windows a
+/// rooted-but-driveless path such as `\share\ghostty` that isAbsolute
+/// rejects outright, is now discarded rather than used. Detection then
+/// finds nothing and the child loses terminfo, man pages and shell
+/// integration. Every rejection is logged by the caller with the value.
 fn validResourcesDir(path: []const u8) bool {
     if (path.len == 0) return false;
     if (!std.fs.path.isAbsolute(path)) return false;
@@ -184,6 +193,16 @@ test "validResourcesDir rejects a path with no directory component" {
     try testing.expect(!validResourcesDir(""));
     try testing.expect(!validResourcesDir("ghostty"));
     try testing.expect(!validResourcesDir("share/ghostty"));
+}
+
+test "validResourcesDir rejects a relative path that exists" {
+    const testing = std.testing;
+
+    // The current directory always exists and always opens, which is what
+    // makes it the input that separates the absolute-path check from the
+    // openDir below it. Every other relative path we could name fails to
+    // open anyway and so is rejected either way.
+    try testing.expect(!validResourcesDir("."));
 }
 
 test "validResourcesDir rejects an absolute path that does not exist" {
