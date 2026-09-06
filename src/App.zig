@@ -614,13 +614,37 @@ pub const Mailbox = struct {
     mailbox: *Queue,
 
     /// Send a message to the surface.
+    ///
+    /// `.forever` does not park here. This queue is drained by `App.tick`
+    /// alone and the apprt calls that from its wakeup handler -- on the
+    /// embedded runtime that handler is the only caller there is -- so a
+    /// producer waiting inside the queue is waiting for a drain its own
+    /// wake has to start. It waits in windows instead and re-issues the
+    /// wake after each one, with no attempt limit: these messages carry
+    /// clipboard payloads and heap pointers that nothing here can
+    /// release, so giving up would leak them.
     pub fn push(self: Mailbox, msg: Message, timeout: Queue.Timeout) Queue.Size {
-        const result = self.mailbox.push(global.io(), msg, timeout);
+        const result = switch (timeout) {
+            .forever => self.mailbox.pushWake(
+                global.io(),
+                msg,
+                self.rt_app,
+                wakeApp,
+                Queue.wake_retry_timeout_ns,
+                Queue.wake_retry_forever,
+            ),
+
+            .instant, .ns => self.mailbox.push(global.io(), msg, timeout),
+        };
 
         // Wake up our app loop
         self.rt_app.wakeup();
 
         return result;
+    }
+
+    fn wakeApp(rt_app: *apprt.App) void {
+        rt_app.wakeup();
     }
 };
 
