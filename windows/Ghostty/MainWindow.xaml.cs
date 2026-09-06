@@ -660,6 +660,19 @@ public sealed partial class MainWindow : Window
                     App.NoteRegularWindowRegistered(this);
                 }
             }
+
+            // A restored window says so once, on its first activation. Not
+            // on the Loaded above: the tree exists there, but the window can
+            // still be behind the splash and focus has not reached a pane,
+            // which is the state BellAnnouncementSource records a
+            // notification being measured as dropped in.
+            Activated += OnFirstActivationAnnounceRestore;
+            void OnFirstActivationAnnounceRestore(object s, WindowActivatedEventArgs e)
+            {
+                if (e.WindowActivationState == Microsoft.UI.Xaml.WindowActivationState.Deactivated) return;
+                Activated -= OnFirstActivationAnnounceRestore;
+                AnnounceSessionRestored();
+            }
         }
 
         if (!IsQuickTerminal)
@@ -770,6 +783,12 @@ public sealed partial class MainWindow : Window
 
         if (restoredTabs is not null)
         {
+            // Kept for the announcement, which cannot run until there is a
+            // tree to raise it into -- by which time the manager has
+            // normalized pins and gathered runs, so its count no longer
+            // answers "how many came back".
+            _restoredTabCount = restoredTabs.Count;
+
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
                 seed: restoredTabs[0],
@@ -1465,6 +1484,48 @@ public sealed partial class MainWindow : Window
     private FrameworkElement? BellAnnouncementSource(TabModel tab)
         => FocusManager.GetFocusedElement(Content.XamlRoot) as FrameworkElement
             ?? _tabHost.TabElement(tab);
+
+    /// <summary>
+    /// How many tabs a session restore rebuilt into this window, or zero
+    /// when this window was not restored.
+    ///
+    /// Captured at the restore rather than counted later, because what the
+    /// announcement is about is what the restore rebuilt -- not what the
+    /// window happens to hold by the time there is a tree to speak into.
+    /// The two are equal today; a tab opened in between would make them
+    /// differ, and the count would then describe something the user did.
+    /// </summary>
+    private int _restoredTabCount;
+
+    /// <summary>
+    /// Tell a listener the window came back, once.
+    ///
+    /// Not from the constructor, where the restore happens: the tab hosts
+    /// do not exist yet, <c>Content.XamlRoot</c> is null so there is no
+    /// focused element to raise from, and there is no UIA tree, so the
+    /// notification would be built from nothing and dropped.
+    ///
+    /// Nor from the content's Loaded, which was the first attempt: the tree
+    /// exists there, but the window may still be behind a splash and focus
+    /// has not reached a pane, so this would take the fallback path that
+    /// the note on <see cref="BellAnnouncementSource"/> records being
+    /// MEASURED as dropped. Activation is the first moment the window is
+    /// foreground and something in it holds focus.
+    ///
+    /// Its own activity id, because notifications coalesce per source and a
+    /// bell arriving in the same breath would otherwise discard this one.
+    ///
+    /// NOT verified with a screen reader: that the notification is heard
+    /// from here rests on the same measurement the bell relies on, not on a
+    /// measurement of this path.
+    /// </summary>
+    private void AnnounceSessionRestored()
+    {
+        if (Content?.XamlRoot is null) return;
+        if (_tabManager.ActiveTab is not { } active) return;
+        if (TabAccessibleText.SessionRestoredAnnouncement(active, _restoredTabCount) is not { } text) return;
+        UiaAnnouncer.Announce(BellAnnouncementSource(active), text, "session-restore");
+    }
 
     private void OnActivatedInstallBeepSuppressor(object sender, WindowActivatedEventArgs args)
     {
