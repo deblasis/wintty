@@ -48,14 +48,33 @@ public sealed class RendererHealthNoticeSource
     // frame-completion, not per change, on some paths -- cannot inflate it.
     private readonly HashSet<nint> _unhealthy = new();
 
+    // The surfaces the renderer has given up on. Held apart from _unhealthy
+    // rather than folded in, because the two need opposite advice: one is
+    // "wait", the other is "this pane is not coming back". The Update arms
+    // keep them disjoint, so a pane is in at most one.
+    private readonly HashSet<nint> _abandoned = new();
+
     // The banner currently on screen, kept because Dismiss takes the instance.
     private Notice? _active;
 
-    // Set when the viewer closed the banner themselves. Distinct from _active
-    // being null, because the two mean opposite things for what to do next:
-    // no banner because the outage ended, versus no banner because they have
-    // already read this one and put it away.
-    private bool _dismissedByViewer;
+    // Which of the two banners _active is, so a pane being given up on while
+    // the "rebuilding" banner is up replaces it rather than being swallowed.
+    private bool _activeIsAbandoned;
+
+    // How bad the news is. Ordered, because what the viewer has already been
+    // told is only worth repeating when it gets worse.
+    private enum Level
+    {
+        Rebuilding,
+        Abandoned,
+    }
+
+    // The most severe banner the viewer has closed during this outage, or
+    // null if they have closed none. A dismissal means "I have seen enough
+    // about this outage", so this level and anything below it stays quiet;
+    // only something worse is worth raising again. Cleared when every pane
+    // recovers, so the next outage speaks up.
+    private Level? _dismissed;
 
     /// <summary>
     /// Record what one surface reported.
@@ -66,9 +85,17 @@ public sealed class RendererHealthNoticeSource
     /// </returns>
     public RendererHealthNoticeChange Update(nint surface, RendererHealth health)
     {
-        var changed = health == RendererHealth.Unhealthy
-            ? _unhealthy.Add(surface)
-            : _unhealthy.Remove(surface);
+        var changed = health switch
+        {
+            // Abandoned is terminal, so the pane moves out of the set that
+            // still expects a recovery.
+            RendererHealth.Abandoned => _abandoned.Add(surface) | _unhealthy.Remove(surface),
+            // Removing from _abandoned keeps the sets disjoint by
+            // construction rather than by trusting the renderer never to
+            // walk that transition back.
+            RendererHealth.Unhealthy => _unhealthy.Add(surface) | _abandoned.Remove(surface),
+            _ => _unhealthy.Remove(surface) | _abandoned.Remove(surface),
+        };
 
         return changed ? Reconcile() : default;
     }
@@ -79,50 +106,90 @@ public sealed class RendererHealthNoticeSource
     /// </summary>
     /// <returns>What to do about the banner.</returns>
     public RendererHealthNoticeChange Forget(nint surface) =>
-        _unhealthy.Remove(surface) ? Reconcile() : default;
+        _unhealthy.Remove(surface) | _abandoned.Remove(surface) ? Reconcile() : default;
 
     private RendererHealthNoticeChange Reconcile()
     {
-        if (_unhealthy.Count > 0)
+        // A pane nothing will rebuild outranks one still being retried: its
+        // advice is the only advice that helps, and it is the only pane the
+        // user has to act on themselves.
+        var wantAbandoned = _abandoned.Count > 0;
+        var want = wantAbandoned || _unhealthy.Count > 0;
+
+        if (want)
         {
-            // One banner per outage. A viewer who closed it is not shown it
-            // again while the same panes are still down; the flag clears when
-            // they all recover, so the next outage speaks up.
-            if (_active is not null || _dismissedByViewer) return default;
+            var level = wantAbandoned ? Level.Abandoned : Level.Rebuilding;
+
+            // Already saying the right thing.
+            if (_active is not null && _activeIsAbandoned == wantAbandoned) return default;
+
+            // The viewer has already been told this much. Take down whatever
+            // is up if it now says the wrong thing, but do not raise it again.
+            if (_dismissed is { } seen && seen >= level)
+            {
+                return Retract();
+            }
+
+            // Changing level replaces the banner. Both share a DedupKey, so
+            // the old one has to come down first or Show is a no-op -- which
+            // is why the caller applies Dismiss before Show.
+            var stale = _active;
 
             // OnDismiss fires for our own Dismiss as well as for the close X,
             // and only the second one should latch. Comparing against _active
-            // tells them apart: the recovery path below always clears _active
-            // before handing the notice back, so by the time that dismissal
-            // lands this no longer matches.
+            // tells them apart: we always clear or replace _active before
+            // handing a notice back to be dismissed, so by the time that
+            // dismissal lands this no longer matches.
             Notice? raised = null;
-            raised = Build(() =>
+            raised = Build(wantAbandoned, () =>
             {
-                if (ReferenceEquals(_active, raised)) _dismissedByViewer = true;
+                if (!ReferenceEquals(_active, raised)) return;
+                _dismissed = level;
             });
             _active = raised;
-            return new RendererHealthNoticeChange(Show: raised, Dismiss: null);
+            _activeIsAbandoned = wantAbandoned;
+            return new RendererHealthNoticeChange(Show: raised, Dismiss: stale);
         }
 
-        _dismissedByViewer = false;
-        if (_active is null) return default;
-        var stale = _active;
-        _active = null;
-        return new RendererHealthNoticeChange(Show: null, Dismiss: stale);
+        // The outage is over, so the next one starts from a clean slate.
+        _dismissed = null;
+        return Retract();
     }
 
-    private static Notice Build(Action onDismiss) => new()
+    // Take the banner down, whatever it was saying, and report that.
+    private RendererHealthNoticeChange Retract()
     {
-        Title = "Graphics device lost",
-        Message =
-            "The GPU stopped responding and Wintty is trying to rebuild the "
-            + "renderer. Affected panes stay frozen until it succeeds, and some "
-            + "may not come back at all. This usually follows a graphics driver "
-            + "update or crash; if it keeps happening, check for a driver update "
-            + "and try clearing custom-shader.",
-        // Warning, not Error: the terminal session itself is untouched -- the
-        // shell keeps running and the scrollback is intact -- so nothing the
-        // user typed is at risk even when a pane never repaints.
+        if (_active is null) return default;
+        var last = _active;
+        _active = null;
+        _activeIsAbandoned = false;
+        return new RendererHealthNoticeChange(Show: null, Dismiss: last);
+    }
+
+    private static Notice Build(bool abandoned, Action onDismiss) => new()
+    {
+        Title = abandoned ? "Graphics device gave out" : "Graphics device lost",
+        Message = abandoned
+            // The only case where the user has something to do, and the only
+            // one where waiting is the wrong advice.
+            // The reason does not cross the ABI, only the state does, so this
+            // cannot say which of the three reasons applied. The renderer
+            // blames a custom-shader for exactly one of them and refuses to
+            // for the other two, so this offers it as something to try rather
+            // than as the likely cause; the log line names it when it is.
+            ? "Wintty has stopped trying to rebuild the renderer for one or more "
+              + "panes, so those will not come back on their own. Open a new tab "
+              + "to carry on; the shell in the frozen pane is still running and "
+              + "its scrollback is intact. If you use a custom-shader, it is "
+              + "worth checking whether this still happens without it."
+            : "The GPU stopped responding and Wintty is trying to rebuild the "
+              + "renderer. Affected panes stay frozen until it succeeds. This "
+              + "usually follows a graphics driver update or crash; if it keeps "
+              + "happening, check for a driver update and try clearing "
+              + "custom-shader.",
+        // Warning, not Error, in both cases: the terminal session itself is
+        // untouched -- the shell keeps running and the scrollback is intact --
+        // so nothing the user typed is at risk even when a pane never repaints.
         Severity = NoticeSeverity.Warning,
         DedupKey = DedupKey,
         // Fires for the close X as well as our own Dismiss, which is why the
@@ -138,6 +205,11 @@ public sealed class RendererHealthNoticeSource
 
 /// <summary>
 /// What <see cref="RendererHealthNoticeSource"/> wants done about the banner.
-/// At most one half is set; both are null when nothing changed.
+/// Both are null when nothing changed. Either half can be set on its own, and
+/// BOTH are set when one banner replaces another — callers must apply
+/// <see cref="Dismiss"/> before <see cref="Show"/>, because the two share a
+/// <see cref="Notice.DedupKey"/> and showing first makes the replacement a
+/// no-op. Every call site has to handle both halves; one that applies only
+/// the dismissal drops a banner other panes still need.
 /// </summary>
 public readonly record struct RendererHealthNoticeChange(Notice? Show, Notice? Dismiss);

@@ -897,6 +897,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             if (handle == IntPtr.Zero) continue;
             Interop.NativeMethods.SurfaceSetVisible(
                 new Interop.GhosttySurface(handle), visible);
+
+            // A hidden pane cannot recover a lost GPU device, because
+            // recovery runs from a draw and a hidden surface does not draw.
+            // Leaving it counted would hold the "graphics device lost"
+            // banner up over a window where every pane the user can see is
+            // fine. The renderer re-sends its health when the surface comes
+            // back, so nothing is lost by forgetting it here.
+            if (!visible) _host.ForgetRendererHealth(handle);
         }
     }
 

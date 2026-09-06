@@ -47,8 +47,21 @@ pub const Renderer = switch (build_config.renderer) {
 /// renderers even if some states aren't reachable so that our API users
 /// can use the same enum for all renderers.
 pub const Health = enum(c_int) {
+    /// Drawing normally.
     healthy,
+
+    /// Not drawing, and expected to recover. On Windows this is a lost
+    /// GPU device with a rebuild under way: the surface keeps showing
+    /// whatever frame was on it when the device died until that lands.
     unhealthy,
+
+    /// Not drawing, and nothing will try again. Separate from
+    /// `unhealthy` because it is the one state where waiting is not the
+    /// answer, and an embedder that cannot tell them apart has to
+    /// either promise a recovery that will never come or withhold one
+    /// that is seconds away. Appended rather than inserted so the two
+    /// ordinals that already crossed the ABI keep their values.
+    abandoned,
 
     test "ghostty.h Health" {
         try lib.checkGhosttyHEnum(Health, "GHOSTTY_RENDERER_HEALTH_");
