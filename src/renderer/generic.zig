@@ -1436,6 +1436,48 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
+        /// Deep-idle trim: release the memory that exists only to make
+        /// the NEXT frame cheap -- every uploaded image copy and the
+        /// shaped-run cache. The terminal's ImageStorage remains the
+        /// source of truth for images, and shaping recomputes per run, so
+        /// both rebuild lazily on the frame that wants them; on a
+        /// deep-idle surface that frame may be arbitrarily far away.
+        ///
+        /// The swap chain is NOT touched: visibility already owns it
+        /// (see `releaseGpuResources`), and this trim deliberately also
+        /// serves visible-but-untouched surfaces, whose swap chain must
+        /// stay ready for the next draw.
+        pub fn trimIdleMemory(self: *Self) void {
+            self.draw_mutex.lockUncancelable(global.io());
+            defer self.draw_mutex.unlock(global.io());
+
+            // Virtual placements re-prep on EVERY frame the surface
+            // draws (kittyRequiresUpdate), so trimming their copies only
+            // buys the gap until the next frame and costs a full
+            // re-upload to end it. Surfaces with plain placements are
+            // where the copies genuinely idle.
+            if (!self.images.kitty_virtual) {
+                self.images.trimAll(self.alloc);
+
+                // The trim empties the copy map while the terminal's
+                // placements live on, and nothing in the frame path
+                // revisits placements whose terminal state did not
+                // change. Latch the same loss flag device recovery
+                // uses -- WITHOUT the wake-pending half: a deep-idle
+                // surface draws nothing, so the rebuild lands on the
+                // first updateFrame after it is shown again, which is
+                // exactly when the copies are worth having back.
+                self.images_lost = true;
+            }
+
+            // Whole-cache replacement, the font-change pattern: the old
+            // table frees its shaped runs and a cold first frame on wake
+            // re-populates it.
+            const font_shaper_cache = font.ShaperCache.init();
+            self.font_shaper_cache.deinit(self.alloc);
+            self.font_shaper_cache = font_shaper_cache;
+        }
+
         /// Create or update the display link and match it to the current
         /// surface state.
         fn syncDisplayLink(

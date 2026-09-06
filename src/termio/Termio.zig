@@ -649,6 +649,42 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
     try self.queueWrite(td, &[_]u8{0x0C}, false);
 }
 
+/// Deep-idle trim: drop the parse state a sequence cut mid-flight is
+/// pinning. A truncated OSC can hold up to its allocating cap until the
+/// sequence's next byte arrives; DCS, APC, an iTerm2 multipart transfer,
+/// and an in-flight kitty clipboard write each pin their own capture.
+/// These buffers self-clear per completed sequence, so a surface at
+/// ground holds nothing to trim -- the reset is simply cheap when it
+/// has nothing to do. Runs on the IO thread (the stream's owner) under
+/// the same lock the read path parses under, so it cannot race a parse.
+///
+/// Kept: kitty clipboard grants (a session permission, not parse state;
+/// dropping one costs the user a re-prompt) and every terminal screen
+/// (user data -- scrollback shedding is the compression scheduler's
+/// job, not this one).
+///
+/// The one visible behavior change: if the writer resumes a sequence
+/// the trim cut (a stalled peer waking after minutes mid-OSC), its tail
+/// parses as plain text from ground rather than completing the
+/// sequence. That takes a minute-plus stall inside a single sequence,
+/// by which point the peer is almost certainly dead or the payload
+/// garbage either way.
+pub fn deepIdleTrim(self: *Termio) void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    self.terminal_stream.resetToGround();
+
+    const h = &self.terminal_stream.handler;
+    h.apc.deinit();
+    h.apc = .{};
+    h.dcs.deinit();
+    h.dcs = .{};
+    h.multipart_iterm2.deinit(h.alloc);
+    h.multipart_iterm2 = .{};
+    h.kittyClipboardWriteAbort();
+}
+
 /// Scroll the viewport
 pub fn scrollViewport(
     self: *Termio,

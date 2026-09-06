@@ -30,6 +30,15 @@ internal sealed class FakePaneHost : IPaneHost
     /// </summary>
     public long LastActivityTick { get; set; }
 
+    /// <summary>
+    /// The idle tells the tracker's flip delivered, in order. The real
+    /// host forwards them across the seam; the fake records them so
+    /// model-level tests can assert the edges without any native side.
+    /// </summary>
+    public System.Collections.Generic.List<bool> IdleTells { get; } = new();
+
+    public void SetSurfaceIdle(bool idle) => IdleTells.Add(idle);
+
     public PaneOrientation? LastSplitOrientation { get; private set; }
     public ProfileSnapshot? LastSplitSnapshot { get; private set; }
     public int SplitCalls { get; private set; }

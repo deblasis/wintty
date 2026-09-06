@@ -392,6 +392,26 @@ fn drainMailbox(self: *Thread) !void {
                 // check the visible state themselves to control their behavior.
             },
 
+            .deep_idle => {
+                // Tier B, renderer half: the image copies and the shaped-run
+                // cache exist only to make the next frame cheap, and a
+                // deep-idle surface's next frame may be arbitrarily far
+                // away. The terminal's image storage stays the source of
+                // truth; trimIdleMemory latches images_lost so the first
+                // updateFrame after the surface is shown rebuilds the
+                // copies -- without the latch, live placements would draw
+                // with nothing behind them, because no frame revisits
+                // placements whose terminal state did not change.
+                self.renderer.trimIdleMemory();
+
+                // Idle is the strongest "activity stopped" signal there is,
+                // and it arrives on surfaces that may still be visible (an
+                // untouched foreground tab), where the hide transition never
+                // fires: kick the compression scheduler the same way a hide
+                // does so cold pages shed without waiting on a render.
+                self.compression.wake(self);
+            },
+
             .focus => |v| focus: {
                 // If our state didn't change we do nothing.
                 if (self.flags.focused == v) break :focus;

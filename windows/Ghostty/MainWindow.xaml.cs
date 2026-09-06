@@ -830,8 +830,12 @@ public sealed partial class MainWindow : Window
         // live (the UI thread), so the timer's fire is marshalled.
         // (TryEnqueue wants a DispatcherQueueHandler, not an Action, so
         // the marshal closes over the conversion rather than fighting it.)
+        // The flip hook carries the same edge across the seam, so the
+        // native idle trims land the moment the moon does, never a sweep
+        // before or after it.
         _idleTracker = new TabIdleTracker(
-            _tabManager, a => DispatcherQueue.TryEnqueue(() => a()));
+            _tabManager, a => DispatcherQueue.TryEnqueue(() => a()),
+            onIdleFlip: (tab, idle) => tab.PaneHost.SetSurfaceIdle(idle));
         _idleTracker.Start();
         _windowState = WindowState.Load();
         // Apply the restored window geometry when restoring; otherwise use

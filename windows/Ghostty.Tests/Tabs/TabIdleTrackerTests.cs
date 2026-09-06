@@ -39,10 +39,13 @@ public class TabIdleTrackerTests
             // The timer provider never arms a real timer: tests drive
             // Sweep() themselves, and a live TimeProvider.System timer
             // would keep sweeping this rig from a threadpool thread for
-            // the rest of the test-host process.
+            // the rest of the test-host process. The flip hook is wired
+            // exactly as MainWindow wires it, so the IdleTells the fake
+            // records are the tells the product would deliver.
             _tracker = new TabIdleTracker(
                 Manager, a => a(), idleAfter ?? TimeSpan.FromSeconds(10),
-                () => Now, new NoTimerProvider());
+                () => Now, new NoTimerProvider(),
+                onIdleFlip: (tab, idle) => tab.PaneHost.SetSurfaceIdle(idle));
             _tracker.Start();
         }
 
@@ -177,6 +180,48 @@ public class TabIdleTrackerTests
         rig.Sweep();
         Assert.False(rig.Manager.Tabs[0].IsIdle);
         Assert.True(rig.Manager.Tabs[1].IsIdle);
+    }
+
+    [Fact]
+    public void TheIdleFlipCrossesToThePaneHostAsEdges()
+    {
+        var rig = new Rig();
+        rig.Start();
+        rig.Manager.NewTab();
+
+        // Sweeps that do not change the state tell the host nothing: the
+        // native trims ride EDGES, and a per-sweep tell would re-trim
+        // every thirty seconds forever.
+        rig.Now += 9_000;
+        rig.Sweep();
+        rig.Now += 60_000;
+        rig.Sweep();
+        rig.Sweep();
+        Assert.Equal(new[] { true }, rig.Hosts[0].IdleTells);
+
+        // Data wakes it: the second edge, and nothing more on the
+        // sweeps that follow it.
+        rig.Hosts[0].LastActivityTick = rig.Now;
+        rig.Sweep();
+        rig.Sweep();
+        Assert.Equal(new[] { true, false }, rig.Hosts[0].IdleTells);
+    }
+
+    [Fact]
+    public void ActivatingAnIdleTabTellsTheHostEagerly()
+    {
+        var rig = new Rig();
+        rig.Start();
+        rig.Manager.NewTab();
+        rig.Now += 60_000;
+        rig.Sweep();
+        Assert.Equal(new[] { true }, rig.Hosts[0].IdleTells);
+
+        // The eager clear on activation is an edge too: the native side
+        // learns the tab woke the moment the moon lifts, not one sweep
+        // later.
+        rig.Manager.ActivateIndex(0);
+        Assert.Equal(new[] { true, false }, rig.Hosts[0].IdleTells);
     }
 
     [Fact]

@@ -22,6 +22,11 @@ pub const Message = union(enum) {
     /// and still have focus.
     visible: bool,
 
+    /// The surface went deep-idle: trim what exists only to make the next
+    /// frame cheap. One-directional like the termio-side message -- waking
+    /// rebuilds lazily and needs no signal.
+    deep_idle,
+
     /// Reset the cursor blink by immediately showing the cursor then
     /// restarting the timer.
     reset_cursor_blink,
