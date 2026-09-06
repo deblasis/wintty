@@ -171,7 +171,11 @@ pub fn threadEnter(
     // Create our pipe that we'll use to kill our read thread.
     // pipe[0] is the read end, pipe[1] is the write end.
     const pipe = try internal_os.pipe();
-    errdefer internal_os.closePipeEnd(pipe[0]);
+
+    // The read end goes to the read thread, which closes it itself, so we
+    // only clean it up while we are still the ones holding it.
+    var own_read_end = true;
+    errdefer if (own_read_end) internal_os.closePipeEnd(pipe[0]);
     errdefer internal_os.closePipeEnd(pipe[1]);
 
     // Setup our stream so that we can write.
@@ -208,6 +212,16 @@ pub fn threadEnter(
             .{ pty_fds.read, io, pipe[0] },
         );
     read_thread.setName(global.io(), "io-reader") catch {};
+    own_read_end = false;
+
+    // From here on the reader holds &self.read_quit and the Termio, so a
+    // later failure has to bring it down before either goes away. This
+    // wakes the reader the same way threadExit does, so it cannot block
+    // on a read that nothing will interrupt.
+    errdefer {
+        self.stopReadThread(pipe[1], pty_fds.read);
+        read_thread.join();
+    }
 
     // Setup our threadata backend state to be our own
     td.backend = .{ .exec = .{
@@ -277,22 +291,20 @@ pub fn threadEnter(
     }
 }
 
-pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
-    assert(td.backend == .exec);
-    const exec = &td.backend.exec;
-
-    if (exec.exited) self.subprocess.externalExit();
-    self.subprocess.stop();
-
-    // Quit our read thread after exiting the subprocess so that
-    // we don't get stuck waiting for data to stop flowing if it is
-    // a particularly noisy process.
-    //
+/// Ask the read thread to stop and wake it up so it can notice.
+///
+/// Both threadExit and the error path in threadEnter have to do this
+/// before they join, so it lives in one place: a reader left running
+/// holds a pointer into this Exec and into the Termio that owns it.
+///
+/// This never waits for the reader to exit, only for it to be wakeable.
+/// The caller joins.
+fn stopReadThread(self: *Exec, quit_pipe: posix.fd_t, read_fd: posix.fd_t) void {
     // Windows cannot poll the pty handle and this pipe together, so the
     // reader there watches the quit flag below instead and never reads
     // the pipe. A write would wake nobody.
     if (comptime builtin.os.tag != .windows) {
-        switch (internal_os.writePipeEnd(exec.read_thread_pipe, "x")) {
+        switch (internal_os.writePipeEnd(quit_pipe, "x")) {
             .ok => {},
 
             // A broken pipe means our read thread is closed already,
@@ -313,13 +325,13 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
         // CancelIoEx only cancels a read that is already pending. If the
         // reader is inside processOutput when we call it there is nothing
         // to cancel, and the read it issues next blocks until a writer
-        // goes away, which cannot happen before we return: the
-        // pseudoconsole that owns the write end is closed after this
-        // join. So keep interrupting until the reader acknowledges.
+        // goes away, which cannot happen before the caller's join: the
+        // pseudoconsole that owns the write end is closed after it. So
+        // keep interrupting until the reader acknowledges.
         self.read_quit.request();
 
         var cancel: ReadThread.WindowsCancel = .{
-            .fd = exec.read_thread_fd,
+            .fd = read_fd,
             .quit = &self.read_quit,
         };
         if (!ReadThread.cancelUntilAcked(
@@ -327,6 +339,19 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
             ReadThread.cancel_max_attempts,
         )) log.warn("read thread did not acknowledge the quit request", .{});
     }
+}
+
+pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
+    assert(td.backend == .exec);
+    const exec = &td.backend.exec;
+
+    if (exec.exited) self.subprocess.externalExit();
+    self.subprocess.stop();
+
+    // Quit our read thread after exiting the subprocess so that
+    // we don't get stuck waiting for data to stop flowing if it is
+    // a particularly noisy process.
+    self.stopReadThread(exec.read_thread_pipe, exec.read_thread_fd);
 
     exec.read_thread.join();
 
