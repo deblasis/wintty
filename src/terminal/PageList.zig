@@ -3013,12 +3013,18 @@ fn resizeWithoutReflowGrowCols(
                 page,
                 dst_row,
                 src_row,
-            ) catch {
-                // If an error happens, we undo our row copy and stop
-                // filling. A partial copy can leave managed memory in the
-                // row, and the row is retired back into unused capacity,
-                // which the grow() fast path re-exposes without any
-                // clearing, so it has to go back to the default state.
+            ) catch |err| {
+                // Undo the row copy and stop filling. A partial copy can
+                // leave managed memory in the row, and the row is retired
+                // back into unused capacity, which the grow() fast path
+                // re-exposes without any clearing, so the cells have to be
+                // released. resetRow releases only what the cells still
+                // point at, so a reference the failed clone took but had
+                // not yet recorded on a cell stays held by this page.
+                log.warn(
+                    "cloneRowFrom failure backfilling the previous page during resizeWithoutReflowGrowCols: {}",
+                    .{err},
+                );
                 prev_page.resetRow(dst_row);
                 prev_page.size.rows -= 1;
                 copied -= 1;
@@ -3093,8 +3099,9 @@ fn resizeWithoutReflowGrowCols(
 
                 // We can actually safely handle this though by exiting
                 // this loop early and cutting our copy short. The row goes
-                // back into unused capacity so it must be reset, since a
-                // partial copy can leave managed memory behind.
+                // back into unused capacity so it must be reset, with the
+                // same caveat as the backfill above: only what the cells
+                // still point at is released.
                 new_page.resetRow(dst_row);
                 new_page.size.rows -= 1;
                 break;
@@ -19454,16 +19461,12 @@ test "PageList resize (no reflow) more cols remaps pins when backfill fails" {
 
     try s.resize(.{ .cols = cols + 1, .reflow = false });
 
-    // The pin must point at a page that is still in the list.
-    var found = false;
-    var it = s.pages.first;
-    while (it) |node| : (it = node.next) {
-        if (node == tracked.node) {
-            found = true;
-            break;
-        }
-    }
-    try testing.expect(found);
+    // The pin must have gone to the backfill destination. Asserting the
+    // node rather than just "some live node" is what keeps this test tied
+    // to the partial-backfill path: if the geometry ever stops producing a
+    // backfill, the pin is remapped by the new page loop instead and every
+    // other assertion here still holds.
+    try testing.expectEqual(first_node, tracked.node);
     try testing.expect(tracked.y < tracked.node.rows());
 
     // And it must still point at the content it was tracking.
