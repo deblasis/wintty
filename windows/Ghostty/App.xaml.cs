@@ -463,13 +463,136 @@ public partial class App : Application
 
     private static readonly object _crashLogLock = new();
 
+    // Enough of crash.log to hold every entry that could postdate the
+    // previous launch; the file itself is unbounded. A post-stall
+    // cascade (three handlers per exception, one entry per unobserved
+    // task, other instances appending) can add a burst of entries after
+    // the stall line, so this is deliberately generous: the cost is one
+    // 1 MiB read at launch, and a marker advanced past a stall the
+    // window missed is unrecoverable.
+    private const long CrashLogTailBytes = 1024 * 1024;
+
+    /// <summary>
+    /// Show the one-per-stall notice for hang evidence a previous
+    /// session left in crash.log (#1046). Best-effort by contract: any
+    /// I/O failure gives up on the notice, never on the launch.
+    /// </summary>
+    private void ShowPreviousSessionHangNotice()
+    {
+        // This session's boundary is the watchdog's arm instant, the
+        // earliest moment a stall could belong to this launch. Capturing
+        // "now" instead would fold a stall from a slow early launch (the
+        // arm is OnLaunched's first statement) into the previous-session
+        // window: the notice would describe a freeze the user just
+        // watched, and the marker write would consume it.
+        var launchedAt = Diagnostics.HangWatchdog.ArmedAtUtc;
+        try
+        {
+            var root = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Ghostty.Core.AppIdentity.StateDirName);
+            var markerPath = Path.Combine(root, "last-launch");
+
+            // A missing or unparseable marker means "nothing has been
+            // reported yet", so any stall entry in the log is news.
+            var lastLaunch = DateTimeOffset.MinValue;
+            if (File.Exists(markerPath))
+            {
+                if (!DateTimeOffset.TryParseExact(
+                        File.ReadAllText(markerPath).Trim(),
+                        "O",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind,
+                        out lastLaunch))
+                {
+                    lastLaunch = DateTimeOffset.MinValue;
+                }
+            }
+
+            var outcome = Ghostty.Core.Diagnostics.HangEvidenceStartup.Resolve(
+                ReadCrashLogTail(Path.Combine(root, "crash.log")),
+                lastLaunch,
+                launchedAt);
+
+            // Written after the evaluation and whether or not a notice
+            // follows: the next launch compares against THIS one, so a
+            // stall logged later in this session still reads as new
+            // then. A failed write means the notice may repeat next
+            // launch; losing it entirely would be worse.
+            File.WriteAllText(markerPath, $"{launchedAt:O}");
+
+            if (!outcome.Notify) return;
+
+            var hangsDir = Path.Combine(root, "hangs");
+            // Null-conditional out of parity with the field's declared
+            // nullability, not out of doubt: the wiring pin holds this
+            // call after the service's construction.
+            _notificationService?.Show(new Ghostty.Core.Notifications.Notice
+            {
+                Title = "Wintty froze and captured evidence",
+                Message = "Wintty froze in a previous session. crash.log holds the stall "
+                    + "entries, and any captured hang dump sits in " + hangsDir
+                    + "; a dump may contain sensitive content.",
+                Severity = Ghostty.Core.Notifications.NoticeSeverity.Informational,
+                IsClosable = true,
+                DedupKey = "hang-evidence",
+                Actions = new Ghostty.Core.Notifications.NoticeAction[]
+                {
+                    // Shell-executing a directory opens it in Explorer,
+                    // the same open pattern the config file uses.
+                    new(
+                        "Open folder",
+                        () =>
+                        {
+                            try
+                            {
+                                System.Diagnostics.Process.Start(
+                                    new System.Diagnostics.ProcessStartInfo
+                                    {
+                                        FileName = hangsDir,
+                                        UseShellExecute = true,
+                                    });
+                            }
+                            catch { /* a folder that will not open must not take the app down */ }
+                        },
+                        IsPrimary: true),
+                    // SetContent races the clipboard broker and can throw
+                    // COMException; the path is in the message either way.
+                    new(
+                        "Copy path",
+                        () =>
+                        {
+                            try
+                            {
+                                var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                                data.SetText(hangsDir);
+                                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
+                            }
+                            catch { /* clipboard busy; the path is one glance away */ }
+                        }),
+                },
+            });
+        }
+        catch
+        {
+            // Deliberately bare: a notice about evidence is the
+            // definition of not worth blocking the launch for.
+        }
+    }
+
+    private static string? ReadCrashLogTail(string path) =>
+        Diagnostics.FileTail.Read(path, CrashLogTailBytes) is { } tail
+            ? System.Text.Encoding.UTF8.GetString(tail)
+            : null;
+
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         // UI-thread stall watchdog (#1033): a hang writes no exception
-        // anywhere, so this records it -- a crash.log entry plus a full
-        // minidump of the still-hung process under
-        // %LOCALAPPDATA%\Wintty\hangs\. First thing in the launch: the
-        // #1036 class of hang existed from the first frame.
+        // anywhere, so this records it -- a crash.log entry plus a
+        // minidump of the still-hung process (triage scope by default,
+        // full via hang-dump) under %LOCALAPPDATA%\Wintty\hangs\. First
+        // thing in the launch: the #1036 class of hang existed from the
+        // first frame.
         Diagnostics.HangWatchdog.Start(DispatcherQueue.GetForCurrentThread());
 
         // Set the explicit AppUserModelID. This MUST happen before
@@ -561,6 +684,12 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
+        // The watchdog armed above, before the config service could
+        // exist; hand it the hang-dump scope now, still well inside the
+        // first stall window. Until this line a stall captures the
+        // triage default.
+        Diagnostics.HangWatchdog.ConfigureDumpMode(_configService.HangDump);
+
         // build the factory from Ghostty config before any other service constructs an
         // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Wintty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
@@ -577,6 +706,11 @@ public partial class App : Application
         _logFilters = filters;
         LoggerFactory = factory;
         _configService.ConfigChanged += OnConfigChanged_ApplyLogFilters;
+        // The watchdog's hang-dump scope is a launch-time seed, not a
+        // live read; re-seed on reload so a mid-session switch (support
+        // asking for hang-dump = full before a repro) takes effect
+        // without a restart, in both directions.
+        _configService.ConfigChanged += OnConfigChanged_SeedHangDumpMode;
 
         // Install the libghostty log bridge now that the factory
         // exists. After this point every Zig std.log call is delivered
@@ -646,12 +780,19 @@ public partial class App : Application
             if (noColorNotice is not null) _notificationService.Show(noColorNotice);
         }
 
-        // Single-instance gate. Acted on here -- after the logger factory
-        // exists (so failures are visible in Release), but before the
-        // bootstrap host, window, and DX12 renderer are created -- so a
-        // secondary process forwards its launch and exits without ever
-        // creating a window or paying for the renderer.
+        // Hang evidence from a previous session (#1046): the watchdog
+        // logged a stall while the UI thread was hung, and a hung UI
+        // thread cannot show anything, so this launch is the first
+        // moment the user can be told. One notice per stall event; the
+        // last-launch marker inside keeps later launches quiet unless a
+        // newer stall lands. AFTER the single-instance gate: a secondary
+        // process forwards and exits below, and if it evaluated first it
+        // would advance the marker and consume the notice into a
+        // NotificationService no host ever binds -- precisely when the
+        // user re-launched because the primary hung.
         HandleSingleInstanceGate(Program.SingleInstance);
+
+        ShowPreviousSessionHangNotice();
 
         // Power-saving monitor. Reads power-saver-mode from config every
         // time it resolves (Func thunk decouples it from ConfigService
@@ -1914,6 +2055,12 @@ public partial class App : Application
         if (_logFilters is null) return;
         Ghostty.Core.Logging.LoggingBootstrap.ApplyFilters(
             _logFilters, cfg.LogLevel, cfg.LogFilter);
+    }
+
+    private void OnConfigChanged_SeedHangDumpMode(Ghostty.Core.Config.IConfigService cfg)
+    {
+        // Fires after the re-read, so the property is the fresh value.
+        Diagnostics.HangWatchdog.ConfigureDumpMode(_configService.HangDump);
     }
 
     private void OnConfigChanged_NotifyPowerMonitor(Ghostty.Core.Config.IConfigService cfg)

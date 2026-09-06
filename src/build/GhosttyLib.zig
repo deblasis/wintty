@@ -16,6 +16,9 @@ step: *std.Build.Step,
 output: std.Build.LazyPath,
 /// The import library for DLL builds on Windows (.lib), null otherwise.
 implib: ?std.Build.LazyPath = null,
+/// The MSVC PDB for DLL builds on Windows, null otherwise. User minidumps
+/// captured by the app are only symbolizable against this file.
+pdb: ?std.Build.LazyPath = null,
 dsym: ?std.Build.LazyPath,
 pkg_config: ?std.Build.LazyPath,
 pkg_config_static: ?std.Build.LazyPath,
@@ -94,6 +97,23 @@ pub fn initShared(
         .search_strategy = .mode_first,
     };
 
+    // The one Windows dll target this fork ships; the CRT block below
+    // already assumes it. One const because three decisions hang on it
+    // (strip, CRT libs, pdb install), and drifting apart is exactly how
+    // an unsymbolizable dll ships quietly.
+    const win_msvc = deps.config.target.result.os.tag == .windows and
+        deps.config.target.result.abi == .msvc;
+
+    // Stripping a Windows MSVC DLL saves no bytes: the debug info lives in
+    // the .pdb beside the PE, not inside it. Honoring -Dstrip here would
+    // ship releases whose user minidumps can never be symbolized, so the
+    // strip default keeps applying to every other artifact and target.
+    // Scope note: this forces only the root module; zig's default
+    // additionally strips dependencies under ReleaseSmall, so a
+    // ReleaseSmall dll pdb would carry zig frames but not C dependency
+    // frames. ReleaseSmall is not a shipped dll mode.
+    const strip = deps.config.strip and !win_msvc;
+
     const lib = b.addLibrary(.{
         .name = "ghostty",
         .linkage = .dynamic,
@@ -101,9 +121,9 @@ pub fn initShared(
             .root_source_file = b.path("src/main_c.zig"),
             .target = deps.config.target,
             .optimize = deps.config.optimize,
-            .strip = deps.config.strip,
+            .strip = strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
-            .unwind_tables = if (deps.config.strip) .none else .sync,
+            .unwind_tables = if (strip) .none else .sync,
         }),
 
         // Fails on self-hosted x86_64
@@ -116,8 +136,7 @@ pub fn initShared(
     // that references symbols in vcruntime.lib and ucrt.lib. Zig's library
     // search paths include the MSVC lib dir and the Windows SDK 'um' dir,
     // but not the SDK 'ucrt' dir where ucrt.lib lives.
-    if (deps.config.target.result.os.tag == .windows and
-        deps.config.target.result.abi == .msvc)
+    if (win_msvc)
     {
         // The CRT initialization code in msvcrt.lib calls __vcrt_initialize
         // and __acrt_initialize, which are in the static CRT libraries.
@@ -186,6 +205,7 @@ pub fn initShared(
             lib.getEmittedImplib()
         else
             null,
+        .pdb = if (win_msvc) lib.getEmittedPdb() else null,
         .dsym = dsymutil,
         .pkg_config = pcs.shared,
         .pkg_config_static = pcs.static,
@@ -229,6 +249,11 @@ pub fn install(self: *const GhosttyLib, name: []const u8) void {
     const step = b.getInstallStep();
     const lib_install = b.addInstallLibFile(self.output, name);
     step.dependOn(&lib_install.step);
+
+    if (self.pdb) |pdb| {
+        const pdb_install = b.addInstallLibFile(pdb, "ghostty.pdb");
+        step.dependOn(&pdb_install.step);
+    }
 
     if (self.pkg_config) |pc| {
         step.dependOn(&b.addInstallFileWithDir(

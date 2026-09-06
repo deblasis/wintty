@@ -74,6 +74,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public bool WindowsHighContrast { get; private set; } = true;
     public string CommandPaletteBackground { get; private set; } = "acrylic";
     public string NoColorOverride { get; private set; } = NoColorPolicy.Default;
+    // Read here but consumed by the hang watchdog via the seed App hands
+    // it in OnLaunched and again on every ConfigChanged: the watchdog
+    // arms before this service exists, and reloads must not leave it on
+    // a stale scope.
+    public Ghostty.Core.Diagnostics.HangDumpMode HangDump { get; private set; }
+        = Ghostty.Core.Diagnostics.HangDumpMode.Triage;
 
     // The High Contrast palette to layer on top of the user's config, or
     // null when HC is inactive/opted-out. Set by HighContrastMonitor;
@@ -989,6 +995,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             GetFileValue("no-color-override", ""),
             allowed: NoColorPolicy.Allowed,
             defaultValue: NoColorPolicy.Default);
+        HangDump = Ghostty.Core.Diagnostics.HangDump.Parse(
+            GetFileValue("hang-dump", ""));
         // Windows-only logger keys. Parsing into LogLevel/filter rules
         // happens in LoggingBootstrap; here we just surface the raw
         // strings so reloads can re-read them without parser knowledge.
