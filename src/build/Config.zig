@@ -260,8 +260,15 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             "emoji font of their own. A system emoji font found through font " ++
             "discovery is preferred either way, so platforms that always have " ++
             "one never pay for this. Turning it off makes such a system render " ++
-            "emoji as boxes.",
-    ) orelse true;
+            "emoji as boxes. Defaults off on Windows.",
+    ) orelse switch (target.result.os.tag) {
+        // Segoe UI Emoji is an OS component, and the discovery pass finds
+        // it on every stock image, so on Windows the embed is 11MB that is
+        // compiled in and never read. Passing the option turns it back on
+        // for an image that has had the font stripped out.
+        .windows => false,
+        else => true,
+    };
 
     config.wayland = b.option(
         bool,
