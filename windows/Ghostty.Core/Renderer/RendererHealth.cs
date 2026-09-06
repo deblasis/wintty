@@ -19,4 +19,11 @@ public enum RendererHealth
 {
     Healthy = 0,
     Unhealthy = 1,
+
+    /// <summary>
+    /// The renderer has stopped trying to rebuild this surface. It will not
+    /// come back on its own, so the only advice that helps is to open a new
+    /// tab; waiting is exactly the wrong thing.
+    /// </summary>
+    Abandoned = 2,
 }
