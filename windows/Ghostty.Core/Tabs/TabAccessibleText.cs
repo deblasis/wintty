@@ -38,9 +38,20 @@ internal static class TabAccessibleText
             ? AppIdentity.ProductName
             : effectiveTitle;
 
-    /// <summary>Transient state for <paramref name="tab"/>.</summary>
+    /// <summary>
+    /// Transient state for <paramref name="tab"/>, membership included.
+    ///
+    /// The model knows its own group, so this reads it rather than leaving
+    /// each strip to remember. Passing the parts by hand is how the two
+    /// strips came to disagree: the vertical one named the run but dropped
+    /// "Starting" on a grouped member, and the horizontal one never named a
+    /// run at all, so switching layout silently lost the segment.
+    /// </summary>
     internal static string Status(TabModel tab)
-        => Status(tab.IsPinned, tab.BellRinging, groupTitle: null, isCollapsed: false, isSettling: tab.IsSettling);
+        => Status(tab.IsPinned, tab.BellRinging,
+            groupTitle: tab.Group?.Title,
+            isCollapsed: tab.Group?.IsCollapsed ?? false,
+            isSettling: tab.IsSettling);
 
     /// <summary>
     /// Transient state for the tab, for AutomationProperties.ItemStatus.
@@ -81,8 +92,13 @@ internal static class TabAccessibleText
         if (!string.IsNullOrEmpty(groupTitle)) segments.Add($"Group {groupTitle}");
         if (isCollapsed) segments.Add("Collapsed");
         if (bellRinging) segments.Add("Bell");
-        // A tab that has not started yet says so: sighted users get the
-        // app's icon in the slot, and this is the same fact for a listener.
+        // A tab that has not started yet says so. For a listener this is
+        // very likely inert: the note below records that NVDA does not
+        // surface ItemStatus on a tab or list item, and a start is over
+        // before anyone could arrow onto it -- so unlike the bell, which
+        // earned an announcement, this is the correct UIA property and
+        // nothing more. Written because it is the honest place for the
+        // state, not because it is known to be heard.
         if (isSettling) segments.Add("Starting");
         return string.Join(", ", segments);
     }

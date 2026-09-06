@@ -49,6 +49,31 @@ public class TabLabelHomeTests
     public void Collapse_LeavesEveryOtherDirectoryAlone(string cwd)
         => Assert.Equal(cwd, TabLabel.Collapse(cwd, Home));
 
+    /// <summary>
+    /// A WSL tab's own home is not a home here, and that is a decision
+    /// rather than an oversight. The native side translates OSC 7 before it
+    /// crosses, so such a tab reports a Windows path and labels itself with
+    /// the leaf -- "alex" -- which is what Finder shows for a home folder
+    /// anyway. Collapsing it needs the distro's Linux $HOME, and nothing in
+    /// this layer knows it: guessing the shape gets a root shell and every
+    /// custom home wrong, and a tilde naming the wrong directory is worse
+    /// than a full path.
+    ///
+    /// The Windows profile cannot accidentally match either spelling, which
+    /// is the half that would be a bug rather than a choice.
+    /// </summary>
+    [Theory]
+    [InlineData(@"\\wsl.localhost\Ubuntu-24.04\home\alex", "alex")]
+    [InlineData(@"\\wsl$\Ubuntu-24.04\home\alex", "alex")]
+    [InlineData(@"\\wsl.localhost\Ubuntu-24.04\home\alex\src", "src")]
+    [InlineData("/home/alex", "alex")]
+    public void AWslHome_KeepsItsPath_AndLabelsFromTheLeaf(string cwd, string leaf)
+    {
+        var displayed = TabLabel.Collapse(cwd, Home);
+        Assert.Equal(cwd, displayed);
+        Assert.Equal(leaf, TabLabel.FolderName(displayed));
+    }
+
     [Theory]
     [InlineData("C:\\Users\\alex\ndel *")]
     [InlineData("C:\\Users\\alex\\\u202Esdaolnwod")]

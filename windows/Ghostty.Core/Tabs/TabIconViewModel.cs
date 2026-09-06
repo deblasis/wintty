@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 using Ghostty.Core.Profiles;
 
 namespace Ghostty.Core.Tabs;
@@ -114,17 +113,29 @@ public sealed class TabIconViewModel : INotifyPropertyChanged
     {
         if (!Equals(oldIcon, Icon))
         {
-            Raise(nameof(Icon));
-            Raise(nameof(IsMdl2Glyph));
-            Raise(nameof(Mdl2CodePoint));
+            Raise(Args.Icon);
+            Raise(Args.IsMdl2Glyph);
+            Raise(Args.Mdl2CodePoint);
         }
         if (!string.Equals(oldTooltip, TooltipText))
         {
-            Raise(nameof(TooltipText));
+            Raise(Args.TooltipText);
         }
     }
 
+    /// <summary>
+    /// One args object per name for the life of the process; see the note on
+    /// <c>TabModel</c>'s. The foreground-process tracker drives all four of
+    /// these on a timer, per tab.
+    /// </summary>
+    private static class Args
+    {
+        internal static readonly PropertyChangedEventArgs Icon = new(nameof(TabIconViewModel.Icon));
+        internal static readonly PropertyChangedEventArgs IsMdl2Glyph = new(nameof(TabIconViewModel.IsMdl2Glyph));
+        internal static readonly PropertyChangedEventArgs Mdl2CodePoint = new(nameof(TabIconViewModel.Mdl2CodePoint));
+        internal static readonly PropertyChangedEventArgs TooltipText = new(nameof(TabIconViewModel.TooltipText));
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
-    private void Raise([CallerMemberName] string? name = null) =>
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    private void Raise(PropertyChangedEventArgs args) => PropertyChanged?.Invoke(this, args);
 }

@@ -1,6 +1,5 @@
 using System;
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Profiles;
 using Ghostty.Core.Session;
@@ -93,7 +92,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         {
             if (field == value) return;
             field = value;
-            Raise();
+            Raise(Args.UserOverrideTitle);
             // EffectiveTitle and the tooltips are computed; classic bindings
             // listen for the exact property name, so raise them explicitly.
             RaiseTitleDerived();
@@ -107,7 +106,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         {
             if (field == value) return;
             field = value;
-            Raise();
+            Raise(Args.ShellReportedTitle);
             RaiseTitleDerived();
             if (value is not null) Settle();
         }
@@ -115,11 +114,11 @@ internal sealed class TabModel : INotifyPropertyChanged
 
     private void RaiseTitleDerived()
     {
-        Raise(nameof(EffectiveTitle));
-        Raise(nameof(IsHome));
-        Raise(nameof(WordTitle));
-        Raise(nameof(TooltipText));
-        Raise(nameof(HoverText));
+        Raise(Args.EffectiveTitle);
+        Raise(Args.IsHome);
+        Raise(Args.WordTitle);
+        Raise(Args.TooltipText);
+        Raise(Args.HoverText);
     }
 
     /// <summary>
@@ -135,7 +134,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         {
             if (field == value) return;
             field = value;
-            Raise();
+            Raise(Args.ShellReportedCwd);
             RaiseTitleDerived();
             if (value is not null) Settle();
         }
@@ -155,7 +154,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         {
             if (field == value) return;
             field = value;
-            Raise();
+            Raise(Args.HomeDirectory);
             RaiseTitleDerived();
         }
     }
@@ -163,7 +162,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     public TabProgressState Progress
     {
         get;
-        set { if (!field.Equals(value)) { field = value; Raise(); } }
+        set { if (!field.Equals(value)) { field = value; Raise(Args.Progress); } }
     } = TabProgressState.None;
 
     /// <summary>
@@ -175,7 +174,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     public TabColor Color
     {
         get;
-        set { if (field != value) { field = value; Raise(); } }
+        set { if (field != value) { field = value; Raise(Args.Color); } }
     } = TabColor.None;
 
     /// <summary>
@@ -187,7 +186,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     public bool BellRinging
     {
         get;
-        set { if (field != value) { field = value; Raise(); } }
+        set { if (field != value) { field = value; Raise(Args.BellRinging); } }
     }
 
     /// <summary>
@@ -201,7 +200,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     public bool IsIdle
     {
         get;
-        set { if (field != value) { field = value; Raise(); } }
+        set { if (field != value) { field = value; Raise(Args.IsIdle); } }
     }
 
     /// <summary>
@@ -225,7 +224,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     public bool IsPinned
     {
         get;
-        set { if (field != value) { field = value; Raise(); } }
+        set { if (field != value) { field = value; Raise(Args.IsPinned); } }
     }
 
     /// <summary>
@@ -242,7 +241,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         {
             if (ReferenceEquals(field, value)) return;
             field = value;
-            Raise();
+            Raise(Args.Group);
         }
     }
 
@@ -321,7 +320,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     public bool IsSettling
     {
         get;
-        private set { if (field != value) { field = value; _tabIcon?.SetSettling(value); Raise(); } }
+        private set { if (field != value) { field = value; _tabIcon?.SetSettling(value); Raise(Args.IsSettling); } }
     }
 
     /// <summary>Marks the tab as starting; the manager calls it on every tab it opens.</summary>
@@ -458,7 +457,40 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// </summary>
     public event Action<TabModel, int?>? ShellPidChanged;
 
+    /// <summary>
+    /// One <see cref="PropertyChangedEventArgs"/> per property name, minted
+    /// once for the process. The names are a closed set known at compile
+    /// time, and a shell drives the title and directory setters at every
+    /// prompt on every tab -- six raises each -- so a fresh args object per
+    /// raise was garbage with nothing to say for itself.
+    ///
+    /// <c>nameof</c> ties each field to the property it names; what it
+    /// cannot check is a setter reaching for the wrong field, which
+    /// <c>[CallerMemberName]</c> made impossible. TabChangeArgsTests walks
+    /// every settable property and holds that line.
+    /// </summary>
+    private static class Args
+    {
+        internal static readonly PropertyChangedEventArgs UserOverrideTitle = new(nameof(TabModel.UserOverrideTitle));
+        internal static readonly PropertyChangedEventArgs ShellReportedTitle = new(nameof(TabModel.ShellReportedTitle));
+        internal static readonly PropertyChangedEventArgs ShellReportedCwd = new(nameof(TabModel.ShellReportedCwd));
+        internal static readonly PropertyChangedEventArgs HomeDirectory = new(nameof(TabModel.HomeDirectory));
+        internal static readonly PropertyChangedEventArgs Progress = new(nameof(TabModel.Progress));
+        internal static readonly PropertyChangedEventArgs Color = new(nameof(TabModel.Color));
+        internal static readonly PropertyChangedEventArgs BellRinging = new(nameof(TabModel.BellRinging));
+        internal static readonly PropertyChangedEventArgs IsIdle = new(nameof(TabModel.IsIdle));
+        internal static readonly PropertyChangedEventArgs IsPinned = new(nameof(TabModel.IsPinned));
+        internal static readonly PropertyChangedEventArgs Group = new(nameof(TabModel.Group));
+        internal static readonly PropertyChangedEventArgs IsSettling = new(nameof(TabModel.IsSettling));
+
+        // Computed; raised explicitly by RaiseTitleDerived.
+        internal static readonly PropertyChangedEventArgs EffectiveTitle = new(nameof(TabModel.EffectiveTitle));
+        internal static readonly PropertyChangedEventArgs IsHome = new(nameof(TabModel.IsHome));
+        internal static readonly PropertyChangedEventArgs WordTitle = new(nameof(TabModel.WordTitle));
+        internal static readonly PropertyChangedEventArgs TooltipText = new(nameof(TabModel.TooltipText));
+        internal static readonly PropertyChangedEventArgs HoverText = new(nameof(TabModel.HoverText));
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
-    private void Raise([CallerMemberName] string? name = null) =>
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    private void Raise(PropertyChangedEventArgs args) => PropertyChanged?.Invoke(this, args);
 }
