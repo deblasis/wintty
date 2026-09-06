@@ -3096,20 +3096,23 @@ fn maybeHandleBinding(
         actions,
     });
     // Set if we ran an action that closes the surface. Our "self" pointer
-    // and the action slice (owned by the keybind set) are both dead after
-    // that, so nothing may touch either of them.
+    // is dead after that, so nothing may touch it.
     var closed: bool = false;
+
+    // Set if we ran an action that frees the keybind set. That is a
+    // larger set of actions than the ones that close us, because a config
+    // reload replaces the set while leaving the surface alive, and the
+    // action slice lives in the set, so nothing may read it afterwards.
+    var chain_ended: bool = false;
     const performed = performed: {
         // If this is a global or all action, then we perform it on
         // the app and it applies to every surface.
         if (leaf.flags.global or leaf.flags.all) {
             // These run on every surface, ours included, so decide before
-            // performing whether we are about to lose it.
+            // performing what we are about to lose.
             for (actions) |action| {
-                if (action.closesSurface()) {
-                    closed = true;
-                    break;
-                }
+                if (action.closesSurface()) closed = true;
+                if (action.endsChain()) chain_ended = true;
             }
 
             self.app.performAllChainedAction(
@@ -3134,11 +3137,13 @@ fn maybeHandleBinding(
             };
             performed = performed or action_performed;
 
-            // Stop the chain at a closing action. The config parser
-            // rejects a chain that continues past one, but a keybind set
-            // built any other way must not run into freed memory.
-            if (action.closesSurface()) {
-                closed = performed;
+            // Stop the chain at an action that freed the set we are
+            // reading from. The config parser rejects a chain that
+            // continues past one, but a keybind set built any other way
+            // must not run into freed memory.
+            if (action.endsChain()) {
+                if (action.closesSurface()) closed = performed;
+                chain_ended = true;
                 break;
             }
         }
@@ -3151,7 +3156,9 @@ fn maybeHandleBinding(
         return .closed;
     }
 
-    if (performed) {
+    // Everything below reads the action slice again, so it is only safe
+    // while the keybind set that owns it is still alive.
+    if (performed and !chain_ended) {
         // If our action was "ignore" then we return the special input
         // effect of "ignored".
         for (actions) |action| if (action == .ignore) {
@@ -3183,7 +3190,7 @@ fn maybeHandleBinding(
         // Store our last trigger so we don't encode the release event
         self.keyboard.last_trigger = event.bindingHash();
 
-        if (insp_ev) |ev| {
+        if (!chain_ended) if (insp_ev) |ev| {
             ev.binding = self.alloc.dupe(
                 input.Binding.Action,
                 actions,
@@ -3194,7 +3201,7 @@ fn maybeHandleBinding(
                 );
                 break :binding &.{};
             };
-        }
+        };
         return .consumed;
     }
 

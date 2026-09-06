@@ -495,9 +495,9 @@ pub fn performAllChainedAction(
         };
 
         // This slice is owned by the keybind set of the surface the
-        // binding came from, and that surface is now gone, so there is
-        // nothing left to read.
-        if (action.closesSurface()) break;
+        // binding came from, and that set has just been freed, so there
+        // is nothing left to read.
+        if (action.endsChain()) break;
     }
 }
 

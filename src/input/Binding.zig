@@ -1368,9 +1368,7 @@ pub const Action = union(enum) {
     }
 
     /// Returns true if performing this action can close the surface it
-    /// was performed on. The surface (and anything owned by it, such as
-    /// the keybind set an action chain lives in) is gone once one of
-    /// these is performed, so nothing may run after it.
+    /// was performed on, so the surface pointer is dead afterwards.
     pub fn closesSurface(self: Action) bool {
         return switch (self) {
             .close_surface,
@@ -1379,6 +1377,27 @@ pub const Action = union(enum) {
             => true,
 
             else => false,
+        };
+    }
+
+    /// Returns true if performing this action can free the keybind set
+    /// that a chain of actions is being read from, so no action after it
+    /// in the chain may be looked at.
+    ///
+    /// Closing the surface frees the config it derived, and so does
+    /// reloading: a config reload replaces every surface's derived
+    /// config, which owns the keybind set, without closing anything.
+    /// `quit` and `close_all_windows` take every surface with them.
+    pub fn endsChain(self: Action) bool {
+        return switch (self) {
+            .reload_config,
+            .close_all_windows,
+            .quit,
+            => true,
+
+            // Every action that takes the surface away takes its keybind
+            // set with it.
+            else => self.closesSurface(),
         };
     }
 
@@ -2730,7 +2749,8 @@ pub const Set = struct {
     /// Append a chained action to the prior set action.
     ///
     /// It is an error if there is no valid prior chain parent or if the
-    /// prior action closes the surface, since nothing can run after that.
+    /// prior action frees the set this chain lives in, since nothing can
+    /// run after that.
     pub fn appendChain(
         self: *Set,
         alloc: Allocator,
@@ -2748,7 +2768,7 @@ pub const Set = struct {
             // If it is already a chained action, we just append the
             // action. Easy!
             .leaf_chained => |*leaf| {
-                if (leaf.actions.getLast().closesSurface()) {
+                if (leaf.actions.getLast().endsChain()) {
                     return error.InvalidChainAction;
                 }
 
@@ -2760,7 +2780,7 @@ pub const Set = struct {
             // mappings for this action since chained actions are not
             // part of the reverse mapping.
             .leaf => |leaf| {
-                if (leaf.action.closesSurface()) {
+                if (leaf.action.endsChain()) {
                     return error.InvalidChainAction;
                 }
 
@@ -4895,6 +4915,55 @@ test "set: appendChain after a closing action in a chain is an error" {
 
     const chained = s.get(.{ .key = .{ .unicode = 'a' } }).?.value_ptr.*.leaf_chained;
     try testing.expectEqual(@as(usize, 2), chained.actions.items.len);
+}
+
+test "set: appendChain after an action that frees the set is an error" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // None of these close the surface, but each one can replace or tear
+    // down the config that owns this set, which frees the action slice a
+    // chain is read from.
+    const actions: []const Action = &.{
+        .{ .reload_config = {} },
+        .{ .close_all_windows = {} },
+        .{ .quit = {} },
+    };
+
+    for (actions) |action| {
+        var s: Set = .{};
+        defer s.deinit(alloc);
+
+        try s.put(alloc, .{ .key = .{ .unicode = 'a' } }, action);
+        try testing.expectError(
+            error.InvalidChainAction,
+            s.appendChain(alloc, .{ .new_tab = {} }),
+        );
+
+        const entry = s.get(.{ .key = .{ .unicode = 'a' } }).?;
+        try testing.expect(entry.value_ptr.* == .leaf);
+    }
+}
+
+test "action: endsChain" {
+    const testing = std.testing;
+
+    // Every action that closes the surface also ends the chain.
+    try testing.expect((Action{ .close_surface = {} }).endsChain());
+    try testing.expect((Action{ .close_window = {} }).endsChain());
+    try testing.expect((Action{ .close_tab = .this }).endsChain());
+
+    // These do not close the surface but do free the keybind set.
+    try testing.expect(!(Action{ .reload_config = {} }).closesSurface());
+    try testing.expect(!(Action{ .close_all_windows = {} }).closesSurface());
+    try testing.expect(!(Action{ .quit = {} }).closesSurface());
+    try testing.expect((Action{ .reload_config = {} }).endsChain());
+    try testing.expect((Action{ .close_all_windows = {} }).endsChain());
+    try testing.expect((Action{ .quit = {} }).endsChain());
+
+    // An ordinary action does neither.
+    try testing.expect(!(Action{ .new_tab = {} }).closesSurface());
+    try testing.expect(!(Action{ .new_tab = {} }).endsChain());
 }
 
 test "set: parseAndPut chain after a closing action is invalid" {
