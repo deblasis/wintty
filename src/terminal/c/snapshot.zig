@@ -214,6 +214,8 @@ pub fn decoder_get(
     data: DecoderData,
     out: ?*anyopaque,
 ) callconv(lib.calling_conv) Result {
+    const out_ptr = out orelse return .invalid_value;
+
     // Enumerate known keys so each branch recovers the correct output type.
     return switch (data) {
         inline .invalid,
@@ -228,7 +230,7 @@ pub fn decoder_get(
         => |comptime_data| decoderGetTyped(
             decoder_,
             comptime_data,
-            @ptrCast(@alignCast(out)),
+            @ptrCast(@alignCast(out_ptr)),
         ),
         _ => .invalid_value,
     };
@@ -1530,4 +1532,8 @@ test "snapshot incremental decoder exposes READY and page progress" {
     try testing.expectEqual(@as(usize, 0), dropped_rows);
     while (decoder_next(dropped_decoder) == .success) {}
     try testing.expectEqual(Result.no_value, decoder_next(dropped_decoder));
+}
+
+test "decoder_get rejects a null out pointer" {
+    try testing.expectEqual(Result.invalid_value, decoder_get(null, .progress_rows, null));
 }
