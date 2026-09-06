@@ -49,6 +49,19 @@ internal static class TabStripMotion
     /// <summary>Neighbour gap motion: a short eased glide.</summary>
     public const double GapGlideMs = 250;
 
+    /// <summary>
+    /// The glide's curve: the signature-experiences table's point-to-point
+    /// cubic-bezier(0.55, 0.55, 0, 1), as the two control points a
+    /// Compositor cubic-bezier easing factory takes. Numbers rather than
+    /// an easing object because Core cannot hold composition types; the
+    /// shell passes them verbatim. One token so every gliding reflow
+    /// decelerates the same -- a pin pushed off a row end is the same
+    /// point-to-point move as the neighbour gliding one pane over, and
+    /// anything else reads as two motion systems at once.
+    /// </summary>
+    public static readonly System.Numerics.Vector2 GlideBezierP1 = new(0.55f, 0.55f);
+    public static readonly System.Numerics.Vector2 GlideBezierP2 = new(0f, 1f);
+
     /// <summary>Row lift on grab: a near-critical scale spring to a 3% grow.</summary>
     public const float LiftDampingRatio = 0.70f;
     public const double LiftPeriodMs = 50;
@@ -164,8 +177,9 @@ internal static class TabStripMotion
     /// HighContrastDetector.IsActive() COMPOSED through
     /// HighContrastState.ShouldApply, because raw IsActive diverges from
     /// the chrome whenever the user has opted out of High Contrast
-    /// themes. There is no existing animation-preference read anywhere
-    /// else in the repo to reuse.
+    /// themes. The plain preference read lives beside its callers in the
+    /// shell (the hosts' own readers and Services.SystemAnimations); this
+    /// gate is the one place the two flags compose.
     /// </summary>
     public static bool Enabled(bool animationsEnabled, bool highContrast)
         => animationsEnabled && !highContrast;

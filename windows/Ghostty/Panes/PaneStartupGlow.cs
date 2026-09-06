@@ -128,6 +128,11 @@ internal sealed partial class PaneStartupGlow : IDisposable
     public void StartGlow()
     {
         if (_disposed) return;
+        // The orbit is decorative continuous motion, the one class of
+        // animation reduce-motion has no reading for; the static ring
+        // stays, because it is the "pane is starting" signal and it does
+        // not move.
+        if (!Ghostty.Services.SystemAnimations.Enabled()) return;
         _coreBrush.StartAnimation("EllipseCenter", _orbit);
         _haloBrush.StartAnimation("EllipseCenter", _orbit);
     }

@@ -1127,6 +1127,35 @@ internal sealed partial class VerticalTabStrip : UserControl
         _fieldMotion.Clear();
     }
 
+    /// <summary>
+    /// Land every long custom clock the strip can hold, at its end state.
+    /// The window's reduce-motion flip handler calls this when the OS
+    /// animation-effects preference turns off mid-session: the per-gesture
+    /// gates read the flag fresh, so the next gesture is already a cut --
+    /// this closes the window where a clock armed before the flip (a pin
+    /// flight, a field glide, a band reflow) keeps playing under a user
+    /// who just told the system to stop moving things.
+    ///
+    /// What lands: the pin flight gives its row back at full strength
+    /// (the row is already arranged where the flight promised -- only the
+    /// ghost flourish dies), each field flight stops and takes its
+    /// destination, and the band hands every gliding square back.
+    /// Deliberately not landed: a drag live at the flip keeps its clocks
+    /// until release -- the follow is the pointer, which is intent, not
+    /// decoration -- and the band is already still mid-drag, because its
+    /// motion is forced off while a drag is live.
+    /// </summary>
+    internal void LandAllMotion()
+    {
+        FinishPinFlight("animations-off");
+        // Snapshot first: StopFieldMotion removes from the dictionary as
+        // it lands each group, and a landing must not mutate the
+        // enumerator it is being reached through.
+        foreach (var group in _fieldMotion.Keys.ToArray())
+            StopFieldMotion(group);
+        _pinnedPanel.StopMotion();
+    }
+
     private void StopFieldMotion(TabGroup group)
     {
         if (!_fieldMotion.Remove(group, out var flight)) return;
@@ -3371,7 +3400,7 @@ internal sealed partial class VerticalTabStrip : UserControl
                 // which is the slot delta GlideRow just pinned.
                 glide.InsertKeyFrame(1f, Vector3.Zero,
                     drag.Visual.Compositor.CreateCubicBezierEasingFunction(
-                        new Vector2(0.55f, 0.55f), new Vector2(0f, 1f)));
+                        TabStripMotion.GlideBezierP1, TabStripMotion.GlideBezierP2));
                 drag.Glide = glide;
             }
         }
@@ -4984,7 +5013,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         fly.Duration = TimeSpan.FromMilliseconds(TabStripMotion.PinFlightMs);
         fly.InsertKeyFrame(1f, Vector3.Zero,
             compositor.CreateCubicBezierEasingFunction(
-                new Vector2(0.55f, 0.55f), new Vector2(0f, 1f)));
+                TabStripMotion.GlideBezierP1, TabStripMotion.GlideBezierP2));
         visual.Properties.InsertVector3("Translation", new Vector3(
             (float)(start.X - dest.X), (float)(start.Y - dest.Y), 0f));
         var flying = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
