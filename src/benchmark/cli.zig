@@ -386,3 +386,75 @@ test "mainAction opens a real data file for screen-clone through setup" {
     // `options.dataFile`, which is what this proves actually happens.
     try mainAction(alloc, .@"screen-clone", .{ .string = args });
 }
+
+// The remaining benchmark actions that take a `--data` path. Their
+// `Options` were the last ones without an `_arena`, so passing a real
+// path leaked the parser's copy of it; driving `mainAction` on
+// `testing.allocator` is what catches that.
+
+test "mainAction opens a real data file for apc-parser through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "\x1b_Gi=1,a=q;abc\x1b\\", &path_buf);
+
+    const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"apc-parser", .{ .string = args });
+}
+
+test "mainAction opens a real data file for is-symbol through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "a\u{2665}b", &path_buf);
+
+    const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"is-symbol", .{ .string = args });
+}
+
+test "mainAction opens a real data file for terminal-parser through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "hello\x1b[31mworld", &path_buf);
+
+    const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"terminal-parser", .{ .string = args });
+}
+
+test "mainAction replays a real data file for terminal-resize through setup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try writeTmpDataFile(&tmp, "hello\r\nworld", &path_buf);
+
+    // Small dimensions and fill, matching TerminalResize's own test, so
+    // the reflow loop stays fast in a debug build.
+    const args = try std.fmt.allocPrint(
+        alloc,
+        "--mode=cols --terminal-rows=10 --terminal-cols=20 " ++
+            "--fill-lines=50 --data={s}",
+        .{path},
+    );
+    defer alloc.free(args);
+
+    try mainAction(alloc, .@"terminal-resize", .{ .string = args });
+}
