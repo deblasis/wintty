@@ -554,6 +554,24 @@ pub fn Stream(comptime H: type) type {
             };
         }
 
+        /// Force the stream back to ground state, discarding any
+        /// mid-sequence parse state: the VT parser's state machine, its
+        /// OSC capture, and any partially decoded codepoint. The
+        /// handler's own transient state (DCS, APC, protocol
+        /// accumulators) is the handler's to discard; the termio-side
+        /// deep-idle trim does both halves under the renderer state
+        /// mutex, which is also the lock the read path parses under.
+        ///
+        /// Continuation tracking is deliberately NOT reset: the termio
+        /// stream runs without a tracker, and on a tracking stream the
+        /// caller must discard the tracker's suffix alongside this, or
+        /// a later writeContinuation would faithfully resurrect the
+        /// sequence this just threw away.
+        pub fn resetToGround(self: *Self) void {
+            self.parser.resetToGround();
+            self.utf8decoder = .{};
+        }
+
         pub fn deinit(self: *Self) void {
             if (self.continuation) |*tracker| tracker.deinit();
             self.parser.deinit();

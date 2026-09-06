@@ -867,6 +867,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private bool? _surfaceVisibility;
 
     /// <summary>
+    /// The last idle state this host was told to hold, or null before the
+    /// first <see cref="SetSurfaceIdle"/> call. Same spawn-gap story as
+    /// <see cref="_surfaceVisibility"/>: a restored leaf that spawns after
+    /// its tab already went idle picks the state up here.
+    /// </summary>
+    private bool? _surfaceIdle;
+
+    /// <summary>
     /// Tell libghostty, per leaf, whether this tab's pixels reach the
     /// screen. A hidden tab stops presenting and releases its GPU atlas
     /// copies until it is shown again (the renderer rebuilds them lazily
@@ -889,6 +897,33 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             if (handle == IntPtr.Zero) continue;
             Interop.NativeMethods.SurfaceSetVisible(
                 new Interop.GhosttySurface(handle), visible);
+        }
+    }
+
+    /// <summary>
+    /// Tell libghostty, per leaf, that this tab is deep-idle (the idle
+    /// tracker's determination). Idle trims what only exists to make the
+    /// next frame cheap: parse state a sequence cut mid-flight is pinning
+    /// (an unterminated OSC can hold its capture for as long as the tab
+    /// stays silent), the renderer's image copies, and the shaped-run
+    /// cache. Clearing sends only the latch reset -- nothing trimmed is
+    /// needed to serve input, so waking does no work and the next frame
+    /// rebuilds lazily. Keyed on the tracker's flip rather than on
+    /// visibility: a foreground tab nobody touches also goes idle.
+    /// </summary>
+    public void SetSurfaceIdle(bool idle)
+    {
+        _surfaceIdle = idle;
+        foreach (var leaf in PaneTree.Leaves(_root))
+        {
+            var handle = leaf.Terminal().SurfaceHandle;
+            // Same zero-handle guard as visibility: before the surface
+            // exists or after disposal, the native call would dereference
+            // a null surface, and the recorded state above is what the
+            // spawn hook applies instead.
+            if (handle == IntPtr.Zero) continue;
+            Interop.NativeMethods.SurfaceSetIdle(
+                new Interop.GhosttySurface(handle), idle);
         }
     }
 
@@ -1153,6 +1188,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // Re-calling SetSurfaceVisibility is idempotent for leaves that
         // already hold the state (libghostty dedups a no-change write).
         if (_surfaceVisibility == false) SetSurfaceVisibility(false);
+
+        // Same spawn-gap as visibility: a tab that went idle before this
+        // leaf existed must not leave the new surface untrimmed.
+        if (_surfaceIdle == true) SetSurfaceIdle(true);
 
         if (!_startupGlowEnabled) return;
         // One glow per control. SurfaceSpawned fires once per control, so

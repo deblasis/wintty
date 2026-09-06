@@ -48,6 +48,7 @@ internal sealed class TabIdleTracker : IDisposable
     private readonly double _idleAfterMs;
     private readonly Func<long> _clock;
     private readonly Action<Action> _marshal;
+    private readonly Action<TabModel, bool>? _onIdleFlip;
     private readonly TimeProvider _time;
     private readonly object _gate = new();
     private ITimer? _timer;
@@ -66,17 +67,25 @@ internal sealed class TabIdleTracker : IDisposable
     /// Stamps and reads must share one domain; only differences are
     /// used, so any monotonic base works.</param>
     /// <param name="time">Timer provider, for tests.</param>
+    /// <param name="onIdleFlip">Notified exactly when a tab's
+    /// <see cref="TabModel.IsIdle"/> changes, with the new value --
+    /// from the sweep (marshalled) and from the eager activation clear.
+    /// The shell uses this to carry the idle state across the seam
+    /// (native footprint trims); null leaves the tracker badge-only,
+    /// with no seam-side effect at all.</param>
     public TabIdleTracker(
         TabManager manager,
         Action<Action> marshal,
         TimeSpan? idleAfter = null,
         Func<long>? clock = null,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        Action<TabModel, bool>? onIdleFlip = null)
     {
         _manager = manager;
         _idleAfterMs = (idleAfter ?? DefaultIdleAfter).TotalMilliseconds;
         _clock = clock ?? DefaultClock;
         _marshal = marshal;
+        _onIdleFlip = onIdleFlip;
         _time = time ?? TimeProvider.System;
     }
 
@@ -112,7 +121,14 @@ internal sealed class TabIdleTracker : IDisposable
         // sweep.
         if (_lastActive is { } previous) previous.LastActivityTick = _clock();
         tab.LastActivityTick = _clock();
-        tab.IsIdle = false;
+        if (tab.IsIdle)
+        {
+            // The eager clear is also an idle flip: activation wakes the
+            // native side the same moment the moon lifts, not one sweep
+            // later.
+            tab.IsIdle = false;
+            _onIdleFlip?.Invoke(tab, false);
+        }
         _lastActive = tab;
     }
 
@@ -133,10 +149,16 @@ internal sealed class TabIdleTracker : IDisposable
             // signal): treat as fresh rather than ancient, so nothing
             // is born asleep.
             var last = Math.Max(tab.LastActivityTick, tab.PaneHost.LastActivityTick);
-            tab.IsIdle = last != 0
+            var idle = last != 0
                 && !ReferenceEquals(tab, active)
                 && !tab.BellRinging
                 && now - last >= _idleAfterMs;
+            if (idle == tab.IsIdle) continue;
+            tab.IsIdle = idle;
+            // On the flip only, so native state and the badge can never
+            // disagree about which tabs are asleep -- the seam-side trim
+            // rides the same edge the strip renders from.
+            _onIdleFlip?.Invoke(tab, idle);
         }
     }
 

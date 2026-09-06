@@ -82,6 +82,12 @@ pub const Message = union(enum) {
     /// The surface gained or lost focus.
     focused: bool,
 
+    /// The surface went deep-idle (the embedder's tracker: no PTY data
+    /// and no interaction for its threshold). One-directional by
+    /// design: waking sends nothing, because nothing the trim removes
+    /// is required to serve input and everything rebuilds lazily.
+    deep_idle: void,
+
     /// Record a Kitty clipboard protocol session grant for a password
     /// so future requests carrying it skip the permission prompt, for
     /// reads and writes respectively.

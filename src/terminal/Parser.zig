@@ -251,6 +251,26 @@ pub fn deinit(self: *Parser) void {
     self.osc_parser.deinit();
 }
 
+/// Return the parser to ground state, dropping any partially collected
+/// sequence state. The OSC capture is the memory that matters: an
+/// unterminated sequence can hold its heap capture until the next byte
+/// of that sequence arrives, which for a tab that has gone idle may be
+/// a very long time. Everything else reset here (intermediates, CSI
+/// params) is fixed-size and cleared for coherence, not footprint.
+///
+/// The bytes of the discarded fragment were never shown, so nothing
+/// visible changes; the next byte parses from ground exactly as a fresh
+/// input would.
+pub fn resetToGround(self: *Parser) void {
+    self.state = .ground;
+    self.intermediates_idx = 0;
+    self.params_idx = 0;
+    self.param_acc = 0;
+    self.param_acc_idx = 0;
+    self.params_sep = .initEmpty();
+    self.osc_parser.reset();
+}
+
 /// Next consumes the next character c and returns the actions to execute.
 /// Up to 3 actions may need to be executed -- in order -- representing
 /// the state exit, transition, and entry actions.
@@ -903,6 +923,45 @@ test "osc: change window title (end in esc)" {
         try testing.expect(cmd == .change_window_title);
         try testing.expectEqualStrings("abc", cmd.change_window_title);
     }
+}
+
+test "resetToGround drops a truncated OSC capture" {
+    var p: Parser = init();
+    defer p.deinit();
+    p.osc_parser.alloc = std.testing.allocator;
+
+    // An OSC 52 cut mid-flight, pushed past the inline buffer so the
+    // heap capture engages: exactly the state a deep-idle tab pins for
+    // as long as it stays silent. OSC 52 is one of the allocating keys;
+    // title-style OSCs cap inline and hold nothing on the heap, so the
+    // command choice here is load-bearing for what the test proves.
+    _ = p.next(0x1B);
+    _ = p.next(']');
+    _ = p.next('5');
+    _ = p.next('2');
+    _ = p.next(';');
+    var i: usize = 0;
+    while (i < 5_000) : (i += 1) _ = p.next('A');
+    try testing.expect(p.state == .osc_string);
+    // Premise made explicit: the heap capture must actually be engaged,
+    // or the reset below proves nothing about the allocating path.
+    try testing.expect(p.osc_parser.capture != null);
+    try testing.expect(p.osc_parser.capture.?.backing == .allocating);
+
+    p.resetToGround();
+    try testing.expect(p.state == .ground);
+    // The capture is gone, not merely closed: the allocation back out is
+    // the entire point of the trim.
+    try testing.expect(p.osc_parser.capture == null);
+
+    // The next byte parses as fresh input from ground -- the discarded
+    // fragment was never shown, and the reset leaves the parser fully
+    // able to consume text. The print rides the transition slot: at
+    // ground, staying at ground means no exit action and no entry
+    // action.
+    const a = p.next('x');
+    try testing.expect(a[1] != null);
+    try testing.expect(a[1].? == .print);
 }
 
 // https://github.com/darrenstarr/VtNetCore/pull/14

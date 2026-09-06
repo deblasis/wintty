@@ -1542,7 +1542,7 @@ pub const StreamHandler = struct {
     }
 
     /// Drop any in-flight write transaction without responding.
-    fn kittyClipboardWriteAbort(self: *StreamHandler) void {
+    pub fn kittyClipboardWriteAbort(self: *StreamHandler) void {
         if (self.kitty_clipboard_write) |state| {
             state.deinit(self.alloc);
             self.alloc.destroy(state);
