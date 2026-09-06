@@ -1369,11 +1369,22 @@ pub const Action = union(enum) {
 
     /// Returns true if performing this action can close the surface it
     /// was performed on, so the surface pointer is dead afterwards.
+    ///
+    /// `quit` and `close_all_windows` take every surface with them, and
+    /// `undo`/`redo` can replay the teardown of whatever created this
+    /// one. Some runtimes defer that work to their event loop, but gtk
+    /// does it inline: `quit` destroys every window before it returns,
+    /// and the surface is freed on the way. A caller still holding the
+    /// surface has to assume it is gone.
     pub fn closesSurface(self: Action) bool {
         return switch (self) {
             .close_surface,
             .close_window,
             .close_tab,
+            .close_all_windows,
+            .quit,
+            .undo,
+            .redo,
             => true,
 
             else => false,
@@ -1384,20 +1395,11 @@ pub const Action = union(enum) {
     /// that a chain of actions is being read from, so no action after it
     /// in the chain may be looked at.
     ///
-    /// Closing the surface frees the config it derived, and so does
-    /// reloading: a config reload replaces every surface's derived
-    /// config, which owns the keybind set, without closing anything.
-    /// `quit` and `close_all_windows` take every surface with them, and
-    /// `undo`/`redo` can replay the teardown of whatever created this
-    /// one.
+    /// Reloading the config replaces every surface's derived config,
+    /// which owns the keybind set, without closing anything.
     pub fn endsChain(self: Action) bool {
         return switch (self) {
-            .reload_config,
-            .close_all_windows,
-            .quit,
-            .undo,
-            .redo,
-            => true,
+            .reload_config => true,
 
             // Every action that takes the surface away takes its keybind
             // set with it.
@@ -4977,18 +4979,20 @@ test "action: endsChain" {
     try testing.expect((Action{ .close_window = {} }).endsChain());
     try testing.expect((Action{ .close_tab = .this }).endsChain());
 
-    // These do not close the surface but do free the keybind set.
+    // A reload frees the keybind set but leaves the surface open.
     try testing.expect(!(Action{ .reload_config = {} }).closesSurface());
-    try testing.expect(!(Action{ .close_all_windows = {} }).closesSurface());
-    try testing.expect(!(Action{ .quit = {} }).closesSurface());
     try testing.expect((Action{ .reload_config = {} }).endsChain());
+
+    // These take every surface with them, ours included.
+    try testing.expect((Action{ .close_all_windows = {} }).closesSurface());
     try testing.expect((Action{ .close_all_windows = {} }).endsChain());
+    try testing.expect((Action{ .quit = {} }).closesSurface());
     try testing.expect((Action{ .quit = {} }).endsChain());
 
     // Undoing whatever created this surface takes the surface with it.
-    try testing.expect(!(Action{ .undo = {} }).closesSurface());
-    try testing.expect(!(Action{ .redo = {} }).closesSurface());
+    try testing.expect((Action{ .undo = {} }).closesSurface());
     try testing.expect((Action{ .undo = {} }).endsChain());
+    try testing.expect((Action{ .redo = {} }).closesSurface());
     try testing.expect((Action{ .redo = {} }).endsChain());
 
     // An ordinary action does neither.

@@ -3151,6 +3151,11 @@ fn maybeHandleBinding(
             // continues past one, but a keybind set built any other way
             // must not run into freed memory.
             if (action.endsChain()) {
+                // performBindingAction answers false only when the apprt
+                // did nothing at all, so a false here means the surface
+                // is still ours. quit and close_all_windows always answer
+                // true; undo and redo answer the apprt, which is what the
+                // performable flag below needs.
                 if (action.closesSurface()) closed = performed;
                 if (borrowed) actions_freed = true;
                 break;
