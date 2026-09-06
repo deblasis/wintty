@@ -57,7 +57,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     const alloc = std.heap.c_allocator;
     const action_ = try cli.action.detectArgs(Action, alloc, minimal.args);
     const action = action_ orelse return error.NoAction;
-    try mainAction(alloc, action, .{ .cli = minimal.args });
+    _ = try mainAction(alloc, action, .{ .cli = minimal.args });
 }
 
 /// Arguments that can be passed to the benchmark.
@@ -69,15 +69,20 @@ pub const Args = union(enum) {
     string: []const u8,
 };
 
+/// Runs the benchmark and returns its result. The CLI itself doesn't
+/// use the result -- the benchmark prints what it measures -- but
+/// returning it is the only way a test can see how the run was
+/// configured, in particular whether `--duration-ms` really made the
+/// step run more than once.
 pub fn mainAction(
     alloc: Allocator,
     action: Action,
     args: Args,
-) !void {
+) !Benchmark.RunResult {
     switch (action) {
         inline else => |comptime_action| {
             const BenchmarkImpl = Action.Struct(comptime_action);
-            try mainActionImpl(BenchmarkImpl, alloc, args);
+            return try mainActionImpl(BenchmarkImpl, alloc, args);
         },
     }
 }
@@ -86,7 +91,7 @@ fn mainActionImpl(
     comptime BenchmarkImpl: type,
     alloc: Allocator,
     args: Args,
-) !void {
+) !Benchmark.RunResult {
     // Collect every raw CLI argument once, as independent copies so
     // they outlive whichever source iterator produced them (the
     // process argv iterator frees its backing buffer on `deinit`, and
@@ -157,7 +162,7 @@ fn mainActionImpl(
 
     // Initialize our benchmark
     const b = impl.benchmark();
-    _ = try b.run(runMode(run_opts.@"duration-ms"));
+    return try b.run(runMode(run_opts.@"duration-ms"));
 }
 
 /// True if `arg` is the `--duration-ms` flag, with or without a value.
@@ -257,12 +262,22 @@ test "mainActionImpl accepts --duration-ms alongside action-specific flags" {
     // has no `_diagnostics` field, so if `--duration-ms` ever reached
     // its parser unfiltered this would fail with error.InvalidField
     // instead of actually running the benchmark in duration mode.
+    //
+    // 50ms is long enough that a step this small -- an empty corpus, so
+    // the step does nothing -- cannot fill it in one iteration, without
+    // making the test slow.
     const testing = std.testing;
-    try mainAction(
+    const result = try mainAction(
         testing.allocator,
         .@"terminal-stream",
-        .{ .string = "--terminal-rows=4 --terminal-cols=4 --duration-ms=1" },
+        .{ .string = "--terminal-rows=4 --terminal-cols=4 --duration-ms=50" },
     );
+
+    // The flag has to reach `Benchmark.run`, not just parse: parsing it
+    // and then still running the step once is exactly what this replaced,
+    // and no other test can see the difference because the CLI has no
+    // other observable output.
+    try testing.expect(result.iterations > 1);
 }
 
 // The tests below drive `mainAction` end to end against a real file on
@@ -302,7 +317,7 @@ test "mainAction preloads a real codepoint-width corpus through setup" {
     const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"codepoint-width", .{ .string = args });
+    _ = try mainAction(alloc, .@"codepoint-width", .{ .string = args });
 }
 
 test "mainAction preloads a real grapheme-break corpus through setup" {
@@ -317,7 +332,7 @@ test "mainAction preloads a real grapheme-break corpus through setup" {
     const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"grapheme-break", .{ .string = args });
+    _ = try mainAction(alloc, .@"grapheme-break", .{ .string = args });
 }
 
 test "mainAction preloads a real osc-parser corpus through setup" {
@@ -342,7 +357,7 @@ test "mainAction preloads a real osc-parser corpus through setup" {
     const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"osc-parser", .{ .string = args });
+    _ = try mainAction(alloc, .@"osc-parser", .{ .string = args });
 }
 
 test "mainAction preloads a real terminal-stream corpus through setup" {
@@ -361,7 +376,7 @@ test "mainAction preloads a real terminal-stream corpus through setup" {
     );
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"terminal-stream", .{ .string = args });
+    _ = try mainAction(alloc, .@"terminal-stream", .{ .string = args });
 }
 
 test "mainAction opens a real data file for screen-clone through setup" {
@@ -384,7 +399,7 @@ test "mainAction opens a real data file for screen-clone through setup" {
     // the others -- it streams the file straight into the terminal
     // before the timed clone loop -- but it still opens a real file via
     // `options.dataFile`, which is what this proves actually happens.
-    try mainAction(alloc, .@"screen-clone", .{ .string = args });
+    _ = try mainAction(alloc, .@"screen-clone", .{ .string = args });
 }
 
 // The remaining benchmark actions that take a `--data` path. Their
@@ -404,7 +419,7 @@ test "mainAction opens a real data file for apc-parser through setup" {
     const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"apc-parser", .{ .string = args });
+    _ = try mainAction(alloc, .@"apc-parser", .{ .string = args });
 }
 
 test "mainAction opens a real data file for is-symbol through setup" {
@@ -419,7 +434,7 @@ test "mainAction opens a real data file for is-symbol through setup" {
     const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"is-symbol", .{ .string = args });
+    _ = try mainAction(alloc, .@"is-symbol", .{ .string = args });
 }
 
 test "mainAction opens a real data file for terminal-parser through setup" {
@@ -434,7 +449,7 @@ test "mainAction opens a real data file for terminal-parser through setup" {
     const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"terminal-parser", .{ .string = args });
+    _ = try mainAction(alloc, .@"terminal-parser", .{ .string = args });
 }
 
 test "mainAction replays a real data file for terminal-resize through setup" {
@@ -456,5 +471,5 @@ test "mainAction replays a real data file for terminal-resize through setup" {
     );
     defer alloc.free(args);
 
-    try mainAction(alloc, .@"terminal-resize", .{ .string = args });
+    _ = try mainAction(alloc, .@"terminal-resize", .{ .string = args });
 }
