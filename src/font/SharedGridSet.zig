@@ -333,6 +333,13 @@ fn collection(
         },
     );
 
+    // Whether font discovery handed us a system colour emoji font. A system
+    // font is preferred over the embedded faces below: it is what the rest
+    // of the platform draws and it tracks OS updates. The embedded faces
+    // are what is left when the search finds nothing, so that a machine
+    // without a system emoji font still draws emoji instead of boxes.
+    var system_emoji_found = false;
+
     // On macOS, always search for and add the Apple Emoji font
     // as our preferred emoji font for fallback. We do this in case
     // people add other emoji fonts to their system, we always want to
@@ -354,6 +361,7 @@ fn collection(
                     // No size adjustment for emojis.
                     .size_adjustment = .none,
                 });
+                system_emoji_found = true;
                 break :apple_emoji;
             }
         }
@@ -369,6 +377,7 @@ fn collection(
                 // No size adjustment for emojis.
                 .size_adjustment = .none,
             });
+            system_emoji_found = true;
         }
     }
 
@@ -390,44 +399,72 @@ fn collection(
                 // No size adjustment for emojis.
                 .size_adjustment = .none,
             });
+            system_emoji_found = true;
         }
     }
 
-    // Embedded emoji fallback for platforms without a system emoji font.
-    // macOS and Windows use their native emoji fonts (added above) when
-    // discovery is available.
-    if (comptime !(builtin.target.os.tag.isDarwin() or builtin.target.os.tag == .windows) or Discover == void) {
-        _ = try c.add(
+    // Embedded emoji fallback, used only when the search above came up
+    // empty. Segoe UI Emoji can be missing from a stripped Windows image
+    // and DirectWrite can fail to enumerate it, and without this the
+    // collection would carry no emoji face at all.
+    if (comptime embed_emoji) {
+        if (!system_emoji_found) try addEmbeddedEmoji(
             self.alloc,
-            try .init(
-                self.font_lib,
-                font.embedded.emoji,
-                load_options.faceOptions(),
-            ),
-            .{
-                .style = .regular,
-                .fallback = true,
-                // No size adjustment for emojis.
-                .size_adjustment = .none,
-            },
-        );
-        _ = try c.add(
-            self.alloc,
-            try .init(
-                self.font_lib,
-                font.embedded.emoji_text,
-                load_options.faceOptions(),
-            ),
-            .{
-                .style = .regular,
-                .fallback = true,
-                // No size adjustment for emojis.
-                .size_adjustment = .none,
-            },
+            self.font_lib,
+            &c,
+            load_options,
         );
     }
 
     return c;
+}
+
+/// Whether the embedded Noto emoji faces are compiled in and reachable.
+///
+/// macOS is the exception: Apple Color Emoji is part of the OS and cannot
+/// be removed, so discovery always finds it and the embedded faces would
+/// never be used. Excluding them at compile time keeps roughly 11MB of
+/// font data out of the binary, since Zig only embeds what is referenced.
+const embed_emoji: bool = !(builtin.target.os.tag.isDarwin() and Discover != void);
+
+/// Add the embedded Noto emoji faces to a fallback collection. Both are
+/// needed: NotoColorEmoji covers the emoji presentation and NotoEmoji the
+/// text presentation, and a codepoint requested with an explicit
+/// presentation only matches a face that provides it.
+fn addEmbeddedEmoji(
+    alloc: Allocator,
+    lib: Library,
+    c: *Collection,
+    load_options: Collection.LoadOptions,
+) !void {
+    _ = try c.add(
+        alloc,
+        try .init(
+            lib,
+            font.embedded.emoji,
+            load_options.faceOptions(),
+        ),
+        .{
+            .style = .regular,
+            .fallback = true,
+            // No size adjustment for emojis.
+            .size_adjustment = .none,
+        },
+    );
+    _ = try c.add(
+        alloc,
+        try .init(
+            lib,
+            font.embedded.emoji_text,
+            load_options.faceOptions(),
+        ),
+        .{
+            .style = .regular,
+            .fallback = true,
+            // No size adjustment for emojis.
+            .size_adjustment = .none,
+        },
+    );
 }
 
 /// Decrement the ref count for the given key. If the ref count is zero,
@@ -872,4 +909,28 @@ test SharedGridSet {
     // If I deref grid1 then we should have a count of 0
     set.deref(key1);
     try testing.expectEqual(@as(usize, 0), set.count());
+}
+
+test addEmbeddedEmoji {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib: Library = try .init(alloc);
+    defer lib.deinit();
+
+    var c = Collection.init();
+    defer c.deinit(alloc);
+    const load_options: Collection.LoadOptions = .{
+        .library = lib,
+        .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 },
+    };
+    c.load_options = load_options;
+
+    try addEmbeddedEmoji(alloc, lib, &c, load_options);
+
+    // The whole point of the fallback is that it renders emoji. Adding
+    // faces that cannot cover both presentations would leave the user
+    // looking at boxes, which is what this fallback exists to prevent.
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .emoji }) != null);
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .text }) != null);
 }
