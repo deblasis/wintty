@@ -69,6 +69,11 @@ pub const CodepointIterator = struct {
             else => |start| {
                 const cp_len = std.unicode.utf8ByteSequenceLength(start) catch
                     return error.InvalidString;
+
+                // A truncated sequence at the end of the value is just an
+                // invalid string; there are no bytes left to decode.
+                if (self.bytes.len - self.i < cp_len) return error.InvalidString;
+
                 defer self.i += cp_len;
                 return std.unicode.utf8Decode(self.bytes[self.i..][0..cp_len]) catch
                     return error.InvalidString;
@@ -146,6 +151,20 @@ test "codepointIterator: escape sequences" {
     try std.testing.expectEqual(@as(u21, '\n'), (try it.next()).?);
     try std.testing.expectEqual(@as(u21, '\\'), (try it.next()).?);
     try std.testing.expectEqual(null, try it.next());
+}
+
+test "codepointIterator: truncated utf8" {
+    // A multi-byte sequence that runs off the end of the value.
+    {
+        var it = codepointIterator("a\xf0");
+        try std.testing.expectEqual(@as(u21, 'a'), (try it.next()).?);
+        try std.testing.expectError(error.InvalidString, it.next());
+    }
+
+    {
+        var it = codepointIterator("\xe2\x94");
+        try std.testing.expectError(error.InvalidString, it.next());
+    }
 }
 
 test "codepointIterator: unicode escape" {

@@ -193,7 +193,7 @@ GHOSTTY_API GhosttyResult ghostty_terminal_paste(
  * Check if paste data is safe to paste into the terminal.
  *
  * Data is considered unsafe if it contains:
- * - Newlines (`\n`) which can inject commands
+ * - Line breaks (`\n`, `\r`, or U+0085) which can inject commands
  * - The bracketed paste end sequence (`\x1b[201~`) which can be used
  *   to exit bracketed paste mode and inject commands
  *

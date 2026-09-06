@@ -15,6 +15,21 @@ pub const App = struct {
     /// it at all.
     pub fn wakeup(_: *const App) void {}
 
+    /// Always return false: there is no apprt here to hand an action to,
+    /// so nothing is ever performed. It exists for the same reason
+    /// `wakeup` does. Without it any core code path that notifies the
+    /// apprt fails to compile under this runtime, and since this is the
+    /// runtime the unit test binary is built with, no test could reach
+    /// one -- `Surface.endKeySequence` among them.
+    pub fn performAction(
+        _: *App,
+        _: apprt.Target,
+        comptime action: apprt.Action.Key,
+        _: apprt.Action.Value(action),
+    ) !bool {
+        return false;
+    }
+
     /// Always return false as there is no apprt to communicate with.
     pub fn performIpc(
         _: Allocator,
