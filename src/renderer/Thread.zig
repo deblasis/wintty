@@ -1028,14 +1028,6 @@ const Compression = struct {
     }
 };
 
-/// How long a bounded mailbox push waits for a slot before it re-issues
-/// this thread's wake and tries again.
-pub const mailbox_push_timeout_ns: u64 = 250 * std.time.ns_per_ms;
-
-/// How many of those windows a producer spends before it treats the
-/// consumer as gone and drops the message. Roughly a minute.
-pub const mailbox_push_attempts: usize = 240;
-
 /// Push a message to a renderer thread's mailbox, re-issuing the
 /// thread's wake between attempts, and give up rather than parking.
 ///
@@ -1064,8 +1056,8 @@ pub fn pushMailbox(
         mailbox,
         wakeup,
         msg,
-        mailbox_push_timeout_ns,
-        mailbox_push_attempts,
+        Mailbox.wake_retry_timeout_ns,
+        Mailbox.wake_retry_attempts,
     );
 }
 
@@ -1076,19 +1068,20 @@ fn pushMailboxBounded(
     timeout_ns: u64,
     max_attempts: usize,
 ) Mailbox.Size {
-    var attempts: usize = 0;
-    while (true) {
-        const size = mailbox.push(global.io(), msg, .{ .ns = timeout_ns });
-        if (size > 0) return size;
+    return mailbox.pushWake(
+        global.io(),
+        msg,
+        wakeup,
+        notifyWake,
+        timeout_ns,
+        max_attempts,
+    );
+}
 
-        // The mailbox is full and the thread has not drained it within
-        // the window, so assume the wake was lost and issue a fresh one.
-        // This is also the recovery when the thread is merely busy.
-        wakeup.notify() catch {};
-
-        attempts += 1;
-        if (attempts >= max_attempts) return 0;
-    }
+/// The `pushWake` wake for an `xev.Async`. A notify that fails means the
+/// loop is gone, which the retry budget already gives up on.
+fn notifyWake(wakeup: *xev.Async) void {
+    wakeup.notify() catch {};
 }
 
 test "renderer mailbox push wakes the thread when it cannot land" {
@@ -1131,7 +1124,7 @@ test "renderer mailbox push wakes the thread when it cannot land" {
 
         fn run(self: *@This()) void {
             // A tiny budget so the test finishes; production uses
-            // mailbox_push_timeout_ns and mailbox_push_attempts.
+            // the mailbox's wake_retry_* defaults.
             self.result = pushMailboxBounded(
                 self.mailbox,
                 self.wakeup,

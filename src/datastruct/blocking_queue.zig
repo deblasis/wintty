@@ -96,9 +96,30 @@ pub fn BlockingQueue(
             alloc.destroy(self);
         }
 
+        /// How long one `pushWake` attempt waits for a slot before the
+        /// consumer's wake is re-issued.
+        pub const wake_retry_timeout_ns: u64 = 250 * std.time.ns_per_ms;
+
+        /// How many of those windows a producer spends before it treats
+        /// the consumer as gone. Roughly a minute.
+        pub const wake_retry_attempts: usize = 240;
+
+        /// A `pushWake` budget that never gives up, for queues carrying
+        /// values the push has no way to release.
+        pub const wake_retry_forever: usize = std.math.maxInt(usize);
+
         /// Push a value to the queue. This returns the total size of the
-        /// queue (unread items) after the push. A return value of zero
-        /// means that the push failed.
+        /// queue (unread items) after the push, so a queued value always
+        /// returns at least one.
+        ///
+        /// A return of zero means the value was NOT queued and the caller
+        /// still owns it: a value that owns memory must be released on
+        /// that path. Only `.instant` and `.ns` can return zero.
+        /// `.forever` waits until a slot is genuinely free, so it never
+        /// returns zero -- and never returns at all while the consumer is
+        /// not draining. Producers of a queue that is drained only when
+        /// its consumer is woken should use `pushWake` instead, because a
+        /// `.forever` wait there withholds the wake it waits on.
         pub fn push(self: *Self, io: std.Io, value: T, timeout: Timeout) Size {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
@@ -155,6 +176,42 @@ pub fn BlockingQueue(
             self.len += 1;
 
             return self.len;
+        }
+
+        /// Push a value, re-issuing the consumer's wake between bounded
+        /// attempts instead of parking on the not-full condition.
+        ///
+        /// Our mailboxes are drained by a thread that only runs when it
+        /// is woken, so a producer that waits inside the queue is waiting
+        /// for a drain its own wake has to start, and on the IOCP backend
+        /// that wake can be lost outright (#1036). `wakeFn` is therefore
+        /// called after every window that did not land the value, which
+        /// is what makes the wait recoverable.
+        ///
+        /// A zero return means the value was not queued and THE CALLER
+        /// STILL OWNS IT: anything holding memory must be released on
+        /// that path. Pass `wake_retry_forever` as `max_attempts` when
+        /// there is nothing sensible to do with a refused value; that
+        /// budget never returns zero.
+        pub fn pushWake(
+            self: *Self,
+            io: std.Io,
+            value: T,
+            ctx: anytype,
+            comptime wakeFn: fn (@TypeOf(ctx)) void,
+            timeout_ns: u64,
+            max_attempts: usize,
+        ) Size {
+            var attempts: usize = 0;
+            while (true) {
+                const result = self.push(io, value, .{ .ns = timeout_ns });
+                if (result > 0) return result;
+
+                wakeFn(ctx);
+
+                attempts += 1;
+                if (attempts >= max_attempts) return 0;
+            }
         }
 
         /// Pop a value from the queue without blocking.
@@ -325,4 +382,79 @@ test "BlockingQueue push forever retries when woken with no free slot" {
     try testing.expect(still_parked);
     try testing.expectEqual(@as(Q.Size, 1), pusher.result);
     try testing.expect(q.pop(io).? == 2);
+}
+
+test "BlockingQueue pushWake wakes the consumer on every window it loses" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    // Fill the queue and never drain it. That is what a consumer asleep
+    // on a lost wake looks like from a producer's side.
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    var woken: usize = 0;
+    const result = q.pushWake(
+        io,
+        2,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+    );
+
+    // The invariant: a producer that cannot land its value must have
+    // woken the consumer anyway, once per window, because that wake is
+    // the only thing that frees the slot it is waiting for.
+    try testing.expectEqual(@as(usize, 3), woken);
+
+    // It gave up rather than parking, and took nothing with it.
+    try testing.expectEqual(@as(Q.Size, 0), result);
+    try testing.expect(q.pop(io).? == 1);
+}
+
+test "BlockingQueue pushWake lands once a wake frees a slot" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // A consumer that drains only when it is woken.
+    const Consumer = struct {
+        q: *Q,
+        io: std.Io,
+        woken: usize = 0,
+
+        fn wake(self: *@This()) void {
+            self.woken += 1;
+            _ = self.q.pop(self.io);
+        }
+    };
+
+    var consumer: Consumer = .{ .q = q, .io = io };
+    const result = q.pushWake(
+        io,
+        2,
+        &consumer,
+        Consumer.wake,
+        1 * std.time.ns_per_ms,
+        3,
+    );
+
+    try testing.expectEqual(@as(Q.Size, 1), result);
+    try testing.expectEqual(@as(usize, 1), consumer.woken);
+    try testing.expect(q.pop(io).? == 2);
+}
+
+fn countWake(woken: *usize) void {
+    woken.* += 1;
 }
