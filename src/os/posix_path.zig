@@ -273,16 +273,10 @@ pub fn hostIsLocal(host: []const u8) bool {
 /// Whether an absolute Windows `path` names this machine.
 ///
 /// This is the whole question a caller holding a path asks, and it is one
-/// function so that the two places that ask -- the pwd a child reports, and
-/// the path a clicked link resolves to -- cannot answer it differently.
-///
-/// Asking twice is not redundant, because `std.fs.path.resolveWindows` does
-/// not read an extended-length UNC path the way Windows does: it roots
-/// `\\?\UNC\host\share` at `\\?\UNC`, which leaves the host as an ordinary
-/// component that `..` can pop, so a path that named this machine when it was
-/// admitted can name another one after something is resolved against it. The
-/// host slot of the result is what Windows will authenticate to, so the
-/// result is what has to be asked about.
+/// function so that no two callers can answer it differently. It is the right
+/// question for a path that is about to be adopted on the strength of bytes
+/// alone; a path that came out of a resolve is a different question, and
+/// `pathHostUnchanged` below is that one.
 ///
 /// A form that names no directory we will place (`error.InvalidPath`, which
 /// is where those popped-apart shapes land, and where a leading separator run
@@ -293,6 +287,41 @@ pub fn pathIsLocal(path: []const u8) bool {
     return switch (host) {
         .local => true,
         .server => |name| hostIsLocal(name),
+    };
+}
+
+/// Whether `resolved`, the product of resolving something against `pwd`, still
+/// names the machine `pwd` names.
+///
+/// This, and not "is the result local", is the question the link-open path has
+/// to ask. A working directory may legitimately be a UNC share: nothing checks
+/// the host of `working-directory`, and there is no reason to -- the user chose
+/// it, and Windows authenticates to it the moment the shell is spawned there.
+/// Refusing that share's own relative links would break a real setup while
+/// protecting nothing.
+///
+/// What must never happen is the resolve *moving* the host, which
+/// `std.fs.path.resolveWindows` makes possible: it roots
+/// `\\?\UNC\host\share` at `\\?\UNC`, leaving the host an ordinary component
+/// that a `../` in the link can pop, so a directory that named one machine
+/// yields a path naming another. The pwd's host is therefore the standard the
+/// result is held to, and a resolve that changed it is refused.
+///
+/// Both sides are read with the strict parse, so a path whose leading
+/// separator run Windows would take for a UNC root but we would not is refused
+/// rather than compared. So is either side naming no directory at all.
+pub fn pathHostUnchanged(pwd: []const u8, resolved: []const u8) bool {
+    const before = hostOfAnyPath(pwd) catch return false;
+    const after = hostOfAnyPath(resolved) catch return false;
+    return switch (before) {
+        .local => switch (after) {
+            .local => true,
+            .server => false,
+        },
+        .server => |a| switch (after) {
+            .local => false,
+            .server => |b| std.ascii.eqlIgnoreCase(a, b),
+        },
     };
 }
 
@@ -632,6 +661,14 @@ test "posix_path: a relative link can resolve off an adopted extended UNC pwd" {
             .link = "../../../evil.example.com/share/payload.exe",
             .resolved = "\\\\.\\UNC\\evil.example.com\\share\\payload.exe",
         },
+        // The pwd can carry the `..` itself, in which case the link needs
+        // none: the host the pwd names is still `localhost`, and the host the
+        // resolve produces is not.
+        .{
+            .pwd = "\\\\?\\UNC\\localhost\\C$\\..\\..\\evil.example.com\\share",
+            .link = "notes.md",
+            .resolved = "\\\\?\\UNC\\evil.example.com\\share\\notes.md",
+        },
     };
 
     for (cases) |c| {
@@ -643,6 +680,7 @@ test "posix_path: a relative link can resolve off an adopted extended UNC pwd" {
         defer alloc.free(resolved);
         try std.testing.expectEqualStrings(c.resolved, resolved);
         try std.testing.expect(!pathIsLocal(resolved));
+        try std.testing.expect(!pathHostUnchanged(c.pwd, resolved));
     }
 
     // A `\\?\C:` pwd walked past its root degrades to an extended prefix
@@ -656,7 +694,82 @@ test "posix_path: a relative link can resolve off an adopted extended UNC pwd" {
         defer alloc.free(resolved);
         try std.testing.expectEqualStrings("\\\\?\\evil.example.com\\share\\payload.exe", resolved);
         try std.testing.expect(!pathIsLocal(resolved));
+        try std.testing.expect(!pathHostUnchanged("\\\\?\\C:\\Users\\me", resolved));
     }
+}
+
+// A working directory may legitimately name a UNC share -- `working-directory`
+// takes one and no layer host-checks it -- and that share's own relative links
+// have to keep opening. Only a resolve that moves the host is a refusal.
+test "posix_path: a remote working directory keeps its own links" {
+    const alloc = std.testing.allocator;
+
+    const Case = struct { pwd: []const u8, link: []const u8, resolved: []const u8 };
+    const kept = [_]Case{
+        .{
+            .pwd = "\\\\fileserver\\projects",
+            .link = "notes.md",
+            .resolved = "\\\\fileserver\\projects\\notes.md",
+        },
+        .{
+            .pwd = "\\\\fileserver\\projects\\src",
+            .link = "../docs/readme.md",
+            .resolved = "\\\\fileserver\\projects\\docs\\readme.md",
+        },
+        // `..` past the share root clamps there, so the host cannot move.
+        .{
+            .pwd = "\\\\fileserver\\projects",
+            .link = "../../elsewhere/notes.md",
+            .resolved = "\\\\fileserver\\projects\\elsewhere\\notes.md",
+        },
+        // The share is written in whatever case the shell reported it in.
+        .{
+            .pwd = "\\\\FileServer\\projects",
+            .link = "notes.md",
+            .resolved = "\\\\FileServer\\projects\\notes.md",
+        },
+    };
+
+    for (kept) |c| {
+        const resolved = try std.fs.path.resolveWindows(alloc, &.{ c.pwd, c.link });
+        defer alloc.free(resolved);
+        try std.testing.expectEqualStrings(c.resolved, resolved);
+        // The predicate this replaced refuses every one of these.
+        try std.testing.expect(!pathIsLocal(resolved));
+        try std.testing.expect(pathHostUnchanged(c.pwd, resolved));
+    }
+
+    // The extended spelling of the same remote share is where the host can
+    // still be popped, and it is refused whether or not the pwd was local.
+    {
+        const resolved = try std.fs.path.resolveWindows(alloc, &.{
+            "\\\\?\\UNC\\fileserver\\projects\\src",
+            "../../../evil.example.com/share/payload.exe",
+        });
+        defer alloc.free(resolved);
+        try std.testing.expectEqualStrings(
+            "\\\\?\\UNC\\evil.example.com\\share\\payload.exe",
+            resolved,
+        );
+        try std.testing.expect(!pathHostUnchanged("\\\\?\\UNC\\fileserver\\projects\\src", resolved));
+    }
+
+    // A drive-letter pwd cannot grow a host: a link that synthesises one is a
+    // change of host like any other.
+    {
+        const resolved = try std.fs.path.resolveWindows(alloc, &.{
+            "\\\\?\\C:\\Users\\me",
+            "../../../UNC/evil.example.com/share/x",
+        });
+        defer alloc.free(resolved);
+        try std.testing.expectEqualStrings("\\\\?\\UNC\\evil.example.com\\share\\x", resolved);
+        try std.testing.expect(!pathHostUnchanged("\\\\?\\C:\\Users\\me", resolved));
+    }
+
+    // Neither side is compared when its leading separator run is one Windows
+    // reads as a UNC root and we do not.
+    try std.testing.expect(!pathHostUnchanged("C:\\Users\\me", "//evil.example.com/share/x"));
+    try std.testing.expect(!pathHostUnchanged("//evil.example.com/share", "//evil.example.com/share/x"));
 }
 
 test "posix_path: ordinary link resolution stays local" {
@@ -710,6 +823,7 @@ test "posix_path: ordinary link resolution stays local" {
         try std.testing.expectEqualStrings(c.resolved, resolved);
         try std.testing.expect(std.fs.path.isAbsoluteWindows(resolved));
         try std.testing.expect(pathIsLocal(resolved));
+        try std.testing.expect(pathHostUnchanged(c.pwd, resolved));
     }
 
     // A drive-relative link naming a drive other than the pwd's keeps its

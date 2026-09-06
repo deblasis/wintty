@@ -2190,52 +2190,77 @@ pub fn pwd(
     return try alloc.dupe(u8, terminal_pwd);
 }
 
+/// What resolving a clicked link against the terminal's pwd came to.
+const LinkPath = union(enum) {
+    /// Nothing was resolved: the link is already absolute, there is no pwd, or
+    /// the resolved file does not exist. The link text is opened as it stands.
+    unresolved,
+
+    /// The resolved absolute path. Owned by the caller.
+    resolved: []const u8,
+
+    /// The link resolves somewhere we will not touch. Nothing may be opened:
+    /// the link text on its own would be resolved against ghostty's own
+    /// directory instead and could name a different file of the same name, and
+    /// quietly opening the wrong file is a worse answer than opening none.
+    refused,
+};
+
 /// Resolves a relative file path to an absolute path using the terminal's pwd.
 fn resolvePathForOpening(
     self: *Surface,
     path: []const u8,
-) Allocator.Error!?[]const u8 {
-    if (!std.fs.path.isAbsolute(path)) {
-        const terminal_pwd = self.io.terminal.getPwd() orelse {
-            return null;
-        };
+) Allocator.Error!LinkPath {
+    if (std.fs.path.isAbsolute(path)) return .unresolved;
 
-        const resolved = try std.fs.path.resolve(self.alloc, &.{ terminal_pwd, path });
+    const terminal_pwd = self.io.terminal.getPwd() orelse return .unresolved;
 
-        // The pwd was cleared as local when it was adopted, but that says
-        // nothing about where resolving against it lands. On Windows
-        // `std.fs.path.resolve` roots an extended-length UNC pwd at `\\?\UNC`
-        // rather than at `\\?\UNC\host`, so the host is an ordinary component
-        // and a `../` in the link pops it: an adopted `\\?\UNC\localhost\C$`
-        // plus a perfectly ordinary relative link yields
-        // `\\?\UNC\<attacker>\share\...`. The `accessAbsolute` below is
-        // already the damage -- it hands the current user's credentials to
-        // whatever is in the host slot -- so the question has to be asked
-        // again here, about the path that actually came out, and answered by
-        // the same predicate that admitted the pwd.
-        //
-        // A resolve that produced no absolute path at all (`C:foo` against a
-        // UNC pwd keeps its drive-relative form) is refused with it: nothing
-        // downstream can place it, and `accessAbsolute` asserts on it.
-        if (comptime builtin.os.tag == .windows) {
-            if (!std.fs.path.isAbsolute(resolved) or
-                !internal_os.posix_path.pathIsLocal(resolved))
-            {
-                log.warn("refusing link that does not resolve to a local path", .{});
-                self.alloc.free(resolved);
-                return null;
-            }
-        }
+    const resolved = try std.fs.path.resolve(self.alloc, &.{ terminal_pwd, path });
 
-        std.Io.Dir.accessAbsolute(global.io(), resolved, .{}) catch {
+    // Resolving is what can move the host, and moving it is the whole defect.
+    // The pwd itself needs no defending: a UNC working directory is one the
+    // user configured, and Windows already authenticated to it to spawn the
+    // shell there. But `std.fs.path.resolve` roots an extended-length UNC pwd
+    // at `\\?\UNC` rather than at `\\?\UNC\host`, so the host is an ordinary
+    // component and a `../` in the link pops it: an adopted
+    // `\\?\UNC\localhost\C$` plus a perfectly ordinary relative link yields
+    // `\\?\UNC\<attacker>\share\...`. The `accessAbsolute` below is already
+    // the damage -- it hands the current user's credentials to whatever is in
+    // the host slot -- so the result is measured against the pwd's own host
+    // here, before it.
+    //
+    // A resolve that produced no absolute path at all (`C:foo` against a UNC
+    // pwd keeps its drive-relative form) is refused with it: nothing
+    // downstream can place it, and `accessAbsolute` asserts on it.
+    if (comptime builtin.os.tag == .windows) {
+        if (!std.fs.path.isAbsolute(resolved) or
+            !internal_os.posix_path.pathHostUnchanged(terminal_pwd, resolved))
+        {
+            log.warn(
+                "refusing link that resolves off the working directory's host pwd={s} resolved={s}",
+                .{ terminal_pwd, resolved },
+            );
             self.alloc.free(resolved);
-            return null;
-        };
-
-        return resolved;
+            return .refused;
+        }
     }
 
-    return null;
+    std.Io.Dir.accessAbsolute(global.io(), resolved, .{}) catch {
+        self.alloc.free(resolved);
+        return .unresolved;
+    };
+
+    return .{ .resolved = resolved };
+}
+
+/// The URL `processLinks` opens for a link whose path resolution came to
+/// `link_path`, or null when nothing at all may be opened.
+fn urlForLinkPath(link_path: LinkPath, link: []const u8) ?[]const u8 {
+    return switch (link_path) {
+        .unresolved => link,
+        .resolved => |resolved| resolved,
+        .refused => null,
+    };
 }
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
@@ -4732,10 +4757,17 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
             });
             defer self.alloc.free(str);
 
-            const resolved_path = try self.resolvePathForOpening(str);
-            defer if (resolved_path) |p| self.alloc.free(p);
+            const link_path = try self.resolvePathForOpening(str);
+            defer switch (link_path) {
+                .resolved => |p| self.alloc.free(p),
+                .unresolved, .refused => {},
+            };
 
-            const url_to_open = resolved_path orelse str;
+            // A refusal opens nothing at all. The link text alone would be
+            // resolved against ghostty's own directory by the opener, so
+            // falling through to it turns "we would not open that" into "we
+            // opened something else", which is the worse of the two.
+            const url_to_open = urlForLinkPath(link_path, str) orelse return true;
             try self.openUrl(.{ .kind = .unknown, .url = url_to_open });
         },
 
@@ -6986,6 +7018,24 @@ test "DerivedConfig: a long click-repeat-interval does not overflow" {
     try testing.expectEqual(
         @as(u64, 5000 * std.time.ns_per_ms),
         derived.mouse_interval,
+    );
+}
+
+test "a refused link resolution opens nothing" {
+    const testing = std.testing;
+
+    // The refusal must not fall through to the link text: the opener resolves
+    // a relative argument against ghostty's own directory, so opening it would
+    // open a same-named file somewhere the user never pointed at.
+    try testing.expect(urlForLinkPath(.refused, "notes.md") == null);
+
+    try testing.expectEqualStrings(
+        "notes.md",
+        urlForLinkPath(.unresolved, "notes.md").?,
+    );
+    try testing.expectEqualStrings(
+        "C:\\Users\\me\\notes.md",
+        urlForLinkPath(.{ .resolved = "C:\\Users\\me\\notes.md" }, "notes.md").?,
     );
 }
 
