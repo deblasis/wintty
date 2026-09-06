@@ -1368,14 +1368,25 @@ pub const Action = union(enum) {
     }
 
     /// Returns true if performing this action can close the surface it
-    /// was performed on, so the surface pointer is dead afterwards.
+    /// was performed on, so a caller still holding that surface has to
+    /// treat the pointer as dead once the action has run.
     ///
-    /// `quit` and `close_all_windows` take every surface with them, and
+    /// "Can", not "does", and the difference matters: no runtime in this
+    /// tree has been shown to free the core surface before
+    /// `performAction` returns. The embedded apprt calls straight out to
+    /// the embedder and returns, and every embedder here defers the
+    /// close to its own UI loop; gtk's `quit` destroys its windows
+    /// inline, but the core surface is freed in GObject `finalize`,
+    /// which runs at last unref and not necessarily before the key
+    /// handler that triggered it returns.
+    ///
+    /// The list is deliberately wider than any of that: `quit` and
+    /// `close_all_windows` take every surface with them, and
     /// `undo`/`redo` can replay the teardown of whatever created this
-    /// one. Some runtimes defer that work to their event loop, but gtk
-    /// does it inline: `quit` destroys every window before it returns,
-    /// and the surface is freed on the way. A caller still holding the
-    /// surface has to assume it is gone.
+    /// one. A caller cannot check afterwards whether it survived, and
+    /// being wrong in the other direction is a use-after-free, so
+    /// membership is a claim about what an apprt is allowed to do, not a
+    /// measurement of what any of them currently does.
     pub fn closesSurface(self: Action) bool {
         return switch (self) {
             .close_surface,

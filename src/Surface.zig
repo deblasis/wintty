@@ -3104,6 +3104,12 @@ fn maybeHandleBinding(
         leaf.flags,
         actions,
     });
+
+    // Anything a closing chain owes the sequence has to be paid now,
+    // before the chain runs, because `return .closed` below leaves
+    // without touching the tail this function normally ends in.
+    self.endKeySequenceBeforeClose(actions);
+
     // Set if we ran an action that closes the surface. Our "self" pointer
     // is dead after that, so nothing may touch it.
     var closed: bool = false;
@@ -3118,7 +3124,10 @@ fn maybeHandleBinding(
         // the app and it applies to every surface.
         if (leaf.flags.global or leaf.flags.all) {
             // These run on every surface, ours included, so decide before
-            // performing what we are about to lose.
+            // performing what we are about to lose. The per-surface arm
+            // below can afford to wait for the result and set `closed`
+            // from it; here there is no result to wait for, since this
+            // arm ends in an unconditional `break :performed true`.
             for (actions) |action| {
                 if (action.closesSurface()) closed = true;
                 if (borrowed and action.endsChain()) actions_freed = true;
@@ -3151,11 +3160,23 @@ fn maybeHandleBinding(
             // continues past one, but a keybind set built any other way
             // must not run into freed memory.
             if (action.endsChain()) {
-                // performBindingAction answers false only when the apprt
-                // did nothing at all, so a false here means the surface
-                // is still ours. quit and close_all_windows always answer
-                // true; undo and redo answer the apprt, which is what the
-                // performable flag below needs.
+                // Read this as "no action in this chain did anything",
+                // not as "this action did nothing": `performed` is the
+                // chain accumulator, so an earlier action that performed
+                // already forces `closed`. That direction is the safe
+                // one, and a `false` still means nothing ran at all.
+                //
+                // Do not read a `true` as evidence that a runtime tore
+                // anything down. It is only that for `undo` and `redo`,
+                // which return the apprt's own boolean, and that is what
+                // the `performable` flag below needs. For `quit` and
+                // `close_all_windows` the valve is stuck open on every
+                // runtime: `performBindingAction` takes its `else` arm
+                // and returns an unconditional `true`, and
+                // `App.performAction` has already thrown the runtime's
+                // answer away with `_ =`. On the embedded apprt that is
+                // exactly where those two land whether the embedder
+                // implements them or not.
                 if (action.closesSurface()) closed = performed;
                 if (borrowed) actions_freed = true;
                 break;
@@ -3274,6 +3295,39 @@ fn catchAllIsIgnore(self: *Surface) bool {
             if (action == .ignore) break :chained true;
         } else false,
     };
+}
+
+/// End the key sequence ahead of a chain that can close the surface.
+///
+/// `maybeHandleBinding` answers `.closed` for such a chain and returns
+/// straight away, so it never reaches the tail where all of its
+/// `endKeySequence` calls live, and `endKeySequence` is the only drain
+/// for `keyboard.sequence_queued` outside `deinit`. The sequence has to
+/// end before the chain runs, while `self` is certainly still ours.
+///
+/// This is not housekeeping for a surface that is about to die. No apprt
+/// in this tree has been shown to free the core surface inside the call,
+/// and the embedded apprt demonstrably does not: it hands the action to
+/// the embedder and returns. The Windows host does not implement `quit`
+/// at all, so `keybind = ctrl+a>q=quit` there leaves a live surface
+/// holding the leader key's encoded write, which the next unrelated
+/// sequence then flushes into the pty out of order.
+///
+/// `.drop` is what every other path that matched a binding does. The one
+/// path that would rather flush is `performable` with nothing performed,
+/// and whether a chain performs is not knowable until it has run, by
+/// which time the surface may be gone. So a `performable` binding whose
+/// chain closes the surface drops its queued leader keys rather than
+/// encoding them.
+fn endKeySequenceBeforeClose(
+    self: *Surface,
+    actions: []const input.Binding.Action,
+) void {
+    for (actions) |action| {
+        if (!action.closesSurface()) continue;
+        self.endKeySequence(.drop, .retain);
+        return;
+    }
 }
 
 const KeySequenceQueued = enum { flush, drop };
@@ -6775,6 +6829,74 @@ fn presentSurface(self: *Surface) !void {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Surface, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.io.getProcessInfo(info);
+}
+
+/// A Surface with only the fields under test initialized. Building a real
+/// one needs a live apprt, an IO thread and a renderer, none of which the
+/// unit test binary has: it is built with `-Dapp-runtime=none`, whose
+/// `App` is an empty struct. Only touch fields a test has set.
+fn testSurface(alloc: Allocator, rt_app: *apprt.App) !*Surface {
+    const surface = try alloc.create(Surface);
+    surface.alloc = alloc;
+    surface.rt_app = rt_app;
+    surface.readonly = false;
+    surface.keyboard = .{};
+    return surface;
+}
+
+test "endKeySequenceBeforeClose: a closing action drops the queued sequence" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var rt_app: apprt.App = undefined;
+    const surface = try testSurface(alloc, &rt_app);
+    defer alloc.destroy(surface);
+    defer surface.keyboard.sequence_queued.deinit(alloc);
+
+    // The leader key's encoded write, queued the way maybeHandleBinding
+    // queues it for `ctrl+a` in `ctrl+a>q=quit`.
+    try surface.keyboard.sequence_queued.append(alloc, .{ .alloc = .{
+        .alloc = alloc,
+        .data = try alloc.dupe(u8, "\x01"),
+    } });
+
+    surface.endKeySequenceBeforeClose(&.{.{ .quit = {} }});
+
+    // `.closed` returns before any other drain, so if this write is
+    // still queued it stays queued, and the next unrelated sequence
+    // flushes it into the pty. The testing allocator also fails the test
+    // if it was left owned by nobody.
+    try testing.expectEqual(
+        @as(usize, 0),
+        surface.keyboard.sequence_queued.items.len,
+    );
+}
+
+test "endKeySequenceBeforeClose: an ordinary action leaves the sequence alone" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var rt_app: apprt.App = undefined;
+    const surface = try testSurface(alloc, &rt_app);
+    defer alloc.destroy(surface);
+    defer {
+        for (surface.keyboard.sequence_queued.items) |req| req.deinit();
+        surface.keyboard.sequence_queued.deinit(alloc);
+    }
+
+    try surface.keyboard.sequence_queued.append(alloc, .{ .alloc = .{
+        .alloc = alloc,
+        .data = try alloc.dupe(u8, "\x01"),
+    } });
+
+    // Nothing here can free the surface, so the tail of
+    // maybeHandleBinding still owns the decision to flush or drop.
+    surface.endKeySequenceBeforeClose(&.{.{ .new_tab = {} }});
+
+    try testing.expectEqual(
+        @as(usize, 1),
+        surface.keyboard.sequence_queued.items.len,
+    );
 }
 
 test "DerivedConfig: a long click-repeat-interval does not overflow" {
