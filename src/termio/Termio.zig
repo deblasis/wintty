@@ -611,8 +611,15 @@ pub fn resize(
         }
     }
 
-    // Mail the renderer so that it can update the GPU and re-render
-    _ = self.renderer_mailbox.push(global.io(), .{ .resize = size }, .{ .forever = {} });
+    // Mail the renderer so that it can update the GPU and re-render.
+    // The wake on the next line is what makes the renderer drain, so
+    // this push must not be able to park: waiting in the queue would
+    // withhold the very notify the renderer needs to free a slot.
+    if (renderer.Thread.pushMailbox(
+        self.renderer_mailbox,
+        self.renderer_wakeup,
+        .{ .resize = size },
+    ) == 0) log.warn("renderer mailbox full, resize not delivered", .{});
     self.renderer_wakeup.notify() catch {};
 }
 

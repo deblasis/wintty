@@ -1027,3 +1027,143 @@ const Compression = struct {
         };
     }
 };
+
+/// How long a bounded mailbox push waits for a slot before it re-issues
+/// this thread's wake and tries again.
+pub const mailbox_push_timeout_ns: u64 = 250 * std.time.ns_per_ms;
+
+/// How many of those windows a producer spends before it treats the
+/// consumer as gone and drops the message. Roughly a minute.
+pub const mailbox_push_attempts: usize = 240;
+
+/// Push a message to a renderer thread's mailbox, re-issuing the
+/// thread's wake between attempts, and give up rather than parking.
+///
+/// This thread drains its mailbox in exactly two places: the `wakeup`
+/// callback, and the safety-net timer that only runs while the surface
+/// is hidden. On a visible surface the wake is therefore the only thing
+/// that can free a slot, so a producer that blocks in the queue instead
+/// of issuing it has removed the wake source it is waiting on. That is
+/// what #1036 was: on the IOCP backend the Async wake can be lost in the
+/// window between a completion firing and its re-arm, and a producer
+/// that then parks in the not-full condition never wakes anyone --
+/// observed as the UI thread hanging inside
+/// `ghostty_surface_set_occlusion`.
+///
+/// A timed-out push re-issues the wake before trying again, so a single
+/// lost notify costs one window rather than the process. Returns the
+/// queue length after the push, or zero when the consumer never drained
+/// at all -- the one genuinely fatal case (the renderer thread is gone),
+/// which an unbounded push would have turned into a deadlock anyway.
+pub fn pushMailbox(
+    mailbox: *Mailbox,
+    wakeup: *xev.Async,
+    msg: rendererpkg.Message,
+) Mailbox.Size {
+    return pushMailboxBounded(
+        mailbox,
+        wakeup,
+        msg,
+        mailbox_push_timeout_ns,
+        mailbox_push_attempts,
+    );
+}
+
+fn pushMailboxBounded(
+    mailbox: *Mailbox,
+    wakeup: *xev.Async,
+    msg: rendererpkg.Message,
+    timeout_ns: u64,
+    max_attempts: usize,
+) Mailbox.Size {
+    var attempts: usize = 0;
+    while (true) {
+        const size = mailbox.push(global.io(), msg, .{ .ns = timeout_ns });
+        if (size > 0) return size;
+
+        // The mailbox is full and the thread has not drained it within
+        // the window, so assume the wake was lost and issue a fresh one.
+        // This is also the recovery when the thread is merely busy.
+        wakeup.notify() catch {};
+
+        attempts += 1;
+        if (attempts >= max_attempts) return 0;
+    }
+}
+
+test "renderer mailbox push wakes the thread when it cannot land" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    const mailbox = try Mailbox.create(alloc);
+    defer mailbox.destroy(alloc);
+
+    var wakeup: xev.Async = try .init();
+    defer wakeup.deinit();
+
+    var loop: xev.Loop = try .init(.{});
+    defer loop.deinit();
+
+    // Fill the mailbox and never drain it. That is what a renderer
+    // asleep on a lost wake looks like from a producer's side.
+    while (mailbox.push(io, .{ .reset_cursor_blink = {} }, .{ .instant = {} }) > 0) {}
+
+    var woken: usize = 0;
+    var c: xev.Completion = .{};
+    wakeup.wait(&loop, &c, usize, &woken, (struct {
+        fn callback(
+            ud: ?*usize,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            ud.?.* += 1;
+            return .disarm;
+        }
+    }).callback);
+
+    const Producer = struct {
+        mailbox: *Mailbox,
+        wakeup: *xev.Async,
+        result: Mailbox.Size = 0,
+
+        fn run(self: *@This()) void {
+            // A tiny budget so the test finishes; production uses
+            // mailbox_push_timeout_ns and mailbox_push_attempts.
+            self.result = pushMailboxBounded(
+                self.mailbox,
+                self.wakeup,
+                .{ .reset_cursor_blink = {} },
+                1 * std.time.ns_per_ms,
+                3,
+            );
+        }
+    };
+
+    var producer: Producer = .{ .mailbox = mailbox, .wakeup = &wakeup };
+    const thread = try std.Thread.spawn(.{}, Producer.run, .{&producer});
+    thread.join();
+
+    // The message could not land, because nothing drained.
+    try testing.expectEqual(@as(Mailbox.Size, 0), producer.result);
+
+    // The invariant: a producer that cannot land its message must still
+    // have woken the consumer, because that wake is the only thing that
+    // makes the consumer drain and free the slot the producer wants. A
+    // producer that parks in the queue instead withholds it, and the
+    // hang is permanent while the surface is visible: the safety-net
+    // drain only runs while it is hidden.
+    const start: std.Io.Timestamp = .now(io, .awake);
+    while (woken == 0) {
+        try loop.run(.no_wait);
+        const now: std.Io.Timestamp = .now(io, .awake);
+        if (start.durationTo(now).toMilliseconds() > 2000) break;
+        std.Thread.yield() catch {};
+    }
+    try testing.expect(woken > 0);
+
+    // Nothing was dropped from the queue on the way.
+    try testing.expect(mailbox.pop(io) != null);
+}
