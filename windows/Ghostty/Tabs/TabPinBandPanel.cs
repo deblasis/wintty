@@ -177,7 +177,13 @@ internal sealed partial class TabPinBandPanel : Panel
 
             var glide = visual.Compositor.CreateVector3KeyFrameAnimation();
             glide.Duration = TimeSpan.FromMilliseconds(TabStripMotion.GapGlideMs);
-            glide.InsertKeyFrame(1f, Vector3.Zero);
+            // The strip's own glide curve, not a linear slide: a square
+            // pushed off a row end is the same point-to-point move the
+            // rows make one pane over, and decelerating differently than
+            // they do reads as two motion systems moving at once.
+            glide.InsertKeyFrame(1f, Vector3.Zero,
+                visual.Compositor.CreateCubicBezierEasingFunction(
+                    TabStripMotion.GlideBezierP1, TabStripMotion.GlideBezierP2));
 
             var batch = visual.Compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
             _gliding[child] = batch;

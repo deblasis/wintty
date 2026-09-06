@@ -13,19 +13,24 @@ using Windows.Foundation;
 namespace Ghostty.Shell;
 
 /// <summary>
-/// Owns every piece of state that drives the runtime switch
-/// between the horizontal and vertical tab layouts: the cross-fade
-/// Storyboard, the strip-column width tween, the snap-to-end-state
-/// helper, and the concurrent-tween guard.
+/// Owns every piece of state that drives the runtime switch between
+/// the horizontal and vertical tab layouts: the compositor-driven
+/// switch timeline (<see cref="LayoutSwitchTimeline"/>), the
+/// once-per-switch strip-column move, the pane reveal, the
+/// snap-to-end-state helper, and the concurrent-switch guard.
 ///
 /// Lifted out of MainWindow so the window itself stays a thin
 /// composition root. The two tab hosts and the vertical title bar
 /// are owned by MainWindow's XAML and passed in via the ctor; this
 /// type only animates and toggles them.
 ///
-/// Why the column width tween is code-driven: WinUI 3 has no native
-/// GridLengthAnimation. Star/Auto refactoring is a separate piece
-/// of work tracked in the deferred review items list.
+/// The strip column is MOVED once per switch, never tweened, and no
+/// Storyboard is involved anywhere in the switch: changing the column
+/// resizes the terminal surface, which re-renders synchronously on the
+/// UI thread, so a per-frame width animation starves the very thread
+/// it runs on. The full measured story lives at the SnapStripColumn
+/// call site below; this note exists so a reader does not reinstate a
+/// GridLength tween for want of a native one.
 /// </summary>
 internal sealed class LayoutCoordinator
 {
@@ -231,9 +236,9 @@ internal sealed class LayoutCoordinator
     /// <summary>
     /// Snap both hosts and the vertical title bar to the end state
     /// for <paramref name="verticalTabs"/>. Used at construction
-    /// (no animation needed) and from the Storyboard Completed
-    /// handler to guarantee a consistent end state regardless of
-    /// mid-flight cancellation.
+    /// (no animation needed) and when a switch lands (the timeline's
+    /// scoped batches complete) to guarantee a consistent end state
+    /// regardless of mid-flight cancellation.
     /// </summary>
     public void Snap(bool verticalTabs)
     {
@@ -705,8 +710,8 @@ internal sealed class LayoutCoordinator
     /// Drop an in-flight layout switch on window teardown without running any
     /// of the end-state work it was going to run.
     ///
-    /// A switch lands on its Storyboard's Completed handler roughly 340ms
-    /// after it starts, and the landing goes through Snap, which touches both
+    /// A switch lands roughly 340ms after it starts, when the timeline's
+    /// scoped batches complete and route the landing through Snap, which touches both
     /// tab hosts, the vertical title bar and the pane host. A closing window
     /// is disposing exactly that tree, so the landing has to be dropped rather
     /// than fast-forwarded: calling FinishSwitch here would run the work this
@@ -787,9 +792,9 @@ internal sealed class LayoutCoordinator
         CancelPaneReveal();
 
         if (_morph is not { } morph) return;
-        // The ghost's box rides the compositor, which no Storyboard.Stop
-        // reaches -- the same shape as the pane reveal's sweep, and
-        // released here for the same reason.
+        // The ghost's box rides the compositor, which nothing in the
+        // switch's landing path stops -- the same shape as the pane
+        // reveal's sweep, and released here for the same reason.
         morph.Ghost.StopBoxAnimations();
         if (morph.Waiting is not null)
         {
@@ -1333,9 +1338,9 @@ internal sealed class LayoutCoordinator
     /// the margin shifted.
     ///
     /// The clip is the half that has to go. Its left inset is swept by a
-    /// key-frame animation the compositor owns, so no Storyboard.Stop reaches
-    /// it and it would go on running against the pane host after the window
-    /// is gone. Restoring the margin is the half that must not run: it is
+    /// key-frame animation the compositor owns, so nothing in the teardown
+    /// path stops it and it would go on running against the pane host after
+    /// the window is gone. Restoring the margin is the half that must not run: it is
     /// cosmetic on a window nobody will see again, and writing it invalidates
     /// measure on a tree whose panes are about to be freed, which is the work
     /// CancelSwitch exists to avoid.

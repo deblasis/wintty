@@ -63,6 +63,13 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// <summary>The strip, for the test seam's drag driver.</summary>
     internal VerticalTabStrip StripForTestSeam => _strip;
 
+    /// <summary>
+    /// The strip, for the window's motion-life coordination: the
+    /// reduce-motion flip handler lands in-flight strip motion rather
+    /// than letting a clock armed before the flip play on.
+    /// </summary>
+    internal VerticalTabStrip Strip => _strip;
+
     public FrameworkElement? TabElement(TabModel tab) => _strip.TabElement(tab);
 
     public System.Collections.Generic.IReadOnlyList<Testing.TestSeamStripRow>

@@ -172,12 +172,17 @@ internal static class TabSwitcherShape
     /// <summary>
     /// The highlight move: the ring, the dim, and the lift all cross on one
     /// clock, so the eye reads one thing moving rather than three things
-    /// changing.
+    /// changing. The table's 167ms rung -- the same one the strips' field
+    /// settle takes, because both are a selection changing hands.
     /// </summary>
-    public const int HighlightMs = 150;
+    public const int HighlightMs = 167;
 
-    /// <summary>The card's entrance, on the same table's Fade token family.</summary>
-    public const int EnterMs = 120;
+    /// <summary>
+    /// The card's entrance, on the table's 167ms rung rather than a bespoke
+    /// value: entrances land on ladder values, or the card reads as a
+    /// different motion system from every surface it arrives over.
+    /// </summary>
+    public const int EnterMs = 167;
 
     /// <summary>The distance the card rises through its entrance.</summary>
     public const double EnterRisePx = 8;
