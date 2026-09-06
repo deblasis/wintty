@@ -55,6 +55,20 @@ pub const WriteLimit = struct {
         _ = self.outstanding.fetchSub(n, .monotonic);
     }
 
+    /// Start a fresh accounting run.
+    ///
+    /// Outstanding bytes are only given back by write completions, so a
+    /// backend run that ends with writes still queued never accounts for
+    /// them. This limit lives on the Termio rather than on the per-run
+    /// thread data, so without this a later run inherits the leftover and
+    /// can sit above the cap for the life of the surface, refusing every
+    /// terminal reply.
+    pub fn reset(self: *WriteLimit) void {
+        self.outstanding.store(0, .monotonic);
+        self.dropped.store(0, .monotonic);
+        self.last_warn_ms.store(0, .monotonic);
+    }
+
     /// Whether advisory writes should be refused right now.
     pub fn atCapacity(self: *const WriteLimit) bool {
         return self.outstanding.load(.monotonic) >= self.max;
@@ -161,4 +175,24 @@ test "termio WriteLimit accounts for every drop with two threads warning" {
         @as(usize, thread_count * drops_per_thread),
         total,
     );
+}
+
+test "termio WriteLimit clears a backlog a teardown left behind" {
+    const testing = std.testing;
+
+    var limit: WriteLimit = .{ .max = 100 };
+
+    // A backend run queues writes and then goes away without its
+    // completions running, so the bytes are never accounted back.
+    limit.queued(100);
+    _ = limit.recordDrop(1_000);
+    try testing.expect(limit.atCapacity());
+
+    // The next run starts from a clean sheet. Without this the counter
+    // is above the cap forever and every terminal reply is refused for
+    // the life of the surface.
+    limit.reset();
+    try testing.expect(!limit.atCapacity());
+    try testing.expectEqual(@as(usize, 0), limit.dropped.load(.monotonic));
+    try testing.expectEqual(@as(i64, 0), limit.last_warn_ms.load(.monotonic));
 }

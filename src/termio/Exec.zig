@@ -185,6 +185,12 @@ pub fn threadEnter(
     );
     read_thread.setName(global.io(), "io-reader") catch {};
 
+    // The write accounting outlives a backend run: it lives on the
+    // Termio, not on this thread data, and a run that ends with writes
+    // still queued never sees their completions. Start every run from
+    // zero so leftovers can't hold us at the cap forever.
+    io.write_limit.reset();
+
     // Setup our threadata backend state to be our own
     td.backend = .{ .exec = .{
         .start = process_start,
