@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Windows.ApplicationModel.DataTransfer;
@@ -31,13 +32,42 @@ internal readonly record struct SnapZoneSource(
 internal static class TabContextMenuBuilder
 {
     /// <summary>
-    /// Whether the directory group is on the menu at all: only while the
-    /// tab has a directory it will act on. Hidden rather than greyed, so
-    /// a shell without integration is not offered two items that can
-    /// never do anything.
+    /// Whether the tab has a directory the two directory items will act on.
     /// </summary>
-    private static Visibility CwdVisibility(TabModel tab)
-        => tab.ActionableCwd is not null ? Visibility.Visible : Visibility.Collapsed;
+    private static bool CwdIsActionable(TabModel tab) => tab.ActionableCwd is not null;
+
+    /// <summary>
+    /// Why the directory items are unavailable, for assistive clients. A
+    /// disabled <see cref="MenuFlyoutItem"/> raises none of the pointer
+    /// events <see cref="ToolTipService"/> needs, so a tooltip here would be
+    /// text nobody could reach; Narrator reads HelpText as the item's
+    /// description. One string for all three reasons the model can refuse --
+    /// nothing reported yet, bytes that are not plain text, a host the spawn
+    /// policy will not enter -- because the menu owes "not here", and the
+    /// reasoning belongs in the policy, not the flyout.
+    /// </summary>
+    private const string CwdUnavailableHelp =
+        "Unavailable: this tab's shell has not reported a working directory that can be used.";
+
+    /// <summary>
+    /// Greys the directory pair rather than hiding it. The horizontal strip
+    /// builds one flyout per tab and reuses it, and a shell reports its
+    /// directory a moment after the tab opens -- hiding made the same menu
+    /// three items shorter at one opening and longer at the next. Greying
+    /// also leaves something to learn from: a shell without integration
+    /// never reports a directory at all, and an absent item cannot say so.
+    /// This is what the Move Tab items above already do with state that
+    /// moves just as freely.
+    /// </summary>
+    private static void ApplyCwdAvailability(TabModel tab, MenuFlyoutItem copy, MenuFlyoutItem open)
+    {
+        var actionable = CwdIsActionable(tab);
+        foreach (var item in new[] { copy, open })
+        {
+            item.IsEnabled = actionable;
+            AutomationProperties.SetHelpText(item, actionable ? null : CwdUnavailableHelp);
+        }
+    }
 
     public static MenuFlyout Build(
         TabManager manager,
@@ -158,16 +188,16 @@ internal static class TabContextMenuBuilder
         // The directory the shell reported, in the two forms a person wants
         // it: on the clipboard, and open in File Explorer. Its own group,
         // because these are about the shell's directory rather than the
-        // tab. Hidden, not greyed, until the model has one it will act on:
-        // reported, plain text, and a directory the spawn policy accepts,
-        // since the path is bytes off the pty.
-        var cwdRule = new MenuFlyoutSeparator { Visibility = CwdVisibility(tab) };
+        // tab. Live only while the model has one it will act on: reported,
+        // plain text, and a directory the spawn policy accepts, since the
+        // path is bytes off the pty. Greyed when it has not, so the menu
+        // keeps one shape -- see ApplyCwdAvailability.
+        var cwdRule = new MenuFlyoutSeparator();
         flyout.Items.Add(cwdRule);
 
         var copyCwd = new MenuFlyoutItem
         {
             Text = "Copy Working Directory",
-            Visibility = CwdVisibility(tab),
         };
         copyCwd.Click += (_, _) =>
         {
@@ -185,7 +215,6 @@ internal static class TabContextMenuBuilder
         var openCwd = new MenuFlyoutItem
         {
             Text = "Open in File Explorer",
-            Visibility = CwdVisibility(tab),
         };
         openCwd.Click += async (_, _) =>
         {
@@ -204,6 +233,7 @@ internal static class TabContextMenuBuilder
             catch (Exception) { }
         };
         flyout.Items.Add(openCwd);
+        ApplyCwdAvailability(tab, copyCwd, openCwd);
 
         flyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -258,12 +288,12 @@ internal static class TabContextMenuBuilder
             if (moveToZone is not null)
                 moveToZone.IsEnabled = manager.Tabs.Count > 1;
             pin.Text = tab.IsPinned ? "Unpin Tab" : "Pin Tab";
-            // The directory group is absent until the tab has one it will
-            // act on, and a shell can report one any time after the flyout
-            // was built. The rule that introduces the group follows it.
-            cwdRule.Visibility = CwdVisibility(tab);
-            copyCwd.Visibility = CwdVisibility(tab);
-            openCwd.Visibility = CwdVisibility(tab);
+            // The directory pair is dead until the tab has one it will act
+            // on, and a shell can report one any time after the flyout was
+            // built -- the horizontal strip keeps one flyout per tab and
+            // reuses it, so build-time alone would freeze the pair grey on
+            // any tab right-clicked in its first second.
+            ApplyCwdAvailability(tab, copyCwd, openCwd);
         };
 
         flyout.Items.Add(new MenuFlyoutSeparator());

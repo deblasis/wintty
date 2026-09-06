@@ -51,4 +51,52 @@ public class PaneCloseFocusWiringTests
             statements.IndexOf(raise!) > statements.IndexOf(lastAssign),
             "LeafFocused is raised before the active leaf's last reassignment, so subscribers rebind to the wrong pane");
     }
+
+    /// <summary>
+    /// The pane that is TOLD to take focus and the pane CloseLeaf REPORTS as
+    /// focused have to be the same one, so the focus call is enqueued after
+    /// the zoom re-entry that can still move the active leaf.
+    ///
+    /// Enqueued before it, the call named the tree's first leaf; re-entering
+    /// zoom then parked that leaf off-screen, the dispatcher drained the
+    /// stale call afterwards, and OnTerminalGotFocus took it for a real
+    /// focus change -- raising a second, contradicting LeafFocused and
+    /// painting the active border on a pane nobody could see.
+    /// </summary>
+    [Fact]
+    public void CloseLeaf_EnqueuesOneFocus_AfterTheZoomDecision()
+    {
+        var close = ShellSource.Load("Panes.PaneHost.cs").Root.DescendantNodes()
+            .OfType<MethodDeclarationSyntax>()
+            .Single(m => m.Identifier.ValueText == "CloseLeaf" && m.ParameterList.Parameters.Count == 2);
+        var statements = close.Body!.DescendantNodes().OfType<StatementSyntax>().ToList();
+
+        // Exactly one enqueued focus call, or two panes race for it.
+        var focusEnqueues = statements.OfType<ExpressionStatementSyntax>()
+            .Where(s => s.ToString().Contains("DispatcherQueue.TryEnqueue")
+                        && s.ToString().Contains(".Focus("))
+            .ToList();
+        Assert.Single(focusEnqueues);
+
+        // It comes after the last thing that can move the active leaf --
+        // which is the zoom re-entry's assignment.
+        var lastAssign = statements.Last(s =>
+            s is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax { Left: IdentifierNameSyntax { Identifier.Text: "_activeLeaf" } } });
+        Assert.True(
+            statements.IndexOf(focusEnqueues[0]) > statements.IndexOf(lastAssign),
+            "the focus call is enqueued before the zoom re-entry can move the active leaf, so it names the wrong pane");
+
+        // And it focuses the leaf that decision settled on, not a copy taken
+        // before it. The capture is a local so the lambda cannot read a
+        // field that moves again before the dispatcher drains.
+        var captured = statements.OfType<LocalDeclarationStatementSyntax>()
+            .Last(s => s.Declaration.Variables.Count == 1
+                       && s.Declaration.Variables[0].Initializer?.Value.ToString() == "_activeLeaf");
+        Assert.True(
+            statements.IndexOf(captured) > statements.IndexOf(lastAssign),
+            "the focus target is captured before the zoom re-entry, so it is the pre-zoom leaf");
+        Assert.Contains(
+            captured.Declaration.Variables[0].Identifier.Text,
+            focusEnqueues[0].ToString());
+    }
 }

@@ -782,7 +782,18 @@ public sealed partial class MainWindow : Window
             // bits. Restore never auto-expands; JoinGroup is not on this
             // path.
             restorer.RestoreGroups(_tabManager, restore!);
-            if (restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
+
+            // Restored shells really are cold-starting, but only the tab the
+            // restore brings to the front says so. The rest go into the tree
+            // collapsed and do not paint until they are first visited, so
+            // flagging them would put "Starting…" across a strip of tabs
+            // that are doing nothing and then release them in a ragged clump
+            // as their cap timers expired one by one.
+            var presenting = restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count
+                ? restore.ActiveTabIndex
+                : 0;
+            restoredTabs[presenting].BeginSettling();
+            if (restore.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
                 _tabManager.ActivateIndex(restore.ActiveTabIndex);
         }
         else
@@ -2491,6 +2502,12 @@ public sealed partial class MainWindow : Window
         var restorer = new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry);
         if (restorer.BuildTab(tabSession) is not { } tab) return;
 
+        // Fresh shells, and this one comes straight to the front, so it wears
+        // the starting state the way a new tab does. Before the adopt: the
+        // adopt activates, and the icon should be right the first time the
+        // strip draws it.
+        tab.BeginSettling();
+
         // AdoptTab raises TabAdded -> AddPaneHost + activation, so the rebuilt
         // tab renders and focuses just like the session-restore path.
         _tabManager.AdoptTab(tab);
@@ -2516,6 +2533,9 @@ public sealed partial class MainWindow : Window
             tab.UserOverrideTitle);
         if (new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry)
                 .BuildTab(session) is not { } clone) return;
+
+        // Same as reopen: fresh shells, front of the strip, so it starts.
+        clone.BeginSettling();
 
         // Adopt appends and activates. Pin comes before the move: the flag
         // defines the zone Move clamps into, so a pinned source's clone is

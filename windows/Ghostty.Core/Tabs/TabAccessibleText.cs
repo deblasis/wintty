@@ -38,9 +38,20 @@ internal static class TabAccessibleText
             ? AppIdentity.ProductName
             : effectiveTitle;
 
-    /// <summary>Transient state for <paramref name="tab"/>.</summary>
+    /// <summary>
+    /// Transient state for <paramref name="tab"/>, membership included.
+    ///
+    /// The model knows its own group, so this reads it rather than leaving
+    /// each strip to remember. Passing the parts by hand is how the two
+    /// strips came to disagree: the vertical one named the run but dropped
+    /// "Starting" on a grouped member, and the horizontal one never named a
+    /// run at all, so switching layout silently lost the segment.
+    /// </summary>
     internal static string Status(TabModel tab)
-        => Status(tab.IsPinned, tab.BellRinging, groupTitle: null, isCollapsed: false, isSettling: tab.IsSettling);
+        => Status(tab.IsPinned, tab.BellRinging,
+            groupTitle: tab.Group?.Title,
+            isCollapsed: tab.Group?.IsCollapsed ?? false,
+            isSettling: tab.IsSettling);
 
     /// <summary>
     /// Transient state for the tab, for AutomationProperties.ItemStatus.

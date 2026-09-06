@@ -246,20 +246,28 @@ $ConfigExtra
             "$Name never reported a directory at its first prompt (the native OSC 7 / OSC 9;9 arms are dead)"
 
         # A shell that starts in the user's own directory is the one tab that
-        # draws the home glyph instead of printing a name. Both branches
-        # assert: the harness decides for itself whether the reported
-        # directory IS the profile directory, requires the product to agree,
-        # and then requires the drawing to match. A skip would otherwise read
-        # as a pass on a machine whose shells start somewhere else.
+        # draws the home glyph, beside the word "Home". Both branches assert:
+        # the harness decides for itself whether the reported directory IS
+        # the profile directory, requires the product to agree, and then
+        # requires the drawing to match. A skip would otherwise read as a
+        # pass on a machine whose shells start somewhere else.
         $atHome = $first.cwd.TrimEnd('\', '/') -eq $ProfileDir
         if ($first.home -ne $atHome) {
             throw ("PRODUCT_FAIL: {0}: the tab says home={1} for '{2}' while the profile directory is '{3}'" -f
                 $Name, $first.home, $first.cwd, $ProfileDir)
         }
         if ($atHome) {
-            if (-not $first.renderedHomeGlyph -or $first.rendered -ne '') {
-                throw ("PRODUCT_FAIL: {0}: at home the row should draw the glyph and print nothing; glyph={1} rendered='{2}'" -f
+            if (-not $first.renderedHomeGlyph -or $first.rendered -ne 'Home') {
+                throw ("PRODUCT_FAIL: {0}: at home the row should draw the glyph and print 'Home'; glyph={1} rendered='{2}'" -f
                     $Name, $first.renderedHomeGlyph, $first.rendered)
+            }
+            # ... and say so through UIA too, which shares no code with the
+            # readout above. A wiring regression that left a home tab
+            # nameless in the tree used to pass this harness.
+            $homeNames = Get-UiaRowNames
+            if (@($homeNames | Where-Object { $_ -eq 'Home' }).Count -eq 0) {
+                throw ("PRODUCT_FAIL: {0}: at home no row is named 'Home'; rows are [{1}]" -f
+                    $Name, ($homeNames -join ', '))
             }
             $entry.homeGlyph = $true
         } else {

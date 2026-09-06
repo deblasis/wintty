@@ -2166,9 +2166,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         ToolTipService.SetToolTip(
             item, NavView.IsPaneOpen ? tab.HoverText : tab.TooltipText);
         AutomationProperties.SetName(item, TabAccessibleText.Name(tab));
-        AutomationProperties.SetItemStatus(item, tab.Group is { } group
-            ? TabAccessibleText.Status(tab.IsPinned, tab.BellRinging, group.Title, group.IsCollapsed)
-            : TabAccessibleText.Status(tab));
+        // One call: the status reads the tab's group itself, so this strip
+        // cannot report a segment the horizontal one forgets -- which is
+        // how a grouped member came to lose "Starting" here and its run
+        // there.
+        AutomationProperties.SetItemStatus(item, TabAccessibleText.Status(tab));
     }
 
     private void OnRowCloseClick(object sender, RoutedEventArgs e)

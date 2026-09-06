@@ -293,11 +293,32 @@ public class TabAccessibleTextTests
 
         Assert.Contains("AutomationProperties.SetName(item, TabAccessibleText.Name(", apply);
         Assert.Contains("AutomationProperties.SetItemStatus(item,", apply);
-        // The status is the tab's; a grouped member adds the run it sits in.
-        Assert.Contains(
-            "TabAccessibleText.Status(tab.IsPinned, tab.BellRinging, group.Title, group.IsCollapsed)",
-            apply);
+        // One call, reading the whole tab. Spelling the segments out here is
+        // what let this strip name a member's run while dropping "Starting",
+        // and the horizontal strip drop the run entirely.
         Assert.Contains("TabAccessibleText.Status(tab)", apply);
+        Assert.DoesNotContain("tab.IsPinned, tab.BellRinging", apply);
+    }
+
+    /// <summary>
+    /// The status a strip shows is composed from the whole tab, so a grouped
+    /// member reports its run AND everything else that is true of it. The
+    /// vertical strip used to build this by hand and pass four of the five
+    /// parts, which left a grouped tab that was still starting saying only
+    /// which group it was in.
+    /// </summary>
+    [Fact]
+    public void TheTabsStatus_NamesItsRun_AndStillReportsEverythingElse()
+    {
+        var tab = new TabModel(new FakePaneHost()) { Group = new TabGroup { Title = "build" } };
+        Assert.Equal("Group build", TabAccessibleText.Status(tab));
+
+        tab.IsPinned = true;
+        tab.BellRinging = true;
+        Assert.Equal("Pinned, Group build, Bell", TabAccessibleText.Status(tab));
+
+        tab.Group!.IsCollapsed = true;
+        Assert.Equal("Pinned, Group build, Collapsed, Bell", TabAccessibleText.Status(tab));
     }
 
     /// <summary>
@@ -353,7 +374,7 @@ public class TabAccessibleTextTests
         var build = Between(host, "var item = new TabViewItem", "tab.PropertyChanged +=");
         Assert.Contains(call, build);
 
-        var titleArm = Between(host, "headerText.Text = tab.EffectiveTitle", "else if");
+        var titleArm = Between(host, "headerText.Text = tab.WordTitle", "else if");
         Assert.Contains(call, titleArm);
 
         var bellArm = Between(host, "bellGlyph.Visibility = tab.BellRinging", "_itemByModel[tab] = item");

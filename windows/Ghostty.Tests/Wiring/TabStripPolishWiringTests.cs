@@ -85,29 +85,39 @@ public class TabStripPolishWiringTests
     }
 
     /// <summary>
-    /// The body row swaps the pair: at home the glyph shows and the title
-    /// does not, both decided by the model's own judgement. Asserting the
-    /// glyph merely exists would survive a row that went on printing the
-    /// tilde beside it.
+    /// The body row draws the glyph BESIDE the word: the house appears at
+    /// home, and the title prints either way -- "Home" there, the folder
+    /// elsewhere. A row that hid its title behind the glyph left two icons
+    /// and no text in a strip that is scanned by reading.
     /// </summary>
     [Fact]
-    public void TheBodyRow_ShowsTheGlyphInsteadOfTheTitle()
+    public void TheBodyRow_DrawsTheGlyphBesideTheWord()
     {
-        var refresh = ShellSource.Load("Tabs.VerticalTabNavRow.cs").Method("Refresh");
+        var row = ShellSource.Load("Tabs.VerticalTabNavRow.cs");
+        var refresh = row.Method("Refresh");
         var writes = refresh.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Where(a => a.Left.ToString().EndsWith(".Visibility", System.StringComparison.Ordinal))
             .ToDictionary(a => a.Left.ToString(), a => a.Right.ToString());
 
-        Assert.Equal("tab.IsHome ? Visibility.Collapsed : Visibility.Visible", writes["_title.Visibility"]);
         Assert.Equal("tab.IsHome ? Visibility.Visible : Visibility.Collapsed", writes["_home.Visibility"]);
+
+        // Nothing hides the title -- not in the refresh, not anywhere else
+        // in the row.
+        Assert.DoesNotContain(row.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "_title.Visibility");
+
+        // And the word it prints is the one every other surface prints.
+        Assert.Contains(refresh.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "_title.Text" && a.Right.ToString() == "tab.WordTitle");
     }
 
     /// <summary>
-    /// The horizontal strip does the same swap inside its anatomy pass,
-    /// where a pinned tab hides both.
+    /// The horizontal strip does the same in its anatomy pass. Only the pin
+    /// takes the title away there -- a 48px square has no room for it. The
+    /// house still hides on a pin, because the square is the icon's.
     /// </summary>
     [Fact]
-    public void TheHorizontalTab_ShowsTheGlyphInsteadOfTheTitle()
+    public void TheHorizontalTab_DrawsTheGlyphBesideTheWord()
     {
         var anatomy = ShellSource.Load("Tabs.TabHost.xaml.cs").Method("ApplyPinnedTabAnatomy");
         var writes = anatomy.DescendantNodes().OfType<AssignmentExpressionSyntax>()
@@ -115,7 +125,7 @@ public class TabStripPolishWiringTests
             .Select(a => a.Right.ToString())
             .ToList();
 
-        Assert.Contains("pinned || tab.IsHome ? Visibility.Collapsed : Visibility.Visible", writes);
+        Assert.Contains("pinned ? Visibility.Collapsed : Visibility.Visible", writes);
         Assert.Contains("pinned || !tab.IsHome ? Visibility.Collapsed : Visibility.Visible", writes);
     }
 

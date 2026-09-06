@@ -42,22 +42,19 @@ public class TabTitleSurfacesTests
     ];
 
     /// <summary>
-    /// Surfaces that can only show words, where a home tab's glyph has to
-    /// become "Home": they read the model's WordTitle instead. Every
-    /// surface is on exactly one of these two lists -- a text surface left
-    /// unclassified is one that prints a bare tilde while the strips draw a
-    /// house and the window title says "Home".
+    /// Every surface prints the word form: a home tab reads "Home"
+    /// everywhere, so the strip agrees with the window title, the palette,
+    /// the switcher and the overview instead of being the one place that
+    /// shows a symbol nobody can read aloud. A surface missing from here is
+    /// one that prints a bare tilde while every other surface says "Home".
     /// </summary>
-    private static readonly string[] WordSurfaceNames =
-    [
-        "Shell.TitleBarCoordinator.cs",     // window title (taskbar, Alt+Tab), vertical caption
-        "Commands.JumpCommandSource.cs",    // command palette entries
-        "Tabs.TabSwitcherPopup.xaml.cs",    // Ctrl+Tab tiles
-        "Tabs.TabOverviewControl.xaml.cs",  // overview grid
-        "Shell.TabMorphGhost.cs",           // the layout-switch ghost
-    ];
+    private static readonly string[] WordSurfaceNames = TitleSurfaceNames;
 
-    /// <summary>The two surfaces that draw the glyph rather than print it.</summary>
+    /// <summary>
+    /// The two strips, which draw the house BESIDE the word rather than
+    /// instead of it. A subset of the word surfaces, not an alternative to
+    /// them: the glyph is the ornament, the word is the label.
+    /// </summary>
     private static readonly string[] GlyphSurfaceNames =
     [
         "Tabs.TabHost.xaml.cs",
@@ -78,10 +75,10 @@ public class TabTitleSurfacesTests
     }
 
     [Fact]
-    public void EveryTitleSurface_IsClassifiedExactlyOnce()
+    public void EveryTitleSurface_PrintsTheWord_AndTheStripsAlsoDrawTheHouse()
     {
-        Assert.Empty(WordSurfaceNames.Intersect(GlyphSurfaceNames));
-        Assert.Empty(TitleSurfaceNames.Except(WordSurfaceNames).Except(GlyphSurfaceNames));
+        Assert.Empty(TitleSurfaceNames.Except(WordSurfaceNames));
+        Assert.Empty(GlyphSurfaceNames.Except(WordSurfaceNames));
     }
 
 
@@ -117,13 +114,22 @@ public class TabTitleSurfacesTests
         }
     }
 
+    /// <summary>
+    /// A strip draws the house AND prints the word. The house alone was two
+    /// icons and no text in a strip whose every other tab is scanned by
+    /// reading a folder name -- and on Windows that glyph is the one File
+    /// Explorer uses for its Home *page*, so unlabelled it names the wrong
+    /// thing.
+    /// </summary>
     [Theory]
     [MemberData(nameof(GlyphSurfaces))]
-    public void AGlyphSurface_DrawsTheComposedTitle_NotTheWordForm(string source)
+    public void AGlyphSurface_DrawsTheHouseBesideTheWord(string source)
     {
         var root = ShellSource.Load(source).Root;
-        Assert.True(InstanceReads(root, "EffectiveTitle") > 0, $"{source} never reads EffectiveTitle");
-        Assert.Equal(0, InstanceReads(root, "WordTitle"));
+        Assert.True(InstanceReads(root, "WordTitle") > 0, $"{source} never reads WordTitle");
+        Assert.Contains(
+            root.DescendantNodes().OfType<VariableDeclaratorSyntax>(),
+            v => v.Identifier.Text == "HomeGlyph");
     }
 
     /// <summary>
