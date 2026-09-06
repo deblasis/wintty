@@ -173,3 +173,13 @@ test {
     const testing = std.testing;
     try testing.expectEqual(@as(usize, 40), @sizeOf(Message));
 }
+
+test "io message variants are all accounted for by the push give-up path" {
+    // `deinit` ends in `else => {}`, so a new variant that owns memory
+    // compiles and then leaks on every drop path -- the mailbox's
+    // failed-notify branch, its give-up branch, and the teardown drain.
+    // Adding a variant is a decision: does it own memory? Make it, then
+    // bump this count.
+    const fields = @typeInfo(Message).@"union".fields;
+    try std.testing.expectEqual(@as(usize, 19), fields.len);
+}

@@ -535,6 +535,11 @@ pub const Mailbox = BlockingQueue(Message, 64);
 ///
 /// Takes ownership of `msg`. It is either queued or released, so giving
 /// up cannot leak the needle's payload.
+///
+/// The budget is the UI pair. The wait here is a window that has stopped
+/// pumping messages, and a window that stops pumping for a minute is one
+/// Windows offers to kill long before the budget runs out -- from the
+/// user's chair that is the hang, not a bound on it.
 pub fn pushMailbox(
     mailbox: *Mailbox,
     wakeup: *xev.Async,
@@ -544,8 +549,8 @@ pub fn pushMailbox(
         mailbox,
         wakeup,
         msg,
-        Mailbox.wake_retry_timeout_ns,
-        Mailbox.wake_retry_attempts,
+        Mailbox.wake_retry_timeout_ns_ui,
+        Mailbox.wake_retry_attempts_ui,
     );
 }
 

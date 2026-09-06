@@ -1047,6 +1047,13 @@ const Compression = struct {
 /// queue length after the push, or zero when the consumer never drained
 /// at all -- the one genuinely fatal case (the renderer thread is gone),
 /// which an unbounded push would have turned into a deadlock anyway.
+///
+/// This keeps the background budget even though most producers are
+/// UI-thread input handlers, where a minute-long wait is a window the
+/// user is told to kill. Moving it to the UI budget has to wait for
+/// `rendererpkg.Message.deinit` to cover `search_viewport_matches` and
+/// `search_selected_match`: both carry an arena, this give-up path frees
+/// nothing, and a shorter budget would trade a freeze for a leak.
 pub fn pushMailbox(
     mailbox: *Mailbox,
     wakeup: *xev.Async,

@@ -97,16 +97,24 @@ pub fn BlockingQueue(
         }
 
         /// How long one `pushWake` attempt waits for a slot before the
-        /// consumer's wake is re-issued.
+        /// consumer's wake is re-issued, and how many of those windows a
+        /// producer spends before it treats the consumer as gone. Roughly
+        /// a minute. This is the budget for a producer that is never the
+        /// UI thread, where the cost of the wait is a stalled background
+        /// job.
         pub const wake_retry_timeout_ns: u64 = 250 * std.time.ns_per_ms;
-
-        /// How many of those windows a producer spends before it treats
-        /// the consumer as gone. Roughly a minute.
         pub const wake_retry_attempts: usize = 240;
 
-        /// A `pushWake` budget that never gives up, for queues carrying
-        /// values the push has no way to release.
-        pub const wake_retry_forever: usize = std.math.maxInt(usize);
+        /// The same pair for a queue whose producer can be the UI thread,
+        /// where the cost of the wait is a frozen window. Windows paints
+        /// a window "Not Responding" after about five seconds without a
+        /// message pump and offers to kill it, so the total has to stay
+        /// well under that: a minute-long "bound" is not one a user can
+        /// tell apart from a hang. The shorter window also re-issues the
+        /// consumer's wake five times as often, and that re-issue is what
+        /// recovers a lost notify.
+        pub const wake_retry_timeout_ns_ui: u64 = 50 * std.time.ns_per_ms;
+        pub const wake_retry_attempts_ui: usize = 40;
 
         /// Push a value to the queue. This returns the total size of the
         /// queue (unread items) after the push, so a queued value always
@@ -190,9 +198,17 @@ pub fn BlockingQueue(
         ///
         /// A zero return means the value was not queued and THE CALLER
         /// STILL OWNS IT: anything holding memory must be released on
-        /// that path. Pass `wake_retry_forever` as `max_attempts` when
-        /// there is nothing sensible to do with a refused value; that
-        /// budget never returns zero.
+        /// that path. There is deliberately no budget that never gives
+        /// up. Every mailbox in this tree can release a refused message,
+        /// and a producer that waits without a limit takes its own thread
+        /// out of service for as long as the consumer is wedged -- which
+        /// is how two mailboxes deadlock each other rather than one of
+        /// them losing a message.
+        ///
+        /// Mutation-testing note: `wakeFn` is a comptime function
+        /// parameter, so `_ = wakeFn;` does not compile ("pointless
+        /// discard of function parameter"). Neutralise the call instead,
+        /// e.g. `if (attempts > 1_000_000) wakeFn(ctx);`.
         pub fn pushWake(
             self: *Self,
             io: std.Io,

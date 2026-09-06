@@ -592,6 +592,25 @@ pub const Message = union(enum) {
     /// message if it needs to.
     redraw_surface: *apprt.Surface,
 
+    /// Release anything the message owns. `Mailbox.push` calls this when
+    /// a full queue makes it give the message up.
+    ///
+    /// Exhaustive on purpose: a variant that starts owning memory has to
+    /// be decided here rather than compiling into a silent leak on every
+    /// drop.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .surface_message => |v| v.message.deinit(),
+
+            .open_config,
+            .new_window,
+            .close,
+            .quit,
+            .redraw_surface,
+            => {},
+        }
+    }
+
     const NewWindow = struct {
         /// The parent surface
         parent: ?*Surface = null,
@@ -613,25 +632,40 @@ pub const Mailbox = struct {
     rt_app: *apprt.App,
     mailbox: *Queue,
 
-    /// Send a message to the surface.
+    /// Send a message to the surface. `.forever` takes ownership of
+    /// `msg`: it is either queued or released.
     ///
     /// `.forever` does not park here. This queue is drained by `App.tick`
     /// alone and the apprt calls that from its wakeup handler -- on the
     /// embedded runtime that handler is the only caller there is -- so a
     /// producer waiting inside the queue is waiting for a drain its own
     /// wake has to start. It waits in windows instead and re-issues the
-    /// wake after each one, with no attempt limit: these messages carry
-    /// clipboard payloads and heap pointers that nothing here can
-    /// release, so giving up would leak them.
+    /// wake after each one.
+    ///
+    /// The budget is the background pair, roughly a minute, because every
+    /// producer that reaches this path is a background thread: the search
+    /// thread, the termio writer and the pty reader. The cost of the wait
+    /// is a stalled search or a stalled child, not a frozen window.
+    ///
+    /// It is a budget and not an unbounded wait because a wedged consumer
+    /// is not the same thing as a dead one. The app thread can be alive
+    /// and itself blocked pushing to another full mailbox, and then a
+    /// producer that never gives up is one half of a deadlock that only a
+    /// kill recovers from. Giving up costs one message; `Message.deinit`
+    /// is what makes that cost bounded rather than a leak.
+    ///
+    /// The re-issued wake has no test of its own. Under
+    /// `-Dapp-runtime=none` -- the only runtime that compiles here --
+    /// `apprt.none.App.wakeup` is an empty body, so a fixed and an
+    /// unfixed push are observationally identical and reverting this
+    /// produces no failure. The loop is tested in
+    /// `BlockingQueue.pushWake`; the give-up path is tested below.
     pub fn push(self: Mailbox, msg: Message, timeout: Queue.Timeout) Queue.Size {
         const result = switch (timeout) {
-            .forever => self.mailbox.pushWake(
-                global.io(),
+            .forever => self.pushBounded(
                 msg,
-                self.rt_app,
-                wakeApp,
                 Queue.wake_retry_timeout_ns,
-                Queue.wake_retry_forever,
+                Queue.wake_retry_attempts,
             ),
 
             .instant, .ns => self.mailbox.push(global.io(), msg, timeout),
@@ -643,10 +677,71 @@ pub const Mailbox = struct {
         return result;
     }
 
+    fn pushBounded(
+        self: Mailbox,
+        msg: Message,
+        timeout_ns: u64,
+        max_attempts: usize,
+    ) Queue.Size {
+        const size = self.mailbox.pushWake(
+            global.io(),
+            msg,
+            self.rt_app,
+            wakeApp,
+            timeout_ns,
+            max_attempts,
+        );
+        if (size == 0) {
+            log.warn("app mailbox full, message dropped", .{});
+            msg.deinit();
+        }
+
+        return size;
+    }
+
     fn wakeApp(rt_app: *apprt.App) void {
         rt_app.wakeup();
     }
 };
+
+test "app mailbox push frees the message it has to give up" {
+    const testing = std.testing;
+    const build_config = @import("build_config.zig");
+
+    // The only runtime whose `wakeup` ignores its receiver, which is what
+    // lets this test hand it an undefined one.
+    if (build_config.app_runtime != .none) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    const queue = try Mailbox.Queue.create(alloc);
+    defer queue.destroy(alloc);
+
+    var rt_app: apprt.App = undefined;
+    const mailbox: Mailbox = .{ .rt_app = &rt_app, .mailbox = queue };
+
+    // Fill the queue and never drain it. An app thread that is alive but
+    // blocked on another full mailbox looks exactly like this from a
+    // producer's side, and that is the state an unbounded wait here turns
+    // into a deadlock.
+    while (queue.push(io, .{ .quit = {} }, .{ .instant = {} }) > 0) {}
+
+    // A pwd longer than the inline capacity is heap allocated, so
+    // std.testing.allocator fails this test if the give-up path leaks it.
+    const pwd = "/" ++ ("d" ** 400);
+    const req = try apprt.surface.Message.WriteReq.init(alloc, @as([]const u8, pwd));
+    try testing.expect(req == .alloc);
+
+    // A tiny budget so the test finishes; production uses the queue's
+    // wake_retry_* defaults.
+    const size = mailbox.pushBounded(.{ .surface_message = .{
+        .surface = undefined,
+        .message = .{ .pwd_change = req },
+    } }, 1 * std.time.ns_per_ms, 3);
+
+    try testing.expectEqual(@as(Mailbox.Queue.Size, 0), size);
+}
 
 // Wasm API.
 pub const Wasm = if (!builtin.target.isWasm()) struct {} else struct {

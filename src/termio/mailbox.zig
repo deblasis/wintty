@@ -71,14 +71,40 @@ pub const Mailbox = union(enum) {
 
     /// Sends the given message without notifying there are messages.
     ///
+    /// Takes ownership of `msg`: it is either queued or released, so a
+    /// message that owns a write buffer cannot leak here.
+    ///
     /// If the optional mutex is given, it must already be LOCKED. If the
     /// send would block, we'll unlock this mutex, resend the message, and
     /// lock it again. This handles an edge case where queues are full.
     /// This may not apply to all writer types.
+    ///
+    /// The budget is the UI one because most of this queue's producers
+    /// are UI-thread input handlers reaching us through
+    /// `Surface.queueIo`. A push that parks here parks the thread that
+    /// drains the app mailbox, and the writer thread this waits on can
+    /// itself be parked on that same app mailbox -- two unbounded hops
+    /// that hold each other up forever, which is what this bound exists
+    /// to break.
     pub fn send(
         self: *Mailbox,
         msg: termio.Message,
         mutex: ?*std.Io.Mutex,
+    ) void {
+        self.sendBounded(
+            msg,
+            mutex,
+            Queue.wake_retry_timeout_ns_ui,
+            Queue.wake_retry_attempts_ui,
+        );
+    }
+
+    fn sendBounded(
+        self: *Mailbox,
+        msg: termio.Message,
+        mutex: ?*std.Io.Mutex,
+        timeout_ns: u64,
+        max_attempts: usize,
     ) void {
         switch (self.*) {
             .spsc => |*mb| send: {
@@ -110,27 +136,33 @@ pub const Mailbox = union(enum) {
                 // and a single notify can be lost outright on the IOCP
                 // backend, so keep re-issuing it while we wait rather
                 // than sleeping on the queue with no wake source left.
-                // There is no attempt limit: a message here can own a
-                // write buffer and this path has nowhere to hand it back
-                // to, so waiting for the slot is the only thing that does
-                // not lose it.
+                //
+                // The wait is bounded. A message here can own a write
+                // buffer, but `termio.Message.deinit` releases exactly
+                // those variants -- the failed-notify path above already
+                // calls it -- so giving up costs one message rather than
+                // the thread.
                 if (mutex) |m| m.unlock(global.io());
                 defer if (mutex) |m| m.lockUncancelable(global.io());
-                _ = mb.queue.pushWake(
+                const size = mb.queue.pushWake(
                     global.io(),
                     msg,
                     mb.wakeup,
                     notifyWake,
-                    Queue.wake_retry_timeout_ns,
-                    Queue.wake_retry_forever,
+                    timeout_ns,
+                    max_attempts,
                 );
+                if (size == 0) {
+                    log.warn("io mailbox full, message dropped", .{});
+                    msg.deinit();
+                }
             },
         }
     }
 
     /// The `pushWake` wake for our writer thread. A notify that fails
-    /// means the loop is gone; the send has nothing better to do than
-    /// keep trying, and the queue drains at teardown.
+    /// means the loop is gone, which the retry budget already gives up
+    /// on.
     fn notifyWake(wakeup: *xev.Async) void {
         wakeup.notify() catch {};
     }
@@ -186,4 +218,54 @@ test "Mailbox: spsc wakeup survives copying the union" {
     producer.notify();
     try loop.run(.until_done);
     try testing.expect(fired);
+}
+
+test "Mailbox: a push it has to give up frees the message" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    var mailbox = try Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    // Register the wait so the notify inside `send` succeeds. Without it
+    // the send can take the failed-notify branch instead, which frees the
+    // message for a different reason and would make this test pass
+    // whatever the retry path does.
+    var fired: bool = false;
+    var c: xev.Completion = .{};
+    mailbox.spsc.wakeup.wait(&loop, &c, bool, &fired, (struct {
+        fn callback(
+            ud: ?*bool,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            ud.?.* = true;
+            return .disarm;
+        }
+    }).callback);
+
+    // Fill the queue and never drain it. A writer thread that is alive
+    // but parked pushing to the full app mailbox looks exactly like this
+    // from a producer's side, and the producer here is usually the UI
+    // thread coming through `Surface.queueIo`.
+    while (mailbox.spsc.queue.push(io, .{ .focused = true }, .{ .instant = {} }) > 0) {}
+
+    // A write too large for the union is heap allocated, so
+    // std.testing.allocator fails this test if the give-up path leaks it.
+    const data = "e" ** 128;
+    const msg = try termio.Message.writeReq(alloc, @as([]const u8, data));
+    try testing.expect(msg == .write_alloc);
+
+    // A tiny budget so the test finishes; production uses the queue's
+    // wake_retry_*_ui defaults.
+    mailbox.sendBounded(msg, null, 1 * std.time.ns_per_ms, 3);
+
+    // Nothing landed, so nothing was dropped from the queue either.
+    try testing.expect(mailbox.spsc.queue.len == 64);
 }
