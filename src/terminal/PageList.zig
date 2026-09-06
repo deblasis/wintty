@@ -2896,11 +2896,16 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
     }
 }
 
+const resizeWithoutReflowGrowCols_tw = tripwire.module(enum {
+    create_page,
+}, resizeWithoutReflowGrowCols);
+
 fn resizeWithoutReflowGrowCols(
     self: *PageList,
     cols: size.CellCountInt,
     chunk: PageIterator.Chunk,
 ) Allocator.Error!void {
+    const tw = resizeWithoutReflowGrowCols_tw;
     assert(cols > self.cols);
     const page = chunk.node.page();
 
@@ -2963,6 +2968,17 @@ fn resizeWithoutReflowGrowCols(
     // we copied exactly our page size.
     var copied: size.CellCountInt = 0;
 
+    // The rows we backfilled into the previous page, if any. The tracked
+    // pins for those rows are only moved once this function can no longer
+    // fail: an error rolls the backfill back, and a pin moved before that
+    // would be left pointing past the restored row count, at a row that
+    // the rollback has reset.
+    var backfill: ?struct {
+        node: *List.Node,
+        base: size.CellCountInt,
+        len: size.CellCountInt,
+    } = null;
+
     // This function has an unfortunate side effect in that it causes memory
     // fragmentation on rows if the columns are increasing in a way that
     // shrinks capacity rows. If we have pages that don't divide evenly then
@@ -3013,25 +3029,21 @@ fn resizeWithoutReflowGrowCols(
         assert(copied <= len);
         assert(prev_page.size.rows <= prev_page.capacity.rows);
 
-        // Remap any tracked pins that pointed to rows we just copied to prev.
-        // The rows copied before a failure above still moved, and this page
-        // is destroyed at the end, so this has to run for them too.
-        const pin_keys = self.tracked_pins.keys();
-        for (pin_keys) |p| {
-            if (p.node != chunk.node or p.y >= copied) continue;
-            p.node = prev_node;
-            p.y += prev_page.size.rows - copied;
-        }
+        if (copied > 0) backfill = .{
+            .node = prev_node,
+            .base = prev_page.size.rows - copied,
+            .len = copied,
+        };
     }
 
     // If we have an error, we clear the rows we just added to our prev page.
-    const prev_copied = copied;
-    errdefer if (prev_copied > 0) {
-        const prev_page = prev.?.page();
-        const prev_size = prev_page.size.rows - prev_copied;
-        const prev_rows = prev_page.rows.ptr(prev_page.memory)[prev_size..prev_page.size.rows];
+    // No tracked pin has been moved onto them yet, so putting the row count
+    // back is a complete undo.
+    errdefer if (backfill) |bf| {
+        const prev_page = bf.node.page();
+        const prev_rows = prev_page.rows.ptr(prev_page.memory)[bf.base..prev_page.size.rows];
         for (prev_rows) |*row| prev_page.resetRow(row);
-        prev_page.size.rows = prev_size;
+        prev_page.size.rows = bf.base;
     };
 
     // We delete any of the nodes we added.
@@ -3048,6 +3060,7 @@ fn resizeWithoutReflowGrowCols(
     // We need to loop because our col growth may force us
     // to split pages.
     while (copied < page.size.rows) {
+        try tw.check(.create_page);
         const new_node = try self.createPage(.{ .cap = cap });
         const new_page = new_node.page();
         defer new_page.assertIntegrity();
@@ -3107,6 +3120,20 @@ fn resizeWithoutReflowGrowCols(
     // Our prior errdeferes are invalid after this point so ensure
     // we don't have any more errors.
     errdefer comptime unreachable;
+
+    // Hand over the tracked pins for the rows we backfilled into the
+    // previous page. This is deliberately last: the rows below were also
+    // moved out of this page, but they went to pages that only exist if we
+    // got here, whereas the backfill destination survives a failure and
+    // would be left holding pins for rows it no longer has.
+    if (backfill) |bf| {
+        const pin_keys = self.tracked_pins.keys();
+        for (pin_keys) |p| {
+            if (p.node != chunk.node or p.y >= bf.len) continue;
+            p.node = bf.node;
+            p.y += bf.base;
+        }
+    }
 
     // Remove the old page.
     // Deallocate the old page.
@@ -19440,6 +19467,74 @@ test "PageList resize (no reflow) more cols remaps pins when backfill fails" {
     try testing.expect(tracked.y < tracked.node.rows());
 
     // And it must still point at the content it was tracking.
+    const cell = tracked.rowAndCell().cell;
+    try testing.expectEqual(marker, cell.content.codepoint.data);
+}
+
+test "PageList resize (no reflow) more cols does not move pins if a later page fails" {
+    // Regression test: the backfill into the previous page is rolled back
+    // when a later allocation fails, so the tracked pins of the backfilled
+    // rows must not have been moved onto it. A pin moved before the
+    // rollback is left with y >= node.rows(), pointing at a row the
+    // rollback has reset.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const tw = resizeWithoutReflowGrowCols_tw;
+
+    // Same geometry as the backfill test above: start wide and shrink so
+    // the first page keeps spare column capacity and is resized in place,
+    // which leaves it as the backfill destination for the second page.
+    const wide_cols: size.CellCountInt = 80;
+    const cols: size.CellCountInt = wide_cols / 2;
+    const cap = try std_capacity.adjust(.{ .cols = wide_cols });
+    var s = try init(alloc, .{ .cols = wide_cols, .rows = cap.rows });
+    defer s.deinit();
+    try s.resize(.{ .cols = cols, .reflow = false });
+
+    // Grow into a second page and give it a few rows.
+    while (s.pages.first == s.pages.last) _ = try s.grow();
+    const first_node = s.pages.first.?;
+    const second_node = s.pages.last.?;
+    while (second_node.rows() < 4) _ = try s.grow();
+
+    // Free rows in the first page so that the backfill has somewhere to
+    // copy to, but fewer than the second page has, so the resize still has
+    // to allocate a page afterwards.
+    s.eraseHistory(.{ .history = .{ .y = 2 } });
+    const spare = first_node.capacity().rows - first_node.rows();
+    try testing.expect(first_node.capacity().cols >= cols + 1);
+    try testing.expect(spare > 0);
+    try testing.expect(second_node.rows() > spare);
+
+    const marker: u21 = 'X';
+    {
+        const page = second_node.page();
+        const rac = page.getRowAndCell(0, 0);
+        rac.cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = .{ .data = marker } },
+        };
+    }
+
+    const tracked = try s.trackPin(.{ .node = second_node, .x = 0, .y = 0 });
+    defer s.untrackPin(tracked);
+    const first_rows = first_node.rows();
+
+    // Fail the first page allocation after the backfill has run.
+    tw.errorAlways(.create_page, error.OutOfMemory);
+    try testing.expectError(
+        error.OutOfMemory,
+        s.resize(.{ .cols = cols + 1, .reflow = false }),
+    );
+    // end() reports an error if the point was never reached, which is what
+    // proves we got past the backfill and into the new page loop.
+    try tw.end(.reset);
+
+    // The backfill was undone, so the pin must still be on its original
+    // page, at its original row, holding its original content.
+    try testing.expectEqual(first_rows, first_node.rows());
+    try testing.expectEqual(second_node, tracked.node);
+    try testing.expectEqual(@as(size.CellCountInt, 0), tracked.y);
     const cell = tracked.rowAndCell().cell;
     try testing.expectEqual(marker, cell.content.codepoint.data);
 }
