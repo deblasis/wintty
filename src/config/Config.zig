@@ -57,6 +57,23 @@ const terminal = struct {
 
 const log = std.log.scoped(.config);
 
+const default_font_size: f32 = switch (builtin.os.tag) {
+    // On macOS we default a little bigger since this tends to look better.
+    // This is purely subjective but this is easy to modify.
+    .macos => 13,
+    else => 12,
+};
+
+/// The range a font size is allowed to be in. The same range is applied
+/// to font size changes at runtime (see the font size keybind actions).
+const min_font_size: f32 = 1;
+const max_font_size: f32 = 255;
+
+/// The largest window size we accept, in cells. The terminal addresses
+/// its grid with a u16, and the value is multiplied by the cell size to
+/// get pixels, so anything larger only overflows.
+const max_window_size_cells: u32 = std.math.maxInt(u16);
+
 /// Used on Unixes for some defaults.
 const c = @cImport({
     @cInclude("unistd.h");
@@ -271,12 +288,7 @@ language: ?[:0]const u8 = null,
 /// On Linux with GTK, font size is scaled according to both display-wide and
 /// text-specific scaling factors, which are often managed by your desktop
 /// environment (e.g. the GNOME display scale and large text settings).
-@"font-size": f32 = switch (builtin.os.tag) {
-    // On macOS we default a little bigger since this tends to look better. This
-    // is purely subjective but this is easy to modify.
-    .macos => 13,
-    else => 12,
-},
+@"font-size": f32 = default_font_size,
 
 /// A repeatable configuration to set one or more font variations values for
 /// a variable font. A variable font is a single font, usually with a filename
@@ -4211,6 +4223,32 @@ test "handle bom in config files" {
     }
 }
 
+test "config file with an over-long line keeps reading" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const data = "title = " ++
+        ("x" ** cli.args.LineIterator.MAX_LINE_SIZE) ++
+        "\nfont-size = 20\n";
+    var reader: std.Io.Reader = .fixed(data);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(
+        alloc,
+        &reader,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+
+    // The rest of the file is still applied and the user is told about
+    // the line we dropped.
+    try testing.expectEqual(20, cfg.@"font-size");
+    try testing.expectEqual(1, cfg._diagnostics.items().len);
+    try testing.expectEqual(
+        @as(usize, 1),
+        cfg._diagnostics.items()[0].location.file.line,
+    );
+}
+
 pub const OptionalFileAction = enum { loaded, not_found, @"error" };
 
 /// Load optional configuration file from `path`. All errors are ignored.
@@ -4404,7 +4442,16 @@ pub fn loadCliArgs(self: *Config, alloc_gpa: Allocator) !void {
             }
 
             self.@"_xdg-terminal-exec" = true;
-            self.@"initial-command" = .{ .direct = try builder.toOwnedSlice(arena_alloc) };
+
+            // Invoked with no command at all. Leave the initial command
+            // unset so we start the default shell; an empty argv has no
+            // program to execute.
+            if (builder.items.len > 0) {
+                self.@"initial-command" = .{
+                    .direct = try builder.toOwnedSlice(arena_alloc),
+                };
+            }
+
             return;
         }
     }
@@ -5010,6 +5057,13 @@ pub fn finalize(self: *Config) !void {
         self.@"click-repeat-interval" = internal_os.clickInterval() orelse 500;
     }
 
+    // Clamp our font size. A font size is turned into integer metrics,
+    // so a value that isn't a real number can't be used at all.
+    self.@"font-size" = if (std.math.isNan(self.@"font-size"))
+        default_font_size
+    else
+        std.math.clamp(self.@"font-size", min_font_size, max_font_size);
+
     // Clamp our mouse scroll multiplier
     self.@"mouse-scroll-multiplier".precision = @min(10_000.0, @max(0.01, self.@"mouse-scroll-multiplier".precision));
     self.@"mouse-scroll-multiplier".discrete = @min(10_000.0, @max(0.01, self.@"mouse-scroll-multiplier".discrete));
@@ -5020,9 +5074,17 @@ pub fn finalize(self: *Config) !void {
     // Clamp our contrast
     self.@"minimum-contrast" = @min(21, @max(1, self.@"minimum-contrast"));
 
-    // Minimum window size
-    if (self.@"window-width" > 0) self.@"window-width" = @max(10, self.@"window-width");
-    if (self.@"window-height" > 0) self.@"window-height" = @max(4, self.@"window-height");
+    // Window size, in cells
+    if (self.@"window-width" > 0) self.@"window-width" = std.math.clamp(
+        self.@"window-width",
+        10,
+        max_window_size_cells,
+    );
+    if (self.@"window-height" > 0) self.@"window-height" = std.math.clamp(
+        self.@"window-height",
+        4,
+        max_window_size_cells,
+    );
 
     // When link-url-style = always, switch the default URL matcher's
     // highlight to .always so the URL matcher behaves like the OSC 8
@@ -11112,6 +11174,52 @@ test "clone default" {
     // try testing.expectEqualDeep(dest, source);
 }
 
+test "finalize clamps font-size" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    {
+        var reader: std.Io.Reader = .fixed("font-size = nan\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try testing.expect(std.math.isNan(cfg.@"font-size"));
+
+        try cfg.finalize();
+        try testing.expectEqual(default_font_size, cfg.@"font-size");
+    }
+
+    {
+        var reader: std.Io.Reader = .fixed("font-size = inf\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+        try testing.expectEqual(max_font_size, cfg.@"font-size");
+    }
+
+    {
+        var reader: std.Io.Reader = .fixed("font-size = 0\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+        try testing.expectEqual(min_font_size, cfg.@"font-size");
+    }
+}
+
 test "default mouse-hide-while-typing is true" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -11120,6 +11228,28 @@ test "default mouse-hide-while-typing is true" {
     defer cfg.deinit();
 
     try testing.expectEqual(true, cfg.@"mouse-hide-while-typing");
+}
+
+test "finalize clamps window size" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var reader: std.Io.Reader = .fixed(
+        \\window-width = 4000000000
+        \\window-height = 1
+        \\
+    );
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(
+        alloc,
+        &reader,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+    try cfg.finalize();
+
+    try testing.expectEqual(max_window_size_cells, cfg.@"window-width");
+    try testing.expectEqual(4, cfg.@"window-height");
 }
 
 test "clone preserves conditional state" {

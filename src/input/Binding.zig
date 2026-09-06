@@ -1367,6 +1367,57 @@ pub const Action = union(enum) {
         return Error.InvalidAction;
     }
 
+    /// Returns true if performing this action can close the surface it
+    /// was performed on, so a caller still holding that surface has to
+    /// treat the pointer as dead once the action has run.
+    ///
+    /// "Can", not "does", and the difference matters: no runtime in this
+    /// tree has been shown to free the core surface before
+    /// `performAction` returns. The embedded apprt calls straight out to
+    /// the embedder and returns, and every embedder here defers the
+    /// close to its own UI loop; gtk's `quit` destroys its windows
+    /// inline, but the core surface is freed in GObject `finalize`,
+    /// which runs at last unref and not necessarily before the key
+    /// handler that triggered it returns.
+    ///
+    /// The list is deliberately wider than any of that: `quit` and
+    /// `close_all_windows` take every surface with them, and
+    /// `undo`/`redo` can replay the teardown of whatever created this
+    /// one. A caller cannot check afterwards whether it survived, and
+    /// being wrong in the other direction is a use-after-free, so
+    /// membership is a claim about what an apprt is allowed to do, not a
+    /// measurement of what any of them currently does.
+    pub fn closesSurface(self: Action) bool {
+        return switch (self) {
+            .close_surface,
+            .close_window,
+            .close_tab,
+            .close_all_windows,
+            .quit,
+            .undo,
+            .redo,
+            => true,
+
+            else => false,
+        };
+    }
+
+    /// Returns true if performing this action can free the keybind set
+    /// that a chain of actions is being read from, so no action after it
+    /// in the chain may be looked at.
+    ///
+    /// Reloading the config replaces every surface's derived config,
+    /// which owns the keybind set, without closing anything.
+    pub fn endsChain(self: Action) bool {
+        return switch (self) {
+            .reload_config => true,
+
+            // Every action that takes the surface away takes its keybind
+            // set with it.
+            else => self.closesSurface(),
+        };
+    }
+
     /// The scope of an action. The scope is the context in which an action
     /// must be executed.
     pub const Scope = enum {
@@ -2330,6 +2381,26 @@ pub const Set = struct {
                 .many => |slice| slice,
             };
         }
+
+        /// Returns true if `actionsSlice` points into the keybind set this
+        /// leaf came from instead of into the leaf itself. Only a borrowed
+        /// slice can be freed by an action that ends the chain; a single
+        /// action is copied into the leaf, so it lives as long as the
+        /// caller's own copy of it.
+        pub fn actionsBorrowed(self: *const GenericLeaf) bool {
+            return self.actions == .many;
+        }
+
+        /// Returns true if any action in this leaf is `ignore`. Ask before
+        /// performing anything: performing an action can free the slice
+        /// this reads.
+        pub fn hasIgnore(self: *const GenericLeaf) bool {
+            for (self.actionsSlice()) |action| {
+                if (action == .ignore) return true;
+            }
+
+            return false;
+        }
     };
 
     /// Maximum trigger steps in a flattened keybind (leader sequences).
@@ -2714,12 +2785,14 @@ pub const Set = struct {
 
     /// Append a chained action to the prior set action.
     ///
-    /// It is an error if there is no valid prior chain parent.
+    /// It is an error if there is no valid prior chain parent or if the
+    /// prior action frees the set this chain lives in, since nothing can
+    /// run after that.
     pub fn appendChain(
         self: *Set,
         alloc: Allocator,
         action: Action,
-    ) (Allocator.Error || error{NoChainParent})!void {
+    ) (Allocator.Error || error{ NoChainParent, InvalidChainAction })!void {
         // Unbind is not a valid chain action; callers must check this.
         assert(action != .unbind);
 
@@ -2731,16 +2804,23 @@ pub const Set = struct {
 
             // If it is already a chained action, we just append the
             // action. Easy!
-            .leaf_chained => |*leaf| try leaf.actions.append(
-                alloc,
-                action,
-            ),
+            .leaf_chained => |*leaf| {
+                if (leaf.actions.getLast().endsChain()) {
+                    return error.InvalidChainAction;
+                }
+
+                try leaf.actions.append(alloc, action);
+            },
 
             // If it is a leaf, we need to convert it to a leaf_chained.
             // We also need to be careful to remove any prior reverse
             // mappings for this action since chained actions are not
             // part of the reverse mapping.
             .leaf => |leaf| {
+                if (leaf.action.endsChain()) {
+                    return error.InvalidChainAction;
+                }
+
                 // Setup our failable actions list first.
                 var actions: std.ArrayList(Action) = .empty;
                 try actions.ensureTotalCapacity(alloc, 2);
@@ -4837,6 +4917,166 @@ test "set: appendChain multiple times" {
     try testing.expect(chained.actions.items[2] == .close_surface);
 }
 
+test "set: appendChain after a closing leaf is an error" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.put(alloc, .{ .key = .{ .unicode = 'a' } }, .{ .close_surface = {} });
+    try testing.expectError(
+        error.InvalidChainAction,
+        s.appendChain(alloc, .{ .new_tab = {} }),
+    );
+
+    // The binding is left as it was.
+    const entry = s.get(.{ .key = .{ .unicode = 'a' } }).?;
+    try testing.expect(entry.value_ptr.* == .leaf);
+    try testing.expect(entry.value_ptr.*.leaf.action == .close_surface);
+}
+
+test "set: appendChain after a closing action in a chain is an error" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.put(alloc, .{ .key = .{ .unicode = 'a' } }, .{ .new_window = {} });
+    try s.appendChain(alloc, .{ .close_tab = .this });
+    try testing.expectError(
+        error.InvalidChainAction,
+        s.appendChain(alloc, .{ .new_tab = {} }),
+    );
+
+    const chained = s.get(.{ .key = .{ .unicode = 'a' } }).?.value_ptr.*.leaf_chained;
+    try testing.expectEqual(@as(usize, 2), chained.actions.items.len);
+}
+
+test "set: appendChain after an action that frees the set is an error" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Each one can replace or tear down the config that owns this set,
+    // which frees the action slice a chain is read from.
+    const actions: []const Action = &.{
+        .{ .reload_config = {} },
+        .{ .close_all_windows = {} },
+        .{ .quit = {} },
+        .{ .undo = {} },
+        .{ .redo = {} },
+    };
+
+    for (actions) |action| {
+        var s: Set = .{};
+        defer s.deinit(alloc);
+
+        try s.put(alloc, .{ .key = .{ .unicode = 'a' } }, action);
+        try testing.expectError(
+            error.InvalidChainAction,
+            s.appendChain(alloc, .{ .new_tab = {} }),
+        );
+
+        const entry = s.get(.{ .key = .{ .unicode = 'a' } }).?;
+        try testing.expect(entry.value_ptr.* == .leaf);
+    }
+}
+
+test "action: endsChain" {
+    const testing = std.testing;
+
+    // Every action that closes the surface also ends the chain.
+    try testing.expect((Action{ .close_surface = {} }).endsChain());
+    try testing.expect((Action{ .close_window = {} }).endsChain());
+    try testing.expect((Action{ .close_tab = .this }).endsChain());
+
+    // A reload frees the keybind set but leaves the surface open.
+    try testing.expect(!(Action{ .reload_config = {} }).closesSurface());
+    try testing.expect((Action{ .reload_config = {} }).endsChain());
+
+    // These take every surface with them, ours included.
+    try testing.expect((Action{ .close_all_windows = {} }).closesSurface());
+    try testing.expect((Action{ .close_all_windows = {} }).endsChain());
+    try testing.expect((Action{ .quit = {} }).closesSurface());
+    try testing.expect((Action{ .quit = {} }).endsChain());
+
+    // Undoing whatever created this surface takes the surface with it.
+    try testing.expect((Action{ .undo = {} }).closesSurface());
+    try testing.expect((Action{ .undo = {} }).endsChain());
+    try testing.expect((Action{ .redo = {} }).closesSurface());
+    try testing.expect((Action{ .redo = {} }).endsChain());
+
+    // An ordinary action does neither.
+    try testing.expect(!(Action{ .new_tab = {} }).closesSurface());
+    try testing.expect(!(Action{ .new_tab = {} }).endsChain());
+}
+
+test "leaf: only a chain borrows its action slice" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    // A single action that ends the chain, and a chain that does not.
+    try s.parseAndPut(alloc, "a=reload_config");
+    try s.parseAndPut(alloc, "b=new_tab");
+    try s.appendChain(alloc, .{ .new_window = {} });
+
+    const single = genericLeaf(&s, 'a');
+    const many = genericLeaf(&s, 'b');
+
+    try testing.expect(!single.actionsBorrowed());
+    try testing.expect(many.actionsBorrowed());
+
+    // The single leaf's slice is inside the leaf we are holding, so it
+    // is readable no matter what performing the action did.
+    try testing.expectEqual(@as(usize, 1), single.actionsSlice().len);
+    try testing.expect(single.actionsSlice()[0] == .reload_config);
+}
+
+test "leaf: hasIgnore sees past an action that ends the chain" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "a=ignore");
+    try s.appendChain(alloc, .{ .reload_config = {} });
+    try s.parseAndPut(alloc, "b=new_tab");
+    try s.appendChain(alloc, .{ .reload_config = {} });
+
+    try testing.expect(genericLeaf(&s, 'a').hasIgnore());
+    try testing.expect(!genericLeaf(&s, 'b').hasIgnore());
+}
+
+fn genericLeaf(s: *const Set, cp: u21) Set.GenericLeaf {
+    const entry = s.get(.{ .key = .{ .unicode = cp } }).?;
+    return switch (entry.value_ptr.*) {
+        .leader => unreachable,
+        inline .leaf, .leaf_chained => |leaf| leaf.generic(),
+    };
+}
+
+test "set: parseAndPut chain after a closing action is invalid" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "a=close_surface");
+    try testing.expectError(
+        error.InvalidFormat,
+        s.parseAndPut(alloc, "chain=new_tab"),
+    );
+
+    const entry = s.get(.{ .key = .{ .unicode = 'a' } }).?;
+    try testing.expect(entry.value_ptr.* == .leaf);
+}
+
 test "set: appendChain removes reverse mapping" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -4871,12 +5111,12 @@ test "set: appendChain with performable does not affect reverse mapping" {
     try s.putFlags(
         alloc,
         .{ .key = .{ .unicode = 'a' } },
-        .{ .close_surface = {} },
+        .{ .reset = {} },
         .{ .performable = true },
     );
 
-    // close_surface was performable, so not in reverse map
-    try testing.expect(s.getTrigger(.{ .close_surface = {} }) == null);
+    // reset was performable, so not in reverse map
+    try testing.expect(s.getTrigger(.{ .reset = {} }) == null);
 
     // Chaining the performable binding should not crash or affect anything
     try s.appendChain(alloc, .{ .new_tab = {} });

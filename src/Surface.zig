@@ -398,7 +398,11 @@ const DerivedConfig = struct {
             .cursor_click_to_move = config.@"cursor-click-to-move",
             .desktop_notifications = config.@"desktop-notifications",
             .font = try font.SharedGridSet.DerivedConfig.init(alloc, config),
-            .mouse_interval = config.@"click-repeat-interval" * 1_000_000, // 500ms
+            // Widened before the multiply: the config value is in
+            // milliseconds and anything over ~4.3s overflows a u32 of
+            // nanoseconds.
+            .mouse_interval = @as(u64, config.@"click-repeat-interval") *
+                std.time.ns_per_ms,
             .mouse_hide_while_typing = config.@"mouse-hide-while-typing",
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
@@ -3086,15 +3090,49 @@ fn maybeHandleBinding(
     // Setup our actions
     const actions = leaf.actionsSlice();
 
+    // Only a chain reads its actions out of the keybind set; a single
+    // action was copied into `leaf`, which is ours, so nothing an action
+    // does can take it away.
+    const borrowed = leaf.actionsBorrowed();
+
+    // Anything we need to know about the actions themselves has to be
+    // decided now, while they are certainly still there.
+    const ignored = leaf.hasIgnore();
+
     // Attempt to perform the action
     log.debug("key event binding flags={} action={any}", .{
         leaf.flags,
         actions,
     });
+
+    // Anything a closing chain owes the sequence has to be paid now,
+    // before the chain runs, because `return .closed` below leaves
+    // without touching the tail this function normally ends in.
+    self.endKeySequenceBeforeClose(actions);
+
+    // Set if we ran an action that closes the surface. Our "self" pointer
+    // is dead after that, so nothing may touch it.
+    var closed: bool = false;
+
+    // Set if we ran an action that freed the actions we are iterating.
+    // That is a larger set of actions than the ones that close us,
+    // because a config reload replaces the keybind set while leaving the
+    // surface alive.
+    var actions_freed: bool = false;
     const performed = performed: {
         // If this is a global or all action, then we perform it on
         // the app and it applies to every surface.
         if (leaf.flags.global or leaf.flags.all) {
+            // These run on every surface, ours included, so decide before
+            // performing what we are about to lose. The per-surface arm
+            // below can afford to wait for the result and set `closed`
+            // from it; here there is no result to wait for, since this
+            // arm ends in an unconditional `break :performed true`.
+            for (actions) |action| {
+                if (action.closesSurface()) closed = true;
+                if (borrowed and action.endsChain()) actions_freed = true;
+            }
+
             self.app.performAllChainedAction(
                 self.rt_app,
                 actions,
@@ -3108,36 +3146,58 @@ fn maybeHandleBinding(
         // actions perform.
         var performed: bool = false;
         for (actions) |action| {
-            if (self.performBindingAction(action)) |v| {
-                performed = performed or v;
-            } else |err| {
+            const action_performed = self.performBindingAction(action) catch |err| act: {
                 log.info(
                     "key binding action failed action={t} err={}",
                     .{ action, err },
                 );
+                break :act false;
+            };
+            performed = performed or action_performed;
+
+            // Stop the chain at an action that freed the set we are
+            // reading from. The config parser rejects a chain that
+            // continues past one, but a keybind set built any other way
+            // must not run into freed memory.
+            if (action.endsChain()) {
+                // Read this as "no action in this chain did anything",
+                // not as "this action did nothing": `performed` is the
+                // chain accumulator, so an earlier action that performed
+                // already forces `closed`. That direction is the safe
+                // one, and a `false` still means nothing ran at all.
+                //
+                // Do not read a `true` as evidence that a runtime tore
+                // anything down. It is only that for `undo` and `redo`,
+                // which return the apprt's own boolean, and that is what
+                // the `performable` flag below needs. For `quit` and
+                // `close_all_windows` the valve is stuck open on every
+                // runtime: `performBindingAction` takes its `else` arm
+                // and returns an unconditional `true`, and
+                // `App.performAction` has already thrown the runtime's
+                // answer away with `_ =`. On the embedded apprt that is
+                // exactly where those two land whether the embedder
+                // implements them or not.
+                if (action.closesSurface()) closed = performed;
+                if (borrowed) actions_freed = true;
+                break;
             }
         }
 
         break :performed performed;
     };
 
-    if (performed) {
-        // If we performed an action and it was a closing action,
-        // our "self" pointer is not safe to use anymore so we need to
-        // just exit immediately.
-        for (actions) |action| if (closingAction(action)) {
-            log.debug("key binding is a closing binding, halting key event processing", .{});
-            return .closed;
-        };
+    if (closed) {
+        log.debug("key binding is a closing binding, halting key event processing", .{});
+        return .closed;
+    }
 
-        // If our action was "ignore" then we return the special input
-        // effect of "ignored".
-        for (actions) |action| if (action == .ignore) {
-            // If we're in a sequence, clear it.
-            self.endKeySequence(.drop, .retain);
+    // If our action was "ignore" then we return the special input
+    // effect of "ignored".
+    if (performed and ignored) {
+        // If we're in a sequence, clear it.
+        self.endKeySequence(.drop, .retain);
 
-            return .ignored;
-        };
+        return .ignored;
     }
 
     // If we have the performable flag and the action was not performed,
@@ -3161,7 +3221,9 @@ fn maybeHandleBinding(
         // Store our last trigger so we don't encode the release event
         self.keyboard.last_trigger = event.bindingHash();
 
-        if (insp_ev) |ev| {
+        // The inspector wants the actions themselves, so it only gets
+        // them while they are still there to copy.
+        if (!actions_freed) if (insp_ev) |ev| {
             ev.binding = self.alloc.dupe(
                 input.Binding.Action,
                 actions,
@@ -3172,7 +3234,7 @@ fn maybeHandleBinding(
                 );
                 break :binding &.{};
             };
-        }
+        };
         return .consumed;
     }
 
@@ -3233,6 +3295,68 @@ fn catchAllIsIgnore(self: *Surface) bool {
             if (action == .ignore) break :chained true;
         } else false,
     };
+}
+
+/// End the key sequence ahead of a chain that can close the surface.
+///
+/// `maybeHandleBinding` answers `.closed` for such a chain and returns
+/// straight away, so it never reaches its own tail, which is where every
+/// `endKeySequence` call it makes lives — two that drop and two that
+/// flush. `endKeySequence` is the only drain for `keyboard.sequence_queued`
+/// outside `deinit`, and it is called from elsewhere in this file too. The
+/// sequence has to end before the chain runs, while `self` is certainly
+/// still ours.
+///
+/// This is not housekeeping for a surface that is about to die. No apprt
+/// in this tree has been shown to free the core surface inside the call,
+/// and the embedded apprt demonstrably does not: it hands the action to
+/// the embedder and returns. The Windows host does not implement `quit`
+/// at all, so `keybind = ctrl+a>q=quit` there leaves a live surface
+/// holding the leader key's encoded write, which the next unrelated
+/// sequence then flushes into the pty out of order.
+///
+/// `.drop` is what every path that matched a binding and then consumed
+/// or ignored the event does. The cost falls on a chain that *contains* a
+/// closing action but turns out not to close, because whether a chain
+/// performs is not knowable until it has run, by which time the surface
+/// may be gone. Such a chain goes on to reach a path that would rather
+/// flush the queued leader keys, and finds the queue already dropped.
+/// All three of those paths are defeated, not just one:
+///
+///   * `performable` with nothing performed.
+///
+///   * The non-consumed tail. `consumed` defaults true, so this needs the
+///     `unconsumed:` prefix, which is legal on a sequence: the parser
+///     rejects only `global`/`all` there. `unconsumed:ctrl+a>u=undo` on a
+///     runtime that answers `undo` with false used to encode the leader
+///     key and then `u`; it now silently swallows the leader keystroke.
+///
+///   * The `end_key_sequence` binding action itself, whose whole stated
+///     purpose is to flush. It does not end a chain, so pairing it with a
+///     closing action in one chain is legal, and it then has nothing left
+///     to flush.
+///
+/// No shipped default is a key sequence at all, so none of this is
+/// reachable without user config. Draining later would not help either:
+/// the cost is in what the drain does (`.drop`), not in when it runs.
+/// Keeping both behaviours means detaching the queue before the chain and
+/// handing it back only if the surface survived, which is a larger change
+/// than this one.
+///
+/// One more consequence, for the same chains: `endKeySequence` notifies
+/// the apprt that the key sequence ended before its own empty-queue early
+/// return, so a closing chain that does not close notifies twice. The
+/// notification is idempotent everywhere it is handled, and the Windows
+/// host does not handle it at all.
+fn endKeySequenceBeforeClose(
+    self: *Surface,
+    actions: []const input.Binding.Action,
+) void {
+    for (actions) |action| {
+        if (!action.closesSurface()) continue;
+        self.endKeySequence(.drop, .retain);
+        return;
+    }
 }
 
 const KeySequenceQueued = enum { flush, drop };
@@ -5890,20 +6014,6 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
     return true;
 }
 
-/// Returns true if performing the given action result in closing
-/// the surface. This is used to determine if our self pointer is
-/// still valid after performing some binding action.
-fn closingAction(action: input.Binding.Action) bool {
-    return switch (action) {
-        .close_surface,
-        .close_window,
-        .close_tab,
-        => true,
-
-        else => false,
-    };
-}
-
 /// The portion of the screen to write for writeScreenFile.
 const WriteScreenLoc = enum {
     screen, // Full screen
@@ -6748,6 +6858,93 @@ fn presentSurface(self: *Surface) !void {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Surface, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.io.getProcessInfo(info);
+}
+
+/// A Surface with only the fields under test initialized. Building a real
+/// one needs a live apprt, an IO thread and a renderer, none of which the
+/// unit test binary has: it is built with `-Dapp-runtime=none`, whose
+/// `App` is an empty struct. Only touch fields a test has set.
+fn testSurface(alloc: Allocator, rt_app: *apprt.App) !*Surface {
+    const surface = try alloc.create(Surface);
+    surface.alloc = alloc;
+    surface.rt_app = rt_app;
+    surface.readonly = false;
+    surface.keyboard = .{};
+    return surface;
+}
+
+test "endKeySequenceBeforeClose: a closing action drops the queued sequence" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var rt_app: apprt.App = undefined;
+    const surface = try testSurface(alloc, &rt_app);
+    defer alloc.destroy(surface);
+    defer surface.keyboard.sequence_queued.deinit(alloc);
+
+    // The leader key's encoded write, queued the way maybeHandleBinding
+    // queues it for `ctrl+a` in `ctrl+a>q=quit`.
+    try surface.keyboard.sequence_queued.append(alloc, .{ .alloc = .{
+        .alloc = alloc,
+        .data = try alloc.dupe(u8, "\x01"),
+    } });
+
+    surface.endKeySequenceBeforeClose(&.{.{ .quit = {} }});
+
+    // `.closed` returns before any other drain, so if this write is
+    // still queued it stays queued, and the next unrelated sequence
+    // flushes it into the pty. The testing allocator also fails the test
+    // if it was left owned by nobody.
+    try testing.expectEqual(
+        @as(usize, 0),
+        surface.keyboard.sequence_queued.items.len,
+    );
+}
+
+test "endKeySequenceBeforeClose: an ordinary action leaves the sequence alone" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var rt_app: apprt.App = undefined;
+    const surface = try testSurface(alloc, &rt_app);
+    defer alloc.destroy(surface);
+    defer {
+        for (surface.keyboard.sequence_queued.items) |req| req.deinit();
+        surface.keyboard.sequence_queued.deinit(alloc);
+    }
+
+    try surface.keyboard.sequence_queued.append(alloc, .{ .alloc = .{
+        .alloc = alloc,
+        .data = try alloc.dupe(u8, "\x01"),
+    } });
+
+    // Nothing here can free the surface, so the tail of
+    // maybeHandleBinding still owns the decision to flush or drop.
+    surface.endKeySequenceBeforeClose(&.{.{ .new_tab = {} }});
+
+    try testing.expectEqual(
+        @as(usize, 1),
+        surface.keyboard.sequence_queued.items.len,
+    );
+}
+
+test "DerivedConfig: a long click-repeat-interval does not overflow" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    try oni.testing.ensureInit();
+
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    config.@"click-repeat-interval" = 5000;
+
+    var derived = try DerivedConfig.init(alloc, &config);
+    defer derived.deinit();
+
+    try testing.expectEqual(
+        @as(u64, 5000 * std.time.ns_per_ms),
+        derived.mouse_interval,
+    );
 }
 
 test "queueIo frees allocated writes in readonly mode" {
