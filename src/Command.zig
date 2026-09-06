@@ -965,31 +965,65 @@ test "windowsCreateCommandLine: a cmd.exe script keeps its own quoting" {
 test "windowsCreateCommandLine: a cmd.exe script without quotes gets one pair" {
     const alloc = testing.allocator;
 
-    const line = try windowsCreateCommandLine(alloc, &.{
+    // Two quotes, but the pipe between them is a cmd metacharacter, so
+    // the pair is stripped and the script runs as written.
+    //
+    // A script with no quotes of its own is byte identical under either
+    // rule, so this case pins the shape and nothing else. The quoted
+    // case below is the one that tells the two rules apart.
+    const plain = try windowsCreateCommandLine(alloc, &.{
         "cmd.exe",
         "/C",
         "echo hi | more",
     });
-    defer alloc.free(line);
+    defer alloc.free(plain);
+    try testing.expectEqualStrings("cmd.exe /C \"echo hi | more\"", plain);
 
-    // Two quotes, but the pipe between them is a cmd metacharacter, so
-    // the pair is stripped and the script runs as written.
-    try testing.expectEqualStrings("cmd.exe /C \"echo hi | more\"", line);
+    // The same pipeline with a quoted argument. C runtime quoting would
+    // write the inner quotes as \", which cmd has no escape for and
+    // would hand to `echo` as literal backslashes.
+    const quoted = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/C",
+        "echo \"hi there\" | more",
+    });
+    defer alloc.free(quoted);
+    try testing.expectEqualStrings(
+        "cmd.exe /C \"echo \"hi there\" | more\"",
+        quoted,
+    );
 }
 
 test "windowsCreateCommandLine: a bare quoted program path stays quoted" {
     const alloc = testing.allocator;
 
-    const line = try windowsCreateCommandLine(alloc, &.{
+    // The one case where cmd preserves the quoting instead of stripping
+    // it, which is what a program path with a space needs.
+    //
+    // Like the plain pipeline above, a script carrying no quotes is byte
+    // identical under either rule, so the pre-quoted case below is what
+    // discriminates.
+    const bare = try windowsCreateCommandLine(alloc, &.{
         "cmd.exe",
         "/c",
         "C:\\Program Files\\app.exe",
     });
-    defer alloc.free(line);
+    defer alloc.free(bare);
+    try testing.expectEqualStrings("cmd.exe /c \"C:\\Program Files\\app.exe\"", bare);
 
-    // The one case where cmd preserves the quoting instead of stripping
-    // it, which is what a program path with a space needs.
-    try testing.expectEqualStrings("cmd.exe /c \"C:\\Program Files\\app.exe\"", line);
+    // A user who quoted the path themselves and added an argument gets
+    // exactly the quotes they wrote. Four quotes, so cmd strips the
+    // outer pair and the inner pair is what keeps the path together.
+    const prequoted = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/c",
+        "\"C:\\Program Files\\app.exe\" --flag",
+    });
+    defer alloc.free(prequoted);
+    try testing.expectEqualStrings(
+        "cmd.exe /c \"\"C:\\Program Files\\app.exe\" --flag\"",
+        prequoted,
+    );
 }
 
 test "windowsCreateCommandLine: a caller supplied /S still gets the verbatim script" {
