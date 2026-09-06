@@ -63,11 +63,27 @@ internal static class SessionProfileResolver
     /// not replace the profile's value either.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A reported directory the shell cannot be trusted to have named is
     /// dropped rather than spawned into, and the profile's own directory
     /// stands -- see <see cref="SpawnCwdPolicy"/> for what that means and
     /// why this is the funnel it guards.
+    /// </para>
+    /// <para>
+    /// Both tests, the same pair <see cref="Ghostty.Core.Tabs.TabModel"/>
+    /// requires before it will put a directory on the clipboard: a host the
+    /// spawn policy accepts, AND plain text. The terminal core refuses a
+    /// path carrying control characters at the source now, but this path
+    /// reaches further back than the core can -- a restored session was
+    /// written by whatever build recorded it, including builds with no such
+    /// check -- and it is the funnel that reaches CreateProcess. Checking
+    /// only the host here meant a directory refused for the clipboard, for
+    /// Explorer, for the label and for the tooltip was still handed to a
+    /// spawn.
+    /// </para>
     /// </remarks>
     private static ProfileSnapshot SpawnAtReportedCwd(ProfileSnapshot snap, string? cwd)
-        => SpawnCwdPolicy.MaySpawnAt(cwd) ? snap with { WorkingDirectory = cwd } : snap;
+        => cwd is not null && Ghostty.Core.Tabs.TabLabel.IsPlain(cwd) && SpawnCwdPolicy.MaySpawnAt(cwd)
+            ? snap with { WorkingDirectory = cwd }
+            : snap;
 }

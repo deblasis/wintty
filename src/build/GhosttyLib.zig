@@ -136,8 +136,7 @@ pub fn initShared(
     // that references symbols in vcruntime.lib and ucrt.lib. Zig's library
     // search paths include the MSVC lib dir and the Windows SDK 'um' dir,
     // but not the SDK 'ucrt' dir where ucrt.lib lives.
-    if (win_msvc)
-    {
+    if (win_msvc) {
         // The CRT initialization code in msvcrt.lib calls __vcrt_initialize
         // and __acrt_initialize, which are in the static CRT libraries.
         lib.root_module.linkSystemLibrary("libvcruntime", dynamic_link_opts);

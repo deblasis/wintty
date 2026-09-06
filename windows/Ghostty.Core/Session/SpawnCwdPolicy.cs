@@ -60,14 +60,27 @@ internal static class SpawnCwdPolicy
 
         var rest = cwd.AsSpan(2);
 
-        // `\\?\` (extended-length) and `\\.\` (device) share a shape and a
-        // meaning: what follows is not a server name. Both prefixes are
-        // matched with literal backslashes because Windows does NOT normalize
-        // separators inside them -- `//?/UNC/host/share` is not an extended
-        // path at all, it is a plain UNC one naming the host `?`, which falls
-        // through below and is refused. Strict here is what makes that true.
-        if (rest.Length >= 2 && (rest[0] == '?' || rest[0] == '.')
-            && cwd[0] == '\\' && cwd[1] == '\\' && rest[1] == '\\')
+        // Both prefixes below are matched with literal backslashes because
+        // Windows does NOT normalize separators inside them --
+        // `//?/UNC/host/share` is not an extended path at all, it is a plain
+        // UNC one naming the host `?`, which falls through below and is
+        // refused. Strict here is what makes that true.
+        var literalPrefix = cwd[0] == '\\' && cwd[1] == '\\' && rest.Length >= 2 && rest[1] == '\\';
+
+        // `\\.\` is the device namespace. It shares its shape with `\\?\` --
+        // what follows either is not a server name -- but not its permitted
+        // continuations: `\\?\C:\dir` is the long-path spelling of a real
+        // directory, while `\\.\C:` is a handle to the volume object. No
+        // shell reports a device as its working directory, and CreateProcess
+        // has no business being handed one, so the whole namespace is refused
+        // rather than sharing the drive-letter escape below. Mirrors
+        // posix_path.pathHost, which decides the same thing for the native
+        // side; the two disagreeing is how a path gets displayed by one layer
+        // and spawned by the other.
+        if (literalPrefix && rest[0] == '.') return false;
+
+        // `\\?\` (extended-length): what follows is not a server name either.
+        if (literalPrefix && rest[0] == '?')
         {
             var tail = rest[2..];
             // `\\?\UNC\server\share` is a second spelling of the same reach,
@@ -76,7 +89,7 @@ internal static class SpawnCwdPolicy
                 return HostIsLocal(tail[4..]);
             // `\\?\C:\dir` is the long-path spelling of a drive root.
             if (tail.Length >= 2 && char.IsAsciiLetter(tail[0]) && tail[1] == ':') return true;
-            // The device namespace names no directory at all.
+            // Anything else under the prefix names no directory at all.
             return false;
         }
 
