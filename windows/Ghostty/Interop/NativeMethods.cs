@@ -593,6 +593,24 @@ internal static partial class NativeMethods
     internal static void SurfaceSetVisible(GhosttySurface surface, bool visible)
         => SurfaceSetOcclusionNative(surface, visible ? (byte)1 : (byte)0);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_idle")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial void SurfaceSetIdleNative(GhosttySurface surface, byte idle);
+
+    /// <summary>
+    /// Tell libghostty whether this surface is deep-idle (the tab
+    /// tracker's determination: no PTY data and no interaction for the
+    /// threshold, never the active tab, never while a bell rings).
+    /// Setting idle trims what only exists to make the next frame cheap
+    /// -- parse state a sequence cut mid-flight is pinning, the
+    /// renderer's image copies, the shaped-run cache. Clearing it crosses
+    /// the seam only to reset the native dedupe latch: waking does no
+    /// work by design, and the clear exists so a later idle transition
+    /// can trim again.
+    /// </summary>
+    internal static void SurfaceSetIdle(GhosttySurface surface, bool idle)
+        => SurfaceSetIdleNative(surface, idle ? (byte)1 : (byte)0);
+
     /// <summary>Scrollback compression counters for one surface's primary
     /// screen, read from the page list under the renderer state mutex.
     /// Observes the idle shed as a terminal fact rather than a

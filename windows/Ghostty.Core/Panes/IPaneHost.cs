@@ -90,6 +90,19 @@ internal interface IPaneHost
     long LastActivityTick { get; }
 
     /// <summary>
+    /// Tell this pane's surfaces whether their tab is deep-idle (the idle
+    /// tracker's flip). The shell implementation forwards per leaf to
+    /// libghostty, which trims what only exists to make the next frame
+    /// cheap -- parse state a sequence cut mid-flight is pinning, image
+    /// copies, the shaped-run cache. Clearing sends only a latch reset:
+    /// waking is lazy, because nothing trimmed is needed to serve input.
+    /// On this interface (unlike the visibility tell, whose call sites
+    /// hold concrete hosts) because the flip originates from the tab
+    /// model side, which only holds this abstraction.
+    /// </summary>
+    void SetSurfaceIdle(bool idle);
+
+    /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
     /// becomes the active leaf. <paramref name="snapshot"/> is recorded
     /// on the freshly-created leaf.

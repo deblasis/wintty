@@ -159,6 +159,12 @@ focused: bool = true,
 /// visible so reporting remains conservative.
 visible: bool = true,
 
+/// Deep-idle state as last reported by the embedder's tracker. Purely the
+/// dedupe latch for `idleCallback`; the trims themselves are one-shot
+/// messages, so a surface that cycles idle -> awake -> idle trims twice
+/// and that is correct (new output may have allocated new captures).
+idle: bool = false,
+
 /// Used to determine whether to continuously scroll.
 selection_scroll_active: bool = false,
 
@@ -3440,6 +3446,35 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
 
     _ = self.pushRendererMailbox(.{
         .visible = visible,
+    });
+
+    try self.queueRender();
+}
+
+/// Update the deep-idle state of the surface. Idle is the embedder's
+/// call (its tracker knows about interaction and bells; a timer here
+/// would duplicate those rules and the two would drift). Going idle
+/// sends two one-shot trims: the parse-side buffers a sequence cut
+/// mid-flight is pinning go to the IO thread that owns the stream, and
+/// the renderer's image copies and shaper cache go to the render thread.
+///
+/// Waking sends nothing and that is the whole design: nothing the trims
+/// removed is required to serve input, keystrokes never touch the
+/// trimmed state, and the first frame after data arrives rebuilds what
+/// it needs lazily.
+pub fn idleCallback(self: *Surface, idle: bool) !void {
+    // Crash metadata in case we crash in here
+    crash.sentry.thread_state = self.crashThreadState();
+    defer crash.sentry.thread_state = null;
+
+    if (self.idle == idle) return;
+    self.idle = idle;
+    if (!idle) return;
+
+    self.queueIo(.{ .deep_idle = {} }, .unlocked);
+
+    _ = self.pushRendererMailbox(.{
+        .deep_idle = {},
     });
 
     try self.queueRender();

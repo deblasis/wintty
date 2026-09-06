@@ -1350,6 +1350,13 @@ pub const Surface = struct {
         };
     }
 
+    pub fn idleCallback(self: *Surface, idle: bool) void {
+        self.core_surface.idleCallback(idle) catch |err| {
+            log.err("error in idle callback err={}", .{err});
+            return;
+        };
+    }
+
     fn queueInspectorRender(self: *Surface) void {
         _ = self.app.performAction(
             .{ .surface = &self.core_surface },
@@ -2901,6 +2908,17 @@ pub const CAPI = struct {
     /// Update the occlusion state of a surface.
     export fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
         surface.occlusionCallback(visible);
+    }
+
+    /// Update the deep-idle state of a surface. The CONTRACT: idle=true
+    /// trims state that exists only to make the next frame cheap (parse
+    /// captures, renderer image copies, shaped-run caches); idle=false
+    /// sends no work at all, because waking is lazy -- it only updates
+    /// the dedupe latch so a later idle transition can trim again. What
+    /// "idle" means is entirely the embedder's determination; the
+    /// embedder's own bindings document its policy.
+    export fn ghostty_surface_set_idle(surface: *Surface, idle: bool) void {
+        surface.idleCallback(idle);
     }
 
     /// Scrollback memory statistics for a surface's primary screen.

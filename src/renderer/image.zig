@@ -189,6 +189,25 @@ pub const State = struct {
         return success;
     }
 
+    /// Deep-idle trim: free every image copy now, in place. A deep-idle
+    /// surface draws nothing, so the frame-driven unload path never runs
+    /// and the copies (CPU staging and GPU textures both) sit resident
+    /// indefinitely. The terminal's ImageStorage is untouched -- it is
+    /// the source of truth -- but the CALLER must latch whatever its
+    /// rebuild path keys on (wintty's renderer: `images_lost`): the
+    /// frame path itself has no reason to revisit placements whose
+    /// terminal state did not change, so an unlatched trim would leave
+    /// live placements drawing with no images behind them.
+    pub fn trimAll(self: *State, alloc: Allocator) void {
+        var image_it = self.images.iterator();
+        while (image_it.next()) |kv| {
+            // deinit frees every backing kind directly; there is no
+            // unload transition to honour here, this is a teardown.
+            kv.value_ptr.image.deinit(alloc);
+        }
+        self.images.clearRetainingCapacity();
+    }
+
     pub const DrawPlacements = enum {
         kitty_below_bg,
         kitty_below_text,
