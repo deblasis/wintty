@@ -741,10 +741,22 @@ test "posix_path: a remote working directory keeps its own links" {
     }
 
     // Windows host names are case-insensitive, so a host that differs only in
-    // case has not moved. No resolve produces that on its own -- `resolveWindows`
-    // copies the pwd's root through verbatim, which is why the mixed-case row
-    // above compares equal byte for byte -- so this assertion is the only thing
-    // holding the compare to host semantics instead of plain equality.
+    // case has not moved. A resolve does reach that shape. `resolveWindows`
+    // copies the pwd's root through verbatim only while the link stays under it,
+    // and an extended-UNC root is one a `../` pops -- the premise of this whole
+    // file -- after which the link re-supplies the host in whatever case it
+    // likes. The link text is attacker-supplied, so the case-insensitive compare
+    // is load-bearing on a production-reachable input rather than defensive
+    // only, and the resolve that produces it is asserted here first.
+    {
+        const resolved = try std.fs.path.resolveWindows(alloc, &.{
+            "\\\\?\\UNC\\fileserver\\projects\\src",
+            "../../../FILESERVER/projects/x",
+        });
+        defer alloc.free(resolved);
+        try std.testing.expectEqualStrings("\\\\?\\UNC\\FILESERVER\\projects\\x", resolved);
+        try std.testing.expect(pathHostUnchanged("\\\\?\\UNC\\fileserver\\projects\\src", resolved));
+    }
     try std.testing.expect(pathHostUnchanged(
         "\\\\FileServer\\projects",
         "\\\\fileserver\\projects\\notes.md",
