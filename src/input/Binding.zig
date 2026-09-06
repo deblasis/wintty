@@ -1387,12 +1387,16 @@ pub const Action = union(enum) {
     /// Closing the surface frees the config it derived, and so does
     /// reloading: a config reload replaces every surface's derived
     /// config, which owns the keybind set, without closing anything.
-    /// `quit` and `close_all_windows` take every surface with them.
+    /// `quit` and `close_all_windows` take every surface with them, and
+    /// `undo`/`redo` can replay the teardown of whatever created this
+    /// one.
     pub fn endsChain(self: Action) bool {
         return switch (self) {
             .reload_config,
             .close_all_windows,
             .quit,
+            .undo,
+            .redo,
             => true,
 
             // Every action that takes the surface away takes its keybind
@@ -2363,6 +2367,26 @@ pub const Set = struct {
                 .single => |*arr| arr,
                 .many => |slice| slice,
             };
+        }
+
+        /// Returns true if `actionsSlice` points into the keybind set this
+        /// leaf came from instead of into the leaf itself. Only a borrowed
+        /// slice can be freed by an action that ends the chain; a single
+        /// action is copied into the leaf, so it lives as long as the
+        /// caller's own copy of it.
+        pub fn actionsBorrowed(self: *const GenericLeaf) bool {
+            return self.actions == .many;
+        }
+
+        /// Returns true if any action in this leaf is `ignore`. Ask before
+        /// performing anything: performing an action can free the slice
+        /// this reads.
+        pub fn hasIgnore(self: *const GenericLeaf) bool {
+            for (self.actionsSlice()) |action| {
+                if (action == .ignore) return true;
+            }
+
+            return false;
         }
     };
 
@@ -4961,9 +4985,63 @@ test "action: endsChain" {
     try testing.expect((Action{ .close_all_windows = {} }).endsChain());
     try testing.expect((Action{ .quit = {} }).endsChain());
 
+    // Undoing whatever created this surface takes the surface with it.
+    try testing.expect(!(Action{ .undo = {} }).closesSurface());
+    try testing.expect(!(Action{ .redo = {} }).closesSurface());
+    try testing.expect((Action{ .undo = {} }).endsChain());
+    try testing.expect((Action{ .redo = {} }).endsChain());
+
     // An ordinary action does neither.
     try testing.expect(!(Action{ .new_tab = {} }).closesSurface());
     try testing.expect(!(Action{ .new_tab = {} }).endsChain());
+}
+
+test "leaf: only a chain borrows its action slice" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    // A single action that ends the chain, and a chain that does not.
+    try s.parseAndPut(alloc, "a=reload_config");
+    try s.parseAndPut(alloc, "b=new_tab");
+    try s.appendChain(alloc, .{ .new_window = {} });
+
+    const single = genericLeaf(&s, 'a');
+    const many = genericLeaf(&s, 'b');
+
+    try testing.expect(!single.actionsBorrowed());
+    try testing.expect(many.actionsBorrowed());
+
+    // The single leaf's slice is inside the leaf we are holding, so it
+    // is readable no matter what performing the action did.
+    try testing.expectEqual(@as(usize, 1), single.actionsSlice().len);
+    try testing.expect(single.actionsSlice()[0] == .reload_config);
+}
+
+test "leaf: hasIgnore sees past an action that ends the chain" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "a=ignore");
+    try s.appendChain(alloc, .{ .reload_config = {} });
+    try s.parseAndPut(alloc, "b=new_tab");
+    try s.appendChain(alloc, .{ .reload_config = {} });
+
+    try testing.expect(genericLeaf(&s, 'a').hasIgnore());
+    try testing.expect(!genericLeaf(&s, 'b').hasIgnore());
+}
+
+fn genericLeaf(s: *const Set, cp: u21) Set.GenericLeaf {
+    const entry = s.get(.{ .key = .{ .unicode = cp } }).?;
+    return switch (entry.value_ptr.*) {
+        .leader => unreachable,
+        inline .leaf, .leaf_chained => |leaf| leaf.generic(),
+    };
 }
 
 test "set: parseAndPut chain after a closing action is invalid" {
