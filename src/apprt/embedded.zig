@@ -517,11 +517,6 @@ pub const Surface = struct {
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
 
-    /// The working directory last handed out by newSurfaceOptions. The
-    /// C API returns that struct by value and has no matching free, so
-    /// the surface keeps ownership of the string.
-    inherited_pwd: ?[:0]const u8 = null,
-
     /// Windows buffers WM_KEYDOWN here so a following WM_CHAR can
     /// attach text before dispatching through key encoding.
     pending_key: if (builtin.os.tag == .windows)
@@ -791,7 +786,6 @@ pub const Surface = struct {
 
         // Free our title
         if (self.title) |v| self.app.core_app.alloc.free(v);
-        if (self.inherited_pwd) |v| self.app.core_app.alloc.free(v);
 
         // Remove ourselves from the list of known surfaces in the app.
         self.app.core_app.deleteSurface(self);
@@ -1376,7 +1370,7 @@ pub const Surface = struct {
         };
     }
 
-    pub fn newSurfaceOptions(self: *Surface, context: apprt.surface.NewSurfaceContext) apprt.Surface.Options {
+    pub fn newSurfaceOptions(self: *const Surface, context: apprt.surface.NewSurfaceContext) apprt.Surface.Options {
         const font_size: f32 = font_size: {
             if (!self.app.config.@"window-inherit-font-size") break :font_size 0;
             break :font_size self.core_surface.font_size.points;
@@ -1387,14 +1381,7 @@ pub const Surface = struct {
             const alloc = self.app.core_app.alloc;
             const cwd = self.core_surface.pwd(alloc) catch null orelse break :wd null;
             defer alloc.free(cwd);
-
-            // The caller only borrows this. Embedders copy the string out
-            // during the call, so we hold on to it until the next one
-            // rather than leaking a fresh copy on every call.
-            const dup = alloc.dupeZ(u8, cwd) catch break :wd null;
-            if (self.inherited_pwd) |old| alloc.free(old);
-            self.inherited_pwd = dup;
-            break :wd dup.ptr;
+            break :wd apprt.surface.dupeInheritedPwd(alloc, cwd);
         };
 
         return .{
@@ -2387,11 +2374,26 @@ pub const CAPI = struct {
     }
 
     /// Returns the config to use for surfaces that inherit from this one.
+    /// The caller owns the working directory in the returned config and
+    /// releases it with ghostty_surface_free_inherited_config.
     export fn ghostty_surface_inherited_config(
         surface: *Surface,
         source: apprt.surface.NewSurfaceContext,
     ) Surface.Options {
         return surface.newSurfaceOptions(source);
+    }
+
+    /// Release the memory owned by a config from
+    /// ghostty_surface_inherited_config. Calling it more than once on the
+    /// same config, or on a config that carries no directory, is safe.
+    export fn ghostty_surface_free_inherited_config(
+        surface: *Surface,
+        config: *Surface.Options,
+    ) void {
+        apprt.surface.freeInheritedPwd(
+            surface.app.core_app.alloc,
+            &config.working_directory,
+        );
     }
 
     /// Update the configuration to the provided config for only this surface.

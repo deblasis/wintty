@@ -369,6 +369,31 @@ pub fn shouldInheritWorkingDirectory(context: NewSurfaceContext, config: *const 
     };
 }
 
+/// Copy a working directory into surface options handed out over the C
+/// API.
+///
+/// The copy belongs to the caller of ghostty_surface_inherited_config,
+/// which releases it with ghostty_surface_free_inherited_config. Giving
+/// the caller its own allocation is what makes the pointer independent
+/// of anything the surface does afterwards: no other call can invalidate
+/// it, so the worst an embedder that ignores the free can do is leak.
+///
+/// Allocation failure yields null, which the config reports as "no
+/// inherited directory" rather than failing the call.
+pub fn dupeInheritedPwd(alloc: Allocator, cwd: []const u8) ?[*:0]const u8 {
+    return alloc.dupeZ(u8, cwd) catch null;
+}
+
+/// Release a working directory produced by dupeInheritedPwd.
+///
+/// Clearing the field as we go keeps a second release a no-op, so an
+/// embedder that frees the same config twice cannot double free.
+pub fn freeInheritedPwd(alloc: Allocator, wd: *?[*:0]const u8) void {
+    const ptr = wd.* orelse return;
+    alloc.free(std.mem.sliceTo(ptr, 0));
+    wd.* = null;
+}
+
 /// Returns a new config for a surface for the given app that should be
 /// used for any new surfaces. The resulting config should be deinitialized
 /// after the surface is initialized.
@@ -394,6 +419,42 @@ pub fn newConfig(
     }
 
     return copy;
+}
+
+test "inherited pwd: the caller owns each copy" {
+    const alloc = std.testing.allocator;
+
+    // Two calls have to hand out two independent allocations, neither of
+    // which the other invalidates. Both are freed here, so the testing
+    // allocator's leak check is what asserts the release reaches all of
+    // the memory we handed out.
+    var first: ?[*:0]const u8 = dupeInheritedPwd(alloc, "/tmp/one");
+    var second: ?[*:0]const u8 = dupeInheritedPwd(alloc, "/tmp/two");
+    try std.testing.expect(first != null);
+    try std.testing.expect(second != null);
+    try std.testing.expect(first.? != second.?);
+    try std.testing.expectEqualStrings("/tmp/one", std.mem.sliceTo(first.?, 0));
+    try std.testing.expectEqualStrings("/tmp/two", std.mem.sliceTo(second.?, 0));
+
+    freeInheritedPwd(alloc, &first);
+
+    // The first release must leave the second copy readable.
+    try std.testing.expectEqualStrings("/tmp/two", std.mem.sliceTo(second.?, 0));
+
+    freeInheritedPwd(alloc, &second);
+    try std.testing.expect(first == null);
+    try std.testing.expect(second == null);
+}
+
+test "inherited pwd: releasing twice is a no-op" {
+    const alloc = std.testing.allocator;
+
+    var wd: ?[*:0]const u8 = dupeInheritedPwd(alloc, "/tmp/one");
+    freeInheritedPwd(alloc, &wd);
+    freeInheritedPwd(alloc, &wd);
+
+    var none: ?[*:0]const u8 = null;
+    freeInheritedPwd(alloc, &none);
 }
 
 test "DesktopNotification init" {

@@ -1279,11 +1279,15 @@ GHOSTTY_API ghostty_surface_t ghostty_surface_new(ghostty_app_t,
 GHOSTTY_API void ghostty_surface_free(ghostty_surface_t);
 GHOSTTY_API void* ghostty_surface_userdata(ghostty_surface_t);
 GHOSTTY_API ghostty_app_t ghostty_surface_app(ghostty_surface_t);
-// The working_directory of the returned config is owned by the surface and
-// stays valid only until the next call for that surface or until the surface
-// is freed, whichever comes first, so copy it before either happens. There is
-// no free for it.
+// The working_directory of the returned config is allocated for the caller,
+// which releases it with ghostty_surface_free_inherited_config. Every call
+// returns its own copy and no call invalidates an earlier one, so a config
+// stays valid until you free it; free it before you free the surface.
 GHOSTTY_API ghostty_surface_config_s ghostty_surface_inherited_config(ghostty_surface_t, ghostty_surface_context_e);
+// Release the memory owned by a config from ghostty_surface_inherited_config,
+// passing the surface it came from. The freed fields are cleared, so calling
+// this twice on the same config is safe.
+GHOSTTY_API void ghostty_surface_free_inherited_config(ghostty_surface_t, ghostty_surface_config_s*);
 GHOSTTY_API void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
 GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
