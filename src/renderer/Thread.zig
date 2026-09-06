@@ -1057,24 +1057,25 @@ const Compression = struct {
 /// The list to cover before moving it, which is larger than round 3
 /// claimed:
 ///
-///   - `.change_config` (`Surface.zig:1903`), the largest: a
+///   - `.change_config` (`Surface.updateConfig`), the largest: a
 ///     `renderer.Thread.DerivedConfig` and a renderer `DerivedConfig`
 ///     that itself owns allocations. `rendererpkg.Message.deinit`
 ///     ALREADY handles this variant, so one call would cover it -- but
 ///     read the ownership note below before adding that call.
-///   - `.font_grid` (`Surface.zig:2540`), a refcount pair rather than
+///   - `.font_grid` (`Surface.setFontSize`), a refcount pair rather than
 ///     memory: a give-up leaks the new grid's ref and strands the old
 ///     key's. No `deinit` arm covers it.
 ///   - `.search_viewport_matches` and `.search_selected_match`
-///     (`Surface.zig:1560-1585`), each carrying an arena moved into the
-///     message. No `deinit` arm covers these either.
+///     (`Surface.searchCallback_`), each carrying an arena moved into
+///     the message. No `deinit` arm covers these either.
 ///
 /// Ownership note, and why this is not a drive-by fix: adding
 /// `msg.deinit()` below is a use-after-free until `Surface.updateConfig`
-/// is restructured. Its three `errdefer`s (`Surface.zig:1897`, `:1899`,
-/// `:1901`) are still live at the `try performAction` calls on `:1918`
-/// and `:1925`, after `:1903` has already handed the message to this
-/// thread. Fix `updateConfig`'s ownership first.
+/// is restructured. Its three `errdefer`s -- `renderer_message.deinit`,
+/// the `destroy` of `termio_config_ptr`, and that pointer's `deinit` --
+/// are still live at the `try performAction` calls further down that
+/// function, after its `pushRendererMailbox` has already handed the
+/// message to this thread. Fix `updateConfig`'s ownership first.
 ///
 /// All of this is pre-existing on merge base `218b8243db`, which had the
 /// same constants and the same absent ownership handling hand-rolled in

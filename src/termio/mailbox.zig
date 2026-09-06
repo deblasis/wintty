@@ -142,28 +142,41 @@ pub const Mailbox = union(enum) {
         /// reports -- but three are not, and a reader deciding a new call
         /// site's policy needs to know that:
         ///
-        ///   * `.resize` (`Surface.zig:2499`, `:2602`) is state, and its
-        ///     loss is silent AND permanent. `Surface.sizeCallback`
-        ///     early-returns when `self.size.screen` already equals the
-        ///     new size, and `resize` assigns that field before it
-        ///     queues, so a dropped resize leaves the renderer on the new
-        ///     size and the child on the old one until the user resizes
-        ///     again. Nothing re-derives it.
-        ///   * `.change_config` (`Surface.zig:1904`) is state. It is
+        ///   * `.resize` (`Surface.setCellSize`, `Surface.resize`) is
+        ///     state, and its loss is silent AND permanent.
+        ///     `Surface.sizeCallback` early-returns when
+        ///     `self.size.screen` already equals the new size, and
+        ///     `Surface.resize` assigns that field before it queues, so a
+        ///     dropped resize leaves the renderer on the new size and the
+        ///     child on the old one until the user resizes again.
+        ///     Nothing re-derives it.
+        ///   * `.change_config` (`Surface.updateConfig`) is state. It is
         ///     freed on the give-up path -- `termio.Message.deinit`
         ///     covers it -- so it does not leak, but the io thread keeps
         ///     the old config until the next config change.
-        ///   * `.paste` / `write_alloc` (`Surface.zig:5944`, `:6311`,
-        ///     `:6368`, `:6414`) is user data. It vanishes with a
-        ///     `log.warn` the user never sees.
+        ///   * `.paste` / `write_alloc` (`Surface.writeScreenFile`,
+        ///     `Surface.completeClipboardPaste`,
+        ///     `Surface.completeClipboardPasteEvent`,
+        ///     `Surface.completeClipboardReadOSC52`) is user data. It
+        ///     vanishes with a `log.warn` the user never sees.
+        ///
+        /// **Those three losses are new.** On merge base `218b8243db`
+        /// this tail ended in a `.forever` push with no timeout, so a
+        /// `.resize` was never dropped -- the UI thread blocked instead,
+        /// indefinitely. Bounding the wait converts that hang into a
+        /// silent, permanent mis-size. That is the right trade, and
+        /// unbounding the hang was the entire point, but do not read the
+        /// list above as documenting a property that was already there:
+        /// it is a user-visible failure mode this change introduces.
         ///
         /// They stay droppable deliberately: their producer *is* the UI
         /// thread, and `required` would hand it a 60s `.persist` wait,
         /// which is the frozen window this whole budget split exists to
         /// remove. Making the loss self-correcting -- the move
-        /// `password_input` makes in `termio/Exec.zig` -- is the fix
-        /// those three want, and it is a change to `Surface`, not to a
-        /// budget constant.
+        /// `password_input` makes in `termio/Exec.zig`'s `termiosTimer`
+        /// -- is the fix those three want, and it is a change to
+        /// `Surface`'s size and config invariants, not to a budget
+        /// constant. Filed separately; `.resize` first.
         pub const droppable: Budget = .{
             .timeout_ns = Queue.wake_retry_timeout_ns_ui,
             .attempts = Queue.wake_retry_attempts_ui,

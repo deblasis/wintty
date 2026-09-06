@@ -381,6 +381,22 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     // queue (search results, the stream handler's OSC replies) fail fast
     // against a wedged app thread precisely so that this one can afford to
     // spend its budget.
+    //
+    // Collapsing this back to `push` type-checks and fails no test --
+    // this file is in no test graph, and both spellings pass the exe
+    // build -- so `apprt.surface.Message.dropAllowed` classifies
+    // `.child_exited` as undroppable and `push` asserts on it. After a
+    // rebase that collapses this line, the first child exit panics in a
+    // Debug build rather than losing the notice quietly.
+    //
+    // What that budget costs at teardown, on Windows: the caller here is
+    // `winProcessWaitThread`, `threadExit` joins that thread, and
+    // `Surface.deinit` joins the io thread on the UI thread, so a full
+    // app mailbox at close spends the whole background budget on the UI
+    // thread -- delivering the push `threadExit` above calls harmless,
+    // which `App.surfaceMessage`'s `hasSurface` gate then discards. See
+    // `App.Mailbox.pushRequired`; suppressing that teardown push is
+    // filed separately.
     _ = td.surface_mailbox.pushRequired(.{
         .child_exited = .{
             .exit_code = exit_code,

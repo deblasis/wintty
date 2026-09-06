@@ -704,12 +704,40 @@ pub const Mailbox = struct {
     /// so the budget is the only thing standing between a wedge and a tab
     /// that never learns its child is gone.
     ///
-    /// The cost, stated plainly: the caller is the termio writer thread
-    /// inside an xev callback, so a wedged app thread can now park it for
-    /// the whole background budget once per child exit, where `push`
-    /// would have returned immediately. That is what this queue did on
-    /// the merge base for every producer, and it is bounded: past the
-    /// budget the message is still given up and freed.
+    /// Where this stands against the merge base: better, not equal. On
+    /// `218b8243db` this function's ancestor waited on the not-full
+    /// condition with no timeout at all, and only a `pop` can signal
+    /// that condition, so a producer facing an app thread that had
+    /// stopped draining parked here forever. `.persist` **bounds** that
+    /// hang at one background budget; it does not restore one.
+    ///
+    /// The cost, stated plainly, and it is worse on Windows than on
+    /// POSIX. On POSIX the caller is `Exec.processExit`, an `xev.Process`
+    /// wait callback on the termio writer thread, so a wedged app thread
+    /// parks that thread for one background budget per child exit.
+    ///
+    /// On Windows -- which is what this fork ships -- the caller is
+    /// `Exec.winProcessWaitThread`, a dedicated `WaitForSingleObject`
+    /// thread, and at teardown the wait reaches the UI thread through two
+    /// joins: `Surface.deinit` joins the io thread, and `Exec.threadExit`
+    /// joins the wait thread. In that path the stall is **guaranteed, not
+    /// conditional**: the app thread is inside `Surface.deinit`, so it is
+    /// by construction not draining this mailbox, and no separate "wedged
+    /// app thread" precondition is needed -- a full mailbox at close time
+    /// is enough. Worse, that is the push `Exec.threadExit` itself calls
+    /// harmless: `App.surfaceMessage` gates on `hasSurface` and the
+    /// surface is being destroyed, so the budget is spent delivering a
+    /// message guaranteed to be discarded.
+    ///
+    /// That path is worth closing and is filed as a follow-up
+    /// (suppressing the teardown push in `Exec`), not fixed here: the
+    /// flag would be written on the io thread and read on the wait
+    /// thread, so it needs an ordering argument rather than an
+    /// assignment, and it can only narrow the window -- the wait thread
+    /// can already be inside `processExitCommon` when the flag is set.
+    ///
+    /// It is bounded either way: past the budget the message is still
+    /// given up and freed.
     pub fn pushRequired(self: Mailbox, msg: Message) Queue.Size {
         return self.pushRequiredBounded(
             msg,

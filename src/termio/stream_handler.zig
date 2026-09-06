@@ -198,8 +198,12 @@ pub const StreamHandler = struct {
     /// the child may be waiting on. Both need a wedged app thread first,
     /// and both are recoverable by the user. A message that is neither --
     /// one shot, and nothing re-derives it -- must use
-    /// `apprt.surface.Mailbox.pushRequired` instead; `.child_exited` in
-    /// `termio/Exec.zig` is the one message in the tree that qualifies.
+    /// `apprt.surface.Mailbox.pushRequired` instead. `.child_exited`,
+    /// pushed by `Exec.processExitCommon`, is the one message in the tree
+    /// that qualifies, and `apprt.surface.Message.dropAllowed` is where
+    /// that classification lives now: `push` asserts on it, so a variant
+    /// added here that should not be dropped is a compile error there
+    /// before it is a bug.
     inline fn surfaceMessageWriter(
         self: *StreamHandler,
         msg: apprt.surface.Message,

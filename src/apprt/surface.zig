@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const apprt = @import("../apprt.zig");
 const build_config = @import("../build_config.zig");
@@ -221,6 +222,68 @@ pub const Message = union(enum) {
         }
     }
 
+    /// Whether a full mailbox may give this message up.
+    ///
+    /// This is the delivery policy `Mailbox.push` and
+    /// `Mailbox.pushRequired` assert on, kept as data rather than as a
+    /// convention two call sites have to remember. `false` means nothing
+    /// re-derives the message, so dropping it is permanent and
+    /// user-visible; those must go through `pushRequired`.
+    ///
+    /// `.child_exited` is the only one today. `Exec.processExitCommon`
+    /// runs once per surface lifetime and `Surface.childExited` is what
+    /// sets `self.child_exited`, so without it `close-on-exit` never
+    /// fires, the exit overlay never appears, and the close confirmation
+    /// keeps asking about a process that is already gone.
+    ///
+    /// Exhaustive on purpose, matching `deinit`. Two things follow, and
+    /// both are the point of writing it this way:
+    ///
+    ///   * A rebase that collapses `Exec.processExitCommon`'s
+    ///     `pushRequired` back into `push` -- which type-checks, because
+    ///     both functions still exist with matching signatures -- now
+    ///     panics on the first child exit in any Debug build instead of
+    ///     silently losing the notice. Nothing else in the tree catches
+    ///     that collapse: `termio/Exec.zig` is in no test graph, and both
+    ///     spellings pass the exe build.
+    ///   * A new `Message` variant is a compile error here until someone
+    ///     picks its delivery policy, rather than inheriting `push`'s by
+    ///     default. That default-inheritance is the trap this whole
+    ///     change exists to close.
+    pub fn dropAllowed(self: Message) bool {
+        return switch (self) {
+            .child_exited => false,
+
+            .set_title,
+            .report_title,
+            .set_mouse_shape,
+            .clipboard_read,
+            .kitty_clipboard_read,
+            .kitty_clipboard_write,
+            .clipboard_write,
+            .change_config,
+            .close,
+            .desktop_notification,
+            .renderer_health,
+            .present_surface,
+            .password_input,
+            .color_change,
+            .selection_scroll_tick,
+            .pwd_change,
+            .ring_bell,
+            .progress_report,
+            .start_command,
+            .stop_command,
+            .prompt_input,
+            .first_render,
+            .custom_shader_failed,
+            .scrollbar,
+            .search_total,
+            .search_selected,
+            => true,
+        };
+    }
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 
@@ -250,11 +313,17 @@ pub const Mailbox = struct {
     app: App.Mailbox,
 
     /// Send a message to the surface.
+    ///
+    /// This is the droppable policy: it fails fast while the app mailbox
+    /// is latched wedged. Use `pushRequired` for a message nothing
+    /// re-derives, and see `Message.dropAllowed` for which those are.
     pub fn push(
         self: Mailbox,
         msg: Message,
         timeout: App.Mailbox.Queue.Timeout,
     ) App.Mailbox.Queue.Size {
+        assert(msg.dropAllowed());
+
         // Surface message sending is actually implemented on the app
         // thread, so we have to rewrap the message with our surface
         // pointer and send it to the app thread.
@@ -270,8 +339,12 @@ pub const Mailbox = struct {
     ///
     /// See `App.Mailbox.pushRequired`. Only for a one-shot whose loss is
     /// permanent and user-visible; everything the stream handler sends
-    /// is an event and belongs on `push`.
+    /// is an event and belongs on `push`. `Message.dropAllowed` is the
+    /// list, and this assert is the other half of `push`'s: neither
+    /// function will carry a message the other one owns.
     pub fn pushRequired(self: Mailbox, msg: Message) App.Mailbox.Queue.Size {
+        assert(!msg.dropAllowed());
+
         return self.app.pushRequired(.{
             .surface_message = .{
                 .surface = self.surface,
@@ -420,4 +493,26 @@ test "surface message variants are all accounted for by the push give-up path" {
     // owning variant compiles and leaks silently on every drop.
     const fields = @typeInfo(Message).@"union".fields;
     try std.testing.expectEqual(@as(usize, 27), fields.len);
+}
+
+test "the child-exit notice is the one message push may not carry" {
+    // This is the decision `Mailbox.push` and `Mailbox.pushRequired`
+    // assert on, and it is the only part of the guard a test in this
+    // config can reach: `Mailbox.push` itself is not semantically
+    // analysed by `zig build test -Dapp-runtime=none` (only the Linux
+    // exe build analyses it), and a Debug panic is not catchable by the
+    // test runner in any case. Moving `.child_exited` into the droppable
+    // arm neuters the guard silently, so grip it here.
+    try std.testing.expect(!(Message{ .child_exited = .{
+        .exit_code = 0,
+        .runtime_ms = 0,
+    } }).dropAllowed());
+
+    // And the assert in `push` must not fire on anything the stream
+    // handler, the renderer or the search thread actually send, one per
+    // producer so a wrong `false` cannot hide behind a passing sibling.
+    try std.testing.expect((Message{ .ring_bell = {} }).dropAllowed());
+    try std.testing.expect((Message{ .password_input = true }).dropAllowed());
+    try std.testing.expect((Message{ .renderer_health = .healthy }).dropAllowed());
+    try std.testing.expect((Message{ .search_total = null }).dropAllowed());
 }
