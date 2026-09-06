@@ -83,9 +83,17 @@ fn buildLib(b: *std.Build, module: *std.Build.Module, options: anytype) !*std.Bu
         "-DFT2_BUILD_LIBRARY",
 
         "-DFT_CONFIG_OPTION_SYSTEM_ZLIB=1",
-
-        "-fno-sanitize=undefined",
     });
+
+    // Only Debug asks Clang for the calls into Zig's UBSan runtime, and
+    // those are what leave __ubsan_handle_* unresolved when someone links
+    // our static archive with their own linker. ReleaseSafe compiles the
+    // same checks down to traps, which need no runtime, and the release
+    // modes emit no checks at all.
+    if (optimize == .Debug) try flags.append(
+        b.allocator,
+        "-fno-sanitize=undefined",
+    );
     if (target.result.os.tag != .windows) {
         try flags.appendSlice(b.allocator, &.{
             "-DHAVE_UNISTD_H",

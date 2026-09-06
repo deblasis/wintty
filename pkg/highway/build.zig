@@ -83,8 +83,14 @@ pub fn build(b: *std.Build) !void {
         "-fno-cxx-exceptions",
         "-fno-slp-vectorize",
         "-fno-vectorize",
+    });
 
-        // Fixes linker issues for release builds missing ubsanitizer symbols
+    // Only Debug asks Clang for the calls into Zig's UBSan runtime, and
+    // those are what leave __ubsan_handle_* unresolved when someone links
+    // our static archive with their own linker. ReleaseSafe compiles the
+    // same checks down to traps, which need no runtime, and the release
+    // modes emit no checks at all.
+    if (optimize == .Debug) try flags.appendSlice(b.allocator, &.{
         "-fno-sanitize=undefined",
         "-fno-sanitize-trap=undefined",
     });
