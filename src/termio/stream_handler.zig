@@ -19,6 +19,65 @@ const posix = std.posix;
 const log = std.log.scoped(.io_handler);
 const log_validate = std.log.scoped(.validate_transport);
 
+/// How much of a reply a single OSC color sequence may produce.
+///
+/// The reply used to be formatted into a 1 KiB fixed buffer, and the first
+/// answer that did not fit returned an error out of `colorOperation`, so the
+/// program got no reply at all -- after any sets in the same sequence had
+/// already been applied, leaving its idea of the palette wrong with nothing
+/// to tell it so. Asking for the whole 256 entry palette is an ordinary thing
+/// to do and produces a little over 7 KiB in the widest report format, so
+/// that was reached by accident rather than by attack.
+///
+/// The reply is grown on demand now, and this is the ceiling on it. It is not
+/// what fixes the above, and it is not a fix for anything the pty can do: the
+/// parser caps an OSC 4 payload at `terminal.osc.Parser.MAX_BUF` bytes in a
+/// capture that cannot move to the heap, and the cheapest repeating query is
+/// four bytes for 26 of answer, so the largest reply the pty can provoke is
+/// about 13 KiB and this sits nearly five times above it. It is cheap defense
+/// in depth against a future caller that is not the parser.
+const color_report_limit = 64 * 1024;
+
+/// The formats one answer to a color query is built with. Named so that the
+/// stack buffer they are formatted into can be sized against them by the
+/// compiler rather than by an argument in a comment.
+const color_report_fmt = struct {
+    const palette_16 = "\x1b]4;{d};rgb:{x:0>4}/{x:0>4}/{x:0>4}";
+    const dynamic_16 = "\x1b]{d};rgb:{x:0>4}/{x:0>4}/{x:0>4}";
+    const palette_8 = "\x1b]4;{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}";
+    const dynamic_8 = "\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}";
+
+    /// The longest answer any of them can produce, terminator included. A
+    /// palette index is a `u8`; a `Dynamic` tag only reaches 19, but it is
+    /// measured as a `u8` as well so that the widest arguments are one pair
+    /// rather than four, which can only over-estimate. ST is the longer of
+    /// the two terminators.
+    const max_len = max: {
+        const wide_16 = .{ @as(u8, 255), @as(u16, 0xffff), @as(u16, 0xffff), @as(u16, 0xffff) };
+        const wide_8 = .{ @as(u8, 255), @as(u16, 0xff), @as(u16, 0xff), @as(u16, 0xff) };
+        break :max @max(
+            std.fmt.comptimePrint(palette_16, wide_16).len,
+            std.fmt.comptimePrint(dynamic_16, wide_16).len,
+            std.fmt.comptimePrint(palette_8, wide_8).len,
+            std.fmt.comptimePrint(dynamic_8, wide_8).len,
+        ) + terminal.osc.Terminator.st.string().len;
+    };
+};
+
+/// Size of the stack buffer one answer to a color query is formatted into.
+const color_answer_buf_len = 64;
+
+// An answer that did not fit its buffer would return `error.WriteFailed` out
+// of `colorOperation` and drop the whole reply after the sequence's sets had
+// already landed -- the exact defect the reply bound exists to prevent, but
+// reached through a buffer size instead of an allocator. So widening a report
+// format past the buffer is a build failure rather than a silent regression.
+comptime {
+    if (color_report_fmt.max_len > color_answer_buf_len) @compileError(
+        "a color report format outgrew color_answer_buf_len",
+    );
+}
+
 /// This is used as the handler for the terminal.Stream type. This is
 /// stateful and is expected to live for the entire lifetime of the terminal.
 /// It is NOT VALID to stop a stream handler, create a new one, and use that
@@ -73,6 +132,10 @@ pub const StreamHandler = struct {
     /// Maximum total decoded bytes per Kitty clipboard protocol
     /// (OSC 5522) write transaction; exceeding it aborts with EFBIG.
     clipboard_write_limit: usize,
+
+    /// Whether a program running in the terminal is allowed to put it
+    /// into tmux control mode.
+    tmux_control_mode: bool,
 
     //---------------------------------------------------------------
     // Internal state
@@ -173,6 +236,7 @@ pub const StreamHandler = struct {
         self.osc_color_report_format = config.osc_color_report_format;
         self.clipboard_write = config.clipboard_write;
         self.clipboard_write_limit = config.clipboard_write_limit;
+        self.tmux_control_mode = config.tmux_control_mode;
         self.enquiry_response = config.enquiry_response;
         self.terminal.setDefaultCursorStyle(config.cursor_style);
         self.terminal.setDefaultCursorBlink(config.cursor_blink);
@@ -509,6 +573,18 @@ pub const StreamHandler = struct {
 
                 switch (tmux) {
                     .enter => {
+                        // Control mode hands the session over to us: we
+                        // start writing tmux commands into the pty on our
+                        // own initiative. Nothing in the sequence proves
+                        // tmux sent it, so it stays off until asked for.
+                        if (!self.tmux_control_mode) {
+                            log.info(
+                                "tmux control mode is disabled by configuration, ignoring",
+                                .{},
+                            );
+                            break :tmux;
+                        }
+
                         // Setup our viewer state
                         assert(self.tmux_viewer == null);
                         const viewer = try self.alloc.create(terminal.tmux.Viewer);
@@ -539,8 +615,11 @@ pub const StreamHandler = struct {
                 assert(tmux != .exit);
 
                 const viewer = self.tmux_viewer orelse {
-                    // This can only really happen if we failed to
-                    // initialize the viewer on enter.
+                    // Normal when tmux-control-mode is configured off: dcs.zig
+                    // hooks and parses the tmux DCS stream unconditionally, so
+                    // notifications keep arriving even though .enter above
+                    // never created a viewer for them to land on. Can also
+                    // happen if viewer creation itself failed.
                     log.info(
                         "received tmux control mode command without viewer: {f}",
                         .{tmux},
@@ -1918,11 +1997,16 @@ pub const StreamHandler = struct {
         // return early if there is nothing to do
         if (requests.count() == 0) return;
 
-        var buffer: [1024]u8 = undefined;
-        var fba: std.heap.FixedBufferAllocator = .init(&buffer);
-        const alloc = fba.allocator();
-
-        var response: std.Io.Writer.Allocating = .init(alloc);
+        // One OSC can carry a few hundred queries, and each one adds around
+        // thirty bytes of reply. A fixed reply buffer meant an ordinary
+        // full palette query failed the whole sequence partway through: no
+        // reply at all, after any sets in the same OSC had already been
+        // applied. The reply grows on demand instead, up to
+        // `color_report_limit`; past that we stop answering rather than
+        // keep buffering whatever the caller asks us to.
+        var response: std.Io.Writer.Allocating = .init(self.alloc);
+        defer response.deinit();
+        var refused_queries: usize = 0;
 
         var it = requests.constIterator(0);
         while (it.next()) |req| {
@@ -2045,6 +2129,15 @@ pub const StreamHandler = struct {
 
                     if (self.osc_color_report_format == .none) break :report;
 
+                    // Once the reply is full we stop for the rest of the
+                    // sequence rather than squeezing in a later, shorter
+                    // answer, so what a program gets back is always a prefix
+                    // of what it asked for and never has a hole in it.
+                    if (refused_queries > 0) {
+                        refused_queries += 1;
+                        break :report;
+                    }
+
                     const color = switch (kind) {
                         .palette => |i| self.terminal.colors.palette.current[i],
                         .dynamic => |dynamic| switch (dynamic) {
@@ -2073,10 +2166,17 @@ pub const StreamHandler = struct {
                         },
                     };
 
+                    // Each answer is built on its own so the shared reply
+                    // only ever grows by a whole one. The buffer is sized
+                    // against the formats below at compile time, so these
+                    // prints cannot fail.
+                    var answer_buf: [color_answer_buf_len]u8 = undefined;
+                    var answer: std.Io.Writer = .fixed(&answer_buf);
+
                     switch (self.osc_color_report_format) {
                         .@"16-bit" => switch (kind) {
-                            .palette => |i| try response.writer.print(
-                                "\x1b]4;{d};rgb:{x:0>4}/{x:0>4}/{x:0>4}",
+                            .palette => |i| try answer.print(
+                                color_report_fmt.palette_16,
                                 .{
                                     i,
                                     @as(u16, color.r) * 257,
@@ -2084,8 +2184,8 @@ pub const StreamHandler = struct {
                                     @as(u16, color.b) * 257,
                                 },
                             ),
-                            .dynamic => |dynamic| try response.writer.print(
-                                "\x1b]{d};rgb:{x:0>4}/{x:0>4}/{x:0>4}",
+                            .dynamic => |dynamic| try answer.print(
+                                color_report_fmt.dynamic_16,
                                 .{
                                     @intFromEnum(dynamic),
                                     @as(u16, color.r) * 257,
@@ -2097,8 +2197,8 @@ pub const StreamHandler = struct {
                         },
 
                         .@"8-bit" => switch (kind) {
-                            .palette => |i| try response.writer.print(
-                                "\x1b]4;{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}",
+                            .palette => |i| try answer.print(
+                                color_report_fmt.palette_8,
                                 .{
                                     i,
                                     @as(u16, color.r),
@@ -2106,8 +2206,8 @@ pub const StreamHandler = struct {
                                     @as(u16, color.b),
                                 },
                             ),
-                            .dynamic => |dynamic| try response.writer.print(
-                                "\x1b]{d};rgb:{x:0>2}/{x:0>2}/{x:0>2}",
+                            .dynamic => |dynamic| try answer.print(
+                                color_report_fmt.dynamic_8,
                                 .{
                                     @intFromEnum(dynamic),
                                     @as(u16, color.r),
@@ -2121,10 +2221,28 @@ pub const StreamHandler = struct {
                         .none => unreachable,
                     }
 
-                    try response.writer.writeAll(terminator.string());
+                    try answer.writeAll(terminator.string());
+
+                    // Checked before the write, so the reply is never
+                    // allocated past the limit in the first place, and cut
+                    // between answers rather than inside one: a half written
+                    // OSC is worse for the program than a missing one. Sets
+                    // and resets later in the same sequence still apply.
+                    const reply = answer.buffered();
+                    if (response.writer.end + reply.len > color_report_limit) {
+                        refused_queries += 1;
+                        break :report;
+                    }
+
+                    try response.writer.writeAll(reply);
                 },
             }
         }
+
+        if (refused_queries > 0) log.warn(
+            "color report hit the {d} byte limit, {d} queries unanswered",
+            .{ color_report_limit, refused_queries },
+        );
 
         if (response.writer.end > 0) {
             // If any of the operations were reports, finalize the report
@@ -2406,6 +2524,10 @@ test "tmux control mode commands survive a full pty write backlog" {
     handler.renderer_state = &renderer_state;
     handler.termio_messaged = false;
     handler.tmux_viewer = null;
+    // Control mode is opt-in now, and this test's subject is the write
+    // backlog, not the gate: it asks what happens to a command inside a
+    // session the user did ask for. The gate has its own test below.
+    handler.tmux_control_mode = true;
     defer if (handler.tmux_viewer) |viewer| {
         viewer.deinit();
         testing.allocator.destroy(viewer);
@@ -2728,4 +2850,216 @@ test "stream handler refuses and frees an owned write at the backlog cap" {
 
     handler.messageWriter(msg);
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "color operation: every query in one OSC is answered" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var term = try terminal.Terminal.init(global.io(), testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(testing.allocator);
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+
+    // A colour reply is advisory, so it goes out on the droppable path and
+    // `messageWriter` weighs it against the pty write backlog. An empty
+    // limit is the state this test is about: nothing outstanding, so the
+    // question is whether every query is answered, not whether a full
+    // backlog refuses them.
+    var write_limit: termio.WriteLimit = .{};
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.terminal = &term;
+    handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
+    handler.renderer_state = &renderer_state;
+    handler.osc_color_report_format = .@"16-bit";
+
+    // Enough replies to overflow any fixed reply buffer. A program can
+    // legitimately query the whole palette in one sequence.
+    const count = 100;
+    var requests: terminal.osc.color.List = .{};
+    defer requests.deinit(testing.allocator);
+    for (0..count) |i| try requests.append(testing.allocator, .{
+        .query = .{ .palette = @intCast(i) },
+    });
+
+    try handler.colorOperation(.osc_4, &requests, .st);
+
+    const response = mailbox.spsc.queue.pop(global.io());
+    try testing.expect(response != null);
+    const msg = response.?;
+    defer msg.deinit();
+    switch (msg) {
+        .write_alloc => |v| try testing.expectEqual(
+            @as(usize, count),
+            std.mem.count(u8, v.data, "\x1b]4;"),
+        ),
+        else => try testing.expect(false),
+    }
+}
+
+test "color operation: a full palette query is answered in full" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var term = try terminal.Terminal.init(global.io(), testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(testing.allocator);
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+
+    // Empty, so nothing is refused for a reason this test is not about.
+    var write_limit: termio.WriteLimit = .{};
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.terminal = &term;
+    handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
+    handler.renderer_state = &renderer_state;
+    handler.osc_color_report_format = .@"16-bit";
+
+    // The whole palette in one sequence, in the widest report format, is the
+    // largest reply a program has any reason to ask for.
+    var requests: terminal.osc.color.List = .{};
+    defer requests.deinit(testing.allocator);
+    for (0..256) |i| try requests.append(testing.allocator, .{
+        .query = .{ .palette = @intCast(i) },
+    });
+
+    try handler.colorOperation(.osc_4, &requests, .st);
+
+    const response = mailbox.spsc.queue.pop(global.io());
+    try testing.expect(response != null);
+    const msg = response.?;
+    defer msg.deinit();
+    switch (msg) {
+        .write_alloc => |v| {
+            try testing.expectEqual(
+                @as(usize, 256),
+                std.mem.count(u8, v.data, "\x1b]4;"),
+            );
+            try testing.expect(std.mem.startsWith(u8, v.data, "\x1b]4;0;rgb:"));
+            try testing.expect(std.mem.indexOf(u8, v.data, "\x1b]4;255;rgb:") != null);
+
+            // The bound has to sit well clear of this, not just above it.
+            try testing.expect(v.data.len * 4 < color_report_limit);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "color operation: the reply to one OSC is bounded" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var term = try terminal.Terminal.init(global.io(), testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(testing.allocator);
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+
+    // Empty, so the reply is cut by `color_report_limit` and not by the pty
+    // write backlog. The two bounds are independent and this test is the
+    // first one's.
+    var write_limit: termio.WriteLimit = .{};
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.terminal = &term;
+    handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
+    handler.renderer_state = &renderer_state;
+    handler.osc_color_report_format = .@"16-bit";
+
+    // Far more queries than there are colours to ask about, which is what a
+    // sequence built to make us allocate looks like: without a bound the
+    // reply is proportional to the query count.
+    const count = 20000;
+    var requests: terminal.osc.color.List = .{};
+    defer requests.deinit(testing.allocator);
+    for (0..count) |i| try requests.append(testing.allocator, .{
+        .query = .{ .palette = @intCast(i % 256) },
+    });
+
+    try handler.colorOperation(.osc_4, &requests, .st);
+
+    const response = mailbox.spsc.queue.pop(global.io());
+    try testing.expect(response != null);
+    const msg = response.?;
+    defer msg.deinit();
+    switch (msg) {
+        .write_alloc => |v| {
+            try testing.expect(v.data.len <= color_report_limit);
+
+            // Cutting the reply between answers rather than inside one means
+            // every answer the program does get is still parseable.
+            try testing.expect(std.mem.endsWith(u8, v.data, "\x1b\\"));
+            try testing.expectEqual(
+                std.mem.count(u8, v.data, "\x1b]4;"),
+                std.mem.count(u8, v.data, "\x1b\\"),
+            );
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "tmux control mode: a program cannot enter it unless configured" {
+    if (comptime !StreamHandler.tmux_enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.tmux_viewer = null;
+    handler.tmux_control_mode = false;
+
+    var enter: terminal.dcs.Command = .{ .tmux = .enter };
+    try handler.dcsCommand(&enter);
+    try testing.expect(handler.tmux_viewer == null);
+
+    // With the option on, the existing behaviour is unchanged.
+    handler.tmux_control_mode = true;
+    try handler.dcsCommand(&enter);
+    try testing.expect(handler.tmux_viewer != null);
+
+    var exit: terminal.dcs.Command = .{ .tmux = .exit };
+    try handler.dcsCommand(&exit);
+    try testing.expect(handler.tmux_viewer == null);
 }
