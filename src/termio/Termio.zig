@@ -13,6 +13,8 @@ const posix = std.posix;
 const termio = @import("../termio.zig");
 const StreamHandler = @import("stream_handler.zig").StreamHandler;
 const terminalpkg = @import("../terminal/main.zig");
+const snapshotpkg = @import("../terminal/snapshot/snapshot.zig");
+const lz4 = @import("../terminal/compress/lz4.zig");
 const global = @import("../global.zig");
 const xev = global.xev;
 const renderer = @import("../renderer.zig");
@@ -27,6 +29,31 @@ const log = std.log.scoped(.io_exec);
 
 /// Mutex state argument for queueMessage.
 pub const MutexState = enum { locked, unlocked };
+
+/// Cap on the replayable parse state the stream's continuation tracker
+/// may retain. Sized to the allocating OSC class's own ceiling class --
+/// a truncated OSC 52-family sequence is the realistic worst case a
+/// dormant tab would otherwise have to drop.
+const continuation_max_bytes = 1024 * 1024;
+
+/// Tier C dormancy: the terminal torn down into snapshot bytes. The
+/// snapshot is the in-tree GHOSTSNP stream wrapped in one raw LZ4 block
+/// (the v1 stream is an uncompressed logical encoding -- unwrapped, a
+/// dormant heavy session would carry more than its live #1039-compressed
+/// pages ever did). plain_len rides along because the LZ4 decoder needs
+/// an exactly-sized destination. Guarded by renderer_state.mutex.
+const DormantSnapshot = struct {
+    compressed: []u8,
+    plain_len: usize,
+
+    /// Presentation flags the v1 snapshot does not carry (they are
+    /// caller-supplied by design). Captured at teardown so the wake can
+    /// put them back: without this, a surface that went dormant hidden
+    /// rebuilds with the default (visible), and every later dormancy is
+    /// refused for "surface visible" by a fact nobody observes.
+    visible: bool,
+    focused: bool,
+};
 
 /// Allocator
 alloc: Allocator,
@@ -68,6 +95,12 @@ mailbox: termio.Mailbox,
 /// The stream parser. This parses the stream of escape codes and so on
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
+
+/// Non-null while the terminal field is torn down into its dormant
+/// snapshot; see DormantSnapshot. Everything that can reach the
+/// terminal takes renderer_state.mutex first; the shared atomic on
+/// renderer_state is what lock-free readers check instead.
+dormant_snapshot: ?DormantSnapshot = null,
 
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
@@ -356,6 +389,12 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .terminal_stream = .init(.{
             .allocator = alloc,
             .handler = handler,
+            // Tier C dormancy snapshots mid-sequence parse state as a
+            // replayable continuation suffix; without tracking enabled
+            // here, a tab that goes dormant inside an OSC cannot be
+            // faithfully woken. The cap bounds what a runaway sequence
+            // can pin; an empty tracker at ground costs a fixed 4 KiB.
+            .continuation_max_bytes = continuation_max_bytes,
         }),
         .thread_enter_state = thread_enter_state,
     };
@@ -363,7 +402,17 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
 
 pub fn deinit(self: *Termio) void {
     self.backend.deinit();
-    self.terminal.deinit(self.alloc);
+    // A dormant terminal is already torn down -- deiniting it again
+    // would double-free the screens -- and its snapshot must be scrubbed
+    // and freed rather than leaked with the scrollback it holds.
+    if (self.dormant_snapshot) |snapshot| {
+        @memset(snapshot.compressed, 0);
+        self.alloc.free(snapshot.compressed);
+        self.dormant_snapshot = null;
+        self.renderer_state.dormant.store(false, .release);
+    } else {
+        self.terminal.deinit(self.alloc);
+    }
     self.config.deinit();
     self.mailbox.deinit(self.alloc);
 
@@ -531,6 +580,12 @@ pub fn resize(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
+        // A coalesced resize timer can fire into a surface that went
+        // dormant inside its window; resizing the torn-down terminal
+        // would walk and reallocate freed pages. Wake first -- arriving
+        // after a failed wake, skip: the next resize retries.
+        if (!self.wakeIfDormantLocked()) return error.OutOfMemory;
+
         // Update the size of our terminal state
         try self.terminal.resize(
             self.alloc,
@@ -589,6 +644,12 @@ fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeRe
 pub fn resetSynchronizedOutput(self: *Termio) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
+    // The synchronized-output timeout is a timer, so it can land on a
+    // surface that went dormant while the mode was armed. The write is
+    // meaningless against a torn-down terminal (the wake's decode
+    // carries the mode state forward), so skip it rather than write
+    // into the undefined field.
+    if (self.renderer_state.dormant.load(.monotonic)) return;
     self.terminal.modes.set(.synchronized_output, false);
     self.renderer_wakeup.notify() catch {};
 }
@@ -674,6 +735,12 @@ pub fn deepIdleTrim(self: *Termio) void {
     defer self.renderer_state.mutex.unlock(global.io());
 
     self.terminal_stream.resetToGround();
+    // The continuation tracker must go with the state it describes: the
+    // stream runs with tracking enabled (dormancy needs it), and a
+    // tracker left holding the trimmed sequence's suffix would
+    // faithfully resurrect it in the next snapshot -- inverting this
+    // trim exactly when dormancy later consumes it.
+    if (self.terminal_stream.continuation) |*tracker| tracker.reset();
 
     const h = &self.terminal_stream.handler;
     h.apc.deinit();
@@ -683,6 +750,220 @@ pub fn deepIdleTrim(self: *Termio) void {
     h.multipart_iterm2.deinit(h.alloc);
     h.multipart_iterm2 = .{};
     h.kittyClipboardWriteAbort();
+}
+
+/// Tier C dormancy: tear the terminal down into snapshot bytes. The
+/// eligibility gates here are the ones only the terminal in hand can
+/// answer; the surface-side gates (an active search) are checked before
+/// the message is ever queued. Everything runs under the renderer state
+/// mutex on the IO thread, which is the lock every other terminal
+/// reader takes, so no reader can observe the half-torn-down window.
+///
+/// What snapshot v1 cannot carry is refused rather than silently lost:
+/// kitty image state, glyph glossary registrations, and kitty drag and
+/// drop state are all user-visible, and a dormant wake that dropped
+/// them would read as corruption. The viewport's scroll offset is the
+/// one accepted loss (v1 wakes at the active position).
+pub fn goDormant(self: *Termio) void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    if (self.dormant_snapshot != null) return;
+    if (self.dormantBlocker()) |reason| {
+        log.info("dormancy refused: {s}", .{reason});
+        return;
+    }
+
+    // The replayable parse state rides inside the snapshot itself.
+    var cont: std.Io.Writer.Allocating = .init(self.alloc);
+    defer cont.deinit();
+    self.terminal_stream.writeContinuation(&cont.writer) catch |err| {
+        log.warn("dormancy refused: continuation unavailable err={}", .{err});
+        return;
+    };
+    const cont_value: snapshotpkg.Continuation = if (cont.written().len == 0)
+        .ground
+    else
+        .{ .bytes = cont.written() };
+
+    // The plain snapshot. One transient allocation the size of the
+    // logical stream; the dormancy this serves only ever runs on a
+    // surface that has been quiet for the embedder's whole patience.
+    // The defer scrubs on EVERY exit -- refusal paths below leave
+    // through it too, and the plain buffer holds the full scrollback,
+    // secrets and all.
+    var plain: std.Io.Writer.Allocating = .init(self.alloc);
+    defer {
+        @memset(plain.written(), 0);
+        plain.deinit();
+    }
+    snapshotpkg.encode(
+        self.alloc,
+        &plain.writer,
+        &self.terminal,
+        .{ .continuation = cont_value },
+    ) catch |err| {
+        log.warn("dormancy refused: encode err={}", .{err});
+        return;
+    };
+
+    // Wrap it in one raw LZ4 block, same codec the page compression
+    // uses. RAM-only and producer/consumer-identical, so there is no
+    // stability requirement to honor -- only the bytes' size.
+    const bound = lz4.compressBound(plain.written().len) catch |err| {
+        log.warn("dormancy refused: input too large for LZ4 err={}", .{err});
+        return;
+    };
+    var compressed = self.alloc.alloc(u8, bound) catch |err| {
+        log.warn("dormancy refused: out of memory err={}", .{err});
+        return;
+    };
+    var table: lz4.HashTable = undefined;
+    const compressed_len = lz4.compress(plain.written(), compressed, &table) catch |err| {
+        self.alloc.free(compressed);
+        log.warn("dormancy refused: compress err={}", .{err});
+        return;
+    };
+    if (self.alloc.realloc(compressed, compressed_len)) |shrunk| {
+        compressed = shrunk;
+    } else |_| {
+        // Shrinking failed; the larger allocation is still correct.
+    }
+
+    // From here the transition is committed. The plain buffer's scrub
+    // rides the defer above; the same hygiene applies to the compressed
+    // block on wake. Capture the presentation flags BEFORE the deinit:
+    // deinit leaves the field undefined (poisoned in safe builds), and
+    // these are facts the snapshot does not carry.
+    const flags_visible = self.terminal.flags.visible;
+    const flags_focused = self.terminal.flags.focused;
+
+    // Tear the terminal down; the field stays undefined until wake
+    // rebuilds it AT THIS ADDRESS, which is the address
+    // renderer_state.terminal and the handler both point at.
+    self.terminal.deinit(self.alloc);
+
+    // The stream's parse state is already inside the snapshot as the
+    // continuation; leaving it live would double-apply on wake, which
+    // resets before replaying.
+    self.terminal_stream.resetToGround();
+
+    self.dormant_snapshot = .{
+        .compressed = compressed,
+        .plain_len = plain.written().len,
+        .visible = flags_visible,
+        .focused = flags_focused,
+    };
+    self.renderer_state.dormant.store(true, .release);
+    log.info("dormant: {d} plain bytes as {d} compressed", .{
+        plain.written().len,
+        compressed_len,
+    });
+}
+
+/// Why this terminal cannot go dormant right now, or null if it can.
+/// Runs under the renderer state mutex.
+fn dormantBlocker(self: *Termio) ?[]const u8 {
+    if (self.renderer_state.inspector != null) return "inspector active";
+    // Visible surfaces are refused: the frames a visible surface draws
+    // read the terminal constantly, and the win is aimed at tabs nobody
+    // is looking at.
+    if (self.terminal.flags.visible) return "surface visible";
+    for ([_]terminalpkg.ScreenSet.Key{ .primary, .alternate }) |key| {
+        const screen = self.terminal.screens.get(key) orelse continue;
+        if (screen.kitty_images.images.count() > 0)
+            return "kitty images present";
+    }
+    if (self.terminal.glyph_glossary.entries.count() > 0)
+        return "glyph glossary registrations present";
+    if (self.terminal.kitty_dnd != null) return "kitty dnd state present";
+    // v1 restores neither selections nor the viewport offset; a tab
+    // whose selection silently evaporated on wake reads as corruption
+    // for the same reason a dropped kitty image would.
+    for ([_]terminalpkg.ScreenSet.Key{ .primary, .alternate }) |key| {
+        const screen = self.terminal.screens.get(key) orelse continue;
+        if (screen.selection != null) return "selection active";
+    }
+    if (self.renderer_state.search_active) return "search active";
+    return null;
+}
+
+/// Wake a dormant terminal if one is present, taking the renderer state
+/// mutex. The funnel for callers that do not already hold it. Returns
+/// whether a live terminal is now in place -- a surface that was never
+/// dormant counts as woken.
+pub fn wakeIfDormant(self: *Termio) bool {
+    if (!self.renderer_state.dormant.load(.acquire)) return true;
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    return self.wakeIfDormantLocked();
+}
+
+/// Rebuild the terminal from its snapshot. CALLER HOLDS the renderer
+/// state mutex, and the terminal field is undefined until this returns
+/// successfully -- a failed wake leaves the snapshot intact and the
+/// surface dormant, retried by the next input, because a terminal that
+/// can never wake must not be torn down into bytes it can never read
+/// back. The bool return is the contract callers must honor: FALSE
+/// means the terminal is undefined and the caller must not touch it.
+fn wakeIfDormantLocked(self: *Termio) bool {
+    const snapshot = self.dormant_snapshot orelse return true;
+
+    const plain = self.alloc.alloc(u8, snapshot.plain_len) catch |err| {
+        log.warn("wake deferred: out of memory err={}", .{err});
+        return false;
+    };
+    defer self.alloc.free(plain);
+    const plain_len = lz4.decompress(snapshot.compressed, plain) catch |err| {
+        log.err("wake failed: snapshot corrupt err={}", .{err});
+        return false;
+    };
+    if (plain_len != snapshot.plain_len) {
+        log.err("wake failed: snapshot truncated", .{});
+        return false;
+    }
+
+    var source: std.Io.Reader = .fixed(plain);
+    var decoded = snapshotpkg.decodeExact(
+        self.alloc,
+        global.io(),
+        &source,
+        .{ .max_continuation_bytes = continuation_max_bytes },
+    ) catch |err| {
+        log.err("wake failed: decode err={}", .{err});
+        return false;
+    };
+
+    // Store at the terminal's final address -- this address -- before
+    // anything can observe it, then rebuild the stream's parse state by
+    // replaying the continuation exactly once. The stream was reset at
+    // dormancy; replaying without that reset would apply the suffix to
+    // whatever parse state accumulated since, which is not the state
+    // the snapshot describes.
+    self.terminal = decoded.toOwned();
+    // The snapshot does not carry presentation flags (caller-supplied
+    // by design); restore what teardown captured so dormancy is
+    // transparent to visibility and focus bookkeeping.
+    self.terminal.flags.visible = snapshot.visible;
+    self.terminal.flags.focused = snapshot.focused;
+    self.terminal_stream.resetToGround();
+    switch (decoded.continuation) {
+        .ground => {},
+        .bytes => |bytes| for (bytes) |ch| {
+            _ = self.terminal_stream.next(ch);
+        },
+    }
+    decoded.deinit(self.alloc);
+
+    // The snapshot's bytes are the same secrets the live scrollback
+    // holds; scrub both copies on the way out the door.
+    @memset(plain, 0);
+    @memset(snapshot.compressed, 0);
+    self.alloc.free(snapshot.compressed);
+    self.dormant_snapshot = null;
+    self.renderer_state.dormant.store(false, .release);
+    log.info("dormant surface woke: {d} bytes restored", .{snapshot.plain_len});
+    return true;
 }
 
 /// Scroll the viewport
@@ -740,6 +1021,19 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
 
 /// Process output from readdata but the lock is already held.
 fn processOutputLocked(self: *Termio, buf: []const u8) void {
+    // Arriving data wakes a dormant surface before it is parsed: the
+    // terminal field is undefined until the wake rebuilds it. A FAILED
+    // wake drops this buffer rather than parsing into the undefined
+    // terminal -- the surface stays dormant and the next arrival
+    // retries, which in the OOM regime this is costs one chunk of
+    // output instead of the process.
+    if (self.renderer_state.dormant.load(.monotonic)) {
+        if (!self.wakeIfDormantLocked()) {
+            log.warn("dropping {d} bytes: dormant wake failed", .{buf.len});
+            return;
+        }
+    }
+
     // Schedule a render. We can call this first because we have the lock.
     self.terminal_stream.handler.queueRender() catch unreachable;
 

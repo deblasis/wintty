@@ -307,6 +307,17 @@ fn drainMailbox(
     // ENOUGH to not mess up throughput on producers.
     var redraw: bool = false;
     while (mailbox.pop(global.io())) |message| {
+        // A dormant terminal is undefined until woken, and every handler
+        // below can reach it (input writes, resize, config, reports).
+        // The check runs per MESSAGE, not per drain: a go_dormant that
+        // lands mid-batch must not leave the messages queued behind it
+        // running against the terminal it just tore down. A failed wake
+        // ends the drain with the popped message released -- the surface
+        // stays dormant and coherent, and the next drain retries.
+        if (!io.wakeIfDormant()) {
+            message.deinit();
+            break;
+        }
         // If we have a message we always redraw
         redraw = true;
 
@@ -348,6 +359,7 @@ fn drainMailbox(
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
             .deep_idle => io.deepIdleTrim(),
+            .go_dormant => io.goDormant(),
             .write_small => |v| try io.queueWrite(
                 data,
                 v.data[0..v.len],
@@ -450,6 +462,15 @@ fn coalesceCallback(
     if (cb.self.coalesce_data.resize) |v| {
         cb.self.coalesce_data.resize = null;
         cb.io.resize(&cb.data, v) catch |err| {
+            // A failed wake (the OOM regime) dropped this resize AFTER
+            // the pty side of it already happened, so the terminal --
+            // and any dormant snapshot -- keep the old geometry while
+            // the pty carries the new one, until the next resize. The
+            // alternatives are worse: re-queuing from this thread would
+            // make a second producer on the mailbox's SPSC queue, and
+            // spinning on the wake burns the memory the wake is failing
+            // for. A resize landing on a dormant surface already needs
+            // the rarest coincidence in the design.
             log.warn("error during resize err={}", .{err});
         };
     }

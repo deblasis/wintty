@@ -330,8 +330,12 @@ internal static partial class NativeMethods
     /// </remarks>
     [LibraryImport(Dll, EntryPoint = "ghostty_crash_wait_ready")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    [return: MarshalAs(UnmanagedType.U1)]
-    internal static partial bool CrashWaitReady(uint timeoutMs);
+    private static partial byte CrashWaitReadyNative(uint timeoutMs);
+
+    /// <summary>Raw P/Invoke returns byte (C99 _Bool), like every other
+    /// bool-returning import here; the wrapper converts.</summary>
+    internal static bool CrashWaitReady(uint timeoutMs)
+        => CrashWaitReadyNative(timeoutMs) != 0;
 
     /// <summary>
     /// Initialize libghostty from this process's own command line.
@@ -610,6 +614,32 @@ internal static partial class NativeMethods
     /// </summary>
     internal static void SurfaceSetIdle(GhosttySurface surface, bool idle)
         => SurfaceSetIdleNative(surface, idle ? (byte)1 : (byte)0);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_go_dormant")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceGoDormantNative(GhosttySurface surface);
+
+    /// <summary>
+    /// Freeze a surface's terminal into a dormant snapshot: the live
+    /// structures are torn down on the IO thread and the state exists
+    /// only as compressed bytes until the next input wakes it. Returns
+    /// false when refused outright (an active search); other eligibility
+    /// is re-checked on the IO thread, so poll
+    /// <see cref="SurfaceIsDormant"/> for the outcome. Driven today only
+    /// by the test seam -- the product trigger is deliberately unwired.
+    /// </summary>
+    internal static bool SurfaceGoDormant(GhosttySurface surface)
+        => SurfaceGoDormantNative(surface) != 0;
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_is_dormant")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceIsDormantNative(GhosttySurface surface);
+
+    /// <summary>Whether the surface's terminal is currently torn down
+    /// into its dormant snapshot (lock-free read of the shared
+    /// flag).</summary>
+    internal static bool SurfaceIsDormant(GhosttySurface surface)
+        => SurfaceIsDormantNative(surface) != 0;
 
     /// <summary>Scrollback compression counters for one surface's primary
     /// screen, read from the page list under the renderer state mutex.

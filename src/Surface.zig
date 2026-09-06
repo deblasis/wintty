@@ -863,7 +863,11 @@ pub fn deinit(self: *Surface) void {
     self.renderer_thread.deinit();
     self.renderer.deinit();
     self.io_thread.deinit();
-    self.mouse.selection_gesture.deinit(&self.io.terminal);
+    // A dormant terminal is already torn down; the gesture's deinit
+    // untracks pins from pages that no longer exist, and Termio.deinit
+    // below owns the dormant teardown instead.
+    if (!self.renderer_state.dormant.load(.acquire))
+        self.mouse.selection_gesture.deinit(&self.io.terminal);
     self.io.deinit();
 
     if (self.inspector) |v| {
@@ -3432,10 +3436,19 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
     self.visible = visible;
 
     // Update the terminal state for synchronous queries, then notify the IO
-    // thread so it can emit a mode 2033 report when enabled.
+    // thread so it can emit a mode 2033 report when enabled. A dormant
+    // surface wakes FIRST: everything below reads and writes the
+    // terminal, which is undefined until the wake rebuilds it -- and the
+    // flag write would otherwise be clobbered wholesale by the rebuild.
+    _ = self.io.wakeIfDormant();
     self.renderer_state.mutex.lockUncancelable(global.io());
-    self.io.terminal.flags.visible = visible;
-    const report_visibility = self.io.terminal.modes.get(.report_visibility);
+    // A failed wake leaves the terminal undefined; skip the writes (an
+    // `if`, not an early return -- the unlock below must run).
+    const report_visibility: bool = dormant: {
+        if (self.renderer_state.dormant.load(.monotonic)) break :dormant false;
+        self.io.terminal.flags.visible = visible;
+        break :dormant self.io.terminal.modes.get(.report_visibility);
+    };
     self.renderer_state.mutex.unlock(global.io());
     if (report_visibility) {
         self.queueIo(.{ .visibility_report = .{
@@ -3478,6 +3491,39 @@ pub fn idleCallback(self: *Surface, idle: bool) !void {
     });
 
     try self.queueRender();
+}
+
+/// Publish search activity into the shared render state, under the same
+/// mutex the search thread walks under. The dormancy eligibility check
+/// reads this flag, which is what makes the check race-free against a
+/// search starting on this (UI) thread.
+fn setSearchActive(self: *Surface, active: bool) void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.search_active = active;
+}
+
+/// Freeze this surface's terminal into a dormant snapshot (Tier C): the
+/// live structures are torn down on the IO thread and the state exists
+/// only as bytes until the next input wakes it. This side checks only
+/// the gates the IO thread cannot see (an active search holds pins into
+/// the page storage the snapshot would tear down); the terminal-side
+/// gates are re-checked against the thing being snapshotted. Fire and
+/// forget: poll `isDormant` for the outcome.
+pub fn goDormantCallback(self: *Surface) void {
+    // The search thread walks the terminal under the renderer state
+    // mutex, but its pins point INTO the pages -- the wake rebuilds
+    // every page, and a pin across that boundary is exactly the class
+    // of stale pointer the search teardown exists to prevent.
+    if (self.search != null) return;
+    self.queueIo(.{ .go_dormant = {} }, .unlocked);
+}
+
+/// Whether this surface's terminal is currently torn down into its
+/// dormant snapshot. Lock-free: the flag is the shared atomic on the
+/// renderer state, published at the dormancy transition.
+pub fn isDormant(self: *const Surface) bool {
+    return self.renderer_state.dormant.load(.acquire);
 }
 
 pub fn focusCallback(self: *Surface, focused: bool) !void {
@@ -3559,10 +3605,15 @@ pub fn focusCallback(self: *Surface, focused: bool) !void {
     // again when tabbing between programs (see #2525).
     self.showMouse();
 
-    // Update the focus state and notify the terminal
+    // Update the focus state and notify the terminal. Wake-first for the
+    // same reason as occlusion: the flag write lands in the terminal,
+    // undefined while dormant, and a failed wake must skip it rather
+    // than write poison.
     {
+        _ = self.io.wakeIfDormant();
         self.renderer_state.mutex.lockUncancelable(global.io());
-        self.io.terminal.flags.focused = focused;
+        if (!self.renderer_state.dormant.load(.monotonic))
+            self.io.terminal.flags.focused = focused;
         self.renderer_state.mutex.unlock(global.io());
         self.queueIo(.{ .focused = focused }, .unlocked);
     }
@@ -5101,6 +5152,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             if (self.search) |*s| {
                 s.deinit();
                 self.search = null;
+                self.setSearchActive(false);
             }
 
             _ = try self.rt_app.performAction(
@@ -5132,6 +5184,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 const s: *Search = &self.search.?;
                 errdefer s.state.deinit();
 
+                // Publish search activity under the same mutex the search
+                // thread walks under, BEFORE the thread exists: the
+                // dormancy eligibility check reads this flag under the
+                // mutex, so a dormant transition can never interleave a
+                // live search's page walks or straddle its pins.
+                self.setSearchActive(true);
+                errdefer self.setSearchActive(false);
+
                 s.thread = try .spawn(
                     .{},
                     terminal.search.Thread.threadMain,
@@ -5146,6 +5206,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             if (text.len == 0) {
                 s.deinit();
                 self.search = null;
+                self.setSearchActive(false);
                 break :search;
             }
 

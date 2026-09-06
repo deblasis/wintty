@@ -999,6 +999,39 @@ internal static class TestSeam
                 });
             }
 
+            case "surface-dormant":
+            {
+                // Tier C dormancy driver: "go" asks the surface's
+                // terminal to freeze into its snapshot (fire-and-forget
+                // across the IO thread; read back with "check", which a
+                // harness polls), "check" only reads the flag. The
+                // product trigger is deliberately unwired, so this op
+                // is the only driver the dormancy machinery has.
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var handle = tab.PaneHost.ActiveLeaf.Terminal().SurfaceHandle;
+                if (handle == IntPtr.Zero)
+                    return Error(op, $"tab {index} has no live surface");
+                var mode = ArgString(args, "mode") ?? "go";
+                var sent = false;
+                if (mode == "go")
+                    sent = Interop.NativeMethods.SurfaceGoDormant(
+                        new Interop.GhosttySurface(handle));
+                else if (mode != "check")
+                    return Error(op, $"unknown mode '{mode}' (go or check)");
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("sent", sent);
+                    json.WriteBoolean("dormant", Interop.NativeMethods.SurfaceIsDormant(
+                        new Interop.GhosttySurface(handle)));
+                    json.WriteEndObject();
+                });
+            }
+
             case "header-rect":
             {
                 var index = ArgInt(args, "index", -1);
