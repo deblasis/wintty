@@ -106,16 +106,33 @@ pub const Mailbox = union(enum) {
                 // could acquire the lock. This is why we have to release our lock
                 // here.
                 //
-                // A `.forever` push cannot fail, so there is no drop path
-                // here: the message is either queued or this thread is
-                // still waiting for a slot. The wake above is what makes
-                // the writer thread drain, and it has already been issued
-                // by the time we get here.
+                // The wake above is what makes the writer thread drain,
+                // and a single notify can be lost outright on the IOCP
+                // backend, so keep re-issuing it while we wait rather
+                // than sleeping on the queue with no wake source left.
+                // There is no attempt limit: a message here can own a
+                // write buffer and this path has nowhere to hand it back
+                // to, so waiting for the slot is the only thing that does
+                // not lose it.
                 if (mutex) |m| m.unlock(global.io());
                 defer if (mutex) |m| m.lockUncancelable(global.io());
-                _ = mb.queue.push(global.io(), msg, .{ .forever = {} });
+                _ = mb.queue.pushWake(
+                    global.io(),
+                    msg,
+                    mb.wakeup,
+                    notifyWake,
+                    Queue.wake_retry_timeout_ns,
+                    Queue.wake_retry_forever,
+                );
             },
         }
+    }
+
+    /// The `pushWake` wake for our writer thread. A notify that fails
+    /// means the loop is gone; the send has nothing better to do than
+    /// keep trying, and the queue drains at teardown.
+    fn notifyWake(wakeup: *xev.Async) void {
+        wakeup.notify() catch {};
     }
 
     /// Notify that there are new messages. This may be a noop depending
