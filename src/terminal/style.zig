@@ -681,7 +681,7 @@ pub const Style = struct {
 pub const Set = RefCountedSet(
     Style,
     Id,
-    size.CellCountInt,
+    size.RefCountInt,
     struct {
         pub fn hash(self: *const @This(), style: Style) u64 {
             _ = self;
