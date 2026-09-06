@@ -1288,6 +1288,8 @@ GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, do
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_idle(ghostty_surface_t, bool);
+GHOSTTY_API bool ghostty_surface_go_dormant(ghostty_surface_t);
+GHOSTTY_API bool ghostty_surface_is_dormant(ghostty_surface_t);
 // Scrollback compression statistics for the surface's primary screen:
 // total pages, how many are compressed, the raw/encoded byte split, and
 // the compression activity serial (the scheduler's arming input: it

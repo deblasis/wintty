@@ -1601,6 +1601,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // when rebuilding the frame fails due to memory pressure.
             defer self.font_shaper.endFrame();
 
+            // A dormant terminal is torn down; its pages exist only as the
+            // IO thread's snapshot bytes. This is the BACKSTOP -- the show
+            // path wakes the surface before the renderer ever gets a
+            // visible transition for it -- because a frame built against
+            // freed pages is exactly the corruption dormancy must never
+            // cause. Nothing is drawn for a dormant surface anyway: it is
+            // hidden by eligibility.
+            if (state.dormant.load(.acquire)) return;
+
             // This is the pass a device recovery asked for; whether it
             // gets as far as the images is up to the terminal state.
             self.images_wake_pending = false;

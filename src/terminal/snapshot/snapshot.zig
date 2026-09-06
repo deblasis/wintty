@@ -919,6 +919,49 @@ test "complete snapshot round trip with history and alternate screen" {
     );
 }
 
+test "complete snapshot survives the dormant LZ4 container" {
+    const testing = std.testing;
+    const lz4 = @import("../compress/lz4.zig");
+
+    // Dormancy stores the snapshot as one raw LZ4 block (the v1 stream
+    // is an uncompressed logical encoding, and unwrapped it can outweigh
+    // the live compressed pages it replaces). This pins the container's
+    // round trip against the checked-in reference bytes: a wrap that
+    // lost, grew, or reordered anything fails the exact decode.
+    const bound = try lz4.compressBound(test_complete_fixture.len);
+    const compressed = try testing.allocator.alloc(u8, bound);
+    defer testing.allocator.free(compressed);
+    var table: lz4.HashTable = undefined;
+    const compressed_len = try lz4.compress(
+        &test_complete_fixture,
+        compressed,
+        &table,
+    );
+
+    const plain = try testing.allocator.alloc(u8, test_complete_fixture.len);
+    defer testing.allocator.free(plain);
+    const plain_len = try lz4.decompress(compressed[0..compressed_len], plain);
+    try testing.expectEqual(test_complete_fixture.len, plain_len);
+    try testing.expectEqualSlices(u8, &test_complete_fixture, plain);
+
+    var source: std.Io.Reader = .fixed(plain);
+    var restored = try decodeExact(
+        testing.allocator,
+        testing.io,
+        &source,
+        test_decode_options,
+    );
+    defer restored.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "file:///tmp/snapshot",
+        restored.terminal.?.getPwd().?,
+    );
+    try testing.expectEqualStrings(
+        "complete snapshot",
+        restored.terminal.?.getTitle().?,
+    );
+}
+
 test "complete snapshot restores a canonical Stream continuation" {
     const testing = std.testing;
 

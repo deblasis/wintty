@@ -939,6 +939,11 @@ const Compression = struct {
         // timer indefinitely.
         if (thread.state.mutex.tryLock()) {
             defer thread.state.mutex.unlock(global.io());
+            // A dormant terminal is torn down; the activity read below
+            // would walk freed pages, so treat it as nothing-to-do (the
+            // step path reaches the same conclusion through its own
+            // guard).
+            if (thread.state.dormant.load(.acquire)) return;
             const activity = thread.state.terminal.compressionActivity();
             if (self.activity == activity) return;
             self.activity = activity;
@@ -998,6 +1003,11 @@ const Compression = struct {
         const state = thread.state;
         if (!state.mutex.tryLock()) return idle_interval;
         defer state.mutex.unlock(global.io());
+
+        // A dormant terminal is torn down; its pages exist only as the
+        // IO thread's snapshot bytes. Nothing to compress, and the
+        // terminal must not be read.
+        if (state.dormant.load(.acquire)) return null;
 
         const activity = state.terminal.compressionActivity();
         if (self.activity != activity) {
