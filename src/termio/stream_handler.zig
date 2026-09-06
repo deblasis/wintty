@@ -1744,6 +1744,25 @@ pub const StreamHandler = struct {
     fn setPwdReported(self: *StreamHandler, reported: []const u8) !void {
         log.debug("terminal pwd: {s}", .{reported});
 
+        // A directory is bytes off the pty, and nothing upstream of here
+        // filters them. The VT parser drops raw C0, but an OSC 7 URL is
+        // percent-decoded AFTER that, so `%0A`, `%1B` and `%07` arrive as
+        // real bytes; the parse table admits DEL and C1 as payload, so an
+        // OSC 9;9 path needs no encoding trick at all; and an interior NUL
+        // is legal in the slice but truncates the moment it crosses the C
+        // ABI as `[*:0]const u8`, leaving the two sides holding different
+        // paths.
+        //
+        // Anything that can move a cursor or open an escape sequence has no
+        // business in a directory name. This is the one funnel every
+        // reporting arm reaches -- the raw Windows path, the translated URL
+        // and OSC 7777 -- so the rule lands on all of them at once. Same
+        // rule the OSC 7777 parser already applies to its own fields.
+        for (reported) |b| if (b < 0x20 or b == 0x7f) {
+            log.warn("ignoring reported pwd containing control characters", .{});
+            return;
+        };
+
         // One prompt reports its directory three times: OSC 7 and OSC 9;9
         // both carry it and OSC 7777 carries it again. Only the first is
         // news. Each of the others otherwise costs a copy, a heap
@@ -2381,6 +2400,45 @@ test "pwd: one prompt's OSC 7, 9;9 and 7777 burst reports once" {
     const moved = h.drain();
     try testing.expectEqual(@as(usize, 1), moved.pwd);
     try testing.expectEqual(@as(usize, 1), moved.title);
+    try testing.expectEqualStrings("C:\\Users\\me\\src", h.handler.terminal.getPwd().?);
+}
+
+test "pwd: a reported directory carrying control characters is refused" {
+    // The VT parser drops raw C0 before an OSC string is assembled, which is
+    // why this went unnoticed: OSC 7 percent-decodes AFTER that, so `%0A`,
+    // `%1B` and `%07` travel as ordinary ASCII and become real control bytes
+    // in the path. OSC 9;9 needs no trick -- the parse table admits DEL as
+    // payload. Either way the surface must keep the directory it had.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var h: PwdTestHarness = undefined;
+    try h.init(testing.allocator);
+    defer h.deinit(testing.allocator);
+
+    // A good directory first, so a refusal has something it must not replace
+    // -- and so this cannot pass merely because nothing was ever set.
+    h.feed("\x1b]9;9;C:\\Users\\me\x07");
+    _ = h.drain();
+    try testing.expectEqualStrings("C:\\Users\\me", h.handler.terminal.getPwd().?);
+
+    // A newline, an ESC opening a title sequence, and a BEL -- all reached
+    // through percent-decoding, all past the parser's C0 filter.
+    h.feed("\x1b]7;file://MYPC/c:/Users/me%0A%1B]0;X%07evil\x07");
+    // A raw DEL, which the parse table hands through as payload.
+    h.feed("\x1b]9;9;C:\\Users\\me\x7fevil\x07");
+    // And a NUL, which is legal in the slice but truncates at the C ABI, so
+    // the two sides of the boundary would disagree about the path.
+    h.feed("\x1b]7;file://MYPC/c:/Users/me%00evil\x07");
+
+    const refused = h.drain();
+    try testing.expectEqual(@as(usize, 0), refused.pwd);
+    try testing.expectEqual(@as(usize, 0), refused.title);
+    try testing.expectEqualStrings("C:\\Users\\me", h.handler.terminal.getPwd().?);
+
+    // The guard refuses those bytes, not every path after them.
+    h.feed("\x1b]9;9;C:\\Users\\me\\src\x07");
+    try testing.expectEqual(@as(usize, 1), h.drain().pwd);
     try testing.expectEqualStrings("C:\\Users\\me\\src", h.handler.terminal.getPwd().?);
 }
 

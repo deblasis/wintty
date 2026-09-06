@@ -168,9 +168,16 @@ pub fn pathHost(path: []const u8) error{InvalidPath}!PathHost {
     if (!std.mem.startsWith(u8, path, "\\\\")) return .local;
     const rest = path[2..];
 
-    // `\\?\` (extended-length) and `\\.\` (device) share a shape and a
-    // meaning: what follows is not a server name.
-    if (rest.len >= 2 and (rest[0] == '?' or rest[0] == '.') and rest[1] == '\\') {
+    // `\\.\` is the device namespace. It shares its shape with `\\?\` --
+    // what follows either is not a server name -- but not its permitted
+    // continuations: `\\?\C:\dir` is the long-path spelling of a real
+    // directory, while `\\.\C:` is a handle to the volume object. No shell
+    // reports a device as its working directory, so the whole namespace is
+    // refused rather than sharing the drive-letter escape below.
+    if (rest.len >= 2 and rest[0] == '.' and rest[1] == '\\') return error.InvalidPath;
+
+    // `\\?\` (extended-length): what follows is not a server name either.
+    if (rest.len >= 2 and rest[0] == '?' and rest[1] == '\\') {
         const tail = rest[2..];
         if (std.ascii.startsWithIgnoreCase(tail, "UNC\\")) return hostOf(tail[4..]);
         // `\\?\C:\dir` is the long-path spelling of a drive root.
@@ -445,6 +452,14 @@ test "posix_path: pathHost recovers the server a raw path names" {
     // The device namespace is not a directory.
     try std.testing.expectError(error.InvalidPath, pathHost("\\\\.\\COM1"));
     try std.testing.expectError(error.InvalidPath, pathHost("\\\\?\\GLOBALROOT\\Device\\X"));
+    // ...including where it borrows a drive letter. `\\?\C:\dir` is the
+    // long-path spelling of a real directory; `\\.\C:` is a handle to the
+    // volume object, and no shell reports one as its working directory. The
+    // two prefixes share a shape, not a permitted continuation.
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\.\\C:\\dir"));
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\.\\C:"));
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\.\\pipe\\x"));
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\.\\UNC\\evil.example.com\\share"));
 }
 
 test "posix_path: isLocalShareHost admits only hosts that never reach the wire" {
