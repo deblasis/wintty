@@ -464,8 +464,13 @@ public partial class App : Application
     private static readonly object _crashLogLock = new();
 
     // Enough of crash.log to hold every entry that could postdate the
-    // previous launch; the file itself is unbounded.
-    private const long CrashLogTailBytes = 64 * 1024;
+    // previous launch; the file itself is unbounded. A post-stall
+    // cascade (three handlers per exception, one entry per unobserved
+    // task, other instances appending) can add a burst of entries after
+    // the stall line, so this is deliberately generous: the cost is one
+    // 1 MiB read at launch, and a marker advanced past a stall the
+    // window missed is unrecoverable.
+    private const long CrashLogTailBytes = 1024 * 1024;
 
     /// <summary>
     /// Show the one-per-stall notice for hang evidence a previous
@@ -503,7 +508,8 @@ public partial class App : Application
 
             var outcome = Ghostty.Core.Diagnostics.HangEvidenceStartup.Resolve(
                 ReadCrashLogTail(Path.Combine(root, "crash.log")),
-                lastLaunch);
+                lastLaunch,
+                launchedAt);
 
             // Written after the evaluation and whether or not a notice
             // follows: the next launch compares against THIS one, so a
@@ -521,8 +527,8 @@ public partial class App : Application
             _notificationService?.Show(new Ghostty.Core.Notifications.Notice
             {
                 Title = "Wintty froze and captured evidence",
-                Message = "Wintty froze in a previous session and captured a hang dump in "
-                    + hangsDir + ", which may contain sensitive terminal content.",
+                Message = "Wintty froze in a previous session and wrote hang evidence to "
+                    + hangsDir + ". If a hang dump is there it may contain sensitive content.",
                 Severity = Ghostty.Core.Notifications.NoticeSeverity.Informational,
                 IsClosable = true,
                 DedupKey = "hang-evidence",
@@ -570,20 +576,10 @@ public partial class App : Application
         }
     }
 
-    private static string? ReadCrashLogTail(string path)
-    {
-        if (!File.Exists(path)) return null;
-
-        // ReadWrite sharing like ConfigIniFile: another instance of the
-        // app may hold the log open for appending.
-        using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        if (stream.Length > CrashLogTailBytes)
-            stream.Seek(-CrashLogTailBytes, SeekOrigin.End);
-        using var reader = new StreamReader(stream);
-        return reader.ReadToEnd();
-    }
+    private static string? ReadCrashLogTail(string path) =>
+        Diagnostics.FileTail.Read(path, CrashLogTailBytes) is { } tail
+            ? System.Text.Encoding.UTF8.GetString(tail)
+            : null;
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -706,6 +702,11 @@ public partial class App : Application
         _logFilters = filters;
         LoggerFactory = factory;
         _configService.ConfigChanged += OnConfigChanged_ApplyLogFilters;
+        // The watchdog's hang-dump scope is a launch-time seed, not a
+        // live read; re-seed on reload so a mid-session switch (support
+        // asking for hang-dump = full before a repro) takes effect
+        // without a restart, in both directions.
+        _configService.ConfigChanged += OnConfigChanged_SeedHangDumpMode;
 
         // Install the libghostty log bridge now that the factory
         // exists. After this point every Zig std.log call is delivered
@@ -780,15 +781,14 @@ public partial class App : Application
         // thread cannot show anything, so this launch is the first
         // moment the user can be told. One notice per stall event; the
         // last-launch marker inside keeps later launches quiet unless a
-        // newer stall lands.
-        ShowPreviousSessionHangNotice();
-
-        // Single-instance gate. Acted on here -- after the logger factory
-        // exists (so failures are visible in Release), but before the
-        // bootstrap host, window, and DX12 renderer are created -- so a
-        // secondary process forwards its launch and exits without ever
-        // creating a window or paying for the renderer.
+        // newer stall lands. AFTER the single-instance gate: a secondary
+        // process forwards and exits below, and if it evaluated first it
+        // would advance the marker and consume the notice into a
+        // NotificationService no host ever binds -- precisely when the
+        // user re-launched because the primary hung.
         HandleSingleInstanceGate(Program.SingleInstance);
+
+        ShowPreviousSessionHangNotice();
 
         // Power-saving monitor. Reads power-saver-mode from config every
         // time it resolves (Func thunk decouples it from ConfigService
@@ -2051,6 +2051,12 @@ public partial class App : Application
         if (_logFilters is null) return;
         Ghostty.Core.Logging.LoggingBootstrap.ApplyFilters(
             _logFilters, cfg.LogLevel, cfg.LogFilter);
+    }
+
+    private void OnConfigChanged_SeedHangDumpMode(Ghostty.Core.Config.IConfigService cfg)
+    {
+        // Fires after the re-read, so the property is the fresh value.
+        Diagnostics.HangWatchdog.ConfigureDumpMode(_configService.HangDump);
     }
 
     private void OnConfigChanged_NotifyPowerMonitor(Ghostty.Core.Config.IConfigService cfg)

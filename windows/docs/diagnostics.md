@@ -95,9 +95,10 @@ GUI process has no usable stderr. Panic messages and their backtraces
 land here verbatim; a native abort otherwise disappears with only an
 exit code.
 
-Capped at 8 MB. When a launch finds the file past the cap it is emptied
-before the capture installs, so the interesting content (a panic at the
-tail) survives.
+Capped at 8 MB. When a launch finds the file past the cap it is
+rewritten holding its newest half (4 MB), so the interesting content
+(a panic at the tail) survives while content from older sessions is
+gone. Content below the cap from a previous session is still present.
 
 Sensitivity: whatever the core printed, which can include echoed text
 and tokens. Redact before sharing, or send it privately.

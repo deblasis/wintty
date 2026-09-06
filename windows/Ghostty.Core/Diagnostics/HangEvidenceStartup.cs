@@ -30,16 +30,28 @@ public static class HangEvidenceStartup
     public const string StallMarker = "[UI-THREAD STALL]";
 
     /// <summary>
-    /// Newest stall entry in <paramref name="crashLogTail"/> that is
-    /// newer than <paramref name="lastLaunch"/>, or
-    /// <c>Notify = false</c> when there is none. Entries are appended
-    /// chronologically, so the scan walks from the end and the first
-    /// line that parses is the newest; a partial trailing line (a crash
-    /// mid-write can leave one) is skipped rather than fatal.
+    /// Newest stall entry in <paramref name="crashLogTail"/> strictly
+    /// between <paramref name="lastLaunch"/> (the previous session's
+    /// marker) and <paramref name="currentLaunch"/> (this launch's
+    /// instant), or <c>Notify = false</c> when there is none. Entries
+    /// are appended chronologically, so the scan walks from the end and
+    /// the first line that parses is the newest; nothing older can
+    /// change the verdict, so the scan stops there. A partial trailing
+    /// line (a crash mid-write can leave one), or a partial leading
+    /// line (the tail read can cut one), is skipped rather than fatal.
+    /// <paramref name="currentLaunch"/> excludes stalls logged during
+    /// this session's own launch (a slow start can trip the watchdog):
+    /// those notify on the NEXT launch instead.
     /// </summary>
-    public static HangEvidenceOutcome Resolve(string? crashLogTail, DateTimeOffset lastLaunch)
+    public static HangEvidenceOutcome Resolve(
+        string? crashLogTail,
+        DateTimeOffset lastLaunch,
+        DateTimeOffset currentLaunch)
     {
         if (string.IsNullOrEmpty(crashLogTail)) return default;
+        // The common case is a log with no stall at all; one ordinal
+        // search over the tail beats walking it line by line.
+        if (!crashLogTail.AsSpan().Contains(StallMarker, StringComparison.Ordinal)) return default;
 
         var rest = crashLogTail.AsSpan();
         while (!rest.IsEmpty)
@@ -50,8 +62,12 @@ public static class HangEvidenceStartup
             var line = lastNewline < 0 ? rest : rest[(lastNewline + 1)..];
             rest = lastNewline < 0 ? default : rest[..lastNewline];
 
-            if (TryReadStallTimestamp(line, out var stall) && stall > lastLaunch)
-                return new HangEvidenceOutcome(Notify: true, NewestStall: stall);
+            // First parseable stall line from the end is the newest;
+            // older entries cannot beat it, so one comparison decides.
+            if (TryReadStallTimestamp(line, out var stall))
+                return stall > lastLaunch && stall <= currentLaunch
+                    ? new HangEvidenceOutcome(Notify: true, NewestStall: stall)
+                    : default;
         }
 
         return default;

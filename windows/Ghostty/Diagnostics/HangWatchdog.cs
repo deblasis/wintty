@@ -117,21 +117,21 @@ internal static class HangWatchdog
             Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
             File.AppendAllText(
                 logPath,
-                $"{DateTimeOffset.UtcNow:O} [UI-THREAD STALL]\n" +
+                $"{DateTimeOffset.UtcNow:O} {HangEvidenceStartup.StallMarker}\n" +
                 $"The UI thread has not pumped for {stalledFor.TotalSeconds:N0}s; " +
                 $"capturing {dumpPath} ({DumpLabel(mode)})\n\n");
         }
         catch { /* diagnostics must not throw */ }
 
-        CaptureMinidump(pid, dumpPath, mode);
+        var written = CaptureMinidump(pid, dumpPath, mode);
 
         try
         {
             var modeWord = HangDump.ConfigValue(mode);
             File.AppendAllText(
                 logPath,
-                $"{DateTimeOffset.UtcNow:O} [UI-THREAD STALL] minidump " +
-                (File.Exists(dumpPath)
+                $"{DateTimeOffset.UtcNow:O} {HangEvidenceStartup.StallMarker} minidump " +
+                (written && File.Exists(dumpPath)
                     ? $"written ({new FileInfo(dumpPath).Length:N0} bytes, {modeWord})"
                     : $"FAILED ({modeWord})") +
                 "\n\n");
@@ -151,15 +151,15 @@ internal static class HangWatchdog
 
     // ---- minidump capture ------------------------------------------------
 
-    // MINIDUMP_TYPE flag values, each with the reason it earns a place
-    // in a mask below.
+    // MINIDUMP_TYPE flag values (minidumpapiset.h), each with the reason
+    // it earns a place in a mask below.
     private const uint MiniDumpWithFullMemory = 0x2;                     // every byte of the process: the secrets-bearing opt-in
     private const uint MiniDumpWithHandleData = 0x4;                     // the handle table: which thread holds the lock the UI thread is stuck on
     private const uint MiniDumpScanMemory = 0x10;                        // marks dump ranges so stacks that walk referenced memory still symbolize
     private const uint MiniDumpWithUnloadedModules = 0x20;               // resolves stale frames pointing into modules that already exited
     private const uint MiniDumpWithFullMemoryInfo = 0x800;               // the full virtual-memory map: only meaningful alongside full memory
     private const uint MiniDumpWithThreadInfo = 0x1000;                  // per-thread timings: how long each thread sat where it is
-    private const uint MiniDumpWithIndirectlyReferencedMemory = 0x40000; // memory the stacks point at: locals and lock words without the whole heap
+    private const uint MiniDumpWithIndirectlyReferencedMemory = 0x40;    // memory the stacks point at: locals and lock words without the whole heap
 
     // Triage mask (the default): walks stacks and lock ownership with no
     // heap sweep, so the dump stays small and free of terminal content.
@@ -185,8 +185,11 @@ internal static class HangWatchdog
     /// purpose: comsvcs' rundll32 dumper writes an Administrators-only
     /// DACL nobody can read without elevating (verified while chasing
     /// #1036), and the dump then can't even be copied out for support.
+    /// Returns whether dbghelp reported success: the file is created
+    /// before the call, so its existence proves nothing (a failed
+    /// capture leaves an empty .dmp).
     /// </summary>
-    private static void CaptureMinidump(int pid, string path, HangDumpMode mode)
+    private static bool CaptureMinidump(int pid, string path, HangDumpMode mode)
     {
         try
         {
@@ -194,12 +197,15 @@ internal static class HangWatchdog
             using var proc = Process.GetProcessById(pid);
             using var fs = new FileStream(
                 path, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
-            _ = MiniDumpWriteDump(
+            return MiniDumpWriteDump(
                 proc.Handle, (uint)pid, fs.SafeFileHandle.DangerousGetHandle(),
                 mode == HangDumpMode.Full ? FullDumpFlags : TriageDumpFlags,
                 IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         }
-        catch { /* diagnostics must not throw */ }
+        catch
+        {
+            return false;
+        }
     }
 
     [DllImport("dbghelp.dll")]

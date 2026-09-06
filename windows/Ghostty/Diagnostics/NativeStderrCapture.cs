@@ -26,7 +26,8 @@ internal static partial class NativeStderrCapture
     /// <summary>
     /// Cap on the capture file. Panics are a few KB; anything past this
     /// is a chatty native write we do not need to keep across launches,
-    /// so the file truncates at the cap rather than growing forever.
+    /// so at the cap the file is rewritten holding its newest half
+    /// rather than growing forever.
     /// </summary>
     private const long MaxBytes = 8 * 1024 * 1024;
 
@@ -91,21 +92,15 @@ internal static partial class NativeStderrCapture
 
     /// <summary>
     /// Rewrite <paramref name="path"/> holding only its last
-    /// <paramref name="keepBytes"/> bytes. ReadWrite sharing because a
-    /// concurrently-running second instance may hold the file open for
-    /// appending; if that same instance then blocks the rewrite, the
+    /// <paramref name="keepBytes"/> bytes, via the shared tail reader.
+    /// If a concurrently-running second instance blocks the rewrite, the
     /// caller treats rotation as failed and keeps appending.
     /// </summary>
     private static void KeepTail(string path, long keepBytes)
     {
-        using var src = new FileStream(
-            path, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        if (src.Length <= keepBytes) return;
-        src.Seek(-keepBytes, SeekOrigin.End);
-        using var tail = new MemoryStream((int)keepBytes);
-        src.CopyTo(tail);
-        File.WriteAllBytes(path, tail.ToArray());
+        var tail = FileTail.Read(path, keepBytes);
+        if (tail is null || tail.Length < keepBytes) return;
+        File.WriteAllBytes(path, tail);
     }
 
     private const int StdErrorHandle = -12; // STD_ERROR_HANDLE

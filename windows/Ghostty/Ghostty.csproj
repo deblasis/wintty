@@ -567,6 +567,19 @@
   </Target>
 
   <!--
+    Same silent-drop mechanism, pdb edition: a zig-out built before the
+    pdb was installed (or by a target that installs none) drops the pdb
+    copy item with zero signal, and every dump that build ever produces
+    is unsymbolizable. A warning, not an error: the app runs fine
+    without symbols, and release packaging (wintty-release's symbol
+    archive step) is where absence becomes fatal.
+  -->
+  <Target Name="WarnIfNoLibghosttyPdb" BeforeTargets="Build"
+          Condition="Exists('..\..\zig-out\lib\ghostty.dll') and !Exists('..\..\zig-out\lib\ghostty.pdb')">
+    <Warning Text="ghostty.pdb missing at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\lib\ghostty.pdb')) while ghostty.dll exists: minidumps from this build cannot be symbolized. Rebuild the dll ('zig build -Dapp-runtime=none') from a tree that installs the pdb." />
+  </Target>
+
+  <!--
     NativeAOT publish omits XAML binary resources (.xbf) and the
     package resource index (.pri) from the publish output. Without
     them Application.LoadComponent() cannot resolve ms-appx:/// URIs

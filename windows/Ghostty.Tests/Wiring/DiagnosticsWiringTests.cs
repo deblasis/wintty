@@ -107,6 +107,51 @@ public class DiagnosticsWiringTests
         Assert.True(service.Index < evaluate.Index,
             "the hang-evidence evaluation must run after the notification service is constructed");
     }
+
+    [Fact]
+    public void OnLaunchedShowsTheHangNoticeAfterTheSingleInstanceGate()
+    {
+        var method = App().Method("OnLaunched");
+        var gate = method.Body!.Statements
+            .Select((s, i) => (Statement: s, Index: i))
+            .Single(t => t.Statement is ExpressionStatementSyntax e &&
+                         e.Expression is InvocationExpressionSyntax i &&
+                         i.CalleeText() == "HandleSingleInstanceGate");
+        var evaluate = method.Body.Statements
+            .Select((s, i) => (Statement: s, Index: i))
+            .Single(t => t.Statement is ExpressionStatementSyntax e &&
+                         e.Expression is InvocationExpressionSyntax i &&
+                         i.CalleeText() == "ShowPreviousSessionHangNotice");
+
+        // A secondary instance forwards and exits inside the gate. With
+        // the evaluation before it, the secondary would advance the
+        // last-launch marker and queue the notice into a service no
+        // host ever binds: exactly when the user re-launched because
+        // the primary hung, the one-per-stall notice is consumed
+        // unseen.
+        Assert.True(gate.Index < evaluate.Index,
+            "the hang-evidence evaluation must run after the single-instance gate");
+    }
+
+    [Fact]
+    public void HangWatchdogMinidumpFlagValuesMatchTheSdk()
+    {
+        // The dump masks are composed from raw MINIDUMP_TYPE literals,
+        // and no behavioral test can see a wrong value: 0x40000 is
+        // MiniDumpWithTokenInformation, not indirectly-referenced
+        // memory (0x40), and a dump captured with that mask passes every
+        // test while containing the wrong evidence, token data
+        // included. Pin the literals to minidumpapiset.h so a typo is a
+        // red test, not a shipped mask.
+        var src = ShellSource.Load("Ghostty.Diagnostics.HangWatchdog.cs");
+        Assert.Equal("0x2", src.Field("MiniDumpWithFullMemory").Variable.Initializer!.Value.ToString());
+        Assert.Equal("0x4", src.Field("MiniDumpWithHandleData").Variable.Initializer!.Value.ToString());
+        Assert.Equal("0x10", src.Field("MiniDumpScanMemory").Variable.Initializer!.Value.ToString());
+        Assert.Equal("0x20", src.Field("MiniDumpWithUnloadedModules").Variable.Initializer!.Value.ToString());
+        Assert.Equal("0x800", src.Field("MiniDumpWithFullMemoryInfo").Variable.Initializer!.Value.ToString());
+        Assert.Equal("0x1000", src.Field("MiniDumpWithThreadInfo").Variable.Initializer!.Value.ToString());
+        Assert.Equal("0x40", src.Field("MiniDumpWithIndirectlyReferencedMemory").Variable.Initializer!.Value.ToString());
+    }
 }
 
 file static class DiagnosticsSyntaxQueries

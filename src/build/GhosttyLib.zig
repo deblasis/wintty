@@ -97,13 +97,22 @@ pub fn initShared(
         .search_strategy = .mode_first,
     };
 
+    // The one Windows dll target this fork ships; the CRT block below
+    // already assumes it. One const because three decisions hang on it
+    // (strip, CRT libs, pdb install), and drifting apart is exactly how
+    // an unsymbolizable dll ships quietly.
+    const win_msvc = deps.config.target.result.os.tag == .windows and
+        deps.config.target.result.abi == .msvc;
+
     // Stripping a Windows MSVC DLL saves no bytes: the debug info lives in
     // the .pdb beside the PE, not inside it. Honoring -Dstrip here would
     // ship releases whose user minidumps can never be symbolized, so the
     // strip default keeps applying to every other artifact and target.
-    const strip = deps.config.strip and
-        !(deps.config.target.result.os.tag == .windows and
-            deps.config.target.result.abi == .msvc);
+    // Scope note: this forces only the root module; zig's default
+    // additionally strips dependencies under ReleaseSmall, so a
+    // ReleaseSmall dll pdb would carry zig frames but not C dependency
+    // frames. ReleaseSmall is not a shipped dll mode.
+    const strip = deps.config.strip and !win_msvc;
 
     const lib = b.addLibrary(.{
         .name = "ghostty",
@@ -127,8 +136,7 @@ pub fn initShared(
     // that references symbols in vcruntime.lib and ucrt.lib. Zig's library
     // search paths include the MSVC lib dir and the Windows SDK 'um' dir,
     // but not the SDK 'ucrt' dir where ucrt.lib lives.
-    if (deps.config.target.result.os.tag == .windows and
-        deps.config.target.result.abi == .msvc)
+    if (win_msvc)
     {
         // The CRT initialization code in msvcrt.lib calls __vcrt_initialize
         // and __acrt_initialize, which are in the static CRT libraries.
@@ -197,11 +205,7 @@ pub fn initShared(
             lib.getEmittedImplib()
         else
             null,
-        .pdb = if (deps.config.target.result.os.tag == .windows and
-            deps.config.target.result.abi == .msvc)
-            lib.getEmittedPdb()
-        else
-            null,
+        .pdb = if (win_msvc) lib.getEmittedPdb() else null,
         .dsym = dsymutil,
         .pkg_config = pcs.shared,
         .pkg_config_static = pcs.static,
