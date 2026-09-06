@@ -105,9 +105,15 @@ pub const Mailbox = union(enum) {
                 // are other messages in the writer queue (resize, focus) that
                 // could acquire the lock. This is why we have to release our lock
                 // here.
+                //
+                // A `.forever` push cannot fail, so there is no drop path
+                // here: the message is either queued or this thread is
+                // still waiting for a slot. The wake above is what makes
+                // the writer thread drain, and it has already been issued
+                // by the time we get here.
                 if (mutex) |m| m.unlock(global.io());
                 defer if (mutex) |m| m.lockUncancelable(global.io());
-                if (mb.queue.push(global.io(), msg, .{ .forever = {} }) == 0) msg.deinit();
+                _ = mb.queue.push(global.io(), msg, .{ .forever = {} });
             },
         }
     }
