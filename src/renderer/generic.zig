@@ -4540,12 +4540,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             if (atlas.size > texture.width) {
-                // Free our old texture
-                texture.*.deinit();
+                try replaceAtlasTexture(&self.api, atlas, texture);
 
-                // Reallocate. The new texture is empty, so it needs the
-                // whole atlas no matter how little the caller asked for.
-                texture.* = try self.api.initAtlasTexture(atlas);
+                // The new texture is empty, so it needs the whole atlas
+                // no matter how little the caller asked for.
                 try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
                 return;
             }
@@ -4570,6 +4568,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             );
         }
     };
+}
+
+/// Point `texture` at a freshly allocated texture sized for `atlas`,
+/// giving up the one it held.
+///
+/// The new texture is created before the old one is released, so that a
+/// creation failure leaves `texture.*` holding a texture that still owns
+/// its resource. Releasing first would leave it holding a released one,
+/// and since a failed grow does not advance the atlas modified counter,
+/// the next frame syncs the same texture again and releases it a second
+/// time -- on DX12 that double-releases the GPU resource and returns its
+/// descriptor slots to the heap twice.
+///
+/// This ordering is also what keeps the backends interchangeable: DX12's
+/// Texture has an all-defaults zero value that deinits to nothing, but
+/// Metal's and OpenGL's wrap a bare handle with no such value, so there is
+/// no "invalid texture" to park in `texture.*` on the error path.
+fn replaceAtlasTexture(
+    api: anytype,
+    atlas: *const font.Atlas,
+    texture: anytype,
+) !void {
+    const new_texture = try api.initAtlasTexture(atlas);
+    texture.deinit();
+    texture.* = new_texture;
 }
 
 /// Whether the post-process custom shader path can be used for a frame.
@@ -4883,6 +4906,113 @@ test "AbandonReason: every reason completes the log sentence" {
     for (std.enums.values(AbandonReason)) |reason| {
         try std.testing.expect(reason.text().len > 0);
     }
+}
+
+/// Backing store for the fake API and textures below. Release is tracked
+/// per texture id so a second release of the same texture is observable
+/// instead of being the silent GPU corruption it is in production.
+const TestAtlasTextures = struct {
+    fail_next: bool = false,
+    next_id: usize = 0,
+    released: [8]bool = @splat(false),
+    double_release: bool = false,
+};
+
+/// Stands in for a backend `Texture`. Only `deinit` matters here; the
+/// grow path's `replaceRegion` is the caller's business.
+const TestAtlasTexture = struct {
+    store: *TestAtlasTextures,
+    id: usize,
+
+    fn deinit(self: TestAtlasTexture) void {
+        if (self.store.released[self.id]) {
+            self.store.double_release = true;
+            return;
+        }
+        self.store.released[self.id] = true;
+    }
+};
+
+/// Stands in for a `GraphicsAPI`, with a const self like all three real
+/// ones so the call in `replaceAtlasTexture` binds the same way.
+const TestAtlasApi = struct {
+    store: *TestAtlasTextures,
+
+    fn initAtlasTexture(
+        self: *const TestAtlasApi,
+        atlas: *const font.Atlas,
+    ) !TestAtlasTexture {
+        _ = atlas;
+        if (self.store.fail_next) return error.TextureCreateFailed;
+        defer self.store.next_id += 1;
+        return .{ .store = self.store, .id = self.store.next_id };
+    }
+};
+
+const test_atlas: font.Atlas = .{
+    .data = undefined,
+    .size = 1,
+    .format = .grayscale,
+};
+
+test "replaceAtlasTexture: a failed grow keeps the texture it had" {
+    // Regression: the grow path used to release the old texture before
+    // asking for the new one. On the error path `texture.*` was left
+    // holding the released value, so the next sync -- the very next frame,
+    // since a failed grow does not advance the atlas modified counter --
+    // released it a second time. On DX12 that double-releases the GPU
+    // resource and hands the same SRV descriptor slots back twice.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var texture = try api.initAtlasTexture(&test_atlas);
+
+    store.fail_next = true;
+    try std.testing.expectError(
+        error.TextureCreateFailed,
+        replaceAtlasTexture(&api, &test_atlas, &texture),
+    );
+
+    // The texture we still hold must still own its resource: it is what
+    // the renderer keeps drawing from until a later grow succeeds.
+    try std.testing.expect(!store.released[texture.id]);
+
+    // And tearing the frame state down now must be that texture's first
+    // release, not its second.
+    texture.deinit();
+    try std.testing.expect(!store.double_release);
+}
+
+test "replaceAtlasTexture: a successful grow releases the old texture once" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var texture = try api.initAtlasTexture(&test_atlas);
+    const old_id = texture.id;
+
+    try replaceAtlasTexture(&api, &test_atlas, &texture);
+
+    try std.testing.expect(texture.id != old_id);
+    try std.testing.expect(store.released[old_id]);
+    try std.testing.expect(!store.released[texture.id]);
+    try std.testing.expect(!store.double_release);
+}
+
+test "replaceAtlasTexture: repeated failed grows never double release" {
+    // The failure is not one-shot: a device that cannot create the bigger
+    // texture usually cannot create it on the next frame either, and the
+    // renderer retries every frame for as long as that lasts.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var texture = try api.initAtlasTexture(&test_atlas);
+
+    store.fail_next = true;
+    for (0..5) |_| {
+        try std.testing.expectError(
+            error.TextureCreateFailed,
+            replaceAtlasTexture(&api, &test_atlas, &texture),
+        );
+    }
+    try std.testing.expect(!store.double_release);
+    try std.testing.expect(!store.released[texture.id]);
 }
 
 test "customShaderUsable: no custom shader state means no custom shader path" {
