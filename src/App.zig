@@ -592,6 +592,25 @@ pub const Message = union(enum) {
     /// message if it needs to.
     redraw_surface: *apprt.Surface,
 
+    /// Release anything the message owns. `Mailbox.push` calls this when
+    /// a full queue makes it give the message up.
+    ///
+    /// Exhaustive on purpose: a variant that starts owning memory has to
+    /// be decided here rather than compiling into a silent leak on every
+    /// drop.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .surface_message => |v| v.message.deinit(),
+
+            .open_config,
+            .new_window,
+            .close,
+            .quit,
+            .redraw_surface,
+            => {},
+        }
+    }
+
     const NewWindow = struct {
         /// The parent surface
         parent: ?*Surface = null,
@@ -613,16 +632,256 @@ pub const Mailbox = struct {
     rt_app: *apprt.App,
     mailbox: *Queue,
 
-    /// Send a message to the surface.
+    /// Send a message to the surface. `.forever` takes ownership of
+    /// `msg`: it is either queued or released.
+    ///
+    /// `.forever` does not park here. This queue is drained by `App.tick`
+    /// alone and the apprt calls that from its wakeup handler -- on the
+    /// embedded runtime that handler is the only caller there is -- so a
+    /// producer waiting inside the queue is waiting for a drain its own
+    /// wake has to start. It waits in windows instead and re-issues the
+    /// wake after each one.
+    ///
+    /// The budget is the background pair, roughly a minute, because every
+    /// producer that reaches this path is a background thread: the search
+    /// thread, the termio writer and the pty reader. The cost of the wait
+    /// is a stalled search or a stalled child, not a frozen window.
+    ///
+    /// It is a budget and not an unbounded wait because a wedged consumer
+    /// is not the same thing as a dead one. The app thread can be alive
+    /// and itself blocked pushing to another full mailbox, and then a
+    /// producer that never gives up is one half of a deadlock that only a
+    /// kill recovers from. Giving up costs one message; `Message.deinit`
+    /// is what makes that cost bounded rather than a leak.
+    ///
+    /// The re-issued wake has no test of its own. Under
+    /// `-Dapp-runtime=none` -- the only runtime that compiles here --
+    /// `apprt.none.App.wakeup` is an empty body, so a fixed and an
+    /// unfixed push are observationally identical and reverting this
+    /// produces no failure. The loop is tested in
+    /// `BlockingQueue.pushWake`; the give-up path is tested below.
+    ///
+    /// `push` is the streaming policy: it fails fast while the queue is
+    /// latched wedged. Use `pushRequired` for the rare message whose
+    /// loss nothing re-derives.
     pub fn push(self: Mailbox, msg: Message, timeout: Queue.Timeout) Queue.Size {
-        const result = self.mailbox.push(global.io(), msg, timeout);
+        const result = switch (timeout) {
+            .forever => self.pushBounded(
+                msg,
+                Queue.wake_retry_timeout_ns,
+                Queue.wake_retry_attempts,
+                // The search thread emits match batches per tick and the
+                // pty reader emits per OSC, so this queue's producers do
+                // arrive in streams. Spending the budget once per stall
+                // rather than once per message is what keeps a wedged app
+                // thread from stalling them for as long as it is wedged.
+                .fail_fast,
+            ),
+
+            .instant, .ns => self.mailbox.push(global.io(), msg, timeout),
+        };
 
         // Wake up our app loop
         self.rt_app.wakeup();
 
         return result;
     }
+
+    /// Push a one-shot message that nothing re-derives if it is lost.
+    ///
+    /// The latch that `push` respects turns a *delayed* delivery into a
+    /// *permanent* loss for this class of message: an app thread wedged
+    /// past one budget and then recovering would still have delivered it
+    /// on the next attempt, and `.fail_fast` throws that attempt away.
+    /// `.persist` spends the full budget instead, which is what the queue
+    /// did for every message before the latch existed.
+    ///
+    /// This is deliberately NOT the policy for `password_input`, the
+    /// other one-shot on this queue: that one is re-derived by the
+    /// termios poll every 200ms until the surface agrees, so a give-up
+    /// there costs one poll rather than the state. `.child_exited` has no
+    /// such poll -- `processExitCommon` runs once per surface lifetime --
+    /// so the budget is the only thing standing between a wedge and a tab
+    /// that never learns its child is gone.
+    ///
+    /// Where this stands against the merge base: better, not equal. On
+    /// `218b8243db` this function's ancestor waited on the not-full
+    /// condition with no timeout at all, and only a `pop` can signal
+    /// that condition, so a producer facing an app thread that had
+    /// stopped draining parked here forever. `.persist` **bounds** that
+    /// hang at one background budget; it does not restore one.
+    ///
+    /// The cost, stated plainly, and it is worse on Windows than on
+    /// POSIX. On POSIX the caller is `Exec.processExit`, an `xev.Process`
+    /// wait callback on the termio writer thread, so a wedged app thread
+    /// parks that thread for one background budget per child exit.
+    ///
+    /// On Windows -- which is what this fork ships -- the caller is
+    /// `Exec.winProcessWaitThread`, a dedicated `WaitForSingleObject`
+    /// thread, and at teardown the wait reaches the UI thread through two
+    /// joins: `Surface.deinit` joins the io thread, and `Exec.threadExit`
+    /// joins the wait thread. In that path the stall is **guaranteed, not
+    /// conditional**: the app thread is inside `Surface.deinit`, so it is
+    /// by construction not draining this mailbox, and no separate "wedged
+    /// app thread" precondition is needed -- a full mailbox at close time
+    /// is enough. Worse, that is the push `Exec.threadExit` itself calls
+    /// harmless: `App.surfaceMessage` gates on `hasSurface` and the
+    /// surface is being destroyed, so the budget is spent delivering a
+    /// message guaranteed to be discarded.
+    ///
+    /// That path is worth closing and is filed as a follow-up
+    /// (suppressing the teardown push in `Exec`), not fixed here: the
+    /// flag would be written on the io thread and read on the wait
+    /// thread, so it needs an ordering argument rather than an
+    /// assignment, and it can only narrow the window -- the wait thread
+    /// can already be inside `processExitCommon` when the flag is set.
+    ///
+    /// It is bounded either way: past the budget the message is still
+    /// given up and freed.
+    pub fn pushRequired(self: Mailbox, msg: Message) Queue.Size {
+        return self.pushRequiredBounded(
+            msg,
+            Queue.wake_retry_timeout_ns,
+            Queue.wake_retry_attempts,
+        );
+    }
+
+    /// `pushRequired` with the budget as a parameter, so a test can make
+    /// the wait short enough to observe. The wedge token is the whole
+    /// point of the function and is what a mutation should revert.
+    fn pushRequiredBounded(
+        self: Mailbox,
+        msg: Message,
+        timeout_ns: u64,
+        max_attempts: usize,
+    ) Queue.Size {
+        const result = self.pushBounded(msg, timeout_ns, max_attempts, .persist);
+
+        // Wake up our app loop
+        self.rt_app.wakeup();
+
+        return result;
+    }
+
+    fn pushBounded(
+        self: Mailbox,
+        msg: Message,
+        timeout_ns: u64,
+        max_attempts: usize,
+        wedge: Queue.Wedge,
+    ) Queue.Size {
+        const size = self.mailbox.pushWake(
+            global.io(),
+            msg,
+            self.rt_app,
+            wakeApp,
+            timeout_ns,
+            max_attempts,
+            wedge,
+        );
+        if (size == 0) {
+            log.warn("app mailbox full, message dropped", .{});
+            msg.deinit();
+        }
+
+        return size;
+    }
+
+    fn wakeApp(rt_app: *apprt.App) void {
+        rt_app.wakeup();
+    }
 };
+
+test "app mailbox push frees the message it has to give up" {
+    const testing = std.testing;
+    const build_config = @import("build_config.zig");
+
+    // The only runtime whose `wakeup` ignores its receiver, which is what
+    // lets this test hand it an undefined one.
+    if (build_config.app_runtime != .none) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    const queue = try Mailbox.Queue.create(alloc);
+    defer queue.destroy(alloc);
+
+    var rt_app: apprt.App = undefined;
+    const mailbox: Mailbox = .{ .rt_app = &rt_app, .mailbox = queue };
+
+    // Fill the queue and never drain it. An app thread that is alive but
+    // blocked on another full mailbox looks exactly like this from a
+    // producer's side, and that is the state an unbounded wait here turns
+    // into a deadlock.
+    while (queue.push(io, .{ .quit = {} }, .{ .instant = {} }) > 0) {}
+
+    // A pwd longer than the inline capacity is heap allocated, so
+    // std.testing.allocator fails this test if the give-up path leaks it.
+    const pwd = "/" ++ ("d" ** 400);
+    const req = try apprt.surface.Message.WriteReq.init(alloc, @as([]const u8, pwd));
+    try testing.expect(req == .alloc);
+
+    // A tiny budget so the test finishes; production uses the queue's
+    // wake_retry_* defaults.
+    const size = mailbox.pushBounded(.{ .surface_message = .{
+        .surface = undefined,
+        .message = .{ .pwd_change = req },
+    } }, 1 * std.time.ns_per_ms, 3, .fail_fast);
+
+    try testing.expectEqual(@as(Mailbox.Queue.Size, 0), size);
+}
+
+test "app mailbox pushRequired ignores a latch that push respects" {
+    const testing = std.testing;
+    const build_config = @import("build_config.zig");
+
+    // The only runtime whose `wakeup` ignores its receiver, which is what
+    // lets this test hand it an undefined one.
+    if (build_config.app_runtime != .none) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    const queue = try Mailbox.Queue.create(alloc);
+    defer queue.destroy(alloc);
+
+    var rt_app: apprt.App = undefined;
+    const mailbox: Mailbox = .{ .rt_app = &rt_app, .mailbox = queue };
+
+    // A wedged app thread: full, and nothing drains it.
+    while (queue.push(io, .{ .quit = {} }, .{ .instant = {} }) > 0) {}
+
+    // Latch the queue the way a stream of search results would.
+    const window_ns = 20 * std.time.ns_per_ms;
+    try testing.expectEqual(@as(Mailbox.Queue.Size, 0), mailbox.pushBounded(
+        .{ .quit = {} },
+        window_ns,
+        3,
+        .fail_fast,
+    ));
+    try testing.expect(queue.wedged.load(.acquire));
+
+    // `.child_exited` is the message this exists for: one shot, nothing
+    // re-derives it. It must still spend its budget against the latch,
+    // because an app thread that recovers inside that budget delivers it.
+    // Measured rather than asserted on the token, so swapping `.persist`
+    // for `.fail_fast` in `pushRequiredBounded` fails here: three 20ms
+    // windows cannot complete in under 30ms, and a fail-fast give-up is
+    // a single non-blocking attempt.
+    const start = std.Io.Timestamp.now(io, .awake);
+    try testing.expectEqual(@as(Mailbox.Queue.Size, 0), mailbox.pushRequiredBounded(
+        .{ .surface_message = .{
+            .surface = undefined,
+            .message = .{ .child_exited = .{ .exit_code = 0, .runtime_ms = 0 } },
+        } },
+        window_ns,
+        3,
+    ));
+
+    // One-directional: load on the build machine can only lengthen this,
+    // never shorten it, so a busy host cannot make this flaky.
+    try testing.expect(start.untilNow(io, .awake).toMilliseconds() >= 30);
+}
 
 // Wasm API.
 pub const Wasm = if (!builtin.target.isWasm()) struct {} else struct {

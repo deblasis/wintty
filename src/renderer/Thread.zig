@@ -1027,3 +1027,174 @@ const Compression = struct {
         };
     }
 };
+
+/// Push a message to a renderer thread's mailbox, re-issuing the
+/// thread's wake between attempts, and give up rather than parking.
+///
+/// This thread drains its mailbox in exactly two places: the `wakeup`
+/// callback, and the safety-net timer that only runs while the surface
+/// is hidden. On a visible surface the wake is therefore the only thing
+/// that can free a slot, so a producer that blocks in the queue instead
+/// of issuing it has removed the wake source it is waiting on. That is
+/// what #1036 was: on the IOCP backend the Async wake can be lost in the
+/// window between a completion firing and its re-arm, and a producer
+/// that then parks in the not-full condition never wakes anyone --
+/// observed as the UI thread hanging inside
+/// `ghostty_surface_set_occlusion`.
+///
+/// A timed-out push re-issues the wake before trying again, so a single
+/// lost notify costs one window rather than the process. Returns the
+/// queue length after the push, or zero when the consumer never drained
+/// at all -- the one genuinely fatal case (the renderer thread is gone),
+/// which an unbounded push would have turned into a deadlock anyway.
+///
+/// This keeps the background budget, and `.persist` with it, even though
+/// seven of its `Surface.zig` producers are on the UI thread, where a
+/// minute-long wait is a window the user is told to kill. Both stay until
+/// this give-up path frees what it gives up, because it frees nothing
+/// today and a cheaper give-up would trade a freeze for a leak.
+///
+/// The list to cover before moving it, which is larger than round 3
+/// claimed:
+///
+///   - `.change_config` (`Surface.updateConfig`), the largest: a
+///     `renderer.Thread.DerivedConfig` and a renderer `DerivedConfig`
+///     that itself owns allocations. `rendererpkg.Message.deinit`
+///     ALREADY handles this variant, so one call would cover it -- but
+///     read the ownership note below before adding that call.
+///   - `.font_grid` (`Surface.setFontSize`), a refcount pair rather than
+///     memory: a give-up leaks the new grid's ref and strands the old
+///     key's. No `deinit` arm covers it.
+///   - `.search_viewport_matches` and `.search_selected_match`
+///     (`Surface.searchCallback_`), each carrying an arena moved into
+///     the message. No `deinit` arm covers these either.
+///
+/// Ownership note, and why this is not a drive-by fix: adding
+/// `msg.deinit()` below is a use-after-free until `Surface.updateConfig`
+/// is restructured. Its three `errdefer`s -- `renderer_message.deinit`,
+/// the `destroy` of `termio_config_ptr`, and that pointer's `deinit` --
+/// are still live at the `try performAction` calls further down that
+/// function, after its `pushRendererMailbox` has already handed the
+/// message to this thread. Fix `updateConfig`'s ownership first.
+///
+/// All of this is pre-existing on merge base `218b8243db`, which had the
+/// same constants and the same absent ownership handling hand-rolled in
+/// `Surface.zig`. Moving the loop here did not introduce it.
+pub fn pushMailbox(
+    mailbox: *Mailbox,
+    wakeup: *xev.Async,
+    msg: rendererpkg.Message,
+) Mailbox.Size {
+    return pushMailboxBounded(
+        mailbox,
+        wakeup,
+        msg,
+        Mailbox.wake_retry_timeout_ns,
+        Mailbox.wake_retry_attempts,
+    );
+}
+
+fn pushMailboxBounded(
+    mailbox: *Mailbox,
+    wakeup: *xev.Async,
+    msg: rendererpkg.Message,
+    timeout_ns: u64,
+    max_attempts: usize,
+) Mailbox.Size {
+    return mailbox.pushWake(
+        global.io(),
+        msg,
+        wakeup,
+        notifyWake,
+        timeout_ns,
+        max_attempts,
+        // Deliberately NOT `.fail_fast`: this give-up path frees
+        // nothing, so making give-ups cheaper here would make the
+        // pre-existing leak above cheaper to reach. It stays `.persist`
+        // until that path frees what it gives up.
+        .persist,
+    );
+}
+
+/// The `pushWake` wake for an `xev.Async`. A notify that fails means the
+/// loop is gone, which the retry budget already gives up on.
+fn notifyWake(wakeup: *xev.Async) void {
+    wakeup.notify() catch {};
+}
+
+test "renderer mailbox push wakes the thread when it cannot land" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    const mailbox = try Mailbox.create(alloc);
+    defer mailbox.destroy(alloc);
+
+    var wakeup: xev.Async = try .init();
+    defer wakeup.deinit();
+
+    var loop: xev.Loop = try .init(.{});
+    defer loop.deinit();
+
+    // Fill the mailbox and never drain it. That is what a renderer
+    // asleep on a lost wake looks like from a producer's side.
+    while (mailbox.push(io, .{ .reset_cursor_blink = {} }, .{ .instant = {} }) > 0) {}
+
+    var woken: usize = 0;
+    var c: xev.Completion = .{};
+    wakeup.wait(&loop, &c, usize, &woken, (struct {
+        fn callback(
+            ud: ?*usize,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            ud.?.* += 1;
+            return .disarm;
+        }
+    }).callback);
+
+    const Producer = struct {
+        mailbox: *Mailbox,
+        wakeup: *xev.Async,
+        result: Mailbox.Size = 0,
+
+        fn run(self: *@This()) void {
+            // A tiny budget so the test finishes; production uses
+            // the mailbox's wake_retry_* defaults.
+            self.result = pushMailboxBounded(
+                self.mailbox,
+                self.wakeup,
+                .{ .reset_cursor_blink = {} },
+                1 * std.time.ns_per_ms,
+                3,
+            );
+        }
+    };
+
+    var producer: Producer = .{ .mailbox = mailbox, .wakeup = &wakeup };
+    const thread = try std.Thread.spawn(.{}, Producer.run, .{&producer});
+    thread.join();
+
+    // The message could not land, because nothing drained.
+    try testing.expectEqual(@as(Mailbox.Size, 0), producer.result);
+
+    // The invariant: a producer that cannot land its message must still
+    // have woken the consumer, because that wake is the only thing that
+    // makes the consumer drain and free the slot the producer wants. A
+    // producer that parks in the queue instead withholds it, and the
+    // hang is permanent while the surface is visible: the safety-net
+    // drain only runs while it is hidden.
+    const start: std.Io.Timestamp = .now(io, .awake);
+    while (woken == 0) {
+        try loop.run(.no_wait);
+        const now: std.Io.Timestamp = .now(io, .awake);
+        if (start.durationTo(now).toMilliseconds() > 2000) break;
+        std.Thread.yield() catch {};
+    }
+    try testing.expect(woken > 0);
+
+    // Nothing was dropped from the queue on the way.
+    try testing.expect(mailbox.pop(io) != null);
+}

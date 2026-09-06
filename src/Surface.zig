@@ -909,41 +909,14 @@ inline fn surfaceMailbox(self: *Surface) Mailbox {
 ///
 /// Every historical push here used `.forever`, which trusts that the
 /// renderer thread always drains its mailbox. On the IOCP backend that
-/// trust has a hole (#1036): the Async wake can be lost in the window
-/// between a completion firing and its re-arm, and once the renderer is
-/// asleep with a full mailbox (64 messages, reached in practice by a
-/// hidden surface whose termio-driven wakes are gated) the pushing
-/// thread parks forever in the queue's not-full condition -- observed
-/// as the UI thread hanging inside `ghostty_surface_set_occlusion`.
-///
-/// The bounded retry closes the hole from the producer side: a timed-out
-/// push re-issues the wake (`queueRender`) before trying again, so a
-/// single lost notify costs one `renderer_push_timeout` stall and a
-/// retry, never a hang. `error.Timeout` callers keep the old
-/// fail-and-drop behavior for the one genuinely fatal case (the
-/// renderer thread is gone), which a `.forever` push would have turned
-/// into a deadlock anyway.
-const renderer_push_timeout_ns: u64 = 250 * std.time.ns_per_ms;
-
+/// trust has a hole (#1036), so every producer of that mailbox goes
+/// through the bounded retry instead; see `renderer.Thread.pushMailbox`.
 fn pushRendererMailbox(self: *Surface, msg: rendererpkg.Message) rendererpkg.Thread.Mailbox.Size {
-    var attempts: usize = 0;
-    while (true) {
-        const size = self.renderer_thread.mailbox.push(
-            global.io(),
-            msg,
-            .{ .ns = renderer_push_timeout_ns },
-        );
-        if (size > 0) return size;
-
-        // The push timed out: the mailbox is full and the renderer has
-        // not drained it within the window, so assume the wake was lost
-        // and issue a fresh one before retrying. The notify below is
-        // also the recovery when the renderer is merely busy.
-        self.queueRender() catch {};
-
-        attempts += 1;
-        if (attempts >= 240) return 0; // ~1 minute: treat as dead consumer
-    }
+    return rendererpkg.Thread.pushMailbox(
+        self.renderer_thread.mailbox,
+        &self.renderer_thread.wakeup,
+        msg,
+    );
 }
 
 /// Queue a message for the IO thread, taking ownership of `msg`.
@@ -5210,26 +5183,29 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 break :search;
             }
 
-            _ = s.state.mailbox.push(
-                global.io(),
+            // This runs on the UI thread and the search thread drains
+            // only when it is woken, so the push must not be able to
+            // park; it takes ownership of the needle either way.
+            _ = terminal.search.Thread.pushMailbox(
+                s.state.mailbox,
+                &s.state.wakeup,
                 .{ .change_needle = try .init(
                     self.alloc,
                     text,
                 ) },
-                .forever,
             );
             s.state.wakeup.notify() catch {};
         },
 
         .navigate_search => |nav| {
             const s: *Search = if (self.search) |*s| s else return false;
-            _ = s.state.mailbox.push(
-                global.io(),
+            _ = terminal.search.Thread.pushMailbox(
+                s.state.mailbox,
+                &s.state.wakeup,
                 .{ .select = switch (nav) {
                     .next => .next,
                     .previous => .prev,
                 } },
-                .forever,
             );
             s.state.wakeup.notify() catch {};
         },

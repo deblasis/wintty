@@ -3480,10 +3480,12 @@ pub const CAPI = struct {
     const Darwin = struct {
         export fn ghostty_surface_set_display_id(ptr: *Surface, display_id: u32) void {
             const surface = &ptr.core_surface;
-            _ = surface.renderer_thread.mailbox.push(
-                global.io(),
+            // Bounded: the notify below is what makes the renderer
+            // drain, so parking in the queue here would withhold it.
+            _ = renderer.Thread.pushMailbox(
+                surface.renderer_thread.mailbox,
+                &surface.renderer_thread.wakeup,
                 .{ .macos_display_id = display_id },
-                .{ .forever = {} },
             );
             surface.renderer_thread.wakeup.notify() catch {};
         }

@@ -92,6 +92,11 @@ size: renderer.Size,
 /// The mailbox implementation to use.
 mailbox: termio.Mailbox,
 
+/// Bounds the data queued to the pty. The backend accounts for its
+/// writes here and the stream handler consults it before queueing a
+/// terminal reply.
+write_limit: termio.WriteLimit = .{},
+
 /// The stream parser. This parses the stream of escape codes and so on
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
@@ -356,11 +361,11 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .alloc = alloc,
         .osc7 = osc7,
         .termio_mailbox = &self.mailbox,
+        .write_limit = &self.write_limit,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
         .renderer_wakeup = opts.renderer_wakeup,
         .renderer_visible = opts.renderer_visible,
-        .renderer_mailbox = opts.renderer_mailbox,
         .size = &self.size,
         .terminal = &self.terminal,
         .osc_color_report_format = opts.config.osc_color_report_format,
@@ -493,6 +498,14 @@ pub fn threadExit(self: *Termio, data: *ThreadData) void {
 /// This will also notify the mailbox thread to process the message. If
 /// you're sending a lot of messages, it may be more efficient to use
 /// the mailbox directly and then call notify separately.
+///
+/// Every message through here takes `termio.Mailbox.Budget.droppable`,
+/// because this is `Surface.queueIo`'s tail and that is a UI-thread
+/// producer. This function is a shared tail and hands its policy to its
+/// callers without their asking: read `Budget.droppable`'s comment before
+/// adding a call site, because three of the ones already here are state
+/// or user data rather than events, and a fourth would be missed the same
+/// way.
 pub fn queueMessage(
     self: *Termio,
     msg: termio.Message,
@@ -605,8 +618,15 @@ pub fn resize(
         }
     }
 
-    // Mail the renderer so that it can update the GPU and re-render
-    _ = self.renderer_mailbox.push(global.io(), .{ .resize = size }, .{ .forever = {} });
+    // Mail the renderer so that it can update the GPU and re-render.
+    // The wake on the next line is what makes the renderer drain, so
+    // this push must not be able to park: waiting in the queue would
+    // withhold the very notify the renderer needs to free a slot.
+    if (renderer.Thread.pushMailbox(
+        self.renderer_mailbox,
+        self.renderer_wakeup,
+        .{ .resize = size },
+    ) == 0) log.warn("renderer mailbox full, resize not delivered", .{});
     self.renderer_wakeup.notify() catch {};
 }
 

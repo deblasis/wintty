@@ -71,6 +71,12 @@ pub fn BlockingQueue(
         cond_not_full: std.Io.Condition = .init,
         not_full_waiters: usize = 0,
 
+        /// Latched by a `pushWake` that spends its whole budget without
+        /// landing, cleared by the next push that lands. It is advisory:
+        /// a stale read costs one budget or one message, never
+        /// correctness, so it is deliberately not under the mutex.
+        wedged: std.atomic.Value(bool) = .init(false),
+
         /// Allocate the blocking queue on the heap.
         pub fn create(alloc: Allocator) Allocator.Error!*Self {
             const ptr = try alloc.create(Self);
@@ -84,6 +90,7 @@ pub fn BlockingQueue(
                 .mutex = .init,
                 .cond_not_full = .init,
                 .not_full_waiters = 0,
+                .wedged = .init(false),
             };
 
             return ptr;
@@ -96,9 +103,61 @@ pub fn BlockingQueue(
             alloc.destroy(self);
         }
 
+        /// How long one `pushWake` attempt waits for a slot before the
+        /// consumer's wake is re-issued, and how many of those windows a
+        /// producer spends before it treats the consumer as gone. Roughly
+        /// a minute. This is the budget for a producer that is never the
+        /// UI thread, where the cost of the wait is a stalled background
+        /// job.
+        pub const wake_retry_timeout_ns: u64 = 250 * std.time.ns_per_ms;
+        pub const wake_retry_attempts: usize = 240;
+
+        /// The same pair for a queue whose producer can be the UI thread,
+        /// where the cost of the wait is a frozen window. The shorter
+        /// window also re-issues the consumer's wake five times as often,
+        /// and that re-issue is what recovers a lost notify.
+        ///
+        /// This bounds ONE push, not the stall. A UI thread feeding a
+        /// wedged consumer -- mouse reporting, autorepeat, typing in the
+        /// search box -- makes one of these calls per event, so on its
+        /// own the pair buys a window that freezes two seconds per event
+        /// indefinitely while pumping often enough that Windows never
+        /// paints it "Not Responding" and never offers the kill. That is
+        /// worse than the minute it replaced, not better. The `wedged`
+        /// latch in `pushWake` is what turns it into a bound on the
+        /// stall: the budget is spent once per wedge, and every push
+        /// after it fails fast until the consumer drains again.
+        pub const wake_retry_timeout_ns_ui: u64 = 50 * std.time.ns_per_ms;
+        pub const wake_retry_attempts_ui: usize = 40;
+
+        /// What a `pushWake` does when the queue is already latched
+        /// `wedged`, i.e. an earlier push already spent a whole budget
+        /// against this consumer and lost it.
+        pub const Wedge = enum {
+            /// Try once, without waiting, and give up. For a producer
+            /// that will be back with another message immediately: the
+            /// budget is then spent once for the whole stall rather than
+            /// once per event, and the thread stays responsive.
+            fail_fast,
+
+            /// Spend the full budget anyway. For the rare message whose
+            /// loss costs more than the wait, and only from a producer
+            /// that is never the UI thread.
+            persist,
+        };
+
         /// Push a value to the queue. This returns the total size of the
-        /// queue (unread items) after the push. A return value of zero
-        /// means that the push failed.
+        /// queue (unread items) after the push, so a queued value always
+        /// returns at least one.
+        ///
+        /// A return of zero means the value was NOT queued and the caller
+        /// still owns it: a value that owns memory must be released on
+        /// that path. Only `.instant` and `.ns` can return zero.
+        /// `.forever` waits until a slot is genuinely free, so it never
+        /// returns zero -- and never returns at all while the consumer is
+        /// not draining. Producers of a queue that is drained only when
+        /// its consumer is woken should use `pushWake` instead, because a
+        /// `.forever` wait there withholds the wake it waits on.
         pub fn push(self: *Self, io: std.Io, value: T, timeout: Timeout) Size {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
@@ -112,29 +171,40 @@ pub fn BlockingQueue(
                     .forever => {
                         self.not_full_waiters += 1;
                         defer self.not_full_waiters -= 1;
-                        self.cond_not_full.waitUncancelable(io, &self.mutex);
+
+                        // Being woken doesn't mean there is a slot for
+                        // us: we have multiple producers, so another one
+                        // can take the freed slot before we reacquire
+                        // the mutex. Wait again instead of dropping the
+                        // value, which callers have no way to notice.
+                        while (self.full()) {
+                            self.cond_not_full.waitUncancelable(io, &self.mutex);
+                        }
                     },
 
                     .ns => |ns| {
                         self.not_full_waiters += 1;
                         defer self.not_full_waiters -= 1;
-                        compat_thread.waitTimeout(
-                            &self.cond_not_full,
-                            io,
-                            &self.mutex,
-                            .{
-                                .duration = .{
-                                    .raw = .fromNanoseconds(ns),
-                                    .clock = .awake,
-                                },
-                            },
-                        ) catch return 0;
+
+                        // Same as above, except we resolve the timeout to
+                        // an absolute deadline first so that waiting
+                        // again can't extend the caller's timeout.
+                        const relative: std.Io.Timeout = .{ .duration = .{
+                            .raw = .fromNanoseconds(ns),
+                            .clock = .awake,
+                        } };
+                        const deadline = relative.toDeadline(io);
+
+                        while (self.full()) {
+                            compat_thread.waitTimeout(
+                                &self.cond_not_full,
+                                io,
+                                &self.mutex,
+                                deadline,
+                            ) catch return 0;
+                        }
                     },
                 }
-
-                // If we're still full, then we failed to write. This can
-                // happen in situations where we are interrupted.
-                if (self.full()) return 0;
             }
 
             // Add our data and update our accounting
@@ -144,6 +214,92 @@ pub fn BlockingQueue(
             self.len += 1;
 
             return self.len;
+        }
+
+        /// Push a value, re-issuing the consumer's wake between bounded
+        /// attempts instead of parking on the not-full condition.
+        ///
+        /// Our mailboxes are drained by a thread that only runs when it
+        /// is woken, so a producer that waits inside the queue is waiting
+        /// for a drain its own wake has to start, and on the IOCP backend
+        /// that wake can be lost outright (#1036). `wakeFn` is therefore
+        /// called after every window that did not land the value, which
+        /// is what makes the wait recoverable.
+        ///
+        /// A zero return means the value was not queued and THE CALLER
+        /// STILL OWNS IT: anything holding memory must be released on
+        /// that path. There is deliberately no budget that never gives
+        /// up. Every mailbox in this tree can release a refused message,
+        /// and a producer that waits without a limit takes its own thread
+        /// out of service for as long as the consumer is wedged -- which
+        /// is how two mailboxes deadlock each other rather than one of
+        /// them losing a message.
+        ///
+        /// The budget bounds one call. It does not bound the stall the
+        /// producer sees, because nothing stops that producer arriving
+        /// with the next message the moment this one gives up. So a lost
+        /// budget latches `wedged`, and a `.fail_fast` caller then skips
+        /// the wait until a push lands and clears the latch. The wake is
+        /// still re-issued on that path, so the consumer can still
+        /// recover; what is given up is only the waiting, which the
+        /// previous full budget already proved was not being repaid.
+        ///
+        /// The cost, stated plainly: after one lost budget, a message
+        /// that would have landed in the next budget's second window is
+        /// dropped instead. A consumer that frees a slot within a budget
+        /// never latches, so the trade only applies to one that has
+        /// already failed to free a single slot across the whole of one
+        /// -- for the UI pair, 40 windows of 50ms with a wake re-issued
+        /// after each.
+        ///
+        /// Mutation-testing note: `wakeFn` is a comptime function
+        /// parameter, so `_ = wakeFn;` does not compile ("pointless
+        /// discard of function parameter"). Neutralise the call instead,
+        /// e.g. `if (attempts > 1_000_000) wakeFn(ctx);`.
+        pub fn pushWake(
+            self: *Self,
+            io: std.Io,
+            value: T,
+            ctx: anytype,
+            comptime wakeFn: fn (@TypeOf(ctx)) void,
+            timeout_ns: u64,
+            max_attempts: usize,
+            wedge: Wedge,
+        ) Size {
+            if (wedge == .fail_fast and self.wedged.load(.acquire)) {
+                const result = self.push(io, value, .{ .instant = {} });
+                if (result > 0) {
+                    self.wedged.store(false, .release);
+                    return result;
+                }
+
+                // Still wake. A lost notify is exactly the failure this
+                // function exists for, and withholding the wake here
+                // would make the latch self-sustaining.
+                wakeFn(ctx);
+                return 0;
+            }
+
+            var attempts: usize = 0;
+            while (true) {
+                const result = self.push(io, value, .{ .ns = timeout_ns });
+                if (result > 0) {
+                    // Load before storing: this is every push's path and
+                    // the latch is clear on all but the recovering one.
+                    if (self.wedged.load(.monotonic)) {
+                        self.wedged.store(false, .release);
+                    }
+                    return result;
+                }
+
+                wakeFn(ctx);
+
+                attempts += 1;
+                if (attempts >= max_attempts) {
+                    self.wedged.store(true, .release);
+                    return 0;
+                }
+            }
         }
 
         /// Pop a value from the queue without blocking.
@@ -258,4 +414,315 @@ test "timed push" {
 
     // Timed push should fail
     try testing.expectEqual(@as(Q.Size, 0), q.push(io, 2, .{ .ns = 1000 }));
+}
+
+test "BlockingQueue push forever retries when woken with no free slot" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    // Fill the queue so the pusher below has to wait for a slot.
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    const Pusher = struct {
+        q: *Q,
+        result: Q.Size = 0,
+
+        fn run(self: *@This(), thread_io: std.Io) void {
+            self.result = self.q.push(thread_io, 2, .{ .forever = {} });
+        }
+    };
+
+    var pusher: Pusher = .{ .q = q };
+    const thread = try std.Thread.spawn(.{}, Pusher.run, .{ &pusher, io });
+
+    // Wait until the pusher is parked on the condition.
+    while (true) {
+        q.mutex.lockUncancelable(io);
+        const parked = q.not_full_waiters > 0;
+        q.mutex.unlock(io);
+        if (parked) break;
+        std.Thread.yield() catch {};
+    }
+
+    // Wake the pusher while the queue is still full. This is what a
+    // second producer taking the slot first looks like from the woken
+    // pusher's side: there is nothing for it, so it has to keep waiting
+    // instead of dropping the value.
+    for (0..1000) |_| {
+        q.cond_not_full.broadcast(io);
+        std.Thread.yield() catch {};
+    }
+
+    q.mutex.lockUncancelable(io);
+    const still_parked = q.not_full_waiters > 0;
+    q.mutex.unlock(io);
+
+    // Free a slot so the pusher can finish either way, then join before
+    // asserting so a failure doesn't leave the thread behind.
+    try testing.expect(q.pop(io).? == 1);
+    thread.join();
+
+    try testing.expect(still_parked);
+    try testing.expectEqual(@as(Q.Size, 1), pusher.result);
+    try testing.expect(q.pop(io).? == 2);
+}
+
+test "BlockingQueue pushWake wakes the consumer on every window it loses" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    // Fill the queue and never drain it. That is what a consumer asleep
+    // on a lost wake looks like from a producer's side.
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    var woken: usize = 0;
+    const result = q.pushWake(
+        io,
+        2,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    );
+
+    // The invariant: a producer that cannot land its value must have
+    // woken the consumer anyway, once per window, because that wake is
+    // the only thing that frees the slot it is waiting for.
+    try testing.expectEqual(@as(usize, 3), woken);
+
+    // It gave up rather than parking, and took nothing with it.
+    try testing.expectEqual(@as(Q.Size, 0), result);
+    try testing.expect(q.pop(io).? == 1);
+}
+
+test "BlockingQueue pushWake lands once a wake frees a slot" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // A consumer that drains only when it is woken.
+    const Consumer = struct {
+        q: *Q,
+        io: std.Io,
+        woken: usize = 0,
+
+        fn wake(self: *@This()) void {
+            self.woken += 1;
+            _ = self.q.pop(self.io);
+        }
+    };
+
+    var consumer: Consumer = .{ .q = q, .io = io };
+    const result = q.pushWake(
+        io,
+        2,
+        &consumer,
+        Consumer.wake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    );
+
+    try testing.expectEqual(@as(Q.Size, 1), result);
+    try testing.expectEqual(@as(usize, 1), consumer.woken);
+    try testing.expect(q.pop(io).? == 2);
+}
+
+test "BlockingQueue pushWake stops spending the budget once it has lost one" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    // Fill the queue and never drain it. This is a wedged consumer.
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // The first push pays the full budget: three windows, three wakes.
+    var woken: usize = 0;
+    try testing.expectEqual(@as(Q.Size, 0), q.pushWake(
+        io,
+        2,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    ));
+    try testing.expectEqual(@as(usize, 3), woken);
+
+    // The second does not. This is what bounds the stall rather than one
+    // message: without it a UI thread with an event stream pays the whole
+    // budget again for every event, indefinitely.
+    woken = 0;
+    try testing.expectEqual(@as(Q.Size, 0), q.pushWake(
+        io,
+        3,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    ));
+
+    // One wake, not three: it tried once and gave up, but it still woke
+    // the consumer, because a lost notify is what it may be recovering.
+    try testing.expectEqual(@as(usize, 1), woken);
+
+    // A `.persist` caller ignores the latch and pays in full. This is
+    // the message whose loss costs more than the wait, and it must not
+    // be shortened by some other producer's give-up.
+    woken = 0;
+    try testing.expectEqual(@as(Q.Size, 0), q.pushWake(
+        io,
+        4,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .persist,
+    ));
+    try testing.expectEqual(@as(usize, 3), woken);
+
+    try testing.expect(q.pop(io).? == 1);
+}
+
+test "BlockingQueue pushWake spends the budget again once the consumer drains" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // Latch it.
+    var woken: usize = 0;
+    try testing.expectEqual(@as(Q.Size, 0), q.pushWake(
+        io,
+        2,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    ));
+    try testing.expect(q.wedged.load(.acquire));
+
+    // The consumer comes back. The next push lands on the fast path and
+    // clears the latch, so recovery costs nothing and drops nothing.
+    try testing.expect(q.pop(io).? == 1);
+    woken = 0;
+    try testing.expectEqual(@as(Q.Size, 1), q.pushWake(
+        io,
+        3,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    ));
+    try testing.expectEqual(@as(usize, 0), woken);
+    try testing.expect(!q.wedged.load(.acquire));
+
+    // And a later wedge is paid for in full again, so the fast path is a
+    // response to one stall and not a permanent downgrade.
+    woken = 0;
+    try testing.expectEqual(@as(Q.Size, 0), q.pushWake(
+        io,
+        4,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    ));
+    try testing.expectEqual(@as(usize, 3), woken);
+
+    try testing.expect(q.pop(io).? == 3);
+}
+
+test "BlockingQueue pushWake clears the latch when a persist push lands the slow way" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // Latch it, the way a stream of UI events against a wedged consumer
+    // does.
+    var woken: usize = 0;
+    try testing.expectEqual(@as(Q.Size, 0), q.pushWake(
+        io,
+        2,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    ));
+    try testing.expect(q.wedged.load(.acquire));
+
+    // A `.persist` push now skips the fast path by construction, so if it
+    // lands it lands inside the budget loop -- and that is the only place
+    // left that can clear the latch. Without the clear there, a queue
+    // carrying both kinds (the termio mailbox; the app mailbox as of
+    // `pushRequired`) stays latched after a genuine recovery and keeps
+    // failing its droppable pushes fast for no reason.
+    const Consumer = struct {
+        q: *Q,
+        io: std.Io,
+        woken: usize = 0,
+
+        fn wake(self: *@This()) void {
+            self.woken += 1;
+            _ = self.q.pop(self.io);
+        }
+    };
+
+    var consumer: Consumer = .{ .q = q, .io = io };
+    try testing.expectEqual(@as(Q.Size, 1), q.pushWake(
+        io,
+        3,
+        &consumer,
+        Consumer.wake,
+        1 * std.time.ns_per_ms,
+        3,
+        .persist,
+    ));
+
+    // It went the slow way: the first window had to expire before the
+    // wake freed a slot. If this is 0 the push took the fast path and the
+    // test is no longer covering the branch it names.
+    try testing.expectEqual(@as(usize, 1), consumer.woken);
+    try testing.expect(!q.wedged.load(.acquire));
+}
+
+fn countWake(woken: *usize) void {
+    woken.* += 1;
 }

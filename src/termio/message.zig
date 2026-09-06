@@ -129,6 +129,21 @@ pub const Message = union(enum) {
         };
     }
 
+    /// Whether handling this message results in a write to the pty.
+    pub fn writesToPty(self: Message) bool {
+        return switch (self) {
+            .color_scheme_report,
+            .visibility_report,
+            .size_report,
+            .write_small,
+            .write_stable,
+            .write_alloc,
+            => true,
+
+            else => false,
+        };
+    }
+
     /// Free resources owned by a message that will not be processed.
     /// The message is invalid after this call.
     pub fn deinit(self: *const Message) void {
@@ -157,4 +172,24 @@ test {
     // Ensure we don't grow our IO message size without explicitly wanting to.
     const testing = std.testing;
     try testing.expectEqual(@as(usize, 40), @sizeOf(Message));
+}
+
+test "io message variants are all accounted for by the push give-up path" {
+    // `deinit` ends in `else => {}`, so a new variant that owns memory
+    // compiles and then leaks on every drop path -- the mailbox's
+    // failed-notify branch, its give-up branch, and the teardown drain.
+    // Adding a variant is a decision: does it own memory? Make it, then
+    // bump this count.
+    //
+    // `deep_idle` and `go_dormant` are the two most recent, and both
+    // answer no: they are `void`, so `deinit`'s `else` and
+    // `writesToPty`'s `else` are both right for them. Their delivery
+    // policy is the other half of the decision and is settled in
+    // `Mailbox.Budget.droppable`, which is what they inherit through
+    // `Surface.queueIo`: losing either defers a memory reclaim to the
+    // next idle transition or leaves the surface live, which is the
+    // conservative direction and re-derivable from the state that asked
+    // for it. Neither is a one-shot the way `.child_exited` is.
+    const fields = @typeInfo(Message).@"union".fields;
+    try std.testing.expectEqual(@as(usize, 21), fields.len);
 }

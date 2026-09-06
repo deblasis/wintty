@@ -177,6 +177,15 @@ pub fn threadEnter(
     var termios_timer = try xev.Timer.init();
     errdefer termios_timer.deinit();
 
+    // The write accounting outlives a backend run: it lives on the
+    // Termio, not on this thread data, and a run that ends with writes
+    // still queued never sees their completions. Start every run from
+    // zero so leftovers can't hold us at the cap forever. This has to
+    // happen before the read thread exists, because the reader is what
+    // observes the cap and would otherwise refuse replies against a
+    // previous run's backlog.
+    io.write_limit.reset();
+
     // Start our read thread
     const read_thread = try std.Thread.spawn(
         .{},
@@ -189,6 +198,7 @@ pub fn threadEnter(
     td.backend = .{ .exec = .{
         .start = process_start,
         .write_stream = stream,
+        .write_limit = &io.write_limit,
         .process = process,
         .read_thread = read_thread,
         .read_thread_pipe = pipe[1],
@@ -361,12 +371,38 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
 
     // We always notify the surface immediately that the child has
     // exited and some metadata about the exit.
-    _ = td.surface_mailbox.push(.{
+    //
+    // `pushRequired`, not `push`: this runs once per surface lifetime and
+    // nothing re-derives it, so a drop is permanent and user-visible.
+    // `Surface.childExited` is what sets `self.child_exited`, and without
+    // it `close-on-exit` never fires, the exit overlay never appears, and
+    // the close confirmation keeps asking about a process that is already
+    // gone -- for the life of the surface. The streaming producers on this
+    // queue (search results, the stream handler's OSC replies) fail fast
+    // against a wedged app thread precisely so that this one can afford to
+    // spend its budget.
+    //
+    // Collapsing this back to `push` type-checks and fails no test --
+    // this file is in no test graph, and both spellings pass the exe
+    // build -- so `apprt.surface.Message.dropAllowed` classifies
+    // `.child_exited` as undroppable and `push` asserts on it. After a
+    // rebase that collapses this line, the first child exit panics in a
+    // Debug build rather than losing the notice quietly.
+    //
+    // What that budget costs at teardown, on Windows: the caller here is
+    // `winProcessWaitThread`, `threadExit` joins that thread, and
+    // `Surface.deinit` joins the io thread on the UI thread, so a full
+    // app mailbox at close spends the whole background budget on the UI
+    // thread -- delivering the push `threadExit` above calls harmless,
+    // which `App.surfaceMessage`'s `hasSurface` gate then discards. See
+    // `App.Mailbox.pushRequired`; suppressing that teardown push is
+    // filed separately.
+    _ = td.surface_mailbox.pushRequired(.{
         .child_exited = .{
             .exit_code = exit_code,
             .runtime_ms = runtime_ms,
         },
-    }, .{ .forever = {} });
+    });
 }
 
 fn processExit(
@@ -436,7 +472,6 @@ fn termiosTimer(
     // If the mode changed, then we process it.
     if (!std.meta.eql(mode, exec.termios_mode)) mode_change: {
         log.debug("termios change mode={}", .{mode});
-        exec.termios_mode = mode;
 
         // We assume we're in some sort of password input if we're
         // in canonical mode and not echoing. This is a heuristic.
@@ -456,16 +491,54 @@ fn termiosTimer(
             }
             const t = td.renderer_state.terminal;
             if (t.flags.password_input == password_input) {
+                exec.termios_mode = mode;
                 break :mode_change;
             }
         }
 
-        // We have to notify the surface that we're in password input.
-        // We must block on this because the balanced true/false state
-        // of this is critical to apprt behavior.
-        _ = td.surface_mailbox.push(.{
+        // Notify the surface that we're in password input. The balanced
+        // true/false state of this is critical to apprt behavior: on
+        // macOS the `false` turns `EnableSecureEventInput` back off, a
+        // mode with effects outside this process, and `passwordInput`'s
+        // own `if (old == v) return` means a later duplicate re-arms
+        // nothing. A dropped `false` therefore sticks the surface in
+        // secure input for as long as it lives.
+        //
+        // We do not block to prevent that, because a producer that waits
+        // without a limit on a wedged app thread does not deliver the
+        // message either. We commit the observed mode only once the
+        // message is actually queued: a give-up leaves `termios_mode`
+        // where it was, so the next poll (TERMIOS_POLL_MS) sees the same
+        // change again and re-sends. The guard above reads the terminal
+        // flag the consumer itself sets, so the retry stops exactly when
+        // the surface has caught up -- and if the mode has flipped back
+        // by then, the guard commits without a send. The state is
+        // balanced by re-deriving the *undelivered change* rather than by
+        // never dropping it, which also recovers from a wedge that
+        // outlasts any budget we could have picked.
+        //
+        // Be precise about the scope of that, because it is narrower than
+        // "re-derived every poll": the re-derivation only runs while
+        // `mode != exec.termios_mode`. Nothing polls the terminal flag
+        // itself, so a path that clears `t.flags.password_input` behind
+        // our back leaves the apprt armed with no send to correct it.
+        // `Terminal.fullReset` is exactly such a path -- it assigns
+        // `self.flags = .{ .visible = visible }` -- so RIS after a
+        // delivered `true` desyncs the apprt for the surface's life. That
+        // hole is pre-existing (the merge base committed `termios_mode`
+        // unconditionally and had the same gap) and is not fixed here;
+        // closing it means the reset path telling the surface, which is
+        // not this function's to do.
+        if (td.surface_mailbox.push(.{
             .password_input = password_input,
-        }, .{ .forever = {} });
+        }, .{ .forever = {} }) > 0) {
+            exec.termios_mode = mode;
+        } else {
+            log.warn(
+                "password input notification dropped, retrying next poll",
+                .{},
+            );
+        }
     }
 
     // Repeat the timer
@@ -539,6 +612,12 @@ pub fn queueWrite(
 
         //for (slice) |b| log.warn("write: {x}", .{b});
 
+        // Account for the backlog before queueing so that a pty which
+        // has stopped draining is visible to the read thread, which
+        // decides whether terminal replies are still worth queueing.
+        w.len = slice.len;
+        exec.write_limit.queued(slice.len);
+
         exec.write_stream.queueWrite(
             td.loop,
             &exec.write_queue,
@@ -560,6 +639,7 @@ fn ttyWrite(
     r: xev.WriteError!usize,
 ) xev.CallbackAction {
     const w = w_.?;
+    w.td.write_limit.completed(w.len);
     w.td.write_pool.destroy(w);
 
     const d = r catch |err| {
@@ -588,6 +668,10 @@ pub const ThreadData = struct {
 
         /// The buffer for the data being written.
         buf: [64]u8,
+
+        /// How much of `buf` this write covers, so the completion can
+        /// take it back off the outstanding-bytes count.
+        len: usize = 0,
     };
 
     /// Process start time and boolean of whether its already exited.
@@ -596,6 +680,10 @@ pub const ThreadData = struct {
 
     /// The data stream is the main IO for the pty.
     write_stream: xev.Stream,
+
+    /// Bounds the data we have queued to the pty. Owned by the Termio
+    /// so that the read thread can see it too.
+    write_limit: *termio.WriteLimit,
 
     /// The process watcher
     process: ?xev.Process,
