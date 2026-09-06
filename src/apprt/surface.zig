@@ -166,6 +166,30 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// Release anything the message owns. A mailbox push calls this when
+    /// it has to give the message up, so a variant that starts owning
+    /// memory has to free it here or it leaks on that path.
+    ///
+    /// Every owning variant already carries its own destructor, so this
+    /// needs no allocator and settles no ownership rule that was not
+    /// already settled: `MessageData` holds the allocator it was built
+    /// with, and the two Kitty requests own the arena they live in --
+    /// including the struct itself -- with nothing registered anywhere
+    /// else that a destroy could dangle.
+    ///
+    /// `change_config` is deliberately not listed: nothing pushes it onto
+    /// a mailbox. `App.updateConfig` hands it straight to
+    /// `Surface.handleMessage`, so this layer never owns one.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .clipboard_write => |v| v.req.deinit(),
+            .pwd_change => |v| v.deinit(),
+            .kitty_clipboard_read => |v| v.destroy(),
+            .kitty_clipboard_write => |v| v.destroy(),
+            else => {},
+        }
+    }
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 
@@ -327,4 +351,28 @@ test "copyUtf8Z preserves UTF-8 that fits" {
     Message.DesktopNotification.copyUtf8Z(dst.len, &dst, "abcЯ");
 
     try std.testing.expectEqualStrings("abcЯ", std.mem.sliceTo(&dst, 0));
+}
+
+test "surface message deinit frees a push the mailbox gave up" {
+    const alloc = std.testing.allocator;
+
+    // A pwd longer than the inline capacity is heap allocated, so
+    // std.testing.allocator fails this test if `deinit` misses it. This
+    // is the whole reason the app mailbox can take an attempt budget
+    // instead of waiting forever for a slot.
+    const pwd = "/" ++ ("d" ** 400);
+    const req = try Message.WriteReq.init(alloc, @as([]const u8, pwd));
+    try std.testing.expect(req == .alloc);
+
+    const msg: Message = .{ .pwd_change = req };
+    msg.deinit();
+}
+
+test "surface message variants are all accounted for by the push give-up path" {
+    // Adding a variant to Message is a decision: does it own memory that
+    // `deinit` has to release when a full mailbox gives the message up?
+    // Make that decision, then bump this count. Without the guard a new
+    // owning variant compiles and leaks silently on every drop.
+    const fields = @typeInfo(Message).@"union".fields;
+    try std.testing.expectEqual(@as(usize, 27), fields.len);
 }
