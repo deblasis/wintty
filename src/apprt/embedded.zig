@@ -2390,12 +2390,16 @@ pub const CAPI = struct {
     /// Release the memory owned by a config from
     /// ghostty_surface_inherited_config. Calling it more than once on the
     /// same config, or on a config that carries no directory, is safe.
+    ///
+    /// No surface is needed to free the config: the copy came from the
+    /// process-wide allocator, the same one every other C API allocation
+    /// comes from, so a config stays releasable after the surface it was
+    /// read from is gone.
     export fn ghostty_surface_free_inherited_config(
-        surface: *Surface,
         config: *Surface.Options,
     ) void {
         apprt.surface.freeInheritedPwd(
-            surface.app.core_app.alloc,
+            global.alloc(),
             &config.working_directory,
         );
     }
