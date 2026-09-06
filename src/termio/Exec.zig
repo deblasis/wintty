@@ -482,12 +482,14 @@ fn termiosTimer(
         // without a limit on a wedged app thread does not deliver the
         // message either. We commit the observed mode only once the
         // message is actually queued: a give-up leaves `termios_mode`
-        // where it was, so the next poll sees the same change again and
-        // re-sends. The guard above reads the terminal flag the consumer
-        // itself sets, so the retry stops exactly when the surface has
-        // caught up -- and if the mode has flipped back by then, the
-        // guard commits without a send. The state is balanced by
-        // re-deriving it every poll rather than by never dropping it.
+        // where it was, so the next poll (TERMIOS_POLL_MS) sees the same
+        // change again and re-sends. The guard above reads the terminal
+        // flag the consumer itself sets, so the retry stops exactly when
+        // the surface has caught up -- and if the mode has flipped back
+        // by then, the guard commits without a send. The state is
+        // balanced by re-deriving it every poll rather than by never
+        // dropping it, which also recovers from a wedge that outlasts
+        // any budget we could have picked.
         if (td.surface_mailbox.push(.{
             .password_input = password_input,
         }, .{ .forever = {} }) > 0) {
