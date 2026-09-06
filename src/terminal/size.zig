@@ -31,6 +31,25 @@ pub const CellCountInt = u16;
 pub const StyleCountInt = CellCountInt;
 pub const HyperlinkCountInt = CellCountInt;
 
+// The int type used for the reference counts in a page's ref-counted sets
+// (styles and hyperlinks). This is deliberately wider than CellCountInt: a
+// page wider than our standard capacity keeps the standard row count rather
+// than shrinking it, so a single page can hold far more than
+// maxInt(CellCountInt) cells and every one of them can reference the same
+// style or hyperlink.
+pub const RefCountInt = u32;
+
+// The bound above holds by coincidence of two independently chosen widths:
+// a page's cell count is at most maxCols * maxRows, both CellCountInt, and
+// 65535 * 65535 is 4294836225 against a u32 ceiling of 4294967295, leaving
+// 131070 to spare. Widening CellCountInt to support very wide terminals is
+// exactly the change that would reintroduce the overflow, and it would do
+// so in a build that stays green, so bind the two types here.
+comptime {
+    assert(@as(u64, std.math.maxInt(CellCountInt)) *
+        std.math.maxInt(CellCountInt) <= std.math.maxInt(RefCountInt));
+}
+
 // Total number of bytes that can be taken up by grapheme data and string
 // data. Both of these technically unlimited with malicious input, but
 // we choose a reasonable limit of 2^32 (4GB) per.

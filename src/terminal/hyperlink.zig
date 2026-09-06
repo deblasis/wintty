@@ -211,7 +211,7 @@ pub const PageEntry = struct {
 pub const Set = RefCountedSet(
     PageEntry,
     Id,
-    size.CellCountInt,
+    size.RefCountInt,
     struct {
         /// The page which holds the strings for items in this set.
         page: ?*Page = null,
