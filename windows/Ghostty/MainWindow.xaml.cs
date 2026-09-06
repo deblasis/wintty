@@ -659,6 +659,18 @@ public sealed partial class MainWindow : Window
                     // window and only App knows which those are.
                     App.NoteRegularWindowRegistered(this);
                 }
+            }
+
+            // A restored window says so once, on its first activation. Not
+            // on the Loaded above: the tree exists there, but the window can
+            // still be behind the splash and focus has not reached a pane,
+            // which is the state BellAnnouncementSource records a
+            // notification being measured as dropped in.
+            Activated += OnFirstActivationAnnounceRestore;
+            void OnFirstActivationAnnounceRestore(object s, WindowActivatedEventArgs e)
+            {
+                if (e.WindowActivationState == Microsoft.UI.Xaml.WindowActivationState.Deactivated) return;
+                Activated -= OnFirstActivationAnnounceRestore;
                 AnnounceSessionRestored();
             }
         }
@@ -1475,31 +1487,43 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// How many tabs a session restore rebuilt into this window, or zero
-    /// when this window was not restored. Read once, by the announcement
-    /// below, and kept because the count is gone by the time there is a
-    /// tree to announce into: the manager normalizes pins and gathers runs
-    /// after the restore, so its own count is no longer the answer to "how
-    /// many came back".
+    /// when this window was not restored.
+    ///
+    /// Captured at the restore rather than counted later, because what the
+    /// announcement is about is what the restore rebuilt -- not what the
+    /// window happens to hold by the time there is a tree to speak into.
+    /// The two are equal today; a tab opened in between would make them
+    /// differ, and the count would then describe something the user did.
     /// </summary>
     private int _restoredTabCount;
 
     /// <summary>
-    /// Tell a listener the window came back, once, when there is finally a
-    /// tree to say it into.
+    /// Tell a listener the window came back, once.
     ///
-    /// Not from the constructor, where the restore actually happens: the
-    /// tab hosts do not exist yet, <c>Content.XamlRoot</c> is still null so
-    /// there is no focused element to raise from, and there is no UIA tree,
-    /// so the notification would be built from nothing and dropped. The
-    /// content's one-shot Loaded is the point where all three are true.
+    /// Not from the constructor, where the restore happens: the tab hosts
+    /// do not exist yet, <c>Content.XamlRoot</c> is null so there is no
+    /// focused element to raise from, and there is no UIA tree, so the
+    /// notification would be built from nothing and dropped.
+    ///
+    /// Nor from the content's Loaded, which was the first attempt: the tree
+    /// exists there, but the window may still be behind a splash and focus
+    /// has not reached a pane, so this would take the fallback path that
+    /// the note on <see cref="BellAnnouncementSource"/> records being
+    /// MEASURED as dropped. Activation is the first moment the window is
+    /// foreground and something in it holds focus.
     ///
     /// Its own activity id, because notifications coalesce per source and a
     /// bell arriving in the same breath would otherwise discard this one.
+    ///
+    /// NOT verified with a screen reader: that the notification is heard
+    /// from here rests on the same measurement the bell relies on, not on a
+    /// measurement of this path.
     /// </summary>
     private void AnnounceSessionRestored()
     {
-        if (TabAccessibleText.SessionRestoredAnnouncement(_restoredTabCount) is not { } text) return;
+        if (Content?.XamlRoot is null) return;
         if (_tabManager.ActiveTab is not { } active) return;
+        if (TabAccessibleText.SessionRestoredAnnouncement(active, _restoredTabCount) is not { } text) return;
         UiaAnnouncer.Announce(BellAnnouncementSource(active), text, "session-restore");
     }
 

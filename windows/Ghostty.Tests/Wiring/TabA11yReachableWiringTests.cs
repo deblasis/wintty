@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -37,7 +38,9 @@ public class TabA11yReachableWiringTests
 
         // One-based: UIA counts from 1, and a 0-based stamp reads as an
         // off-by-one to every client rather than as an obvious break.
-        Assert.Equal("i + 1", position.Arg(1));
+        var loop = Assert.Single(stamp.DescendantNodes().OfType<ForStatementSyntax>());
+        var index = loop.Declaration!.Variables[0].Identifier.Text;
+        Assert.Equal($"{index} + 1", position.Arg(1));
 
         // The size is the panel's own child count, whether that is read
         // inline or hoisted into a local first.
@@ -47,8 +50,10 @@ public class TabA11yReachableWiringTests
             ?? sizeArg;
         Assert.Equal("_pinnedPanel.Children.Count", sizeSource);
 
-        // Both write to a child of the panel, not to some other element.
-        Assert.All([position, size], c => Assert.Contains("_pinnedPanel.Children", c.Arg(0)));
+        // Each writes to the child at the LOOP INDEX, not to a fixed one:
+        // `Children[0]` reads the same in a substring match and gives every
+        // square the first one's position.
+        Assert.All([position, size], c => Assert.Equal($"_pinnedPanel.Children[{index}]", c.Arg(0)));
 
         // And the walk is over the panel, never the unordered dictionary.
         Assert.Contains("_pinnedPanel.Children", stamp.ToString());
@@ -78,6 +83,29 @@ public class TabA11yReachableWiringTests
     }
 
     /// <summary>
+    /// A position is only meaningful inside a set, and the squares report
+    /// themselves as list items -- so the band they sit in has to BE a list
+    /// and has to have a name. Without it a listener hears "Home, list
+    /// item, 1 of 2" with nothing saying which two, and the per-square
+    /// "Pinned" cannot fill the gap because ItemStatus is the property this
+    /// codebase measured as unread on a list item.
+    /// </summary>
+    [Fact]
+    public void ThePinnedBand_IsAListWithAName()
+    {
+        var build = Strip().Method("BuildPinnedShelf");
+
+        var role = Assert.Single(build.Calls("AutomationProperties.SetAutomationControlType"));
+        Assert.Equal("_pinnedPanel", role.Arg(0));
+        Assert.Contains("AutomationControlType.List", role.Arg(1));
+
+        var name = Assert.Single(build.Calls("AutomationProperties.SetName"));
+        Assert.Equal("_pinnedPanel", name.Arg(0));
+        var text = Assert.IsType<LiteralExpressionSyntax>(name.ArgExpression(1)).Token.ValueText;
+        Assert.False(string.IsNullOrWhiteSpace(text), "the band's name says nothing");
+    }
+
+    /// <summary>
     /// NOT stamped from the row's own refresh: the drag's drop preview is
     /// built from that same class and belongs to no set, so a stamp there
     /// would place a ghost at "3 of 5".
@@ -93,15 +121,20 @@ public class TabA11yReachableWiringTests
     // --- a restore says so ---
 
     /// <summary>
-    /// Raised from the content's one-shot Loaded, not from the constructor
-    /// where the restore happens. There the tab hosts do not exist, the
-    /// XamlRoot is null so there is no focused element to raise from, and
-    /// there is no UIA tree -- the notification would be built from nothing
-    /// and dropped, which no test that only checked the call existed would
-    /// notice.
+    /// Raised on the window's FIRST ACTIVATION, and unsubscribed there, so
+    /// it speaks once and only once the window is foreground with focus
+    /// somewhere inside it.
+    ///
+    /// Not from the constructor, where the restore happens: no tab hosts,
+    /// no XamlRoot, no UIA tree. And not from the content's Loaded, which
+    /// was the first attempt -- the tree exists there, but the window can
+    /// still be behind the splash with focus nowhere, which is the state
+    /// BellAnnouncementSource records a notification being measured as
+    /// dropped in. Neither mistake is visible to a test that only checks
+    /// the call exists, so this checks where it is raised from.
     /// </summary>
     [Fact]
-    public void ARestore_AnnouncesItself_OnceTheTreeExists()
+    public void ARestore_AnnouncesItself_OnceTheWindowIsUp()
     {
         var window = ShellSource.Load("MainWindow.xaml.cs");
         var announce = window.Method("AnnounceSessionRestored");
@@ -112,17 +145,44 @@ public class TabA11yReachableWiringTests
         Assert.Equal("\"session-restore\"", call.Arg(2));
         // The wording lives in Core, where it can be tested as text.
         Assert.Contains("TabAccessibleText.SessionRestoredAnnouncement", announce.ToString());
-        // And it is raised from a real element, never a bare null.
-        Assert.NotEqual("null", call.Arg(0));
 
-        // Called from the Loaded one-shot, and from nowhere else.
-        var invocations = window.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.Expression.ToString() == "AnnounceSessionRestored")
-            .ToList();
-        var from = Assert.Single(invocations);
+        // Raised from exactly one place.
+        var from = Assert.Single(window.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString() == "AnnounceSessionRestored"));
+
+        // That place is a handler SUBSCRIBED to Activated -- matched on the
+        // subscription, not on the handler's name, which a rename would
+        // defeat while leaving the wiring correct and which a function
+        // called "OnLoadedAnything" would satisfy while being wired to
+        // nothing at all.
         var handler = from.Ancestors().OfType<LocalFunctionStatementSyntax>().FirstOrDefault();
         Assert.NotNull(handler);
-        Assert.Contains("Loaded", handler!.Identifier.Text, StringComparison.OrdinalIgnoreCase);
+        var subscription = Assert.Single(window.Root.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.IsKind(SyntaxKind.AddAssignmentExpression)
+                        && a.Right.ToString() == handler!.Identifier.Text));
+        Assert.Equal("Activated", subscription.Left.ToString());
+
+        // ...and it takes itself off again, or a restored window announces
+        // on every activation for the rest of its life.
+        Assert.Contains(handler!.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.IsKind(SyntaxKind.SubtractAssignmentExpression)
+                 && a.Left.ToString() == "Activated"
+                 && a.Right.ToString() == handler.Identifier.Text);
+    }
+
+    /// <summary>
+    /// The announcement dereferences the XamlRoot to find a focused element
+    /// to carry it, from inside an event handler, where a throw is an
+    /// unhandled exception on the UI thread. It checks first.
+    /// </summary>
+    [Fact]
+    public void TheAnnouncement_GuardsTheRootItDereferences()
+    {
+        var announce = ShellSource.Load("MainWindow.xaml.cs").Method("AnnounceSessionRestored");
+        Assert.Contains(announce.Body!.Statements.OfType<IfStatementSyntax>(),
+            s => s.Condition.ToString().Contains("XamlRoot")
+                 && s.Statement.ToString().Contains("return"));
     }
 
     /// <summary>
@@ -149,29 +209,50 @@ public class TabA11yReachableWiringTests
     /// have frozen every tab's name at its birth value with nothing between
     /// the change and the defect.
     /// </summary>
-    [Theory]
-    [InlineData("ShellReportedCwd")]
-    [InlineData("HomeDirectory")]
-    public void BothVerticalRowKinds_NameTheDirectoryTheyFollow(string property)
+    [Fact]
+    public void BothVerticalRowKinds_NameTheDirectoryTheyFollow()
     {
-        var bindings = Strip().Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.Expression.ToString() == "AotBinding.Create"
-                        && i.ArgumentList.ToString().Contains($"nameof(TabModel.{property})"))
+        // Matched on the ARGUMENT, not on a substring of the whole list:
+        // the name can also appear inside a callback lambda, which says
+        // nothing about what the binding watches.
+        var methods = Strip().Root.DescendantNodes().OfType<MethodDeclarationSyntax>()
+            .Where(m => m.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Any(i => i.Expression.ToString() == "AotBinding.Create"
+                          && i.ArgumentList.Arguments.Any(a =>
+                              a.ToString() == "nameof(TabModel.ShellReportedCwd)")))
+            .Select(m => m.Identifier.Text)
             .ToList();
 
-        // The body row and the pinned square, both.
-        Assert.Equal(2, bindings.Count);
+        // The body row and the pinned square -- two DIFFERENT builders, not
+        // two bindings that happen to sit in the same one.
+        Assert.Equal(2, methods.Distinct().Count());
     }
 
-    [Theory]
-    [InlineData("ShellReportedCwd")]
-    [InlineData("HomeDirectory")]
-    public void TheHorizontalStrip_NamesTheDirectoryItFollows(string property)
+    [Fact]
+    public void TheHorizontalStrip_NamesTheDirectoryItFollows()
     {
         var add = ShellSource.Load("Tabs.TabHost.xaml.cs").Method("AddItem");
         var arm = Assert.Single(add.DescendantNodes().OfType<IfStatementSyntax>()
             .Where(i => i.Statement.ToString().Contains("ApplyItemAccessibleText")
                         && i.Statement.ToString().Contains("headerText.Text")));
-        Assert.Contains($"nameof(TabModel.{property})", arm.Condition.ToString());
+        Assert.Contains("nameof(TabModel.ShellReportedCwd)", arm.Condition.ToString());
+    }
+
+    /// <summary>
+    /// HomeDirectory reaches the accessible name exactly as the directory
+    /// does, and is deliberately absent from all three lists: it is written
+    /// once, before any strip has a row to subscribe with, so naming it
+    /// would document a dependency that can never fire -- and would then be
+    /// held there by a test.
+    /// </summary>
+    [Fact]
+    public void NoStrip_SubscribesToTheHomeDirectory()
+    {
+        foreach (var source in new[] { "Tabs.VerticalTabStrip.xaml.cs", "Tabs.TabHost.xaml.cs" })
+        {
+            Assert.DoesNotContain(
+                "nameof(TabModel.HomeDirectory)",
+                ShellSource.Load(source).Root.ToString());
+        }
     }
 }

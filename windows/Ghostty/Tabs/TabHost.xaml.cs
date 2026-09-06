@@ -493,11 +493,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // in TabModel that nothing here mentions. Narrow that fan-out
             // and every tab's name would silently freeze at its birth value
             // with no test between the change and the defect.
+            //
+            // HomeDirectory reaches the name the same way and is
+            // deliberately NOT here: it is written once, before this strip
+            // has a row to subscribe with, so naming it would document a
+            // dependency that can never fire.
             if (e.PropertyName == nameof(TabModel.EffectiveTitle) ||
                 e.PropertyName == nameof(TabModel.ShellReportedTitle) ||
                 e.PropertyName == nameof(TabModel.UserOverrideTitle) ||
-                e.PropertyName == nameof(TabModel.ShellReportedCwd) ||
-                e.PropertyName == nameof(TabModel.HomeDirectory))
+                e.PropertyName == nameof(TabModel.ShellReportedCwd))
             {
                 headerText.Text = tab.WordTitle;
                 ApplyItemAccessibleText(item, tab);

@@ -441,10 +441,31 @@ public class TabAccessibleTextTests
     [Theory]
     [InlineData(0, null)]
     [InlineData(1, null)]
-    [InlineData(2, "Session restored, 2 tabs")]
-    [InlineData(17, "Session restored, 17 tabs")]
+    [InlineData(2, "Session restored, 2 tabs, src")]
+    [InlineData(17, "Session restored, 17 tabs, src")]
     public void TheRestoreAnnouncement_CountsTheTabs_AndStaysQuietForOne(int count, string? expected)
-        => Assert.Equal(expected, TabAccessibleText.SessionRestoredAnnouncement(count));
+    {
+        var active = new TabModel(new FakePaneHost()) { ShellReportedCwd = @"C:\Users\alex\src" };
+        Assert.Equal(expected, TabAccessibleText.SessionRestoredAnnouncement(active, count));
+    }
+
+    /// <summary>
+    /// It names the tab the restore landed on, like every other
+    /// announcement in this file. Restoring several WINDOWS raises one per
+    /// window, and without a name that is the same sentence twice with
+    /// nothing to tell them apart.
+    /// </summary>
+    [Fact]
+    public void TheRestoreAnnouncement_NamesWhereTheRestoreLanded()
+    {
+        var home = new TabModel(new FakePaneHost())
+        {
+            HomeDirectory = @"C:\Users\alex",
+            ShellReportedCwd = @"C:\Users\alex",
+        };
+        Assert.Equal("Session restored, 3 tabs, Home",
+            TabAccessibleText.SessionRestoredAnnouncement(home, 3));
+    }
 
     /// <summary>
     /// The accessible name follows the shell's reported directory, through

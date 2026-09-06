@@ -14,12 +14,20 @@ namespace Ghostty.Core.Tabs;
 /// Naming them from the title makes tabs with distinct titles distinct
 /// to a listener. Tabs that are all untitled still collapse onto the same
 /// fallback name, exactly as their visible labels collapse onto the same
-/// text; position in the strip is what separates those. The framework
-/// supplies that for a NavigationViewItem and a TabViewItem, because it
-/// knows the collection they belong to. It does NOT for a pinned square,
-/// which is a plain element in a custom panel -- so the vertical strip
-/// stamps those itself (StampPinnedPositions), and two tabs pinned at
-/// home stopped reading as the same thing twice.
+/// text; position in the strip is what separates those.
+///
+/// A NavigationViewItem and a TabViewItem get some answer from the
+/// framework, which counts the collection they sit in. A pinned square
+/// gets none: it is a plain element in a custom panel, so the vertical
+/// strip stamps those itself (StampPinnedPositions), and two tabs pinned
+/// at home stopped reading as the same thing twice.
+///
+/// The framework's answer is NOT known to be right where it applies. The
+/// vertical strip's group headers are NavigationViewItems in the same
+/// MenuItems collection as the body rows, so a run's header is plausibly
+/// counted as a peer of the tabs and every body row's "n of m" inflated
+/// by the number of groups. Unverified -- it needs a live UIA client
+/// against a window with groups -- and not what the pinned stamp fixed.
 ///
 /// The name has to be non-empty: empty is exactly the state that sent the
 /// vertical strip down the ToString path in the first place.
@@ -142,12 +150,17 @@ internal static class TabAccessibleText
     /// ItemStatus, which the note above records as unread. So the count is
     /// the announcement; the tabs themselves are then there to be browsed.
     ///
+    /// Names the tab the restore lands on, like every other announcement in
+    /// this file: a count alone tells a listener how much came back but not
+    /// where they are, and a restore of several WINDOWS raises one of these
+    /// per window, which without a name is the same sentence three times.
+    ///
     /// Null rather than empty for the degenerate cases, so the caller has
-    /// one thing to test. A single restored tab is a window reopening on
-    /// its own, which needs no telling.
+    /// one thing to test. A single restored tab is indistinguishable from
+    /// an ordinary launch and needs no telling.
     /// </summary>
-    internal static string? SessionRestoredAnnouncement(int tabCount)
-        => tabCount < 2 ? null : $"Session restored, {tabCount} tabs";
+    internal static string? SessionRestoredAnnouncement(TabModel active, int tabCount)
+        => tabCount < 2 ? null : $"Session restored, {tabCount} {Tabs(tabCount)}, {Name(active)}";
 
     // --- Group commands (5b-2a) ---
     //
