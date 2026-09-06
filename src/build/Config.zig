@@ -34,6 +34,7 @@ sentry: bool = true,
 simd: bool = true,
 i18n: bool = true,
 wasm_shared: bool = true,
+embed_emoji_font: bool = true,
 
 /// Ghostty exe properties
 exe_entrypoint: ExeEntrypoint = .ghostty,
@@ -251,6 +252,16 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
 
         break :simd true;
     };
+
+    config.embed_emoji_font = b.option(
+        bool,
+        "embed-emoji-font",
+        "Embed the Noto emoji fonts (about 11MB) for systems that have no " ++
+            "emoji font of their own. A system emoji font found through font " ++
+            "discovery is preferred either way, so platforms that always have " ++
+            "one never pay for this. Turning it off makes such a system render " ++
+            "emoji as boxes.",
+    ) orelse true;
 
     config.wayland = b.option(
         bool,
@@ -668,6 +679,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     step.addOption(bool, "sentry", self.sentry);
     step.addOption(bool, "simd", self.simd);
     step.addOption(bool, "i18n", self.i18n);
+    step.addOption(bool, "embed_emoji_font", self.embed_emoji_font);
     step.addOption(ApprtRuntime, "app_runtime", self.app_runtime);
     step.addOption(FontBackend, "font_backend", self.font_backend);
     step.addOption(RendererBackend, "renderer", self.renderer);
@@ -772,6 +784,7 @@ pub fn fromOptions() Config {
         .wasm_target = std.meta.stringToEnum(WasmTarget, @tagName(options.wasm_target)).?,
         .wasm_shared = options.wasm_shared,
         .i18n = options.i18n,
+        .embed_emoji_font = options.embed_emoji_font,
     };
 }
 

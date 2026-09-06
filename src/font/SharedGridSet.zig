@@ -29,6 +29,7 @@ const discovery = @import("discovery.zig");
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 const global = @import("../global.zig");
+const build_config = @import("../build_config.zig");
 
 const log = std.log.scoped(.font_shared_grid_set);
 
@@ -425,7 +426,10 @@ fn collection(
 /// be removed, so discovery always finds it and the embedded faces would
 /// never be used. Excluding them at compile time keeps roughly 11MB of
 /// font data out of the binary, since Zig only embeds what is referenced.
-const embed_emoji: bool = !(builtin.target.os.tag.isDarwin() and Discover != void);
+/// `-Dembed-emoji-font=false` excludes them everywhere, which buys that
+/// space back at the cost of boxes on a system with no emoji font.
+const embed_emoji: bool = build_config.embed_emoji_font and
+    !(builtin.target.os.tag.isDarwin() and Discover != void);
 
 /// Add the embedded Noto emoji faces to a fallback collection. Both are
 /// needed: NotoColorEmoji covers the emoji presentation and NotoEmoji the
