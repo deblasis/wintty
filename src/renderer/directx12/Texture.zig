@@ -128,6 +128,21 @@ pending_staging: std.ArrayListUnmanaged(*d3d12.ID3D12Resource) = .empty,
 /// COM-querying each ID3D12Resource's size. Incremented in uploadRegion
 /// per band; reset in replaceRegion's release loop.
 pending_staging_bytes: u64 = 0,
+/// Set when `replaceRegion` swallowed an upload failure, so the texture
+/// holds less than the caller handed it. Read and cleared through
+/// `takeUploadDropped` by callers that have to make the loss good; the
+/// rest keep the old behaviour of never hearing about it.
+upload_dropped: bool = false,
+
+/// Whether an upload has been dropped since this was last asked, clearing
+/// the record. `replaceRegion` cannot report a failure through its return
+/// type -- it shares a signature with Metal's, which cannot fail -- so
+/// this is how a caller that needs the texture to hold what it handed
+/// over finds out that it does not.
+pub fn takeUploadDropped(self: *Texture) bool {
+    defer self.upload_dropped = false;
+    return self.upload_dropped;
+}
 
 /// Row-pitch alignment that DX12's CopyTextureRegion requires for staging
 /// buffers (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT). `pub` so image.zig can
@@ -312,13 +327,13 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// the leading bands of the new content and the trailing rows of the
 /// previous content.
 ///
-/// A later call does NOT necessarily repair that. The renderer uploads the
-/// atlas region that went dirty since this texture's last sync, so once
-/// this swallow reports success for bytes that were never copied, the
-/// dropped rows stay stale until something dirties them again or the atlas
-/// is grown or reset. Anything that needs a guaranteed-correct texture has
-/// to notice the failure some other way, which today means not going
-/// through this function.
+/// A later call does NOT necessarily repair that on its own. The renderer
+/// uploads the atlas region that went dirty since this texture's last
+/// sync, so bytes this swallow reported success for would otherwise stay
+/// stale until something dirtied them again. `upload_dropped` is how a
+/// caller hears about it: the atlas sync reads it through
+/// `takeUploadDropped`, leaves its own upload counter where it was, and
+/// ships the whole atlas on the next frame.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
     // Retire the staging buffers from the previous upload. They are the
     // source of CopyTextureRegion calls that may still be executing, so
@@ -336,6 +351,7 @@ pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: u
 
     self.uploadRegion(@intCast(x), @intCast(y), @intCast(width), @intCast(height), data) catch |err| {
         log.warn("replaceRegion upload dropped: {t}", .{err});
+        self.upload_dropped = true;
     };
 
     // Transition back to shader-readable.

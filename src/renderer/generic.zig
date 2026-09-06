@@ -2393,12 +2393,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // If our font atlas changed, sync the texture data.
             // Placed after beginFrame so the DX12 command list is available.
             //
-            // The counter is advanced only once the upload has returned. We
-            // now ship the dirty region rather than the whole atlas, so a
-            // sync that never happened is not made good by the next one: it
-            // would carry only what went dirty after it, leaving the dropped
-            // rows stale for as long as the frame state lives. Leaving the
-            // counter where it was is what makes the next frame try again.
+            // The counter is advanced only once the upload has returned and
+            // said it landed. We now ship the dirty region rather than the
+            // whole atlas, so a sync that never happened is not made good by
+            // the next one: it would carry only what went dirty after it,
+            // leaving the dropped rows stale for as long as the frame state
+            // lives. Leaving the counter where it was is what makes the next
+            // frame try again.
             texture: {
                 const atlas = &self.font_grid.atlas_grayscale;
                 const modified = atlas.modified.load(.monotonic);
@@ -2407,8 +2408,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 defer self.font_grid.lock.unlockShared(global.io());
                 const dirty = atlas.dirtySince(frame.grayscale_modified);
                 const synced = atlas.modified.load(.monotonic);
-                try self.syncAtlasTexture(atlas, &frame.grayscale, dirty);
-                frame.grayscale_modified = synced;
+                if (try syncAtlasTexture(&self.api, atlas, &frame.grayscale, dirty)) {
+                    frame.grayscale_modified = synced;
+                }
             }
             texture: {
                 const atlas = &self.font_grid.atlas_color;
@@ -2418,8 +2420,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 defer self.font_grid.lock.unlockShared(global.io());
                 const dirty = atlas.dirtySince(frame.color_modified);
                 const synced = atlas.modified.load(.monotonic);
-                try self.syncAtlasTexture(atlas, &frame.color, dirty);
-                frame.color_modified = synced;
+                if (try syncAtlasTexture(&self.api, atlas, &frame.color, dirty)) {
+                    frame.color_modified = synced;
+                }
             }
 
             // Determine if we can use the custom shader path.  All post-process
@@ -4516,58 +4519,92 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 try self.addUnderline(@intCast(coord.x + 1), @intCast(coord.y), .single, screen_fg, 255);
             }
         }
-
-        /// Sync the atlas data to the given texture. If the atlas no longer
-        /// fits into the texture, the texture is reallocated and the whole
-        /// atlas copied into it; otherwise only `dirty` is copied.
-        ///
-        /// `dirty` is what this texture is missing, from
-        /// `font.Atlas.dirtySince`; null means it is missing nothing.
-        ///
-        /// Caller must hold the font grid's read lock.
-        fn syncAtlasTexture(
-            self: *const Self,
-            atlas: *const font.Atlas,
-            texture: *Texture,
-            dirty: ?font.Atlas.Region,
-        ) !void {
-            // DX12 rotates command lists across triple-buffered frames.
-            // Update the texture to use the current frame's command list
-            // before any upload or resize operation. Metal and OpenGL use
-            // immediate uploads so they don't need this.
-            if (@hasDecl(GraphicsAPI, "updateTextureCommandList")) {
-                self.api.updateTextureCommandList(texture);
-            }
-
-            if (atlas.size > texture.width) {
-                try replaceAtlasTexture(&self.api, atlas, texture);
-
-                // The new texture is empty, so it needs the whole atlas
-                // no matter how little the caller asked for.
-                try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
-                return;
-            }
-
-            const region = dirty orelse return;
-
-            // `replaceRegion` takes tightly packed rows and has no source
-            // stride, so the narrowest thing we can hand it without copying
-            // the region out first is the full-width band of rows the dirty
-            // box spans, which is already a slice of the atlas data. The
-            // columns outside the box come along for the ride; they hold
-            // what the texture holds, so re-uploading them changes nothing.
-            const stride: usize = @as(usize, atlas.size) * atlas.format.depth();
-            const start: usize = @as(usize, region.y) * stride;
-            const len: usize = @as(usize, region.height) * stride;
-            try texture.replaceRegion(
-                0,
-                region.y,
-                atlas.size,
-                region.height,
-                atlas.data[start..][0..len],
-            );
-        }
     };
+}
+
+/// Whether `texture` has a dropped upload on record.
+///
+/// DX12's `replaceRegion` cannot fail -- it shares a signature with
+/// Metal's, which cannot either -- so it swallows staging-buffer failures
+/// and marks the texture instead. Backends that have no way to drop an
+/// upload never report one.
+fn atlasUploadDropped(texture: anytype) bool {
+    if (!@hasField(@TypeOf(texture.*), "upload_dropped")) return false;
+    return texture.upload_dropped;
+}
+
+/// `atlasUploadDropped`, clearing the record. The record has to outlive
+/// the sync that set it -- it is what tells the next sync to ship the
+/// whole atlas -- so only the sync that acts on it clears it.
+fn takeAtlasUploadDropped(texture: anytype) bool {
+    if (!@hasField(@TypeOf(texture.*), "upload_dropped")) return false;
+    return texture.takeUploadDropped();
+}
+
+/// Sync the atlas data to the given texture. If the atlas no longer fits
+/// into the texture, the texture is reallocated and the whole atlas copied
+/// into it; otherwise only `dirty` is copied.
+///
+/// `dirty` is what this texture is missing, from `font.Atlas.dirtySince`;
+/// null means it is missing nothing.
+///
+/// Returns whether the texture now holds everything it was given. A false
+/// return means the caller must not advance its upload counter: the atlas
+/// stops reporting a region as dirty once it has been handed over, so a
+/// counter advanced over bytes that never arrived leaves them stale for as
+/// long as this texture lives.
+///
+/// A texture that dropped an upload gets the whole atlas next time rather
+/// than the band it lost, because the dirty box is a moving bound: by the
+/// time we come back it may have restarted somewhere past the rows that
+/// went missing.
+///
+/// Caller must hold the font grid's read lock.
+fn syncAtlasTexture(
+    api: anytype,
+    atlas: *const font.Atlas,
+    texture: anytype,
+    dirty: ?font.Atlas.Region,
+) !bool {
+    // DX12 rotates command lists across triple-buffered frames.
+    // Update the texture to use the current frame's command list
+    // before any upload or resize operation. Metal and OpenGL use
+    // immediate uploads so they don't need this.
+    if (@hasDecl(@TypeOf(api.*), "updateTextureCommandList")) {
+        api.updateTextureCommandList(texture);
+    }
+
+    const dropped = takeAtlasUploadDropped(texture);
+    const grew = atlas.size > texture.width;
+    if (grew) try replaceAtlasTexture(api, atlas, texture);
+
+    if (grew or dropped) {
+        // A grown texture is empty and a texture that lost rows has no
+        // record of which, so either way it needs the whole atlas no
+        // matter how little the caller asked for.
+        try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
+        return !atlasUploadDropped(texture);
+    }
+
+    const region = dirty orelse return true;
+
+    // `replaceRegion` takes tightly packed rows and has no source
+    // stride, so the narrowest thing we can hand it without copying
+    // the region out first is the full-width band of rows the dirty
+    // box spans, which is already a slice of the atlas data. The
+    // columns outside the box come along for the ride; they hold
+    // what the texture holds, so re-uploading them changes nothing.
+    const stride: usize = @as(usize, atlas.size) * atlas.format.depth();
+    const start: usize = @as(usize, region.y) * stride;
+    const len: usize = @as(usize, region.height) * stride;
+    try texture.replaceRegion(
+        0,
+        region.y,
+        atlas.size,
+        region.height,
+        atlas.data[start..][0..len],
+    );
+    return !atlasUploadDropped(texture);
 }
 
 /// Point `texture` at a freshly allocated texture sized for `atlas`,
@@ -4916,13 +4953,27 @@ const TestAtlasTextures = struct {
     next_id: usize = 0,
     released: [8]bool = @splat(false),
     double_release: bool = false,
+
+    /// Makes the next `replaceRegion` behave the way DX12's does when a
+    /// staging buffer cannot be allocated: it copies nothing and says
+    /// nothing, leaving the record behind on the texture.
+    drop_next_upload: bool = false,
+
+    /// The last region handed to `replaceRegion`, and how many times it
+    /// has been called at all.
+    uploads: usize = 0,
+    last_y: usize = 0,
+    last_height: usize = 0,
 };
 
-/// Stands in for a backend `Texture`. Only `deinit` matters here; the
-/// grow path's `replaceRegion` is the caller's business.
+/// Stands in for a backend `Texture`, modelling the two things
+/// `syncAtlasTexture` needs from one: a size to compare the atlas
+/// against, and an upload that can quietly drop what it was given.
 const TestAtlasTexture = struct {
     store: *TestAtlasTextures,
     id: usize,
+    width: usize,
+    upload_dropped: bool = false,
 
     fn deinit(self: TestAtlasTexture) void {
         if (self.store.released[self.id]) {
@@ -4930,6 +4981,32 @@ const TestAtlasTexture = struct {
             return;
         }
         self.store.released[self.id] = true;
+    }
+
+    fn replaceRegion(
+        self: *TestAtlasTexture,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        data: []const u8,
+    ) error{}!void {
+        _ = x;
+        _ = width;
+        _ = data;
+        self.store.uploads += 1;
+        if (self.store.drop_next_upload) {
+            self.store.drop_next_upload = false;
+            self.upload_dropped = true;
+            return;
+        }
+        self.store.last_y = y;
+        self.store.last_height = height;
+    }
+
+    fn takeUploadDropped(self: *TestAtlasTexture) bool {
+        defer self.upload_dropped = false;
+        return self.upload_dropped;
     }
 };
 
@@ -4942,12 +5019,21 @@ const TestAtlasApi = struct {
         self: *const TestAtlasApi,
         atlas: *const font.Atlas,
     ) !TestAtlasTexture {
-        _ = atlas;
         if (self.store.fail_next) return error.TextureCreateFailed;
         defer self.store.next_id += 1;
-        return .{ .store = self.store, .id = self.store.next_id };
+        return .{
+            .store = self.store,
+            .id = self.store.next_id,
+            .width = atlas.size,
+        };
     }
 };
+
+/// A 4x4 grayscale atlas with real backing bytes, for the sync tests
+/// below (the `replaceAtlasTexture` tests never touch the data).
+fn testSyncAtlas(data: []u8, size: u32) font.Atlas {
+    return .{ .data = data, .size = size, .format = .grayscale };
+}
 
 const test_atlas: font.Atlas = .{
     .data = undefined,
@@ -5013,6 +5099,117 @@ test "replaceAtlasTexture: repeated failed grows never double release" {
     }
     try std.testing.expect(!store.double_release);
     try std.testing.expect(!store.released[texture.id]);
+}
+
+test "syncAtlasTexture: a clean band upload ships only the band and reports synced" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 1,
+        .width = 4,
+        .height = 2,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), store.last_y);
+    try std.testing.expectEqual(@as(usize, 2), store.last_height);
+}
+
+test "syncAtlasTexture: a dropped upload is not reported as synced" {
+    // Regression: DX12's replaceRegion swallows staging-buffer failures to
+    // keep a signature Metal can implement, so a sync that copied nothing
+    // still returned cleanly. The caller advanced its upload counter over
+    // rows the texture never received, and since only the region that goes
+    // dirty afterwards is ever shipped, they stayed stale for the life of
+    // that frame state.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 1,
+        .width = 4,
+        .height = 2,
+    }));
+}
+
+test "syncAtlasTexture: the sync after a dropped upload ships the whole atlas" {
+    // The dirty box is a moving bound, so by the time we come back it may
+    // describe rows that have nothing to do with the ones that went
+    // missing. Only a full upload is guaranteed to cover them.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    _ = try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 1,
+    });
+
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 3,
+        .width = 4,
+        .height = 1,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), store.last_y);
+    try std.testing.expectEqual(@as(usize, 4), store.last_height);
+}
+
+test "syncAtlasTexture: nothing dirty means no upload at all" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, null));
+    try std.testing.expectEqual(@as(usize, 0), store.uploads);
+}
+
+test "syncAtlasTexture: a grow ships the whole atlas into the new texture" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var small: [4]u8 = @splat(0);
+    const before = testSyncAtlas(&small, 2);
+    var texture = try api.initAtlasTexture(&before);
+
+    var data: [16]u8 = @splat(0);
+    const after = testSyncAtlas(&data, 4);
+    try std.testing.expect(try syncAtlasTexture(&api, &after, &texture, .{
+        .x = 0,
+        .y = 3,
+        .width = 4,
+        .height = 1,
+    }));
+    try std.testing.expectEqual(@as(usize, 4), texture.width);
+    try std.testing.expectEqual(@as(usize, 0), store.last_y);
+    try std.testing.expectEqual(@as(usize, 4), store.last_height);
+}
+
+test "syncAtlasTexture: a grow whose upload is dropped is not reported as synced" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var small: [4]u8 = @splat(0);
+    const before = testSyncAtlas(&small, 2);
+    var texture = try api.initAtlasTexture(&before);
+
+    var data: [16]u8 = @splat(0);
+    const after = testSyncAtlas(&data, 4);
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &after, &texture, null));
 }
 
 test "customShaderUsable: no custom shader state means no custom shader path" {
