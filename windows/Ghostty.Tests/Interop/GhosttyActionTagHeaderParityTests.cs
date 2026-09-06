@@ -114,6 +114,11 @@ public class GhosttyActionTagHeaderParityTests
         AssertMatchesHeader<CustomShaderFailure>(
             "ghostty_action_custom_shader_failure_e", "GHOSTTY_CUSTOM_SHADER_FAILURE_");
 
+    [Fact]
+    public void RendererHealth_Ordinals_Match_Header() =>
+        AssertMatchesHeader<RendererHealth>(
+            "ghostty_action_renderer_health_e", "GHOSTTY_RENDERER_HEALTH_");
+
     // GhosttyGotoTab is the one enum here whose header entries carry explicit
     // values, and they are negative sentinels rather than positions. Read with
     // `explicitValues`, which parses `= N` instead of counting: refusing it
