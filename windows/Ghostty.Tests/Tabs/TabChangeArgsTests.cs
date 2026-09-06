@@ -30,18 +30,29 @@ public class TabChangeArgsTests
 
     // --- one instance per name, not one per raise ---
 
+    /// <summary>
+    /// Across two MODELS, not two raises on one. A per-instance cache would
+    /// satisfy the same-instance check while still allocating a set per tab,
+    /// which is the cost the change exists to remove -- a window holds as
+    /// many tabs as the user opens.
+    /// </summary>
     [Fact]
-    public void RaisingTheSameProperty_ReusesOneArgsObject()
+    public void RaisingTheSameProperty_ReusesOneArgsObject_AcrossEveryTab()
     {
-        var tab = new TabModel(new FakePaneHost());
-        var seen = Record(tab);
+        var one = new TabModel(new FakePaneHost());
+        var other = new TabModel(new FakePaneHost());
+        var seenOne = Record(one);
+        var seenOther = Record(other);
 
-        tab.IsPinned = true;
-        tab.IsPinned = false;
+        one.IsPinned = true;
+        one.IsPinned = false;
+        other.IsPinned = true;
 
-        var pinned = seen.Where(e => e.PropertyName == nameof(TabModel.IsPinned)).ToList();
+        var pinned = seenOne.Where(e => e.PropertyName == nameof(TabModel.IsPinned)).ToList();
         Assert.Equal(2, pinned.Count);
         Assert.Same(pinned[0], pinned[1]);
+        Assert.Same(pinned[0], Assert.Single(seenOther,
+            e => e.PropertyName == nameof(TabModel.IsPinned)));
     }
 
     [Fact]
@@ -107,6 +118,14 @@ public class TabChangeArgsTests
     /// hand-written <c>Args.IsPinned</c> in the <c>IsIdle</c> setter would
     /// notify the wrong listeners and nothing else would catch it.
     /// </summary>
+    /// <summary>
+    /// The properties that deliberately notify nothing. Named rather than
+    /// inferred: a walk that simply skipped whatever stayed silent could not
+    /// tell a plain auto-property from one whose <c>Raise</c> was deleted,
+    /// and would pass on both.
+    /// </summary>
+    private static readonly string[] SilentProperties = [nameof(TabModel.ProfileId)];
+
     [Fact]
     public void EverySettableProperty_RaisesItsOwnName()
     {
@@ -119,23 +138,110 @@ public class TabChangeArgsTests
         // matches nothing, the test would pass while proving nothing.
         Assert.True(properties.Count >= 10, $"expected the model's settable properties, found {properties.Count}");
 
-        var checkedAtLeastOne = false;
         foreach (var property in properties)
         {
-            if (ValueFor(property.PropertyType) is not { } value) continue;
+            var value = ValueFor(property.PropertyType);
+            Assert.True(value is not null,
+                $"{property.Name} is settable but this walk cannot build a value for "
+                + $"{property.PropertyType.Name}, so it is silently uncovered");
 
             var tab = new TabModel(new FakePaneHost());
             var seen = Record(tab);
             property.SetValue(tab, value);
 
-            // A property that notifies nothing (a plain auto-property) is
-            // fine; one that notifies must include its own name.
-            if (seen.Count == 0) continue;
-            checkedAtLeastOne = true;
+            if (SilentProperties.Contains(property.Name))
+            {
+                Assert.Empty(seen);
+                continue;
+            }
             Assert.Contains(property.Name, seen.Select(e => e.PropertyName));
         }
+    }
 
-        Assert.True(checkedAtLeastOne, "no settable property notified; the reflection walk proved nothing");
+    /// <summary>
+    /// The one notifying property the public-setter walk cannot reach: its
+    /// setter is private, and it is the property carrying the strip's
+    /// starting state.
+    /// </summary>
+    [Fact]
+    public void TheStartingFlag_RaisesItsOwnName()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        var seen = Record(tab);
+
+        tab.BeginSettling();
+
+        Assert.Contains(nameof(TabModel.IsSettling), seen.Select(e => e.PropertyName));
+    }
+
+    /// <summary>
+    /// The derived fan-out raises five names, and every one of them is a
+    /// hand-written constant. A swap inside it -- WordTitle where
+    /// EffectiveTitle belongs -- leaves both names present, so a test that
+    /// only asked "are they all there" would pass. Each is raised exactly
+    /// once per change.
+    /// </summary>
+    [Fact]
+    public void TheDerivedFanOut_RaisesEachNameExactlyOnce()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        var seen = Record(tab);
+
+        tab.ShellReportedCwd = @"C:\one";
+
+        foreach (var name in new[]
+        {
+            nameof(TabModel.ShellReportedCwd),
+            nameof(TabModel.EffectiveTitle),
+            nameof(TabModel.IsHome),
+            nameof(TabModel.WordTitle),
+            nameof(TabModel.TooltipText),
+            nameof(TabModel.HoverText),
+        })
+        {
+            Assert.Single(seen, e => e.PropertyName == name);
+        }
+        Assert.Equal(6, seen.Count);
+    }
+
+    /// <summary>
+    /// The other two classes that took the same treatment. Their setters
+    /// name their constants by hand exactly as the model's do, and nothing
+    /// else walks them.
+    /// </summary>
+    [Fact]
+    public void TheGroupsProperties_EachRaiseTheirOwnName()
+    {
+        var group = new TabGroup();
+        var seen = Record(group);
+
+        group.Title = "build";
+        group.Color = TabColor.Green;
+        group.IsCollapsed = true;
+
+        Assert.Equal(
+            [nameof(TabGroup.Title), nameof(TabGroup.Color), nameof(TabGroup.IsCollapsed)],
+            seen.Select(e => e.PropertyName));
+    }
+
+    [Fact]
+    public void TheIconViewModels_Properties_EachRaiseTheirOwnName()
+    {
+        var vm = new TabIconViewModel(new IconSpec.BundledKey("pwsh"), "pwsh");
+        var seen = Record(vm);
+
+        vm.SetOverride(new IconSpec.Mdl2Token(0xE700), "vim");
+
+        // The icon change carries its two derived readings with it, and the
+        // tooltip moved on its own.
+        Assert.Equal(
+            [
+                nameof(TabIconViewModel.Icon),
+                nameof(TabIconViewModel.IsMdl2Glyph),
+                nameof(TabIconViewModel.Mdl2CodePoint),
+                nameof(TabIconViewModel.TooltipText),
+            ],
+            seen.Select(e => e.PropertyName));
     }
 
     private static object? ValueFor(Type type)

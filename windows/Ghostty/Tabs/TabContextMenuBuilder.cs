@@ -37,17 +37,33 @@ internal static class TabContextMenuBuilder
     private static bool CwdIsActionable(TabModel tab) => tab.ActionableCwd is not null;
 
     /// <summary>
-    /// Why the directory items are unavailable, for assistive clients. A
-    /// disabled <see cref="MenuFlyoutItem"/> raises none of the pointer
-    /// events <see cref="ToolTipService"/> needs, so a tooltip here would be
-    /// text nobody could reach; Narrator reads HelpText as the item's
-    /// description. One string for all three reasons the model can refuse --
-    /// nothing reported yet, bytes that are not plain text, a host the spawn
-    /// policy will not enter -- because the menu owes "not here", and the
-    /// reasoning belongs in the policy, not the flyout.
+    /// Why the directory items are unavailable, for assistive clients.
+    ///
+    /// Two strings, because the model refuses for two different reasons and
+    /// only one of them is "there is no directory". A remote share IS
+    /// reported -- the tab labels itself from it, and the tooltip shows it
+    /// in full -- so telling a listener the shell reported nothing, while a
+    /// pointer user reads the path, is a contradiction rather than a
+    /// simplification. What the spawn policy refuses, it refuses because the
+    /// directory is on another machine.
+    ///
+    /// HelpText rather than a tooltip because a disabled
+    /// <see cref="MenuFlyoutItem"/> raises none of the pointer events
+    /// <see cref="ToolTipService"/> needs, so a tooltip here would be text
+    /// nobody could reach. NOT measured, unlike the NVDA note in
+    /// <c>TabAccessibleText</c>: whether a menu's arrow-key traversal stops
+    /// on a disabled item -- and so whether a screen reader reaches this at
+    /// all -- is unverified on WinAppSDK. Object navigation reaches it;
+    /// directional focus may not. Written on the reasoning that an
+    /// unreachable description costs nothing and a missing one cannot be
+    /// read by anyone.
     /// </summary>
-    private const string CwdUnavailableHelp =
-        "Unavailable: this tab's shell has not reported a working directory that can be used.";
+    private const string CwdNotReportedHelp =
+        "Unavailable: this tab's shell has not reported a working directory.";
+
+    /// <summary>The directory was reported, and names another machine.</summary>
+    private const string CwdRefusedHelp =
+        "Unavailable: this tab's working directory is on another computer.";
 
     /// <summary>
     /// Greys the directory pair rather than hiding it. The horizontal strip
@@ -62,10 +78,20 @@ internal static class TabContextMenuBuilder
     private static void ApplyCwdAvailability(TabModel tab, MenuFlyoutItem copy, MenuFlyoutItem open)
     {
         var actionable = CwdIsActionable(tab);
+        var help = actionable ? null
+            : tab.ShellReportedCwd is not null ? CwdRefusedHelp
+            : CwdNotReportedHelp;
         foreach (var item in new[] { copy, open })
         {
             item.IsEnabled = actionable;
-            AutomationProperties.SetHelpText(item, actionable ? null : CwdUnavailableHelp);
+            // Cleared rather than blanked: UIA reports an empty string as
+            // present-but-blank, so a live item would carry an empty
+            // description instead of none. Same rule as the palette's
+            // SetOrClear, and the same reason.
+            if (help is null)
+                item.ClearValue(AutomationProperties.HelpTextProperty);
+            else
+                AutomationProperties.SetHelpText(item, help);
         }
     }
 

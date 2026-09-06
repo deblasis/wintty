@@ -200,7 +200,13 @@ public class VerticalTabGroupHeaderWiringTests
         Assert.Contains("nameof(TabGroup.IsCollapsed)", headerBinding.ArgumentList.ToString());
         Assert.Contains("nameof(TabGroup.Title)", headerBinding.ArgumentList.ToString());
         Assert.Contains("nameof(TabGroup.Color)", headerBinding.ArgumentList.ToString());
-        Assert.Contains("ScheduleReconcile", headerBinding.Arg(1).ToString());
+        // The binding goes through OnGroupStateChanged, which first rewrites
+        // each member's accessible status -- the group's title and collapse
+        // bit are segments of it, and a group change is not a per-tab event
+        // -- then defers the layout answer to the same coalescing reconcile
+        // the binding used to call directly.
+        Assert.Contains("OnGroupStateChanged", headerBinding.Arg(1).ToString());
+        Assert.Single(strip.Method("OnGroupStateChanged").Calls("ScheduleReconcile"));
 
         var remove = strip.Method("RemoveGroupRow");
         var fence = remove.AssignsTo("_syncing").Where(a => a.Right.ToString() == "true").ToList();

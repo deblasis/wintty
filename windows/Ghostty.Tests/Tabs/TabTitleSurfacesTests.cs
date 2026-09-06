@@ -74,12 +74,16 @@ public class TabTitleSurfacesTests
         return data;
     }
 
+    /// <summary>
+    /// The glyph surfaces are a SUBSET of the word surfaces, not an
+    /// alternative to them: a strip draws the house and prints the word.
+    /// (That every title surface prints the word is not asserted here --
+    /// it would be <c>X.Except(X)</c> now that the two lists are one. The
+    /// theory below carries it, file by file.)
+    /// </summary>
     [Fact]
-    public void EveryTitleSurface_PrintsTheWord_AndTheStripsAlsoDrawTheHouse()
-    {
-        Assert.Empty(TitleSurfaceNames.Except(WordSurfaceNames));
-        Assert.Empty(GlyphSurfaceNames.Except(WordSurfaceNames));
-    }
+    public void TheStripsThatDrawTheHouse_AlsoPrintTheWord()
+        => Assert.Empty(GlyphSurfaceNames.Except(WordSurfaceNames));
 
 
     [Theory]

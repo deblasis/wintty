@@ -67,11 +67,21 @@ public class TabContextMenuCwdTests
         Assert.DoesNotContain(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
             a => a.Left.ToString().StartsWith("cwdRule.", System.StringComparison.Ordinal));
 
-        // And the hiding rule itself is gone, not merely unused.
+        // ...including through its own initializer, where the assignment
+        // reads `Visibility = ...` and the receiver never appears. That is
+        // exactly the shape this replaced.
+        var rule = build.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.Text == "cwdRule");
+        Assert.DoesNotContain(rule.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "Visibility");
+
+        // And nothing in the file decides a Visibility from the directory,
+        // whatever it is called -- naming the old method alone would only
+        // detect a rename.
         Assert.DoesNotContain(
             ShellSource.Load("Tabs.TabContextMenuBuilder.cs").Root.DescendantNodes()
                 .OfType<MethodDeclarationSyntax>(),
-            m => m.Identifier.Text == "CwdVisibility");
+            m => m.ReturnType.ToString() == "Visibility");
     }
 
     [Fact]
@@ -119,24 +129,72 @@ public class TabContextMenuCwdTests
     /// description. Cleared again when the item is live, or a usable item
     /// carries an explanation for a state it is not in.
     /// </summary>
+    /// <summary>
+    /// BOTH items are greyed, not just the one a Single() would find. The
+    /// helper loops, so one assignment covers two items -- which means the
+    /// guard has to say what it loops over, or a body touching only `copy`
+    /// reads identically and leaves Open in File Explorer live on a tab with
+    /// no directory.
+    /// </summary>
     [Fact]
-    public void TheUnavailableReason_RidesHelpText_AndClearsWhenLive()
+    public void BothItems_AreGreyedTogether()
     {
         var apply = ShellSource.Load("Tabs.TabContextMenuBuilder.cs").Method("ApplyCwdAvailability");
+        var loop = Assert.Single(apply.DescendantNodes().OfType<ForEachStatementSyntax>());
 
-        var enabled = apply.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left.ToString().EndsWith(".IsEnabled", System.StringComparison.Ordinal));
+        var collection = loop.Expression.ToString();
+        foreach (var parameter in apply.ParameterList.Parameters
+                     .Where(p => p.Type!.ToString() == "MenuFlyoutItem"))
+        {
+            Assert.Contains(parameter.Identifier.Text, collection);
+        }
 
-        var help = apply.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Single(i => i.Expression.ToString() == "AutomationProperties.SetHelpText");
+        // The two items the caller hands over, and no fewer.
+        Assert.Equal(2, apply.ParameterList.Parameters
+            .Count(p => p.Type!.ToString() == "MenuFlyoutItem"));
 
-        // The same decision drives both, and the help text is null exactly
-        // when the item is enabled.
-        var choice = Assert.IsType<ConditionalExpressionSyntax>(
-            help.ArgumentList.Arguments[1].Expression);
-        Assert.Equal(enabled.Right.ToString(), choice.Condition.ToString());
-        Assert.Equal("null", choice.WhenTrue.ToString());
-        Assert.NotEqual("null", choice.WhenFalse.ToString());
+        var enabled = Assert.Single(loop.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString().EndsWith(".IsEnabled", System.StringComparison.Ordinal)));
+        Assert.Equal($"{loop.Identifier.Text}.IsEnabled", enabled.Left.ToString());
+    }
+
+    /// <summary>
+    /// The reason rides HelpText, is CLEARED rather than blanked when the
+    /// item is live (UIA reports an empty string as present-but-blank), and
+    /// distinguishes the two things the model can mean. A directory on
+    /// another machine WAS reported -- the label prints it and the tooltip
+    /// shows it in full -- so telling a listener the shell reported nothing
+    /// contradicts what a pointer user is reading.
+    /// </summary>
+    [Fact]
+    public void TheUnavailableReason_RidesHelpText_ClearsWhenLive_AndNamesTheRightCause()
+    {
+        var menu = ShellSource.Load("Tabs.TabContextMenuBuilder.cs");
+        var apply = menu.Method("ApplyCwdAvailability");
+
+        // Set when there is a reason, cleared when there is not.
+        Assert.Single(apply.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString() == "AutomationProperties.SetHelpText"));
+        Assert.Contains(apply.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.Expression.ToString().EndsWith("ClearValue", System.StringComparison.Ordinal)
+                 && i.ArgumentList.Arguments[0].ToString() == "AutomationProperties.HelpTextProperty");
+
+        // Two distinct reasons, told apart by whether the shell reported at
+        // all -- not by the spawn policy's verdict alone.
+        var reasons = menu.Root.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Identifier.Text.StartsWith("Cwd", System.StringComparison.Ordinal)
+                        && v.Identifier.Text.EndsWith("Help", System.StringComparison.Ordinal))
+            .Select(v => Assert.IsType<LiteralExpressionSyntax>(v.Initializer!.Value).Token.ValueText)
+            .ToList();
+        Assert.Equal(2, reasons.Count);
+        Assert.Equal(2, reasons.Distinct().Count());
+        // Each says something; an emptied constant is the silent failure.
+        Assert.All(reasons, r => Assert.True(r.Length > 20, $"the reason '{r}' explains nothing"));
+        // And only one of them claims nothing was reported.
+        Assert.Single(reasons, r => r.Contains("has not reported"));
+
+        Assert.Contains(apply.DescendantNodes().OfType<MemberAccessExpressionSyntax>(),
+            m => m.ToString() == "tab.ShellReportedCwd");
     }
 
     [Fact]

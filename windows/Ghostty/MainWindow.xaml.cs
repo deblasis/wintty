@@ -783,18 +783,24 @@ public sealed partial class MainWindow : Window
             // path.
             restorer.RestoreGroups(_tabManager, restore!);
 
+            if (restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
+                _tabManager.ActivateIndex(restore.ActiveTabIndex);
+
             // Restored shells really are cold-starting, but only the tab the
             // restore brings to the front says so. The rest go into the tree
             // collapsed and do not paint until they are first visited, so
             // flagging them would put "Starting…" across a strip of tabs
             // that are doing nothing and then release them in a ragged clump
             // as their cap timers expired one by one.
-            var presenting = restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count
-                ? restore.ActiveTabIndex
-                : 0;
-            restoredTabs[presenting].BeginSettling();
-            if (restore.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
-                _tabManager.ActivateIndex(restore.ActiveTabIndex);
+            //
+            // Asked of the manager AFTER activating, not computed from an
+            // index: a saved tab whose tree no longer rebuilds shortens the
+            // list, so the saved index can fall off the end and the adopt
+            // loop's last tab is what stays active -- and even in range, the
+            // saved index counts the list as saved while the manager has
+            // since normalized pins and runs. Whichever tab is actually
+            // active is the one that will paint.
+            _tabManager.ActiveTab?.BeginSettling();
         }
         else
         {

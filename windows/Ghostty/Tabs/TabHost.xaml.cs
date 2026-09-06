@@ -435,6 +435,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // TabViewItem: the close button and the hover chrome stay
         // full-strength so an idle tab still reads as fully operable.
         ApplyIdleInk(iconHost, headerText, tab);
+        // The house takes the label's ink here too, not only on the later
+        // IsIdle pass: a tab restored past the idle threshold and sitting at
+        // home would otherwise draw a full-strength house beside a dimmed
+        // "Home" until something happened to change IsIdle.
+        homeGlyph.Opacity = headerText.Opacity;
 
         // The group rail: a 2px line in the group's color in the header's
         // TOP slot. The progress bar owns the bottom slot; the two
@@ -565,6 +570,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 ReconcileStripOrder();
                 ApplyTabChrome(item, headerPanel, tab,
                     ReferenceEquals(tab, _manager.ActiveTab));
+                // The run the tab sits in rides ItemStatus, so leaving this
+                // out left a tab that had just left a group still telling
+                // assistive clients it was in one -- until some unrelated
+                // prompt or bell happened to rewrite the status.
+                ApplyItemAccessibleText(item, tab);
             }
         };
         _itemByModel[tab] = item;
@@ -977,6 +987,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // repaints them, so a recolor never leaves a two-tone run.
             RefreshRunRails(group);
         }
+
+        // A group's title and its collapse bit are both segments of every
+        // member's ItemStatus, and a group change is not a per-tab event, so
+        // nothing else would rewrite them: a renamed run left every member
+        // naming the old title to assistive clients. The members are the
+        // manager's to enumerate; the strip only owns the items.
+        foreach (var member in _manager.Tabs)
+            if (ReferenceEquals(member.Group, group)
+                && _itemByModel.TryGetValue(member, out var memberItem))
+                ApplyItemAccessibleText(memberItem, member);
 
         // Both arms move the field, and neither reaches it on its own.
         //

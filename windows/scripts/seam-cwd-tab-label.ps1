@@ -145,6 +145,10 @@ function Exit-StagedResources($res) {
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
+# Whether any scenario's shell actually started in the profile directory, so
+# the home assertions ran at all. See the 'home-exercised' scenario appended
+# after the run.
+$script:SawHome = $false
 
 
 function New-ProbeDir([string]$Leaf, [string]$Root = $OutDir) {
@@ -270,6 +274,7 @@ $ConfigExtra
                     $Name, ($homeNames -join ', '))
             }
             $entry.homeGlyph = $true
+            $script:SawHome = $true
         } else {
             if ($first.renderedHomeGlyph -or $first.rendered -eq '') {
                 throw ("PRODUCT_FAIL: {0}: away from home the row should print its name; glyph={1} rendered='{2}' cwd='{3}'" -f
@@ -524,6 +529,20 @@ try {
     } -ConfigExtra "profile.probe.name = Probe`nprofile.probe.command = pwsh.exe"
     Invoke-UncRefusedScenario
 } finally { Exit-StagedResources $staged }
+
+# The home leg is the one this harness can silently skip: whether a shell
+# starts in the profile directory is the machine's business, not the
+# product's, so an `else` branch takes over and every scenario still passes.
+# That would report a green run in which the glyph, the word and the
+# accessible name were never looked at once. A run that never reached home
+# proves nothing about home, and says so.
+$script:Scenarios.Add([pscustomobject]@{
+    name = 'home-exercised'; ok = [bool]$script:SawHome
+    class = $(if ($script:SawHome) { '' } else { 'harness' })
+    error = $(if ($script:SawHome) { '' } else {
+        "no scenario's shell started in '$ProfileDir', so the home glyph, the word and the accessible name went unchecked" })
+    cwd = ''; rendered = ''; icon = ''
+})
 
 # The icon has to name the interpreter, which means two shells must not wear
 # the same one.

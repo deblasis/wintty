@@ -23,23 +23,34 @@ public class RestoredTabSettlingWiringTests
 {
     private static SyntaxNode Window() => ShellSource.Load("MainWindow.xaml.cs").Root;
 
+    /// <summary>
+    /// It asks the manager which tab is active rather than indexing the
+    /// restored list. A saved tab whose tree no longer rebuilds shortens
+    /// that list, so the saved index can fall off the end -- and the
+    /// fallback would then flag a collapsed tab that never paints while the
+    /// adopt loop's last tab is the one on screen. Even in range, the saved
+    /// index counts the list as saved and the manager has since normalized
+    /// pins and runs.
+    /// </summary>
     [Fact]
-    public void TheRestore_BeginsSettlingOnlyTheTabItBringsToTheFront()
+    public void TheRestore_BeginsSettlingOnTheTabTheManagerMadeActive()
     {
-        var begins = Window().DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.Expression is MemberAccessExpressionSyntax
-            {
-                Name.Identifier.Text: "BeginSettling",
-                Expression: ElementAccessExpressionSyntax,
-            })
-            .ToList();
+        // The restore lives in a constructor, so this finds the statement
+        // rather than a named method.
+        var begin = Assert.Single(Window().DescendantNodes().OfType<ExpressionStatementSyntax>()
+            .Where(s => s.ToString().Contains("BeginSettling")
+                        && s.ToString().Contains("_tabManager.ActiveTab")));
 
-        // Exactly one, and it indexes the restored list rather than looping
-        // it -- a foreach here is the flicker this guard exists to stop.
-        var begin = Assert.Single(begins);
-        var target = (ElementAccessExpressionSyntax)
-            ((MemberAccessExpressionSyntax)begin.Expression).Expression;
-        Assert.Equal("restoredTabs", target.Expression.ToString());
+        // On the manager's own answer, not on a subscript of the built list.
+        Assert.DoesNotContain("restoredTabs[", begin.ToString());
+
+        // And after the activation that decides that answer, in the same
+        // block, or it names whichever tab the adopt loop left active.
+        var block = Assert.IsType<BlockSyntax>(begin.Parent);
+        var activate = block.Statements.Last(s => s.ToString().Contains("ActivateIndex"));
+        Assert.True(
+            block.Statements.IndexOf(begin) > block.Statements.IndexOf(activate),
+            "the restore begins settling before it activates, so it flags the wrong tab");
     }
 
     [Theory]
@@ -75,11 +86,23 @@ public class RestoredTabSettlingWiringTests
     [Fact]
     public void NoBeginSettling_SitsInsideALoop()
     {
-        foreach (var begin in Window().DescendantNodes().OfType<InvocationExpressionSyntax>()
-                     .Where(i => i.Expression is MemberAccessExpressionSyntax { Name.Identifier.Text: "BeginSettling" }))
+        // EndsWith, not a MemberAccess pattern: the restore's call is
+        // null-conditional, which parses as a member BINDING and would slip
+        // a pattern match silently.
+        var begins = Window().DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString().EndsWith("BeginSettling", System.StringComparison.Ordinal))
+            .ToList();
+
+        // Three sites: the restore, reopen-closed-tab, Duplicate Tab. An
+        // empty query would make the loop below say nothing at all.
+        Assert.Equal(3, begins.Count);
+
+        foreach (var begin in begins)
         {
+            // CommonForEachStatementSyntax covers the deconstructing form
+            // too, which is its own node type.
             Assert.DoesNotContain(begin.Ancestors(),
-                a => a is ForEachStatementSyntax or ForStatementSyntax or WhileStatementSyntax);
+                a => a is CommonForEachStatementSyntax or ForStatementSyntax or WhileStatementSyntax);
         }
     }
 }

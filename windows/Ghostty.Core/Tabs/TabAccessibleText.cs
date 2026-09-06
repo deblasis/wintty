@@ -92,8 +92,13 @@ internal static class TabAccessibleText
         if (!string.IsNullOrEmpty(groupTitle)) segments.Add($"Group {groupTitle}");
         if (isCollapsed) segments.Add("Collapsed");
         if (bellRinging) segments.Add("Bell");
-        // A tab that has not started yet says so: sighted users get the
-        // app's icon in the slot, and this is the same fact for a listener.
+        // A tab that has not started yet says so. For a listener this is
+        // very likely inert: the note below records that NVDA does not
+        // surface ItemStatus on a tab or list item, and a start is over
+        // before anyone could arrow onto it -- so unlike the bell, which
+        // earned an announcement, this is the correct UIA property and
+        // nothing more. Written because it is the honest place for the
+        // state, not because it is known to be heard.
         if (isSettling) segments.Add("Starting");
         return string.Join(", ", segments);
     }

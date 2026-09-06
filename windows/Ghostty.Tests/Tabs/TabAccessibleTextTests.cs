@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using Ghostty.Core;
 using Ghostty.Core.Tabs;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace Ghostty.Tests.Tabs;
@@ -293,11 +294,18 @@ public class TabAccessibleTextTests
 
         Assert.Contains("AutomationProperties.SetName(item, TabAccessibleText.Name(", apply);
         Assert.Contains("AutomationProperties.SetItemStatus(item,", apply);
+
         // One call, reading the whole tab. Spelling the segments out here is
         // what let this strip name a member's run while dropping "Starting",
-        // and the horizontal strip drop the run entirely.
-        Assert.Contains("TabAccessibleText.Status(tab)", apply);
-        Assert.DoesNotContain("tab.IsPinned, tab.BellRinging", apply);
+        // and the horizontal strip drop the run entirely. Asserted on the
+        // syntax tree: a negative substring match is defeated by a line
+        // break, and the hand-spelled form is exactly what someone would
+        // reintroduce wrapped.
+        var chrome = Wiring.ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs")
+            .Method("ApplyItemTitleChrome");
+        var status = Assert.Single(chrome.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString() == "TabAccessibleText.Status"));
+        Assert.Equal("tab", Assert.Single(status.ArgumentList.Arguments).ToString());
     }
 
     /// <summary>
@@ -319,6 +327,12 @@ public class TabAccessibleTextTests
 
         tab.Group!.IsCollapsed = true;
         Assert.Equal("Pinned, Group build, Collapsed, Bell", TabAccessibleText.Status(tab));
+
+        // The combination the old two-branch call site actually lost: a
+        // grouped tab that is still starting. Reported ungrouped, and
+        // reported grouped, "Starting" has to survive both.
+        tab.BeginSettling();
+        Assert.Equal("Pinned, Group build, Collapsed, Bell, Starting", TabAccessibleText.Status(tab));
     }
 
     /// <summary>
@@ -379,6 +393,42 @@ public class TabAccessibleTextTests
 
         var bellArm = Between(host, "bellGlyph.Visibility = tab.BellRinging", "_itemByModel[tab] = item");
         Assert.Contains(call, bellArm);
+    }
+
+    /// <summary>
+    /// The run a tab sits in is a segment of its ItemStatus, so a group
+    /// change has to rewrite it — in BOTH strips. The status is not a
+    /// per-tab event when a group is renamed or collapsed, so nothing else
+    /// would: the horizontal strip left a tab that had just left a group
+    /// still claiming membership, and both strips left a renamed run's
+    /// members naming the old title, until some unrelated prompt or bell
+    /// happened to rewrite the status.
+    /// </summary>
+    [Theory]
+    [InlineData("Tabs.TabHost.xaml.cs", "OnGroupPropertyChanged", "ApplyItemAccessibleText")]
+    [InlineData("Tabs.VerticalTabStrip.xaml.cs", "OnGroupStateChanged", "ApplyItemTitleChrome")]
+    public void AGroupChange_RewritesEveryMembersStatus(string source, string method, string apply)
+    {
+        var handler = Wiring.ShellSource.Load(source).Method(method);
+
+        // Over the members, because one group change is many tabs' status.
+        // CommonForEachStatementSyntax, so a deconstructing foreach -- its
+        // own node type -- counts.
+        var loop = Assert.Single(handler.DescendantNodes().OfType<CommonForEachStatementSyntax>());
+        Assert.Contains(loop.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.Expression.ToString().EndsWith(apply, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// And a tab joining or leaving a group rewrites its own, which is the
+    /// per-tab half of the same fact.
+    /// </summary>
+    [Fact]
+    public void ATabLeavingAGroup_RewritesItsOwnStatus()
+    {
+        var host = Source("TabHost.xaml.cs");
+        var groupArm = Between(host, "nameof(TabModel.Group)", "_itemByModel[tab] = item");
+        Assert.Contains("ApplyItemAccessibleText(item, tab)", groupArm);
     }
 
     /// <summary>

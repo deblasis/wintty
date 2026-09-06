@@ -120,13 +120,26 @@ public class TabStripPolishWiringTests
     public void TheHorizontalTab_DrawsTheGlyphBesideTheWord()
     {
         var anatomy = ShellSource.Load("Tabs.TabHost.xaml.cs").Method("ApplyPinnedTabAnatomy");
-        var writes = anatomy.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString().EndsWith(".Visibility", System.StringComparison.Ordinal))
-            .Select(a => a.Right.ToString())
-            .ToList();
 
-        Assert.Contains("pinned ? Visibility.Collapsed : Visibility.Visible", writes);
-        Assert.Contains("pinned || !tab.IsHome ? Visibility.Collapsed : Visibility.Visible", writes);
+        // Keyed by the switch arm each write sits in, not gathered into one
+        // bag of right-hand sides: swapping the two bodies leaves both
+        // strings present, and a home tab would then wear a permanent house
+        // and no title -- the exact regression this names.
+        static string WriteIn(MethodDeclarationSyntax method, string label)
+        {
+            var section = method.DescendantNodes().OfType<SwitchSectionSyntax>()
+                .Single(s => s.Labels.ToString().Contains(label, System.StringComparison.Ordinal));
+            return section.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                .Single(a => a.Left.ToString().EndsWith(".Visibility", System.StringComparison.Ordinal))
+                .Right.ToString();
+        }
+
+        Assert.Equal(
+            "pinned ? Visibility.Collapsed : Visibility.Visible",
+            WriteIn(anatomy, "TextBlock title"));
+        Assert.Equal(
+            "pinned || !tab.IsHome ? Visibility.Collapsed : Visibility.Visible",
+            WriteIn(anatomy, "HomeGlyph"));
     }
 
     /// <summary>
