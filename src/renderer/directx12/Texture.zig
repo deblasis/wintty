@@ -332,8 +332,12 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// sync, so bytes this swallow reported success for would otherwise stay
 /// stale until something dirtied them again. `upload_dropped` is how a
 /// caller hears about it: the atlas sync reads it through
-/// `takeUploadDropped`, leaves its own upload counter where it was, and
-/// ships the whole atlas on the next frame.
+/// `takeUploadDropped` and leaves its own upload counter where it was.
+/// That is the whole repair -- the atlas keeps reporting those rows as
+/// dirty to a consumer that has not caught up, so the next sync is handed
+/// them again. It does not escalate to a full-atlas upload, which would
+/// ask for the largest upload there is at exactly the moment a small
+/// staging allocation has just failed.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
     // Retire the staging buffers from the previous upload. They are the
     // source of CopyTextureRegion calls that may still be executing, so

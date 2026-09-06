@@ -4533,9 +4533,10 @@ fn atlasUploadDropped(texture: anytype) bool {
     return texture.upload_dropped;
 }
 
-/// `atlasUploadDropped`, clearing the record. The record has to outlive
-/// the sync that set it -- it is what tells the next sync to ship the
-/// whole atlas -- so only the sync that acts on it clears it.
+/// `atlasUploadDropped`, clearing the record. `replaceRegion` only ever
+/// sets it, so every sync starts by taking what the last one left behind:
+/// a record left standing would make each later sync report a drop it did
+/// not have, and the caller's counter would never advance again.
 fn takeAtlasUploadDropped(texture: anytype) bool {
     if (!@hasField(@TypeOf(texture.*), "upload_dropped")) return false;
     return texture.takeUploadDropped();
@@ -4554,10 +4555,15 @@ fn takeAtlasUploadDropped(texture: anytype) bool {
 /// counter advanced over bytes that never arrived leaves them stale for as
 /// long as this texture lives.
 ///
-/// A texture that dropped an upload gets the whole atlas next time rather
-/// than the band it lost, because the dirty box is a moving bound: by the
-/// time we come back it may have restarted somewhere past the rows that
-/// went missing.
+/// A texture that dropped an upload gets the same dirty band as anyone
+/// else next time: not advancing the counter is enough on its own. Since
+/// the counter stayed put, `dirtySince` either hands back a box that has
+/// only grown by union over the rows that went missing, or -- if the box
+/// restarted, which raises `dirty_base` above a counter we did not
+/// advance -- the whole atlas. Escalating to a full upload instead would
+/// ask for the largest upload the atlas can produce at exactly the moment
+/// a staging buffer allocation has just failed, which is the request most
+/// likely to fail again and to keep re-arming itself.
 ///
 /// Caller must hold the font grid's read lock.
 fn syncAtlasTexture(
@@ -4574,14 +4580,14 @@ fn syncAtlasTexture(
         api.updateTextureCommandList(texture);
     }
 
-    const dropped = takeAtlasUploadDropped(texture);
-    const grew = atlas.size > texture.width;
-    if (grew) try replaceAtlasTexture(api, atlas, texture);
+    // Clear whatever the last sync left behind, so that what this one
+    // reports describes this one.
+    _ = takeAtlasUploadDropped(texture);
 
-    if (grew or dropped) {
-        // A grown texture is empty and a texture that lost rows has no
-        // record of which, so either way it needs the whole atlas no
-        // matter how little the caller asked for.
+    if (atlas.size > texture.width) {
+        // A grown texture is empty, so it needs the whole atlas no matter
+        // how little the caller asked for.
+        try replaceAtlasTexture(api, atlas, texture);
         try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
         return !atlasUploadDropped(texture);
     }
@@ -5140,10 +5146,14 @@ test "syncAtlasTexture: a dropped upload is not reported as synced" {
     }));
 }
 
-test "syncAtlasTexture: the sync after a dropped upload ships the whole atlas" {
-    // The dirty box is a moving bound, so by the time we come back it may
-    // describe rows that have nothing to do with the ones that went
-    // missing. Only a full upload is guaranteed to cover them.
+test "syncAtlasTexture: the sync after a dropped upload ships the band, not the whole atlas" {
+    // `replaceRegion` drops an upload when a staging buffer cannot be
+    // allocated. Answering that with the largest upload the atlas can
+    // produce -- 256 MiB grayscale at the 16384 ceiling -- asks the
+    // allocation that just failed to succeed at a hundred times the size,
+    // and each failure sets the record again. The caller not advancing
+    // its counter is what repairs the drop: the box it gets back next
+    // time still covers the rows that went missing.
     var store: TestAtlasTextures = .{};
     const api: TestAtlasApi = .{ .store = &store };
     var data: [16]u8 = @splat(0);
@@ -5158,14 +5168,43 @@ test "syncAtlasTexture: the sync after a dropped upload ships the whole atlas" {
         .height = 1,
     });
 
+    // What the caller comes back with, having left its counter alone.
     try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, .{
         .x = 0,
-        .y = 3,
+        .y = 0,
+        .width = 4,
+        .height = 2,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), store.last_y);
+    try std.testing.expectEqual(@as(usize, 2), store.last_height);
+}
+
+test "syncAtlasTexture: a drop does not stick to the texture" {
+    // The record is set by `replaceRegion` and never cleared there. A sync
+    // that did not clear it before uploading would report every later
+    // clean upload as dropped too, and the caller's counter would never
+    // advance again.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
         .width = 4,
         .height = 1,
     }));
-    try std.testing.expectEqual(@as(usize, 0), store.last_y);
-    try std.testing.expectEqual(@as(usize, 4), store.last_height);
+
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 1,
+    }));
+    try std.testing.expect(!texture.upload_dropped);
 }
 
 test "syncAtlasTexture: nothing dirty means no upload at all" {
