@@ -2644,3 +2644,41 @@ test "pwd: the first report of a session is not swallowed by the spawn cwd" {
     try testing.expectEqual(@as(usize, 1), counts.pwd);
     try testing.expectEqual(@as(usize, 1), counts.title);
 }
+
+test "stream handler refuses and frees an owned write at the backlog cap" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+
+    // A backlog that is already at its cap, so every advisory write is
+    // refused rather than queued.
+    var write_limit: termio.WriteLimit = .{ .max = 1 };
+    write_limit.queued(1);
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
+    handler.renderer_state = &renderer_state;
+    handler.termio_messaged = false;
+
+    // Longer than WriteReq's inline capacity, so this is a .write_alloc
+    // that owns its bytes. Refusing it has to free them: the testing
+    // allocator fails the test if the drop path forgets.
+    const data: []const u8 = "\x1B]11;rgb:1111/2222/3333\x1B\\" ** 4;
+    const msg = try termio.Message.writeReq(testing.allocator, data);
+    try testing.expect(msg == .write_alloc);
+
+    handler.messageWriter(msg);
+    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
