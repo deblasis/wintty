@@ -48,10 +48,19 @@ internal static class HangWatchdog
 
     // The watchdog arms before the config service can exist, so the
     // capture scope starts at the triage default and is seeded from
-    // hang-dump once App has a config to read (well inside the first
-    // stall window). volatile: written on the UI thread, read on the
-    // watch thread.
+    // hang-dump once App has a config to read, then re-seeded on every
+    // config reload (well inside the first stall window either way).
+    // volatile: written on the UI thread, read on the watch thread.
     private static volatile HangDumpMode _dumpMode = HangDumpMode.Triage;
+
+    /// <summary>
+    /// When the watchdog armed, i.e. the earliest instant a stall could
+    /// belong to this session. The launch notice uses it as this
+    /// session's boundary: capturing the instant at the notice instead
+    /// would mislabel a stall from a slow early launch as a previous
+    /// session's and consume it.
+    /// </summary>
+    public static DateTimeOffset ArmedAtUtc { get; private set; }
 
     /// <summary>
     /// Seed the capture scope from the <c>hang-dump</c> config key.
@@ -65,6 +74,7 @@ internal static class HangWatchdog
     public static void Start(DispatcherQueue dispatcher)
     {
         if (Interlocked.Exchange(ref _armed, 1) == 1) return;
+        ArmedAtUtc = DateTimeOffset.UtcNow;
 
         // The heartbeat: a lightweight repeating timer on the UI thread.
         // DispatcherQueueTimer runs on the thread that owns the queue,

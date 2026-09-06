@@ -76,7 +76,7 @@ public static class WindowsOnlyKeys
         new("log-filter",
             "Comma-separated CATEGORY=LEVEL pairs overriding log-level per component (longest matching category prefix wins). Malformed pairs and unknown levels are skipped silently."),
         new("hang-dump",
-            "Capture scope of the hang watchdog's dump when the UI thread stalls: triage (default, stacks and locks only) or full (all process memory, which can include terminal output and secrets)."),
+            "Capture scope of the hang watchdog's dump when the UI thread stalls: triage (default, stacks and locks only) or full (all process memory, which can include terminal output and secrets). Read live: a config reload re-applies it without a restart."),
     ];
 
     public static readonly FrozenSet<string> Set =

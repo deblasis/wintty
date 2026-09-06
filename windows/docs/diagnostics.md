@@ -31,8 +31,9 @@ reaches one of the handlers (UI thread, `AppDomain`, `TaskScheduler`),
 and it receives `[UI-THREAD STALL]` entries from the hang watchdog
 described below.
 
-Entries carry a round-trip UTC timestamp (`2026-04-17T14:23:17.042Z`)
-and a handler tag, followed by the exception detail.
+Entries carry a round-trip UTC timestamp
+(`2026-04-17T14:23:17.0423168+00:00`) and a handler tag, followed by
+the exception detail.
 
 Never pruned, never truncated: it only grows when something goes wrong.
 Delete it at any time; the next failure recreates it.

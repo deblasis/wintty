@@ -99,7 +99,7 @@ internal static partial class NativeStderrCapture
     private static void KeepTail(string path, long keepBytes)
     {
         var tail = FileTail.Read(path, keepBytes);
-        if (tail is null || tail.Length < keepBytes) return;
+        if (tail is null || tail.Length <= keepBytes) return;
         File.WriteAllBytes(path, tail);
     }
 

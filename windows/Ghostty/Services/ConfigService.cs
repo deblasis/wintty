@@ -75,7 +75,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public string CommandPaletteBackground { get; private set; } = "acrylic";
     public string NoColorOverride { get; private set; } = NoColorPolicy.Default;
     // Read here but consumed by the hang watchdog via the seed App hands
-    // it in OnLaunched: the watchdog arms before this service exists.
+    // it in OnLaunched and again on every ConfigChanged: the watchdog
+    // arms before this service exists, and reloads must not leave it on
+    // a stale scope.
     public Ghostty.Core.Diagnostics.HangDumpMode HangDump { get; private set; }
         = Ghostty.Core.Diagnostics.HangDumpMode.Triage;
 

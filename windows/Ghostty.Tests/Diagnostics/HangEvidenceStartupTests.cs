@@ -125,10 +125,24 @@ public class HangEvidenceStartupTests
     }
 
     [Fact]
-    public void MarkerMatchesWhatTheWatchdogWrites()
+    public void OutOfWindowNewestEntryDoesNotHideAnOlderInWindowEntry()
     {
-        // The watchdog writes the constant into crash.log and this test
-        // pins the constant's spelling to the literal, so rewording the
+        // Append order does not guarantee timestamp order: several
+        // instances append concurrently and the clock can step back. A
+        // newest-by-position entry outside the window must not stop the
+        // scan and swallow an older entry that IS unreported news.
+        var log = Entry(T1) + Entry(T2);
+        var outcome = HangEvidenceStartup.Resolve(
+            log, lastLaunch: T1, currentLaunch: T2.AddSeconds(-1));
+        Assert.True(outcome.Notify);
+        Assert.Equal(T1.AddSeconds(2), outcome.NewestStall);
+    }
+
+    [Fact]
+    public void MarkerSpellingIsPinnedToTheLiteral()
+    {
+        // The watchdog and the resolver share the constant; this pins
+        // the constant's spelling to the literal, so rewording the
         // marker is a deliberate, visible act rather than a silent
         // reader-writer split.
         Assert.Equal("[UI-THREAD STALL]", HangEvidenceStartup.StallMarker);

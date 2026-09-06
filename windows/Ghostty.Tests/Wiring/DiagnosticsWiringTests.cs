@@ -151,6 +151,24 @@ public class DiagnosticsWiringTests
         Assert.Equal("0x800", src.Field("MiniDumpWithFullMemoryInfo").Variable.Initializer!.Value.ToString());
         Assert.Equal("0x1000", src.Field("MiniDumpWithThreadInfo").Variable.Initializer!.Value.ToString());
         Assert.Equal("0x40", src.Field("MiniDumpWithIndirectlyReferencedMemory").Variable.Initializer!.Value.ToString());
+
+        // The masks' compositions too: the whole secrets posture of the
+        // default hangs on TriageDumpFlags not containing
+        // MiniDumpWithFullMemory, and no behavioral test can see a flag
+        // quietly dropped or added.
+        var triage = src.Field("TriageDumpFlags").Variable.Initializer!.Value.ToString();
+        Assert.Contains("MiniDumpWithHandleData", triage);
+        Assert.Contains("MiniDumpScanMemory", triage);
+        Assert.Contains("MiniDumpWithUnloadedModules", triage);
+        Assert.Contains("MiniDumpWithThreadInfo", triage);
+        Assert.Contains("MiniDumpWithIndirectlyReferencedMemory", triage);
+        Assert.DoesNotContain("MiniDumpWithFullMemory", triage);
+
+        var full = src.Field("FullDumpFlags").Variable.Initializer!.Value.ToString();
+        Assert.Contains("MiniDumpWithFullMemory", full);
+        Assert.Contains("MiniDumpWithHandleData", full);
+        Assert.Contains("MiniDumpWithFullMemoryInfo", full);
+        Assert.Contains("MiniDumpWithThreadInfo", full);
     }
 }
 

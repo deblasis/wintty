@@ -30,18 +30,19 @@ public static class HangEvidenceStartup
     public const string StallMarker = "[UI-THREAD STALL]";
 
     /// <summary>
-    /// Newest stall entry in <paramref name="crashLogTail"/> strictly
+    /// The newest stall entry in <paramref name="crashLogTail"/> strictly
     /// between <paramref name="lastLaunch"/> (the previous session's
-    /// marker) and <paramref name="currentLaunch"/> (this launch's
-    /// instant), or <c>Notify = false</c> when there is none. Entries
-    /// are appended chronologically, so the scan walks from the end and
-    /// the first line that parses is the newest; nothing older can
-    /// change the verdict, so the scan stops there. A partial trailing
-    /// line (a crash mid-write can leave one), or a partial leading
-    /// line (the tail read can cut one), is skipped rather than fatal.
-    /// <paramref name="currentLaunch"/> excludes stalls logged during
-    /// this session's own launch (a slow start can trip the watchdog):
-    /// those notify on the NEXT launch instead.
+    /// marker) and <paramref name="currentLaunch"/> (this launch's arm
+    /// instant), or <c>Notify = false</c> when there is none. The scan
+    /// walks from the end and stops at the first entry inside the
+    /// window; entries outside it do not stop the scan, because append
+    /// order does not guarantee timestamp order (several instances
+    /// append concurrently, and the clock can step back). A partial
+    /// trailing line (a crash mid-write can leave one), or a partial
+    /// leading line (the tail read can cut one), is skipped rather than
+    /// fatal. <paramref name="currentLaunch"/> excludes stalls logged
+    /// during this session's own launch (a slow start can trip the
+    /// watchdog): those notify on the NEXT launch instead.
     /// </summary>
     public static HangEvidenceOutcome Resolve(
         string? crashLogTail,
@@ -62,12 +63,9 @@ public static class HangEvidenceStartup
             var line = lastNewline < 0 ? rest : rest[(lastNewline + 1)..];
             rest = lastNewline < 0 ? default : rest[..lastNewline];
 
-            // First parseable stall line from the end is the newest;
-            // older entries cannot beat it, so one comparison decides.
-            if (TryReadStallTimestamp(line, out var stall))
-                return stall > lastLaunch && stall <= currentLaunch
-                    ? new HangEvidenceOutcome(Notify: true, NewestStall: stall)
-                    : default;
+            if (TryReadStallTimestamp(line, out var stall) &&
+                stall > lastLaunch && stall <= currentLaunch)
+                return new HangEvidenceOutcome(Notify: true, NewestStall: stall);
         }
 
         return default;

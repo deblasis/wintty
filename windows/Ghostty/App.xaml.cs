@@ -479,10 +479,13 @@ public partial class App : Application
     /// </summary>
     private void ShowPreviousSessionHangNotice()
     {
-        // The launch instant, captured before any evaluation I/O: a
-        // stall in the moments between the two must still count as new
-        // next launch, so the marker cannot say "now at write time".
-        var launchedAt = DateTimeOffset.UtcNow;
+        // This session's boundary is the watchdog's arm instant, the
+        // earliest moment a stall could belong to this launch. Capturing
+        // "now" instead would fold a stall from a slow early launch (the
+        // arm is OnLaunched's first statement) into the previous-session
+        // window: the notice would describe a freeze the user just
+        // watched, and the marker write would consume it.
+        var launchedAt = Diagnostics.HangWatchdog.ArmedAtUtc;
         try
         {
             var root = Path.Combine(
@@ -527,8 +530,9 @@ public partial class App : Application
             _notificationService?.Show(new Ghostty.Core.Notifications.Notice
             {
                 Title = "Wintty froze and captured evidence",
-                Message = "Wintty froze in a previous session and wrote hang evidence to "
-                    + hangsDir + ". If a hang dump is there it may contain sensitive content.",
+                Message = "Wintty froze in a previous session. crash.log holds the stall "
+                    + "entries, and any captured hang dump sits in " + hangsDir
+                    + "; a dump may contain sensitive content.",
                 Severity = Ghostty.Core.Notifications.NoticeSeverity.Informational,
                 IsClosable = true,
                 DedupKey = "hang-evidence",
