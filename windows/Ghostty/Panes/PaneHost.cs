@@ -1082,7 +1082,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // nested visual structure to confuse the framework.
         if (!TryIncrementalCloseRebuild(leafParentGrid)) Rebuild();
         UpdateHighlightPosition();
-        DispatcherQueue.TryEnqueue(() => nextActive.Terminal().Focus(FocusState.Programmatic));
 
         // A close while zoomed always force-unzooms (the structural rebuild
         // clears zoom state). If the pane that closed was NOT the zoomed
@@ -1097,6 +1096,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             _activeLeaf = zoomedBefore;
             ToggleSplitZoom();
         }
+
+        // Focus goes to whichever leaf the zoom decision above settled on,
+        // which is why it is enqueued here rather than beside the rebuild.
+        // Enqueued earlier it named the tree's first leaf, and a re-entered
+        // zoom then parked that leaf off-screen: the dispatcher drained the
+        // stale call afterwards, OnTerminalGotFocus took it as a real focus
+        // change, and the tab spent a beat naming a pane nobody could see.
+        var focusTarget = _activeLeaf;
+        DispatcherQueue.TryEnqueue(() => focusTarget.Terminal().Focus(FocusState.Programmatic));
 
         // The active leaf was reassigned above, before focus lands on it,
         // so OnTerminalGotFocus sees a leaf that is already active and

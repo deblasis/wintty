@@ -1,6 +1,5 @@
 using System;
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 
 namespace Ghostty.Core.Tabs;
 
@@ -36,7 +35,7 @@ internal sealed class TabGroup : INotifyPropertyChanged
     public string Title
     {
         get => field;
-        set { if (field != value) { field = value; Raise(); } }
+        set { if (field != value) { field = value; Raise(Args.Title); } }
     } = "New group";
 
     /// <summary>
@@ -59,7 +58,7 @@ internal sealed class TabGroup : INotifyPropertyChanged
         set
         {
             var resolved = TabColorPalette.EnsureGroupColor(value);
-            if (field != resolved) { field = resolved; Raise(); }
+            if (field != resolved) { field = resolved; Raise(Args.Color); }
         }
     } = TabColorPalette.DefaultGroupColor;
 
@@ -71,11 +70,21 @@ internal sealed class TabGroup : INotifyPropertyChanged
     public bool IsCollapsed
     {
         get => field;
-        set { if (field != value) { field = value; Raise(); } }
+        set { if (field != value) { field = value; Raise(Args.IsCollapsed); } }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    private void Raise([CallerMemberName] string? name = null) =>
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    /// <summary>
+    /// One args object per name for the life of the process; see the note on
+    /// <c>TabModel</c>'s.
+    /// </summary>
+    private static class Args
+    {
+        internal static readonly PropertyChangedEventArgs Title = new(nameof(TabGroup.Title));
+        internal static readonly PropertyChangedEventArgs Color = new(nameof(TabGroup.Color));
+        internal static readonly PropertyChangedEventArgs IsCollapsed = new(nameof(TabGroup.IsCollapsed));
+    }
+
+    private void Raise(PropertyChangedEventArgs args) => PropertyChanged?.Invoke(this, args);
 }

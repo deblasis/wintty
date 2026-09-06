@@ -66,8 +66,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // "resting", strong enough to notice in a scan of the strip.
     private const double IdleOpacity = 0.45;
 
-    // Segoe Fluent / MDL2 "Home": drawn in the title's place for a tab
-    // sitting in the user's own directory.
+    // Segoe Fluent / MDL2 "Home": drawn ahead of the title on a tab sitting
+    // in the user's own directory, where the title reads "Home".
     private const string HomeGlyph = "\uE80F";
 
     // One chip per group the projection renders as collapsed-without-the-
@@ -323,7 +323,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // trimming mode is set.
         var headerText = new TextBlock
         {
-            Text = tab.EffectiveTitle,
+            // WordTitle, not EffectiveTitle: a home tab reads "Home" here,
+            // the same word every other surface prints for it.
+            Text = tab.WordTitle,
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
         // If the shell theme is already active, paint the new tab's
@@ -368,14 +370,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
         };
         iconHost.Attach(tab.TabIcon);
         iconRow.Children.Add(iconHost);
-        iconRow.Children.Add(headerText);
-        // The home glyph, shown instead of the title when the tab sits in
-        // the user's own directory; the anatomy pass toggles the pair.
+        // The home glyph leads the title rather than replacing it: a house
+        // with no word beside it is the one Windows draws for Explorer's
+        // Home *page*, and a header with no text cannot be scanned like its
+        // neighbours. The anatomy pass toggles it.
         var homeGlyph = new FontIcon
         {
             Glyph = HomeGlyph,
             FontSize = 14,
             VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
             Visibility = tab.IsHome ? Visibility.Visible : Visibility.Collapsed,
         };
         if (Application.Current.Resources.TryGetValue("SymbolThemeFontFamily", out var homeFont)
@@ -387,6 +391,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         AutomationProperties.SetAccessibilityView(
             homeGlyph, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
         iconRow.Children.Add(homeGlyph);
+        iconRow.Children.Add(headerText);
 
         // Bell indicator: a Ringer glyph shown after the title while the
         // tab has an unacknowledged bell (bell-features `title`). Collapsed
@@ -430,6 +435,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // TabViewItem: the close button and the hover chrome stay
         // full-strength so an idle tab still reads as fully operable.
         ApplyIdleInk(iconHost, headerText, tab);
+        // The house takes the label's ink here too, not only on the later
+        // IsIdle pass: a tab restored past the idle threshold and sitting at
+        // home would otherwise draw a full-strength house beside a dimmed
+        // "Home" until something happened to change IsIdle.
+        homeGlyph.Opacity = headerText.Opacity;
 
         // The group rail: a 2px line in the group's color in the header's
         // TOP slot. The progress bar owns the bottom slot; the two
@@ -480,7 +490,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 e.PropertyName == nameof(TabModel.ShellReportedTitle) ||
                 e.PropertyName == nameof(TabModel.UserOverrideTitle))
             {
-                headerText.Text = tab.EffectiveTitle;
+                headerText.Text = tab.WordTitle;
                 ApplyItemAccessibleText(item, tab);
                 // headerText is COLLAPSED on a pinned tab, so the line above
                 // updates something nobody can see and the tooltip -- the
@@ -560,6 +570,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 ReconcileStripOrder();
                 ApplyTabChrome(item, headerPanel, tab,
                     ReferenceEquals(tab, _manager.ActiveTab));
+                // The run the tab sits in rides ItemStatus, so leaving this
+                // out left a tab that had just left a group still telling
+                // assistive clients it was in one -- until some unrelated
+                // prompt or bell happened to rewrite the status.
+                ApplyItemAccessibleText(item, tab);
             }
         };
         _itemByModel[tab] = item;
@@ -972,6 +987,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // repaints them, so a recolor never leaves a two-tone run.
             RefreshRunRails(group);
         }
+
+        // A group's title and its collapse bit are both segments of every
+        // member's ItemStatus, and a group change is not a per-tab event, so
+        // nothing else would rewrite them: a renamed run left every member
+        // naming the old title to assistive clients. The members are the
+        // manager's to enumerate; the strip only owns the items.
+        foreach (var member in _manager.Tabs)
+            if (ReferenceEquals(member.Group, group)
+                && _itemByModel.TryGetValue(member, out var memberItem))
+                ApplyItemAccessibleText(memberItem, member);
 
         // Both arms move the field, and neither reaches it on its own.
         //
@@ -2148,7 +2173,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     icon.ShowsTooltip = !pinned;
                     break;
                 case TextBlock title:
-                    title.Visibility = pinned || tab.IsHome ? Visibility.Collapsed : Visibility.Visible;
+                    title.Visibility = pinned ? Visibility.Collapsed : Visibility.Visible;
                     break;
                 case FontIcon home when home.Glyph == HomeGlyph:
                     home.Visibility = pinned || !tab.IsHome ? Visibility.Collapsed : Visibility.Visible;

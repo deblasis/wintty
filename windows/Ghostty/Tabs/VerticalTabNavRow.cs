@@ -16,8 +16,8 @@ internal sealed partial class VerticalTabNavRow : Grid
     // strip's: sleeping is a rest state, not an alert.
     private const string IdleGlyph = "\uE708";
     private const double IdleOpacity = 0.45;
-    // Segoe Fluent / MDL2 "Home": what a tab sitting in the user's own
-    // directory shows in place of a printed tilde.
+    // Segoe Fluent / MDL2 "Home": drawn ahead of the title on a tab sitting
+    // in the user's own directory, where the title reads "Home".
     private const string HomeGlyph = "\uE80F";
 
     private readonly TextBlock _title;
@@ -39,9 +39,12 @@ internal sealed partial class VerticalTabNavRow : Grid
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             Margin = new Thickness(0, 0, 4, 0),
-            Text = tab.EffectiveTitle,
+            Text = tab.WordTitle,
         };
-        // The home glyph shares the title's column and shows instead of it.
+        // The home glyph leads the title rather than replacing it: a house
+        // with no word beside it is the one Windows draws for Explorer's
+        // Home *page*, and a row with no text cannot be scanned like its
+        // neighbours.
         _home = new FontIcon
         {
             Glyph = HomeGlyph,
@@ -110,6 +113,11 @@ internal sealed partial class VerticalTabNavRow : Grid
         _close.Click += closeClick;
 
         var textRow = new Grid();
+        // House, then title, then badges. The house takes its own auto
+        // column so the title still owns the star column and trims against
+        // the badges the way it always did -- the word gives way first, the
+        // glyph never trims.
+        textRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         textRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         textRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         // Both badges share the one auto column -- moon first, bell
@@ -123,11 +131,11 @@ internal sealed partial class VerticalTabNavRow : Grid
         };
         badges.Children.Add(_idle);
         badges.Children.Add(_bell);
-        Grid.SetColumn(_title, 0);
         Grid.SetColumn(_home, 0);
-        Grid.SetColumn(badges, 1);
-        textRow.Children.Add(_title);
+        Grid.SetColumn(_title, 1);
+        Grid.SetColumn(badges, 2);
         textRow.Children.Add(_home);
+        textRow.Children.Add(_title);
         textRow.Children.Add(badges);
 
         Grid.SetColumn(textRow, 0);
@@ -157,14 +165,14 @@ internal sealed partial class VerticalTabNavRow : Grid
     /// <summary>
     /// The text this row is actually showing. Read by the test seam so a
     /// label assertion sees the rendered TextBlock, not the model property
-    /// that was supposed to reach it. Empty when the row draws the home
-    /// glyph instead, which is what a person sees there.
+    /// that was supposed to reach it. A home row reads "Home" here, beside
+    /// the glyph.
     /// </summary>
     internal string TestSeamRenderedTitle
         => _title.Visibility == Visibility.Visible ? _title.Text : "";
 
     /// <summary>
-    /// Whether the row is drawing the home glyph in the title's place.
+    /// Whether the row is drawing the home glyph ahead of the title.
     /// </summary>
     internal bool TestSeamShowsHomeGlyph => _home.Visibility == Visibility.Visible;
 
@@ -176,10 +184,9 @@ internal sealed partial class VerticalTabNavRow : Grid
     internal void Refresh(TabModel tab)
     {
         _tab = tab;
-        _title.Text = tab.EffectiveTitle;
-        // A home tab draws the glyph where the title would print; the
-        // TextBlock keeps the text so the seam can still read it.
-        _title.Visibility = tab.IsHome ? Visibility.Collapsed : Visibility.Visible;
+        // WordTitle, not EffectiveTitle: a home tab reads "Home" here, the
+        // same word the window title, the palette and the switcher use.
+        _title.Text = tab.WordTitle;
         _home.Visibility = tab.IsHome ? Visibility.Visible : Visibility.Collapsed;
         ApplyTooltip(tab);
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
@@ -192,10 +199,10 @@ internal sealed partial class VerticalTabNavRow : Grid
     }
 
     /// <summary>
-    /// The row's hover text, on the row rather than on the title: a home
-    /// row's title is collapsed, and a tooltip on a collapsed element is a
-    /// tooltip nobody can reach. A label the row has had to trim is the one
-    /// case where a hover that repeats the label still earns its place.
+    /// The row's hover text, on the row rather than on the title, so the
+    /// whole row -- glyph included -- is the hover target rather than just
+    /// the words. A label the row has had to trim is the one case where a
+    /// hover that repeats the label still earns its place.
     /// </summary>
     private void ApplyTooltip(TabModel tab)
         => ToolTipService.SetToolTip(

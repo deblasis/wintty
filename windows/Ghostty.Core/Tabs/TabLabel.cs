@@ -62,9 +62,18 @@ internal static class TabLabel
     /// otherwise tilde the whole disk. A share (<c>\\server\profiles\alex</c>)
     /// is a home like any other. Redirected profiles, 8.3 spellings and
     /// junctions can miss the textual match; the cost is the full path
-    /// showing, which is what it did before. A WSL tab's own home is
-    /// <c>\\wsl.localhost\&lt;distro&gt;\home\&lt;user&gt;</c>, which this does not
-    /// know, so there the tilde still means the Windows profile.
+    /// showing, which is what it did before.
+    ///
+    /// A WSL tab reports a Windows path: the native side translates OSC 7
+    /// before it crosses, so that tab's own home arrives as
+    /// <c>\\wsl.localhost\&lt;distro&gt;\home\&lt;user&gt;</c> and its label is the
+    /// leaf, <c>alex</c> -- no tilde, and no risk of one, since a Windows
+    /// profile path can prefix neither that nor a raw POSIX path. Collapsing
+    /// it would need the distro's Linux <c>$HOME</c>, which nothing here
+    /// knows; guessing the shape is wrong for a root shell and for any
+    /// custom home, and a <c>~</c> naming the wrong directory is worse than
+    /// a full path. The shell integration reporting <c>$HOME</c> once at
+    /// startup is the seam if it is ever wanted.
     ///
     /// A directory that is not <see cref="IsPlain"/> -- control characters,
     /// a line break, a bidi override -- is null out, and the label falls to

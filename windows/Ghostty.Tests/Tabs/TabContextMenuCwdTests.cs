@@ -17,6 +17,13 @@ namespace Ghostty.Tests.Tabs;
 /// file path runs the file's handler, so the menu goes through the
 /// folder-only launcher, and only after a directory check that runs off
 /// the UI thread.
+///
+/// The pair is GREYED, never hidden. The horizontal strip builds one
+/// flyout per tab and reuses it, and a shell reports its directory a
+/// moment after the tab opens -- hiding made the same menu change shape
+/// between two openings. Greying also leaves something to learn from: a
+/// shell with no integration never reports a directory at all, and an
+/// absent item cannot say why.
 /// </summary>
 public class TabContextMenuCwdTests
 {
@@ -33,16 +40,14 @@ public class TabContextMenuCwdTests
 
         Assert.Contains(build.Calls("flyout.Items.Add"), c => c.Arg(0) == local);
 
-        // Hidden, not greyed, unless the tab has a directory to act on --
-        // decided from the same property at build and on every Opening.
+        // Greyed, never hidden: nothing in the method may write this item's
+        // Visibility, at build time or on any later pass.
         var declared = build.DescendantNodes().OfType<VariableDeclaratorSyntax>()
             .Single(v => v.Identifier.Text == local);
-        Assert.Contains(declared.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == "Visibility" && a.Right.ToString() == "CwdVisibility(tab)");
-        Assert.Contains(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == $"{local}.Visibility" && a.Right.ToString() == "CwdVisibility(tab)");
+        Assert.DoesNotContain(declared.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "Visibility");
         Assert.DoesNotContain(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == $"{local}.IsEnabled");
+            a => a.Left.ToString() == $"{local}.Visibility");
 
         // The click reads ActionableCwd, and nothing else off the tab.
         var click = ClickHandler(build, local);
@@ -54,21 +59,142 @@ public class TabContextMenuCwdTests
     }
 
     [Fact]
-    public void TheDirectoryGroup_HidesWithItsItems()
+    public void TheDirectoryGroup_KeepsItsShape()
     {
-        // The separator that introduces the group follows the same
-        // visibility, or a bare rule is left behind when the items hide.
+        // The separator that introduces the group is a plain rule now. A
+        // rule that hid with the items is what made the menu change height.
+        var build = Build();
+        Assert.DoesNotContain(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString().StartsWith("cwdRule.", System.StringComparison.Ordinal));
+
+        // ...including through its own initializer, where the assignment
+        // reads `Visibility = ...` and the receiver never appears. That is
+        // exactly the shape this replaced.
+        var rule = build.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.Text == "cwdRule");
+        Assert.DoesNotContain(rule.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "Visibility");
+
+        // And nothing in the file decides a Visibility from the directory,
+        // whatever it is called -- naming the old method alone would only
+        // detect a rename.
+        Assert.DoesNotContain(
+            ShellSource.Load("Tabs.TabContextMenuBuilder.cs").Root.DescendantNodes()
+                .OfType<MethodDeclarationSyntax>(),
+            m => m.ReturnType.ToString() == "Visibility");
+    }
+
+    [Fact]
+    public void Availability_IsDecidedFromTheActionableDirectory()
+    {
+        var rule = ShellSource.Load("Tabs.TabContextMenuBuilder.cs").Method("CwdIsActionable");
+        Assert.Equal("tab.ActionableCwd is not null", rule.ExpressionBody!.Expression.ToString());
+    }
+
+    /// <summary>
+    /// The horizontal strip builds this flyout once per tab and reuses it,
+    /// so a decision taken only at build time freezes at the value the tab
+    /// had before its shell said anything. Both passes, or the item is
+    /// permanently grey on every tab that was right-clicked early.
+    /// </summary>
+    [Fact]
+    public void Availability_IsAppliedAtBuild_AndAgainOnEveryOpening()
+    {
+        var build = Build();
+        var applications = build.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString() == "ApplyCwdAvailability")
+            .ToList();
+        Assert.Equal(2, applications.Count);
+
+        var opening = build.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.IsKind(SyntaxKind.AddAssignmentExpression)
+                         && a.Left.ToString() == "flyout.Opening")
+            .Right;
+        Assert.Single(applications, a => a.Ancestors().Any(n => n == opening));
+        Assert.Single(applications, a => !a.Ancestors().Any(n => n == opening));
+
+        // Both items go through it, not just one.
+        foreach (var text in new[] { "Copy Working Directory", "Open in File Explorer" })
+        {
+            var local = ItemNamed(build, text);
+            Assert.All(applications, a =>
+                Assert.Contains(a.ArgumentList.Arguments, arg => arg.Expression.ToString() == local));
+        }
+    }
+
+    /// <summary>
+    /// A disabled MenuFlyoutItem raises none of the pointer events
+    /// ToolTipService needs, so the reason it is unavailable rides
+    /// AutomationProperties.HelpText, which Narrator reads as the item's
+    /// description. Cleared again when the item is live, or a usable item
+    /// carries an explanation for a state it is not in.
+    /// </summary>
+    /// <summary>
+    /// BOTH items are greyed, not just the one a Single() would find. The
+    /// helper loops, so one assignment covers two items -- which means the
+    /// guard has to say what it loops over, or a body touching only `copy`
+    /// reads identically and leaves Open in File Explorer live on a tab with
+    /// no directory.
+    /// </summary>
+    [Fact]
+    public void BothItems_AreGreyedTogether()
+    {
+        var apply = ShellSource.Load("Tabs.TabContextMenuBuilder.cs").Method("ApplyCwdAvailability");
+        var loop = Assert.Single(apply.DescendantNodes().OfType<ForEachStatementSyntax>());
+
+        var collection = loop.Expression.ToString();
+        foreach (var parameter in apply.ParameterList.Parameters
+                     .Where(p => p.Type!.ToString() == "MenuFlyoutItem"))
+        {
+            Assert.Contains(parameter.Identifier.Text, collection);
+        }
+
+        // The two items the caller hands over, and no fewer.
+        Assert.Equal(2, apply.ParameterList.Parameters
+            .Count(p => p.Type!.ToString() == "MenuFlyoutItem"));
+
+        var enabled = Assert.Single(loop.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString().EndsWith(".IsEnabled", System.StringComparison.Ordinal)));
+        Assert.Equal($"{loop.Identifier.Text}.IsEnabled", enabled.Left.ToString());
+    }
+
+    /// <summary>
+    /// The reason rides HelpText, is CLEARED rather than blanked when the
+    /// item is live (UIA reports an empty string as present-but-blank), and
+    /// distinguishes the two things the model can mean. A directory on
+    /// another machine WAS reported -- the label prints it and the tooltip
+    /// shows it in full -- so telling a listener the shell reported nothing
+    /// contradicts what a pointer user is reading.
+    /// </summary>
+    [Fact]
+    public void TheUnavailableReason_RidesHelpText_ClearsWhenLive_AndNamesTheRightCause()
+    {
         var menu = ShellSource.Load("Tabs.TabContextMenuBuilder.cs");
-        var build = menu.Method("Build");
-        Assert.Contains(build.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == "cwdRule.Visibility" && a.Right.ToString() == "CwdVisibility(tab)");
-        // Pinned as parsed: inverted, the rule reads the same in substrings
-        // while showing the group exactly when there is nothing to act on.
-        var rule = menu.Method("CwdVisibility");
-        var choice = Assert.IsType<ConditionalExpressionSyntax>(rule.ExpressionBody!.Expression);
-        Assert.Equal("tab.ActionableCwd is not null", choice.Condition.ToString());
-        Assert.Equal("Visibility.Visible", choice.WhenTrue.ToString());
-        Assert.Equal("Visibility.Collapsed", choice.WhenFalse.ToString());
+        var apply = menu.Method("ApplyCwdAvailability");
+
+        // Set when there is a reason, cleared when there is not.
+        Assert.Single(apply.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString() == "AutomationProperties.SetHelpText"));
+        Assert.Contains(apply.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.Expression.ToString().EndsWith("ClearValue", System.StringComparison.Ordinal)
+                 && i.ArgumentList.Arguments[0].ToString() == "AutomationProperties.HelpTextProperty");
+
+        // Two distinct reasons, told apart by whether the shell reported at
+        // all -- not by the spawn policy's verdict alone.
+        var reasons = menu.Root.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Identifier.Text.StartsWith("Cwd", System.StringComparison.Ordinal)
+                        && v.Identifier.Text.EndsWith("Help", System.StringComparison.Ordinal))
+            .Select(v => Assert.IsType<LiteralExpressionSyntax>(v.Initializer!.Value).Token.ValueText)
+            .ToList();
+        Assert.Equal(2, reasons.Count);
+        Assert.Equal(2, reasons.Distinct().Count());
+        // Each says something; an emptied constant is the silent failure.
+        Assert.All(reasons, r => Assert.True(r.Length > 20, $"the reason '{r}' explains nothing"));
+        // And only one of them claims nothing was reported.
+        Assert.Single(reasons, r => r.Contains("has not reported"));
+
+        Assert.Contains(apply.DescendantNodes().OfType<MemberAccessExpressionSyntax>(),
+            m => m.ToString() == "tab.ShellReportedCwd");
     }
 
     [Fact]

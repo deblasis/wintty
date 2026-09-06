@@ -2166,9 +2166,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         ToolTipService.SetToolTip(
             item, NavView.IsPaneOpen ? tab.HoverText : tab.TooltipText);
         AutomationProperties.SetName(item, TabAccessibleText.Name(tab));
-        AutomationProperties.SetItemStatus(item, tab.Group is { } group
-            ? TabAccessibleText.Status(tab.IsPinned, tab.BellRinging, group.Title, group.IsCollapsed)
-            : TabAccessibleText.Status(tab));
+        // One call: the status reads the tab's group itself, so this strip
+        // cannot report a segment the horizontal one forgets -- which is
+        // how a grouped member came to lose "Starting" here and its run
+        // there.
+        AutomationProperties.SetItemStatus(item, TabAccessibleText.Status(tab));
     }
 
     private void OnRowCloseClick(object sender, RoutedEventArgs e)
@@ -2237,7 +2239,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         ApplyGroupChrome(item, group);
         ApplyHeaderAnatomy(item);
 
-        var binding = AotBinding.Create(group, _ => ScheduleReconcile(),
+        var binding = AotBinding.Create(group, _ => OnGroupStateChanged(group),
             nameof(TabGroup.IsCollapsed), nameof(TabGroup.Title), nameof(TabGroup.Color));
         _headers[group] = item;
         _groupHooks[group] = binding;
@@ -2335,6 +2337,22 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private double ContentInsetRight
         => ShowsTitles ? RowInsetRight - NavItemTemplateRightGutter : 0;
+
+    /// <summary>
+    /// A group's own state changed: its title, its colour, or its collapse
+    /// bit. The layout answer is the deferred reconcile, but the title and
+    /// the collapse bit are also segments of every member's ItemStatus, and
+    /// a group change is not a per-tab event -- so without this pass a
+    /// renamed run left every member naming the old title to assistive
+    /// clients until something unrelated rewrote it.
+    /// </summary>
+    private void OnGroupStateChanged(TabGroup group)
+    {
+        foreach (var (tab, item) in _items)
+            if (ReferenceEquals(tab.Group, group))
+                ApplyItemTitleChrome(item, tab);
+        ScheduleReconcile();
+    }
 
     private void OnTabGroupStateChanged(TabModel tab)
     {
