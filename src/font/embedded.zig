@@ -54,3 +54,38 @@ pub const terminus_ttf = @embedFile("res/TerminusTTF-Regular.ttf");
 pub const spleen_bdf = @embedFile("res/spleen-8x16.bdf");
 pub const spleen_pcf = @embedFile("res/spleen-8x16.pcf");
 pub const spleen_otb = @embedFile("res/spleen-8x16.otb");
+
+test "variable face defaults to the Regular instance" {
+    // lib-vt source archives intentionally exclude full Ghostty font fixtures.
+    if (comptime @import("terminal_options").artifact == .lib) return error.SkipZigTest;
+
+    const std = @import("std");
+    const sfnt = @import("opentype/sfnt.zig");
+    const alloc = std.testing.allocator;
+
+    // The inspector hands this face to imgui without pinning a variation
+    // axis, so FreeType renders whatever the fvar default instance is. If
+    // that stops being Regular the entire inspector UI changes weight, and
+    // nothing else in the tree would notice: the terminal faces pin `wght`
+    // explicitly in SharedGridSet.
+    const face = try sfnt.SFNT.init(variable, alloc);
+    defer face.deinit(alloc);
+
+    const fvar = face.getTable("fvar").?;
+    const axes_offset = std.mem.readInt(u16, fvar[4..6], .big);
+    const axis_count = std.mem.readInt(u16, fvar[8..10], .big);
+    const axis_size = std.mem.readInt(u16, fvar[10..12], .big);
+
+    var weight_axes: usize = 0;
+    for (0..axis_count) |i| {
+        const axis = fvar[axes_offset + i * axis_size ..][0..axis_size];
+        if (!std.mem.eql(u8, axis[0..4], "wght")) continue;
+        weight_axes += 1;
+
+        const default: sfnt.Fixed = @bitCast(
+            std.mem.readInt(i32, axis[8..12], .big),
+        );
+        try std.testing.expectEqual(400, default.int);
+    }
+    try std.testing.expectEqual(1, weight_axes);
+}

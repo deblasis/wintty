@@ -44,6 +44,12 @@ pub fn setup() void {
         var font_config: cimgui.c.ImFontConfig = undefined;
         cimgui.ext.ImFontConfig_ImFontConfig(&font_config);
         font_config.FontDataOwnedByAtlas = false;
+
+        // We hand imgui a variable font and never pin an axis, so its
+        // FreeType loader renders the default instance. JetBrains Mono
+        // defaults to wght 400, the same weight as the static Regular
+        // face this used to load, which is why the inspector looks the
+        // same. `font/embedded.zig` has a test that keeps it that way.
         _ = cimgui.c.ImFontAtlas_AddFontFromMemoryTTF(
             io.Fonts,
             @ptrCast(@constCast(font.embedded.variable.ptr)),
