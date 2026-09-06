@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Ghostty.Core.Diagnostics;
 using Microsoft.UI.Dispatching;
 
 namespace Ghostty.Diagnostics;
@@ -17,14 +18,15 @@ namespace Ghostty.Diagnostics;
 /// watchdog closes that gap: a UI-thread heartbeat counter is advanced
 /// by a dispatcher timer, and a background thread checks it. If the
 /// counter has not moved for the stall window, the watchdog appends a
-/// crash.log entry and captures a full minidump of the still-hung
-/// process -- the same evidence class that took a three-hour ad-hoc
-/// debug session to collect by hand.
+/// crash.log entry and captures a minidump of the still-hung process
+/// (triage scope by default; full via hang-dump) -- the same evidence
+/// class that took a three-hour ad-hoc debug session to collect by
+/// hand.
 ///
 /// One capture per stall: after firing, the watchdog disarms itself
 /// (the UI thread is not going to un-hang on its own; a second dump of
-/// the same stacks helps nobody) and keeps a marker so the stall is
-/// still visible in the log if the process is later killed.
+/// the same stacks helps nobody). The crash.log entries it wrote are
+/// what the next launch's hang notice reads (#1046).
 /// </summary>
 internal static class HangWatchdog
 {
@@ -44,6 +46,27 @@ internal static class HangWatchdog
     private static DispatcherQueueTimer? _heartbeatTimer;
     private static Thread? _watchThread;
 
+    // The watchdog arms before the config service can exist, so the
+    // capture scope starts at the triage default and is seeded from
+    // hang-dump once App has a config to read, then re-seeded on every
+    // config reload (well inside the first stall window either way).
+    // volatile: written on the UI thread, read on the watch thread.
+    private static volatile HangDumpMode _dumpMode = HangDumpMode.Triage;
+
+    /// <summary>
+    /// When the watchdog armed, i.e. the earliest instant a stall could
+    /// belong to this session. The launch notice uses it as this
+    /// session's boundary: capturing the instant at the notice instead
+    /// would mislabel a stall from a slow early launch as a previous
+    /// session's and consume it.
+    /// </summary>
+    public static DateTimeOffset ArmedAtUtc { get; private set; }
+
+    /// <summary>
+    /// Seed the capture scope from the <c>hang-dump</c> config key.
+    /// </summary>
+    internal static void ConfigureDumpMode(HangDumpMode mode) => _dumpMode = mode;
+
     /// <summary>
     /// Arm the watchdog. Call once, on the UI thread, once the
     /// dispatcher exists -- the heartbeat timer needs it. Idempotent.
@@ -51,6 +74,7 @@ internal static class HangWatchdog
     public static void Start(DispatcherQueue dispatcher)
     {
         if (Interlocked.Exchange(ref _armed, 1) == 1) return;
+        ArmedAtUtc = DateTimeOffset.UtcNow;
 
         // The heartbeat: a lightweight repeating timer on the UI thread.
         // DispatcherQueueTimer runs on the thread that owns the queue,
@@ -94,26 +118,32 @@ internal static class HangWatchdog
     private static void RecordStall(TimeSpan stalledFor)
     {
         var pid = Environment.ProcessId;
+        // Read at capture time: the seed can land while the watch thread
+        // is already running.
+        var mode = _dumpMode;
         var (logPath, dumpPath) = Paths(pid);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
             File.AppendAllText(
                 logPath,
-                $"{DateTimeOffset.UtcNow:O} [UI-THREAD STALL]\n" +
+                $"{DateTimeOffset.UtcNow:O} {HangEvidenceStartup.StallMarker}\n" +
                 $"The UI thread has not pumped for {stalledFor.TotalSeconds:N0}s; " +
-                $"capturing {dumpPath}\n\n");
+                $"capturing {dumpPath} ({DumpLabel(mode)})\n\n");
         }
         catch { /* diagnostics must not throw */ }
 
-        CaptureMinidump(pid, dumpPath);
+        var written = CaptureMinidump(pid, dumpPath, mode);
 
         try
         {
+            var modeWord = HangDump.ConfigValue(mode);
             File.AppendAllText(
                 logPath,
-                $"{DateTimeOffset.UtcNow:O} [UI-THREAD STALL] minidump " +
-                (File.Exists(dumpPath) ? $"written ({new FileInfo(dumpPath).Length:N0} bytes)" : "FAILED") +
+                $"{DateTimeOffset.UtcNow:O} {HangEvidenceStartup.StallMarker} minidump " +
+                (written && File.Exists(dumpPath)
+                    ? $"written ({new FileInfo(dumpPath).Length:N0} bytes, {modeWord})"
+                    : $"FAILED ({modeWord})") +
                 "\n\n");
         }
         catch { }
@@ -131,18 +161,45 @@ internal static class HangWatchdog
 
     // ---- minidump capture ------------------------------------------------
 
-    private const uint MiniDumpWithFullMemory = 0x2;
-    private const uint MiniDumpWithHandleData = 0x4;
-    private const uint MiniDumpWithFullMemoryInfo = 0x800;
-    private const uint MiniDumpWithThreadInfo = 0x1000;
+    // MINIDUMP_TYPE flag values (minidumpapiset.h), each with the reason
+    // it earns a place in a mask below.
+    private const uint MiniDumpWithFullMemory = 0x2;                     // every byte of the process: the secrets-bearing opt-in
+    private const uint MiniDumpWithHandleData = 0x4;                     // the handle table: which thread holds the lock the UI thread is stuck on
+    private const uint MiniDumpScanMemory = 0x10;                        // marks dump ranges so stacks that walk referenced memory still symbolize
+    private const uint MiniDumpWithUnloadedModules = 0x20;               // resolves stale frames pointing into modules that already exited
+    private const uint MiniDumpWithFullMemoryInfo = 0x800;               // the full virtual-memory map: only meaningful alongside full memory
+    private const uint MiniDumpWithThreadInfo = 0x1000;                  // per-thread timings: how long each thread sat where it is
+    private const uint MiniDumpWithIndirectlyReferencedMemory = 0x40;    // memory the stacks point at: locals and lock words without the whole heap
+
+    // Triage mask (the default): walks stacks and lock ownership with no
+    // heap sweep, so the dump stays small and free of terminal content.
+    private const uint TriageDumpFlags =
+        MiniDumpWithHandleData |
+        MiniDumpScanMemory |
+        MiniDumpWithUnloadedModules |
+        MiniDumpWithThreadInfo |
+        MiniDumpWithIndirectlyReferencedMemory;
+
+    // Full mask (hang-dump = full): exactly the pre-#1045 0x1806 capture.
+    private const uint FullDumpFlags =
+        MiniDumpWithFullMemory |
+        MiniDumpWithHandleData |
+        MiniDumpWithFullMemoryInfo |
+        MiniDumpWithThreadInfo;
+
+    private static string DumpLabel(HangDumpMode mode) =>
+        mode == HangDumpMode.Full ? "full memory dump" : "triage dump";
 
     /// <summary>
     /// dbghelp's MiniDumpWriteDump called in-process. In-process on
     /// purpose: comsvcs' rundll32 dumper writes an Administrators-only
     /// DACL nobody can read without elevating (verified while chasing
     /// #1036), and the dump then can't even be copied out for support.
+    /// Returns whether dbghelp reported success: the file is created
+    /// before the call, so its existence proves nothing (a failed
+    /// capture leaves an empty .dmp).
     /// </summary>
-    private static void CaptureMinidump(int pid, string path)
+    private static bool CaptureMinidump(int pid, string path, HangDumpMode mode)
     {
         try
         {
@@ -150,12 +207,15 @@ internal static class HangWatchdog
             using var proc = Process.GetProcessById(pid);
             using var fs = new FileStream(
                 path, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
-            // 0x1806: full memory + handle data + full memory info + thread info.
-            _ = MiniDumpWriteDump(
+            return MiniDumpWriteDump(
                 proc.Handle, (uint)pid, fs.SafeFileHandle.DangerousGetHandle(),
-                0x1806, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                mode == HangDumpMode.Full ? FullDumpFlags : TriageDumpFlags,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         }
-        catch { /* diagnostics must not throw */ }
+        catch
+        {
+            return false;
+        }
     }
 
     [DllImport("dbghelp.dll")]

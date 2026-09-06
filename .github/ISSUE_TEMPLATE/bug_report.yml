@@ -1,0 +1,117 @@
+name: Bug report
+description: Report a crash, hang, or anything behaving wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Attach the diagnostic files the app already wrote on your
+        machine; what each one is and where it lives is documented in
+        [windows/docs/diagnostics.md](https://github.com/deblasis/wintty/blob/windows/windows/docs/diagnostics.md).
+
+        Sensitivity rules, short version:
+        - full hang dumps and unredacted `native-stderr.log` can hold
+          secrets (tokens, echoed passwords, command history). Never
+          attach them here; send them to the maintainer over a private
+          channel.
+        - redacted text logs and triage hang dumps are fine to attach.
+        - the redaction prompt at the bottom of this form scrubs text
+          logs before you post them.
+
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Edition
+      options:
+        - OSS build
+        - Sponsor
+        - Pro
+        - Pro Enterprise
+        - Pro Legacy
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      options:
+        - stable
+        - tip
+        - "-debug install"
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      options:
+        - x64
+        - arm64
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Wintty version
+      description: Paste the Version dialog Copy button output, or `wintty +version`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, what you expected instead, and the steps that reproduce it.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: artifacts
+    attributes:
+      label: Attached artifacts
+      description: Check only what you are attaching and are comfortable making public.
+      options:
+        - label: crash.log
+        - label: ghostty-crash.log
+        - label: 'newest two logs\ghostty-*.log'
+        - label: redacted native-stderr.log
+        - label: 'hang dump from hangs\ (triage only, and only if comfortable; full dumps never go in a public issue, see the sensitivity note above)'
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Redaction prompt
+
+        Text logs only. Copy the prompt, give it to any LLM agent
+        together with your log text, and attach the redacted output it
+        returns. Binary `.dmp` files cannot be redacted this way and
+        never go in a public issue.
+
+        ```text
+        You are redacting a log file before I post it in public.
+
+        Replace every secret or identifying value with a same-shaped
+        placeholder, and change nothing else. Redact:
+        - tokens, passwords, API keys, cookies, and anything that looks like a
+          credential, including long random strings in URLs and headers
+        - usernames and account names
+        - hostnames and machine names
+        - file paths that identify me or my organization, keeping the path
+          shape (C:\Users\alice\... becomes C:\Users\<user>\...)
+
+        Preserve exactly:
+        - line order, line structure, and the pipe-separated field layout
+        - timestamps, log levels, event ids, thread ids, error codes, and hex
+          addresses
+        - the wording of error messages, exception types, and function names
+
+        Ambiguous values are redacted, not kept. Output the full redacted log
+        verbatim and nothing else: no commentary, no summary, no surrounding
+        markup.
+        ```

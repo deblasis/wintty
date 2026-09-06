@@ -26,7 +26,8 @@ internal static partial class NativeStderrCapture
     /// <summary>
     /// Cap on the capture file. Panics are a few KB; anything past this
     /// is a chatty native write we do not need to keep across launches,
-    /// so the file truncates at the cap rather than growing forever.
+    /// so at the cap the file is rewritten holding its newest half
+    /// rather than growing forever.
     /// </summary>
     private const long MaxBytes = 8 * 1024 * 1024;
 
@@ -58,12 +59,18 @@ internal static partial class NativeStderrCapture
             var path = LogPath;
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
-            // Rotate at the cap: truncate rather than rename -- simpler
-            // than rename racing a concurrent writer, and the
-            // interesting content (the panic) is always at the tail,
-            // which truncation preserves.
+            // Rotate at the cap: keep the newest half. A rename would
+            // race any concurrent writer, and emptying would discard
+            // exactly the panic text the file exists to keep -- the
+            // evidence is always at the tail.
             if (File.Exists(path) && new FileInfo(path).Length > MaxBytes)
-                File.WriteAllText(path, string.Empty);
+            {
+                try
+                {
+                    KeepTail(path, MaxBytes / 2);
+                }
+                catch { /* rotation is best-effort; the append below still happens */ }
+            }
 
             // FileShare.ReadWrite so a concurrently-running second
             // window of the same process does not open-exclusively us.
@@ -81,6 +88,19 @@ internal static partial class NativeStderrCapture
         {
             // Best-effort by contract: silent on failure.
         }
+    }
+
+    /// <summary>
+    /// Rewrite <paramref name="path"/> holding only its last
+    /// <paramref name="keepBytes"/> bytes, via the shared tail reader.
+    /// If a concurrently-running second instance blocks the rewrite, the
+    /// caller treats rotation as failed and keeps appending.
+    /// </summary>
+    private static void KeepTail(string path, long keepBytes)
+    {
+        var tail = FileTail.Read(path, keepBytes);
+        if (tail is null || tail.Length <= keepBytes) return;
+        File.WriteAllBytes(path, tail);
     }
 
     private const int StdErrorHandle = -12; // STD_ERROR_HANDLE

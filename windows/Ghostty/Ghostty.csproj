@@ -504,10 +504,18 @@
     Always copy regardless of whether the static lib also exists:
     zig build produces both artifacts, and Debug builds load the DLL
     at runtime even when the static lib is present on disk.
+    The pdb rides along beside it: user minidumps of hangs and crashes
+    are only symbolizable against the pdb matching this exact dll, and
+    release packaging sweeps every *.pdb out of the publish folder into
+    the per-build symbol archive before anything ships.
   -->
   <ItemGroup>
     <None Include="..\..\zig-out\lib\ghostty.dll" Condition="Exists('..\..\zig-out\lib\ghostty.dll')">
       <Link>native\ghostty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\zig-out\lib\ghostty.pdb" Condition="Exists('..\..\zig-out\lib\ghostty.pdb')">
+      <Link>native\ghostty.pdb</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
@@ -556,6 +564,19 @@
   <Target Name="ErrorIfNoLibghostty" BeforeTargets="Build"
           Condition="!Exists('..\..\zig-out\lib\ghostty.dll')">
     <Error Text="ghostty.dll missing at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\lib\ghostty.dll')). Run 'zig build -Dapp-runtime=none' in the directory containing build.zig before 'dotnet build'." />
+  </Target>
+
+  <!--
+    Same silent-drop mechanism, pdb edition: a zig-out built before the
+    pdb was installed (or by a target that installs none) drops the pdb
+    copy item with zero signal, and every dump that build ever produces
+    is unsymbolizable. A warning, not an error: the app runs fine
+    without symbols, and release packaging (wintty-release's symbol
+    archive step) is where absence becomes fatal.
+  -->
+  <Target Name="WarnIfNoLibghosttyPdb" BeforeTargets="Build"
+          Condition="Exists('..\..\zig-out\lib\ghostty.dll') and !Exists('..\..\zig-out\lib\ghostty.pdb')">
+    <Warning Text="ghostty.pdb missing at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\lib\ghostty.pdb')) while ghostty.dll exists: minidumps from this build cannot be symbolized. Rebuild the dll ('zig build -Dapp-runtime=none') from a tree that installs the pdb." />
   </Target>
 
   <!--
