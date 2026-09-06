@@ -41,6 +41,24 @@ mouse: Mouse = .{},
 /// first saw a printable byte. Set once and never reset.
 first_content: bool = false,
 
+/// Tier C dormancy: true while this surface's terminal has been torn
+/// down and its state exists only as the IO thread's snapshot bytes. Set
+/// under `mutex` by the IO thread at the dormancy transition; read
+/// WITHOUT the mutex by readers that must not touch a torn-down terminal
+/// (the compression scheduler's tryLock path, the memory-stats export,
+/// the C API's readback). Any reader that takes `mutex` and needs the
+/// terminal itself must first funnel through the IO-side wake, which is
+/// the only thing that can make the terminal valid again.
+dormant: std.atomic.Value(bool) = .init(false),
+
+/// Whether a search thread is walking this terminal's pages. Held under
+/// `mutex` (set before the thread spawns, cleared after it is joined)
+/// so the dormancy eligibility check can refuse race-free: a search
+/// holds pins into the page storage dormancy would tear down, and the
+/// surface-side `search != null` check runs on the wrong thread to be
+/// the gate.
+search_active: bool = false,
+
 /// The number of threads currently waiting to acquire `mutex` via
 /// `lockDemand`. This is not protected by the mutex; it is read by
 /// hot lock/unlock loops (the IO parse thread) in `yieldToDemand` to

@@ -88,6 +88,14 @@ pub const Message = union(enum) {
     /// is required to serve input and everything rebuilds lazily.
     deep_idle: void,
 
+    /// Freeze this surface's terminal into a dormant snapshot (Tier C):
+    /// the live structures are torn down and the state exists only as
+    /// bytes until the next input wakes it. Fire-and-forget --
+    /// eligibility is re-checked by the handler against the terminal it
+    /// is about to snapshot, and the is-dormant readback is how a caller
+    /// learns the outcome.
+    go_dormant: void,
+
     /// Record a Kitty clipboard protocol session grant for a password
     /// so future requests carrying it skip the permission prompt, for
     /// reads and writes respectively.

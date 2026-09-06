@@ -447,6 +447,13 @@ fn termiosTimer(
         {
             td.renderer_state.mutex.lockUncancelable(global.io());
             defer td.renderer_state.mutex.unlock(global.io());
+            // The poll timer runs regardless of dormancy, and reading
+            // the torn-down terminal's flags would mismatch every tick
+            // (poison in Debug, stale in Release) and spam the surface
+            // with phantom mode changes for the whole dormancy.
+            if (td.renderer_state.dormant.load(.acquire)) {
+                break :mode_change;
+            }
             const t = td.renderer_state.terminal;
             if (t.flags.password_input == password_input) {
                 break :mode_change;

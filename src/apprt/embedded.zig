@@ -2444,6 +2444,11 @@ pub const CAPI = struct {
         result: *Text,
     ) bool {
         const core_surface = &surface.core_surface;
+        // A dormant terminal is undefined until woken; these pull reads
+        // serve background tabs (tab overview previews, UIA queries),
+        // which are exactly the dormancy candidates. A failed wake
+        // answers "nothing to read" rather than walking undefined memory.
+        if (!core_surface.io.wakeIfDormant()) return false;
         core_surface.renderer_state.mutex.lockUncancelable(global.io());
         defer core_surface.renderer_state.mutex.unlock(global.io());
 
@@ -2464,6 +2469,9 @@ pub const CAPI = struct {
         sel: Selection,
         result: *Text,
     ) bool {
+        // Wake-first: same dormancy rule as read_selection -- a failed
+        // wake answers "nothing to read".
+        if (!surface.core_surface.io.wakeIfDormant()) return false;
         surface.core_surface.renderer_state.mutex.lockUncancelable(global.io());
         defer surface.core_surface.renderer_state.mutex.unlock(global.io());
 
@@ -2520,6 +2528,9 @@ pub const CAPI = struct {
         result: *Cells,
     ) bool {
         const core_surface = &surface.core_surface;
+        // Wake-first: the tab overview reads background tabs, the exact
+        // surfaces dormancy targets; the read below walks their pages.
+        if (!core_surface.io.wakeIfDormant()) return false;
         core_surface.renderer_state.mutex.lockUncancelable(global.io());
         defer core_surface.renderer_state.mutex.unlock(global.io());
         return readCellsLocked(core_surface, result) catch |err| {
@@ -2921,6 +2932,28 @@ pub const CAPI = struct {
         surface.idleCallback(idle);
     }
 
+    /// Freeze a surface's terminal into a dormant snapshot: the live
+    /// structures are torn down on the IO thread and the state exists
+    /// only as (compressed) bytes until the next input wakes it. Returns
+    /// false when the request was refused outright (an active search);
+    /// other eligibility is re-checked against the terminal on the IO
+    /// thread, so poll `ghostty_surface_is_dormant` for the outcome.
+    /// Wintty drives this only from its test seam today -- the product
+    /// trigger (a long idle threshold and a config knob) is deliberately
+    /// not wired yet.
+    export fn ghostty_surface_go_dormant(surface: *Surface) bool {
+        const core_surface = &surface.core_surface;
+        if (core_surface.search != null) return false;
+        core_surface.goDormantCallback();
+        return true;
+    }
+
+    /// Whether the surface's terminal is currently torn down into its
+    /// dormant snapshot. Lock-free read of the shared flag.
+    export fn ghostty_surface_is_dormant(surface: *Surface) bool {
+        return surface.core_surface.isDormant();
+    }
+
     /// Scrollback memory statistics for a surface's primary screen.
     ///
     /// This exists for embedders and harnesses that need to observe the
@@ -2941,6 +2974,20 @@ pub const CAPI = struct {
         const core_surface = &surface.core_surface;
         core_surface.renderer_state.mutex.lockUncancelable(global.io());
         defer core_surface.renderer_state.mutex.unlock(global.io());
+
+        // A dormant terminal is torn down; its pages exist only as the
+        // IO thread's snapshot bytes, and reading the field here would
+        // walk freed memory. Zeroes say "nothing resident", which is
+        // true in the only sense a memory census reports.
+        if (core_surface.renderer_state.dormant.load(.monotonic)) {
+            out_total_pages.* = 0;
+            out_compressed_pages.* = 0;
+            out_resident_raw_bytes.* = 0;
+            out_decommitted_raw_bytes.* = 0;
+            out_encoded_bytes.* = 0;
+            out_activity_serial.* = 0;
+            return;
+        }
 
         const term = core_surface.renderer_state.terminal;
         const pages = &term.screens.get(.primary).?.pages;
@@ -2988,6 +3035,12 @@ pub const CAPI = struct {
         event: KeyEvent,
     ) bool {
         const key_event = event.keyEvent();
+        // Input is a wake: handling reads and writes the terminal
+        // directly on this thread, and a dormant surface's terminal is
+        // undefined until rebuilt. A FAILED wake drops the event: the
+        // callbacks below would walk undefined memory, and the surface
+        // stays dormant for the next input to retry.
+        if (!surface.core_surface.io.wakeIfDormant()) return false;
 
         if (comptime builtin.os.tag == .windows) {
             // Theme picker etc. intercepts before keybinding resolution.
@@ -3043,6 +3096,12 @@ pub const CAPI = struct {
         ptr: [*]const u8,
         len: usize,
     ) void {
+        // Input is a wake: handling reads and writes the terminal
+        // directly on this thread, and a dormant surface's terminal is
+        // undefined until rebuilt. A FAILED wake drops the event: the
+        // callbacks below would walk undefined memory, and the surface
+        // stays dormant for the next input to retry.
+        if (!surface.core_surface.io.wakeIfDormant()) return;
         if (comptime builtin.os.tag == .windows) {
             if (surface.pending_key) |*pending| {
                 const text = ptr[0..len];
@@ -3098,6 +3157,12 @@ pub const CAPI = struct {
         button: input.MouseButton,
         mods: c_int,
     ) bool {
+        // Input is a wake: handling reads and writes the terminal
+        // directly on this thread, and a dormant surface's terminal is
+        // undefined until rebuilt. A FAILED wake drops the event: the
+        // callbacks below would walk undefined memory, and the surface
+        // stays dormant for the next input to retry.
+        if (!surface.core_surface.io.wakeIfDormant()) return false;
         return surface.mouseButtonCallback(
             action,
             button,
@@ -3115,6 +3180,12 @@ pub const CAPI = struct {
         y: f64,
         mods: c_int,
     ) void {
+        // Input is a wake: handling reads and writes the terminal
+        // directly on this thread, and a dormant surface's terminal is
+        // undefined until rebuilt. A FAILED wake drops the event: the
+        // callbacks below would walk undefined memory, and the surface
+        // stays dormant for the next input to retry.
+        if (!surface.core_surface.io.wakeIfDormant()) return;
         surface.cursorPosCallback(
             x,
             y,
@@ -3131,6 +3202,12 @@ pub const CAPI = struct {
         y: f64,
         scroll_mods: c_int,
     ) void {
+        // Input is a wake: handling reads and writes the terminal
+        // directly on this thread, and a dormant surface's terminal is
+        // undefined until rebuilt. A FAILED wake drops the event: the
+        // callbacks below would walk undefined memory, and the surface
+        // stays dormant for the next input to retry.
+        if (!surface.core_surface.io.wakeIfDormant()) return;
         surface.scrollCallback(
             x,
             y,
@@ -3144,6 +3221,12 @@ pub const CAPI = struct {
         pressure: f64,
     ) void {
         const stage = std.enums.fromInt(input.MousePressureStage, stage_raw) orelse return;
+        // Input is a wake: handling reads and writes the terminal
+        // directly on this thread, and a dormant surface's terminal is
+        // undefined until rebuilt. A FAILED wake drops the event: the
+        // callbacks below would walk undefined memory, and the surface
+        // stays dormant for the next input to retry.
+        if (!surface.core_surface.io.wakeIfDormant()) return;
         surface.mousePressureCallback(stage, pressure);
     }
 
@@ -3460,6 +3543,8 @@ pub const CAPI = struct {
             result: *Text,
         ) bool {
             const surface = &ptr.core_surface;
+            // Wake-first: same dormancy rule as the other pull reads.
+            if (!surface.io.wakeIfDormant()) return false;
             surface.renderer_state.mutex.lockUncancelable(global.io());
             defer surface.renderer_state.mutex.unlock(global.io());
 

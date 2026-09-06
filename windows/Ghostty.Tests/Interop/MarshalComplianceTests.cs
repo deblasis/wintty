@@ -115,7 +115,14 @@ public class MarshalComplianceTests
     public void NativeMethods_HasNoMarshalAsAttributes()
     {
         var source = ReadEmbeddedSource();
-        var offending = ScanForBannedAttribute(source, BannedAttribute);
+        // "[return: MarshalAs" does not contain the bare "[MarshalAs"
+        // substring, so it is listed separately: the two-BOOL-shape rule
+        // (byte for libghostty _Bool, wrapper converts) holds of return
+        // values too, and a return-position attribute would otherwise be
+        // the one import shape the scan never sees.
+        var offending = ScanForBannedTokens(
+            source,
+            new[] { BannedAttribute, "[return: MarshalAs" });
 
         Assert.True(
             offending.Count == 0,
