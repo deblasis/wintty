@@ -2263,10 +2263,12 @@ pub const ReadThread = struct {
     /// How long to wait between the remaining interrupt attempts, and how
     /// many to make before giving up and joining anyway. The interval is
     /// a floor, not a period: without a raised timer resolution the
-    /// scheduler rounds it up to a tick, so a full budget is on the order
-    /// of seconds rather than the millisecond product. That only ever
-    /// costs anything if the reader is stuck somewhere that is not the
-    /// read, and the join that follows would then hang outright.
+    /// scheduler rounds a 2 ms sleep up to a ~15.6 ms tick, so spending
+    /// the whole budget blocks the IO thread for something like eight
+    /// seconds, not one. The budget is diagnostic rather than a recovery
+    /// mechanism: it exists to get the warning into the log, because the
+    /// join that follows hangs outright in the only case that reaches
+    /// the end of it.
     const cancel_interval_ms = 2;
     const cancel_max_attempts = 500;
 

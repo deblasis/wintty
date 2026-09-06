@@ -823,6 +823,19 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
 /// Index of the `/C` or `/K` switch when `argv` is a cmd.exe invocation
 /// with a single script after it, which is the shape a wrapped shell
 /// command has. Returns null for anything else.
+///
+/// Two deliberate narrownesses, both of which fail closed to the CRT
+/// quoting that was here before:
+///
+///   - The program is recognized by basename, not by the module
+///     `resolveWindowsProgram` actually loads. A user program named
+///     `cmd.exe` would get its last argument written verbatim, which
+///     `CommandLineToArgvW` would then mis-parse.
+///   - A `/C` with more than one argument after it does not match, so
+///     `["cmd.exe", "/c", "prog", "arg one"]` is CRT-quoted and cmd
+///     mis-parses it the way this function exists to avoid. Nothing in
+///     the tree produces that shape: the wrap always joins the tail
+///     into one script.
 fn windowsCmdScriptSwitch(argv: []const []const u8) ?usize {
     if (argv.len < 3) return null;
 
