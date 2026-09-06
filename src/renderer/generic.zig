@@ -336,6 +336,23 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// Semaphore that we wait on to make sure we have an available
             /// frame state struct so we can start working on a new frame.
             frame_sema: std.Io.Semaphore = .{ .permits = buf_count },
+            /// Frames handed out by `nextFrame` and not yet given back,
+            /// checked by the asserts in `releaseFrame` and `deinit`.
+            ///
+            /// A release with no matching wait behind it is otherwise
+            /// silent: it lifts `frame_sema` above `buf_count`, and what
+            /// anyone notices is a frame slot handed out while a draw is
+            /// still using it, somewhere else entirely. Only that
+            /// direction is caught. The opposite mistake, a permit never
+            /// given back, ends as `deinit` blocking forever, which no
+            /// counter can turn into a message.
+            ///
+            /// Atomic because backends release from their own completion
+            /// threads. `releaseFrame` must decrement before it posts:
+            /// `deinit` takes every permit before reading this, so the
+            /// semaphore's own ordering is what makes the decrements
+            /// visible to it.
+            frames_out: std.atomic.Value(usize) = .{ .raw = 0 },
 
             pub fn init(
                 alloc: Allocator,
@@ -365,6 +382,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 for (0..buf_count) |_| self.frame_sema.waitUncancelable(
                     global.io(),
                 );
+                assert(self.frames_out.load(.monotonic) == 0);
                 for (&self.frames) |*frame| frame.deinit();
             }
 
@@ -373,12 +391,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// always be paired with a call to releaseFrame.
             pub fn nextFrame(self: *SwapChain) *FrameState {
                 self.frame_sema.waitUncancelable(global.io());
+                _ = self.frames_out.fetchAdd(1, .monotonic);
                 self.frame_index = (self.frame_index + 1) % buf_count;
                 return &self.frames[self.frame_index];
             }
 
             /// This should be called when the frame has completed drawing.
             pub fn releaseFrame(self: *SwapChain) void {
+                // Decrement before the post; see `frames_out`. The upper
+                // bound catches the mirror image of the lower one: a
+                // release with no `nextFrame` behind it at all.
+                const outstanding = self.frames_out.fetchSub(1, .monotonic);
+                assert(outstanding > 0 and outstanding <= buf_count);
                 self.frame_sema.post(global.io());
             }
         };
@@ -2020,7 +2044,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Wait for a frame to be available.
             const frame = swap_chain.nextFrame();
-            errdefer swap_chain.releaseFrame();
+            // The permit `nextFrame` took is ours to give back only until
+            // `beginFrame` succeeds below. From that point the deferred
+            // `frame_ctx.complete` owns it -- every backend's completion
+            // path ends in `frameCompleted`, which releases the frame, and
+            // a defer runs on the error paths too. Giving it back here as
+            // well would post twice for one wait, and neither symptom is
+            // local. The spare permit lets `nextFrame` hand out a slot a
+            // draw is still using, whose `resize` reuses descriptor slots
+            // the GPU may still be reading; and it lets `SwapChain.deinit`
+            // stop waiting before the frames it destroys are done. That
+            // second one bites on Metal, where the semaphore is posted
+            // from the GPU completion handler and is the only proof of
+            // quiescence. DX12 posts it after the fence signal rather than
+            // after execution, so there teardown still rests on
+            // `waitForGpu` and only the first symptom applies.
+            //
+            // On DX12 that completion path is indirect, and both ends of
+            // it matter here: `Frame.complete` only parks
+            // `pending_complete`, and `drawFrameEnd` is what releases the
+            // frame, reached because its defer is registered earlier in
+            // this function and so unwinds afterwards. Break that hand-off
+            // and this stops posting at all rather than posting twice,
+            // which is the worse failure -- `deinit` then blocks forever.
+            var frame_owed = true;
+            errdefer if (frame_owed) swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{swap_chain.frame_index});
 
             // `nextFrame` has waited on frame_sema, so this frame slot's
@@ -2115,6 +2163,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // OpenGL use immediate CPU-to-GPU copies so this ordering is
             // transparent to them.
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
+            frame_owed = false;
             defer frame_ctx.complete(sync);
 
             // Upload kitty graphics images to the GPU as necessary.
