@@ -779,7 +779,19 @@ pub fn drawFrameStart(self: *DirectX12) void {
     const dev_ptr = &(self.dev orelse return);
     // A removed device's fence reports a value that means nothing; the
     // recovery path tears the whole queue down instead.
-    if (dev_ptr.removed()) return;
+    //
+    // Say so on the way out rather than dropping the answer. With
+    // `presentLastTarget` a no-op here, this is the only thing that
+    // touches the device on a wakeup that draws nothing, so it is the
+    // only place an idle TDR can be noticed before the next real frame.
+    // `deviceLost` is polled a few lines below the call to this, so
+    // recovery starts in the same `drawFrame`. Only the first wakeup
+    // announces it: attempts between recovery retries would otherwise
+    // log the same removal once per draw interval.
+    if (dev_ptr.removed()) {
+        if (!self.device_lost) self.handleDeviceRemoved();
+        return;
+    }
     dev_ptr.retirement.collect(dev_ptr.fence.GetCompletedValue());
 }
 
