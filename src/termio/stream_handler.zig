@@ -31,6 +31,10 @@ pub const StreamHandler = struct {
     /// Mailbox for data to the termio thread.
     termio_mailbox: *termio.Mailbox,
 
+    /// Bounds the data queued to the pty. Terminal replies are dropped
+    /// while this is at capacity; see termio.WriteLimit.
+    write_limit: *termio.WriteLimit,
+
     /// Mailbox for the surface.
     surface_mailbox: apprt.surface.Mailbox,
 
@@ -42,9 +46,6 @@ pub const StreamHandler = struct {
 
     /// The shared render state
     renderer_state: *renderer.State,
-
-    /// The mailbox for notifying the renderer of things.
-    renderer_mailbox: *renderer.Thread.Mailbox,
 
     /// A handle to wake up the renderer. This hints to the renderer that
     /// a repaint should happen. See termio.Options for why this is a pointer.
@@ -180,6 +181,29 @@ pub const StreamHandler = struct {
         self.messageWriter(.{ .color_scheme_report = .{ .force = false } });
     }
 
+    /// Send a surface message on behalf of the child's output.
+    ///
+    /// This is a shared tail, so name what it hands its callers: all 22
+    /// call sites in this file get `App.Mailbox.push`'s `.fail_fast`, on
+    /// the pty read thread. That is right for them -- they are produced
+    /// per OSC by whatever the child emits, so they arrive in exactly the
+    /// stream the latch exists to stop paying for, and every one of them
+    /// is either advisory or re-derivable by the next escape sequence.
+    ///
+    /// It is right for them *by that argument*, not because a wrapper
+    /// happened to pass it. Two are worth knowing about before adding a
+    /// third: a lost `.stop_command` leaves a shell-integration mark
+    /// showing a command still running until the next prompt, and a lost
+    /// `.clipboard_read` / `.kitty_clipboard_read` drops an OSC 52 reply
+    /// the child may be waiting on. Both need a wedged app thread first,
+    /// and both are recoverable by the user. A message that is neither --
+    /// one shot, and nothing re-derives it -- must use
+    /// `apprt.surface.Mailbox.pushRequired` instead. `.child_exited`,
+    /// pushed by `Exec.processExitCommon`, is the one message in the tree
+    /// that qualifies, and `apprt.surface.Message.dropAllowed` is where
+    /// that classification lives now: `push` asserts on it, so a variant
+    /// added here that should not be dropped is a compile error there
+    /// before it is a bug.
     inline fn surfaceMessageWriter(
         self: *StreamHandler,
         msg: apprt.surface.Message,
@@ -193,41 +217,50 @@ pub const StreamHandler = struct {
         }
     }
 
+    /// Send a message to the termio thread. Almost everything this handler
+    /// sends is a reply to output the child produced, so once the pty write
+    /// backlog is at its cap we drop it: a child that isn't draining its
+    /// input isn't reading the replies either. User input doesn't come
+    /// through here.
+    ///
+    /// Use `messageWriterRequired` for a write something is blocked on
+    /// rather than merely informed by.
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
+        if (msg.writesToPty() and self.write_limit.atCapacity()) {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            if (self.write_limit.recordDrop(now.toMilliseconds())) |n| {
+                log.warn(
+                    "pty write backlog full, dropped {} terminal responses",
+                    .{n},
+                );
+            }
+
+            msg.deinit();
+            return;
+        }
+
+        // Deliberately NOT routed through `messageWriterRequired`. A
+        // child that spams cursor-position queries produces a stream of
+        // these, and the required budget would spend up to a minute on
+        // each one while ignoring the wedge latch -- stalling the pty
+        // read thread per reply, which is the per-message-not-per-stall
+        // trap one level down. These are advisory; they are droppable.
         self.termio_mailbox.send(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }
 
-    /// Send a renderer message and unlock the renderer state mutex
-    /// if necessary to ensure we don't deadlock.
+    /// Send a message the backlog cap must not drop.
     ///
-    /// This assumes the renderer state mutex is locked.
-    inline fn rendererMessageWriter(
+    /// This runs on the pty read thread, never the UI thread, so it takes
+    /// the required budget rather than the droppable one: the cost of
+    /// waiting here is a stalled child, not a frozen window. It has one
+    /// caller, the tmux control-mode command path.
+    inline fn messageWriterRequired(
         self: *StreamHandler,
-        msg: renderer.Message,
+        msg: termio.Message,
     ) void {
-        // See termio.Mailbox.send for more details on how this works.
-
-        // Try instant first. If it works then we can return.
-        if (self.renderer_mailbox.push(msg, .{ .instant = {} }) > 0) {
-            return;
-        }
-
-        // Instant would have blocked. Release the renderer mutex,
-        // wake up the renderer to allow it to process the message,
-        // and then try again.
-        self.renderer_state.mutex.unlock(global.io());
-        defer self.renderer_state.mutex.lockUncancelable(global.io());
-        self.renderer_wakeup.notify() catch |err| {
-            // This is an EXTREMELY unlikely case. We still don't return
-            // and attempt to send the message because its most likely
-            // that everything is fine, but log in case a freeze happens.
-            log.warn(
-                "failed to notify renderer, may deadlock err={}",
-                .{err},
-            );
-        };
-        _ = self.renderer_mailbox.push(msg, .{ .forever = {} });
+        self.termio_mailbox.sendRequired(msg, self.renderer_state.mutex);
+        self.termio_messaged = true;
     }
 
     pub fn vt(
@@ -533,7 +566,24 @@ pub const StreamHandler = struct {
                                 self.alloc,
                                 command,
                             );
-                            self.messageWriter(msg);
+
+                            // Not a reply: this drives the control mode
+                            // session the user asked for, and tmux answers
+                            // every command with a %begin/%end block the
+                            // viewer waits for, so dropping one wedges the
+                            // viewer.
+                            //
+                            // That is why this bypasses the pty write
+                            // backlog cap, which drops replies freely. It
+                            // is not an absolute guarantee and cannot be:
+                            // waiting on the writer thread without a limit
+                            // would stop this thread reading the pty, and a
+                            // tmux session whose output is no longer read
+                            // is wedged either way. So the command gets the
+                            // required budget -- roughly a minute, and
+                            // unaffected by another producer's give-up --
+                            // and past that it is dropped and logged.
+                            self.messageWriterRequired(msg);
                         },
 
                         .windows => {
@@ -2281,9 +2331,11 @@ test "kitty clipboard write: oversized text replies EFBIG" {
         .mutex = &mutex,
         .terminal = undefined,
     };
+    var write_limit: termio.WriteLimit = .{};
     var handler: StreamHandler = undefined;
     handler.alloc = testing.allocator;
     handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
     handler.renderer_state = &renderer_state;
     handler.clipboard_write = .allow;
     handler.clipboard_write_limit = 4;
@@ -2324,6 +2376,73 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     // Teardown leaves no transaction that could be committed and
     // forwarded to the macOS clipboard path.
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "tmux control mode commands survive a full pty write backlog" {
+    if (comptime !StreamHandler.tmux_enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+
+    // A backlog that is already at its cap.
+    var write_limit: termio.WriteLimit = .{ .max = 1 };
+    write_limit.queued(1);
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
+    handler.renderer_state = &renderer_state;
+    handler.termio_messaged = false;
+    handler.tmux_viewer = null;
+    defer if (handler.tmux_viewer) |viewer| {
+        viewer.deinit();
+        testing.allocator.destroy(viewer);
+    };
+
+    // A terminal reply is refused at the cap...
+    handler.messageWriter(.{ .write_stable = "\x1B[0n" });
+    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+
+    // ...but a control mode command is not a reply: tmux answers each
+    // one with a %begin/%end block the viewer waits for, so dropping it
+    // wedges a session the user asked for.
+    var enter: terminal.dcs.Command = .{ .tmux = .enter };
+    try handler.dcsCommand(&enter);
+    var block_end: terminal.dcs.Command = .{ .tmux = .{ .block_end = "" } };
+    try handler.dcsCommand(&block_end);
+    var session_changed: terminal.dcs.Command = .{ .tmux = .{ .session_changed = .{
+        .id = 1,
+        .name = "first",
+    } } };
+    try handler.dcsCommand(&session_changed);
+
+    const queued = mailbox.spsc.queue.pop(global.io());
+    try testing.expect(queued != null);
+    const msg = queued.?;
+    defer msg.deinit();
+    const command: termio.Message.WriteReq = switch (msg) {
+        .write_small => |v| .{ .small = v },
+        .write_stable => |v| .{ .stable = v },
+        .write_alloc => |v| .{ .alloc = v },
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(std.mem.startsWith(
+        u8,
+        command.slice(),
+        "display-message",
+    ));
 }
 
 /// Everything a pwd report needs from a `StreamHandler`, and nothing else.
@@ -2571,4 +2690,42 @@ test "pwd: the first report of a session is not swallowed by the spawn cwd" {
     const counts = h.drain();
     try testing.expectEqual(@as(usize, 1), counts.pwd);
     try testing.expectEqual(@as(usize, 1), counts.title);
+}
+
+test "stream handler refuses and frees an owned write at the backlog cap" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+
+    // A backlog that is already at its cap, so every advisory write is
+    // refused rather than queued.
+    var write_limit: termio.WriteLimit = .{ .max = 1 };
+    write_limit.queued(1);
+
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.termio_mailbox = &mailbox;
+    handler.write_limit = &write_limit;
+    handler.renderer_state = &renderer_state;
+    handler.termio_messaged = false;
+
+    // Longer than WriteReq's inline capacity, so this is a .write_alloc
+    // that owns its bytes. Refusing it has to free them: the testing
+    // allocator fails the test if the drop path forgets.
+    const data: []const u8 = "\x1B]11;rgb:1111/2222/3333\x1B\\" ** 4;
+    const msg = try termio.Message.writeReq(testing.allocator, data);
+    try testing.expect(msg == .write_alloc);
+
+    handler.messageWriter(msg);
+    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
 }

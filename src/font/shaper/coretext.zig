@@ -24,6 +24,16 @@ const global = @import("../../global.zig");
 
 const log = std.log.scoped(.font_shaper);
 
+/// How long `endFrame` waits for room in the release thread's mailbox
+/// before releasing the frame's references itself.
+///
+/// It cannot wait indefinitely: the wake that makes the release thread
+/// drain is only issued once the push has landed, so a shaping thread
+/// that parks on a full mailbox has no way to produce one, and the
+/// thread it is waiting for is stopped outright on shutdown and font
+/// reload. Releasing here costs a slow frame; waiting costs the process.
+const release_push_timeout_ns: u64 = 100 * std.time.ns_per_ms;
+
 /// Shaper that uses CoreText.
 ///
 /// CoreText shaping differs in subtle ways from HarfBuzz so it may result
@@ -281,12 +291,12 @@ pub const Shaper = struct {
         };
 
         // Send the items. If the send succeeds then we wake up the
-        // thread to process the items. If the send fails then do a manual
-        // cleanup.
+        // thread to process the items. If the send times out then do a
+        // manual cleanup rather than parking this thread.
         if (self.cf_release_thread.mailbox.push(global.io(), .{ .release = .{
             .refs = items,
             .alloc = self.alloc,
-        } }, .{ .forever = {} }) != 0) {
+        } }, .{ .ns = release_push_timeout_ns }) != 0) {
             self.cf_release_thread.wakeup.notify() catch |err| {
                 log.warn(
                     "error notifying cf release thread to wake up, may stall err={}",

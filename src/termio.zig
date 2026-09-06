@@ -26,6 +26,7 @@ pub const Exec = @import("termio/Exec.zig");
 pub const Options = @import("termio/Options.zig");
 pub const Termio = @import("termio/Termio.zig");
 pub const Thread = @import("termio/Thread.zig");
+pub const WriteLimit = @import("termio/write_limit.zig").WriteLimit;
 pub const Backend = backend.Backend;
 pub const DerivedConfig = Termio.DerivedConfig;
 pub const Mailbox = mailbox.Mailbox;
@@ -36,4 +37,5 @@ test {
     @import("std").testing.refAllDecls(@This());
 
     _ = @import("termio/shell_integration.zig");
+    _ = @import("termio/write_limit.zig");
 }
