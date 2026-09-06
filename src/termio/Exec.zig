@@ -371,12 +371,22 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
 
     // We always notify the surface immediately that the child has
     // exited and some metadata about the exit.
-    _ = td.surface_mailbox.push(.{
+    //
+    // `pushRequired`, not `push`: this runs once per surface lifetime and
+    // nothing re-derives it, so a drop is permanent and user-visible.
+    // `Surface.childExited` is what sets `self.child_exited`, and without
+    // it `close-on-exit` never fires, the exit overlay never appears, and
+    // the close confirmation keeps asking about a process that is already
+    // gone -- for the life of the surface. The streaming producers on this
+    // queue (search results, the stream handler's OSC replies) fail fast
+    // against a wedged app thread precisely so that this one can afford to
+    // spend its budget.
+    _ = td.surface_mailbox.pushRequired(.{
         .child_exited = .{
             .exit_code = exit_code,
             .runtime_ms = runtime_ms,
         },
-    }, .{ .forever = {} });
+    });
 }
 
 fn processExit(
@@ -487,9 +497,22 @@ fn termiosTimer(
         // flag the consumer itself sets, so the retry stops exactly when
         // the surface has caught up -- and if the mode has flipped back
         // by then, the guard commits without a send. The state is
-        // balanced by re-deriving it every poll rather than by never
-        // dropping it, which also recovers from a wedge that outlasts
-        // any budget we could have picked.
+        // balanced by re-deriving the *undelivered change* rather than by
+        // never dropping it, which also recovers from a wedge that
+        // outlasts any budget we could have picked.
+        //
+        // Be precise about the scope of that, because it is narrower than
+        // "re-derived every poll": the re-derivation only runs while
+        // `mode != exec.termios_mode`. Nothing polls the terminal flag
+        // itself, so a path that clears `t.flags.password_input` behind
+        // our back leaves the apprt armed with no send to correct it.
+        // `Terminal.fullReset` is exactly such a path -- it assigns
+        // `self.flags = .{ .visible = visible }` -- so RIS after a
+        // delivered `true` desyncs the apprt for the surface's life. That
+        // hole is pre-existing (the merge base committed `termios_mode`
+        // unconditionally and had the same gap) and is not fixed here;
+        // closing it means the reset path telling the surface, which is
+        // not this function's to do.
         if (td.surface_mailbox.push(.{
             .password_input = password_input,
         }, .{ .forever = {} }) > 0) {

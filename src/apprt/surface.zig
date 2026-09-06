@@ -183,8 +183,9 @@ pub const Message = union(enum) {
     ///
     /// Exhaustive on purpose, matching `App.Message.deinit`: a variant
     /// that starts owning memory is then a compile error here rather
-    /// than a silent leak on every drop. The field-count test below is
-    /// the weaker guard this replaces -- it fires only if this file is
+    /// than a silent leak on every drop. The field-count test below
+    /// backs this up rather than being replaced by it; it is kept, and
+    /// it is the weaker of the two because it fires only if this file is
     /// in the running build graph, and only at test time.
     pub fn deinit(self: Message) void {
         switch (self) {
@@ -263,6 +264,20 @@ pub const Mailbox = struct {
                 .message = msg,
             },
         }, timeout);
+    }
+
+    /// Send a message the surface cannot re-derive if it is lost.
+    ///
+    /// See `App.Mailbox.pushRequired`. Only for a one-shot whose loss is
+    /// permanent and user-visible; everything the stream handler sends
+    /// is an event and belongs on `push`.
+    pub fn pushRequired(self: Mailbox, msg: Message) App.Mailbox.Queue.Size {
+        return self.app.pushRequired(.{
+            .surface_message = .{
+                .surface = self.surface,
+                .message = msg,
+            },
+        });
     }
 };
 
