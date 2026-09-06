@@ -2112,7 +2112,11 @@ pub const CAPI = struct {
                 ),
             };
 
-            // Clamp our point to the screen bounds.
+            // Columns are the same width in every point space, so unlike
+            // y this clamp cannot pick the wrong row. PageList.pin would
+            // reject an out of range x on its own; clamping instead
+            // answers with the last column, which is what the selection
+            // callers who pass a "to the end of the line" x want.
             const clamped_x = @min(self.x, screen.pages.cols -| 1);
 
             return switch (self.coord_tag) {
