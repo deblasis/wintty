@@ -22,23 +22,25 @@ namespace Ghostty.Core.Tabs;
 /// </summary>
 internal static class TabAccessibleText
 {
-    /// <summary>Accessible name for <paramref name="tab"/>.</summary>
-    internal static string Name(TabModel tab) => Name(tab.EffectiveTitle);
+    /// <summary>
+    /// Accessible name for <paramref name="tab"/>. A tab the strips draw as
+    /// the home glyph is named for what the glyph means; a tab merely
+    /// titled "~" by its shell keeps the name it gave itself.
+    /// </summary>
+    internal static string Name(TabModel tab) => tab.IsHome ? "Home" : Name(tab.EffectiveTitle);
 
     /// <summary>
     /// Accessible name for the tab whose title is
-    /// <paramref name="effectiveTitle"/>. A tab sitting in the user's own
-    /// directory is labelled <c>~</c>, which a screen reader speaks as
-    /// "tilde"; the name says what the glyph means.
+    /// <paramref name="effectiveTitle"/>.
     /// </summary>
     internal static string Name(string? effectiveTitle)
-        => string.IsNullOrWhiteSpace(effectiveTitle) ? AppIdentity.ProductName
-            : effectiveTitle == "~" ? "Home"
+        => string.IsNullOrWhiteSpace(effectiveTitle)
+            ? AppIdentity.ProductName
             : effectiveTitle;
 
     /// <summary>Transient state for <paramref name="tab"/>.</summary>
     internal static string Status(TabModel tab)
-        => Status(tab.IsPinned, tab.BellRinging);
+        => Status(tab.IsPinned, tab.BellRinging, groupTitle: null, isCollapsed: false, isSettling: tab.IsSettling);
 
     /// <summary>
     /// Transient state for the tab, for AutomationProperties.ItemStatus.
@@ -72,13 +74,16 @@ internal static class TabAccessibleText
     /// tree, where the member still exists.
     /// </summary>
     internal static string Status(
-        bool isPinned, bool bellRinging, string? groupTitle, bool isCollapsed)
+        bool isPinned, bool bellRinging, string? groupTitle, bool isCollapsed, bool isSettling = false)
     {
         var segments = new List<string>();
         if (isPinned) segments.Add("Pinned");
         if (!string.IsNullOrEmpty(groupTitle)) segments.Add($"Group {groupTitle}");
         if (isCollapsed) segments.Add("Collapsed");
         if (bellRinging) segments.Add("Bell");
+        // A tab that has not started yet says so: sighted users get the
+        // app's icon in the slot, and this is the same fact for a listener.
+        if (isSettling) segments.Add("Starting");
         return string.Join(", ", segments);
     }
 

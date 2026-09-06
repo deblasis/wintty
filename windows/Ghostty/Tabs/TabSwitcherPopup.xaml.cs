@@ -671,7 +671,8 @@ internal sealed partial class TabSwitcherPopup : UserControl
 
         var title = new TextBlock
         {
-            Text = tab.EffectiveTitle,
+            // The tile prints; it draws no glyph, so a home tab is spelled.
+            Text = tab.WordTitle,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             MaxWidth = TitleMaxWidth,

@@ -108,7 +108,8 @@ internal sealed partial class TabMorphGhost : Grid
 
         _label = new TextBlock
         {
-            Text = tab.EffectiveTitle,
+            // The ghost prints; it draws no glyph, so a home tab is spelled.
+            Text = tab.WordTitle,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.Clip,
             TextWrapping = TextWrapping.NoWrap,
