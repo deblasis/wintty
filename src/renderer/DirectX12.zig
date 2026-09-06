@@ -763,10 +763,24 @@ pub fn maxTextureSize(self: *const DirectX12) u32 {
 }
 
 pub fn drawFrameStart(self: *DirectX12) void {
-    _ = self;
     // RTV heap slots are per-frame and stable. No reset needed; each frame's
     // CustomShaderState reuses its own dedicated RTV descriptors during
     // resize via the rtv_slot option in Texture.Options.
+
+    // Free what the GPU has finished with. `beginFrame` collects too, but
+    // it only runs on a wakeup the renderer decided was worth drawing, and
+    // this runs on every wakeup. Whatever the last drawn frame retired
+    // would otherwise stay resident for as long as the terminal stays
+    // quiet, and an atlas grown on that frame retires a texture up to the
+    // size of the atlas ceiling.
+    //
+    // Nothing here waits: `collect` frees only what the fence says is
+    // already done, so a wakeup that draws nothing costs one fence read.
+    const dev_ptr = &(self.dev orelse return);
+    // A removed device's fence reports a value that means nothing; the
+    // recovery path tears the whole queue down instead.
+    if (dev_ptr.removed()) return;
+    dev_ptr.retirement.collect(dev_ptr.fence.GetCompletedValue());
 }
 
 pub fn drawFrameEnd(self: *DirectX12) void {
