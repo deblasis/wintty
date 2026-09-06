@@ -663,6 +663,66 @@ test "BlockingQueue pushWake spends the budget again once the consumer drains" {
     try testing.expect(q.pop(io).? == 3);
 }
 
+test "BlockingQueue pushWake clears the latch when a persist push lands the slow way" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // Latch it, the way a stream of UI events against a wedged consumer
+    // does.
+    var woken: usize = 0;
+    try testing.expectEqual(@as(Q.Size, 0), q.pushWake(
+        io,
+        2,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+    ));
+    try testing.expect(q.wedged.load(.acquire));
+
+    // A `.persist` push now skips the fast path by construction, so if it
+    // lands it lands inside the budget loop -- and that is the only place
+    // left that can clear the latch. Without the clear there, a queue
+    // carrying both kinds (the termio mailbox; the app mailbox as of
+    // `pushRequired`) stays latched after a genuine recovery and keeps
+    // failing its droppable pushes fast for no reason.
+    const Consumer = struct {
+        q: *Q,
+        io: std.Io,
+        woken: usize = 0,
+
+        fn wake(self: *@This()) void {
+            self.woken += 1;
+            _ = self.q.pop(self.io);
+        }
+    };
+
+    var consumer: Consumer = .{ .q = q, .io = io };
+    try testing.expectEqual(@as(Q.Size, 1), q.pushWake(
+        io,
+        3,
+        &consumer,
+        Consumer.wake,
+        1 * std.time.ns_per_ms,
+        3,
+        .persist,
+    ));
+
+    // It went the slow way: the first window had to expire before the
+    // wake freed a slot. If this is 0 the push took the fast path and the
+    // test is no longer covering the branch it names.
+    try testing.expectEqual(@as(usize, 1), consumer.woken);
+    try testing.expect(!q.wedged.load(.acquire));
+}
+
 fn countWake(woken: *usize) void {
     woken.* += 1;
 }
