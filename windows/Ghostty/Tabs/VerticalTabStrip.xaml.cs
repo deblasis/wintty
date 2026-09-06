@@ -2050,6 +2050,12 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle),
+        // Named even though EffectiveTitle already carries them: the
+        // directory names the tab whenever nothing else does, and listing
+        // only the composed property left the accessible name depending on
+        // a fan-out in TabModel that nothing here mentions.
+        nameof(TabModel.ShellReportedCwd),
+        nameof(TabModel.HomeDirectory),
         nameof(TabModel.BellRinging),
         nameof(TabModel.IsIdle),
         nameof(TabModel.IsSettling));
@@ -2113,6 +2119,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle),
+        // The square shows no label at all, so its accessible name and its
+        // tooltip are the whole of what it says -- and the directory names
+        // it whenever nothing else does. See the body row's list.
+        nameof(TabModel.ShellReportedCwd),
+        nameof(TabModel.HomeDirectory),
         nameof(TabModel.BellRinging),
         nameof(TabModel.IsIdle),
         nameof(TabModel.IsSettling));
@@ -2653,6 +2664,38 @@ internal sealed partial class VerticalTabStrip : UserControl
         // length of the gesture is what keeps the two from fighting.
         _pinnedPanel.MotionEnabled =
             _drag is null && TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
+
+        StampPinnedPositions();
+    }
+
+    /// <summary>
+    /// Where each pinned square sits in the band, for assistive clients.
+    ///
+    /// The framework answers this for a NavigationViewItem or a TabViewItem
+    /// because it knows the collection they belong to. A pinned square is
+    /// neither -- it is a plain element in a custom panel -- so nothing
+    /// computes a position, and a listener hears the same bare name for
+    /// every square. Two tabs pinned at home are both called "Home", and
+    /// with no label, no order and no count they are indistinguishable.
+    ///
+    /// Stamped from the strip rather than from
+    /// <see cref="VerticalTabPinnedRow.Refresh"/>: the drag's drop preview
+    /// is built from that same class and belongs to no set, so stamping
+    /// there would put a ghost at "3 of 5".
+    ///
+    /// Rides <see cref="UpdatePinnedShelfChrome"/> so it follows the panel's
+    /// children rather than any single mutation. Adds, removals and the
+    /// reorder all reach it, and so does the rebuild the reconcile falls
+    /// back to when it finds skew.
+    /// </summary>
+    private void StampPinnedPositions()
+    {
+        var count = _pinnedPanel.Children.Count;
+        for (var i = 0; i < count; i++)
+        {
+            AutomationProperties.SetPositionInSet(_pinnedPanel.Children[i], i + 1);
+            AutomationProperties.SetSizeOfSet(_pinnedPanel.Children[i], count);
+        }
     }
 
     /// <summary>

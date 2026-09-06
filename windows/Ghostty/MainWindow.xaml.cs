@@ -659,6 +659,7 @@ public sealed partial class MainWindow : Window
                     // window and only App knows which those are.
                     App.NoteRegularWindowRegistered(this);
                 }
+                AnnounceSessionRestored();
             }
         }
 
@@ -770,6 +771,12 @@ public sealed partial class MainWindow : Window
 
         if (restoredTabs is not null)
         {
+            // Kept for the announcement, which cannot run until there is a
+            // tree to raise it into -- by which time the manager has
+            // normalized pins and gathered runs, so its count no longer
+            // answers "how many came back".
+            _restoredTabCount = restoredTabs.Count;
+
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
                 seed: restoredTabs[0],
@@ -1465,6 +1472,36 @@ public sealed partial class MainWindow : Window
     private FrameworkElement? BellAnnouncementSource(TabModel tab)
         => FocusManager.GetFocusedElement(Content.XamlRoot) as FrameworkElement
             ?? _tabHost.TabElement(tab);
+
+    /// <summary>
+    /// How many tabs a session restore rebuilt into this window, or zero
+    /// when this window was not restored. Read once, by the announcement
+    /// below, and kept because the count is gone by the time there is a
+    /// tree to announce into: the manager normalizes pins and gathers runs
+    /// after the restore, so its own count is no longer the answer to "how
+    /// many came back".
+    /// </summary>
+    private int _restoredTabCount;
+
+    /// <summary>
+    /// Tell a listener the window came back, once, when there is finally a
+    /// tree to say it into.
+    ///
+    /// Not from the constructor, where the restore actually happens: the
+    /// tab hosts do not exist yet, <c>Content.XamlRoot</c> is still null so
+    /// there is no focused element to raise from, and there is no UIA tree,
+    /// so the notification would be built from nothing and dropped. The
+    /// content's one-shot Loaded is the point where all three are true.
+    ///
+    /// Its own activity id, because notifications coalesce per source and a
+    /// bell arriving in the same breath would otherwise discard this one.
+    /// </summary>
+    private void AnnounceSessionRestored()
+    {
+        if (TabAccessibleText.SessionRestoredAnnouncement(_restoredTabCount) is not { } text) return;
+        if (_tabManager.ActiveTab is not { } active) return;
+        UiaAnnouncer.Announce(BellAnnouncementSource(active), text, "session-restore");
+    }
 
     private void OnActivatedInstallBeepSuppressor(object sender, WindowActivatedEventArgs args)
     {

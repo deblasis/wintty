@@ -486,9 +486,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
         item.PointerExited += (_, _) => ApplyLabelPhase(_labelRules.HoverExit());
         tab.PropertyChanged += (_, e) =>
         {
+            // The directory names the tab whenever nothing else does, so it
+            // belongs in this list even though EffectiveTitle already
+            // carries it: the model raises both, and listing only the
+            // composed one left the accessible name depending on a fan-out
+            // in TabModel that nothing here mentions. Narrow that fan-out
+            // and every tab's name would silently freeze at its birth value
+            // with no test between the change and the defect.
             if (e.PropertyName == nameof(TabModel.EffectiveTitle) ||
                 e.PropertyName == nameof(TabModel.ShellReportedTitle) ||
-                e.PropertyName == nameof(TabModel.UserOverrideTitle))
+                e.PropertyName == nameof(TabModel.UserOverrideTitle) ||
+                e.PropertyName == nameof(TabModel.ShellReportedCwd) ||
+                e.PropertyName == nameof(TabModel.HomeDirectory))
             {
                 headerText.Text = tab.WordTitle;
                 ApplyItemAccessibleText(item, tab);
@@ -498,7 +507,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 // saying whatever the tab was called when it was pinned,
                 // until a theme change or a drag happened to re-run the
                 // anatomy sweep. The vertical band's square already refreshes
-                // on these same three property names; this is the horizontal
+                // on these same property names; this is the horizontal
                 // edition catching up.
                 ApplyPinnedTabAnatomy(item, tab);
             }

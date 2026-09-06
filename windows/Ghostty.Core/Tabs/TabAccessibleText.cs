@@ -14,8 +14,12 @@ namespace Ghostty.Core.Tabs;
 /// Naming them from the title makes tabs with distinct titles distinct
 /// to a listener. Tabs that are all untitled still collapse onto the same
 /// fallback name, exactly as their visible labels collapse onto the same
-/// text; position in the strip is what separates those, and the strips
-/// leave PositionInSet and SizeOfSet to the framework.
+/// text; position in the strip is what separates those. The framework
+/// supplies that for a NavigationViewItem and a TabViewItem, because it
+/// knows the collection they belong to. It does NOT for a pinned square,
+/// which is a plain element in a custom panel -- so the vertical strip
+/// stamps those itself (StampPinnedPositions), and two tabs pinned at
+/// home stopped reading as the same thing twice.
 ///
 /// The name has to be non-empty: empty is exactly the state that sent the
 /// vertical strip down the ToString path in the first place.
@@ -126,6 +130,24 @@ internal static class TabAccessibleText
     /// </summary>
     internal static string BellAnnouncement(TabModel tab)
         => $"Bell in {Name(tab)}";
+
+    /// <summary>
+    /// Spoken once when a session restore finishes, or null when there is
+    /// nothing to say.
+    ///
+    /// A restore is the one moment the strip fills with tabs the user did
+    /// not open, one at a time, and nothing else tells a listener it
+    /// happened: the tabs arrive without focus changes of their own, and
+    /// what they carry -- "Starting", the run they belong to -- rides
+    /// ItemStatus, which the note above records as unread. So the count is
+    /// the announcement; the tabs themselves are then there to be browsed.
+    ///
+    /// Null rather than empty for the degenerate cases, so the caller has
+    /// one thing to test. A single restored tab is a window reopening on
+    /// its own, which needs no telling.
+    /// </summary>
+    internal static string? SessionRestoredAnnouncement(int tabCount)
+        => tabCount < 2 ? null : $"Session restored, {tabCount} tabs";
 
     // --- Group commands (5b-2a) ---
     //
