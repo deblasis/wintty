@@ -118,7 +118,7 @@ try {
     # The switcher and the wrap oracle. switcher-cells is the purpose-built
     # instrument (#923): every slot's CARD rect in one synchronous UI-thread
     # read, screen pixels, refusing cleanly when the popup is down. A UIA
-    # walk could straddle the 120ms entrance rise and read same-row tiles
+    # walk could straddle the 167ms entrance rise and read same-row tiles
     # into different row bins - inflated rows is the false-PASS direction of
     # the one-row gate - and it measured the tile ICON, ~14px inside the
     # card the claim is about. One instant, the card itself.

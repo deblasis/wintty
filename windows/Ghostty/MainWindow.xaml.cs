@@ -310,6 +310,14 @@ public sealed partial class MainWindow : Window
     private readonly WindowState _windowState;
     // Kept as a field so the ColorValuesChanged subscription is not GC'd.
     private readonly Windows.UI.ViewManagement.UISettings _systemUiSettings;
+    // The animation-effects flip event arrived in 19041 and the project
+    // still reaches down to 17763: on an older machine the only correct
+    // behavior is not to subscribe at all. ApiInformation is also the
+    // guard CA1416 recognizes, so the event use stays warning-free.
+    private static readonly bool AnimationsFlipObservable =
+        Windows.Foundation.Metadata.ApiInformation.IsEventPresent(
+            typeof(Windows.UI.ViewManagement.UISettings).FullName,
+            "AnimationsEnabledChanged");
     // Mirrors the current tab-strip orientation so we can detect when
     // a config reload or settings-toggle callback actually changed the
     // visible state (vs. echoing the same value we already apply).
@@ -695,6 +703,15 @@ public sealed partial class MainWindow : Window
         // outlives the window, and a live subscription both keeps the closed
         // window alive and points an OS callback at a freed libghostty app.
         _systemUiSettings.ColorValuesChanged += OnSystemColorValuesChanged;
+
+        // The other system motion preference, on the same lifetime terms.
+        // High Contrast arrives through ColorValuesChanged above, but the
+        // animation-effects toggle is its own event and nobody listened:
+        // every gate reads the flag fresh per gesture, so a flip applies
+        // from the NEXT gesture, and any clock armed before the flip
+        // played on under a user who had just turned motion off.
+        if (AnimationsFlipObservable)
+            _systemUiSettings.AnimationsEnabledChanged += OnSystemAnimationsEnabledChanged;
 
         // Apply initial backdrop (Mica when opaque, transparent when
         // background-opacity < 1). Also sets the Win32 class brush
@@ -2029,6 +2046,8 @@ public sealed partial class MainWindow : Window
         // toggle during teardown puts AppSetColorScheme through the app
         // pointer _host.Dispose is about to free at the end of this method.
         _systemUiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
+        if (AnimationsFlipObservable)
+            _systemUiSettings.AnimationsEnabledChanged -= OnSystemAnimationsEnabledChanged;
 
         // CompositionTarget.Rendering is static, so a window closed before
         // its first composed frame would otherwise stay subscribed.
@@ -3970,6 +3989,48 @@ public sealed partial class MainWindow : Window
             // but the backdrop still re-tints off the new desktop, so
             // everything scored against it is stale until this runs.
             RefreshBackdropChrome();
+        });
+    }
+
+    /// <summary>
+    /// UISettings.AnimationsEnabledChanged handler: the user flipped the
+    /// system's animation effects while this window lives. Fires on a
+    /// thread-pool thread like ColorValuesChanged, so the work hops to the
+    /// dispatcher before touching the strip.
+    ///
+    /// Only the OFF direction does work. Every motion gate reads the
+    /// preference fresh per gesture, so the gesture after an on-flip is
+    /// already animated; but an off-flip mid-flight left a pin flight or a
+    /// field glide armed before the flip playing out its half-second under
+    /// a user who had just told the system to stop moving things. The long
+    /// clocks land; one-shot entrances and the switch timeline are left to
+    /// finish on their own (each is well under half a second, and stopping
+    /// a switch mid-flight would cost more than it saves). The horizontal
+    /// host's clocks are likewise left -- per-gesture one-shots, all under
+    /// half a second -- and a drag live at the flip keeps its clocks until
+    /// release in both strips, because the follow is the pointer, which is
+    /// intent rather than decoration.
+    /// </summary>
+    private void OnSystemAnimationsEnabledChanged(
+        Windows.UI.ViewManagement.UISettings sender, object args)
+    {
+        if (_isClosed) return;
+        // The event's own sender, for the same reason the color handler
+        // reads it: a fresh instance could answer for a later moment.
+        bool enabled;
+        try { enabled = sender.AnimationsEnabled; }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            // Unreadable is not "off": fail open, as every gate does.
+            return;
+        }
+        if (enabled) return;
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_isClosed) return;
+            _verticalTabHost.Strip.LandAllMotion();
         });
     }
 

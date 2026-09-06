@@ -1057,7 +1057,13 @@ internal sealed partial class TabSwitcherPopup : UserControl
             To = to,
             Duration = new Duration(duration),
             EasingFunction = easing,
-            EnableDependentAnimation = true,
+            // Deliberately no EnableDependentAnimation: the flag is only
+            // consulted for DEPENDENT (layout-affecting) properties, so on
+            // the independent paths this board serves (Opacity,
+            // RenderTransform scale and offset) it was a no-op. This comment
+            // is the guard for the day a track targets a dependent property
+            // (Width, Margin): those do not run without the flag, and this
+            // helper is generic over the path.
         };
         Storyboard.SetTarget(animation, target);
         Storyboard.SetTargetProperty(animation, path);

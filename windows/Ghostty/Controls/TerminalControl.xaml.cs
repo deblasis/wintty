@@ -503,7 +503,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private BellAudioPlayer? _bellAudio;
 
     // Fade-out duration for the visual bell border once acknowledged.
-    // Matches the macOS easeInOut(duration: 0.3) bell border animation.
+    // Duration matches the macOS easeInOut(duration: 0.3) bell border
+    // animation; the curve is the exit-fade ease-out below, because a
+    // linear decay at this length reads as the border glitching away.
     private const int BellBorderFadeMs = 300;
 
     /// <summary>
@@ -546,10 +548,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (!_bellBorderActive) return;
         _bellBorderActive = false;
 
+        if (!Ghostty.Services.SystemAnimations.Enabled())
+        {
+            // Reduce-motion cut: the border leaves in the same frame the
+            // dismissal lands, rather than riding a fade under a user who
+            // told the system to stop moving things.
+            BellOverlay.Opacity = 0.0;
+            BellOverlay.Visibility = Visibility.Collapsed;
+            return;
+        }
+
         var fade = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
         {
             To = 0.0,
             Duration = new Duration(TimeSpan.FromMilliseconds(BellBorderFadeMs)),
+            EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase
+            {
+                EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut,
+            },
         };
         Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(fade, BellOverlay);
         Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(fade, "Opacity");
