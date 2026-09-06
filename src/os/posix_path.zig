@@ -655,12 +655,6 @@ test "posix_path: a relative link can resolve off an adopted extended UNC pwd" {
             .link = "../../../../evil.example.com/share/payload.exe",
             .resolved = "\\\\?\\unc\\evil.example.com\\share\\payload.exe",
         },
-        // The device-namespace spelling reaches the same place.
-        .{
-            .pwd = "\\\\.\\UNC\\127.0.0.1\\C$\\tmp",
-            .link = "../../../evil.example.com/share/payload.exe",
-            .resolved = "\\\\.\\UNC\\evil.example.com\\share\\payload.exe",
-        },
         // The pwd can carry the `..` itself, in which case the link needs
         // none: the host the pwd names is still `localhost`, and the host the
         // resolve produces is not.
@@ -682,6 +676,13 @@ test "posix_path: a relative link can resolve off an adopted extended UNC pwd" {
         try std.testing.expect(!pathIsLocal(resolved));
         try std.testing.expect(!pathHostUnchanged(c.pwd, resolved));
     }
+
+    // The device namespace spells the same escape -- `\\.\UNC\host\share`
+    // reaches a server exactly as `\\?\UNC\host\share` does -- but it never
+    // reaches the resolve, because a device path is refused as a pwd outright
+    // and so is never adopted. The row is asserted here rather than in the
+    // table above, whose premise is a pwd we DO adopt.
+    try std.testing.expect(!pathIsLocal("\\\\.\\UNC\\127.0.0.1\\C$\\tmp"));
 
     // A `\\?\C:` pwd walked past its root degrades to an extended prefix
     // introducing neither `UNC\` nor a drive. Windows cannot open it, and it
