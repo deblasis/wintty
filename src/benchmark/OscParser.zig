@@ -12,9 +12,11 @@ const Parser = @import("../terminal/osc.zig").Parser;
 const log = std.log.scoped(.@"osc-parser-bench");
 const global = @import("../global.zig");
 
-/// Prevent a malformed or accidentally enormous corpus from consuming
-/// unbounded memory during benchmark setup.
-const max_data_size = 64 * 1024 * 1024;
+/// Cap on the corpus preloaded in `setup`. This benchmark used to
+/// stream its input in chunks and had no limit at all, so the cap is
+/// only a guard against a malformed or accidentally enormous file and
+/// is set well above any corpus a developer would pass on purpose.
+const max_data_size = 1024 * 1024 * 1024;
 
 /// Byte width of the little-endian length prefix preceding each record
 /// in the corpus. Matches `takeInt(usize, ...)`'s prior on-disk format.
@@ -96,7 +98,12 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
         self.alloc,
         max_data_size,
     ) catch |err| {
-        log.warn("error reading data file err={}", .{err});
+        // Name the cap: a corpus over it fails with StreamTooLong,
+        // which on its own reads like an IO error.
+        log.warn("error reading data file err={} max_bytes={}", .{
+            err,
+            max_data_size,
+        });
         return error.BenchmarkFailed;
     };
     self.parser.reset();
