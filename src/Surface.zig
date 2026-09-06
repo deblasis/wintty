@@ -3300,10 +3300,12 @@ fn catchAllIsIgnore(self: *Surface) bool {
 /// End the key sequence ahead of a chain that can close the surface.
 ///
 /// `maybeHandleBinding` answers `.closed` for such a chain and returns
-/// straight away, so it never reaches the tail where all of its
-/// `endKeySequence` calls live, and `endKeySequence` is the only drain
-/// for `keyboard.sequence_queued` outside `deinit`. The sequence has to
-/// end before the chain runs, while `self` is certainly still ours.
+/// straight away, so it never reaches its own tail, which is where every
+/// `endKeySequence` call it makes lives — two that drop and two that
+/// flush. `endKeySequence` is the only drain for `keyboard.sequence_queued`
+/// outside `deinit`, and it is called from elsewhere in this file too. The
+/// sequence has to end before the chain runs, while `self` is certainly
+/// still ours.
 ///
 /// This is not housekeeping for a surface that is about to die. No apprt
 /// in this tree has been shown to free the core surface inside the call,
@@ -3313,12 +3315,39 @@ fn catchAllIsIgnore(self: *Surface) bool {
 /// holding the leader key's encoded write, which the next unrelated
 /// sequence then flushes into the pty out of order.
 ///
-/// `.drop` is what every other path that matched a binding does. The one
-/// path that would rather flush is `performable` with nothing performed,
-/// and whether a chain performs is not knowable until it has run, by
-/// which time the surface may be gone. So a `performable` binding whose
-/// chain closes the surface drops its queued leader keys rather than
-/// encoding them.
+/// `.drop` is what every path that matched a binding and then consumed
+/// or ignored the event does. The cost falls on a chain that *contains* a
+/// closing action but turns out not to close, because whether a chain
+/// performs is not knowable until it has run, by which time the surface
+/// may be gone. Such a chain goes on to reach a path that would rather
+/// flush the queued leader keys, and finds the queue already dropped.
+/// All three of those paths are defeated, not just one:
+///
+///   * `performable` with nothing performed.
+///
+///   * The non-consumed tail. `consumed` defaults true, so this needs the
+///     `unconsumed:` prefix, which is legal on a sequence: the parser
+///     rejects only `global`/`all` there. `unconsumed:ctrl+a>u=undo` on a
+///     runtime that answers `undo` with false used to encode the leader
+///     key and then `u`; it now silently swallows the leader keystroke.
+///
+///   * The `end_key_sequence` binding action itself, whose whole stated
+///     purpose is to flush. It does not end a chain, so pairing it with a
+///     closing action in one chain is legal, and it then has nothing left
+///     to flush.
+///
+/// No shipped default is a key sequence at all, so none of this is
+/// reachable without user config. Draining later would not help either:
+/// the cost is in what the drain does (`.drop`), not in when it runs.
+/// Keeping both behaviours means detaching the queue before the chain and
+/// handing it back only if the surface survived, which is a larger change
+/// than this one.
+///
+/// One more consequence, for the same chains: `endKeySequence` notifies
+/// the apprt that the key sequence ended before its own empty-queue early
+/// return, so a closing chain that does not close notifies twice. The
+/// notification is idempotent everywhere it is handled, and the Windows
+/// host does not handle it at all.
 fn endKeySequenceBeforeClose(
     self: *Surface,
     actions: []const input.Binding.Action,
