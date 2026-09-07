@@ -1766,7 +1766,7 @@ pub const StreamHandler = struct {
                 };
                 switch (host) {
                     .local => {},
-                    .server => |name| if (!uncHostIsLocal(name)) {
+                    .server => |name| if (!internal_os.posix_path.hostIsLocal(name)) {
                         log.warn("reported pwd (OSC 7/9;9/7777) UNC host ({s}) must be local", .{name});
                         return;
                     },
@@ -1854,24 +1854,6 @@ pub const StreamHandler = struct {
             path;
 
         return self.setPwdReported(reported);
-    }
-
-    /// Whether a UNC path's server is this machine. The share pseudo-hosts
-    /// (`wsl.localhost`, loopback) are decided by name alone; the real
-    /// computer name needs the OS, and gets the same `hostname.isLocal` the
-    /// URL arm uses.
-    ///
-    /// `isLocal` compares the computer name exactly, so a share written in a
-    /// case the OS does not report it in -- `\\mypc\x` against a `MYPC` --
-    /// reads as remote and the cwd is simply not adopted. That is the safe
-    /// direction to be wrong in; a spawn at the profile's directory is a
-    /// nuisance, and one at an attacker's is a credential.
-    fn uncHostIsLocal(host: []const u8) bool {
-        if (internal_os.posix_path.isLocalShareHost(host)) return true;
-        return internal_os.hostname.isLocal(host) catch |err| {
-            log.warn("failed to get hostname for UNC validation: {}", .{err});
-            return false;
-        };
     }
 
     /// Whether `path` can be a directory name at all, as opposed to bytes a
