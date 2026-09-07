@@ -41,6 +41,14 @@ const ProcessInfo = @import("pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.surface);
 
+/// Behavior-neutral bring-up timing. Attributes the synchronous
+/// UI-thread work inside `init` and the later hand-off to first render,
+/// all under one scope so the C# host's log bridge carries every phase
+/// into a single `Ghostty.Zig.surface_init` category. INFO because
+/// `main_ghostty.zig`'s `std_options.log_level` is always at least
+/// `.info`, in every build mode, so these are never compiled out.
+const init_log = std.log.scoped(.surface_init);
+
 // The renderer implementation to use.
 const Renderer = rendererpkg.Renderer;
 
@@ -61,6 +69,15 @@ const max_active_key_tables = 8;
 /// value when communicating an ID over DBus as DBus does not allow null/maybe
 /// values.
 id: u64,
+
+/// Wall-clock (`.awake` clock) timestamp captured at the very top of
+/// `init`, before any of its synchronous UI-thread work starts. Used to
+/// attribute `surface_init` phase log lines (see `init_log` above).
+/// Written once here; the only other read is from the `.first_render`
+/// message handler in `handleMessage`, which runs on this same main
+/// thread (via `App`'s mailbox drain), so no cross-thread
+/// synchronization is required.
+init_started: std.Io.Timestamp,
 
 /// Allocator
 alloc: Allocator,
@@ -482,6 +499,12 @@ pub fn init(
     rt_app: *apprt.runtime.App,
     rt_surface: *apprt.runtime.Surface,
 ) !void {
+    // Captured before any other work below so every `surface_init` phase
+    // (here and in the DX12 backend, threaded through via
+    // `rendererpkg.Options.init_started`) can report elapsed time from
+    // the same reference point.
+    const init_started: std.Io.Timestamp = .now(global.io(), .awake);
+
     // Apply our conditional state. If we fail to apply the conditional state
     // then we log and attempt to move forward with the old config.
     var config_: ?configpkg.Config = config_original.changeConditionalState(
@@ -536,6 +559,12 @@ pub fn init(
     );
     errdefer app.font_grid_set.deref(font_grid_key);
 
+    // No surface id yet: `self` isn't populated until the struct literal
+    // below.
+    init_log.info("surface_init font-grid-ref done +{d} ms", .{
+        init_started.untilNow(global.io(), .awake).toMilliseconds(),
+    });
+
     // Build our size struct which has all the sizes we need.
     const size: rendererpkg.Size = size: {
         var size: rendererpkg.Size = .{
@@ -572,6 +601,7 @@ pub fn init(
     errdefer alloc.destroy(mutex);
 
     self.* = .{
+        .init_started = init_started,
         .id = id: {
             while (true) {
                 const candidate = candidate: {
@@ -631,8 +661,13 @@ pub fn init(
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
             .rt_surface = rt_surface,
             .thread = &self.renderer_thread,
+            .init_started = init_started,
         });
     };
+    init_log.info("surface_init renderer-init done +{d} ms id=0x{x:0>16}", .{
+        self.init_started.untilNow(global.io(), .awake).toMilliseconds(),
+        self.id,
+    });
     errdefer self.renderer.deinit();
 
     self.renderer_thread = try rendererpkg.Thread.init(
@@ -754,6 +789,11 @@ pub fn init(
     // Give the renderer one more opportunity to finalize any surface
     // setup on the main thread prior to spinning up the rendering thread.
     try self.renderer.finalizeSurfaceInit(rt_surface);
+
+    init_log.info("surface_init ui-thread-handoff +{d} ms id=0x{x:0>16}", .{
+        self.init_started.untilNow(global.io(), .awake).toMilliseconds(),
+        self.id,
+    });
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
@@ -1273,6 +1313,10 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         },
 
         .first_render => {
+            init_log.info("surface_init first-render +{d} ms id=0x{x:0>16}", .{
+                self.init_started.untilNow(global.io(), .awake).toMilliseconds(),
+                self.id,
+            });
             _ = self.rt_app.performAction(
                 .{ .surface = self },
                 .first_render,
