@@ -65,6 +65,17 @@ pub const Options = struct {
     /// (not part of the benchmark) to build the screen contents that
     /// get resized.
     data: ?[]const u8 = null,
+
+    /// `cli.args.parse` allocates `[]const u8` fields (like `data`
+    /// above) out of this arena when present; without it, allocations
+    /// go through an internal allocator that's never freed. See
+    /// `deinit`.
+    _arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: *Options) void {
+        if (self._arena) |arena| arena.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const Mode = enum {

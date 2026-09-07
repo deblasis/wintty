@@ -18,7 +18,7 @@ export fn ghostty_benchmark_cli(
         return false;
     };
 
-    cli.mainAction(
+    _ = cli.mainAction(
         global.alloc(),
         action,
         .{ .string = std.mem.sliceTo(args, 0) },
