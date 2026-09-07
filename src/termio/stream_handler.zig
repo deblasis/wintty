@@ -2401,13 +2401,172 @@ pub const StreamHandler = struct {
     }
 };
 
+/// Everything a `StreamHandler` needs in order to exist, owned by one test.
+///
+/// The handler below is built with a struct literal that names every field,
+/// rather than with `undefined` plus whichever fields a test happens to
+/// reach. That is the whole point of this type: a field added to
+/// `StreamHandler` is a compile error here, in one place, until someone
+/// gives it a value a test can stand behind -- instead of becoming a wild
+/// read inside whatever shared helper reaches it first.
+///
+/// Both directions of that have already bitten inside a single rebase. Two
+/// colour tests reached a `write_limit` that other work had added and they
+/// had never set, and a `tmux_control_mode` gate silently changed what an
+/// older test exercised. Neither was visible to a reviewer of either change.
+///
+/// The dependencies here are real -- a real terminal, a real mailbox, a real
+/// renderer wakeup -- so a path a test did not think about does something
+/// defined rather than something arbitrary. A test that needs a different
+/// value assigns it after `init`.
+const TestHandler = struct {
+    /// Home for handler allocations a test cannot account for individually;
+    /// see `useArena`. Always created, used only on request.
+    arena: std.heap.ArenaAllocator,
+
+    term: terminal.Terminal,
+    size: renderer.Size,
+    mutex: std.Io.Mutex,
+    renderer_state: renderer.State,
+    renderer_wakeup: xev.Async,
+    renderer_visible: std.atomic.Value(bool),
+    termio_mailbox: termio.Mailbox,
+    write_limit: termio.WriteLimit,
+    app_mailbox: *App.Mailbox.Queue,
+    rt_app: apprt.App,
+    handler: StreamHandler,
+
+    /// What the surface would have acted on; see `drain`.
+    const Counts = struct { pwd: usize = 0, title: usize = 0 };
+
+    /// `alloc` owns the harness and is also the handler's allocator, so a
+    /// path that leaks fails the test.
+    fn init(self: *TestHandler, alloc: Allocator) !void {
+        self.arena = .init(alloc);
+        errdefer self.arena.deinit();
+
+        self.term = try terminal.Terminal.init(global.io(), alloc, .{
+            .cols = 80,
+            .rows = 24,
+        });
+        errdefer self.term.deinit(alloc);
+
+        self.termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+        errdefer self.termio_mailbox.deinit(alloc);
+
+        self.app_mailbox = try App.Mailbox.Queue.create(alloc);
+        errdefer self.app_mailbox.destroy(alloc);
+
+        self.renderer_wakeup = try .init();
+        errdefer self.renderer_wakeup.deinit();
+
+        // Nothing below reads these, but a grid that could exist is a better
+        // answer to a future reader than one that could not.
+        self.size = .{
+            .screen = .{ .width = 800, .height = 480 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        };
+
+        self.mutex = .init;
+        self.mutex.lockUncancelable(global.io());
+        self.renderer_state = .{ .mutex = &self.mutex, .terminal = &self.term };
+
+        // Visible, so `queueRender` takes the wake rather than the early
+        // return: a path no test asks about should be the one a real surface
+        // takes.
+        self.renderer_visible = .init(true);
+        self.write_limit = .{};
+        self.rt_app = .{};
+
+        self.handler = .{
+            .alloc = alloc,
+            .size = &self.size,
+            .terminal = &self.term,
+            .termio_mailbox = &self.termio_mailbox,
+            .write_limit = &self.write_limit,
+            .surface_mailbox = .{
+                // Never dereferenced: the mailbox only carries the pointer
+                // through to the app thread, which these tests stand in for.
+                .surface = undefined,
+                .app = .{ .rt_app = &self.rt_app, .mailbox = self.app_mailbox },
+            },
+            .first_content_flagged = false,
+            .renderer_state = &self.renderer_state,
+            .renderer_wakeup = &self.renderer_wakeup,
+            .renderer_visible = &self.renderer_visible,
+            .enquiry_response = "",
+            .osc7 = null,
+            .osc_color_report_format = .@"16-bit",
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024,
+            .tmux_control_mode = false,
+            .apc = .{},
+            .dcs = .{},
+            .multipart_iterm2 = .{},
+            .tmux_viewer = if (StreamHandler.tmux_enabled) null else {},
+            .kitty_clipboard_grants = .{},
+            .kitty_clipboard_write = null,
+            .termio_messaged = false,
+            .seen_title = false,
+            .pwd_reported = false,
+            .pwd_refused = false,
+        };
+    }
+
+    fn deinit(self: *TestHandler, alloc: Allocator) void {
+        self.handler.deinit();
+        self.mutex.unlock(global.io());
+        self.renderer_wakeup.deinit();
+        self.termio_mailbox.deinit(alloc);
+        self.app_mailbox.destroy(alloc);
+        self.term.deinit(alloc);
+        self.arena.deinit();
+    }
+
+    /// Route the handler's allocations through an arena this harness frees
+    /// wholesale.
+    ///
+    /// The pwd path hands an owned payload to the app mailbox, and a test
+    /// that only counts messages never takes ownership of it, so the testing
+    /// allocator would report a leak the shipped code does not have: there,
+    /// the app thread owns and releases it.
+    fn useArena(self: *TestHandler) void {
+        self.handler.alloc = self.arena.allocator();
+    }
+
+    /// Drive raw bytes through a real `Stream`, so what a test counts is what
+    /// an actual burst produces and not a hand-called method.
+    fn feed(self: *TestHandler, input: []const u8) void {
+        var stream: terminal.Stream(*StreamHandler) = .init(.{
+            .handler = &self.handler,
+        });
+        for (input) |c| stream.next(c);
+    }
+
+    /// Drain the app mailbox and count what the surface would have acted on.
+    fn drain(self: *TestHandler) Counts {
+        var counts: Counts = .{};
+        while (self.app_mailbox.pop(global.io())) |msg| switch (msg) {
+            .surface_message => |sm| switch (sm.message) {
+                .pwd_change => counts.pwd += 1,
+                .set_title => counts.title += 1,
+                else => {},
+            },
+            else => {},
+        };
+        return counts;
+    }
+};
+
 test "kitty clipboard read: targets-only never consumes a one-time grant" {
     const testing = std.testing;
 
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.kitty_clipboard_grants = .{};
-    defer handler.kitty_clipboard_grants.deinit(testing.allocator);
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
+
     try handler.kitty_clipboard_grants.grant(testing.allocator, "otp", .read, true);
 
     // A listing request must not burn the one-time paste password...
@@ -2420,27 +2579,11 @@ test "kitty clipboard read: targets-only never consumes a one-time grant" {
 test "kitty clipboard write: oversized text replies EFBIG" {
     const testing = std.testing;
 
-    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
-    defer mailbox.deinit(testing.allocator);
-
-    var mutex: std.Io.Mutex = .init;
-    mutex.lockUncancelable(global.io());
-    defer mutex.unlock(global.io());
-
-    var renderer_state: renderer.State = .{
-        .mutex = &mutex,
-        .terminal = undefined,
-    };
-    var write_limit: termio.WriteLimit = .{};
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.termio_mailbox = &mailbox;
-    handler.write_limit = &write_limit;
-    handler.renderer_state = &renderer_state;
-    handler.clipboard_write = .allow;
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
     handler.clipboard_write_limit = 4;
-    handler.kitty_clipboard_write = null;
-    defer handler.kittyClipboardWriteAbort();
 
     const begin: terminal.kitty.clipboard.Metadata = .{
         .op = .write,
@@ -2461,7 +2604,7 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     try handler.kittyClipboardWriteFinish(state, .EFBIG, .st);
     try testing.expect(handler.kitty_clipboard_write == null);
 
-    const response = mailbox.spsc.queue.pop(global.io());
+    const response = th.termio_mailbox.spsc.queue.pop(global.io());
     try testing.expect(response != null);
     const msg = response.?;
     defer msg.deinit();
@@ -2475,7 +2618,7 @@ test "kitty clipboard write: oversized text replies EFBIG" {
 
     // Teardown leaves no transaction that could be committed and
     // forwarded to the macOS clipboard path.
-    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+    try testing.expect(th.termio_mailbox.spsc.queue.pop(global.io()) == null);
 }
 
 test "tmux control mode commands survive a full pty write backlog" {
@@ -2483,41 +2626,23 @@ test "tmux control mode commands survive a full pty write backlog" {
 
     const testing = std.testing;
 
-    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
-    defer mailbox.deinit(testing.allocator);
-
-    var mutex: std.Io.Mutex = .init;
-    mutex.lockUncancelable(global.io());
-    defer mutex.unlock(global.io());
-
-    var renderer_state: renderer.State = .{
-        .mutex = &mutex,
-        .terminal = undefined,
-    };
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
 
     // A backlog that is already at its cap.
-    var write_limit: termio.WriteLimit = .{ .max = 1 };
-    write_limit.queued(1);
+    th.write_limit = .{ .max = 1 };
+    th.write_limit.queued(1);
 
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.termio_mailbox = &mailbox;
-    handler.write_limit = &write_limit;
-    handler.renderer_state = &renderer_state;
-    handler.termio_messaged = false;
-    handler.tmux_viewer = null;
     // Control mode is opt-in now, and this test's subject is the write
     // backlog, not the gate: it asks what happens to a command inside a
     // session the user did ask for. The gate has its own test below.
     handler.tmux_control_mode = true;
-    defer if (handler.tmux_viewer) |viewer| {
-        viewer.deinit();
-        testing.allocator.destroy(viewer);
-    };
 
     // A terminal reply is refused at the cap...
     handler.messageWriter(.{ .write_stable = "\x1B[0n" });
-    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+    try testing.expect(th.termio_mailbox.spsc.queue.pop(global.io()) == null);
 
     // ...but a control mode command is not a reply: tmux answers each
     // one with a %begin/%end block the viewer waits for, so dropping it
@@ -2532,7 +2657,7 @@ test "tmux control mode commands survive a full pty write backlog" {
     } } };
     try handler.dcsCommand(&session_changed);
 
-    const queued = mailbox.spsc.queue.pop(global.io());
+    const queued = th.termio_mailbox.spsc.queue.pop(global.io());
     try testing.expect(queued != null);
     const msg = queued.?;
     defer msg.deinit();
@@ -2549,96 +2674,16 @@ test "tmux control mode commands survive a full pty write backlog" {
     ));
 }
 
-/// Everything a pwd report needs from a `StreamHandler`, and nothing else.
-/// The handler is huge and mostly irrelevant here, so the fields the pwd path
-/// reads are set and the rest is left alone; touching another one from this
-/// path would show up as a crash rather than a wrong answer.
-const PwdTestHarness = struct {
-    arena: std.heap.ArenaAllocator,
-    term: terminal.Terminal,
-    mutex: std.Io.Mutex,
-    renderer_state: renderer.State,
-    app_mailbox: *App.Mailbox.Queue,
-    rt_app: apprt.App,
-    handler: StreamHandler,
-
-    const Counts = struct { pwd: usize = 0, title: usize = 0 };
-
-    fn init(self: *PwdTestHarness, alloc: Allocator) !void {
-        self.arena = .init(alloc);
-        errdefer self.arena.deinit();
-
-        self.term = try terminal.Terminal.init(
-            global.io(),
-            alloc,
-            .{ .cols = 80, .rows = 24 },
-        );
-        errdefer self.term.deinit(alloc);
-
-        self.app_mailbox = try App.Mailbox.Queue.create(alloc);
-        errdefer self.app_mailbox.destroy(alloc);
-
-        self.mutex = .init;
-        self.mutex.lockUncancelable(global.io());
-
-        self.renderer_state = .{ .mutex = &self.mutex, .terminal = &self.term };
-
-        self.handler = undefined;
-        self.handler.alloc = self.arena.allocator();
-        self.handler.terminal = &self.term;
-        self.handler.renderer_state = &self.renderer_state;
-        self.rt_app = .{};
-        self.handler.surface_mailbox = .{
-            // Never dereferenced: the mailbox only carries the pointer
-            // through to the app thread, which this test stands in for.
-            .surface = undefined,
-            .app = .{ .rt_app = &self.rt_app, .mailbox = self.app_mailbox },
-        };
-        self.handler.osc7 = null;
-        self.handler.seen_title = false;
-        self.handler.pwd_reported = false;
-    }
-
-    fn deinit(self: *PwdTestHarness, alloc: Allocator) void {
-        self.mutex.unlock(global.io());
-        self.app_mailbox.destroy(alloc);
-        self.term.deinit(alloc);
-        self.arena.deinit();
-    }
-
-    /// Drive raw bytes through a real `Stream`, so what is counted below is
-    /// what an actual prompt burst produces and not a hand-called method.
-    fn feed(self: *PwdTestHarness, input: []const u8) void {
-        var stream: terminal.Stream(*StreamHandler) = .init(.{
-            .handler = &self.handler,
-        });
-        for (input) |c| stream.next(c);
-    }
-
-    /// Drain the app mailbox and count what the surface would have acted on.
-    fn drain(self: *PwdTestHarness) Counts {
-        var counts: Counts = .{};
-        while (self.app_mailbox.pop(global.io())) |msg| switch (msg) {
-            .surface_message => |sm| switch (sm.message) {
-                .pwd_change => counts.pwd += 1,
-                .set_title => counts.title += 1,
-                else => {},
-            },
-            else => {},
-        };
-        return counts;
-    }
-};
-
 test "pwd: one prompt's OSC 7, 9;9 and 7777 burst reports once" {
     // The burst is Windows-shaped: OSC 9;9 and OSC 7777 both carry a raw
     // Windows path, and only the Windows arm of reportPwd adopts one.
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
-    var h: PwdTestHarness = undefined;
+    var h: TestHandler = undefined;
     try h.init(testing.allocator);
     defer h.deinit(testing.allocator);
+    h.useArena();
 
     // What the shipped PowerShell integration writes for one prompt in
     // C:\Users\me, in the order it writes it. The OSC 7 URL spells the drive
@@ -2717,9 +2762,10 @@ test "pwd: a reported directory carrying control characters is refused" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
-    var h: PwdTestHarness = undefined;
+    var h: TestHandler = undefined;
     try h.init(testing.allocator);
     defer h.deinit(testing.allocator);
+    h.useArena();
 
     // A good directory first, so a refusal has something it must not replace
     // -- and so this cannot pass merely because nothing was ever set.
@@ -2752,9 +2798,10 @@ test "pwd: a title an application set survives the next prompt's burst" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
-    var h: PwdTestHarness = undefined;
+    var h: TestHandler = undefined;
     try h.init(testing.allocator);
     defer h.deinit(testing.allocator);
+    h.useArena();
 
     // The window title tracks the folder until an application claims it.
     // That is the behaviour the dedupe must not disturb in either direction:
@@ -2780,9 +2827,10 @@ test "pwd: the first report of a session is not swallowed by the spawn cwd" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
-    var h: PwdTestHarness = undefined;
+    var h: TestHandler = undefined;
     try h.init(testing.allocator);
     defer h.deinit(testing.allocator);
+    h.useArena();
 
     // `Exec.initTerminal` seeds the pwd slot from the subprocess's own
     // working directory and sends no surface message, so the first prompt in
@@ -2799,29 +2847,15 @@ test "pwd: the first report of a session is not swallowed by the spawn cwd" {
 test "stream handler refuses and frees an owned write at the backlog cap" {
     const testing = std.testing;
 
-    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
-    defer mailbox.deinit(testing.allocator);
-
-    var mutex: std.Io.Mutex = .init;
-    mutex.lockUncancelable(global.io());
-    defer mutex.unlock(global.io());
-
-    var renderer_state: renderer.State = .{
-        .mutex = &mutex,
-        .terminal = undefined,
-    };
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
 
     // A backlog that is already at its cap, so every advisory write is
     // refused rather than queued.
-    var write_limit: termio.WriteLimit = .{ .max = 1 };
-    write_limit.queued(1);
-
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.termio_mailbox = &mailbox;
-    handler.write_limit = &write_limit;
-    handler.renderer_state = &renderer_state;
-    handler.termio_messaged = false;
+    th.write_limit = .{ .max = 1 };
+    th.write_limit.queued(1);
 
     // Longer than WriteReq's inline capacity, so this is a .write_alloc
     // that owns its bytes. Refusing it has to free them: the testing
@@ -2831,43 +2865,22 @@ test "stream handler refuses and frees an owned write at the backlog cap" {
     try testing.expect(msg == .write_alloc);
 
     handler.messageWriter(msg);
-    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+    try testing.expect(th.termio_mailbox.spsc.queue.pop(global.io()) == null);
 }
 
 test "color operation: every query in one OSC is answered" {
     const testing = std.testing;
 
-    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
-    defer mailbox.deinit(testing.allocator);
-
-    var mutex: std.Io.Mutex = .init;
-    mutex.lockUncancelable(global.io());
-    defer mutex.unlock(global.io());
-
-    var term = try terminal.Terminal.init(global.io(), testing.allocator, .{
-        .cols = 80,
-        .rows = 24,
-    });
-    defer term.deinit(testing.allocator);
-
-    var renderer_state: renderer.State = .{
-        .mutex = &mutex,
-        .terminal = &term,
-    };
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
 
     // A colour reply is advisory, so it goes out on the droppable path and
-    // `messageWriter` weighs it against the pty write backlog. An empty
-    // limit is the state this test is about: nothing outstanding, so the
-    // question is whether every query is answered, not whether a full
-    // backlog refuses them.
-    var write_limit: termio.WriteLimit = .{};
-
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.terminal = &term;
-    handler.termio_mailbox = &mailbox;
-    handler.write_limit = &write_limit;
-    handler.renderer_state = &renderer_state;
+    // `messageWriter` weighs it against the pty write backlog. The harness
+    // leaves the limit empty, which is the state this test is about: nothing
+    // outstanding, so the question is whether every query is answered, not
+    // whether a full backlog refuses them.
     handler.osc_color_report_format = .@"16-bit";
 
     // Enough replies to overflow any fixed reply buffer. A program can
@@ -2881,7 +2894,7 @@ test "color operation: every query in one OSC is answered" {
 
     try handler.colorOperation(.osc_4, &requests, .st);
 
-    const response = mailbox.spsc.queue.pop(global.io());
+    const response = th.termio_mailbox.spsc.queue.pop(global.io());
     try testing.expect(response != null);
     const msg = response.?;
     defer msg.deinit();
@@ -2897,33 +2910,13 @@ test "color operation: every query in one OSC is answered" {
 test "color operation: a full palette query is answered in full" {
     const testing = std.testing;
 
-    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
-    defer mailbox.deinit(testing.allocator);
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
 
-    var mutex: std.Io.Mutex = .init;
-    mutex.lockUncancelable(global.io());
-    defer mutex.unlock(global.io());
-
-    var term = try terminal.Terminal.init(global.io(), testing.allocator, .{
-        .cols = 80,
-        .rows = 24,
-    });
-    defer term.deinit(testing.allocator);
-
-    var renderer_state: renderer.State = .{
-        .mutex = &mutex,
-        .terminal = &term,
-    };
-
-    // Empty, so nothing is refused for a reason this test is not about.
-    var write_limit: termio.WriteLimit = .{};
-
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.terminal = &term;
-    handler.termio_mailbox = &mailbox;
-    handler.write_limit = &write_limit;
-    handler.renderer_state = &renderer_state;
+    // The harness leaves the backlog empty, so nothing is refused for a
+    // reason this test is not about.
     handler.osc_color_report_format = .@"16-bit";
 
     // The whole palette in one sequence, in the widest report format, is the
@@ -2936,7 +2929,7 @@ test "color operation: a full palette query is answered in full" {
 
     try handler.colorOperation(.osc_4, &requests, .st);
 
-    const response = mailbox.spsc.queue.pop(global.io());
+    const response = th.termio_mailbox.spsc.queue.pop(global.io());
     try testing.expect(response != null);
     const msg = response.?;
     defer msg.deinit();
@@ -2959,35 +2952,14 @@ test "color operation: a full palette query is answered in full" {
 test "color operation: the reply to one OSC is bounded" {
     const testing = std.testing;
 
-    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
-    defer mailbox.deinit(testing.allocator);
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
 
-    var mutex: std.Io.Mutex = .init;
-    mutex.lockUncancelable(global.io());
-    defer mutex.unlock(global.io());
-
-    var term = try terminal.Terminal.init(global.io(), testing.allocator, .{
-        .cols = 80,
-        .rows = 24,
-    });
-    defer term.deinit(testing.allocator);
-
-    var renderer_state: renderer.State = .{
-        .mutex = &mutex,
-        .terminal = &term,
-    };
-
-    // Empty, so the reply is cut by `color_report_limit` and not by the pty
-    // write backlog. The two bounds are independent and this test is the
-    // first one's.
-    var write_limit: termio.WriteLimit = .{};
-
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.terminal = &term;
-    handler.termio_mailbox = &mailbox;
-    handler.write_limit = &write_limit;
-    handler.renderer_state = &renderer_state;
+    // The harness leaves the backlog empty, so the reply is cut by
+    // `color_report_limit` and not by the pty write backlog. The two bounds
+    // are independent and this test is the first one's.
     handler.osc_color_report_format = .@"16-bit";
 
     // Far more queries than there are colours to ask about, which is what a
@@ -3002,7 +2974,7 @@ test "color operation: the reply to one OSC is bounded" {
 
     try handler.colorOperation(.osc_4, &requests, .st);
 
-    const response = mailbox.spsc.queue.pop(global.io());
+    const response = th.termio_mailbox.spsc.queue.pop(global.io());
     try testing.expect(response != null);
     const msg = response.?;
     defer msg.deinit();
@@ -3027,10 +2999,10 @@ test "tmux control mode: a program cannot enter it unless configured" {
 
     const testing = std.testing;
 
-    var handler: StreamHandler = undefined;
-    handler.alloc = testing.allocator;
-    handler.tmux_viewer = null;
-    handler.tmux_control_mode = false;
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    const handler = &th.handler;
 
     var enter: terminal.dcs.Command = .{ .tmux = .enter };
     try handler.dcsCommand(&enter);
