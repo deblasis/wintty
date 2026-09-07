@@ -84,6 +84,10 @@ pub fn benchmark(self: *OscParser) Benchmark {
 fn setup(ptr: *anyopaque) Benchmark.Error!void {
     const self: *OscParser = @ptrCast(@alignCast(ptr));
 
+    // Reset before the early return below: with no `--data` there is
+    // nothing to preload, but the parser must still start clean.
+    self.parser.reset();
+
     // Preload the entire data file into memory so the timed step below
     // measures OSC parser throughput, not file IO.
     assert(self.data.len == 0);
@@ -98,7 +102,7 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
         self.alloc,
         max_data_size,
     ) catch |err| {
-        // Name the cap: a corpus over it fails with StreamTooLong,
+        // Name the cap: a corpus over it fails with FileTooBig,
         // which on its own reads like an IO error.
         log.warn("error reading data file err={} max_bytes={}", .{
             err,
@@ -106,7 +110,6 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
         });
         return error.BenchmarkFailed;
     };
-    self.parser.reset();
 }
 
 fn teardown(ptr: *anyopaque) void {

@@ -142,7 +142,7 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
         self.alloc,
         max_data_size,
     ) catch |err| {
-        // Name the cap: a corpus over it fails with StreamTooLong,
+        // Name the cap: a corpus over it fails with FileTooBig,
         // which on its own reads like an IO error.
         log.warn("error reading data file err={} max_bytes={}", .{
             err,

@@ -28,15 +28,8 @@ const max_data_size = 1024 * 1024 * 1024;
 opts: Options,
 alloc: Allocator,
 
-/// The file, opened in the setup function. Used only by the `simd`
-/// mode's step, which reads directly from disk on every call. That
-/// mode measures a dead code path scheduled for removal separately, so
-/// it's left untouched here rather than folded into the preload below.
-data_f: ?std.Io.File = null,
-
-/// Complete contents of the input corpus for the `noop`, `wcwidth` and
-/// `table` modes, read once in `setup` so the timed step measures
-/// codepoint-width throughput rather than file IO.
+/// Complete contents of the input corpus, read once in `setup` so the
+/// timed step measures codepoint-width throughput rather than file IO.
 data: []u8 = &.{},
 
 pub const Options = struct {
@@ -109,49 +102,35 @@ pub fn benchmark(self: *CodepointWidth) Benchmark {
 fn setup(ptr: *anyopaque) Benchmark.Error!void {
     const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
 
-    switch (self.opts.mode) {
-        // Unchanged: this mode reads from `data_f` directly inside its
-        // step. See the field doc comment for why.
-        .simd => {
-            assert(self.data_f == null);
-            self.data_f = options.dataFile(self.opts.data) catch |err| {
-                log.warn("error opening data file err={}", .{err});
-                return error.BenchmarkFailed;
-            };
-        },
-        .noop, .wcwidth, .table => {
-            assert(self.data.len == 0);
-            const f = (options.dataFile(self.opts.data) catch |err| {
-                log.warn("error opening data file err={}", .{err});
-                return error.BenchmarkFailed;
-            }) orelse return;
-            defer f.close(global.io());
+    // Preload the entire data file into memory so the timed steps below
+    // measure width calculation, not file IO. Every mode reads the same
+    // buffer, so no mode depends on the file handle staying open.
+    assert(self.data.len == 0);
+    const f = (options.dataFile(self.opts.data) catch |err| {
+        log.warn("error opening data file err={}", .{err});
+        return error.BenchmarkFailed;
+    }) orelse return;
+    defer f.close(global.io());
 
-            self.data = compat_file.readToEndAlloc(
-                f,
-                self.alloc,
-                max_data_size,
-            ) catch |err| {
-                // Name the cap: a corpus over it fails with
-                // StreamTooLong, which on its own reads like an IO error.
-                log.warn("error reading data file err={} max_bytes={}", .{
-                    err,
-                    max_data_size,
-                });
-                return error.BenchmarkFailed;
-            };
-        },
-    }
+    self.data = compat_file.readToEndAlloc(
+        f,
+        self.alloc,
+        max_data_size,
+    ) catch |err| {
+        // Name the cap: a corpus over it fails with FileTooBig,
+        // which on its own reads like an IO error.
+        log.warn("error reading data file err={} max_bytes={}", .{
+            err,
+            max_data_size,
+        });
+        return error.BenchmarkFailed;
+    };
 }
 
 fn teardown(ptr: *anyopaque) void {
     const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
-    if (self.data_f) |f| {
-        f.close(global.io());
-        self.data_f = null;
-    }
     // `Allocator.free` is a no-op on a zero-length slice, so this is
-    // safe even for the `simd` mode, which never populates `data`.
+    // safe even when `setup` never populated `data`.
     self.alloc.free(self.data);
     self.data = &.{};
 }
@@ -201,26 +180,12 @@ fn stepTable(ptr: *anyopaque) Benchmark.Error!void {
 fn stepSimd(ptr: *anyopaque) Benchmark.Error!void {
     const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
 
-    const f = self.data_f orelse return;
-    var read_buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    var f_reader = f.reader(global.io(), &read_buf);
-    var r = &f_reader.interface;
-
     var d: UTF8Decoder = .{};
-    var buf: [4096]u8 align(std.atomic.cache_line) = undefined;
-    while (true) {
-        const n = r.readSliceShort(&buf) catch {
-            log.warn("error reading data file err={?}", .{f_reader.err});
-            return error.BenchmarkFailed;
-        };
-        if (n == 0) break; // EOF reached
-
-        for (buf[0..n]) |c| {
-            const cp_, const consumed = d.next(c);
-            assert(consumed);
-            if (cp_) |cp| {
-                std.mem.doNotOptimizeAway(simd.codepointWidth(cp));
-            }
+    for (self.data) |c| {
+        const cp_, const consumed = d.next(c);
+        assert(consumed);
+        if (cp_) |cp| {
+            std.mem.doNotOptimizeAway(simd.codepointWidth(cp));
         }
     }
 }
@@ -243,9 +208,9 @@ test "CodepointWidth stepTable consumes preloaded data without a file" {
     const impl: *CodepointWidth = try .create(alloc, .{ .mode = .table });
     defer impl.destroy(alloc);
 
-    // `stepTable` must work entirely off `self.data`; `data_f` stays
-    // null for this mode. This only passes if `setup`'s preload
-    // contract holds for non-simd modes.
+    // `stepTable` must work entirely off `self.data`, with no file
+    // handle at all. This only passes if `setup`'s preload contract
+    // holds.
     impl.data = try alloc.dupe(u8, "hello");
     try stepTable(impl);
     teardown(impl);

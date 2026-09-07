@@ -192,9 +192,17 @@ fn stepClone(ptr: *anyopaque) Benchmark.Error!void {
             return error.BenchmarkFailed;
         };
 
-        // Free each clone before the next iteration. `step` can run
-        // many times in `.duration` mode, and an unfreed clone here
-        // grows without bound for as long as the benchmark runs.
+        // The original author purposely did not free here, so that the
+        // number measured only the clone. That is no longer affordable:
+        // `step` runs until the deadline in `.duration` mode, so an
+        // unfreed clone per iteration grows without bound for as long
+        // as the benchmark runs. `Benchmark.run` times the whole `step`
+        // call and offers no per-iteration hook outside the timer, so
+        // there is nowhere to put the free that escapes measurement.
+        //
+        // The number this mode reports is therefore clone *plus*
+        // teardown of the cloned page list, and is not comparable with
+        // one recorded before this commit.
         defer copy.deinit();
         std.mem.doNotOptimizeAway(&copy);
     }

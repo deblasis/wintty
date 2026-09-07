@@ -4,6 +4,8 @@ const cli = @import("../cli.zig");
 const global = @import("../global.zig");
 const Benchmark = @import("Benchmark.zig");
 
+const log = std.log.scoped(.benchmark);
+
 /// The available actions for the CLI. This is the list of available
 /// benchmarks. View docs for each individual one in the predictably
 /// named files.
@@ -134,8 +136,18 @@ fn mainActionImpl(
     var run_opts: RunOptions = .{};
     defer run_opts.deinit();
     {
-        var iter: SliceArgIterator = .{ .items = raw_args.items };
+        var iter = cli.args.sliceIterator(raw_args.items);
         try cli.args.parse(RunOptions, alloc, &run_opts, &iter);
+    }
+
+    // That same `_diagnostics` field also swallows errors on the one
+    // flag `RunOptions` owns: `--duration-ms=abc` records a diagnostic
+    // and leaves the field at 0, which would silently degrade the run
+    // to `.once` and report a number for the wrong thing.
+    for (run_opts._diagnostics.items()) |diag| {
+        if (!std.mem.eql(u8, diag.key, "duration-ms")) continue;
+        log.warn("--duration-ms: {s}", .{diag.message});
+        return error.InvalidDurationMs;
     }
 
     // Parse the action-specific options from the same argv with
@@ -152,7 +164,7 @@ fn mainActionImpl(
             try filtered.append(alloc, arg);
         }
 
-        var iter: SliceArgIterator = .{ .items = filtered.items };
+        var iter = cli.args.sliceIterator(filtered.items);
         try cli.args.parse(Options, alloc, &opts, &iter);
     }
 
@@ -169,6 +181,10 @@ fn mainActionImpl(
 /// This is the one flag every benchmark action's own `Options` must
 /// not see (it has no field for it, and no `_diagnostics` list to
 /// tolerate an unknown one).
+///
+/// Only the `--duration-ms=<value>` form is recognized. `cli.args.parse`
+/// does not support values separated by a space, so `--duration-ms 5`
+/// is not a form this needs to match.
 fn isDurationMsFlag(arg: []const u8) bool {
     const key = if (std.mem.indexOfScalar(u8, arg, '=')) |idx|
         arg[0..idx]
@@ -176,22 +192,6 @@ fn isDurationMsFlag(arg: []const u8) bool {
         arg;
     return std.mem.eql(u8, key, "--duration-ms");
 }
-
-/// A `cli.args.parse`-compatible iterator (just needs a `next`
-/// returning `?[]const u8`) over an already-collected list of argument
-/// strings. Lets `mainActionImpl` parse the same argv twice (once per
-/// struct below) without re-reading the process's real argv or
-/// re-tokenizing a string each time.
-const SliceArgIterator = struct {
-    items: []const []const u8,
-    index: usize = 0,
-
-    pub fn next(self: *SliceArgIterator) ?[]const u8 {
-        if (self.index >= self.items.len) return null;
-        defer self.index += 1;
-        return self.items[self.index];
-    }
-};
 
 /// Flags accepted for every benchmark action, independent of the
 /// per-action `Options` parsed above.
@@ -211,8 +211,15 @@ const RunOptions = struct {
 };
 
 fn runMode(duration_ms: u64) Benchmark.RunMode {
+    // Saturate rather than overflow: `ghostty-bench` is built
+    // ReleaseFast unconditionally, where an unchecked multiply here is
+    // undefined behaviour rather than a panic.
     return if (duration_ms > 0)
-        .{ .duration = duration_ms * std.time.ns_per_ms }
+        .{ .duration = std.math.mul(
+            u64,
+            duration_ms,
+            std.time.ns_per_ms,
+        ) catch std.math.maxInt(u64) }
     else
         .once;
 }
@@ -248,6 +255,18 @@ test "RunOptions parses duration-ms and ignores unrelated action flags" {
     try testing.expectEqual(@as(u64, 5), opts.@"duration-ms");
 }
 
+test "runMode saturates instead of overflowing" {
+    // duration_ms * ns_per_ms overflows u64 above this value.
+    const too_big: u64 = (std.math.maxInt(u64) / std.time.ns_per_ms) + 1;
+    switch (runMode(too_big)) {
+        .duration => |ns| try std.testing.expectEqual(
+            std.math.maxInt(u64),
+            ns,
+        ),
+        .once => return error.TestUnexpectedResult,
+    }
+}
+
 test "isDurationMsFlag matches with and without a value, not lookalikes" {
     const testing = std.testing;
     try testing.expect(isDurationMsFlag("--duration-ms"));
@@ -278,6 +297,25 @@ test "mainActionImpl accepts --duration-ms alongside action-specific flags" {
     // and no other test can see the difference because the CLI has no
     // other observable output.
     try testing.expect(result.iterations > 1);
+}
+
+test "mainActionImpl rejects a malformed --duration-ms instead of running once" {
+    // `RunOptions._diagnostics` exists so unrecognized action flags
+    // don't fail the parse. Without an explicit check it also absorbs
+    // errors on `--duration-ms` itself, and the run silently degrades
+    // to `.once` -- a number reported for the wrong thing.
+    const testing = std.testing;
+    for ([_][]const u8{
+        "--terminal-rows=4 --terminal-cols=4 --duration-ms=abc",
+        "--terminal-rows=4 --terminal-cols=4 --duration-ms=-5",
+        "--terminal-rows=4 --terminal-cols=4 --duration-ms=99999999999999999999",
+    }) |args| {
+        try testing.expectError(error.InvalidDurationMs, mainAction(
+            testing.allocator,
+            .@"terminal-stream",
+            .{ .string = args },
+        ));
+    }
 }
 
 // The tests below drive `mainAction` end to end against a real file on
