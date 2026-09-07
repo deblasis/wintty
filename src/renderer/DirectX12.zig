@@ -17,6 +17,13 @@ const Renderer = rendererpkg.GenericRenderer(DirectX12);
 const shadertoy = @import("shadertoy.zig");
 const log = std.log.scoped(.directx12);
 
+/// Same scope as `Surface.zig`'s `init_log`; shared name (not a shared
+/// declaration, each file's `std.log.scoped(.surface_init)` is its own
+/// comptime value) so the C# host's log bridge files every
+/// `surface_init` phase, whichever module logs it, under one
+/// `Ghostty.Zig.surface_init` category.
+const init_log = std.log.scoped(.surface_init);
+
 // --- GraphicsAPI contract: types ---
 
 pub const GraphicsAPI = DirectX12;
@@ -112,6 +119,14 @@ dev: ?device.Device = null,
 swap_chain3: ?*dxgi.IDXGISwapChain3 = null,
 
 allocator: Allocator = undefined,
+
+/// Copied from `rendererpkg.Options.init_started` at the top of `init`,
+/// so the GPU bring-up phases below (device creation, init-fence wait,
+/// PSO build in `initShaders`) can log elapsed time from the same
+/// reference `Surface.init` used, without their own plumbing. Null
+/// when unset (e.g. the non-Windows early return in `init`, or a
+/// caller that never threaded it through `Options`).
+init_started: ?std.Io.Timestamp = null,
 
 /// RTV descriptor heap for swap chain back buffers.
 /// Heap-allocated so copies of DirectX12 share the same mutable state
@@ -223,7 +238,7 @@ inline fn unpackSize(packed_size: u64) struct { width: u32, height: u32 } {
 // --- GraphicsAPI contract: functions ---
 
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
-    var result = DirectX12{ .allocator = alloc };
+    var result = DirectX12{ .allocator = alloc, .init_started = opts.init_started };
 
     if (comptime builtin.os.tag != .windows) {
         return result;
@@ -293,6 +308,10 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         if (self.shared_texture_version != 0) st.version = self.shared_texture_version + 1;
     }
     self.dev = dev;
+    if (self.init_started) |started| init_log.info(
+        "surface_init d3d12-device done +{d} ms",
+        .{started.untilNow(global.io(), .awake).toMilliseconds()},
+    );
     errdefer {
         // A reused surface handle stays ours until this whole build
         // lands: take it back before Device.deinit would close it, or a
@@ -712,6 +731,10 @@ pub fn flushInitCommands(self: *DirectX12) void {
             dev_ptr.waitForGpu() catch |err| {
                 log.err("waitForGpu after init commands failed: {}", .{err});
             };
+            if (self.init_started) |started| init_log.info(
+                "surface_init init-fence-wait done +{d} ms",
+                .{started.untilNow(global.io(), .awake).toMilliseconds()},
+            );
         } else {
             // Close failed -- the recorded barriers won't reach the GPU.
             // Texture.state already reads PIXEL_SHADER_RESOURCE but the
@@ -894,7 +917,19 @@ pub fn initShaders(
     custom_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
     const dev_device = if (self.dev) |*d| d.device else null;
-    return shaders.Shaders.init(dev_device, alloc, custom_shaders);
+    const result = try shaders.Shaders.init(dev_device, alloc, custom_shaders);
+    // Logged here rather than inside `shaders.Shaders.init` itself: that
+    // function is shared with Metal.zig and OpenGL.zig, and threading
+    // `init_started` into its signature (or the shared `shaders.zig`
+    // module) would ripple into those backends and their tests for a
+    // Windows-only bring-up trace. This wrapper is DX12-specific and
+    // already has `self.init_started`, and covers the same "all 5 PSOs
+    // built" boundary as a log placed inside `Shaders.init` would.
+    if (self.init_started) |started| init_log.info(
+        "surface_init pso-build done +{d} ms",
+        .{started.untilNow(global.io(), .awake).toMilliseconds()},
+    );
+    return result;
 }
 
 /// Called by the apprt (via generic.zig) when the surface is resized.
