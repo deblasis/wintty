@@ -181,6 +181,14 @@ init_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// Must be saved here because GetCurrentBackBufferIndex advances after Present.
 pending_frame_index: u32 = 0,
 
+/// Counts Present calls, for the surface_init timing marks in
+/// drawFrameEnd (first 8 presents, or any that run long).
+present_count: u32 = 0,
+
+/// Counts per-frame fence waits in beginFrame, for the same surface_init
+/// timing marks (first 8 waits, or any that run long).
+frame_wait_count: u32 = 0,
+
 /// Deferred frame completion state. DX12 must at least submit the frame
 /// and signal the GPU fence before releasing the frame semaphore (which
 /// happens in frameCompleted), because frame.resize() reuses descriptor
@@ -869,7 +877,25 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     // before any new GPU work. The renderer thread owns Present
     // exclusively; the apprt UI thread does no GPU work during resize.
     if (self.swap_chain3) |sc3| {
+        // Bracket the Present call itself: composition swap chains queue
+        // frames for the compositor, and if nothing is consuming that
+        // queue yet (e.g. the C# host hasn't bound the SwapChainPanel),
+        // Present blocks here rather than returning immediately.
+        const present_start: std.Io.Timestamp = .now(global.io(), .awake);
         const hr = sc3.Present(1, 0);
+        if (self.init_started) |started| {
+            self.present_count += 1;
+            const dur_ms = present_start.durationTo(.now(global.io(), .awake)).toMilliseconds();
+            if (self.present_count <= 8 or dur_ms > 50) init_log.info(
+                "surface_init present #{d} at +{d} ms took {d} ms hr=0x{x}",
+                .{
+                    self.present_count,
+                    started.durationTo(present_start).toMilliseconds(),
+                    dur_ms,
+                    @as(u32, @bitCast(hr)),
+                },
+            );
+        }
         if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
             self.handleDeviceRemoved();
             // Fence signal is intentionally skipped -- the device is gone.
@@ -1186,9 +1212,22 @@ pub inline fn beginFrame(
     var frame = api.gpu_frames[frame_idx] orelse return error.FrameNotReady;
     const wait_value = frame.fence_value;
     if (dev_ptr.fence.GetCompletedValue() < wait_value) {
+        const wait_start: std.Io.Timestamp = .now(global.io(), .awake);
         const hr = dev_ptr.fence.SetEventOnCompletion(wait_value, dev_ptr.fence_event);
         if (com.FAILED(hr)) return error.FrameSyncFailed;
         _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
+        if (api.init_started) |started| {
+            api.frame_wait_count += 1;
+            const dur_ms = wait_start.durationTo(.now(global.io(), .awake)).toMilliseconds();
+            if (api.frame_wait_count <= 8 or dur_ms > 50) init_log.info(
+                "surface_init frame-wait #{d} at +{d} ms took {d} ms",
+                .{
+                    api.frame_wait_count,
+                    started.durationTo(wait_start).toMilliseconds(),
+                    dur_ms,
+                },
+            );
+        }
     }
 
     // Free resources whose last referencing submission the GPU has now
