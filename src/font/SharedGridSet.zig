@@ -29,6 +29,7 @@ const discovery = @import("discovery.zig");
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 const global = @import("../global.zig");
+const build_config = @import("../build_config.zig");
 
 const log = std.log.scoped(.font_shared_grid_set);
 
@@ -333,6 +334,13 @@ fn collection(
         },
     );
 
+    // Whether font discovery handed us a system colour emoji font. A system
+    // font is preferred over the embedded faces below: it is what the rest
+    // of the platform draws and it tracks OS updates. The embedded faces
+    // are what is left when the search finds nothing, so that a machine
+    // without a system emoji font still draws emoji instead of boxes.
+    var system_emoji_found = false;
+
     // On macOS, always search for and add the Apple Emoji font
     // as our preferred emoji font for fallback. We do this in case
     // people add other emoji fonts to their system, we always want to
@@ -354,6 +362,7 @@ fn collection(
                     // No size adjustment for emojis.
                     .size_adjustment = .none,
                 });
+                system_emoji_found = true;
                 break :apple_emoji;
             }
         }
@@ -369,6 +378,7 @@ fn collection(
                 // No size adjustment for emojis.
                 .size_adjustment = .none,
             });
+            system_emoji_found = true;
         }
     }
 
@@ -390,48 +400,89 @@ fn collection(
                 // No size adjustment for emojis.
                 .size_adjustment = .none,
             });
+            system_emoji_found = true;
         }
     }
 
-    // Embedded emoji fallback for platforms without a system emoji font.
-    // macOS and Windows use their native emoji fonts (added above) when
-    // discovery is available.
-    if (comptime !(builtin.target.os.tag.isDarwin() or builtin.target.os.tag == .windows) or Discover == void) {
-        _ = try c.add(
-            self.alloc,
-            try .init(
-                self.font_lib,
-                font.embedded.emoji,
-                load_options.faceOptions(),
-            ),
-            .{
-                .style = .regular,
-                .fallback = true,
-                // No size adjustment for emojis.
-                .size_adjustment = .none,
-            },
-        );
-        _ = try c.add(
-            self.alloc,
-            try .init(
-                self.font_lib,
-                font.embedded.emoji_text,
-                load_options.faceOptions(),
-            ),
-            .{
-                .style = .regular,
-                .fallback = true,
-                // No size adjustment for emojis.
-                .size_adjustment = .none,
-            },
-        );
-    }
+    // Embedded emoji fallback, used only when the search above came up
+    // empty. Segoe UI Emoji can be missing from a stripped Windows image
+    // and DirectWrite can fail to enumerate it, and without this the
+    // collection would carry no emoji face at all.
+    if (comptime embed_emoji) try addEmbeddedEmojiFallback(
+        self.alloc,
+        self.font_lib,
+        &c,
+        load_options,
+        system_emoji_found,
+    );
 
     return c;
 }
 
+/// Whether the embedded Noto emoji faces are compiled in and reachable.
+///
+/// macOS is the exception: Apple Color Emoji is part of the OS and cannot
+/// be removed, so discovery always finds it and the embedded faces would
+/// never be used. Excluding them at compile time keeps roughly 11MB of
+/// font data out of the binary, since Zig only embeds what is referenced.
+/// `-Dembed-emoji-font` says whether to embed them elsewhere; it is off by
+/// default on Windows, where Segoe UI Emoji ships with the OS, and on
+/// means the fallback below is armed at the cost of that 11MB.
+const embed_emoji: bool = build_config.embed_emoji_font and
+    !(builtin.target.os.tag.isDarwin() and Discover != void);
+
+/// Add the embedded Noto emoji faces to a fallback collection, unless
+/// font discovery already found a system emoji font.
+///
+/// The system font wins when there is one: it is what the rest of the
+/// platform draws and it tracks OS updates. The embedded faces are what is
+/// left when the search finds nothing, so that a machine without a system
+/// emoji font still draws emoji instead of boxes.
+///
+/// Both faces are needed: NotoColorEmoji covers the emoji presentation and
+/// NotoEmoji the text presentation, and a codepoint requested with an
+/// explicit presentation only matches a face that provides it.
+fn addEmbeddedEmojiFallback(
+    alloc: Allocator,
+    lib: Library,
+    c: *Collection,
+    load_options: Collection.LoadOptions,
+    system_emoji_found: bool,
+) !void {
+    if (system_emoji_found) return;
+
+    _ = try c.add(
+        alloc,
+        try .init(
+            lib,
+            font.embedded.emoji,
+            load_options.faceOptions(),
+        ),
+        .{
+            .style = .regular,
+            .fallback = true,
+            // No size adjustment for emojis.
+            .size_adjustment = .none,
+        },
+    );
+    _ = try c.add(
+        alloc,
+        try .init(
+            lib,
+            font.embedded.emoji_text,
+            load_options.faceOptions(),
+        ),
+        .{
+            .style = .regular,
+            .fallback = true,
+            // No size adjustment for emojis.
+            .size_adjustment = .none,
+        },
+    );
+}
+
 /// Decrement the ref count for the given key. If the ref count is zero,
-/// the grid will be deinitialized and removed from the map.j:w
+/// the grid will be deinitialized and removed from the map.
 pub fn deref(self: *SharedGridSet, key: Key) void {
     self.lock.lockUncancelable(global.io());
     defer self.lock.unlock(global.io());
@@ -872,4 +923,52 @@ test SharedGridSet {
     // If I deref grid1 then we should have a count of 0
     set.deref(key1);
     try testing.expectEqual(@as(usize, 0), set.count());
+}
+
+test "addEmbeddedEmojiFallback adds both faces when discovery found none" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib: Library = try .init(alloc);
+    defer lib.deinit();
+
+    var c = Collection.init();
+    defer c.deinit(alloc);
+    const load_options: Collection.LoadOptions = .{
+        .library = lib,
+        .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 },
+    };
+    c.load_options = load_options;
+
+    try addEmbeddedEmojiFallback(alloc, lib, &c, load_options, false);
+
+    // The whole point of the fallback is that it renders emoji. Adding
+    // faces that cannot cover both presentations would leave the user
+    // looking at boxes, which is what this fallback exists to prevent.
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .emoji }) != null);
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .text }) != null);
+}
+
+test "addEmbeddedEmojiFallback adds nothing when discovery found a face" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib: Library = try .init(alloc);
+    defer lib.deinit();
+
+    var c = Collection.init();
+    defer c.deinit(alloc);
+    const load_options: Collection.LoadOptions = .{
+        .library = lib,
+        .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 },
+    };
+    c.load_options = load_options;
+
+    try addEmbeddedEmojiFallback(alloc, lib, &c, load_options, true);
+
+    // A system emoji font was already added by the caller, so adding the
+    // embedded copies on top would shadow it with a face that does not
+    // track OS updates. The collection stays as the caller left it.
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .emoji }) == null);
+    try testing.expect(c.getIndex('🥸', .regular, .{ .explicit = .text }) == null);
 }

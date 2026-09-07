@@ -43,6 +43,11 @@ pub const font_backend: font.Backend = config.font_backend;
 pub const renderer: rendererpkg.Backend = config.renderer;
 pub const i18n: bool = config.i18n;
 
+/// Whether the Noto emoji fonts are embedded as a fallback for systems
+/// with no emoji font of their own. A system emoji font found through
+/// font discovery is preferred regardless of this.
+pub const embed_emoji_font: bool = config.embed_emoji_font;
+
 /// The bundle ID for the app. This is used in many places and is currently
 /// hardcoded here. We could make this configurable in the future if there
 /// is a reason to do so.
