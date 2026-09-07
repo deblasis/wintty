@@ -24,6 +24,8 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
     private const int MaxDueMs = 30_000;
 
     private readonly Timer _timer;
+    private readonly int _tickIntervalMs;
+    private readonly int _maxDueMs;
     private readonly ConcurrentDictionary<int, byte> _roots = new();
     private readonly ActiveProcessDebouncer _debouncer = new(DebounceWindowMs);
     private int _disposed;
@@ -31,7 +33,36 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
     public event EventHandler<ActiveProcessChangedEventArgs>? Changed;
 
     public WindowsActiveProcessTracker()
+        : this(TickIntervalMs, MaxDueMs)
     {
+    }
+
+    /// <summary>
+    /// Cadence-controlled construction, for tests that assert on what the
+    /// tracker reports rather than on how often it looks.
+    /// </summary>
+    /// <remarks>
+    /// The shipped cadence stretches with machine load
+    /// (<c>max(interval, 3x the last walk)</c>, capped at
+    /// <paramref name="maxDueMs"/>), which is what keeps the tracker's duty
+    /// cycle down on a process-heavy box. It also makes the interval between
+    /// two consecutive observations unbounded from a test's point of view, up
+    /// to the cap -- and the debouncer needs TWO observations of a value
+    /// before it emits, so a test asserting "the tracker reported X" is
+    /// implicitly asserting the load-dependent cadence too. Passing
+    /// <paramref name="maxDueMs"/> equal to <paramref name="tickIntervalMs"/>
+    /// pins the cadence and leaves the walker, the broker filter, the
+    /// debouncer and the event wiring as the only things under test.
+    /// <see cref="ActiveProcessDebouncer"/> takes its clock from the caller
+    /// for the same reason.
+    /// </remarks>
+    internal WindowsActiveProcessTracker(int tickIntervalMs, int maxDueMs)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tickIntervalMs);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxDueMs, tickIntervalMs);
+        _tickIntervalMs = tickIntervalMs;
+        _maxDueMs = maxDueMs;
+
         // period: never. A fixed period re-enters OnTick while a slow tick
         // (one full-machine process snapshot) is still walking, and the
         // concurrent ticks pile up without bound - measured at more than a
@@ -39,7 +70,7 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
         // re-arms itself when its work is done, so the real cadence is one
         // walk every (interval + work) and no walk ever overlaps another.
         _timer = new Timer(OnTick, state: null,
-            dueTime: TickIntervalMs, period: Timeout.Infinite);
+            dueTime: tickIntervalMs, period: Timeout.Infinite);
     }
 
     public void Register(int rootPid) => _roots.TryAdd(rootPid, 0);
@@ -124,7 +155,7 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
             // stretch the tracker's dead time. ObjectDisposed races the
             // Dispose wait below; a lost re-arm is the shutdown case anyway.
             var walkMs = Environment.TickCount64 - walkStart;
-            var dueMs = Math.Min(MaxDueMs, Math.Max(TickIntervalMs, 3 * (int)walkMs));
+            var dueMs = Math.Min(_maxDueMs, Math.Max(_tickIntervalMs, 3 * (int)walkMs));
             try { _timer.Change(dueMs, Timeout.Infinite); }
             catch (ObjectDisposedException) { }
         }

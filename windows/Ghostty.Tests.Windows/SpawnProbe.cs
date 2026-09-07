@@ -58,16 +58,20 @@ internal sealed class SpawnProbe
     private const int CmdBudgetMs = 2_000;
 
     /// <summary>
-    /// The same question for pwsh.exe, derived from what the tests that spawn
-    /// it actually assert: the tracker smoke tests allow themselves 8000 ms
-    /// end to end. 750 ms of that is fixed tracker cost (500 ms tick +
-    /// 250 ms debounce) and is available to no spawn at all. The remaining
-    /// 7250 ms has to cover pwsh getting to the point of running its command
-    /// AND everything it is then asked to do -- launch cmd, cmd exec ping,
-    /// and a tracker snapshot that catches them alive. This probe measures
-    /// only the first half, so it gets half the budget: 3625 ms, taken as
-    /// 3500. A host slower than that cannot pass those tests for a reason
-    /// that has nothing to do with the tracker.
+    /// The same question for pwsh.exe: the latency past which a host's own
+    /// slowness, rather than the subject, is what a pwsh-spawning test would
+    /// be reporting. A healthy host starts a no-op pwsh in a few hundred ms
+    /// even cold, so 3500 ms is several times the honest cost and still well
+    /// short of the seconds a blocked or scanned spawn takes.
+    ///
+    /// Deliberately NOT derived from a downstream test's deadline any more.
+    /// It used to be: "the tracker smoke tests allow themselves 8000 ms end to
+    /// end, 750 ms of that is fixed tracker cost, halve the rest". Every term
+    /// in that stopped being true when the tracker gained its adaptive cadence
+    /// (the fixed cost is no longer 750 ms and no longer fixed) and the smoke
+    /// tests stopped using a flat budget -- and nothing caught it, because a
+    /// constant computed from another constant has no way to notice the other
+    /// one moved. A gate on the host's health should stand on its own.
     /// </summary>
     private const int PwshBudgetMs = 3_500;
 
