@@ -229,16 +229,26 @@ fn initTarget(
     try self.config.addOptions(self.options);
 }
 
+/// Add the shared dependencies to `step`.
+///
+/// `optimize` is the mode the vendored dependencies and the C/C++ compiled
+/// beside them are built in. It is the mode `step`'s root module would have
+/// without `-Dvt-safe`, which is not always the root module's actual mode:
+/// `-Dvt-safe` measures what Zig's runtime safety checks cost, so raising the
+/// dependencies along with the Zig would fold a simdutf and highway recompile
+/// into that same number. Callers pass it rather than it being derived here
+/// because a step that pins its own mode (`ghostty-bench`, `ghostty-gen`,
+/// `ghostty-test`) is the only thing that knows what its pin is.
 pub fn add(
     self: *const SharedDeps,
     step: *std.Build.Step.Compile,
+    optimize: std.builtin.OptimizeMode,
 ) !LazyPathList {
     const b = step.step.owner;
 
-    // We could use our config.target/optimize fields here but its more
-    // correct to always match our step.
+    // We could use our config.target field here but its more correct to
+    // always match our step.
     const target = step.root_module.resolved_target.?;
-    const optimize = step.root_module.optimize.?;
 
     // We maintain a list of our static libraries and return it so that
     // we can build a single fat static library for the final app.
@@ -262,7 +272,10 @@ pub fn add(
     step.root_module.addOptions("build_options", self.options);
 
     // Every exe needs the terminal options
-    self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);
+    self.config.terminalOptions(
+        .ghostty,
+        step.root_module.optimize.?,
+    ).add(b, step.root_module);
 
     // Every exe needs the uucode module
     step.root_module.addImport("uucode", self.uucode_mod);
@@ -503,6 +516,7 @@ pub fn add(
     if (self.config.simd) try addSimd(
         b,
         step.root_module,
+        optimize,
         &static_libs,
     );
 
@@ -535,15 +549,31 @@ pub fn add(
     // C files
     step.root_module.link_libc = true;
     step.root_module.addIncludePath(b.path("src/stb"));
-    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
-    // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
-    // the static archive is consumed by an external linker.
+    // stb decodes untrusted image bytes, so it gets a stack protector
+    // wherever the runtime is guaranteed to be there. Not on the msvc ABI:
+    // this function is what puts stb.c into ghostty-static.lib
+    // (GhosttyLib.initStatic), and that archive is handed to MSVC link.exe
+    // for the NativeAOT image. A per-file flag is appended after the
+    // module-level setting, so it would win, and __security_cookie
+    // references would reach an external linker that Zig never drives.
+    // pkg/sentry/build.zig documents the same trap costing a release: no
+    // zig build and no dotnet build reaches link.exe, so the gate stays
+    // green. Note the archive at risk is not ghostty-vt: GhosttyLibVt never
+    // calls this function, it reaches addSimd directly, so stb.c cannot
+    // land there and narrowing this gate to ghostty-vt would re-open the
+    // failure on ghostty-static.lib.
+    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled on
+    // Windows (LNK4229), leaving __ubsan_handle_* unresolved when the
+    // static archive is consumed by an external linker.
     step.root_module.addCSourceFiles(.{
         .files = &.{"src/stb/stb.c"},
         .flags = if (step.rootModuleTarget().abi == .msvc)
-            &.{ "-fno-sanitize=undefined", "-fno-sanitize-trap=undefined" }
+            &.{
+                "-fno-sanitize=undefined",
+                "-fno-sanitize-trap=undefined",
+            }
         else
-            &.{},
+            &.{"-fstack-protector-strong"},
     });
     if (step.rootModuleTarget().os.tag == .linux) {
         step.root_module.addIncludePath(b.path("src/apprt/gtk"));
@@ -752,7 +782,7 @@ pub fn add(
         step.root_module.addIncludePath(b.path("vendor/glad/include/"));
         step.root_module.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
-            .flags = &.{},
+            .flags = &.{"-fstack-protector-strong"},
         });
 
         // When we're targeting flatpak we ALWAYS link GTK so we
@@ -802,7 +832,10 @@ fn addGtkNg(
 ) !void {
     const b = step.step.owner;
     const target = step.root_module.resolved_target.?;
-    const optimize = step.root_module.optimize.?;
+    const optimize = if (self.config.vt_safe)
+        self.config.optimize
+    else
+        step.root_module.optimize.?;
 
     const gobject_ = b.lazyDependency("gobject", .{
         .target = target,
@@ -992,10 +1025,10 @@ fn addGtkNg(
 pub fn addSimd(
     b: *std.Build,
     m: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
     static_libs: ?*LazyPathList,
 ) !void {
     const target = m.resolved_target.?;
-    const optimize = m.optimize.?;
     const system_highway = b.systemIntegrationOption("highway", .{ .default = false });
 
     // MSVC's C++ static-init pass populates simdutf's implementation
@@ -1070,6 +1103,17 @@ pub fn addSimd(
         try flags.append(
             b.allocator,
             "-std=c++17",
+        );
+
+        // These read terminal bytes straight off the wire, so they get a
+        // stack protector wherever the runtime is guaranteed to be there.
+        // Not on the msvc ABI: these objects sit in the root module of the
+        // vt static library, which turns stack-protector generation off for
+        // msvc so its consumers don't need BufferOverflowU, and a per-file
+        // flag is appended after the module-level setting, so it would win.
+        if (!is_msvc) try flags.append(
+            b.allocator,
+            "-fstack-protector-strong",
         );
 
         // Keep our SIMD sources in the same Highway header mode as the

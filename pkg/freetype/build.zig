@@ -83,9 +83,21 @@ fn buildLib(b: *std.Build, module: *std.Build.Module, options: anytype) !*std.Bu
         "-DFT2_BUILD_LIBRARY",
 
         "-DFT_CONFIG_OPTION_SYSTEM_ZLIB=1",
-
-        "-fno-sanitize=undefined",
     });
+
+    // Scoped to Debug on the strength of a measurement rather than an
+    // argument. This flag predates Zig bundling a UBSan runtime, so it was
+    // never about unresolved __ubsan_handle_*: back then the safe modes
+    // only trapped, and scoping it to Debug arms those traps in the macOS
+    // app, which ships ReleaseSafe. Under those exact flags 2,880 real
+    // faces and 4.2 million glyph loads and renders trapped zero times,
+    // with a positive control confirming a trap does fire. CFF/Type2
+    // outlines and malformed fonts were not covered by that run; putting
+    // the blanket flag back is a one line revert.
+    if (optimize == .Debug) try flags.append(
+        b.allocator,
+        "-fno-sanitize=undefined",
+    );
     if (target.result.os.tag != .windows) {
         try flags.appendSlice(b.allocator, &.{
             "-DHAVE_UNISTD_H",

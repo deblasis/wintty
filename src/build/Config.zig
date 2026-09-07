@@ -46,6 +46,11 @@ pie: bool = false,
 strip: bool = false,
 patchelf: ?PatchElf = null,
 
+/// Build Ghostty's own Zig code with runtime safety checks even when
+/// the requested optimize mode is a fast release. See `-Dvt-safe` and
+/// `zigOptimize`.
+vt_safe: bool = false,
+
 /// Artifacts
 flatpak: bool = false,
 snap: bool = false,
@@ -428,6 +433,19 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         }
     }
 
+    config.vt_safe = b.option(
+        bool,
+        "vt-safe",
+        "Compile Ghostty's Zig code with runtime safety checks (bounds, " ++
+            "overflow, unreachable) even in a fast release build. The " ++
+            "terminal and VT parser are part of the same Zig module as the " ++
+            "rest of the application, so this raises all of it, and with it " ++
+            "the C and C++ compiled into that module. The vendored " ++
+            "dependency packages (simdutf, highway, freetype, ...) are " ++
+            "separate artifacts and keep the mode they would have had " ++
+            "without this option.",
+    ) orelse false;
+
     config.pie = b.option(
         bool,
         "pie",
@@ -721,6 +739,30 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
             break :channel .tip;
         },
     );
+}
+
+/// The optimize mode for Ghostty's own Zig code.
+///
+/// This is `optimize` unless `-Dvt-safe` was passed, which raises the
+/// unsafe release modes to ReleaseSafe so that the VT parser and terminal
+/// keep their runtime safety checks while consuming attacker-controlled
+/// bytes.
+///
+/// Only the steps that follow `-Doptimize` use this. A step that pins its
+/// own mode (`ghostty-bench`, `ghostty-gen`, `ghostty-test`) decides for
+/// itself, and every step passes its dependencies' mode to `SharedDeps.add`
+/// separately, so the vendored dependencies never take this raise.
+///
+/// Note this raises the C and C++ compiled *into* the module too, which on
+/// Windows means ReleaseSafe's `-D_FORTIFY_SOURCE` and different sanitizer
+/// settings for `src/stb/stb.c` and `src/simd/*.cpp`. The vendored
+/// dependency packages are separate artifacts and are unaffected.
+pub fn zigOptimize(self: *const Config) std.builtin.OptimizeMode {
+    if (!self.vt_safe) return self.optimize;
+    return switch (self.optimize) {
+        .Debug, .ReleaseSafe => self.optimize,
+        .ReleaseFast, .ReleaseSmall => .ReleaseSafe,
+    };
 }
 
 /// Returns the build options for the terminal module. This assumes a

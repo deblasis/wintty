@@ -126,6 +126,9 @@ fn buildLib(b: *std.Build, module: *std.Build.Module, options: anytype) !*std.Bu
         "-Wno-implicit-function-declaration",
         "-Wno-int-conversion",
 
+        // Fontconfig has real undefined behaviour, not just the missing
+        // UBSan runtime the other vendored packages work around, so this
+        // stays on in every mode until upstream takes the fix.
         // https://gitlab.freedesktop.org/fontconfig/fontconfig/-/merge_requests/231
         "-fno-sanitize=undefined",
         "-fno-sanitize-trap=undefined",

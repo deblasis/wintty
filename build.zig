@@ -453,7 +453,9 @@ pub fn build(b: *std.Build) !void {
             config.addPatchElf(test_exe, &test_exe_install.step);
             test_step.dependOn(&test_exe_install.step);
         }
-        _ = try deps.add(test_exe);
+        // The test binary pins Debug above, so its dependencies stay Debug
+        // too; -Doptimize and -Dvt-safe must not split the two apart.
+        _ = try deps.add(test_exe, .Debug);
         config.addPatchElf(
             test_exe,
             installTestBinary(b, test_binaries_step, &test_binary_roots, test_exe),
