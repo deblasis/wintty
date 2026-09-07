@@ -13,7 +13,6 @@ const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
 const compat_file = @import("../lib/compat/file.zig");
 const UTF8Decoder = @import("../terminal/UTF8Decoder.zig");
-const simd = @import("../simd/main.zig");
 const table = @import("../unicode/main.zig").table;
 const global = @import("../global.zig");
 
@@ -64,9 +63,6 @@ pub const Mode = enum {
     /// libc wcwidth
     wcwidth,
 
-    /// Our SIMD implementation.
-    simd,
-
     /// Test our lookup table implementation.
     table,
 };
@@ -92,7 +88,6 @@ pub fn benchmark(self: *CodepointWidth) Benchmark {
             .noop => stepNoop,
             .wcwidth => stepWcwidth,
             .table => stepTable,
-            .simd => stepSimd,
         },
         .setupFn = setup,
         .teardownFn = teardown,
@@ -173,19 +168,6 @@ fn stepTable(ptr: *anyopaque) Benchmark.Error!void {
                 1
             else
                 table.get(@intCast(cp)).width);
-        }
-    }
-}
-
-fn stepSimd(ptr: *anyopaque) Benchmark.Error!void {
-    const self: *CodepointWidth = @ptrCast(@alignCast(ptr));
-
-    var d: UTF8Decoder = .{};
-    for (self.data) |c| {
-        const cp_, const consumed = d.next(c);
-        assert(consumed);
-        if (cp_) |cp| {
-            std.mem.doNotOptimizeAway(simd.codepointWidth(cp));
         }
     }
 }
