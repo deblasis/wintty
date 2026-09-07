@@ -225,7 +225,7 @@ pub fn main() !void {
 
         for (min..max) |cp2| {
             if (cp2 == '\r' or cp2 == '\n' or
-                uucode.get(.grapheme_break, @intCast(cp1)) == .control) continue;
+                uucode.get(.grapheme_break, @intCast(cp2)) == .control) continue;
 
             const gb = graphemeBreak(@intCast(cp1), @intCast(cp2), &state);
             const uu_gb = uucode.grapheme.isBreak(@intCast(cp1), @intCast(cp2), &uu_state);
