@@ -1155,23 +1155,35 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         AnsiPalette = GetAllPaletteColors();
 
         // Profile-view second pass. The scalar keys (default-profile
-        // and profile-order) are read through GetFileValue which hits
-        // the parsed line cache populated at the top of ReadFlags.
-        // The profile.<id>.* regex and hidden-id extraction need the
-        // raw file text though, and _configFileCache stores parsed
-        // pairs rather than the original bytes, so this second read is
-        // deliberate -- the reload is already cold-path and the config
-        // is small. Readers of the five profile-view properties see a
-        // consistent snapshot via the single volatile _profileView
-        // assignment below.
-        // Reads the path rather than the cache, so it needs the same
-        // suppression: _configFileCache being empty under --no-config would
-        // not stop this one from putting the file's profiles back in force.
-        var rawConfigText = ConfigSourcePath is { } profileSource && File.Exists(profileSource)
-            ? File.ReadAllText(profileSource)
-            : string.Empty;
+        // and profile-order) are read through GetFileValue, which hits
+        // the parsed cache populated at the top of ReadFlags. The
+        // profile.<id>.* regex and hidden-id extraction used to need
+        // the raw file text -- ConfigServiceProfileParser.ParseAll's
+        // string overload -- because _configFileCache stores parsed
+        // pairs keyed by whole "profile.<id>.<subkey>" strings rather
+        // than the original bytes, and nothing walked that cache
+        // looking for the profile.* shape.
+        //
+        // That second read is gone: ProfileSourceParser now has a
+        // sibling that walks the same cache instead of raw text (same
+        // "profile.<id>.<subkey>" regex, applied to each cache key
+        // instead of each line), taking the cache's last value per key
+        // as "last occurrence wins" -- the cache already stores every
+        // occurrence in file order, so its last element is the same
+        // value the forward-order text scan would have landed on. A
+        // reload is now bounded by the native read plus the two
+        // LoadIniFile calls above (config file, active theme file),
+        // not a third file open. Readers of the five profile-view
+        // properties see a consistent snapshot via the single volatile
+        // _profileView assignment below.
+        //
+        // No separate --no-config gate is needed here: _configFileCache
+        // is already the suppressible one (LoadIniFile(ConfigSourcePath)
+        // at the top of this method returns empty under --no-config), so
+        // the profile pass inherits the same suppression the scalar
+        // reads above it already have.
         var view = Ghostty.Core.Config.ConfigServiceProfileParser.ParseAll(
-            rawConfigText,
+            _configFileCache ?? new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase),
             key =>
             {
                 var v = GetFileValue(key, string.Empty);

@@ -109,21 +109,35 @@ public class ConfigLoadOrderWiringTests
     }
 
     /// <summary>
-    /// The profile keys are read out of the raw file text rather than the
-    /// parsed cache, so emptying that cache does not stop them. This read
-    /// needs the suppression at its own site.
+    /// The profile keys used to come from a second raw-text read of the
+    /// config file (<c>File.ReadAllText</c>), a third read of the same file
+    /// on top of the native ConfigNew..ConfigFinalize read and the managed
+    /// <c>_configFileCache = LoadIniFile(...)</c> read that ReadFlags already
+    /// does. That call is gone: the profile pass now consumes the same
+    /// pairs cache <c>GetFileValue</c> and friends already read from, so a
+    /// reload is bounded by the native read plus the two <c>LoadIniFile</c>
+    /// calls ReadFlags documents (config file, active theme file), not a
+    /// third file open.
+    ///
+    /// Scanning the whole file rather than just ReadFlagsCore, so a
+    /// File.ReadAllText that migrates to some other method in this class
+    /// still trips the guard.
     /// </summary>
     [Fact]
-    public void TheProfileTextReadIsSuppressedAtItsOwnSite()
+    public void TheProfilePassReadsFromTheSharedCacheNotAThirdFileRead()
     {
-        var core = ShellSource.Load(ConfigService).Method("ReadFlagsCore");
+        var source = ShellSource.Load(ConfigService);
 
-        var read = core.Call("File.ReadAllText");
-        var conditional = read.Ancestors().OfType<ConditionalExpressionSyntax>().First();
+        Assert.Empty(source.Root.Calls("File.ReadAllText"));
 
-        Assert.Contains("ConfigSourcePath", conditional.Condition.ToString());
-        Assert.DoesNotContain("ConfigFilePath", conditional.Condition.ToString());
-        Assert.DoesNotContain("ConfigFilePath", read.Arg(0));
+        var core = source.Method("ReadFlagsCore");
+        var cacheReferences = core.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(id => id.Identifier.ValueText == "_configFileCache")
+            .ToList();
+        Assert.True(
+            cacheReferences.Count > 0,
+            "ReadFlagsCore no longer references _configFileCache -- the profile pass "
+                + "has to read the same cache ReadFlags populated, not some other source.");
     }
 
     /// <summary>
