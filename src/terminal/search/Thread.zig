@@ -120,7 +120,12 @@ pub fn deinit(self: *Thread) void {
     self.wakeup.deinit();
     self.stop.deinit();
     self.loop.deinit();
-    // Nothing can possibly access the mailbox anymore, destroy it.
+
+    // Nothing can possibly access the mailbox anymore, so drain and destroy
+    // it. Producers can publish right up until the thread is joined, and the
+    // thread can also exit on an error before it ever reaches its shutdown
+    // drain, so anything still queued here has to be freed by us.
+    while (self.mailbox.pop(global.io())) |message| message.deinit();
     self.mailbox.destroy(self.alloc);
 
     if (self.search) |*s| {
@@ -186,6 +191,7 @@ fn threadMain_(self: *Thread) !void {
         if (self.loop.stopped()) {
             while (self.mailbox.pop(global.io())) |message| {
                 log.debug("mailbox message ignored during shutdown={}", .{message});
+                message.deinit();
             }
 
             return;
@@ -692,6 +698,121 @@ const TestUserData = struct {
         }
     }
 };
+
+/// Userdata for the shutdown test below. It queues a mailbox message from
+/// the search thread itself at the moment the search completes and then
+/// stops the loop, so the message is guaranteed to still be queued when the
+/// shutdown path runs.
+const ShutdownUserData = struct {
+    const Self = @This();
+
+    /// Longer than `Message.WriteReq`'s small size so the needle is
+    /// heap allocated and a dropped message is a detectable leak.
+    const needle = "y" ** 512;
+
+    thread: *Thread,
+    queued: std.Io.Event = .unset,
+    pushed: bool = false,
+
+    fn callback(event: Event, userdata: ?*anyopaque) void {
+        const ud: *Self = @ptrCast(@alignCast(userdata.?));
+        switch (event) {
+            .complete => {
+                if (ud.pushed) return;
+                ud.pushed = true;
+
+                const io = global.io();
+                _ = ud.thread.mailbox.push(io, .{ .change_needle = Message.WriteReq.init(
+                    testing.allocator,
+                    @as([]const u8, needle),
+                ) catch unreachable }, .forever);
+
+                // Stop without waking the mailbox drain.
+                ud.thread.stop.notify() catch unreachable;
+                ud.queued.set(io);
+            },
+
+            else => {},
+        }
+    }
+};
+
+test "search thread shutdown frees messages left in the mailbox" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var mutex: std.Io.Mutex = .init;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 20, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Hello, world");
+
+    var thread: Thread = try .init(alloc, .{
+        .mutex = &mutex,
+        .terminal = &t,
+    });
+    defer thread.deinit();
+
+    var ud: ShutdownUserData = .{ .thread = &thread };
+    thread.opts.event_cb = &ShutdownUserData.callback;
+    thread.opts.event_userdata = &ud;
+
+    var os_thread = try std.Thread.spawn(
+        .{},
+        threadMain,
+        .{&thread},
+    );
+
+    _ = thread.mailbox.push(
+        io,
+        .{ .change_needle = try .init(
+            alloc,
+            @as([]const u8, "world"),
+        ) },
+        .forever,
+    );
+    try thread.wakeup.notify();
+
+    ud.queued.waitTimeout(io, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(5000),
+    } }) catch {
+        // The search never completed so the callback never ran. Stop the
+        // thread ourselves so this fails rather than hanging on join.
+        thread.stop.notify() catch {};
+    };
+    os_thread.join();
+
+    try testing.expect(ud.pushed);
+}
+
+test "search thread deinit frees messages left in the mailbox" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var mutex: std.Io.Mutex = .init;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 20, .rows = 2 });
+    defer t.deinit(alloc);
+
+    // The thread is never started, so nothing ever drains the mailbox and
+    // deinit is the only thing that can free the queued needle.
+    var thread: Thread = try .init(alloc, .{
+        .mutex = &mutex,
+        .terminal = &t,
+    });
+    defer thread.deinit();
+
+    // Longer than the small size so the needle is heap allocated.
+    const needle = "x" ** 512;
+    _ = thread.mailbox.push(
+        io,
+        .{ .change_needle = try .init(
+            alloc,
+            @as([]const u8, needle),
+        ) },
+        .forever,
+    );
+}
 
 test {
     const alloc = testing.allocator;
