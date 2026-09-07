@@ -133,8 +133,6 @@ NOT_ROOTED = {
         "src/lib/allocator.zig names it with a plain pub const",
     "src/os/desktop.zig":
         "absent from src/os/main.zig's test block",
-    "src/os/open.zig":
-        "absent from src/os/main.zig's test block",
     "src/os/passwd.zig":
         "absent from src/os/main.zig's test block",
     "src/renderer/directx12/inspector_surface.zig":
