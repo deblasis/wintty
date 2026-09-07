@@ -117,7 +117,7 @@ fn initVt(
     const vt = b.addModule(name, .{
         .root_source_file = b.path("src/lib_vt.zig"),
         .target = cfg.target,
-        .optimize = cfg.optimize,
+        .optimize = cfg.zigOptimize(),
 
         // SIMD requires libc. Vendored C++ dependencies are built with
         // no-libcxx mode (HWY_NO_LIBCXX / SIMDUTF_NO_LIBCXX) so we
@@ -153,7 +153,7 @@ fn initVt(
 
     // If SIMD is enabled, add all our SIMD dependencies.
     if (cfg.simd) {
-        try SharedDeps.addSimd(b, vt, simd_libs);
+        try SharedDeps.addSimd(b, vt, cfg.optimize, simd_libs);
     }
 
     return vt;

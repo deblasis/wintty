@@ -32,7 +32,7 @@ pub fn initStatic(
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main_c.zig"),
             .target = deps.config.target,
-            .optimize = deps.config.optimize,
+            .optimize = deps.config.zigOptimize(),
             .strip = deps.config.strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
             .unwind_tables = if (deps.config.strip) .none else .sync,
@@ -56,7 +56,7 @@ pub fn initStatic(
 
     // Add our dependencies. Get the list of all static deps so we can
     // build a combined archive.
-    var lib_list = try deps.add(lib);
+    var lib_list = try deps.add(lib, deps.config.optimize);
     try lib_list.append(b.allocator, lib.getEmittedBin());
 
     // Combine all archives into a single fat static library so
@@ -120,7 +120,7 @@ pub fn initShared(
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main_c.zig"),
             .target = deps.config.target,
-            .optimize = deps.config.optimize,
+            .optimize = deps.config.zigOptimize(),
             .strip = strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
             .unwind_tables = if (strip) .none else .sync,
@@ -129,7 +129,7 @@ pub fn initShared(
         // Fails on self-hosted x86_64
         .use_llvm = true,
     });
-    _ = try deps.add(lib);
+    _ = try deps.add(lib, deps.config.optimize);
 
     // On Windows with MSVC, building a DLL requires the full CRT library
     // chain. linkLibC() (called via deps.add) provides msvcrt.lib, but

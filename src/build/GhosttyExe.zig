@@ -16,7 +16,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = cfg.target,
-            .optimize = cfg.optimize,
+            .optimize = cfg.zigOptimize(),
             .strip = cfg.strip,
             .omit_frame_pointer = cfg.omitFramePointer(),
             .unwind_tables = if (cfg.strip) .none else .sync,
@@ -31,7 +31,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
 
     // Add the shared dependencies. When building only lib-vt we skip
     // heavy deps so cross-compilation doesn't pull in GTK, etc.
-    if (!cfg.emit_lib_vt) _ = try deps.add(exe);
+    // The root module above may be raised to ReleaseSafe by -Dvt-safe; the
+    // dependencies follow -Doptimize either way. See SharedDeps.add.
+    if (!cfg.emit_lib_vt) _ = try deps.add(exe, cfg.optimize);
 
     // Check for possible issues
     try checkNixShell(exe, cfg);
