@@ -31,6 +31,16 @@ data: []u8,
 /// always square so this is both the width and the height.
 size: u32 = 0,
 
+/// The largest size this atlas may grow to. Growing past the maximum 2D
+/// texture size of the GPU makes every subsequent texture upload fail, so
+/// `grow` refuses instead and leaves it to the caller to make room some
+/// other way (see `reset`).
+///
+/// Atlases are created before any renderer exists, so the default has to
+/// hold on the weakest device we support (see `default_max_size`). A backend
+/// raises or lowers it with `setMaxSize` once it has a device to ask.
+max_size: u32 = default_max_size,
+
 /// The nodes (rectangles) of available space.
 nodes: std.ArrayList(Node) = .empty,
 
@@ -49,6 +59,23 @@ modified: std.atomic.Value(usize) = .{ .raw = 0 },
 /// for knowing if a GPU texture can be updated in-place or if it requires
 /// a resize operation.
 resized: std.atomic.Value(usize) = .{ .raw = 0 },
+
+/// This will be incremented every time the atlas is emptied by `reset`,
+/// which invalidates every region previously handed out. Anything caching
+/// atlas coordinates must drop that cache when this changes.
+generation: std.atomic.Value(usize) = .{ .raw = 0 },
+
+/// The default value of `max_size`: the smallest maximum any backend we
+/// support reports. Metal devices below the apple3 family stop at 8192, and
+/// the OpenGL atlas is a rectangle texture, whose limit is its own
+/// (GL_MAX_RECTANGLE_TEXTURE_SIZE) and can be lower than the ordinary 2D
+/// texture limit. Starting here means no device ever gets an atlas it cannot
+/// hold, even before a renderer has attached.
+///
+/// Metal never calls `setMaxSize`: it cannot be built on the machine this
+/// branch is developed on, and 8192 is already its worst case, so it keeps
+/// the default until someone can compile and test the call.
+pub const default_max_size: u32 = 8192;
 
 pub const Format = enum(u8) {
     /// 1 byte per pixel grayscale.
@@ -76,6 +103,11 @@ const Node = struct {
 pub const Error = error{
     /// Atlas cannot fit the desired region. You must enlarge the atlas.
     AtlasFull,
+};
+
+pub const GrowError = Allocator.Error || error{
+    /// The requested size is past `max_size`. The atlas is unchanged.
+    AtlasTooLarge,
 };
 
 /// A region within the texture atlas. These can be acquired using the
@@ -305,17 +337,28 @@ pub fn setFromLarger(
     _ = self.modified.fetchAdd(1, .monotonic);
 }
 
+/// Set the ceiling `grow` refuses to pass, for a caller that has queried
+/// the real limit of the device the atlas is uploaded to.
+///
+/// A limit below the current size is raised to it: the atlas already exists
+/// at that size, and refusing to grow it is the most we can do about a device
+/// that cannot hold it.
+pub fn setMaxSize(self: *Atlas, size_max: u32) void {
+    self.max_size = @max(size_max, self.size);
+}
+
 pub const grow_tw = tripwire.module(enum {
     ensure_node_capacity,
     alloc_data,
 }, grow);
 
 // Grow the texture to the new size, preserving all previously written data.
-pub fn grow(self: *Atlas, alloc: Allocator, size_new: u32) Allocator.Error!void {
+pub fn grow(self: *Atlas, alloc: Allocator, size_new: u32) GrowError!void {
     const tw = grow_tw;
 
     assert(size_new >= self.size);
     if (size_new == self.size) return;
+    if (size_new > self.max_size) return error.AtlasTooLarge;
 
     // We reserve space ahead of time for the new node, so that we
     // won't have to handle any errors after allocating our new data.
@@ -373,6 +416,16 @@ pub fn clear(self: *Atlas) void {
     // and is the initial rectangle we fit our regions in. We keep a 1px border
     // to avoid artifacting when sampling the texture.
     self.nodes.appendAssumeCapacity(.{ .x = 1, .y = 1, .width = self.size - 2 });
+}
+
+/// Empty the atlas, invalidating every region previously reserved from it.
+///
+/// This is `clear` plus a generation bump, which is how a caller that has
+/// handed out atlas coordinates learns that they are all stale. Use it when
+/// the atlas is full and cannot grow any further.
+pub fn reset(self: *Atlas) void {
+    self.clear();
+    _ = self.generation.fetchAdd(1, .monotonic);
 }
 
 /// Dump the atlas as a PPM to a writer, for debug purposes.
@@ -886,4 +939,71 @@ test "grow error" {
         try testing.expectEqual(@as(u8, 3), atlas.data[9]);
         try testing.expectEqual(@as(u8, 4), atlas.data[10]);
     }
+}
+
+test "grow past the maximum size" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 4, .grayscale); // +2 for 1px border
+    defer atlas.deinit(alloc);
+    atlas.max_size = 5;
+
+    const reg = try atlas.reserve(alloc, 2, 2);
+    atlas.set(reg, &[_]u8{ 1, 2, 3, 4 });
+
+    // Up to the maximum is allowed.
+    try atlas.grow(alloc, 5);
+    try testing.expectEqual(@as(u32, 5), atlas.size);
+
+    // Past it is refused and leaves the atlas untouched.
+    const old_modified = atlas.modified.load(.monotonic);
+    const old_resized = atlas.resized.load(.monotonic);
+    try testing.expectError(
+        GrowError.AtlasTooLarge,
+        atlas.grow(alloc, 6),
+    );
+    try testing.expectEqual(@as(u32, 5), atlas.size);
+    try testing.expectEqual(old_modified, atlas.modified.load(.monotonic));
+    try testing.expectEqual(old_resized, atlas.resized.load(.monotonic));
+    try testing.expectEqual(@as(u8, 1), atlas.data[atlas.size + 1]);
+    try testing.expectEqual(@as(u8, 2), atlas.data[atlas.size + 2]);
+}
+
+test "setMaxSize" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 4, .grayscale); // +2 for 1px border
+    defer atlas.deinit(alloc);
+
+    // A device that can hold more than the default raises the ceiling.
+    atlas.setMaxSize(16384);
+    try testing.expectEqual(@as(u32, 16384), atlas.max_size);
+    try atlas.grow(alloc, 8);
+
+    // A device that can hold less lowers it, but never below what we
+    // already have.
+    atlas.setMaxSize(4);
+    try testing.expectEqual(@as(u32, 8), atlas.max_size);
+    try testing.expectError(
+        GrowError.AtlasTooLarge,
+        atlas.grow(alloc, 16),
+    );
+}
+
+test "reset empties the atlas and bumps the generation" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 4, .grayscale); // +2 for 1px border
+    defer atlas.deinit(alloc);
+
+    const reg = try atlas.reserve(alloc, 2, 2);
+    atlas.set(reg, &[_]u8{ 1, 2, 3, 4 });
+    try testing.expectError(Error.AtlasFull, atlas.reserve(alloc, 1, 1));
+
+    const old_generation = atlas.generation.load(.monotonic);
+    const old_modified = atlas.modified.load(.monotonic);
+    atlas.reset();
+    try testing.expect(atlas.generation.load(.monotonic) > old_generation);
+    try testing.expect(atlas.modified.load(.monotonic) > old_modified);
+
+    // The space is available again and the old data is gone.
+    try testing.expectEqual(@as(u8, 0), atlas.data[5]);
+    _ = try atlas.reserve(alloc, 2, 2);
 }
