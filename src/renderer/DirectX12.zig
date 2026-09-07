@@ -763,10 +763,36 @@ pub fn maxTextureSize(self: *const DirectX12) u32 {
 }
 
 pub fn drawFrameStart(self: *DirectX12) void {
-    _ = self;
     // RTV heap slots are per-frame and stable. No reset needed; each frame's
     // CustomShaderState reuses its own dedicated RTV descriptors during
     // resize via the rtv_slot option in Texture.Options.
+
+    // Free what the GPU has finished with. `beginFrame` collects too, but
+    // it only runs on a wakeup the renderer decided was worth drawing, and
+    // this runs on every wakeup. Whatever the last drawn frame retired
+    // would otherwise stay resident for as long as the terminal stays
+    // quiet, and an atlas grown on that frame retires a texture up to the
+    // size of the atlas ceiling.
+    //
+    // Nothing here waits: `collect` frees only what the fence says is
+    // already done, so a wakeup that draws nothing costs one fence read.
+    const dev_ptr = &(self.dev orelse return);
+    // A removed device's fence reports a value that means nothing; the
+    // recovery path tears the whole queue down instead.
+    //
+    // Say so on the way out rather than dropping the answer. With
+    // `presentLastTarget` a no-op here, this is the only thing that
+    // touches the device on a wakeup that draws nothing, so it is the
+    // only place an idle TDR can be noticed before the next real frame.
+    // `deviceLost` is polled a few lines below the call to this, so
+    // recovery starts in the same `drawFrame`. Only the first wakeup
+    // announces it: attempts between recovery retries would otherwise
+    // log the same removal once per draw interval.
+    if (dev_ptr.removed()) {
+        if (!self.device_lost) self.handleDeviceRemoved();
+        return;
+    }
+    dev_ptr.retirement.collect(dev_ptr.fence.GetCompletedValue());
 }
 
 pub fn drawFrameEnd(self: *DirectX12) void {
@@ -1144,22 +1170,29 @@ pub inline fn beginFrame(
     return frame;
 }
 
+/// Show the last frame again, for a wakeup that produced nothing new.
+/// Nothing to do here, the same as Metal.
+///
+/// Presenting without rendering does not repeat the last frame. `Present`
+/// on a flip-model chain queues the *current back buffer*, which with three
+/// buffers is the one last written three presents ago, so the screen jumps
+/// back to a stale frame (or to whatever an untouched buffer holds, early
+/// on). It also advances the swap chain's back buffer index without the
+/// renderer advancing its own frame state, which leaves the two paired up
+/// differently from then on -- see the note in directx12/Texture.zig about
+/// staging buffers outliving the wait that was supposed to cover them.
+///
+/// Nothing needs the repeat anyway: the frame we last presented stays
+/// composited by DWM until we present another one.
+///
+/// What is lost with it: that Present was the only thing checking for
+/// DXGI_ERROR_DEVICE_REMOVED on a surface with nothing to draw, so a TDR
+/// while the terminal sits idle is now noticed on the first frame after
+/// it rather than within a draw interval of the reset. Every path that
+/// touches the GPU still checks, so nothing is drawn against a lost
+/// device; the loss is only in how early we hear about it.
 pub fn presentLastTarget(self: *DirectX12) !void {
-    // Called when no redraw is needed -- re-present the current frame.
-    // No new GPU work is submitted, so the existing fence values remain
-    // valid and the next beginFrame will wait correctly.
-    if (self.swap_chain3) |sc3| {
-        // Sync interval 1: see drawFrameEnd for the rationale.
-        const hr = sc3.Present(1, 0);
-        if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
-            self.handleDeviceRemoved();
-            return error.PresentFailed;
-        }
-        if (com.FAILED(hr)) {
-            log.err("presentLastTarget failed: 0x{x}", .{@as(u32, @bitCast(hr))});
-            return error.PresentFailed;
-        }
-    }
+    _ = self;
 }
 
 fn handleDeviceRemoved(self: *DirectX12) void {

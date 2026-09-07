@@ -152,9 +152,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells goes into a separate shader.
         cells: cellpkg.Contents,
 
-        /// Set to true after rebuildCells is called. This can be used
-        /// to determine if any possible changes have been made to the
-        /// cells for the draw call.
+        /// Set when an update produced something the last drawn frame does
+        /// not already show: a rebuilt row, a different cursor glyph, or a
+        /// changed uniform. Cleared by the draw that consumes it. An update
+        /// that finds none of that leaves it alone, which is what lets a
+        /// wakeup with no work skip its frame.
         cells_rebuilt: bool = false,
 
         /// The atlas generations we last built cells against. A generation
@@ -192,6 +194,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         custom_shader_failure: ?renderer.CustomShaderFailure = null,
 
         /// The current GPU uniform values.
+        ///
+        /// `updateFrame` snapshots these around its critical section and
+        /// asks for a draw if anything moved, so a write from inside there
+        /// takes care of itself. A write from anywhere else must be paired
+        /// with `markDirty()` (or happen on a frame that resizes, which
+        /// draws regardless), or the new value will sit in this struct with
+        /// nothing on screen to show for it. The current outside writers are
+        /// `changeConfig` and `setFontGrid` (both call `markDirty`) and
+        /// `setScreenSize` plus `drawFrame`'s own resize branch (both only
+        /// run for a geometry change, which draws anyway).
         uniforms: shaderpkg.Uniforms,
 
         /// Custom shader uniform values.
@@ -1799,6 +1811,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // kitty state on every frame because any cell change can move
                 // an image.
                 if (self.images_lost or self.images.kittyRequiresUpdate(state.terminal)) {
+                    // The image state is a channel to the renderer of its
+                    // own: it is not part of grid or screen dirtiness, and
+                    // the placements are only drawn on a frame we decide to
+                    // draw. A client that replaces an image in place with
+                    // the cursor hidden dirties no row and moves no uniform,
+                    // so if we don't ask for the frame here nobody will and
+                    // the new image never appears. `kittyUpdate` clears the
+                    // flag, so read it first.
+                    //
+                    // A lost device counts as a change for the same reason:
+                    // the rebuild below is the only thing that puts the
+                    // images back, and nothing else dirties a row to say so.
+                    //
+                    // Virtual references alone are not a change: they only
+                    // move when a cell moves, and that dirties the rows that
+                    // carry them.
+                    const changed = self.images_lost or
+                        state.terminal.screens.active.kitty_images.dirty;
+
                     // We need to grab the draw mutex since this updates
                     // our image state that drawFrame uses.
                     self.draw_mutex.lockUncancelable(global.io());
@@ -1812,6 +1843,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             .height = self.grid_metrics.cell_height,
                         },
                     );
+                    if (changed) self.cells_rebuilt = true;
                 }
 
                 // Determine which OSC 8 hyperlink cells should be
@@ -1958,6 +1990,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
 
+                // The uniforms are as much of the frame as the cells are,
+                // and some of them change without any row going dirty: OSC
+                // 11 moves the background color, the cursor moves within an
+                // otherwise unchanged screen. Whatever this block leaves
+                // different has to be drawn, so hold on to what we had.
+                const uniforms_before = self.uniforms;
+                defer if (!std.meta.eql(uniforms_before, self.uniforms)) {
+                    self.cells_rebuilt = true;
+                };
+
                 // If an atlas was emptied between frames because it hit its
                 // maximum size, the rows we still hold point into the old
                 // layout and would draw garbage. Rebuild everything, the
@@ -2037,15 +2079,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
                 // state that survives frames.
-                self.images.overlayUpdate(
+                //
+                // Like the kitty state above, the overlay reaches the frame
+                // through the image path rather than through any row, so it
+                // has to ask for the draw itself. On an error nothing was
+                // changed and the overlay is rebuilt next frame anyway.
+                const overlay_changed = self.images.overlayUpdate(
                     self.alloc,
                     self.overlay,
-                ) catch |err| {
+                ) catch |err| overlay: {
                     log.warn("error updating overlay images err={}", .{err});
+                    break :overlay false;
                 };
+                if (overlay_changed) self.cells_rebuilt = true;
 
-                // Update custom shader uniforms that depend on terminal state.
-                self.updateCustomShaderUniformsFromState();
+                // Update custom shader uniforms that depend on terminal
+                // state. These live in their own struct, outside the
+                // comparison above, so they report their own changes.
+                if (self.updateCustomShaderUniformsFromState()) {
+                    self.cells_rebuilt = true;
+                }
             }
 
             // Start the display link now that the rebuilt frame is ready.
@@ -2339,21 +2392,37 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // If our font atlas changed, sync the texture data.
             // Placed after beginFrame so the DX12 command list is available.
+            //
+            // The counter is advanced only once the upload has returned and
+            // said it landed. We now ship the dirty region rather than the
+            // whole atlas, so a sync that never happened is not made good by
+            // the next one: it would carry only what went dirty after it,
+            // leaving the dropped rows stale for as long as the frame state
+            // lives. Leaving the counter where it was is what makes the next
+            // frame try again.
             texture: {
-                const modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
+                const atlas = &self.font_grid.atlas_grayscale;
+                const modified = atlas.modified.load(.monotonic);
                 if (modified <= frame.grayscale_modified) break :texture;
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
-                frame.grayscale_modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
-                try self.syncAtlasTexture(&self.font_grid.atlas_grayscale, &frame.grayscale);
+                const dirty = atlas.dirtySince(frame.grayscale_modified);
+                const synced = atlas.modified.load(.monotonic);
+                if (try syncAtlasTexture(&self.api, atlas, &frame.grayscale, dirty)) {
+                    frame.grayscale_modified = synced;
+                }
             }
             texture: {
-                const modified = self.font_grid.atlas_color.modified.load(.monotonic);
+                const atlas = &self.font_grid.atlas_color;
+                const modified = atlas.modified.load(.monotonic);
                 if (modified <= frame.color_modified) break :texture;
                 self.font_grid.lock.lockSharedUncancelable(global.io());
                 defer self.font_grid.lock.unlockShared(global.io());
-                frame.color_modified = self.font_grid.atlas_color.modified.load(.monotonic);
-                try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
+                const dirty = atlas.dirtySince(frame.color_modified);
+                const synced = atlas.modified.load(.monotonic);
+                if (try syncAtlasTexture(&self.api, atlas, &frame.color, dirty)) {
+                    frame.color_modified = synced;
+                }
             }
 
             // Determine if we can use the custom shader path.  All post-process
@@ -3093,13 +3162,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Update custom shader uniforms that depend on terminal state.
         ///
         /// This should be called in `updateFrame` when terminal state changes.
-        fn updateCustomShaderUniformsFromState(self: *Self) void {
+        ///
+        /// Returns true if any of them moved. A shader with
+        /// `custom-shader-animation = false` has no animation wake to fall
+        /// back on, so a shader that draws from these would otherwise sit on
+        /// a stale frame until something else asked for a draw.
+        fn updateCustomShaderUniformsFromState(self: *Self) bool {
             // We only need to do this if we have custom shaders.
-            if (!self.has_custom_shaders) return;
+            if (!self.has_custom_shaders) return false;
 
             // Only update when terminal state is dirty.
-            if (self.terminal_state.dirty == .false) return;
+            if (self.terminal_state.dirty == .false) return false;
 
+            const before = self.custom_shader_uniforms;
             const uniforms: *shadertoy.Uniforms = &self.custom_shader_uniforms;
             const colors: *const terminal.RenderState.Colors = &self.terminal_state.colors;
 
@@ -3180,6 +3255,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
             uniforms.previous_cursor_style = uniforms.current_cursor_style;
             uniforms.current_cursor_style = @as(i32, @intFromEnum(cursor_style));
+
+            return !std.meta.eql(before, uniforms.*);
         }
 
         /// Update per-frame custom shader uniforms.
@@ -3388,6 +3465,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ) Allocator.Error!void {
             const state: *terminal.RenderState = &self.terminal_state;
 
+            // The cursor glyph coming in. Taken before anything below can
+            // disturb the cell contents, and compared at the end: a blink
+            // or a style change replaces this glyph without dirtying any
+            // row, and it is not covered by the uniforms our caller
+            // watches. Where the cursor is and what color it is are.
+            const cursor_glyph_before = self.cells.getCursorGlyph();
+
             const grid_size_diff =
                 self.cells.size.rows != state.rows or
                 self.cells.size.columns != state.cols;
@@ -3404,6 +3488,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             const rebuild = state.dirty == .full or grid_size_diff;
+
+            // Whether anything about the cells themselves changed. The
+            // cursor is handled separately, at the end.
+            var cells_changed = rebuild;
+
             if (rebuild) {
                 // If we are doing a full rebuild, then we clear the entire cell buffer.
                 self.cells.reset();
@@ -3491,6 +3580,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Unmark the dirty state in our render state.
                 dirty.* = false;
+                cells_changed = true;
 
                 self.rebuildRow(
                     y,
@@ -3666,8 +3756,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            // Update that our cells rebuilt
-            self.cells_rebuilt = true;
+            // Report the rebuild only if it produced something new. A
+            // wakeup that finds no dirty row and leaves the cursor alone
+            // would otherwise draw and present a frame identical to the one
+            // already on screen, and keep the display link running for it.
+            // The flag is only ever raised, never cleared, because a second
+            // rebuild in the same frame must not take back what the first
+            // one found, and because our caller raises it too.
+            if (cells_changed or
+                !std.meta.eql(cursor_glyph_before, self.cells.getCursorGlyph()))
+            {
+                self.cells_rebuilt = true;
+            }
 
             // Log some things
             // log.debug("rebuildCells complete cached_runs={}", .{
@@ -4419,34 +4519,139 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 try self.addUnderline(@intCast(coord.x + 1), @intCast(coord.y), .single, screen_fg, 255);
             }
         }
-
-        /// Sync the atlas data to the given texture. This copies the bytes
-        /// associated with the atlas to the given texture. If the atlas no
-        /// longer fits into the texture, the texture will be resized.
-        fn syncAtlasTexture(
-            self: *const Self,
-            atlas: *const font.Atlas,
-            texture: *Texture,
-        ) !void {
-            // DX12 rotates command lists across triple-buffered frames.
-            // Update the texture to use the current frame's command list
-            // before any upload or resize operation. Metal and OpenGL use
-            // immediate uploads so they don't need this.
-            if (@hasDecl(GraphicsAPI, "updateTextureCommandList")) {
-                self.api.updateTextureCommandList(texture);
-            }
-
-            if (atlas.size > texture.width) {
-                // Free our old texture
-                texture.*.deinit();
-
-                // Reallocate
-                texture.* = try self.api.initAtlasTexture(atlas);
-            }
-
-            try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
-        }
     };
+}
+
+/// Whether `texture` has a dropped upload on record.
+///
+/// DX12's `replaceRegion` cannot fail -- it shares a signature with
+/// Metal's, which cannot either -- so it swallows staging-buffer failures
+/// and marks the texture instead. Backends that have no way to drop an
+/// upload never report one.
+fn atlasUploadDropped(texture: anytype) bool {
+    if (!@hasField(@TypeOf(texture.*), "upload_dropped")) return false;
+    return texture.upload_dropped;
+}
+
+/// `atlasUploadDropped`, clearing the record. `replaceRegion` only ever
+/// sets it, so every sync starts by taking what the last one left behind:
+/// a record left standing would make each later sync report a drop it did
+/// not have, and the caller's counter would never advance again.
+fn takeAtlasUploadDropped(texture: anytype) bool {
+    if (!@hasField(@TypeOf(texture.*), "upload_dropped")) return false;
+    return texture.takeUploadDropped();
+}
+
+/// Sync the atlas data to the given texture. If the atlas no longer fits
+/// into the texture, the texture is reallocated and the whole atlas copied
+/// into it; otherwise only `dirty` is copied.
+///
+/// `dirty` is what the atlas says this texture is missing, from
+/// `font.Atlas.dirtySince`; null means the atlas has nothing to offer it.
+/// That is not the same as the texture holding everything -- a sync that
+/// dropped an upload lost rows the atlas has already handed over.
+///
+/// Returns whether the texture now holds everything it was given. A false
+/// return means the caller must not advance its upload counter: the atlas
+/// stops reporting a region as dirty once it has been handed over, so a
+/// counter advanced over bytes that never arrived leaves them stale for as
+/// long as this texture lives.
+///
+/// A texture that dropped an upload gets the same dirty band as anyone
+/// else next time: not advancing the counter is enough on its own. Since
+/// the counter stayed put, `dirtySince` either hands back a box that has
+/// only grown by union over the rows that went missing, or -- if the box
+/// restarted, which raises `dirty_base` above a counter we did not
+/// advance -- the whole atlas. Escalating to a full upload instead would
+/// ask for the largest upload the atlas can produce at exactly the moment
+/// a staging buffer allocation has just failed, which is the request most
+/// likely to fail again and to keep re-arming itself.
+///
+/// Caller must hold the font grid's read lock.
+fn syncAtlasTexture(
+    api: anytype,
+    atlas: *const font.Atlas,
+    texture: anytype,
+    dirty: ?font.Atlas.Region,
+) !bool {
+    // DX12 rotates command lists across triple-buffered frames.
+    // Update the texture to use the current frame's command list
+    // before any upload or resize operation. Metal and OpenGL use
+    // immediate uploads so they don't need this.
+    if (@hasDecl(@TypeOf(api.*), "updateTextureCommandList")) {
+        api.updateTextureCommandList(texture);
+    }
+
+    // Clear whatever the last sync left behind, so that what this one
+    // reports describes this one. The record is still worth keeping: it
+    // says this texture is missing rows nobody has re-offered yet.
+    const dropped_before = takeAtlasUploadDropped(texture);
+
+    if (atlas.size > texture.width) {
+        // A grown texture is empty, so it needs the whole atlas no matter
+        // how little the caller asked for.
+        try replaceAtlasTexture(api, atlas, texture);
+        try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
+        return !atlasUploadDropped(texture);
+    }
+
+    // Nothing dirty means the atlas has nothing this texture is missing --
+    // unless the last sync dropped an upload, in which case it is missing
+    // exactly what that one lost and the atlas has not been asked for it
+    // again. Reporting synced would advance the caller's counter over
+    // those rows, which is the one thing this function exists to prevent.
+    // Reporting not-synced keeps the counter back, so the next change to
+    // the atlas hands `dirtySince` a consumer that is behind and it
+    // re-offers them.
+    //
+    // Today's callers never reach this with a standing record: they only
+    // call in when `atlas.modified` is ahead of their counter, and
+    // `dirtySince` is null only when it is not. That is their invariant,
+    // not one this function can see, so it does not lean on it.
+    const region = dirty orelse return !dropped_before;
+
+    // `replaceRegion` takes tightly packed rows and has no source
+    // stride, so the narrowest thing we can hand it without copying
+    // the region out first is the full-width band of rows the dirty
+    // box spans, which is already a slice of the atlas data. The
+    // columns outside the box come along for the ride; they hold
+    // what the texture holds, so re-uploading them changes nothing.
+    const stride: usize = @as(usize, atlas.size) * atlas.format.depth();
+    const start: usize = @as(usize, region.y) * stride;
+    const len: usize = @as(usize, region.height) * stride;
+    try texture.replaceRegion(
+        0,
+        region.y,
+        atlas.size,
+        region.height,
+        atlas.data[start..][0..len],
+    );
+    return !atlasUploadDropped(texture);
+}
+
+/// Point `texture` at a freshly allocated texture sized for `atlas`,
+/// giving up the one it held.
+///
+/// The new texture is created before the old one is released, so that a
+/// creation failure leaves `texture.*` holding a texture that still owns
+/// its resource. Releasing first would leave it holding a released one,
+/// and since a failed grow does not advance the atlas modified counter,
+/// the next frame syncs the same texture again and releases it a second
+/// time -- on DX12 that double-releases the GPU resource and returns its
+/// descriptor slots to the heap twice.
+///
+/// This ordering is also what keeps the backends interchangeable: DX12's
+/// Texture has an all-defaults zero value that deinits to nothing, but
+/// Metal's and OpenGL's wrap a bare handle with no such value, so there is
+/// no "invalid texture" to park in `texture.*` on the error path.
+fn replaceAtlasTexture(
+    api: anytype,
+    atlas: *const font.Atlas,
+    texture: anytype,
+) !void {
+    const new_texture = try api.initAtlasTexture(atlas);
+    texture.deinit();
+    texture.* = new_texture;
 }
 
 /// Whether the post-process custom shader path can be used for a frame.
@@ -4760,6 +4965,331 @@ test "AbandonReason: every reason completes the log sentence" {
     for (std.enums.values(AbandonReason)) |reason| {
         try std.testing.expect(reason.text().len > 0);
     }
+}
+
+/// Backing store for the fake API and textures below. Release is tracked
+/// per texture id so a second release of the same texture is observable
+/// instead of being the silent GPU corruption it is in production.
+const TestAtlasTextures = struct {
+    fail_next: bool = false,
+    next_id: usize = 0,
+    released: [8]bool = @splat(false),
+    double_release: bool = false,
+
+    /// Makes the next `replaceRegion` behave the way DX12's does when a
+    /// staging buffer cannot be allocated: it copies nothing and says
+    /// nothing, leaving the record behind on the texture.
+    drop_next_upload: bool = false,
+
+    /// The last region handed to `replaceRegion`, and how many times it
+    /// has been called at all.
+    uploads: usize = 0,
+    last_y: usize = 0,
+    last_height: usize = 0,
+};
+
+/// Stands in for a backend `Texture`, modelling the two things
+/// `syncAtlasTexture` needs from one: a size to compare the atlas
+/// against, and an upload that can quietly drop what it was given.
+const TestAtlasTexture = struct {
+    store: *TestAtlasTextures,
+    id: usize,
+    width: usize,
+    upload_dropped: bool = false,
+
+    fn deinit(self: TestAtlasTexture) void {
+        if (self.store.released[self.id]) {
+            self.store.double_release = true;
+            return;
+        }
+        self.store.released[self.id] = true;
+    }
+
+    fn replaceRegion(
+        self: *TestAtlasTexture,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        data: []const u8,
+    ) error{}!void {
+        _ = x;
+        _ = width;
+        _ = data;
+        self.store.uploads += 1;
+        if (self.store.drop_next_upload) {
+            self.store.drop_next_upload = false;
+            self.upload_dropped = true;
+            return;
+        }
+        self.store.last_y = y;
+        self.store.last_height = height;
+    }
+
+    fn takeUploadDropped(self: *TestAtlasTexture) bool {
+        defer self.upload_dropped = false;
+        return self.upload_dropped;
+    }
+};
+
+/// Stands in for a `GraphicsAPI`, with a const self like all three real
+/// ones so the call in `replaceAtlasTexture` binds the same way.
+const TestAtlasApi = struct {
+    store: *TestAtlasTextures,
+
+    fn initAtlasTexture(
+        self: *const TestAtlasApi,
+        atlas: *const font.Atlas,
+    ) !TestAtlasTexture {
+        if (self.store.fail_next) return error.TextureCreateFailed;
+        defer self.store.next_id += 1;
+        return .{
+            .store = self.store,
+            .id = self.store.next_id,
+            .width = atlas.size,
+        };
+    }
+};
+
+/// A 4x4 grayscale atlas with real backing bytes, for the sync tests
+/// below (the `replaceAtlasTexture` tests never touch the data).
+fn testSyncAtlas(data: []u8, size: u32) font.Atlas {
+    return .{ .data = data, .size = size, .format = .grayscale };
+}
+
+const test_atlas: font.Atlas = .{
+    .data = undefined,
+    .size = 1,
+    .format = .grayscale,
+};
+
+test "replaceAtlasTexture: a failed grow keeps the texture it had" {
+    // Regression: the grow path used to release the old texture before
+    // asking for the new one. On the error path `texture.*` was left
+    // holding the released value, so the next sync -- the very next frame,
+    // since a failed grow does not advance the atlas modified counter --
+    // released it a second time. On DX12 that double-releases the GPU
+    // resource and hands the same SRV descriptor slots back twice.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var texture = try api.initAtlasTexture(&test_atlas);
+
+    store.fail_next = true;
+    try std.testing.expectError(
+        error.TextureCreateFailed,
+        replaceAtlasTexture(&api, &test_atlas, &texture),
+    );
+
+    // The texture we still hold must still own its resource: it is what
+    // the renderer keeps drawing from until a later grow succeeds.
+    try std.testing.expect(!store.released[texture.id]);
+
+    // And tearing the frame state down now must be that texture's first
+    // release, not its second.
+    texture.deinit();
+    try std.testing.expect(!store.double_release);
+}
+
+test "replaceAtlasTexture: a successful grow releases the old texture once" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var texture = try api.initAtlasTexture(&test_atlas);
+    const old_id = texture.id;
+
+    try replaceAtlasTexture(&api, &test_atlas, &texture);
+
+    try std.testing.expect(texture.id != old_id);
+    try std.testing.expect(store.released[old_id]);
+    try std.testing.expect(!store.released[texture.id]);
+    try std.testing.expect(!store.double_release);
+}
+
+test "replaceAtlasTexture: repeated failed grows never double release" {
+    // The failure is not one-shot: a device that cannot create the bigger
+    // texture usually cannot create it on the next frame either, and the
+    // renderer retries every frame for as long as that lasts.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var texture = try api.initAtlasTexture(&test_atlas);
+
+    store.fail_next = true;
+    for (0..5) |_| {
+        try std.testing.expectError(
+            error.TextureCreateFailed,
+            replaceAtlasTexture(&api, &test_atlas, &texture),
+        );
+    }
+    try std.testing.expect(!store.double_release);
+    try std.testing.expect(!store.released[texture.id]);
+}
+
+test "syncAtlasTexture: a clean band upload ships only the band and reports synced" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 1,
+        .width = 4,
+        .height = 2,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), store.last_y);
+    try std.testing.expectEqual(@as(usize, 2), store.last_height);
+}
+
+test "syncAtlasTexture: a dropped upload is not reported as synced" {
+    // Regression: DX12's replaceRegion swallows staging-buffer failures to
+    // keep a signature Metal can implement, so a sync that copied nothing
+    // still returned cleanly. The caller advanced its upload counter over
+    // rows the texture never received, and since only the region that goes
+    // dirty afterwards is ever shipped, they stayed stale for the life of
+    // that frame state.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 1,
+        .width = 4,
+        .height = 2,
+    }));
+}
+
+test "syncAtlasTexture: the sync after a dropped upload ships the band, not the whole atlas" {
+    // `replaceRegion` drops an upload when a staging buffer cannot be
+    // allocated. Answering that with the largest upload the atlas can
+    // produce -- 256 MiB grayscale at the 16384 ceiling -- asks the
+    // allocation that just failed to succeed at a hundred times the size,
+    // and each failure sets the record again. The caller not advancing
+    // its counter is what repairs the drop: the box it gets back next
+    // time still covers the rows that went missing.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    _ = try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 1,
+    });
+
+    // What the caller comes back with, having left its counter alone.
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 2,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), store.last_y);
+    try std.testing.expectEqual(@as(usize, 2), store.last_height);
+}
+
+test "syncAtlasTexture: a drop does not stick to the texture" {
+    // The record is set by `replaceRegion` and never cleared there. A sync
+    // that did not clear it before uploading would report every later
+    // clean upload as dropped too, and the caller's counter would never
+    // advance again.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 1,
+    }));
+
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 1,
+    }));
+    try std.testing.expect(!texture.upload_dropped);
+}
+
+test "syncAtlasTexture: nothing dirty means no upload at all" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    try std.testing.expect(try syncAtlasTexture(&api, &atlas, &texture, null));
+    try std.testing.expectEqual(@as(usize, 0), store.uploads);
+}
+
+test "syncAtlasTexture: nothing dirty after a dropped upload is not synced" {
+    // The early return for a null `dirty` used to answer "synced" without
+    // looking at what the previous sync left on the texture, so a standing
+    // drop record was taken, thrown away, and reported as success -- the
+    // caller would then advance its counter over rows that never arrived.
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var data: [16]u8 = @splat(0);
+    const atlas = testSyncAtlas(&data, 4);
+    var texture = try api.initAtlasTexture(&atlas);
+
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, .{
+        .x = 0,
+        .y = 0,
+        .width = 4,
+        .height = 1,
+    }));
+
+    // The record from that sync is still standing, and the atlas is now
+    // offering nothing. The texture is still short those rows.
+    try std.testing.expect(!try syncAtlasTexture(&api, &atlas, &texture, null));
+    try std.testing.expectEqual(@as(usize, 1), store.uploads);
+}
+
+test "syncAtlasTexture: a grow ships the whole atlas into the new texture" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var small: [4]u8 = @splat(0);
+    const before = testSyncAtlas(&small, 2);
+    var texture = try api.initAtlasTexture(&before);
+
+    var data: [16]u8 = @splat(0);
+    const after = testSyncAtlas(&data, 4);
+    try std.testing.expect(try syncAtlasTexture(&api, &after, &texture, .{
+        .x = 0,
+        .y = 3,
+        .width = 4,
+        .height = 1,
+    }));
+    try std.testing.expectEqual(@as(usize, 4), texture.width);
+    try std.testing.expectEqual(@as(usize, 0), store.last_y);
+    try std.testing.expectEqual(@as(usize, 4), store.last_height);
+}
+
+test "syncAtlasTexture: a grow whose upload is dropped is not reported as synced" {
+    var store: TestAtlasTextures = .{};
+    const api: TestAtlasApi = .{ .store = &store };
+    var small: [4]u8 = @splat(0);
+    const before = testSyncAtlas(&small, 2);
+    var texture = try api.initAtlasTexture(&before);
+
+    var data: [16]u8 = @splat(0);
+    const after = testSyncAtlas(&data, 4);
+    store.drop_next_upload = true;
+    try std.testing.expect(!try syncAtlasTexture(&api, &after, &texture, null));
 }
 
 test "customShaderUsable: no custom shader state means no custom shader path" {
