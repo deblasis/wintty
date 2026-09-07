@@ -2211,6 +2211,18 @@ pub const Application = extern struct {
 
     pub fn openUrlFallback(self: *Application, kind: apprt.action.OpenUrl.Kind, url: []const u8) void {
         _ = self;
+        // This apprt has no policy of its own (unlike macOS's graded
+        // allow/confirm/block prompt), so the scheme allow-list is the
+        // only thing standing between an untrusted target and the OS's
+        // default-verb opener.
+        if (!internal_os.isUrlAllowed(kind, url)) {
+            log.warn("refusing to open untrusted url kind={t} url={s}", .{
+                kind,
+                url,
+            });
+            return;
+        }
+
         // Fallback to the minimal cross-platform way of opening a URL.
         // This is always a safe fallback and enables for example Windows
         // to open URLs (GTK on Windows via WSL is a thing).
