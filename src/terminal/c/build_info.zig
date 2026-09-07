@@ -51,11 +51,13 @@ pub fn get(
         };
     }
 
+    const out_ptr = out orelse return .invalid_value;
+
     return switch (data) {
         .invalid => .invalid_value,
         inline else => |comptime_data| getTyped(
             comptime_data,
-            @ptrCast(@alignCast(out)),
+            @ptrCast(@alignCast(out_ptr)),
         ),
     };
 }
@@ -173,4 +175,8 @@ test "get version_build" {
 
 test "get invalid" {
     try std.testing.expectEqual(Result.invalid_value, get(.invalid, null));
+}
+
+test "get rejects a null out pointer" {
+    try std.testing.expectEqual(Result.invalid_value, get(.simd, null));
 }

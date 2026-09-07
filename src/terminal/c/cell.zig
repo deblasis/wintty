@@ -116,12 +116,14 @@ pub fn get(
         };
     }
 
+    const out_ptr = out orelse return .invalid_value;
+
     return switch (data) {
         .invalid => .invalid_value,
         inline else => |comptime_data| getTyped(
             cell_,
             comptime_data,
-            @ptrCast(@alignCast(out)),
+            @ptrCast(@alignCast(out_ptr)),
         ),
     };
 }
@@ -241,4 +243,9 @@ test "get_multi null values returns invalid_value" {
     const cell: CCell = @bitCast(Cell.init('A'));
     const keys = [_]CellData{.codepoint};
     try testing.expectEqual(Result.invalid_value, get_multi(cell, 1, &keys, null, null));
+}
+
+test "get rejects a null out pointer" {
+    const cell: CCell = @bitCast(Cell.init('A'));
+    try testing.expectEqual(Result.invalid_value, get(cell, .codepoint, null));
 }

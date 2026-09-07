@@ -73,12 +73,14 @@ pub fn get(
         };
     }
 
+    const out_ptr = out orelse return .invalid_value;
+
     return switch (data) {
         .invalid => .invalid_value,
         inline else => |comptime_data| getTyped(
             row_,
             comptime_data,
-            @ptrCast(@alignCast(out)),
+            @ptrCast(@alignCast(out_ptr)),
         ),
     };
 }
@@ -190,4 +192,11 @@ test "get_multi null keys returns invalid_value" {
     var wrap: bool = false;
     var values = [_]?*anyopaque{@ptrCast(&wrap)};
     try testing.expectEqual(Result.invalid_value, get_multi(row_val, 1, null, &values, null));
+}
+
+test "get rejects a null out pointer" {
+    var zig_row: Row = @bitCast(@as(u64, 0));
+    zig_row.wrap = true;
+    const row: CRow = @bitCast(zig_row);
+    try testing.expectEqual(Result.invalid_value, get(row, .wrap, null));
 }
