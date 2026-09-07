@@ -237,6 +237,14 @@ inline fn unpackSize(packed_size: u64) struct { width: u32, height: u32 } {
 
 // --- GraphicsAPI contract: functions ---
 
+/// Detected via @hasDecl by App.zig and run on a background thread at app
+/// startup, well before the first surface's initGpu needs a device. Thin
+/// forwarder so the actual D3D12 warmup work (see device.zig) stays next
+/// to the code it warms.
+pub fn warmup() void {
+    device.warmup();
+}
+
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
     var result = DirectX12{ .allocator = alloc, .init_started = opts.init_started };
 
@@ -704,6 +712,10 @@ pub fn recoverDevice(self: *DirectX12) !void {
     if (surface == .shared_texture) {
         surface.shared_texture = .{ .width = width, .height = height };
     }
+
+    // A warm reference still parked from warmup() would pin the removed
+    // singleton and make initGpu's D3D12CreateDevice return it again.
+    device.dropWarmDevice();
 
     // Unconditional: with no device this sweeps whatever a failed
     // attempt built before it stopped.

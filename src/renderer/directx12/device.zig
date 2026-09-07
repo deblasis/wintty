@@ -27,8 +27,153 @@ const FAILED = com.FAILED;
 
 const log = std.log.scoped(.directx12);
 
+/// Same scope as `Surface.zig`'s and `DirectX12.zig`'s `init_log`; shared
+/// name (not a shared declaration) so the C# host's log bridge files every
+/// `surface_init` phase, whichever module logs it, under one
+/// `Ghostty.Zig.surface_init` category.
+const init_log = std.log.scoped(.surface_init);
+
 /// Number of back buffers (triple buffering).
 pub const frame_count: u32 = 3;
+
+// --- Warmup: process-wide warm device handoff ---
+//
+// D3D12 devices are singletons per adapter per process: D3D12CreateDevice
+// returns the existing device (AddRef'd) while any reference to it is
+// alive anywhere in the process, and costs 1.2-2.0s cold vs ~1ms once
+// warm. `warmup()` pays that cost on a background thread at app startup
+// (see App.zig's renderer.Renderer.API.warmup hook and DirectX12.zig's
+// forwarder) so the UI thread's first `Device.init` -- which otherwise
+// eats almost all of Surface.init's ~440ms of ~520ms measured cost --
+// finds the singleton already warm.
+//
+// The warmup device is deliberately never released by `warmup()` itself:
+// releasing the only reference throws the warm state away and the next
+// create pays the full cost again. Ownership transfers to the first real
+// `Device.init` instead, which takes this slot's reference right after
+// its own D3D12CreateDevice call succeeds (see there for why the order
+// matters) and releases it once. A reference that lands after the last
+// surface is gone stays parked until process exit on purpose: it keeps
+// the singleton warm, and a live-object report at shutdown will show it.
+
+/// Guards `warm_device` for cross-thread handoff: `warmup()`'s background
+/// thread stores, `Device.init` on the UI thread takes. Same primitive as
+/// `shared_texture_mutex` above.
+var warm_device_mutex: std.Io.Mutex = .init;
+
+/// Populated by `warmup()`, consumed exactly once by `takeWarmDevice()`.
+var warm_device: ?*d3d12.ID3D12Device = null;
+
+/// Create a D3D12 device ahead of time and park it in `warm_device` for
+/// the first real `Device.init` to pick up. Safe to call from any thread;
+/// never panics, logs and returns on any failure so a warmup problem
+/// never blocks the real (synchronous, on-the-critical-path) device
+/// creation that follows it.
+pub fn warmup() void {
+    const started: std.Io.Timestamp = .now(global.io(), .awake);
+
+    // Must match Device.init: the debug layer can only be enabled before
+    // the first device is created in the process, so if warmup creates
+    // that first device it has to turn the layer on itself, or the real
+    // device created later would silently inherit a layer-less singleton.
+    if (comptime builtin.mode == .Debug) {
+        enableDebugLayer();
+    }
+
+    const factory_flags: u32 = if (comptime builtin.mode == .Debug)
+        dxgi.DXGI_CREATE_FACTORY_DEBUG
+    else
+        0;
+
+    var factory: ?*dxgi.IDXGIFactory2 = null;
+    {
+        const hr = dxgi.CreateDXGIFactory2(
+            factory_flags,
+            &dxgi.IDXGIFactory2.IID,
+            @ptrCast(&factory),
+        );
+        if (FAILED(hr)) {
+            log.warn("warmup: CreateDXGIFactory2 failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return;
+        }
+    }
+    defer _ = factory.?.Release();
+
+    var device: ?*d3d12.ID3D12Device = null;
+    {
+        const hr = d3d12.D3D12CreateDevice(
+            null,
+            d3d12.D3D_FEATURE_LEVEL_12_0,
+            &d3d12.ID3D12Device.IID,
+            @ptrCast(&device),
+        );
+        if (FAILED(hr)) {
+            log.warn("warmup: D3D12CreateDevice failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return;
+        }
+    }
+    const dev = device.?;
+
+    // The first command queue created on a device pays extra one-time
+    // driver setup cost; create and release one now so it's not paid
+    // again by the real command queue Device.init creates later. Same
+    // rationale as Metal.warmup's throwaway command queue.
+    {
+        const desc = d3d12.D3D12_COMMAND_QUEUE_DESC{
+            .Type = .DIRECT,
+            .Priority = 0,
+            .Flags = .NONE,
+            .NodeMask = 0,
+        };
+        var queue: ?*d3d12.ID3D12CommandQueue = null;
+        const hr = dev.CreateCommandQueue(
+            &desc,
+            &d3d12.ID3D12CommandQueue.IID,
+            @ptrCast(&queue),
+        );
+        if (SUCCEEDED(hr)) {
+            _ = queue.?.Release();
+        } else {
+            log.warn("warmup: CreateCommandQueue failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+        }
+    }
+
+    // Keep the reference alive: store it for Device.init to take. Do not
+    // release `dev` here (see the section doc comment above). A reference
+    // already parked (a second warmup in the same process) is released
+    // rather than overwritten, so the slot never hides a lost AddRef.
+    warm_device_mutex.lockUncancelable(global.io());
+    if (warm_device) |prev| {
+        log.warn("warmup: slot already held a device, releasing the older one", .{});
+        _ = prev.Release();
+    }
+    warm_device = dev;
+    warm_device_mutex.unlock(global.io());
+
+    init_log.info(
+        "surface_init warmup-device done +{d} ms",
+        .{started.untilNow(global.io(), .awake).toMilliseconds()},
+    );
+}
+
+/// Take and clear the warm device slot, if populated. Called by
+/// `Device.init` right after its own D3D12CreateDevice succeeds.
+fn takeWarmDevice() ?*d3d12.ID3D12Device {
+    warm_device_mutex.lockUncancelable(global.io());
+    defer warm_device_mutex.unlock(global.io());
+    const dev = warm_device;
+    warm_device = null;
+    return dev;
+}
+
+/// Release a still-parked warm reference, if any. Device.init calls this
+/// right after its own create succeeds (the handoff); device recovery
+/// calls it before tearing the lost device down, because a parked
+/// reference to a removed device would keep the singleton alive and make
+/// the recovery's D3D12CreateDevice hand the removed device straight back.
+pub fn dropWarmDevice() void {
+    if (takeWarmDevice()) |warm| _ = warm.Release();
+}
 
 // --- Device state ---
 
@@ -259,6 +404,15 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     errdefer _ = device.?.Release();
 
     const dev = device.?;
+
+    // Handoff: `dev` above is either a fresh device or (if warmup() won
+    // the race) the same singleton object warmup's D3D12CreateDevice
+    // call already returned, AddRef'd again for `dev`. Either way `dev`
+    // now holds a reference, so it is safe to drop warmup's -- taking it
+    // here, right after `dev` is established rather than before, is what
+    // keeps the singleton's refcount from ever touching zero in between.
+    // A no-op if warmup never ran or hasn't finished yet.
+    dropWarmDevice();
 
     // -- Command queue --
     var command_queue: ?*d3d12.ID3D12CommandQueue = null;
@@ -828,4 +982,19 @@ test "Device struct fields" {
 
 test "frame_count is 3" {
     try std.testing.expectEqual(@as(u32, 3), frame_count);
+}
+
+test "warm device slot: take clears it, empty take returns null" {
+    // Exercises the handoff bookkeeping without touching D3D: park a
+    // never-dereferenced pointer directly in the module-level slot, the
+    // same way warmup() would, and confirm takeWarmDevice hands it back
+    // exactly once and leaves the slot empty for the next caller.
+    var fake: d3d12.ID3D12Device = undefined;
+
+    warm_device_mutex.lockUncancelable(global.io());
+    warm_device = &fake;
+    warm_device_mutex.unlock(global.io());
+
+    try std.testing.expectEqual(@as(?*d3d12.ID3D12Device, &fake), takeWarmDevice());
+    try std.testing.expectEqual(@as(?*d3d12.ID3D12Device, null), takeWarmDevice());
 }
