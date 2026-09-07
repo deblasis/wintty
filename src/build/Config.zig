@@ -258,17 +258,18 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "embed-emoji-font",
         "Embed the Noto emoji fonts (about 11MB) for systems that have no " ++
             "emoji font of their own. A system emoji font found through font " ++
-            "discovery is preferred either way, so platforms that always have " ++
-            "one never pay for this. Turning it off makes such a system render " ++
-            "emoji as boxes. Defaults off on Windows.",
-    ) orelse switch (target.result.os.tag) {
-        // Segoe UI Emoji is an OS component, and the discovery pass finds
-        // it on every stock image, so on Windows the embed is 11MB that is
-        // compiled in and never read. Passing the option turns it back on
-        // for an image that has had the font stripped out.
-        .windows => false,
-        else => true,
-    };
+            "discovery is preferred either way, so a system that has one never " ++
+            "pays for this. Defaults off: turn it on for a build that has to " ++
+            "cover an image with no emoji font at all.",
+    ) orelse false;
+    // Off by default on every target. The fallback here is the *operating
+    // system's* emoji font, not a bundled one: none of the faces we ship
+    // (JetBrains Mono, the Nerd Font symbols, and the alternates) contains
+    // emoji, so the only emoji faces in the tree are the two Noto files this
+    // option controls. That is fine where the OS always supplies one --
+    // Segoe UI Emoji on Windows and Apple Color Emoji on macOS are both OS
+    // components that cannot be removed. A Linux image with no emoji font
+    // installed is the case that renders boxes, and is why the option exists.
 
     config.wayland = b.option(
         bool,
