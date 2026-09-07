@@ -73,6 +73,15 @@ pub const ImageStorage = struct {
     const ImageMap = std.AutoHashMapUnmanaged(u32, Image);
     const PlacementMap = std.AutoHashMapUnmanaged(PlacementKey, Placement);
 
+    /// Maximum number of placements a storage will hold, and the maximum
+    /// number that may reference a single image. A placement holds no
+    /// image bytes, so the byte budget doesn't limit them at all; without
+    /// these a client can spend unbounded memory on display commands for
+    /// one tiny image. The values are far above what a screen can usefully
+    /// show at once.
+    const max_placements = 4096;
+    const max_placements_per_image = 1024;
+
     /// Dirty is set to true if placements or images change. This is
     /// purely informational for the renderer and doesn't affect the
     /// correctness of the program. The renderer must set this to false
@@ -402,14 +411,13 @@ pub const ImageStorage = struct {
             gop.value_ptr.deinit(s);
         } else {
             const img = self.images.getPtr(image_id).?;
-            img.metadata.placement_count = std.math.add(
-                @TypeOf(img.metadata.placement_count),
-                img.metadata.placement_count,
-                1,
-            ) catch {
+            if (self.placements.count() > max_placements or
+                img.metadata.placement_count >= max_placements_per_image)
+            {
                 self.placements.removeByPtr(gop.key_ptr);
                 return error.OutOfMemory;
-            };
+            }
+            img.metadata.placement_count += 1;
         }
         gop.value_ptr.* = p;
 
@@ -2248,6 +2256,82 @@ test "storage: placement count limit permits replacement" {
         s.addPlacement(io, alloc, t.screens.active, 1, 2, .{ .location = .{ .virtual = {} } }),
     );
     try testing.expectEqual(@as(usize, 1), s.placements.count());
+}
+
+test "storage: placements for one image are capped" {
+    const testing = std.testing;
+    const io = testing.io;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(io, alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+    try s.addImage(io, alloc, t.screens.active, .{ .id = 1 });
+
+    const cap = ImageStorage.max_placements_per_image;
+    for (0..cap) |i| try s.addPlacement(
+        io,
+        alloc,
+        t.screens.active,
+        1,
+        @intCast(i + 1),
+        .{ .location = .{ .virtual = {} } },
+    );
+
+    try testing.expectError(error.OutOfMemory, s.addPlacement(
+        io,
+        alloc,
+        t.screens.active,
+        1,
+        cap + 1,
+        .{ .location = .{ .virtual = {} } },
+    ));
+    try testing.expectEqual(@as(usize, cap), s.placements.count());
+}
+
+test "storage: placements across images are capped" {
+    const testing = std.testing;
+    const io = testing.io;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(io, alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+
+    // Enough images to reach the total cap without any one of them
+    // reaching the per-image cap, plus one more to place onto.
+    const cap = ImageStorage.max_placements;
+    const per_image = ImageStorage.max_placements_per_image;
+    const image_count = cap / per_image;
+    for (1..image_count + 2) |id| try s.addImage(
+        io,
+        alloc,
+        t.screens.active,
+        .{ .id = @intCast(id) },
+    );
+    for (1..image_count + 1) |id| {
+        for (0..per_image) |i| try s.addPlacement(
+            io,
+            alloc,
+            t.screens.active,
+            @intCast(id),
+            @intCast(i + 1),
+            .{ .location = .{ .virtual = {} } },
+        );
+    }
+    try testing.expectEqual(@as(usize, cap), s.placements.count());
+
+    try testing.expectError(error.OutOfMemory, s.addPlacement(
+        io,
+        alloc,
+        t.screens.active,
+        image_count + 1,
+        1,
+        .{ .location = .{ .virtual = {} } },
+    ));
+    try testing.expectEqual(@as(usize, cap), s.placements.count());
 }
 
 test "storage: delete all visible placements and matching images" {
