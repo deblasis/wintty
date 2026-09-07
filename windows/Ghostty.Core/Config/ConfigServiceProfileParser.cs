@@ -19,7 +19,10 @@ public static class ConfigServiceProfileParser
     /// <paramref name="fileValueReader"/> delegate is a thin adapter
     /// over <c>ConfigService</c>'s existing <c>GetFileValue</c>
     /// helper: it returns the last raw value for a key, or
-    /// <see langword="null"/> when the key is absent.
+    /// <see langword="null"/> when the key is absent. Has no production
+    /// caller since <c>ConfigService.ReadFlagsCore</c> reads the ini
+    /// cache; kept as the reference implementation the pairs overload is
+    /// tested against and as the simpler fixture API for tests.
     /// </summary>
     public static ProfileView ParseAll(
         string configText,
@@ -30,7 +33,38 @@ public static class ConfigServiceProfileParser
 
         var parsed = ProfileSourceParser.Parse(configText);
         var hidden = ProfileSourceParser.ExtractHiddenIds(configText);
+        var hiddenMentions = ProfileSourceParser.ExtractHiddenMentionIds(configText);
 
+        return BuildView(parsed, hidden, hiddenMentions, fileValueReader);
+    }
+
+    /// <summary>
+    /// Same result as <see cref="ParseAll(string, Func{string, string?})"/>,
+    /// built from the config-file cache <c>ConfigService.ReadFlags</c>
+    /// already populated (<see cref="ConfigIniFile.Load"/>'s shape), instead
+    /// of a second raw-text read of the same file. Callers on the hot path
+    /// (<c>ConfigService.ReadFlagsCore</c>) should prefer this overload.
+    /// </summary>
+    public static ProfileView ParseAll(
+        IReadOnlyDictionary<string, List<string>> configPairs,
+        Func<string, string?> fileValueReader)
+    {
+        ArgumentNullException.ThrowIfNull(configPairs);
+        ArgumentNullException.ThrowIfNull(fileValueReader);
+
+        var parsed = ProfileSourceParser.Parse(configPairs);
+        var hidden = ProfileSourceParser.ExtractHiddenIds(configPairs);
+        var hiddenMentions = ProfileSourceParser.ExtractHiddenMentionIds(configPairs);
+
+        return BuildView(parsed, hidden, hiddenMentions, fileValueReader);
+    }
+
+    private static ProfileView BuildView(
+        ProfileParseResult parsed,
+        IReadOnlySet<string> hidden,
+        IReadOnlySet<string> hiddenMentions,
+        Func<string, string?> fileValueReader)
+    {
         var defaultId = fileValueReader("default-profile");
         if (string.IsNullOrEmpty(defaultId)) defaultId = null;
 
@@ -43,7 +77,6 @@ public static class ConfigServiceProfileParser
         // markers, not malformed definitions; the un-hide path of the
         // settings-page toggle writes hidden = false, so filtering only
         // on the true-set would leak false-positive warnings.
-        var hiddenMentions = ProfileSourceParser.ExtractHiddenMentionIds(configText);
         var warnings = FilterHiddenOnlyWarnings(parsed.Warnings, parsed.Profiles, hiddenMentions);
 
         return new ProfileView(

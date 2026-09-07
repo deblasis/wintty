@@ -1,3 +1,4 @@
+using Ghostty.Core.Config;
 using Ghostty.Core.Profiles;
 using Xunit;
 
@@ -132,6 +133,100 @@ public sealed class ProfileSourceParserHiddenIdsTests
     {
         const string text = "profile.azure.name = Azure";
         var result = ProfileSourceParser.ExtractHiddenMentionIds(text);
+        Assert.Empty(result);
+    }
+
+    // -- ExtractHiddenIds/ExtractHiddenMentionIds(pairs cache) ----------
+
+    [Fact]
+    public void ExtractHiddenIds_Pairs_HiddenTrue_ReturnsId()
+    {
+        const string text = "profile.azure.hidden = true";
+        var result = ProfileSourceParser.ExtractHiddenIds(ConfigIniFile.ParseText(text));
+        Assert.Single(result);
+        Assert.Contains("azure", result);
+    }
+
+    [Fact]
+    public void ExtractHiddenIds_Pairs_HiddenFalse_IsIgnored()
+    {
+        const string text = "profile.azure.hidden = false";
+        var result = ProfileSourceParser.ExtractHiddenIds(ConfigIniFile.ParseText(text));
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void ExtractHiddenIds_Pairs_NonHiddenSubkey_Ignored()
+    {
+        const string text = "profile.azure.name = Azure";
+        var result = ProfileSourceParser.ExtractHiddenIds(ConfigIniFile.ParseText(text));
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void ExtractHiddenIds_Pairs_InvalidIdCharacters_AreIgnored()
+    {
+        const string text = "profile.BAD_ID.hidden = true";
+        var result = ProfileSourceParser.ExtractHiddenIds(ConfigIniFile.ParseText(text));
+        Assert.Empty(result);
+    }
+
+    /// <summary>
+    /// The text path's `ids` set has no un-add: once a line sets
+    /// `hidden = true` the id stays in the set even if a later line for the
+    /// same id sets `hidden = false` (see <see cref="ExtractHiddenIds_HiddenFalse_IsIgnored"/>
+    /// for the single-line case; here two lines for the same id disagree).
+    /// The pairs overload has to reproduce that "any occurrence true" rule,
+    /// not "last occurrence wins" -- pin both directions so a future rewrite
+    /// toward the more intuitive last-wins semantics fails loudly here
+    /// instead of silently changing behavior.
+    /// </summary>
+    [Fact]
+    public void ExtractHiddenIds_Pairs_MultipleOccurrences_AnyTrueWinsOverALaterFalse()
+    {
+        const string text = "profile.azure.hidden = true\nprofile.azure.hidden = false\n";
+
+        var fromText = ProfileSourceParser.ExtractHiddenIds(text);
+        var fromPairs = ProfileSourceParser.ExtractHiddenIds(ConfigIniFile.ParseText(text));
+
+        Assert.Contains("azure", fromText);
+        Assert.Contains("azure", fromPairs);
+    }
+
+    [Fact]
+    public void ExtractHiddenIds_Pairs_MultipleOccurrences_AnEarlierFalseDoesNotSuppressALaterTrue()
+    {
+        const string text = "profile.azure.hidden = false\nprofile.azure.hidden = true\n";
+
+        var fromText = ProfileSourceParser.ExtractHiddenIds(text);
+        var fromPairs = ProfileSourceParser.ExtractHiddenIds(ConfigIniFile.ParseText(text));
+
+        Assert.Contains("azure", fromText);
+        Assert.Contains("azure", fromPairs);
+    }
+
+    [Fact]
+    public void ExtractHiddenMentionIds_Pairs_HiddenFalse_Included()
+    {
+        const string text = "profile.azure.hidden = false";
+        var result = ProfileSourceParser.ExtractHiddenMentionIds(ConfigIniFile.ParseText(text));
+        Assert.Single(result);
+        Assert.Contains("azure", result);
+    }
+
+    [Fact]
+    public void ExtractHiddenMentionIds_Pairs_NonBoolValue_StillIncluded()
+    {
+        const string text = "profile.weird.hidden = oops";
+        var result = ProfileSourceParser.ExtractHiddenMentionIds(ConfigIniFile.ParseText(text));
+        Assert.Contains("weird", result);
+    }
+
+    [Fact]
+    public void ExtractHiddenMentionIds_Pairs_NonHiddenSubkey_Ignored()
+    {
+        const string text = "profile.azure.name = Azure";
+        var result = ProfileSourceParser.ExtractHiddenMentionIds(ConfigIniFile.ParseText(text));
         Assert.Empty(result);
     }
 }

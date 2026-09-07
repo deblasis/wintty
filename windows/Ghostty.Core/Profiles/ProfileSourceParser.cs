@@ -28,6 +28,26 @@ public static partial class ProfileSourceParser
         RegexOptions.IgnoreCase)]
     private static partial Regex LineRegex();
 
+    /// <summary>
+    /// The key half of <see cref="LineRegex"/> (the "profile.&lt;id&gt;.&lt;subkey&gt;"
+    /// shape, with no "= value" suffix), for the overloads that start from an
+    /// already-split key/value cache (<see cref="ConfigIniFile"/>'s
+    /// dictionary) instead of raw file text. Same character classes and the
+    /// same <see cref="RegexOptions.IgnoreCase"/>, so a key this rejects is a
+    /// key <see cref="LineRegex"/> would also have rejected, and vice versa.
+    /// </summary>
+    [GeneratedRegex(
+        @"^profile\.([a-z0-9-]+)\.([a-z0-9-]+)$",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex KeyRegex();
+
+    /// <summary>
+    /// Has no production caller: the profile pass reads the ini cache via
+    /// <see cref="Parse(IReadOnlyDictionary{string, List{string}})"/>
+    /// instead. Kept as the reference implementation the pairs overload is
+    /// tested against (equivalence tests) and as the simpler fixture API
+    /// for tests that don't need a config-file cache.
+    /// </summary>
     public static ProfileParseResult Parse(string configText)
     {
         ArgumentNullException.ThrowIfNull(configText);
@@ -36,7 +56,6 @@ public static partial class ProfileSourceParser
             configText = configText.Substring(1);
 
         var groups = new Dictionary<string, Dictionary<string, string>>();
-        var warnings = new List<string>();
 
         foreach (var rawLine in configText.Split('\n'))
         {
@@ -55,6 +74,64 @@ public static partial class ProfileSourceParser
             bag[subKey] = value;
         }
 
+        return BuildProfiles(groups);
+    }
+
+    /// <summary>
+    /// Same result as <see cref="Parse(string)"/>, built from the parsed-pairs
+    /// cache <see cref="ConfigIniFile.Load"/> already produced, instead of a
+    /// second raw-text read of the same file.
+    ///
+    /// <paramref name="configPairs"/> is keyed by the untouched "key" half of
+    /// each "key = value" line (whatever casing the file used), with every
+    /// occurrence's value in file order -- the shape
+    /// <see cref="ConfigIniFile.Load"/> already returns. Each key is matched
+    /// against <see cref="KeyRegex"/> exactly the way <see cref="LineRegex"/>
+    /// would match the key half of the original line, so a line this drops
+    /// is a line <see cref="Parse(string)"/> would also have dropped. Last
+    /// value wins per (id, subkey) pair, matching the forward-order
+    /// <c>bag[subKey] = value</c> overwrite in the text path -- which is
+    /// exactly the cache list's last element, since
+    /// <see cref="ConfigIniFile.Load"/> appends every occurrence of a key in
+    /// the order it read them.
+    ///
+    /// A whitespace-only value, e.g. "profile.x.name =    ", is dropped
+    /// identically by both paths: <see cref="Parse(string)"/> trims the
+    /// whole line first, leaving "profile.x.name =" with nothing left for
+    /// <see cref="LineRegex"/> to capture, the same way <see cref="ConfigIniFile.Load"/>
+    /// skips a key whose value is empty after trimming.
+    /// </summary>
+    public static ProfileParseResult Parse(IReadOnlyDictionary<string, List<string>> configPairs)
+    {
+        ArgumentNullException.ThrowIfNull(configPairs);
+
+        var groups = new Dictionary<string, Dictionary<string, string>>();
+
+        foreach (var (rawKey, values) in configPairs)
+        {
+            if (values.Count == 0) continue;
+
+            var match = KeyRegex().Match(rawKey);
+            if (!match.Success) continue;
+
+            var id = match.Groups[1].Value.ToLowerInvariant();
+            var subKey = match.Groups[2].Value.ToLowerInvariant();
+            // Last occurrence wins, same as the forward-order overwrite in
+            // Parse(string) above -- the cache list is already in file order.
+            var value = values[^1];
+
+            if (!groups.TryGetValue(id, out var bag))
+                groups[id] = bag = new Dictionary<string, string>();
+            bag[subKey] = value;
+        }
+
+        return BuildProfiles(groups);
+    }
+
+    private static ProfileParseResult BuildProfiles(
+        Dictionary<string, Dictionary<string, string>> groups)
+    {
+        var warnings = new List<string>();
         var profiles = new Dictionary<string, ProfileDef>();
         foreach (var (id, bag) in groups)
         {
@@ -117,6 +194,26 @@ public static partial class ProfileSourceParser
     public static IReadOnlySet<string> ExtractHiddenMentionIds(string configText)
         => ExtractHiddenIdsCore(configText, requireTrue: false);
 
+    /// <summary>
+    /// Pairs-cache counterpart of <see cref="ExtractHiddenIds(string)"/>. See
+    /// <see cref="Parse(IReadOnlyDictionary{string, List{string}})"/> for the
+    /// shape <paramref name="configPairs"/> is expected in.
+    ///
+    /// The text path adds an id as soon as any one occurrence of its
+    /// <c>hidden</c> line parses to <see langword="true"/> -- later
+    /// occurrences overwriting it back to <see langword="false"/> do not
+    /// remove it, since <c>ids</c> is a set with no un-add. So this checks
+    /// whether *any* cached value for that key parses to <see langword="true"/>,
+    /// which is the same test applied to every occurrence instead of just the
+    /// last one.
+    /// </summary>
+    public static IReadOnlySet<string> ExtractHiddenIds(IReadOnlyDictionary<string, List<string>> configPairs)
+        => ExtractHiddenIdsCore(configPairs, requireTrue: true);
+
+    /// <summary>Pairs-cache counterpart of <see cref="ExtractHiddenMentionIds(string)"/>.</summary>
+    public static IReadOnlySet<string> ExtractHiddenMentionIds(IReadOnlyDictionary<string, List<string>> configPairs)
+        => ExtractHiddenIdsCore(configPairs, requireTrue: false);
+
     private static IReadOnlySet<string> ExtractHiddenIdsCore(string configText, bool requireTrue)
     {
         ArgumentNullException.ThrowIfNull(configText);
@@ -142,6 +239,45 @@ public static partial class ProfileSourceParser
             {
                 var value = match.Groups[3].Value;
                 if (!bool.TryParse(value, out var flag) || !flag) continue;
+            }
+
+            var id = match.Groups[1].Value.ToLowerInvariant();
+            ids.Add(id);
+        }
+
+        return ids;
+    }
+
+    private static IReadOnlySet<string> ExtractHiddenIdsCore(
+        IReadOnlyDictionary<string, List<string>> configPairs, bool requireTrue)
+    {
+        ArgumentNullException.ThrowIfNull(configPairs);
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (rawKey, values) in configPairs)
+        {
+            if (values.Count == 0) continue;
+
+            var match = KeyRegex().Match(rawKey);
+            if (!match.Success) continue;
+
+            var subKey = match.Groups[2].Value;
+            if (!string.Equals(subKey, "hidden", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (requireTrue)
+            {
+                var anyTrue = false;
+                foreach (var value in values)
+                {
+                    if (bool.TryParse(value, out var flag) && flag)
+                    {
+                        anyTrue = true;
+                        break;
+                    }
+                }
+                if (!anyTrue) continue;
             }
 
             var id = match.Groups[1].Value.ToLowerInvariant();
