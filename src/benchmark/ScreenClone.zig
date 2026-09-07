@@ -42,6 +42,17 @@ pub const Options = struct {
     /// cloning. This data can switch to alt screen if it wants. The time
     /// to read this is not part of the benchmark.
     data: ?[]const u8 = null,
+
+    /// `cli.args.parse` allocates `[]const u8` fields (like `data`
+    /// above) out of this arena when present; without it, allocations
+    /// go through an internal allocator that's never freed. See
+    /// `deinit`.
+    _arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn deinit(self: *Options) void {
+        if (self._arena) |arena| arena.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const Mode = enum {
@@ -171,7 +182,7 @@ fn stepClone(ptr: *anyopaque) Benchmark.Error!void {
     // properly capture our speeds.
     for (0..1000) |_| {
         const s: *terminalpkg.Screen = self.terminal.screens.active;
-        const copy = s.clone(
+        var copy = s.clone(
             s.io,
             s.alloc,
             .{ .viewport = .{} },
@@ -180,10 +191,20 @@ fn stepClone(ptr: *anyopaque) Benchmark.Error!void {
             log.warn("error cloning screen err={}", .{err});
             return error.BenchmarkFailed;
         };
-        std.mem.doNotOptimizeAway(copy);
 
-        // Note: we purposely do not free memory because we don't want
-        // to benchmark that. We'll free when the benchmark exits.
+        // The original author purposely did not free here, so that the
+        // number measured only the clone. That is no longer affordable:
+        // `step` runs until the deadline in `.duration` mode, so an
+        // unfreed clone per iteration grows without bound for as long
+        // as the benchmark runs. `Benchmark.run` times the whole `step`
+        // call and offers no per-iteration hook outside the timer, so
+        // there is nowhere to put the free that escapes measurement.
+        //
+        // The number this mode reports is therefore clone *plus*
+        // teardown of the cloned page list, and is not comparable with
+        // one recorded before this commit.
+        defer copy.deinit();
+        std.mem.doNotOptimizeAway(&copy);
     }
 }
 
@@ -301,4 +322,23 @@ fn stepRenderPartial(ptr: *anyopaque) Benchmark.Error!void {
         };
         std.mem.doNotOptimizeAway(&state);
     }
+}
+
+test "ScreenClone stepClone frees every clone" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const impl: *ScreenClone = try .create(alloc, .{
+        .mode = .clone,
+        .@"terminal-rows" = 4,
+        .@"terminal-cols" = 10,
+    });
+    defer impl.destroy(alloc);
+
+    // `testing.allocator` fails the test on any leak. Before the fix,
+    // `stepClone` allocated 1000 clones per call and never freed them,
+    // which would grow without bound if `step` ran more than once
+    // (e.g. under `.duration` mode).
+    try stepClone(impl);
+    try stepClone(impl);
 }
