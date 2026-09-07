@@ -65,16 +65,36 @@ resized: std.atomic.Value(usize) = .{ .raw = 0 },
 /// atlas coordinates must drop that cache when this changes.
 generation: std.atomic.Value(usize) = .{ .raw = 0 },
 
+/// Bounding box of everything modified since `modified` was `dirty_base`,
+/// or a zero-sized region when we are not tracking one. See `dirtySince`,
+/// which is how a consumer reads this.
+///
+/// A consumer never clears it. The atlas is shared: several renderers, each
+/// with several frames in flight, upload it to the GPU independently and at
+/// different times, so from here there is no way to know which of them was
+/// the last one that still needed it.
+dirty: Region = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+
+/// The `modified` count the `dirty` box started accumulating from. A
+/// consumer that is at least this up to date can catch up with the box;
+/// one that is further behind has to take the whole atlas instead.
+dirty_base: usize = 0,
+
+/// The `dirty` box is thrown away and started over once it would span more
+/// than this fraction of the atlas's rows.
+///
+/// Since no consumer can clear the box, it would otherwise only ever grow,
+/// and a box that spans most of the atlas has stopped saving anything over
+/// uploading all of it. Starting over costs the consumers that have not
+/// caught up a full upload, which is what they were doing anyway.
+const dirty_restart_rows_divisor = 4;
+
 /// The default value of `max_size`: the smallest maximum any backend we
 /// support reports. Metal devices below the apple3 family stop at 8192, and
 /// the OpenGL atlas is a rectangle texture, whose limit is its own
 /// (GL_MAX_RECTANGLE_TEXTURE_SIZE) and can be lower than the ordinary 2D
 /// texture limit. Starting here means no device ever gets an atlas it cannot
 /// hold, even before a renderer has attached.
-///
-/// Metal never calls `setMaxSize`: it cannot be built on the machine this
-/// branch is developed on, and 8192 is already its worst case, so it keeps
-/// the default until someone can compile and test the call.
 pub const default_max_size: u32 = 8192;
 
 pub const Format = enum(u8) {
@@ -303,6 +323,7 @@ pub fn set(self: *Atlas, reg: Region, data: []const u8) void {
         );
     }
 
+    self.markDirty(reg);
     _ = self.modified.fetchAdd(1, .monotonic);
 }
 
@@ -334,7 +355,78 @@ pub fn setFromLarger(
         );
     }
 
+    self.markDirty(reg);
     _ = self.modified.fetchAdd(1, .monotonic);
+}
+
+/// Fold `reg` into the dirty box.
+///
+/// Call this before bumping `modified`, so that the count read here is the
+/// one a consumer must already have reached for the box to be of any use
+/// to it.
+fn markDirty(self: *Atlas, reg: Region) void {
+    if (reg.width == 0 or reg.height == 0) return;
+
+    const restart = restart: {
+        if (self.dirty.width == 0 or self.dirty.height == 0) break :restart true;
+        const y_min = @min(self.dirty.y, reg.y);
+        const y_max = @max(self.dirty.y + self.dirty.height, reg.y + reg.height);
+        break :restart (y_max - y_min) > self.size / dirty_restart_rows_divisor;
+    };
+
+    if (restart) {
+        self.dirty = reg;
+        self.dirty_base = self.modified.load(.monotonic);
+        return;
+    }
+
+    const x_min = @min(self.dirty.x, reg.x);
+    const y_min = @min(self.dirty.y, reg.y);
+    const x_max = @max(self.dirty.x + self.dirty.width, reg.x + reg.width);
+    const y_max = @max(self.dirty.y + self.dirty.height, reg.y + reg.height);
+    self.dirty = .{
+        .x = x_min,
+        .y = y_min,
+        .width = x_max - x_min,
+        .height = y_max - y_min,
+    };
+}
+
+/// Record that every byte of the atlas changed, which is what `clear` and
+/// `grow` do. A box that covers everything is of use to any consumer, no
+/// matter how far behind, so the base goes back to the start.
+fn markDirtyAll(self: *Atlas) void {
+    self.dirty = .{ .x = 0, .y = 0, .width = self.size, .height = self.size };
+    self.dirty_base = 0;
+}
+
+/// The region a consumer whose last upload happened at `modified_last` (a
+/// value it previously read from `modified`) has to upload to catch up, or
+/// null if it has nothing left to upload.
+///
+/// The box is a bounding box over regions that may be far apart, so it can
+/// cover bytes the consumer already has. Uploading those again is wasted
+/// work, never wrong.
+///
+/// The dirty fields are plain, not atomic: they only mean anything read
+/// together. A caller must hold at least the shared lock that guards
+/// `data` (for the renderer, `font.SharedGrid.lock`) across this call and
+/// the upload it describes, the same discipline reading `data` needs.
+pub fn dirtySince(self: *const Atlas, modified_last: usize) ?Region {
+    if (modified_last >= self.modified.load(.monotonic)) return null;
+
+    // Behind the box, or no box at all: it does not describe the changes
+    // this consumer missed, so it has to take everything.
+    if (modified_last < self.dirty_base or
+        self.dirty.width == 0 or
+        self.dirty.height == 0) return .{
+        .x = 0,
+        .y = 0,
+        .width = self.size,
+        .height = self.size,
+    };
+
+    return self.dirty;
 }
 
 /// Set the ceiling `grow` refuses to pass, for a caller that has queried
@@ -401,6 +493,10 @@ pub fn grow(self: *Atlas, alloc: Allocator, size_new: u32) GrowError!void {
         .width = size_new - size_old,
     });
 
+    // Every byte moved to a new address at a new stride, and the box the
+    // copy above left behind is in the old coordinate space.
+    self.markDirtyAll();
+
     // We are both modified and resized
     _ = self.modified.fetchAdd(1, .monotonic);
     _ = self.resized.fetchAdd(1, .monotonic);
@@ -408,6 +504,7 @@ pub fn grow(self: *Atlas, alloc: Allocator, size_new: u32) GrowError!void {
 
 // Empty the atlas. This doesn't reclaim any previously allocated memory.
 pub fn clear(self: *Atlas) void {
+    self.markDirtyAll();
     _ = self.modified.fetchAdd(1, .monotonic);
     @memset(self.data, 0);
     self.nodes.clearRetainingCapacity();
@@ -986,6 +1083,110 @@ test "setMaxSize" {
         GrowError.AtlasTooLarge,
         atlas.grow(alloc, 16),
     );
+}
+
+test "dirtySince covers the regions that were written" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 64, .grayscale);
+    defer atlas.deinit(alloc);
+
+    // Nothing has been uploaded yet, so everything is outstanding.
+    {
+        const dirty = atlas.dirtySince(0).?;
+        try testing.expectEqual(@as(u32, 0), dirty.x);
+        try testing.expectEqual(@as(u32, 0), dirty.y);
+        try testing.expectEqual(@as(u32, 64), dirty.width);
+        try testing.expectEqual(@as(u32, 64), dirty.height);
+    }
+
+    // Once a consumer has uploaded that, it has nothing left to do.
+    const synced = atlas.modified.load(.monotonic);
+    try testing.expectEqual(@as(?Region, null), atlas.dirtySince(synced));
+
+    // A single write is exactly the region that was written.
+    const first = try atlas.reserve(alloc, 2, 3);
+    atlas.set(first, &[_]u8{0} ** 6);
+    {
+        const dirty = atlas.dirtySince(synced).?;
+        try testing.expectEqual(first.x, dirty.x);
+        try testing.expectEqual(first.y, dirty.y);
+        try testing.expectEqual(@as(u32, 2), dirty.width);
+        try testing.expectEqual(@as(u32, 3), dirty.height);
+    }
+
+    // A second write extends the box to just cover both.
+    const second = try atlas.reserve(alloc, 4, 2);
+    atlas.set(second, &[_]u8{0} ** 8);
+    {
+        const dirty = atlas.dirtySince(synced).?;
+        try testing.expectEqual(@min(first.x, second.x), dirty.x);
+        try testing.expectEqual(@min(first.y, second.y), dirty.y);
+        try testing.expectEqual(
+            @max(first.x + first.width, second.x + second.width),
+            dirty.x + dirty.width,
+        );
+        try testing.expectEqual(
+            @max(first.y + first.height, second.y + second.height),
+            dirty.y + dirty.height,
+        );
+    }
+
+    // And it clears once a consumer has caught up again.
+    try testing.expectEqual(
+        @as(?Region, null),
+        atlas.dirtySince(atlas.modified.load(.monotonic)),
+    );
+}
+
+test "dirtySince gives the whole atlas to a consumer that fell behind" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 64, .grayscale);
+    defer atlas.deinit(alloc);
+
+    const behind = atlas.modified.load(.monotonic);
+
+    const small = try atlas.reserve(alloc, 4, 2);
+    atlas.set(small, &[_]u8{0} ** 8);
+    try testing.expectEqual(@as(u32, 2), atlas.dirtySince(behind).?.height);
+
+    // A write that would stretch the box across a quarter of the atlas
+    // makes it start over, which puts `behind` out of its reach.
+    const tall = try atlas.reserve(alloc, 4, 40);
+    atlas.set(tall, &[_]u8{0} ** (4 * 40));
+    {
+        const dirty = atlas.dirtySince(behind).?;
+        try testing.expectEqual(@as(u32, 64), dirty.width);
+        try testing.expectEqual(@as(u32, 64), dirty.height);
+    }
+
+    // A consumer that is current with the restart gets the small box.
+    const dirty = atlas.dirtySince(atlas.modified.load(.monotonic) - 1).?;
+    try testing.expectEqual(@as(u32, 40), dirty.height);
+}
+
+test "dirtySince covers everything after a reset or a grow" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 64, .grayscale);
+    defer atlas.deinit(alloc);
+
+    const reg = try atlas.reserve(alloc, 2, 2);
+    atlas.set(reg, &[_]u8{ 1, 2, 3, 4 });
+
+    const synced = atlas.modified.load(.monotonic);
+    atlas.reset();
+    {
+        const dirty = atlas.dirtySince(synced).?;
+        try testing.expectEqual(@as(u32, 64), dirty.width);
+        try testing.expectEqual(@as(u32, 64), dirty.height);
+    }
+
+    const grown = atlas.modified.load(.monotonic);
+    try atlas.grow(alloc, 128);
+    {
+        const dirty = atlas.dirtySince(grown).?;
+        try testing.expectEqual(@as(u32, 128), dirty.width);
+        try testing.expectEqual(@as(u32, 128), dirty.height);
+    }
 }
 
 test "reset empties the atlas and bumps the generation" {

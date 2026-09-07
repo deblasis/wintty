@@ -763,10 +763,36 @@ pub fn maxTextureSize(self: *const DirectX12) u32 {
 }
 
 pub fn drawFrameStart(self: *DirectX12) void {
-    _ = self;
     // RTV heap slots are per-frame and stable. No reset needed; each frame's
     // CustomShaderState reuses its own dedicated RTV descriptors during
     // resize via the rtv_slot option in Texture.Options.
+
+    // Free what the GPU has finished with. `beginFrame` collects too, but
+    // it only runs on a wakeup the renderer decided was worth drawing, and
+    // this runs on every wakeup. Whatever the last drawn frame retired
+    // would otherwise stay resident for as long as the terminal stays
+    // quiet, and an atlas grown on that frame retires a texture up to the
+    // size of the atlas ceiling.
+    //
+    // Nothing here waits: `collect` frees only what the fence says is
+    // already done, so a wakeup that draws nothing costs one fence read.
+    const dev_ptr = &(self.dev orelse return);
+    // A removed device's fence reports a value that means nothing; the
+    // recovery path tears the whole queue down instead.
+    //
+    // Say so on the way out rather than dropping the answer. A wakeup
+    // that draws nothing presents nothing, so this is the only thing
+    // that touches the device then, and the only place an idle TDR can
+    // be noticed before the next real frame.
+    // `deviceLost` is polled a few lines below the call to this, so
+    // recovery starts in the same `drawFrame`. Only the first wakeup
+    // announces it: attempts between recovery retries would otherwise
+    // log the same removal once per draw interval.
+    if (dev_ptr.removed()) {
+        if (!self.device_lost) self.handleDeviceRemoved();
+        return;
+    }
+    dev_ptr.retirement.collect(dev_ptr.fence.GetCompletedValue());
 }
 
 pub fn drawFrameEnd(self: *DirectX12) void {
@@ -1142,24 +1168,6 @@ pub inline fn beginFrame(
     api.pending_frame_index = frame_idx;
 
     return frame;
-}
-
-pub fn presentLastTarget(self: *DirectX12) !void {
-    // Called when no redraw is needed -- re-present the current frame.
-    // No new GPU work is submitted, so the existing fence values remain
-    // valid and the next beginFrame will wait correctly.
-    if (self.swap_chain3) |sc3| {
-        // Sync interval 1: see drawFrameEnd for the rationale.
-        const hr = sc3.Present(1, 0);
-        if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
-            self.handleDeviceRemoved();
-            return error.PresentFailed;
-        }
-        if (com.FAILED(hr)) {
-            log.err("presentLastTarget failed: 0x{x}", .{@as(u32, @bitCast(hr))});
-            return error.PresentFailed;
-        }
-    }
 }
 
 fn handleDeviceRemoved(self: *DirectX12) void {
