@@ -2225,6 +2225,15 @@ pub const CAPI = struct {
         const core_app = try CoreApp.create(global.alloc());
         errdefer core_app.destroy();
 
+        // Seed the core app's conditional state from the config it was
+        // created with. The host may have already set a non-default color
+        // scheme on `config` (ghostty_config_set_color_scheme) before this
+        // call; without this, core_app starts at the `.{}` default (light)
+        // and the host's first ghostty_app_set_color_scheme then sees a
+        // change, triggering a needless soft config reload right after
+        // startup.
+        core_app.config_conditional_state = config._conditional_state;
+
         // Create our runtime app
         var app = try global.alloc().create(App);
         errdefer global.alloc().destroy(app);
