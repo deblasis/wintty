@@ -1,3 +1,4 @@
+using Ghostty.Core.Config;
 using Ghostty.Core.Profiles;
 using Xunit;
 
@@ -351,5 +352,121 @@ public sealed class ProfileSourceParserTests
             "profile.foo.name = Foo\nprofile.foo.command = pwsh\nprofile.foo.tab-icon-tracks-foreground = FALSE\n"
         ).Profiles["foo"];
         Assert.False(parsed.TabIconTracksForeground);
+    }
+
+    // -- Parse(IReadOnlyDictionary<string, List<string>>) --------------
+    //
+    // The pairs-cache overload consumed by ConfigService.ReadFlagsCore
+    // instead of a second raw-text read. Each fixture below is built with
+    // ConfigIniFile.ParseText, the same helper the production cache is
+    // populated with, so these tests exercise the real handoff shape
+    // rather than a hand-built dictionary.
+
+    [Fact]
+    public void Parse_Pairs_SingleProfile_AllRequiredKeys()
+    {
+        const string config = """
+            profile.pwsh.name = PowerShell
+            profile.pwsh.command = pwsh.exe
+            """;
+
+        var result = ProfileSourceParser.Parse(ConfigIniFile.ParseText(config));
+
+        Assert.Single(result.Profiles);
+        var p = result.Profiles["pwsh"];
+        Assert.Equal("pwsh", p.Id);
+        Assert.Equal("PowerShell", p.Name);
+        Assert.Equal("pwsh.exe", p.Command);
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public void Parse_Pairs_DuplicateKeys_LastWins()
+    {
+        const string config = """
+            profile.pwsh.name = PowerShell
+            profile.pwsh.command = pwsh.exe
+            profile.pwsh.command = pwsh-preview.exe
+            """;
+
+        var p = ProfileSourceParser.Parse(ConfigIniFile.ParseText(config)).Profiles["pwsh"];
+        Assert.Equal("pwsh-preview.exe", p.Command);
+    }
+
+    [Fact]
+    public void Parse_Pairs_IgnoresNonProfileLines()
+    {
+        const string config = """
+            font-family = Cascadia Code
+            theme = GruvboxDark
+            profile.pwsh.name = PowerShell
+            profile.pwsh.command = pwsh.exe
+            background-opacity = 0.9
+            """;
+
+        var result = ProfileSourceParser.Parse(ConfigIniFile.ParseText(config));
+
+        Assert.Single(result.Profiles);
+        Assert.True(result.Profiles.ContainsKey("pwsh"));
+    }
+
+    [Theory]
+    [InlineData("with space")]
+    [InlineData("under_score")]
+    [InlineData("dot.in.id")]
+    public void Parse_Pairs_InvalidIdFormat_LineIgnored(string id)
+    {
+        var config = $"profile.{id}.name = X\nprofile.{id}.command = x\n";
+
+        var result = ProfileSourceParser.Parse(ConfigIniFile.ParseText(config));
+
+        Assert.Empty(result.Profiles);
+    }
+
+    [Fact]
+    public void Parse_Pairs_MissingCommand_DropsProfileAndWarns()
+    {
+        const string config = "profile.pwsh.name = PowerShell";
+
+        var result = ProfileSourceParser.Parse(ConfigIniFile.ParseText(config));
+
+        Assert.Empty(result.Profiles);
+        Assert.Single(result.Warnings);
+        Assert.Contains("pwsh", result.Warnings[0]);
+        Assert.Contains("command", result.Warnings[0]);
+    }
+
+    [Fact]
+    public void Parse_Pairs_ValuesAreAlreadyTrimmedByTheCache()
+    {
+        // ConfigIniFile trims each value when it parses the file, so the
+        // pairs overload does not re-trim: it just takes the cache's value
+        // as-is. Pin that the end-to-end result still matches a config
+        // with spaces around the value.
+        const string config = "profile.pwsh.name =   PowerShell   \nprofile.pwsh.command = pwsh.exe\n";
+
+        var p = ProfileSourceParser.Parse(ConfigIniFile.ParseText(config)).Profiles["pwsh"];
+        Assert.Equal("PowerShell", p.Name);
+    }
+
+    [Fact]
+    public void Parse_Pairs_EmptyCache_ReturnsEmptyResult()
+    {
+        var result = ProfileSourceParser.Parse(ConfigIniFile.ParseText(string.Empty));
+        Assert.Empty(result.Profiles);
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public void Parse_Pairs_MixedCaseProfileKey_MatchesLikeTheTextPath()
+    {
+        const string config = "Profile.CASED.Name = Cased\nProfile.CASED.Command = cased.exe\n";
+
+        var fromText = ProfileSourceParser.Parse(config);
+        var fromPairs = ProfileSourceParser.Parse(ConfigIniFile.ParseText(config));
+
+        Assert.Equal(fromText.Profiles.Count, fromPairs.Profiles.Count);
+        Assert.True(fromPairs.Profiles.ContainsKey("cased"));
+        Assert.Equal(fromText.Profiles["cased"], fromPairs.Profiles["cased"]);
     }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Ghostty.Core.Config;
 using Ghostty.Core.Profiles;
 using Xunit;
@@ -145,5 +146,82 @@ public class ConfigServiceProfileParserTests
         Assert.Contains("bro", result.HiddenProfileIds);
         Assert.Single(result.ProfileWarnings);
         Assert.Contains("broken", result.ProfileWarnings[0]);
+    }
+
+    /// <summary>
+    /// The overload ConfigService.ReadFlagsCore is switching to (consuming
+    /// the already-populated <see cref="ConfigIniFile"/> pairs cache instead
+    /// of a second <c>File.ReadAllText</c> of the same file) has to produce
+    /// the same <see cref="ProfileView"/> the old text-based call did, for
+    /// the same underlying file content. This fixture exercises every knob
+    /// called out in the redundant-read diagnosis: multiple profiles,
+    /// duplicate subkey lines (last wins), values with surrounding spaces,
+    /// a hidden id (true), a hidden-mention-only id (false, still
+    /// suppresses its own missing-key warning), comment and blank lines, a
+    /// non-profile key, and a mixed-case "Profile." key.
+    /// </summary>
+    [Fact]
+    public void ParseAll_TextAndPairsCache_ProduceIdenticalResults()
+    {
+        const string text = """
+            # a leading comment
+
+            profile.web.name = Web Browser
+            profile.web.command = firefox.exe
+            profile.web.command = chrome.exe
+            profile.mail.name =   Mail Client
+            profile.mail.command = outlook.exe
+            profile.mail.hidden = true
+
+            profile.archived.hidden = false
+            Profile.CASED.name = Cased Profile
+            Profile.CASED.command = cased.exe
+            font-family = Cascadia Code
+            """;
+        var values = new Dictionary<string, string?>
+        {
+            ["default-profile"] = "web",
+            // Deliberately leaves "cased" uncovered: ProfileOrderResolver.
+            // ResolveDefault falls back to ParsedProfiles enumeration order
+            // when profile-order does not disambiguate, so this fixture only
+            // exercises that fallback path if profile-order is partial.
+            ["profile-order"] = "mail, web",
+        };
+
+        var fromText = ConfigServiceProfileParser.ParseAll(text, key => FileValue(values, key));
+        var pairs = ConfigIniFile.ParseText(text);
+        var fromPairs = ConfigServiceProfileParser.ParseAll(pairs, key => FileValue(values, key));
+
+        Assert.Equal(fromText.ParsedProfiles.Count, fromPairs.ParsedProfiles.Count);
+        foreach (var (id, def) in fromText.ParsedProfiles)
+        {
+            Assert.True(fromPairs.ParsedProfiles.TryGetValue(id, out var otherDef));
+            Assert.Equal(def, otherDef);
+        }
+        // Order-preserving, not just membership: ProfileOrderResolver.
+        // ResolveDefault falls back to ParsedProfiles enumeration order when
+        // profile-order does not disambiguate, so the pairs path must yield
+        // the same key sequence as the text path, first valid line wins.
+        Assert.Equal(fromText.ParsedProfiles.Keys.ToList(), fromPairs.ParsedProfiles.Keys.ToList());
+        Assert.Equal(fromText.ProfileOrder, fromPairs.ProfileOrder);
+        Assert.Equal(fromText.DefaultProfileId, fromPairs.DefaultProfileId);
+        // Set-compared: iteration order over a HashSet is not itself a
+        // behavioral guarantee either path makes.
+        Assert.Equal(
+            fromText.HiddenProfileIds.OrderBy(x => x, System.StringComparer.Ordinal),
+            fromPairs.HiddenProfileIds.OrderBy(x => x, System.StringComparer.Ordinal));
+        Assert.Equal(
+            fromText.ProfileWarnings.OrderBy(x => x, System.StringComparer.Ordinal),
+            fromPairs.ProfileWarnings.OrderBy(x => x, System.StringComparer.Ordinal));
+
+        // Pin the concrete values, not just that the two paths agree with
+        // each other -- two paths agreeing on the wrong answer would still
+        // pass the assertions above.
+        Assert.Equal("chrome.exe", fromPairs.ParsedProfiles["web"].Command); // duplicate subkey, last wins
+        Assert.Equal("Mail Client", fromPairs.ParsedProfiles["mail"].Name); // surrounding spaces trimmed
+        Assert.Contains("mail", fromPairs.HiddenProfileIds); // hidden = true
+        Assert.DoesNotContain("archived", fromPairs.HiddenProfileIds); // hidden = false
+        Assert.Empty(fromPairs.ProfileWarnings); // archived's missing-name warning is suppressed
+        Assert.Equal("Cased Profile", fromPairs.ParsedProfiles["cased"].Name); // "Profile." (mixed case) still matches
     }
 }
