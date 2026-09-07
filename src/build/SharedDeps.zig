@@ -728,18 +728,6 @@ pub fn add(
                 .{ .root_source_file = jb_mono.path("fonts/ttf/JetBrainsMono-Regular.ttf") },
             );
             step.root_module.addAnonymousImport(
-                "jetbrains_mono_bold",
-                .{ .root_source_file = jb_mono.path("fonts/ttf/JetBrainsMono-Bold.ttf") },
-            );
-            step.root_module.addAnonymousImport(
-                "jetbrains_mono_italic",
-                .{ .root_source_file = jb_mono.path("fonts/ttf/JetBrainsMono-Italic.ttf") },
-            );
-            step.root_module.addAnonymousImport(
-                "jetbrains_mono_bold_italic",
-                .{ .root_source_file = jb_mono.path("fonts/ttf/JetBrainsMono-BoldItalic.ttf") },
-            );
-            step.root_module.addAnonymousImport(
                 "jetbrains_mono_variable",
                 .{ .root_source_file = jb_mono.path("fonts/variable/JetBrainsMono[wght].ttf") },
             );
