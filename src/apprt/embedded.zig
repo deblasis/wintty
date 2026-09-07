@@ -720,10 +720,12 @@ pub const Surface = struct {
             }
         }
 
-        // Apply any environment variables that were requested.
-        if (opts.env_var_count > 0) {
+        // Apply any environment variables that were requested. A null
+        // pointer with a non-zero count is a caller bug; read it as "none"
+        // rather than dereferencing the null.
+        if (opts.env_vars) |env_vars| {
             const alloc = config.arenaAlloc();
-            for (opts.env_vars.?[0..opts.env_var_count]) |env_var| {
+            for (env_vars[0..opts.env_var_count]) |env_var| {
                 const key = std.mem.sliceTo(env_var.key, 0);
                 const value = std.mem.sliceTo(env_var.value, 0);
                 try config.env.map.put(
@@ -1376,9 +1378,10 @@ pub const Surface = struct {
 
         const working_directory: ?[*:0]const u8 = wd: {
             if (!apprt.surface.shouldInheritWorkingDirectory(context, &self.app.config)) break :wd null;
-            const cwd = self.core_surface.pwd(self.app.core_app.alloc) catch null orelse break :wd null;
-            defer self.app.core_app.alloc.free(cwd);
-            break :wd self.app.core_app.alloc.dupeZ(u8, cwd) catch null;
+            const alloc = self.app.core_app.alloc;
+            const cwd = self.core_surface.pwd(alloc) catch null orelse break :wd null;
+            defer alloc.free(cwd);
+            break :wd apprt.surface.dupeInheritedPwd(alloc, cwd);
         };
 
         return .{
@@ -2109,9 +2112,12 @@ pub const CAPI = struct {
                 ),
             };
 
-            // Clamp our point to the screen bounds.
+            // Columns are the same width in every point space, so unlike
+            // y this clamp cannot pick the wrong row. PageList.pin would
+            // reject an out of range x on its own; clamping instead
+            // answers with the last column, which is what the selection
+            // callers who pass a "to the end of the line" x want.
             const clamped_x = @min(self.x, screen.pages.cols -| 1);
-            const clamped_y = @min(self.y, screen.pages.rows -| 1);
 
             return switch (self.coord_tag) {
                 // Exact coordinates require a specific pin.
@@ -2125,7 +2131,24 @@ pub const CAPI = struct {
                         inline else => |v| @unionInit(
                             terminal.Point,
                             @tagName(v),
-                            .{ .x = pt_x, .y = clamped_y },
+                            .{
+                                .x = pt_x,
+                                // Only the active and viewport spaces are
+                                // bounded by the screen height. Screen and
+                                // history run the full length of the
+                                // pagelist, and PageList.pin already
+                                // rejects a y past its end, so clamping
+                                // them would answer with the wrong row.
+                                .y = switch (v) {
+                                    .active,
+                                    .viewport,
+                                    => @min(self.y, screen.pages.rows -| 1),
+
+                                    .screen,
+                                    .history,
+                                    => self.y,
+                                },
+                            },
                         ),
                     };
 
@@ -2355,11 +2378,30 @@ pub const CAPI = struct {
     }
 
     /// Returns the config to use for surfaces that inherit from this one.
+    /// The caller owns the working directory in the returned config and
+    /// releases it with ghostty_surface_free_inherited_config.
     export fn ghostty_surface_inherited_config(
         surface: *Surface,
         source: apprt.surface.NewSurfaceContext,
     ) Surface.Options {
         return surface.newSurfaceOptions(source);
+    }
+
+    /// Release the memory owned by a config from
+    /// ghostty_surface_inherited_config. Calling it more than once on the
+    /// same config, or on a config that carries no directory, is safe.
+    ///
+    /// No surface is needed to free the config: the copy came from the
+    /// process-wide allocator, the same one every other C API allocation
+    /// comes from, so a config stays releasable after the surface it was
+    /// read from is gone.
+    export fn ghostty_surface_free_inherited_config(
+        config: *Surface.Options,
+    ) void {
+        apprt.surface.freeInheritedPwd(
+            global.alloc(),
+            &config.working_directory,
+        );
     }
 
     /// Update the configuration to the provided config for only this surface.
