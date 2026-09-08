@@ -31,9 +31,27 @@ internal sealed partial class TaskbarOverlayFacade : ITaskbarBadgeSink, IDisposa
     private readonly ITaskbarList3 _taskbar;
     private HICON _bell;
 
-    /// <summary>Icons for the kinds this assembly does not draw itself
-    /// (the sponsor update overlay registers its .ico set). A kind with no
-    /// icon keeps its notice and shows no overlay.</summary>
+    /// <summary>
+    /// Icons for the kinds this assembly does not draw itself (the sponsor
+    /// update overlay registers its .ico set). A kind with no icon keeps
+    /// its notice and shows no overlay.
+    ///
+    /// <para>
+    /// Ownership contract: the provider owns and caches one <see cref="HICON"/>
+    /// per <see cref="TaskbarBadgeKind"/> for the life of the process (the
+    /// same pattern this class itself uses for <c>_bell</c>) and must return
+    /// that same handle on every call for a given kind. This class never
+    /// calls <c>DestroyIcon</c> on a handle obtained through this hook, only
+    /// on <c>_bell</c>, the one icon it creates itself; a provider that
+    /// hands back a freshly created handle on every invocation leaks it.
+    /// </para>
+    ///
+    /// <para>
+    /// The delegate is invoked defensively (see <see cref="Show"/>): it is
+    /// arbitrary code from another assembly, so an exception it throws is
+    /// treated as "no icon for this kind" rather than allowed to propagate.
+    /// </para>
+    /// </summary>
     internal Func<TaskbarBadgeKind, HICON>? IconProvider { get; set; }
 
     public TaskbarOverlayFacade(IntPtr hwnd)
@@ -62,7 +80,7 @@ internal sealed partial class TaskbarOverlayFacade : ITaskbarBadgeSink, IDisposa
             }
             else
             {
-                icon = IconProvider?.Invoke(kind) ?? default;
+                icon = InvokeIconProviderSafely(IconProvider, kind);
             }
             if (icon.IsNull) { Clear(); return; }
             _taskbar.SetOverlayIcon(_hwnd, icon, description);
@@ -72,6 +90,31 @@ internal sealed partial class TaskbarOverlayFacade : ITaskbarBadgeSink, IDisposa
             // Deliberately not logged: this fires on every focus
             // transition, the indicator is cosmetic, and the sibling
             // TaskbarList3Facade is likewise logger-free.
+        }
+    }
+
+    /// <summary>
+    /// Invokes <see cref="IconProvider"/> defensively. It is arbitrary code
+    /// supplied by a producer in another assembly, and <see cref="Show"/>'s
+    /// own contract promises a COM failure here must not tear the window
+    /// down; that promise must hold for a misbehaving producer too, not
+    /// just for <c>ITaskbarList3</c> itself. Any exception the provider
+    /// throws is treated the same as "no icon registered for this kind":
+    /// <see cref="Show"/> falls through to <see cref="Clear"/> and the
+    /// badge lands in the same sane, dot-less state a null return produces.
+    /// Not logged: no logger is threaded into this class (see the
+    /// COMException handling above for the same tradeoff).
+    /// </summary>
+    internal static HICON InvokeIconProviderSafely(Func<TaskbarBadgeKind, HICON>? provider, TaskbarBadgeKind kind)
+    {
+        if (provider is null) return default;
+        try
+        {
+            return provider(kind);
+        }
+        catch (Exception)
+        {
+            return default;
         }
     }
 
