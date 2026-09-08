@@ -28,14 +28,20 @@ public sealed class TaskbarBadgeArbiter
 
     public TaskbarBadgeArbiter(ITaskbarBadgeSink sink, INotificationService notices)
     {
+        ArgumentNullException.ThrowIfNull(sink);
+        ArgumentNullException.ThrowIfNull(notices);
         _sink = sink;
         _notices = notices;
     }
 
-    public IReadOnlyCollection<string> ActiveKeys => _overlay;
+    /// <summary>A snapshot of the keys currently owning an overlay slot
+    /// contender. Not a live view: safe to enumerate even if a reentrant
+    /// Raise/Clear mutates the arbiter afterward.</summary>
+    public IReadOnlyCollection<string> ActiveKeys => _overlay.ToArray();
 
     public void Raise(TaskbarBadge badge)
     {
+        ArgumentNullException.ThrowIfNull(badge);
         if (_acknowledged.TryGetValue(badge.Key, out var seen) &&
             string.Equals(seen, badge.Signature, StringComparison.Ordinal))
         {

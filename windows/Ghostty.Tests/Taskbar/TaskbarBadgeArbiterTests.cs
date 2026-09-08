@@ -153,4 +153,33 @@ public class TaskbarBadgeArbiterTests
         // transient write must not appear.
         Assert.DoesNotContain(sink.Writes.Skip(writesBeforeSupersede), w => w.Kind is null);
     }
+
+    [Fact]
+    public void ActiveKeys_IsASnapshot_NotALiveView()
+    {
+        var (a, _, _) = New();
+        a.Raise(Bell("1"));
+        var keys = a.ActiveKeys;
+
+        a.Raise(UpdateError("x"));
+
+        Assert.Single(keys);
+        Assert.Equal(2, a.ActiveKeys.Count);
+    }
+
+    [Fact]
+    public void Constructor_RejectsNullArguments()
+    {
+        var sink = new FakeTaskbarBadgeSink();
+        var notices = new NotificationService();
+        Assert.Throws<ArgumentNullException>(() => new TaskbarBadgeArbiter(null!, notices));
+        Assert.Throws<ArgumentNullException>(() => new TaskbarBadgeArbiter(sink, null!));
+    }
+
+    [Fact]
+    public void Raise_RejectsNullBadge()
+    {
+        var (a, _, _) = New();
+        Assert.Throws<ArgumentNullException>(() => a.Raise(null!));
+    }
 }
