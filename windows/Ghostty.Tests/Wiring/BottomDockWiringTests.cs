@@ -58,4 +58,14 @@ public sealed class BottomDockWiringTests
         Assert.NotEmpty(spans);
         Assert.All(spans, s => Assert.Equal("3", s.Item2));
     }
+
+    [Fact]
+    public void DockSizeChange_NotesALayoutSwitch_OnVisibleTerminals()
+    {
+        var src = ShellSource.Load("MainWindow.xaml.cs");
+        var handler = src.Method("OnNotificationDockSizeChanged");
+        var calls = handler.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>()
+            .Select(i => i.Expression.ToString()).ToList();
+        Assert.Contains(calls, c => c.EndsWith("NoteLayoutSwitch"));
+    }
 }
