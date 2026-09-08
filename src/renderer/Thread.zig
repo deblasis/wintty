@@ -720,6 +720,24 @@ fn cancelHiddenDrain(self: *Thread) void {
     );
 }
 
+/// The tail of the hidden drain: keep the timer going while hidden.
+/// Extracted so the idiom is unit-tested against the real xev backend.
+fn hiddenDrainRearm(
+    loop: *xev.Loop,
+    timer: *xev.Timer,
+    c: *xev.Completion,
+    comptime Userdata: type,
+    userdata: ?*Userdata,
+    comptime cb: fn (?*Userdata, *xev.Loop, *xev.Completion, xev.Timer.RunError!void) xev.CallbackAction,
+) xev.CallbackAction {
+    _ = loop;
+    _ = timer;
+    _ = c;
+    _ = userdata;
+    _ = cb;
+    return .rearm;
+}
+
 fn hiddenDrainCallback(
     self_: ?*Thread,
     _: *xev.Loop,
@@ -1197,4 +1215,97 @@ test "renderer mailbox push wakes the thread when it cannot land" {
 
     // Nothing was dropped from the queue on the way.
     try testing.expect(mailbox.pop(io) != null);
+}
+
+// The hidden-drain timer must never starve the loop: a timer callback that
+// returns `.rearm` on the IOCP backend is re-inserted at its elapsed
+// deadline and fires on every tick before the loop waits on the port, so
+// a posted async (our `stop`) is never delivered and `Surface.deinit`
+// joins forever (2026-09-08 close hang). Timers re-run and `.disarm`;
+// only asyncs `.rearm`.
+//
+// The fire cap below is not a "give up and pass anyway" valve: hitting it
+// sets `starved`, which stops the loop immediately and fails the test on
+// its own assertion. A starved run can never limp past the cap, get
+// lucky on a later tick, and pass `stop_seen` for the wrong reason.
+test "hidden drain idiom: a timer that re-runs itself lets a posted async through" {
+    const testing = std.testing;
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    var timer = try xev.Timer.init();
+    defer timer.deinit();
+    var timer_c: xev.Completion = .{};
+
+    var stop = try xev.Async.init();
+    defer stop.deinit();
+    var stop_c: xev.Completion = .{};
+
+    const State = struct {
+        // A healthy loop sees `stop` on the timer's first or second
+        // fire (see the `timer_fires < 5` assertion below); this cap is
+        // only a hard backstop against a genuinely starved loop running
+        // forever, and it fails the test rather than rescuing it.
+        const starve_fire_cap: u32 = 8;
+
+        timer_fires: u32 = 0,
+        stop_seen: bool = false,
+        starved: bool = false,
+        loop: *xev.Loop,
+        timer: *xev.Timer,
+        timer_c: *xev.Completion,
+
+        fn onTimer(
+            self_: ?*@This(),
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            const self = self_.?;
+            self.timer_fires += 1;
+            if (self.stop_seen) return .disarm;
+            if (self.timer_fires > starve_fire_cap) {
+                // The timer keeps winning the ready queue and the loop
+                // never reaches the port wait: this is the starvation
+                // under test. Fail outright instead of disarming and
+                // letting a later, now-uncontested tick observe the
+                // already-posted `stop` and pass the assertions below
+                // for the wrong reason.
+                self.starved = true;
+                return .disarm;
+            }
+            // The idiom under test: same as hiddenDrainCallback's tail.
+            return hiddenDrainRearm(self.loop, self.timer, self.timer_c, @This(), self, onTimer);
+        }
+
+        fn onStop(
+            self_: ?*@This(),
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            self_.?.stop_seen = true;
+            return .disarm;
+        }
+    };
+
+    var st: State = .{ .loop = &loop, .timer = &timer, .timer_c = &timer_c };
+    timer.run(&loop, &timer_c, 0, State, &st, State.onTimer);
+    stop.wait(&loop, &stop_c, State, &st, State.onStop);
+    try stop.notify();
+
+    // Stop ticking the instant either outcome is decided; a starved run
+    // must not get extra ticks in which to recover.
+    var ticks: u32 = 0;
+    while (!st.stop_seen and !st.starved and ticks < 20) : (ticks += 1) {
+        try loop.run(.once);
+    }
+    try testing.expect(!st.starved);
+    try testing.expect(st.stop_seen);
+    // Anything close to the starvation cap means the port wait was
+    // mostly starved even though it eventually got lucky.
+    try testing.expect(st.timer_fires < 5);
 }
