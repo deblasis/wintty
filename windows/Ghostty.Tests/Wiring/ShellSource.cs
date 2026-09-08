@@ -28,7 +28,11 @@ internal sealed class ShellSource
 {
     private readonly CompilationUnitSyntax _root;
 
-    private ShellSource(CompilationUnitSyntax root) => _root = root;
+    private ShellSource(CompilationUnitSyntax root, string name = "")
+    {
+        _root = root;
+        Name = name;
+    }
 
     /// <summary>
     /// The configuration these scans read the shell in.
@@ -199,8 +203,53 @@ internal sealed class ShellSource
         return found;
     }
 
+    /// <summary>
+    /// Every embedded source under the shell prefix (Ghostty and
+    /// Ghostty.Core both), parsed, each carrying its tail name relative to
+    /// that prefix -- "Taskbar.TaskbarOverlayFacade.cs", or
+    /// "Core.Taskbar.TaskbarBadgeArbiter.cs" for a Core file -- so a census
+    /// that finds an unwanted caller can name the file instead of only
+    /// counting it.
+    ///
+    /// Unlike <see cref="AllShellSources"/> this does not exclude Core: a
+    /// census asking "does anything besides the one file I expect call
+    /// this" has to see the whole corpus, not just the WinUI half of it, or
+    /// a second caller living in Ghostty.Core would pass unseen. Same
+    /// omission as <see cref="AllShellSources"/> on the disabled-region
+    /// check <see cref="Load"/> makes: a corpus-wide sweep cannot refuse
+    /// every file with a conditional region without refusing most of the
+    /// corpus, so that risk is still open here too.
+    /// </summary>
+    public static IEnumerable<ShellSource> AllFiles()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var found = new List<ShellSource>();
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            var dotted = Normalize(name);
+            if (!dotted.StartsWith(ShellPrefix, StringComparison.Ordinal)) continue;
+            if (!dotted.EndsWith(".cs", StringComparison.Ordinal)) continue;
+
+            using var stream = asm.GetManifestResourceStream(name)!;
+            using var reader = new StreamReader(stream);
+            var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd(), ParseOptions);
+            found.Add(new ShellSource((CompilationUnitSyntax)tree.GetRoot(), dotted[ShellPrefix.Length..]));
+        }
+
+        // Load-bearing, matching AllShellSources: an empty sweep reads as
+        // full coverage to every caller.
+        Assert.True(found.Count > 0, "no embedded shell sources found under " + ShellPrefix);
+        return found;
+    }
+
     /// <summary>The whole parsed file.</summary>
     public SyntaxNode Root => _root;
+
+    /// <summary>The file's tail name relative to the shell prefix, as
+    /// <see cref="AllFiles"/> computes it. Empty for a <see cref="Load"/>ed
+    /// or <see cref="ParseForCorpusScan"/>ed instance, which name themselves
+    /// by the caller's own dottedTail instead.</summary>
+    public string Name { get; }
 
     /// <summary>The one method with this name in the file.</summary>
     public MethodDeclarationSyntax Method(string name)
