@@ -5,6 +5,8 @@ using Ghostty.Core.Notifications;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace Ghostty.Controls.Notifications;
 
@@ -200,7 +202,18 @@ public sealed partial class NotificationHost : UserControl
                     _service?.Dismiss(notice);
                 }
             };
-            bar.Loaded += (s, _) => ((Control)s).Focus(FocusState.Programmatic);
+            // Loaded is not one-shot: WinUI can refire it on a reparent or a
+            // monitor move, the same thing Attach's own doc comment notes
+            // for this host. Left subscribed, a refire while the bar is
+            // still up would grab focus back a second time regardless of
+            // where the user has since moved it, so the handler detaches
+            // itself the first time it runs.
+            void FocusOnce(object sender, RoutedEventArgs args)
+            {
+                bar.Loaded -= FocusOnce;
+                bar.Focus(FocusState.Programmatic);
+            }
+            bar.Loaded += FocusOnce;
         }
 
         _bars[notice] = bar;
@@ -214,11 +227,34 @@ public sealed partial class NotificationHost : UserControl
         {
             bar.IsOpen = false;
             if (_timers.Remove(notice, out var timer)) timer.Stop();
-            var hadFocus = notice.FocusOnShow;
+            // Read before the bar leaves the tree: FocusManager answers a
+            // different question once its element is gone. Gated on the bar
+            // (or something inside it) actually holding focus right now, not
+            // merely on FocusOnShow, so an auto-dismiss timer -- or any other
+            // removal path -- firing after the user has since clicked into a
+            // pane, opened Settings, or started renaming a tab does not yank
+            // focus back out from under them.
+            var returnFocus = notice.FocusOnShow && BarHasFocus(bar);
             Stack.Children.Remove(bar);
             UpdateVisibility();
-            if (hadFocus) FocusReturn?.Invoke();
+            if (returnFocus) FocusReturn?.Invoke();
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="bar"/>, or something inside it, currently
+    /// holds keyboard focus. Same walk-up-from-FocusManager idiom as
+    /// MainWindow.FocusedTerminal and PaneHost.TestSeamFocusedLeafIndex.
+    /// </summary>
+    private static bool BarHasFocus(InfoBar bar)
+    {
+        if (bar.XamlRoot is null) return false;
+        var node = FocusManager.GetFocusedElement(bar.XamlRoot) as DependencyObject;
+        for (; node is not null; node = VisualTreeHelper.GetParent(node))
+        {
+            if (ReferenceEquals(node, bar)) return true;
+        }
+        return false;
     }
 
     private Button MakeButton(Notice notice, NoticeAction action)
