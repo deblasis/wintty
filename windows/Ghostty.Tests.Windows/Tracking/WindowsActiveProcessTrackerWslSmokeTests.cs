@@ -3,12 +3,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using Ghostty.Core.Profiles;
-using Ghostty.Core.Profiles.Tracking;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace Ghostty.Tests.Windows.Tracking;
 
+[Collection(TrackerSmoke.SerialCollection)]
 public sealed class WindowsActiveProcessTrackerWslSmokeTests
 {
     private readonly ITestOutputHelper _output;
@@ -29,14 +29,20 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
         var distro = WslDistro.Name!;
         _output.WriteLine($"probed distro: {distro}");
 
-        // Spawn pwsh -> wsl.exe --distribution <distro> -- sleep 5
+        // Spawn pwsh -> wsl.exe --distribution <distro> -- sleep 60
         // pwsh is the root we register; wsl.exe is the descendant the walker
-        // should observe. The 5s sleep gives the 500 ms tick + 250 ms debounce
-        // a comfortable window to fire while wsl.exe is still alive.
+        // should observe.
+        //
+        // sleep 60, not sleep 5: the old five seconds had to outlast pwsh's
+        // cold start AND however long the tracker took to look, so on a
+        // loaded machine wsl.exe could exit before it was ever observed --
+        // the test then failed for the scenario ending early rather than for
+        // anything the tracker did. The process is killed in the finally
+        // below, so a longer sleep costs nothing on a healthy run.
         using var pwsh = Process.Start(new ProcessStartInfo
         {
             FileName = "pwsh.exe",
-            Arguments = $"-NoLogo -NoProfile -Command \"& wsl.exe --distribution {distro} -- sleep 5\"",
+            Arguments = $"-NoLogo -NoProfile -Command \"& wsl.exe --distribution {distro} -- sleep 60\"",
             UseShellExecute = false,
             CreateNoWindow = true,
         });
@@ -44,8 +50,9 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
 
         try
         {
-            using var tracker = new WindowsActiveProcessTracker();
-            var tcs = new TaskCompletionSource<(string exe, string? cmd)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var tracker = TrackerSmoke.NewTracker();
+            var tcs = new TaskCompletionSource<(string Exe, string? Cmd)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             var observed = new List<string>();
             var sw = Stopwatch.StartNew();
 
@@ -65,7 +72,24 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
             };
             tracker.Register(pwsh!.Id);
 
-            var winner = await Task.WhenAny(tcs.Task, Task.Delay(8000));
+            // Precondition, not an assertion about the tracker: wait until the
+            // walker can see wsl.exe under pwsh at all. pwsh's cold start and
+            // wsl's own launch are not the tracker's doing and used to be
+            // charged to its budget.
+            var scenario = await TrackerSmoke.AwaitScenario(
+                pwsh!.Id,
+                e => string.Equals(e, "wsl.exe", StringComparison.OrdinalIgnoreCase));
+            Assert.True(
+                scenario.Live,
+                $"pwsh never produced a wsl.exe descendant within "
+                + $"{TrackerSmoke.ScenarioBudgetMs} ms, so there was nothing for the "
+                + $"tracker to report: this is the host, pwsh or wsl, not the tracker.");
+            _output.WriteLine(
+                $"scenario live: {scenario.Exe} after {scenario.ElapsedMs} ms "
+                + $"(worst walk {scenario.WalkMs} ms)");
+
+            var deadlineMs = TrackerSmoke.TrackerDeadlineMs(scenario.WalkMs);
+            var winner = await Task.WhenAny(tcs.Task, Task.Delay(deadlineMs));
             lock (observed)
             {
                 foreach (var line in observed)
@@ -73,7 +97,9 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
             }
             Assert.True(
                 winner == tcs.Task,
-                $"tracker did not report wsl.exe within 8s; observed: [{string.Join(", ", observed)}]");
+                $"the walker could already see wsl.exe under pwsh, but the tracker "
+                + $"tracker did not report wsl.exe within {deadlineMs} ms; "
+                + $"observed: [{string.Join(", ", observed)}]");
 
             var (exe, cmd) = await tcs.Task;
             Assert.Equal("wsl.exe", exe, ignoreCase: true);
@@ -90,7 +116,7 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
         }
         finally
         {
-            try { pwsh.Kill(entireProcessTree: true); } catch { }
+            try { pwsh!.Kill(entireProcessTree: true); } catch { }
         }
     }
 }
