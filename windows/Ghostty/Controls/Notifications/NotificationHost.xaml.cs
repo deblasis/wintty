@@ -35,6 +35,13 @@ public sealed partial class NotificationHost : UserControl
     public NotificationHost()
     {
         InitializeComponent();
+        // WinUI folds Margin into DesiredSize even when Stack has zero
+        // children, so an empty host would still report the StackPanel's own
+        // ~16px and keep the Auto dock row -- and this control's opaque
+        // background -- permanently open. A Collapsed element reports (0,0)
+        // DesiredSize regardless of its content's Margin, which is what "no
+        // notices, no row" actually needs. See UpdateVisibility.
+        Visibility = Visibility.Collapsed;
     }
 
     /// <summary>
@@ -75,6 +82,7 @@ public sealed partial class NotificationHost : UserControl
         Stack.Children.Clear();
         _bars.Clear();
         StopAllTimers();
+        UpdateVisibility();
     }
 
     private void OnActiveChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -91,9 +99,19 @@ public sealed partial class NotificationHost : UserControl
                 Stack.Children.Clear();
                 _bars.Clear();
                 StopAllTimers();
+                UpdateVisibility();
                 break;
         }
     }
+
+    /// <summary>
+    /// The dock row is genuinely zero height, and this control paints
+    /// nothing, exactly when there is nothing to show. Called from every
+    /// path that changes <see cref="_bars"/>, so all of them agree on what
+    /// "collapse" means rather than each reaching for Visibility by hand.
+    /// </summary>
+    private void UpdateVisibility() =>
+        Visibility = _bars.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>
     /// Stop every armed auto-dismiss timer without dismissing the notices
@@ -187,6 +205,7 @@ public sealed partial class NotificationHost : UserControl
 
         _bars[notice] = bar;
         Stack.Children.Add(bar);
+        UpdateVisibility();
     }
 
     private void RemoveBar(Notice notice)
@@ -197,6 +216,7 @@ public sealed partial class NotificationHost : UserControl
             if (_timers.Remove(notice, out var timer)) timer.Stop();
             var hadFocus = notice.FocusOnShow;
             Stack.Children.Remove(bar);
+            UpdateVisibility();
             if (hadFocus) FocusReturn?.Invoke();
         }
     }

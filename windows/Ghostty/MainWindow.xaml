@@ -216,9 +216,10 @@
         <!--
             Generic in-window notice surface. Docked in its own row under the
             terminal (Row 2, Col 1: clear of both tab strips and the OS caption
-            buttons). The row is Auto, so with no notice it is zero height and
-            the terminal has the whole star row; with one, the terminal shrinks
-            and libghostty resizes, nothing composites over the swapchain.
+            buttons). The host collapses itself whenever it has no active
+            notice, so the Auto row is genuinely zero height and the terminal
+            has the whole star row; with one, the terminal shrinks and
+            libghostty resizes, nothing composites over the swapchain.
             Renders one InfoBar per active Notice. Attached to
             App.NotificationService in code-behind.
         -->
