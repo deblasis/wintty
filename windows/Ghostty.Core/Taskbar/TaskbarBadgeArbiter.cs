@@ -24,6 +24,7 @@ public sealed class TaskbarBadgeArbiter
     private readonly Dictionary<string, string> _acknowledged = new(StringComparer.Ordinal);
     private readonly HashSet<string> _overlay = new(StringComparer.Ordinal);
     private TaskbarBadgeKind? _shown;
+    private bool _superseding;
 
     public TaskbarBadgeArbiter(ITaskbarBadgeSink sink, INotificationService notices)
     {
@@ -49,9 +50,22 @@ public sealed class TaskbarBadgeArbiter
                 return;
             }
             // Superseded: retire the old notice without treating that as a
-            // user dismissal of the new situation.
+            // user dismissal of the new situation. Suppress the retiring
+            // notice's own OnDismissed recompute here: it would otherwise
+            // run mid-flight, with the new badge not yet in place, and
+            // transiently clear or hand the slot to a different active key
+            // before Raise puts the superseding badge back a few lines
+            // down. One Recompute below is enough.
             _active.Remove(badge.Key);
-            _notices.Dismiss(current.Notice);
+            _superseding = true;
+            try
+            {
+                _notices.Dismiss(current.Notice);
+            }
+            finally
+            {
+                _superseding = false;
+            }
         }
         var notice = new Notice
         {
@@ -89,6 +103,7 @@ public sealed class TaskbarBadgeArbiter
             _active.Remove(key);
             _acknowledged[key] = signature;
         }
+        if (_superseding) return;
         if (_overlay.Remove(key)) Recompute();
     }
 

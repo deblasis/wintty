@@ -136,4 +136,21 @@ public class TaskbarBadgeArbiterTests
         Assert.Equal(TaskbarBadgeKind.UpdateError, sink.Current);
         Assert.Single(notices.Active);
     }
+
+    [Fact]
+    public void SupersedingTheOverlayOwner_DoesNotFlicker()
+    {
+        var (a, sink, _) = New();
+        a.Raise(UpdateError("a"));
+        var writesBeforeSupersede = sink.Writes.Count;
+
+        a.Raise(UpdateError("b"));
+
+        // The kind that owns the slot does not change across a signature
+        // change on the same key, so nothing about the visible overlay
+        // needs to change. The old double-Recompute bug briefly cleared
+        // the overlay (a (null, "") write) before re-showing it; that
+        // transient write must not appear.
+        Assert.DoesNotContain(sink.Writes.Skip(writesBeforeSupersede), w => w.Kind is null);
+    }
 }
