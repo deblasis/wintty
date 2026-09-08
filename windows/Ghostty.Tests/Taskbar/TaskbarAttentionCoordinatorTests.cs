@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Linq;
+using Ghostty.Core.Notifications;
 using Ghostty.Core.Tabs;
 using Ghostty.Core.Taskbar;
 using Ghostty.Tests.Tabs;
@@ -8,7 +10,7 @@ namespace Ghostty.Tests.Taskbar;
 
 public class TaskbarAttentionCoordinatorTests
 {
-    private static (TabManager mgr, List<FakePaneHost> hosts, FakeTaskbarOverlaySink sink, TaskbarAttentionCoordinator coord) New()
+    private static (TabManager mgr, List<FakePaneHost> hosts, FakeTaskbarBadgeSink sink, NotificationService notices, TaskbarAttentionCoordinator coord) New()
     {
         var hosts = new List<FakePaneHost>();
         var mgr = new TabManager(_ =>
@@ -17,33 +19,33 @@ public class TaskbarAttentionCoordinatorTests
             hosts.Add(h);
             return h;
         });
-        var sink = new FakeTaskbarOverlaySink();
-        var coord = new TaskbarAttentionCoordinator(mgr, sink);
-        return (mgr, hosts, sink, coord);
+        var sink = new FakeTaskbarBadgeSink();
+        var notices = new NotificationService();
+        var coord = new TaskbarAttentionCoordinator(mgr, new TaskbarBadgeArbiter(sink, notices));
+        return (mgr, hosts, sink, notices, coord);
     }
 
     [Fact]
     public void No_writes_on_construction()
     {
-        var (_, _, sink, _) = New();
+        var (_, _, sink, _, _) = New();
         Assert.Empty(sink.Writes);
     }
 
     [Fact]
-    public void Bell_while_unfocused_shows_badge()
+    public void Bell_while_unfocused_shows_badge_and_notice()
     {
-        var (_, hosts, sink, coord) = New();
+        var (_, hosts, sink, notices, coord) = New();
         coord.SetFocused(false);
-
         hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
-
-        Assert.Equal(new[] { true }, sink.Writes);
+        Assert.Equal(TaskbarBadgeKind.Bell, sink.Current);
+        Assert.Equal("badge:bell", Assert.Single(notices.Active).DedupKey);
     }
 
     [Fact]
     public void Bell_while_focused_does_nothing()
     {
-        var (_, hosts, sink, coord) = New();
+        var (_, hosts, sink, _, coord) = New();
         coord.SetFocused(true);
 
         hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
@@ -54,7 +56,7 @@ public class TaskbarAttentionCoordinatorTests
     [Fact]
     public void Bell_without_attention_feature_shows_no_badge()
     {
-        var (_, hosts, sink, coord) = New();
+        var (_, hosts, sink, _, coord) = New();
         coord.SetFocused(false);
 
         // title only, no attention: the badge must stay off even unfocused.
@@ -64,34 +66,30 @@ public class TaskbarAttentionCoordinatorTests
     }
 
     [Fact]
-    public void Focus_clears_active_badge()
+    public void Focus_clears_the_badge_but_keeps_the_notice()
     {
-        var (_, hosts, sink, coord) = New();
+        var (_, hosts, sink, notices, coord) = New();
         coord.SetFocused(false);
         hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
-
         coord.SetFocused(true);
-
-        Assert.Equal(new[] { true, false }, sink.Writes);
+        Assert.Null(sink.Current);
+        Assert.Single(notices.Active);
     }
 
     [Fact]
-    public void Repeated_bells_coalesce_to_one_show()
+    public void Two_bells_in_one_episode_write_once()
     {
-        var (_, hosts, sink, coord) = New();
+        var (_, hosts, sink, _, coord) = New();
         coord.SetFocused(false);
-
         hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
         hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
-        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
-
-        Assert.Equal(new[] { true }, sink.Writes);
+        Assert.Single(sink.Writes);
     }
 
     [Fact]
     public void Focus_with_no_pending_attention_does_not_clear()
     {
-        var (_, _, sink, coord) = New();
+        var (_, _, sink, _, coord) = New();
         coord.SetFocused(false);
         coord.SetFocused(true);
 
@@ -99,15 +97,15 @@ public class TaskbarAttentionCoordinatorTests
     }
 
     [Fact]
-    public void Re_arms_after_clear()
+    public void A_later_episode_badges_again()
     {
-        var (_, hosts, sink, coord) = New();
+        var (_, hosts, sink, notices, coord) = New();
         coord.SetFocused(false);
-        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);   // true
-        coord.SetFocused(true);     // false
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
+        coord.SetFocused(true);
+        notices.Dismiss(notices.Active.Single());
         coord.SetFocused(false);
-        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);   // true
-
-        Assert.Equal(new[] { true, false, true }, sink.Writes);
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
+        Assert.Equal(TaskbarBadgeKind.Bell, sink.Current);
     }
 }
