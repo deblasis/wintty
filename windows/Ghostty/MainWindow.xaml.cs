@@ -975,6 +975,10 @@ public sealed partial class MainWindow : Window
         // harmless and it stays hidden until summoned.
         if (Ghostty.App.NotificationService is { } notifications)
             NotificationHost.Attach(notifications);
+        // A notice appearing or leaving resizes the star row, and with it every
+        // visible surface; that is a layout switch, not a user drag, so the
+        // cols x rows pill stays quiet.
+        NotificationHost.SizeChanged += OnNotificationDockSizeChanged;
 
         // Parent every existing and future PaneHost into the shared
         // container declared in MainWindow.xaml. This is the single
@@ -1677,6 +1681,24 @@ public sealed partial class MainWindow : Window
             foreach (var leaf in PaneTree.Leaves(host.RootNode))
                 leaf.Terminal().NoteLayoutSwitch();
         }
+    }
+
+    /// <summary>
+    /// The notice dock's own row changes height as notices come and go
+    /// (report 3), which resizes the star row and everything visible in it.
+    /// That is a layout switch on the active tab's terminals, the same
+    /// suppression <see cref="NoteLayoutSwitchToSurfaces"/> gives an actual
+    /// tab-layout switch, so the cols x rows resize pill stays quiet.
+    ///
+    /// Only the active tab: a background tab's PaneHost is not laid out, so
+    /// its terminals never see the resize that would trip the pill.
+    /// </summary>
+    private void OnNotificationDockSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.NewSize.Height == e.PreviousSize.Height) return;
+        if (_tabManager.ActiveTab?.PaneHost is not Panes.PaneHost host) return;
+        foreach (var leaf in PaneTree.Leaves(host.RootNode))
+            leaf.Terminal().NoteLayoutSwitch();
     }
 
     /// <summary>
