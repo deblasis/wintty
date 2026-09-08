@@ -730,12 +730,13 @@ fn hiddenDrainRearm(
     userdata: ?*Userdata,
     comptime cb: fn (?*Userdata, *xev.Loop, *xev.Completion, xev.Timer.RunError!void) xev.CallbackAction,
 ) xev.CallbackAction {
-    _ = loop;
-    _ = timer;
-    _ = c;
-    _ = userdata;
-    _ = cb;
-    return .rearm;
+    // Re-run with a fresh deadline and disarm this completion, the way
+    // cursorTimerCallback and animationTimerCallback do. `.rearm` on a
+    // timer re-inserts the elapsed deadline on the IOCP backend and
+    // starves the port wait; that starved the stop async and hung
+    // Surface.deinit's join on the UI thread.
+    timer.run(loop, c, hidden_drain_interval_ms, Userdata, userdata, cb);
+    return .disarm;
 }
 
 fn hiddenDrainCallback(
@@ -759,7 +760,7 @@ fn hiddenDrainCallback(
         log.err("error draining mailbox (hidden safety net) err={}", .{err});
 
     // Stay armed while hidden; the .visible = true transition cancels.
-    if (!t.flags.visible) return .rearm;
+    if (!t.flags.visible) return hiddenDrainRearm(&t.loop, &t.hidden_drain_h, &t.hidden_drain_c, Thread, t, hiddenDrainCallback);
     return .disarm;
 }
 
