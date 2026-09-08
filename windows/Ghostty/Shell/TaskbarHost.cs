@@ -33,6 +33,11 @@ internal sealed partial class TaskbarHost : IDisposable
 
     public bool IsAvailable => _coordinator is not null;
 
+    /// <summary>The window's badge arbiter; producers in other assemblies raise through it.</summary>
+    public TaskbarBadgeArbiter? Badges { get; }
+    /// <summary>The overlay facade, so producers can register icons for their kinds.</summary>
+    public TaskbarOverlayFacade? Overlay => _overlayFacade;
+
     public TaskbarHost(Window window, TabManager tabs, ILogger<TaskbarHost> logger)
     {
         try
@@ -45,7 +50,10 @@ internal sealed partial class TaskbarHost : IDisposable
                 () => DateTime.UtcNow);
 
             _overlayFacade = new TaskbarOverlayFacade(hwnd);
-            _attention = new TaskbarAttentionCoordinator(tabs, _overlayFacade);
+            Badges = new TaskbarBadgeArbiter(
+                _overlayFacade,
+                Ghostty.App.NotificationService ?? new Ghostty.Core.Notifications.NotificationService());
+            _attention = new TaskbarAttentionCoordinator(tabs, Badges);
             _window = window;
             // Window focus drives the attention badge: an unfocused bell
             // sets it, regaining focus clears it. Seed from the current

@@ -330,6 +330,14 @@ public sealed partial class MainWindow : Window
     private readonly LayoutCoordinator _layout;
     private readonly TitleBarCoordinator _titleBar;
     private readonly TaskbarHost _taskbar;
+
+    /// <summary>The window's badge arbiter, so a producer in another assembly
+    /// (the sponsor update overlay) can reach it without depending on TaskbarHost.</summary>
+    internal Ghostty.Core.Taskbar.TaskbarBadgeArbiter? TaskbarBadges => _taskbar.Badges;
+    /// <summary>The overlay facade, so a producer in another assembly can
+    /// register icons for the kinds this shell does not draw itself.</summary>
+    internal Ghostty.Taskbar.TaskbarOverlayFacade? TaskbarOverlay => _taskbar.Overlay;
+
     private readonly TabBellAnnouncer _bellAnnouncer;
     private readonly WindowThemeManager _themeManager;
     private readonly ShellThemeService _shellTheme;
