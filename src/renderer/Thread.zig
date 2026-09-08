@@ -1310,3 +1310,19 @@ test "hidden drain idiom: a timer that re-runs itself lets a posted async throug
     // mostly starved even though it eventually got lucky.
     try testing.expect(st.timer_fires < 5);
 }
+
+// The idiom test above drives hiddenDrainRearm directly, so it cannot
+// catch a revert of hiddenDrainCallback's callsite (back to a bare
+// `return .rearm;`) while the helper itself stays correct. This census
+// closes that gap: it scans every xev.Timer callback's own source text
+// for the literal string that reintroduces the starvation bug.
+test "no xev.Timer callback in this file returns .rearm" {
+    const src = @embedFile("Thread.zig");
+    const names = [_][]const u8{ "fn hiddenDrainCallback(", "fn cursorTimerCallback(", "fn animationTimerCallback(" };
+    for (names) |name| {
+        const start = std.mem.indexOf(u8, src, name) orelse return error.CallbackNotFound;
+        // The body ends at the next "\n}\n" at column 0.
+        const end = start + (std.mem.indexOf(u8, src[start..], "\n}\n") orelse return error.BodyNotClosed);
+        try std.testing.expect(std.mem.indexOf(u8, src[start..end], "return .rearm") == null);
+    }
+}
