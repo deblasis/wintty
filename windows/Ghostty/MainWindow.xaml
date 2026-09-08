@@ -49,6 +49,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="StripColumn" Width="0"/>
@@ -163,7 +164,7 @@
             header lane and the sidebar rail in one coordinate space.
         -->
         <Canvas x:Name="TabMorphLayer"
-                Grid.Row="0" Grid.RowSpan="2"
+                Grid.Row="0" Grid.RowSpan="3"
                 Grid.Column="0" Grid.ColumnSpan="2"
                 IsHitTestVisible="False"/>
 
@@ -171,7 +172,7 @@
         <Popup x:Name="CommandPalettePopup"
                IsLightDismissEnabled="True"
                ShouldConstrainToRootBounds="True"
-               Grid.Row="0" Grid.RowSpan="2"
+               Grid.Row="0" Grid.RowSpan="3"
                Grid.Column="0" Grid.ColumnSpan="2">
             <cmdpalette:CommandPaletteControl x:Name="CommandPaletteUI"/>
         </Popup>
@@ -179,7 +180,7 @@
         <!-- Tab switcher MRU cycle popup -->
         <Popup x:Name="TabSwitcherPopupHost"
                ShouldConstrainToRootBounds="True"
-               Grid.Row="0" Grid.RowSpan="2"
+               Grid.Row="0" Grid.RowSpan="3"
                Grid.Column="0" Grid.ColumnSpan="2">
             <tabs:TabSwitcherPopup x:Name="TabSwitcherPopupUI"/>
         </Popup>
@@ -187,7 +188,7 @@
         <!-- Tab overview grid -->
         <Popup x:Name="TabOverviewHost"
                ShouldConstrainToRootBounds="True"
-               Grid.Row="0" Grid.RowSpan="2"
+               Grid.Row="0" Grid.RowSpan="3"
                Grid.Column="0" Grid.ColumnSpan="2">
             <tabs:TabOverviewControl x:Name="TabOverviewUI"/>
         </Popup>
@@ -213,15 +214,16 @@
                   ToolTipService.ToolTip="Power saving mode active."/>
 
         <!--
-            Generic in-window notice surface. Bottom-anchored in the terminal
-            content area (Row 1, Col 1 — clear of both tab strips and the OS
-            caption buttons), overlaying only the terminal so it never covers
-            chrome. Renders one InfoBar per active Notice (NO_COLOR is its first
-            customer). Attached to App.NotificationService in code-behind.
+            Generic in-window notice surface. Docked in its own row under the
+            terminal (Row 2, Col 1: clear of both tab strips and the OS caption
+            buttons). The row is Auto, so with no notice it is zero height and
+            the terminal has the whole star row; with one, the terminal shrinks
+            and libghostty resizes, nothing composites over the swapchain.
+            Renders one InfoBar per active Notice. Attached to
+            App.NotificationService in code-behind.
         -->
         <notifications:NotificationHost x:Name="NotificationHost"
-                                        Grid.Row="1" Grid.Column="1"
-                                        VerticalAlignment="Bottom"
+                                        Grid.Row="2" Grid.Column="1"
                                         HorizontalAlignment="Stretch"/>
 
         <!--
@@ -234,7 +236,7 @@
             where the OS caption buttons used to be.
         -->
         <ToggleButton x:Name="QuakePinButton"
-                      Grid.Row="0" Grid.RowSpan="2"
+                      Grid.Row="0" Grid.RowSpan="3"
                       Grid.Column="0" Grid.ColumnSpan="2"
                       HorizontalAlignment="Right"
                       VerticalAlignment="Top"

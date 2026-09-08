@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     NotificationHost: the app's generic in-window notice surface. Renders one
-    InfoBar per active Notice from INotificationService, stacked at the BOTTOM
-    of the terminal content area so banners never fight the tab strip, the
-    prompt, or the OS caption buttons (mirrors macOS Ghostty's bottom-anchored
-    UpdateOverlay).
+    InfoBar per active Notice from INotificationService, docked in its own
+    row under the terminal (MainWindow.xaml RootGrid row 2) so banners never
+    fight the tab strip, the prompt, or the OS caption buttons, and never
+    composite over the terminal's DX12 swapchain.
 
-    The inner StackPanel is bottom-aligned and only as tall as its content, so
-    when there are no notices it occupies nothing and passes all pointer events
-    through to the terminal underneath. MainWindow calls Attach() once to bind
-    the shared service.
+    The inner StackPanel is only as tall as its content, so when there are no
+    notices the row is zero height and the terminal has the whole star row.
+    MainWindow calls Attach() once to bind the shared service.
 -->
 <UserControl
     x:Class="Ghostty.Controls.Notifications.NotificationHost"
@@ -17,12 +16,13 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+    Background="#0C0C0C">
 
     <StackPanel x:Name="Stack"
                 Orientation="Vertical"
                 Spacing="4"
                 VerticalAlignment="Bottom"
                 HorizontalAlignment="Stretch"
-                Margin="8,0,8,8"/>
+                Margin="8,8,8,8"/>
 </UserControl>
