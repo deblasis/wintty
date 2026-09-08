@@ -110,4 +110,30 @@ public class TaskbarBadgeArbiterTests
         a.Raise(Bell("2"));
         Assert.Equal(TaskbarBadgeKind.Bell, sink.Current);
     }
+
+    [Fact]
+    public void DismissedSignature_StaysSuppressedWhileStillOngoing_ButRecursAfterClear()
+    {
+        var (a, sink, notices) = New();
+        a.Raise(UpdateError("not entitled"));
+        notices.Dismiss(notices.Active.Single());
+
+        // The producer keeps polling and the same failure is still
+        // happening: an acknowledged, merely-ongoing situation must not
+        // re-raise.
+        a.Raise(UpdateError("not entitled"));
+        Assert.Null(sink.Current);
+        Assert.Empty(notices.Active);
+
+        // The producer reports the situation resolved.
+        a.Clear("update");
+        Assert.Null(sink.Current);
+
+        // It genuinely recurs later with the identical signature. This is a
+        // new episode of the same problem, not the one already reviewed and
+        // dismissed, so it must badge again.
+        a.Raise(UpdateError("not entitled"));
+        Assert.Equal(TaskbarBadgeKind.UpdateError, sink.Current);
+        Assert.Single(notices.Active);
+    }
 }

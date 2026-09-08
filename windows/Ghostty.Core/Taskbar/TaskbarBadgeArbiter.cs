@@ -9,6 +9,11 @@ namespace Ghostty.Core.Taskbar;
 /// Owns the taskbar overlay slot. A badge is never shown without a notice
 /// the user can read and dismiss; dismissing clears it; a producer's
 /// <see cref="Clear"/> ends the overlay but leaves the notice for review.
+/// A dismissal suppresses only a still-ongoing situation (the same
+/// signature raised again with no intervening <see cref="Clear"/>); once
+/// the producer calls <see cref="Clear"/> the acknowledgement is forgotten,
+/// so a genuine later recurrence badges again instead of staying silenced
+/// for the rest of the process.
 /// Pure logic: no WinUI, no threads. Callers hold the UI thread.
 /// </summary>
 public sealed class TaskbarBadgeArbiter
@@ -65,9 +70,14 @@ public sealed class TaskbarBadgeArbiter
     }
 
     /// <summary>The trigger ended (focus regained, state moved on). The overlay
-    /// drops this key; the notice stays until the user dismisses it.</summary>
+    /// drops this key; the notice stays until the user dismisses it. Also
+    /// forgets any acknowledged signature for this key: an acknowledgement
+    /// only suppresses a situation the producer still considers ongoing, so
+    /// once the producer reports it over, a later recurrence (even with the
+    /// exact same signature) is a new situation and must badge again.</summary>
     public void Clear(string key)
     {
+        _acknowledged.Remove(key);
         if (_overlay.Remove(key)) Recompute();
     }
 
