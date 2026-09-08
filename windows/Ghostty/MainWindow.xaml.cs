@@ -979,6 +979,10 @@ public sealed partial class MainWindow : Window
         // visible surface; that is a layout switch, not a user drag, so the
         // cols x rows pill stays quiet.
         NotificationHost.SizeChanged += OnNotificationDockSizeChanged;
+        // A focused notice (FocusOnShow) takes keyboard focus while it is up;
+        // when it leaves, hand focus back to the active terminal the same way
+        // the command palette does on close.
+        NotificationHost.FocusReturn = FocusActiveLeaf;
 
         // Parent every existing and future PaneHost into the shared
         // container declared in MainWindow.xaml. This is the single
