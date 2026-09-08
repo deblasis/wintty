@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using Ghostty.Core.Notifications;
@@ -25,6 +26,11 @@ public sealed partial class NotificationHost : UserControl
     private INotificationService? _service;
     private bool _subscribed;
     private readonly Dictionary<Notice, InfoBar> _bars = new();
+    private readonly Dictionary<Notice, Microsoft.UI.Dispatching.DispatcherQueueTimer> _timers = new();
+
+    /// <summary>Set by the window: returns focus to the active terminal after
+    /// a focused bar leaves. Null in tests and before Attach.</summary>
+    public Action? FocusReturn { get; set; }
 
     public NotificationHost()
     {
@@ -68,6 +74,7 @@ public sealed partial class NotificationHost : UserControl
         _subscribed = false;
         Stack.Children.Clear();
         _bars.Clear();
+        StopAllTimers();
     }
 
     private void OnActiveChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -83,8 +90,21 @@ public sealed partial class NotificationHost : UserControl
             case NotifyCollectionChangedAction.Reset:
                 Stack.Children.Clear();
                 _bars.Clear();
+                StopAllTimers();
                 break;
         }
+    }
+
+    /// <summary>
+    /// Stop every armed auto-dismiss timer without dismissing the notices
+    /// they belong to. Used by the two paths that clear <see cref="_bars"/>
+    /// out from under the timers instead of going through
+    /// <see cref="RemoveBar"/> one notice at a time.
+    /// </summary>
+    private void StopAllTimers()
+    {
+        foreach (var timer in _timers.Values) timer.Stop();
+        _timers.Clear();
     }
 
     private void AddBar(Notice notice)
@@ -135,6 +155,36 @@ public sealed partial class NotificationHost : UserControl
         // drives RemoveBar).
         bar.CloseButtonClick += (_, _) => _service?.Dismiss(notice);
 
+        // A transient notice dismisses itself after its own timeout: the
+        // caller does not have to hold a reference or race the dispatcher.
+        if (notice.AutoDismissAfter is { } after)
+        {
+            var timer = DispatcherQueue.CreateTimer();
+            timer.Interval = after;
+            timer.IsRepeating = false;
+            timer.Tick += (_, _) => _service?.Dismiss(notice);
+            _timers[notice] = timer;
+            timer.Start();
+        }
+
+        // A notice raised from a command the user just ran already has the
+        // user's attention, so the bar takes focus and Enter or Space acts
+        // as its dismiss; a notice that arrives on its own leaves focus
+        // wherever it was.
+        if (notice.FocusOnShow)
+        {
+            bar.IsTabStop = true;
+            bar.KeyDown += (_, e) =>
+            {
+                if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)
+                {
+                    e.Handled = true;
+                    _service?.Dismiss(notice);
+                }
+            };
+            bar.Loaded += (s, _) => ((Control)s).Focus(FocusState.Programmatic);
+        }
+
         _bars[notice] = bar;
         Stack.Children.Add(bar);
     }
@@ -144,7 +194,10 @@ public sealed partial class NotificationHost : UserControl
         if (_bars.Remove(notice, out var bar))
         {
             bar.IsOpen = false;
+            if (_timers.Remove(notice, out var timer)) timer.Stop();
+            var hadFocus = notice.FocusOnShow;
             Stack.Children.Remove(bar);
+            if (hadFocus) FocusReturn?.Invoke();
         }
     }
 
