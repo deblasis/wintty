@@ -899,7 +899,12 @@ public sealed partial class MainWindow : Window
 
         Grid.SetRow(_verticalTabHost, 0);
         Grid.SetColumn(_verticalTabHost, 0);
-        Grid.SetRowSpan(_verticalTabHost, 2);
+        // Three rows, matching every RowSpan="2"->"3" bump the dock row's
+        // XAML-declared spanning overlays got: left at 2, the strip stopped
+        // at the old row-1 boundary while the notice dock (row 2, column 1)
+        // extended below it, leaving row 2/column 0 bare RootGrid background
+        // instead of continuing the sidebar under a notice.
+        Grid.SetRowSpan(_verticalTabHost, 3);
         Canvas.SetZIndex(_verticalTabHost, -1);
         RootGrid.Children.Add(_verticalTabHost);
 
@@ -957,7 +962,10 @@ public sealed partial class MainWindow : Window
             Width = VerticalSeamOverlap + Core.Panes.PaneChrome.SurfaceInset,
         };
         Grid.SetRow(_verticalSeamCover, 0);
-        Grid.SetRowSpan(_verticalSeamCover, 2);
+        // Same three-row correction as _verticalTabHost just above: this
+        // cover rides along the strip it seams, so it has to span exactly
+        // what the strip spans.
+        Grid.SetRowSpan(_verticalSeamCover, 3);
         Grid.SetColumn(_verticalSeamCover, 0);
         Grid.SetColumnSpan(_verticalSeamCover, 2);
         RootGrid.Children.Add(_verticalSeamCover);
@@ -1690,19 +1698,22 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// The notice dock's own row changes height as notices come and go
     /// (report 3), which resizes the star row and everything visible in it.
-    /// That is a layout switch on the active tab's terminals, the same
-    /// suppression <see cref="NoteLayoutSwitchToSurfaces"/> gives an actual
-    /// tab-layout switch, so the cols x rows resize pill stays quiet.
+    /// That is a layout switch, the same suppression
+    /// <see cref="NoteLayoutSwitchToSurfaces"/> gives an actual tab-layout
+    /// switch, so the cols x rows resize pill stays quiet.
     ///
-    /// Only the active tab: a background tab's PaneHost is not laid out, so
-    /// its terminals never see the resize that would trip the pill.
+    /// Every tab, not just the active one, for the same reason
+    /// <see cref="NoteLayoutSwitchToSurfaces"/> already walks every tab: a
+    /// background tab's PaneHost is not laid out while hidden, so it never
+    /// sees the resize at the moment the dock changes height, only the
+    /// deferred one WinUI does the moment the user switches to it -- and by
+    /// then the transient notice that caused it may be long gone, with
+    /// nothing narrating the resize the pill would flash for.
     /// </summary>
     private void OnNotificationDockSizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (e.NewSize.Height == e.PreviousSize.Height) return;
-        if (_tabManager.ActiveTab?.PaneHost is not Panes.PaneHost host) return;
-        foreach (var leaf in PaneTree.Leaves(host.RootNode))
-            leaf.Terminal().NoteLayoutSwitch();
+        NoteLayoutSwitchToSurfaces();
     }
 
     /// <summary>
@@ -2149,6 +2160,13 @@ public sealed partial class MainWindow : Window
         // that can still land after the tree starts coming down.
         _horizontalTabHost.SelectedTabSeamChanged -= OnSelectedTabSeamChanged;
         _verticalTabHost.SelectionRowChanged -= OnVerticalSeamChanged;
+        // Same reasoning as the two above: NotificationHost is this window's
+        // own XAML element, so leaving this attached would leak nothing by
+        // itself, but the handler is raised from a layout callback -- one of
+        // the ones that can still land after the tree starts coming down --
+        // so it is detached here rather than left to the census to wave
+        // through as an assumption nobody wrote down.
+        NotificationHost.SizeChanged -= OnNotificationDockSizeChanged;
         // UISettings is an OS object and calls back on a thread-pool thread.
         // Left attached, an OS light/dark flip, accent change or high-contrast
         // toggle during teardown puts AppSetColorScheme through the app
@@ -3600,7 +3618,7 @@ public sealed partial class MainWindow : Window
         // is a bar of terminal colour drawn across the pane at a height with
         // no tab beside it.
         //
-        // The list, not the host: the host is Row 0 with RowSpan 2, so it
+        // The list, not the host: the host is Row 0 with RowSpan 3, so it
         // covers the whole window and clamping to it does nothing at all.
         if (_verticalTabHost.SelectionViewport(RootGrid) is { } viewport)
         {
