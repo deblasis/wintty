@@ -33,6 +33,11 @@ internal sealed partial class TaskbarHost : IDisposable
 
     public bool IsAvailable => _coordinator is not null;
 
+    /// <summary>The window's badge arbiter; producers in other assemblies raise through it.</summary>
+    public TaskbarBadgeArbiter? Badges { get; }
+    /// <summary>The overlay facade, so producers can register icons for their kinds.</summary>
+    public TaskbarOverlayFacade? Overlay => _overlayFacade;
+
     public TaskbarHost(Window window, TabManager tabs, ILogger<TaskbarHost> logger)
     {
         try
@@ -45,7 +50,23 @@ internal sealed partial class TaskbarHost : IDisposable
                 () => DateTime.UtcNow);
 
             _overlayFacade = new TaskbarOverlayFacade(hwnd);
-            _attention = new TaskbarAttentionCoordinator(tabs, _overlayFacade);
+            // No silent fallback to a throwaway NotificationService here: a
+            // badge from Badges is only ever paired with a notice the user
+            // can see and dismiss (the whole point of this arbiter) if that
+            // notice lands in the service the app's NotificationHost is
+            // actually bound to. If App.NotificationService is ever null
+            // when a window is constructed, do not badge at all rather than
+            // reproduce the exact "unexplained dot" bug this feature exists
+            // to fix; the catch below logs it and the taskbar wiring is
+            // simply unavailable for this window, same as any other
+            // failure here.
+            Badges = new TaskbarBadgeArbiter(
+                _overlayFacade,
+                Ghostty.App.NotificationService
+                    ?? throw new InvalidOperationException(
+                        "TaskbarHost requires App.NotificationService to already be set; " +
+                        "without it, badge notices would go to a service no NotificationHost renders."));
+            _attention = new TaskbarAttentionCoordinator(tabs, Badges);
             _window = window;
             // Window focus drives the attention badge: an unfocused bell
             // sets it, regaining focus clears it. Seed from the current
