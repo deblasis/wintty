@@ -1,9 +1,12 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using Ghostty.Core.Notifications;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace Ghostty.Controls.Notifications;
 
@@ -25,10 +28,33 @@ public sealed partial class NotificationHost : UserControl
     private INotificationService? _service;
     private bool _subscribed;
     private readonly Dictionary<Notice, InfoBar> _bars = new();
+    private readonly Dictionary<Notice, Microsoft.UI.Dispatching.DispatcherQueueTimer> _timers = new();
+
+    /// <summary>Set by the window: returns focus to the active terminal after
+    /// a focused bar leaves. Null in tests and before Attach.</summary>
+    public Action? FocusReturn { get; set; }
+
+    /// <summary>
+    /// Set by the window: raised when the dock actually appears or
+    /// disappears, before the layout pass that resizes the terminal. The
+    /// window uses it to mark the coming resize as a layout switch so the
+    /// cols x rows pill stays quiet. Deliberately NOT the host's
+    /// SizeChanged: a collapsed element never arranges, so the leaving
+    /// transition raises no size event to hang this on. Null in tests and
+    /// before Attach.
+    /// </summary>
+    public Action? DockOccupancyChanged { get; set; }
 
     public NotificationHost()
     {
         InitializeComponent();
+        // WinUI folds Margin into DesiredSize even when Stack has zero
+        // children, so an empty host would still report the StackPanel's own
+        // ~16px and keep the Auto dock row -- and this control's opaque
+        // background -- permanently open. A Collapsed element reports (0,0)
+        // DesiredSize regardless of its content's Margin, which is what "no
+        // notices, no row" actually needs. See UpdateVisibility.
+        Visibility = Visibility.Collapsed;
     }
 
     /// <summary>
@@ -68,6 +94,8 @@ public sealed partial class NotificationHost : UserControl
         _subscribed = false;
         Stack.Children.Clear();
         _bars.Clear();
+        StopAllTimers();
+        UpdateVisibility();
     }
 
     private void OnActiveChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -83,8 +111,48 @@ public sealed partial class NotificationHost : UserControl
             case NotifyCollectionChangedAction.Reset:
                 Stack.Children.Clear();
                 _bars.Clear();
+                StopAllTimers();
+                UpdateVisibility();
                 break;
         }
+    }
+
+    /// <summary>
+    /// The dock row is genuinely zero height, and this control paints
+    /// nothing, exactly when there is nothing to show. Called from every
+    /// path that changes <see cref="_bars"/>, so all of them agree on what
+    /// "collapse" means rather than each reaching for Visibility by hand.
+    /// </summary>
+    private void UpdateVisibility()
+    {
+        var next = _bars.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (Visibility == next) return;
+        Visibility = next;
+
+        // Announce the flip HERE, before the layout pass it triggers, rather
+        // than leaving the host's own SizeChanged to carry it. A collapsed
+        // element is skipped by Measure and Arrange, so on the way OUT this
+        // host never arranges and its SizeChanged never fires at all: the
+        // stamp meant to mark the terminal's growth as a layout switch would
+        // never land, and the cols x rows pill would pulse on exactly the
+        // transition it is supposed to stay quiet through. On the way IN the
+        // host arranges after the terminal, since it is declared later in
+        // the grid, so the stamp would land after the resize it must
+        // precede. Announcing at the source matches how the tab-switch path
+        // notes a switch at the start rather than at the result.
+        DockOccupancyChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Stop every armed auto-dismiss timer without dismissing the notices
+    /// they belong to. Used by the two paths that clear <see cref="_bars"/>
+    /// out from under the timers instead of going through
+    /// <see cref="RemoveBar"/> one notice at a time.
+    /// </summary>
+    private void StopAllTimers()
+    {
+        foreach (var timer in _timers.Values) timer.Stop();
+        _timers.Clear();
     }
 
     private void AddBar(Notice notice)
@@ -135,8 +203,50 @@ public sealed partial class NotificationHost : UserControl
         // drives RemoveBar).
         bar.CloseButtonClick += (_, _) => _service?.Dismiss(notice);
 
+        // A transient notice dismisses itself after its own timeout: the
+        // caller does not have to hold a reference or race the dispatcher.
+        if (notice.AutoDismissAfter is { } after)
+        {
+            var timer = DispatcherQueue.CreateTimer();
+            timer.Interval = after;
+            timer.IsRepeating = false;
+            timer.Tick += (_, _) => _service?.Dismiss(notice);
+            _timers[notice] = timer;
+            timer.Start();
+        }
+
+        // A notice raised from a command the user just ran already has the
+        // user's attention, so the bar takes focus and Enter or Space acts
+        // as its dismiss; a notice that arrives on its own leaves focus
+        // wherever it was.
+        if (notice.FocusOnShow)
+        {
+            bar.IsTabStop = true;
+            bar.KeyDown += (_, e) =>
+            {
+                if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)
+                {
+                    e.Handled = true;
+                    _service?.Dismiss(notice);
+                }
+            };
+            // Loaded is not one-shot: WinUI can refire it on a reparent or a
+            // monitor move, the same thing Attach's own doc comment notes
+            // for this host. Left subscribed, a refire while the bar is
+            // still up would grab focus back a second time regardless of
+            // where the user has since moved it, so the handler detaches
+            // itself the first time it runs.
+            void FocusOnce(object sender, RoutedEventArgs args)
+            {
+                bar.Loaded -= FocusOnce;
+                bar.Focus(FocusState.Programmatic);
+            }
+            bar.Loaded += FocusOnce;
+        }
+
         _bars[notice] = bar;
         Stack.Children.Add(bar);
+        UpdateVisibility();
     }
 
     private void RemoveBar(Notice notice)
@@ -144,8 +254,35 @@ public sealed partial class NotificationHost : UserControl
         if (_bars.Remove(notice, out var bar))
         {
             bar.IsOpen = false;
+            if (_timers.Remove(notice, out var timer)) timer.Stop();
+            // Read before the bar leaves the tree: FocusManager answers a
+            // different question once its element is gone. Gated on the bar
+            // (or something inside it) actually holding focus right now, not
+            // merely on FocusOnShow, so an auto-dismiss timer -- or any other
+            // removal path -- firing after the user has since clicked into a
+            // pane, opened Settings, or started renaming a tab does not yank
+            // focus back out from under them.
+            var returnFocus = notice.FocusOnShow && BarHasFocus(bar);
             Stack.Children.Remove(bar);
+            UpdateVisibility();
+            if (returnFocus) FocusReturn?.Invoke();
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="bar"/>, or something inside it, currently
+    /// holds keyboard focus. Same walk-up-from-FocusManager idiom as
+    /// MainWindow.FocusedTerminal and PaneHost.TestSeamFocusedLeafIndex.
+    /// </summary>
+    private static bool BarHasFocus(InfoBar bar)
+    {
+        if (bar.XamlRoot is null) return false;
+        var node = FocusManager.GetFocusedElement(bar.XamlRoot) as DependencyObject;
+        for (; node is not null; node = VisualTreeHelper.GetParent(node))
+        {
+            if (ReferenceEquals(node, bar)) return true;
+        }
+        return false;
     }
 
     private Button MakeButton(Notice notice, NoticeAction action)

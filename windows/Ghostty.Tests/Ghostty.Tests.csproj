@@ -203,6 +203,13 @@
                       Link="Tabs\VerticalTabHost.xaml"
                       LogicalName="Ghostty.Tests.Tabs.VerticalTabHost.xaml" />
     <!--
+      MainWindow.xaml, for BottomDockWiringTests: the notice dock must live
+      in its own grid row, which only the XAML can show.
+    -->
+    <EmbeddedResource Include="..\Ghostty\MainWindow.xaml"
+                      Link="MainWindow.xaml"
+                      LogicalName="Ghostty.Tests.MainWindow.xaml" />
+    <!--
       The shell project file, for LaunchIconAssetsTests. It carries the one
       copy of the launch-icon ladder that no C# type can share: an explicit
       <Content Include> list of the generated PNG rungs.
