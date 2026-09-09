@@ -658,7 +658,53 @@ public partial class App : Application
         }
         catch (System.Exception ex)
         {
-            Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex);
+            Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex, ex.Message);
+        }
+
+        // Register() writes this identity's registration once and then leaves
+        // whatever it finds alone, so on a machine that has had an earlier
+        // install the values it re-registers against are that install's. Two
+        // of them are wrong forever and nothing else ever corrects them: the
+        // CustomActivator's LocalServer32 still names an exe that may not
+        // exist, so a toast click launches nothing, and DisplayName still
+        // reads whatever that install called itself. Show() keeps working
+        // either way, which is why this went unseen. See ToastRegistration.
+        //
+        // Before Register(), for the same reason the superseded sweep above
+        // runs first: Register() is what writes the key back, so a removal
+        // that runs first is recoverable within this launch and one that runs
+        // after costs every toast until the next one.
+        // The qualified names stay unbroken: the wiring guard matches the
+        // callee as source text, and a name wrapped mid-way stops matching.
+        // Arguments may wrap freely.
+        //
+        // wantIconUri is null because nothing in this repository declares a
+        // toast icon, so Register()'s own choice (extracted from the process
+        // image) stands and the rewrite below leaves IconUri alone. A build
+        // tier that ships one passes it here and gets it written.
+        var toastRegistration = Ghostty.Core.Windows.ToastRegistration.Read(AppUserModelId);
+        var toastRepair = Ghostty.Core.Windows.ToastRegistration.Diagnose(
+            toastRegistration,
+            System.Environment.ProcessPath,
+            Ghostty.Core.AppIdentity.ProductName,
+            wantIconUri: null);
+        string? toastRemoveRefusal = null;
+        if (toastRepair.Recreate
+            && Ghostty.Core.Windows.ToastRegistration.Remove(
+                AppUserModelId, toastRegistration.ActivatorClsid, out toastRemoveRefusal))
+        {
+            Ghostty.Logging.StaticLoggers.App.LogToastRegistrationRecreated(
+                toastRegistration.ActivatorServer ?? "(no activator server)");
+        }
+        else if (toastRepair.Recreate)
+        {
+            // A refusal used to be completely silent: Remove() swallows by
+            // contract, the key stayed, and the launch went on looking
+            // repaired while the next toast click was still dead. Still no
+            // control flow - the launch continues either way - but the line
+            // now names the key and carries the OS message.
+            Ghostty.Logging.StaticLoggers.App.LogToastRegistrationRemoveRefused(
+                AppUserModelId, toastRemoveRefusal ?? "the registration was not removed");
         }
 
         // Exactly one Register() call may exist in the process.
@@ -668,7 +714,27 @@ public partial class App : Application
         }
         catch (System.Exception ex)
         {
-            Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex);
+            // The message, not just the generic line: the HRESULT behind this
+            // is the only thing that tells a stale registration apart from a
+            // platform refusal, and the stack alone names neither.
+            Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex, ex.Message);
+        }
+
+        // The two values Register() derives from the process image rather than
+        // from anything this build declares. Written straight onto the key it
+        // has just settled, because a delete-and-re-register would only make
+        // it derive the same values again: a disagreement Register() would
+        // reproduce is a delete on every launch, forever.
+        var toastSettled = Ghostty.Core.Windows.ToastRegistration.Read(AppUserModelId);
+        var toastRewrite = Ghostty.Core.Windows.ToastRegistration.Diagnose(
+            toastSettled,
+            System.Environment.ProcessPath,
+            Ghostty.Core.AppIdentity.ProductName,
+            wantIconUri: null);
+        if (Ghostty.Core.Windows.ToastRegistration.Apply(
+                AppUserModelId, toastRewrite, Ghostty.Core.AppIdentity.ProductName, iconUri: null))
+        {
+            Ghostty.Logging.StaticLoggers.App.LogToastRegistrationRewritten(Ghostty.Core.AppIdentity.ProductName);
         }
 
         // Read the activation this process was started for, before the
@@ -2346,11 +2412,34 @@ internal static partial class AppLogExtensions
     internal static partial void LogJumpListFailed(
         this ILogger<App> logger, System.Exception ex);
 
+    // The reason is spelled into the message rather than left to the
+    // exception: this is a WinRT HRESULT arriving through a projected
+    // interface, and the frames alone say only which method threw. Whoever
+    // reads this line is trying to tell a stale registration apart from a
+    // platform refusal, and that difference lives entirely in the message.
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ToastRegisterFailed,
                    Level = LogLevel.Warning,
-                   Message = "Failed to register for toast notifications")]
+                   Message = "Failed to register for toast notifications: {Reason}")]
     internal static partial void LogToastRegisterFailed(
-        this ILogger<App> logger, System.Exception ex);
+        this ILogger<App> logger, System.Exception ex, string reason);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ToastRegistrationRecreated,
+                   Level = LogLevel.Information,
+                   Message = "Removed a toast registration whose activator pointed at {StaleServer}")]
+    internal static partial void LogToastRegistrationRecreated(
+        this ILogger<App> logger, string staleServer);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ToastRegistrationRemoveRefused,
+                   Level = LogLevel.Warning,
+                   Message = "Could not remove the stale toast registration for {Aumid}: {Reason}")]
+    internal static partial void LogToastRegistrationRemoveRefused(
+        this ILogger<App> logger, string aumid, string reason);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ToastRegistrationRewritten,
+                   Level = LogLevel.Information,
+                   Message = "Rewrote the toast registration's display name to {DisplayName}")]
+    internal static partial void LogToastRegistrationRewritten(
+        this ILogger<App> logger, string displayName);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ConfigOpenFailed,
                    Level = LogLevel.Warning,
