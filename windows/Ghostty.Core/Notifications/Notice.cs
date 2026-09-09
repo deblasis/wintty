@@ -48,4 +48,18 @@ public sealed class Notice
     /// action that dismisses, or <see cref="INotificationService.Dismiss"/>.
     /// </summary>
     public Action? OnDismiss { get; init; }
+
+    /// <summary>
+    /// When set, the host dismisses the notice on its own after this long.
+    /// Null (the default) is a sticky notice that waits for the user.
+    /// </summary>
+    public TimeSpan? AutoDismissAfter { get; init; }
+
+    /// <summary>
+    /// When true, the host focuses the bar as it appears so Enter or Space
+    /// dismisses it, and hands focus back to the terminal when it leaves.
+    /// For notices raised from a command the user just ran (the palette
+    /// already held focus); leave false for notices that arrive on their own.
+    /// </summary>
+    public bool FocusOnShow { get; init; }
 }
