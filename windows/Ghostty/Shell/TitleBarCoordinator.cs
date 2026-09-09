@@ -144,6 +144,13 @@ internal sealed class TitleBarCoordinator
                 _captionInset.Width = new GridLength(dip);
                 if (_horizontalTabHost.DragRegion is FrameworkElement drag)
                     drag.MinWidth = dip;
+                // The horizontal sponsor overlay host's own cell sits at
+                // the footer's right edge, which is the window's, so it
+                // needs this number as a margin or the pill draws under
+                // the caption buttons. The vertical row's presenter sits
+                // in its own cell ahead of the inset column, which clears
+                // it for free.
+                _horizontalTabHost.SyncSponsorOverlayInset(dip);
                 CaptionInsetChanged?.Invoke();
             }
         }
@@ -166,6 +173,10 @@ internal sealed class TitleBarCoordinator
         _captionInset.Width = new GridLength(0);
         if (_horizontalTabHost.DragRegion is FrameworkElement dragRegion)
             dragRegion.MinWidth = 0;
+        // No buttons to clear on a borderless window, so the overlay host
+        // keeps only its gap. Left to the XAML default it would hold 146 DIP
+        // of empty lane open on the one layout that has nothing there.
+        _horizontalTabHost.SyncSponsorOverlayInset(0);
         _verticalTitleText.Visibility = Visibility.Collapsed;
     }
 
