@@ -51,15 +51,16 @@ public sealed class NotificationHostWiringTests
     {
         var src = Host();
 
-        // Not restricted to block-bodied methods: UpdateVisibility itself is
-        // an expression-bodied one, whose assignment lives under
-        // ExpressionBody rather than Body -- a Body-only search would find
-        // zero methods and fail this fact for a reason that has nothing to
-        // do with what it is meant to pin.
+        // Not restricted to block-bodied methods, and not matched on the
+        // assignment's right-hand side: the updater computes the next value
+        // into a local first (so it can compare against the current one and
+        // announce a real flip), which leaves the assignment reading
+        // `Visibility = next`. Match the method that both assigns Visibility
+        // and consults _bars.Count.
         var updater = src.Root.DescendantNodes().OfType<MethodDeclarationSyntax>()
             .Where(m => m.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-                .Any(a => a.Left is IdentifierNameSyntax { Identifier.ValueText: "Visibility" }
-                    && a.Right.ToString().Contains("_bars.Count")))
+                    .Any(a => a.Left is IdentifierNameSyntax { Identifier.ValueText: "Visibility" })
+                && m.ToString().Contains("_bars.Count"))
             .ToList();
         Assert.True(
             updater.Count == 1,
@@ -75,6 +76,46 @@ public sealed class NotificationHostWiringTests
                 calls,
                 c => c == helperName);
         }
+
+        // The flip is announced at the source, before the layout pass it
+        // causes. It cannot be carried by the host's own SizeChanged: a
+        // collapsed element is skipped by Measure and Arrange, so the
+        // leaving transition raises no size event at all, and the arriving
+        // one arranges the terminal first. Losing this puts the cols x rows
+        // pill back on exactly the transitions the dock is meant to be
+        // quiet through, which no rendering test in this repo would catch.
+        // CalleeText, not Expression: a null-conditional call parses with the
+        // receiver hoisted out, so the invocation's own expression reads as
+        // ".Invoke" and a match on it finds nothing.
+        var body = updater[0].Body!;
+        Assert.Single(body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText() == "DockOccupancyChanged?.Invoke"));
+
+        // Only on a real change: announcing every call would stamp a layout
+        // switch on notices that come and go while the dock stays visible,
+        // which the window's SizeChanged handler already covers.
+        Assert.Contains(
+            body.DescendantNodes().OfType<IfStatementSyntax>(),
+            s => s.Condition.ToString().Contains("Visibility ==")
+                 && s.Statement.ToString().Contains("return"));
+    }
+
+    [Fact]
+    public void TheWindowWiresOccupancyToTheLayoutSwitchStamp_AndDropsItOnTeardown()
+    {
+        var window = ShellSource.Load("MainWindow.xaml.cs");
+
+        var assignments = window.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "NotificationHost.DockOccupancyChanged")
+            .ToList();
+
+        // One wire-up and one teardown. The hook is invoked from
+        // UpdateVisibility, which a late auto-dismiss timer can still reach
+        // while the tree is coming down, so leaving it attached calls back
+        // into a window that is already disposing.
+        Assert.Equal(2, assignments.Count);
+        Assert.Contains(assignments, a => a.Right.ToString() == "NoteLayoutSwitchToSurfaces");
+        Assert.Contains(assignments, a => a.Right.ToString() == "null");
     }
 
     /// <summary>

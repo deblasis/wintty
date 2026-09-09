@@ -34,6 +34,17 @@ public sealed partial class NotificationHost : UserControl
     /// a focused bar leaves. Null in tests and before Attach.</summary>
     public Action? FocusReturn { get; set; }
 
+    /// <summary>
+    /// Set by the window: raised when the dock actually appears or
+    /// disappears, before the layout pass that resizes the terminal. The
+    /// window uses it to mark the coming resize as a layout switch so the
+    /// cols x rows pill stays quiet. Deliberately NOT the host's
+    /// SizeChanged: a collapsed element never arranges, so the leaving
+    /// transition raises no size event to hang this on. Null in tests and
+    /// before Attach.
+    /// </summary>
+    public Action? DockOccupancyChanged { get; set; }
+
     public NotificationHost()
     {
         InitializeComponent();
@@ -112,8 +123,25 @@ public sealed partial class NotificationHost : UserControl
     /// path that changes <see cref="_bars"/>, so all of them agree on what
     /// "collapse" means rather than each reaching for Visibility by hand.
     /// </summary>
-    private void UpdateVisibility() =>
-        Visibility = _bars.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    private void UpdateVisibility()
+    {
+        var next = _bars.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (Visibility == next) return;
+        Visibility = next;
+
+        // Announce the flip HERE, before the layout pass it triggers, rather
+        // than leaving the host's own SizeChanged to carry it. A collapsed
+        // element is skipped by Measure and Arrange, so on the way OUT this
+        // host never arranges and its SizeChanged never fires at all: the
+        // stamp meant to mark the terminal's growth as a layout switch would
+        // never land, and the cols x rows pill would pulse on exactly the
+        // transition it is supposed to stay quiet through. On the way IN the
+        // host arranges after the terminal, since it is declared later in
+        // the grid, so the stamp would land after the resize it must
+        // precede. Announcing at the source matches how the tab-switch path
+        // notes a switch at the start rather than at the result.
+        DockOccupancyChanged?.Invoke();
+    }
 
     /// <summary>
     /// Stop every armed auto-dismiss timer without dismissing the notices

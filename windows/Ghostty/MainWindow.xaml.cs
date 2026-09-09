@@ -986,6 +986,16 @@ public sealed partial class MainWindow : Window
         // A notice appearing or leaving resizes the star row, and with it every
         // visible surface; that is a layout switch, not a user drag, so the
         // cols x rows pill stays quiet.
+        //
+        // Two hooks, because one cannot cover both cases. The occupancy hook
+        // fires when the dock flips visible or collapsed, at the source and
+        // before the layout pass: the collapsing transition raises no
+        // SizeChanged at all, since a collapsed element is skipped by
+        // Measure and Arrange, and the appearing one arranges the terminal
+        // first because it is declared earlier in the grid. SizeChanged then
+        // covers what occupancy cannot: a height change while the dock stays
+        // visible, such as two bars becoming one.
+        NotificationHost.DockOccupancyChanged = NoteLayoutSwitchToSurfaces;
         NotificationHost.SizeChanged += OnNotificationDockSizeChanged;
         // A focused notice (FocusOnShow) takes keyboard focus while it is up;
         // when it leaves, hand focus back to the active terminal the same way
@@ -2167,6 +2177,11 @@ public sealed partial class MainWindow : Window
         // so it is detached here rather than left to the census to wave
         // through as an assumption nobody wrote down.
         NotificationHost.SizeChanged -= OnNotificationDockSizeChanged;
+        // Same reasoning for the occupancy hook: it is invoked from
+        // UpdateVisibility, which a late auto-dismiss timer can still reach
+        // while the tree is coming down, and it calls back into this window.
+        NotificationHost.DockOccupancyChanged = null;
+        NotificationHost.FocusReturn = null;
         // UISettings is an OS object and calls back on a thread-pool thread.
         // Left attached, an OS light/dark flip, accent change or high-contrast
         // toggle during teardown puts AppSetColorScheme through the app
