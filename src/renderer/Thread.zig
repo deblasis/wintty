@@ -1318,11 +1318,38 @@ test "hidden drain idiom: a timer that re-runs itself lets a posted async throug
 // for the literal string that reintroduces the starvation bug.
 test "no xev.Timer callback in this file returns .rearm" {
     const src = @embedFile("Thread.zig");
-    const names = [_][]const u8{ "fn hiddenDrainCallback(", "fn cursorTimerCallback(", "fn animationTimerCallback(" };
-    for (names) |name| {
-        const start = std.mem.indexOf(u8, src, name) orelse return error.CallbackNotFound;
-        // The body ends at the next "\n}\n" at column 0.
-        const end = start + (std.mem.indexOf(u8, src[start..], "\n}\n") orelse return error.BodyNotClosed);
-        try std.testing.expect(std.mem.indexOf(u8, src[start..end], "return .rearm") == null);
+
+    // The set is DERIVED, not listed. An earlier version of this test named
+    // three callbacks while the file had five: renderCallback and
+    // Compression.timerCallback went unwatched, so a `.rearm` reintroducing
+    // this exact hang in either would have kept the census green, which is
+    // the false negative the census exists to prevent. The commented-out
+    // render-coalescing block earlier in this file contemplates precisely
+    // that return. Identify every timer callback by its return type instead,
+    // so a new one is covered the day it is written.
+    // Split so the needle never appears contiguously in this file: an
+    // unsplit literal would match its own text here and scan this test's
+    // body as if it were a callback.
+    const sig = "xev.Timer." ++ "RunError!void";
+    var found: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, src, i, sig)) |hit| {
+        i = hit + sig.len;
+
+        // Scan FORWARD from the signature to the next closing brace at
+        // column 0. The body always follows the signature, so there is no
+        // need to walk back to the `fn` keyword, which is ambiguous anyway:
+        // one of these signatures is a callback-typed parameter, and the
+        // nearest preceding `fn ` there is that parameter's own type.
+        // Overshooting into a later function only widens the region, which
+        // can add a false failure but never hide a real one.
+        const end = hit + (std.mem.indexOf(u8, src[hit..], "\n}\n") orelse
+            return error.BodyNotClosed);
+        found += 1;
+        try std.testing.expect(std.mem.indexOf(u8, src[hit..end], "return .rearm") == null);
     }
+
+    // A scan that matched nothing would pass while proving nothing. Five is
+    // what the file carries today; it may grow, and must not silently shrink.
+    try std.testing.expect(found >= 5);
 }
