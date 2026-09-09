@@ -1605,6 +1605,82 @@ public sealed partial class MainWindow : Window
         AnimateTabLayoutTo(vertical);
     }
 
+    // --- Sponsor overlay host contract -------------------------------
+    //
+    // A downstream build tier (wintty-release's sponsor-update overlay)
+    // renders an update pill in the title row. This shell owns where that
+    // pill lives; the overlay owns what it is.
+    //
+    // There are TWO presenters, because there are two title rows and each
+    // one is inside the row its own layout hides: SponsorOverlayHost in
+    // MainWindow.xaml's VerticalTitleBar, and SponsorOverlayHostHorizontal
+    // in TabHost's strip footer. Whichever row is on screen is the one
+    // holding the content, and this shell moves it across on every layout
+    // switch, so the overlay assigns once and never thinks about layout
+    // again:
+    //
+    //     if (window is MainWindow main) main.SponsorOverlayContent = pill;
+    //
+    // Both sit in a cell of their own BESIDE their row's drag region,
+    // never inside it: VerticalTitleDragRegion and CustomDragRegion are
+    // what SetTitleBar binds, and the SetTitleBar element's subtree is
+    // caption input to the OS, so a pill under it could render but never
+    // take a click. The new-tab control outside TabHost's drag region is
+    // the same rule; SponsorOverlayHostWiringTests holds both doors shut.
+    //
+    // A FindName("SponsorOverlayHost") on the window content resolves to
+    // the VERTICAL presenter only, and that presenter is Collapsed with the
+    // row that carries it unless vertical-tabs is on. That is exactly the
+    // bug in deblasis/wintty-release#655: with the default horizontal
+    // layout no update state was ever visible. A caller that wants the pill
+    // in both layouts uses the property below, not the name.
+    private object? _sponsorOverlayContent;
+
+    /// <summary>
+    /// What the sponsor overlay wants rendered in the title row, in
+    /// whichever layout is on screen. Null clears both presenters. See the
+    /// contract above this property.
+    /// </summary>
+    internal object? SponsorOverlayContent
+    {
+        get => _sponsorOverlayContent;
+        set
+        {
+            _sponsorOverlayContent = value;
+            ReHomeSponsorOverlay();
+        }
+    }
+
+    /// <summary>
+    /// The presenter that is inside the title row currently on screen, or
+    /// null before the tab hosts are built. Exposed for the overlay's own
+    /// measurement and teleport work; assign through
+    /// <see cref="SponsorOverlayContent"/> rather than to this.
+    /// </summary>
+    internal ContentPresenter? ActiveSponsorOverlayHost =>
+        _verticalTabsVisible ? SponsorOverlayHost : _horizontalTabHost?.SponsorOverlayHost;
+
+    /// <summary>
+    /// Put the overlay content in the presenter belonging to the layout on
+    /// screen, and take it out of the other one.
+    /// </summary>
+    /// <remarks>
+    /// The idle presenter is cleared FIRST and unconditionally. The content
+    /// is a live UIElement and a UIElement has exactly one parent, so
+    /// assigning it to the incoming presenter while the outgoing one still
+    /// holds it throws rather than moving it. Clearing an already-empty
+    /// presenter costs nothing, which is why there is no guard.
+    /// </remarks>
+    private void ReHomeSponsorOverlay()
+    {
+        var horizontal = _horizontalTabHost?.SponsorOverlayHost;
+        var active = _verticalTabsVisible ? SponsorOverlayHost : horizontal;
+        var idle = _verticalTabsVisible ? horizontal : SponsorOverlayHost;
+
+        if (idle is not null) idle.Content = null;
+        if (active is not null) active.Content = _sponsorOverlayContent;
+    }
+
     private void AnimateTabLayoutTo(bool vertical)
     {
         if (_layout.IsSwitching)
@@ -1620,6 +1696,10 @@ public sealed partial class MainWindow : Window
         _pendingLayoutTarget = null;
         _verticalTabsVisible = vertical;
         _tabHost = vertical ? _verticalTabHost : _horizontalTabHost;
+        // Before the cross-fade, not after: the row that is arriving is made
+        // Visible at the start of the switch, so the pill travels with it
+        // instead of popping in at the landing. Reads the flag just set.
+        ReHomeSponsorOverlay();
         // The seam covers are gated on the flag just set, and the strip that
         // is coming back may not raise anything on its own (a switch does not
         // resize it or move its selection). Ask both for a fresh placement so

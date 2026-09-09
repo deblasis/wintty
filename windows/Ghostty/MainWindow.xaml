@@ -57,16 +57,16 @@
         </Grid.ColumnDefinitions>
 
         <!--
-            Vertical-mode title bar. Three columns:
+            Vertical-mode title bar. Four columns:
             Col 0 mirrors StripColumn so the drag region starts after
             the tab strip, avoiding a Z-order fight with the chevron
             button inside VerticalTabHost. Col 1 is the draggable
-            area with the window title. Col 2 reserves room for the
-            OS caption buttons.
+            area with the window title. Col 2 is the sponsor pill's
+            own cell. Col 3 reserves room for the OS caption buttons.
 
             Col 0 uses a non-hit-testable fill so the strip-lane band
             can match the tab bar while clicks still reach the icon /
-            chevron in VerticalTabHost below. Fills for all three
+            chevron in VerticalTabHost below. Fills for all four
             columns come from ApplyVerticalTitleBarChrome, which leaves
             them transparent unless window-theme=wintty is painting the
             row. The default row is the window backdrop.
@@ -84,6 +84,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="TitleBarStripMirror" Width="0"/>
                 <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition x:Name="VerticalCaptionInset" Width="146"/>
             </Grid.ColumnDefinitions>
 
@@ -112,10 +113,34 @@
                            IsHitTestVisible="False"/>
             </Grid>
 
+            <!--
+                Sponsor overlay host for the vertical title row. One of
+                TWO presenters; the other is SponsorOverlayHostHorizontal
+                in TabHost's strip footer. Read the contract on
+                MainWindow.SponsorOverlayContent before touching either:
+                each presenter lives in the title row its own layout
+                hides, so the shell moves the content between them and a
+                lookup of one name alone only ever renders in one layout
+                (deblasis/wintty-release#655).
+
+                In its own cell BETWEEN the drag region and the caption
+                column, never inside the drag region, on the same terms
+                as the horizontal strip's new-tab control:
+                SetTitleBar(VerticalTitleDragRegion) makes that element
+                and everything under it caption input to the OS, so a
+                pill inside it would render but could not take a click.
+                The 8 here is the gap to the caption column; the column
+                itself clears the OS buttons.
+            -->
+            <ContentPresenter x:Name="SponsorOverlayHost"
+                              Grid.Column="2"
+                              VerticalAlignment="Center"
+                              Margin="0,0,8,0"/>
+
             <!-- Caption-button column: same fill as the drag region, so
                  the two never disagree across the row. -->
             <Border x:Name="VerticalTitleCaptionFill"
-                    Grid.Column="2"
+                    Grid.Column="3"
                     IsHitTestVisible="False"/>
 
             <!-- There is no caption seam cover here any more, and that is

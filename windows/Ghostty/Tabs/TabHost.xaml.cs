@@ -226,6 +226,41 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     public UIElement DragRegion => CustomDragRegion;
 
+    /// <summary>
+    /// This layout's half of the sponsor overlay host pair. See the contract
+    /// on <see cref="MainWindow.SponsorOverlayContent"/>: the shell owns
+    /// which of the two presenters holds the content; this only says where
+    /// the horizontal one is.
+    /// </summary>
+    public ContentPresenter SponsorOverlayHost => SponsorOverlayHostHorizontal;
+
+    /// <summary>
+    /// The gap kept between the overlay host and the caption buttons. The
+    /// same one the vertical title row's presenter carries in its margin, so
+    /// the pill sits in the same place in both layouts.
+    /// </summary>
+    private const double SponsorOverlayCaptionGap = 8;
+
+    /// <summary>
+    /// Keep the overlay host clear of the OS caption buttons.
+    /// <paramref name="captionInsetDip"/> is the live
+    /// <c>AppWindow.TitleBar.RightInset</c> in DIP, the same number
+    /// <see cref="DragRegion"/>'s MinWidth is set from; called from
+    /// <c>TitleBarCoordinator</c> so the two cannot disagree.
+    ///
+    /// Without it the host's cell runs to the footer's right edge, which
+    /// is the window's, and the pill renders underneath the buttons.
+    /// A zero inset is the captionless (quake) window, where there are no
+    /// buttons to clear and only the gap is left.
+    /// </summary>
+    public void SyncSponsorOverlayInset(double captionInsetDip)
+    {
+        var right = captionInsetDip > 0
+            ? captionInsetDip + SponsorOverlayCaptionGap
+            : SponsorOverlayCaptionGap;
+        SponsorOverlayHostHorizontal.Margin = new Thickness(0, 0, right, 0);
+    }
+
     public TabHost(TabManager manager, PaneActionRouter router, DialogTracker dialogs)
     {
         InitializeComponent();
