@@ -64,9 +64,10 @@
                 <branding:AppIconBadge x:Name="IconBadgeHost" />
             </controls:TabView.TabStripHeader>
             <!--
-                TabStripFooter is a two-cell row. Cell 0 holds the
-                NewTabSplitButton (not inside the drag region so clicks
-                land on the button). Cell 1 is the drag-only spacer
+                TabStripFooter is a three-cell row. Cells 0 and 2 hold the
+                two interactive residents, the NewTabSplitButton and the
+                sponsor overlay host, both OUTSIDE the drag region so
+                clicks land on them. Cell 1 is the drag-only spacer
                 named CustomDragRegion; MainWindow calls
                 SetTitleBar(CustomDragRegion) so the empty strip area
                 still drags the window.
@@ -76,6 +77,7 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <!-- Cell 0: composite new-tab control. NOT inside the
                          drag region; clicks reach the SplitButton. -->
@@ -91,6 +93,29 @@
                           Grid.Column="1"
                           MinWidth="146"
                           Background="Transparent"/>
+                    <!-- Cell 2: sponsor overlay host for the horizontal
+                         strip: the twin of MainWindow's SponsorOverlayHost,
+                         and the half that did not exist, which is why the
+                         update pill only ever rendered under
+                         vertical-tabs (deblasis/wintty-release#655). Read
+                         the contract on MainWindow.SponsorOverlayContent.
+
+                         In its own cell BESIDE the drag region, never
+                         inside it, on the same terms as the new-tab control
+                         in cell 0: SetTitleBar(CustomDragRegion) makes that
+                         element and everything under it caption input to
+                         the OS, so a pill inside it would render but could
+                         not take a click, and the pill IS a click target.
+                         Right margin is the caption inset, so the pill
+                         stops where the OS buttons begin: the 154 here is
+                         the 100%-scale fallback (146 inset + the 8 gap the
+                         vertical row keeps) and SyncSponsorOverlayInset
+                         overwrites it from the live inset, exactly as
+                         MinWidth above. -->
+                    <ContentPresenter x:Name="SponsorOverlayHostHorizontal"
+                                      Grid.Column="2"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,154,0"/>
                 </Grid>
             </controls:TabView.TabStripFooter>
         </controls:TabView>

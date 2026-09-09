@@ -16,6 +16,9 @@ internal static class LogEvents
         public const int StaleAumidRemoved   = 2004;
         public const int ConfigOpenFailed    = 2005;
         public const int QuakeWindowFailed   = 2006;
+        public const int ToastRegistrationRecreated = 2007;
+        public const int ToastRegistrationRewritten = 2008;
+        public const int ToastRegistrationRemoveRefused = 2009;
     }
 
     // 2100-2199: Clipboard
