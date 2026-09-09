@@ -26,6 +26,21 @@ public sealed class TaskbarBadgeArbiter
     private TaskbarBadgeKind? _shown;
     private bool _superseding;
 
+    /// <summary>
+    /// Namespaces this arbiter's dedup keys. One arbiter exists per window,
+    /// but the notification service is process-wide and dedups on
+    /// <see cref="Notice.DedupKey"/> across every window. Without this, two
+    /// windows raising the same producer key produce the identical key, the
+    /// second window's notice is dropped as a duplicate, and that window
+    /// wears a dot whose notice no host renders. Dismissing the one visible
+    /// banner then runs only the first window's OnDismiss, leaving a dot
+    /// with zero active notices anywhere: exactly the meaningless red dot
+    /// this class exists to prevent. The quake window makes this reachable
+    /// for single-window users, since it is a second window sharing the
+    /// same queue and is unfocused whenever it rings.
+    /// </summary>
+    private readonly string _scope = Guid.NewGuid().ToString("N");
+
     public TaskbarBadgeArbiter(ITaskbarBadgeSink sink, INotificationService notices)
     {
         ArgumentNullException.ThrowIfNull(sink);
@@ -80,12 +95,24 @@ public sealed class TaskbarBadgeArbiter
             Severity = badge.Severity,
             IsClosable = true,
             Actions = badge.Actions,
-            DedupKey = "badge:" + badge.Key,
+            DedupKey = "badge:" + _scope + ":" + badge.Key,
             OnDismiss = () => OnDismissed(badge.Key, badge.Signature),
         };
+        _notices.Show(notice);
+
+        // Only badge once the notice is genuinely on screen. Show is a no-op
+        // against an active duplicate, and could become a no-op for other
+        // reasons (an eviction or rate-limit policy in the service), so
+        // asking the service what it actually holds is what keeps the
+        // guarantee true rather than assumed. A dot whose notice was
+        // silently dropped is the failure this class exists to prevent.
+        if (!_notices.Active.Contains(notice))
+        {
+            return;
+        }
+
         _active[badge.Key] = (badge, notice);
         _overlay.Add(badge.Key);
-        _notices.Show(notice);
         Recompute();
     }
 

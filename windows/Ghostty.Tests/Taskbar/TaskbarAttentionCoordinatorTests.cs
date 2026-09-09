@@ -39,7 +39,12 @@ public class TaskbarAttentionCoordinatorTests
         coord.SetFocused(false);
         hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
         Assert.Equal(TaskbarBadgeKind.Bell, sink.Current);
-        Assert.Equal("badge:bell", Assert.Single(notices.Active).DedupKey);
+        // Namespaced by a per-arbiter scope, so match the shape rather than
+        // the literal: two windows must not share a key, or the second
+        // window's notice is deduped away and its dot has nothing behind it.
+        var key = Assert.Single(notices.Active).DedupKey;
+        Assert.StartsWith("badge:", key);
+        Assert.EndsWith(":bell", key);
     }
 
     [Fact]

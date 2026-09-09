@@ -1,4 +1,5 @@
 using System;
+using System.Collections.ObjectModel;
 using System.Linq;
 using Ghostty.Core.Notifications;
 using Ghostty.Core.Taskbar;
@@ -26,15 +27,106 @@ public class TaskbarBadgeArbiterTests
     }
 
     [Fact]
+    public void TwoWindowsSharingOneService_NeitherDotOutlivesItsNotice()
+    {
+        // Every other test in this file gives its arbiter a private
+        // NotificationService, which is not how the app runs: there is one
+        // arbiter per window and ONE process-wide service that dedups on
+        // DedupKey across all of them. That gap is why a green suite still
+        // shipped a dot with no notice behind it.
+        //
+        // Two unfocused windows, same producer key. Before the fix the
+        // second window's notice was dropped as a duplicate, the second dot
+        // lit anyway, and dismissing the single visible banner ran only the
+        // first window's OnDismiss, leaving a dot with zero notices
+        // anywhere and nothing for the user to click.
+        var notices = new NotificationService();
+        var sinkA = new FakeTaskbarBadgeSink();
+        var sinkB = new FakeTaskbarBadgeSink();
+        var a = new TaskbarBadgeArbiter(sinkA, notices);
+        var b = new TaskbarBadgeArbiter(sinkB, notices);
+
+        a.Raise(Bell("1"));
+        b.Raise(Bell("1"));
+
+        // Both windows badge, and each has its own notice to be dismissed by.
+        Assert.NotNull(sinkA.Current);
+        Assert.NotNull(sinkB.Current);
+        Assert.Equal(2, notices.Active.Count);
+
+        // Dismissing every notice must leave no dot anywhere.
+        foreach (var notice in notices.Active.ToArray()) notices.Dismiss(notice);
+
+        Assert.Null(sinkA.Current);
+        Assert.Null(sinkB.Current);
+        Assert.Empty(notices.Active);
+    }
+
+    [Fact]
+    public void ANoticeTheServiceRefuses_RaisesNoBadge()
+    {
+        // The guarantee is "never a badge without a dismissable notice", so
+        // a Show the service declines must leave no dot. The per-instance
+        // dedup scope means this arbiter's own logic can no longer collide
+        // with itself, which is the point; this pins the guarantee against
+        // any FUTURE reason the service might decline (an eviction cap, a
+        // rate limit) rather than against today's dedup.
+        var sink = new FakeTaskbarBadgeSink();
+        var arbiter = new TaskbarBadgeArbiter(sink, new RefusingNotificationService());
+
+        arbiter.Raise(Bell("1"));
+
+        // No write at all, which is stronger than "the last write was a
+        // clear": the overlay must never have been touched.
+        Assert.Empty(sink.Writes);
+    }
+
+    /// <summary>Accepts nothing, so <c>Active</c> never contains the notice.</summary>
+    private sealed class RefusingNotificationService : INotificationService
+    {
+        private readonly ObservableCollection<Notice> _items = new();
+
+        public RefusingNotificationService() => Active = new ReadOnlyObservableCollection<Notice>(_items);
+
+        public ReadOnlyObservableCollection<Notice> Active { get; }
+
+        public void Show(Notice notice) { }
+
+        public void Dismiss(Notice notice) { }
+    }
+
+    [Fact]
     public void Raise_ShowsOverlayAndNoticeTogether()
     {
         var (a, sink, notices) = New();
         a.Raise(Bell("1"));
         Assert.Equal(TaskbarBadgeKind.Bell, sink.Current);
         var notice = Assert.Single(notices.Active);
-        Assert.Equal("badge:bell", notice.DedupKey);
+        // The key carries a per-arbiter scope between the prefix and the
+        // producer key, so it cannot be spelled literally here. What matters
+        // is the shape (still namespaced by producer key) and, pinned by
+        // TwoWindowsSharingOneService below, that two arbiters never collide.
+        Assert.StartsWith("badge:", notice.DedupKey);
+        Assert.EndsWith(":bell", notice.DedupKey);
         Assert.Equal("Bell", notice.Title);
         Assert.True(notice.IsClosable);
+    }
+
+    [Fact]
+    public void TwoArbiters_DoNotShareADedupKey()
+    {
+        // The one-line property behind the cross-window fix, stated on its
+        // own so a future refactor of the key format cannot quietly drop it.
+        var notices = new NotificationService();
+        var a = new TaskbarBadgeArbiter(new FakeTaskbarBadgeSink(), notices);
+        var b = new TaskbarBadgeArbiter(new FakeTaskbarBadgeSink(), notices);
+
+        a.Raise(Bell("1"));
+        b.Raise(Bell("1"));
+
+        var keys = notices.Active.Select(n => n.DedupKey).ToArray();
+        Assert.Equal(2, keys.Length);
+        Assert.Equal(2, keys.Distinct(StringComparer.Ordinal).Count());
     }
 
     [Fact]
