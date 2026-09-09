@@ -25,11 +25,12 @@ public class PaneStartupGlowStateTests
 
     private static readonly TimeSpan Cap = TimeSpan.FromMilliseconds(10000);
     private static readonly TimeSpan Fade = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan Grace = TimeSpan.FromMilliseconds(2000);
 
     private static (PaneStartupGlowState s, FakeTimer t, List<PaneStartupGlowState.Phase> log) Make()
     {
         var t = new FakeTimer();
-        var s = new PaneStartupGlowState(t, Cap, Fade);
+        var s = new PaneStartupGlowState(t, Cap, Fade, Grace);
         var log = new List<PaneStartupGlowState.Phase>();
         s.StateChanged += p => log.Add(p);
         return (s, t, log);
@@ -121,10 +122,76 @@ public class PaneStartupGlowStateTests
     }
 
     [Fact]
+    public void FirstRender_arms_the_grace_not_the_fade()
+    {
+        var (s, t, _) = Make();
+        s.Start();
+        s.NotifyFirstRender();
+        Assert.Equal(PaneStartupGlowState.Phase.Glowing, s.Current);
+        Assert.Equal(Grace, t.LastScheduled);
+    }
+
+    [Fact]
+    public void Grace_elapsing_fades()
+    {
+        var (s, t, log) = Make();
+        s.Start();
+        s.NotifyFirstRender();
+        t.Fire();
+        Assert.Equal(PaneStartupGlowState.Phase.FadingOut, s.Current);
+        Assert.Equal(Fade, t.LastScheduled);
+        Assert.Equal([PaneStartupGlowState.Phase.Glowing, PaneStartupGlowState.Phase.FadingOut], log);
+    }
+
+    [Fact]
+    public void Ready_during_the_grace_fades_at_once()
+    {
+        var (s, t, _) = Make();
+        s.Start();
+        s.NotifyFirstRender();
+        s.NotifyReady();
+        Assert.Equal(PaneStartupGlowState.Phase.FadingOut, s.Current);
+        Assert.Equal(Fade, t.LastScheduled);
+    }
+
+    [Fact]
+    public void Ready_before_any_render_fades_at_once()
+    {
+        var (s, t, _) = Make();
+        s.Start();
+        s.NotifyReady();
+        Assert.Equal(PaneStartupGlowState.Phase.FadingOut, s.Current);
+        Assert.Equal(Fade, t.LastScheduled);
+    }
+
+    [Fact]
+    public void A_second_FirstRender_does_not_rearm()
+    {
+        var (s, t, _) = Make();
+        s.Start();
+        s.NotifyFirstRender();
+        s.NotifyFirstRender();
+        Assert.Equal(2, t.ScheduleCount); // cap, then grace, nothing more
+    }
+
+    [Fact]
+    public void FirstRender_when_idle_or_fading_is_ignored()
+    {
+        var (s, t, _) = Make();
+        s.NotifyFirstRender();
+        Assert.Equal(0, t.ScheduleCount);
+        s.Start();
+        s.NotifyReady();
+        s.NotifyFirstRender();
+        Assert.Equal(PaneStartupGlowState.Phase.FadingOut, s.Current);
+        Assert.Equal(Fade, t.LastScheduled);
+    }
+
+    [Fact]
     public void Dispose_disposes_timer()
     {
         var t = new FakeTimer();
-        var s = new PaneStartupGlowState(t, Cap, Fade);
+        var s = new PaneStartupGlowState(t, Cap, Fade, Grace);
         s.Dispose();
         Assert.Equal(1, t.DisposeCount);
     }
@@ -169,7 +236,7 @@ public class PaneStartupGlowStateTests
     public void Dispose_twice_disposes_the_timer_once()
     {
         var t = new FakeTimer();
-        var s = new PaneStartupGlowState(t, Cap, Fade);
+        var s = new PaneStartupGlowState(t, Cap, Fade, Grace);
         s.Dispose();
         s.Dispose();
         Assert.Equal(1, t.DisposeCount);

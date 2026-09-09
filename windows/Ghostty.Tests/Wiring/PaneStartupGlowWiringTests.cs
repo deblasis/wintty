@@ -69,23 +69,39 @@ public class PaneStartupGlowWiringTests
     }
 
     /// <summary>
-    /// Start on the surface spawn, end on the first render, both wired where
-    /// every leaf's control is born. Wiring one of them somewhere else (a
-    /// focus handler, a Loaded handler) would silently skip splits and
-    /// restored panes, which are the panes a glow is most useful on.
+    /// Start on the surface spawn, the grace on the first render, ready on
+    /// the prompt, all three wired where every leaf's control is born.
+    /// Wiring one of them somewhere else (a focus handler, a Loaded handler)
+    /// would silently skip splits and restored panes, which are the panes a
+    /// glow is most useful on.
     /// </summary>
     [Fact]
-    public void CreateTerminal_WiresSpawnToStart_AndFirstRenderToEnd()
+    public void CreateTerminal_WiresSpawnToStart_FirstRenderToGrace_AndPromptToEnd()
     {
         var body = Host().Method("CreateTerminal").Body!.Statements;
 
         var wired = body.SelectMany(s => s.DescendantNodesAndSelf())
             .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Right.ToString() is "OnLeafSurfaceSpawned" or "OnLeafFirstRender")
+            .Where(a => a.Right.ToString() is "OnLeafSurfaceSpawned" or "OnLeafFirstRender" or "OnLeafPromptReady")
             .Select(a => a.Left.ToString())
             .ToList();
 
-        Assert.Equal(["t.SurfaceSpawned", "t.FirstRender"], wired);
+        Assert.Equal(["t.SurfaceSpawned", "t.FirstRender", "t.PromptReady"], wired);
+    }
+
+    /// <summary>
+    /// The first paint is not readiness: on a daemon-attached pane it is the
+    /// attach resize repainting blank cells, seconds before the prompt. It
+    /// only arms the grace; the prompt is what ends the glow.
+    /// </summary>
+    [Fact]
+    public void FirstRender_ArmsTheGrace_PromptReady_EndsTheGlow()
+    {
+        var first = Host().Method("OnLeafFirstRender").Body!.ToString();
+        Assert.Contains("NotifyFirstRender()", first);
+        Assert.DoesNotContain("NotifyReady()", first);
+        var prompt = Host().Method("OnLeafPromptReady").Body!.ToString();
+        Assert.Contains("NotifyReady()", prompt);
     }
 
     /// <summary>

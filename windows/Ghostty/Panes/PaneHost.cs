@@ -121,6 +121,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // genuinely stuck, and a glow that never leaves is worse than none).
     private static readonly TimeSpan GlowCapDuration = TimeSpan.FromMilliseconds(10000);
     private static readonly TimeSpan GlowFadeDuration = TimeSpan.FromMilliseconds(250);
+    // After the first paint, how long the glow keeps going for a shell that
+    // never reports a prompt. Long enough to outlive the launch splash's
+    // dismissal (which rides the same first paint), short enough that a
+    // cmd.exe with no integration does not glow for the whole cap.
+    private static readonly TimeSpan GlowRenderGrace = TimeSpan.FromMilliseconds(2000);
 
     // Top-right "restore" affordance shown only while a pane is zoomed,
     // styled like the quake pin button. Clicking it unzooms. The resting
@@ -1228,7 +1233,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<
                     Ghostty.Core.Config.SystemSchedulerTimer>.Instance),
             cap: GlowCapDuration,
-            fade: GlowFadeDuration);
+            fade: GlowFadeDuration,
+            renderGrace: GlowRenderGrace);
         // The timer callback runs on a threadpool thread; the visual tree
         // only moves on the dispatcher thread.
         state.StateChanged += phase => DispatcherQueue.TryEnqueue(() => OnGlowPhase(terminal, phase));
@@ -1245,17 +1251,24 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void OnLeafFirstRender(object? sender, EventArgs e)
     {
         if (sender is not TerminalControl terminal) return;
-        // The pane produced renderable content for the first time: end this
-        // leaf's glow now rather than waiting out the cap. NotifyReady is a
-        // no-op if the glow already faded or never started, so a late or
-        // duplicate signal is harmless. FirstRender is raised on the UI
-        // thread, and the state machine is thread-safe regardless.
+        // The pane painted something. On a daemon-attached pane that is the
+        // attach resize repainting blank cells, well before the prompt, so
+        // this only arms the grace; the prompt ends the glow.
         if (_glowStates.TryGetValue(terminal, out var state))
-            state.NotifyReady();
+            state.NotifyFirstRender();
         // The same sign tells the tab it is no longer starting. Raised
         // outside the glow lookup: a pane too small to glow still paints,
         // and a tab stuck reading as "starting" is worse than a missing glow.
         RaiseFirstRendered();
+    }
+
+    private void OnLeafPromptReady(object? sender, EventArgs e)
+    {
+        if (sender is not TerminalControl terminal) return;
+        // The shell drew its prompt: the pane is usable, end the glow now.
+        // NotifyReady is a no-op if the glow already faded or never started.
+        if (_glowStates.TryGetValue(terminal, out var state))
+            state.NotifyReady();
     }
 
     // A surface that never paints -- a command that fails to spawn, a
@@ -1781,14 +1794,17 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested += OnTerminalCloseRequested;
         t.ContextMenuRequested += OnTerminalContextMenuRequested;
         t.PwdChanged += OnTerminalPwdChanged;
-        // Startup glow: begin the orbit when this leaf's surface spawns; end
-        // it on the FIRST of first_render (the pane produced renderable
-        // content, shell-agnostic) or the cap timer as the fallback. We use
-        // first_render rather than OSC 133 prompt-ready: prompt-ready depends
-        // on shell integration loading and varies per shell
-        // (cmd/pwsh/wsl/...), whereas first_render is universal.
+        // Startup glow: begin the orbit when this leaf's surface spawns.
+        // first_render only arms a short grace, not the end -- on a
+        // daemon-attached pane it is the attach resize repainting blank
+        // cells, seconds before the prompt is actually up, and on a cold
+        // start it is also what dismisses the launch splash, so ending the
+        // glow there would end it while the splash still covers it.
+        // PromptReady (OSC 133;B) ends the glow for real; the render grace
+        // and the cap remain the fallback for a shell that never reports one.
         t.SurfaceSpawned += OnLeafSurfaceSpawned;
         t.FirstRender += OnLeafFirstRender;
+        t.PromptReady += OnLeafPromptReady;
         return t;
     }
 

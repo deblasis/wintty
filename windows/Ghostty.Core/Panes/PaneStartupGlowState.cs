@@ -27,7 +27,9 @@ public sealed class PaneStartupGlowState : IDisposable
     private readonly ISchedulerTimer _timer;
     private readonly TimeSpan _cap;
     private readonly TimeSpan _fade;
+    private readonly TimeSpan _renderGrace;
     private bool _disposed;
+    private bool _renderSeen;
 
     public Phase Current { get; private set; } = Phase.Idle;
 
@@ -36,12 +38,13 @@ public sealed class PaneStartupGlowState : IDisposable
     /// UI must marshal onto the dispatcher.</summary>
     public event Action<Phase>? StateChanged;
 
-    public PaneStartupGlowState(ISchedulerTimer timer, TimeSpan cap, TimeSpan fade)
+    public PaneStartupGlowState(ISchedulerTimer timer, TimeSpan cap, TimeSpan fade, TimeSpan renderGrace)
     {
         ArgumentNullException.ThrowIfNull(timer);
         _timer = timer;
         _cap = cap;
         _fade = fade;
+        _renderGrace = renderGrace;
         _timer.Callback = OnTimerFired;
     }
 
@@ -61,11 +64,27 @@ public sealed class PaneStartupGlowState : IDisposable
         Raise(changed);
     }
 
-    /// <summary>The surface produced its first render: end the glow early.
+    /// <summary>The surface painted something. That is not readiness: on a
+    /// daemon-attached pane the first paint is the attach resize repainting
+    /// blank cells, seconds before the prompt. Arm a short grace so a shell
+    /// with no prompt signal still ends the glow soon after it paints,
+    /// while <see cref="NotifyReady"/> can still cut in earlier. No-op
+    /// unless Glowing, and once per glow: the second paint never re-arms.</summary>
+    public void NotifyFirstRender()
+    {
+        lock (_gate)
+        {
+            if (_disposed || Current != Phase.Glowing || _renderSeen) return;
+            _renderSeen = true;
+            _timer.Schedule(_renderGrace);
+        }
+    }
+
+    /// <summary>The shell is ready (prompt up): end the glow now.
     /// No-op unless currently <see cref="Phase.Glowing"/> (Idle/FadingOut/
     /// disposed all ignore it). The fade timer supersedes the pending cap
-    /// (last-schedule-wins), so the cap is the fallback only for surfaces
-    /// that never render.</summary>
+    /// or grace (last-schedule-wins), so the cap is the fallback only for
+    /// surfaces that never render and never report a prompt.</summary>
     public void NotifyReady()
     {
         Phase? changed = null;
@@ -86,6 +105,7 @@ public sealed class PaneStartupGlowState : IDisposable
         {
             if (_disposed) return;
             _timer.Cancel();
+            _renderSeen = false;
             if (Current != Phase.Idle)
             {
                 Current = Phase.Idle;
