@@ -720,6 +720,25 @@ fn cancelHiddenDrain(self: *Thread) void {
     );
 }
 
+/// The tail of the hidden drain: keep the timer going while hidden.
+/// Extracted so the idiom is unit-tested against the real xev backend.
+fn hiddenDrainRearm(
+    loop: *xev.Loop,
+    timer: *xev.Timer,
+    c: *xev.Completion,
+    comptime Userdata: type,
+    userdata: ?*Userdata,
+    comptime cb: fn (?*Userdata, *xev.Loop, *xev.Completion, xev.Timer.RunError!void) xev.CallbackAction,
+) xev.CallbackAction {
+    // Re-run with a fresh deadline and disarm this completion, the way
+    // cursorTimerCallback and animationTimerCallback do. `.rearm` on a
+    // timer re-inserts the elapsed deadline on the IOCP backend and
+    // starves the port wait; that starved the stop async and hung
+    // Surface.deinit's join on the UI thread.
+    timer.run(loop, c, hidden_drain_interval_ms, Userdata, userdata, cb);
+    return .disarm;
+}
+
 fn hiddenDrainCallback(
     self_: ?*Thread,
     _: *xev.Loop,
@@ -741,7 +760,7 @@ fn hiddenDrainCallback(
         log.err("error draining mailbox (hidden safety net) err={}", .{err});
 
     // Stay armed while hidden; the .visible = true transition cancels.
-    if (!t.flags.visible) return .rearm;
+    if (!t.flags.visible) return hiddenDrainRearm(&t.loop, &t.hidden_drain_h, &t.hidden_drain_c, Thread, t, hiddenDrainCallback);
     return .disarm;
 }
 
@@ -1197,4 +1216,140 @@ test "renderer mailbox push wakes the thread when it cannot land" {
 
     // Nothing was dropped from the queue on the way.
     try testing.expect(mailbox.pop(io) != null);
+}
+
+// The hidden-drain timer must never starve the loop: a timer callback that
+// returns `.rearm` on the IOCP backend is re-inserted at its elapsed
+// deadline and fires on every tick before the loop waits on the port, so
+// a posted async (our `stop`) is never delivered and `Surface.deinit`
+// joins forever (2026-09-08 close hang). Timers re-run and `.disarm`;
+// only asyncs `.rearm`.
+//
+// The fire cap below is not a "give up and pass anyway" valve: hitting it
+// sets `starved`, which stops the loop immediately and fails the test on
+// its own assertion. A starved run can never limp past the cap, get
+// lucky on a later tick, and pass `stop_seen` for the wrong reason.
+test "hidden drain idiom: a timer that re-runs itself lets a posted async through" {
+    const testing = std.testing;
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    var timer = try xev.Timer.init();
+    defer timer.deinit();
+    var timer_c: xev.Completion = .{};
+
+    var stop = try xev.Async.init();
+    defer stop.deinit();
+    var stop_c: xev.Completion = .{};
+
+    const State = struct {
+        // A healthy loop sees `stop` on the timer's first or second
+        // fire (see the `timer_fires < 5` assertion below); this cap is
+        // only a hard backstop against a genuinely starved loop running
+        // forever, and it fails the test rather than rescuing it.
+        const starve_fire_cap: u32 = 8;
+
+        timer_fires: u32 = 0,
+        stop_seen: bool = false,
+        starved: bool = false,
+        loop: *xev.Loop,
+        timer: *xev.Timer,
+        timer_c: *xev.Completion,
+
+        fn onTimer(
+            self_: ?*@This(),
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            const self = self_.?;
+            self.timer_fires += 1;
+            if (self.stop_seen) return .disarm;
+            if (self.timer_fires > starve_fire_cap) {
+                // The timer keeps winning the ready queue and the loop
+                // never reaches the port wait: this is the starvation
+                // under test. Fail outright instead of disarming and
+                // letting a later, now-uncontested tick observe the
+                // already-posted `stop` and pass the assertions below
+                // for the wrong reason.
+                self.starved = true;
+                return .disarm;
+            }
+            // The idiom under test: same as hiddenDrainCallback's tail.
+            return hiddenDrainRearm(self.loop, self.timer, self.timer_c, @This(), self, onTimer);
+        }
+
+        fn onStop(
+            self_: ?*@This(),
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            self_.?.stop_seen = true;
+            return .disarm;
+        }
+    };
+
+    var st: State = .{ .loop = &loop, .timer = &timer, .timer_c = &timer_c };
+    timer.run(&loop, &timer_c, 0, State, &st, State.onTimer);
+    stop.wait(&loop, &stop_c, State, &st, State.onStop);
+    try stop.notify();
+
+    // Stop ticking the instant either outcome is decided; a starved run
+    // must not get extra ticks in which to recover.
+    var ticks: u32 = 0;
+    while (!st.stop_seen and !st.starved and ticks < 20) : (ticks += 1) {
+        try loop.run(.once);
+    }
+    try testing.expect(!st.starved);
+    try testing.expect(st.stop_seen);
+    // Anything close to the starvation cap means the port wait was
+    // mostly starved even though it eventually got lucky.
+    try testing.expect(st.timer_fires < 5);
+}
+
+// The idiom test above drives hiddenDrainRearm directly, so it cannot
+// catch a revert of hiddenDrainCallback's callsite (back to a bare
+// `return .rearm;`) while the helper itself stays correct. This census
+// closes that gap: it scans every xev.Timer callback's own source text
+// for the literal string that reintroduces the starvation bug.
+test "no xev.Timer callback in this file returns .rearm" {
+    const src = @embedFile("Thread.zig");
+
+    // The set is DERIVED, not listed. An earlier version of this test named
+    // three callbacks while the file had five: renderCallback and
+    // Compression.timerCallback went unwatched, so a `.rearm` reintroducing
+    // this exact hang in either would have kept the census green, which is
+    // the false negative the census exists to prevent. The commented-out
+    // render-coalescing block earlier in this file contemplates precisely
+    // that return. Identify every timer callback by its return type instead,
+    // so a new one is covered the day it is written.
+    // Split so the needle never appears contiguously in this file: an
+    // unsplit literal would match its own text here and scan this test's
+    // body as if it were a callback.
+    const sig = "xev.Timer." ++ "RunError!void";
+    var found: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, src, i, sig)) |hit| {
+        i = hit + sig.len;
+
+        // Scan FORWARD from the signature to the next closing brace at
+        // column 0. The body always follows the signature, so there is no
+        // need to walk back to the `fn` keyword, which is ambiguous anyway:
+        // one of these signatures is a callback-typed parameter, and the
+        // nearest preceding `fn ` there is that parameter's own type.
+        // Overshooting into a later function only widens the region, which
+        // can add a false failure but never hide a real one.
+        const end = hit + (std.mem.indexOf(u8, src[hit..], "\n}\n") orelse
+            return error.BodyNotClosed);
+        found += 1;
+        try std.testing.expect(std.mem.indexOf(u8, src[hit..end], "return .rearm") == null);
+    }
+
+    // A scan that matched nothing would pass while proving nothing. Five is
+    // what the file carries today; it may grow, and must not silently shrink.
+    try std.testing.expect(found >= 5);
 }
