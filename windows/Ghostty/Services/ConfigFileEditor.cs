@@ -89,6 +89,12 @@ internal sealed class ConfigFileEditor : IConfigFileEditor
 
     private void WriteAtomic(string content)
     {
+        // The one write boundary every mutating call funnels through (the
+        // array overload calls this one), so the guard holds for every
+        // Settings page, profile toggle, opacity drag and raw-editor save
+        // without any of them knowing the guard exists.
+        Ghostty.Core.Config.TestConfigGuard.AssertUnderTemp(FilePath, "config write");
+
         var dir = Path.GetDirectoryName(FilePath);
         if (dir != null) Directory.CreateDirectory(dir);
 

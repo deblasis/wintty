@@ -893,7 +893,15 @@ public partial class App : Application
         // batched write rather than a burst. The 150ms debounce is
         // short enough that toggle clicks still feel instant when
         // committed, long enough to absorb a slider drag.
-        _configEditor = new ConfigFileEditor(_configService.ConfigFilePath);
+        //
+        // --no-config gets the refusing editor, not the real one: the flag
+        // exists to ignore the config file, so the run that flew it must
+        // not write that file either. Reads through the editor answer
+        // empty, matching ConfigSourcePath's null; writes throw, and the
+        // scheduler and migrator log the refusal instead of crashing.
+        _configEditor = _configService.NoConfig
+            ? new Ghostty.Core.Config.NoConfigFileEditor()
+            : new ConfigFileEditor(_configService.ConfigFilePath);
         ConfigFileEditor = _configEditor;
 
         var uiDispatcher = DispatcherQueue.GetForCurrentThread();

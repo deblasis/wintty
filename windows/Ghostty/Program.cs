@@ -61,6 +61,13 @@ public static partial class Program
         /// exit code come from <see cref="InitGhostty"/>.</summary>
         InitFailed = 2,
 
+        /// <summary>Startup refused because <c>WINTTY_TEST_CONFIG</c> is
+        /// armed and the config root resolved outside the temp directory.
+        /// Distinct from every other code so a harness can tell "the guard
+        /// did its job" from a usage error or a crash without parsing
+        /// stderr; the refusing line is on stderr either way.</summary>
+        TestConfigRefused = 4,
+
         /// <summary>Unhandled managed exception in the startup path, on the
         /// main thread or (via <see cref="FatalHandler"/>) on any other.
         /// <see cref="ReportFatal"/> appends <c>ghostty-crash.log</c> in
@@ -897,6 +904,18 @@ public static partial class Program
             Environment.Exit(0);
         }
 
+        // The test-config guard, ahead of everything that could touch a
+        // config file: the CLI actions below reach libghostty config
+        // parsing through InitGhostty, the GUI path reaches it through
+        // InitGhostty and ReadSingleInstanceSetting, and libghostty's own
+        // loadDefaultFiles/openPath can CREATE the config dir and a
+        // template file before any managed code sees a path. The one root
+        // all of that grows from is the xdg config dir, so checking the
+        // root here is the only placement that refuses before a native
+        // read or create, not after. Sits after the intercepts above
+        // (+version, +crash, help), none of which read config.
+        GuardTestConfigRoot();
+
         // CLI actions are delegated to libghostty, matching the macOS
         // architecture: ghostty_init parses argv, ghostty_cli_run_action
         // runs the action (if any). If no action, we start the WinUI app.
@@ -1005,6 +1024,48 @@ public static partial class Program
         // shell. The gate that used to live here existed because a
         // console-subsystem binary was handed a console it did not want.
         return StartGui();
+    }
+
+    /// <summary>
+    /// Refuse to run when <see cref="Ghostty.Core.Config.TestConfigGuard"/>
+    /// is armed and the config root is outside the temp directory, exiting
+    /// non-zero before any window opens and before libghostty reads or
+    /// creates a single config byte.
+    ///
+    /// The root is computed managed-side, mirroring
+    /// <c>src/os/xdg.zig dir()</c> for the config dir: XDG_CONFIG_HOME,
+    /// else APPDATA, else the home directory. Everything downstream, every
+    /// read and every writer including libghostty's own creates, derives
+    /// from that one root, so proving it is under temp proves all of them.
+    /// The resolved-path and write-boundary checks in ConfigService,
+    /// SeedConfigIfEmpty and ConfigFileEditor.WriteAtomic remain as
+    /// belt-and-braces for a path that resolved somewhere the root check
+    /// did not predict.
+    /// </summary>
+    private static void GuardTestConfigRoot()
+    {
+        if (!Ghostty.Core.Config.TestConfigGuard.IsArmed) return;
+
+        var root = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+        if (string.IsNullOrEmpty(root))
+            root = Environment.GetEnvironmentVariable("APPDATA");
+        if (string.IsNullOrEmpty(root))
+            root = Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile);
+
+        if (Ghostty.Core.Config.TestConfigGuard.IsUnderTemp(root)) return;
+
+        // Both sinks a pre-init failure has: the console a harness watches,
+        // with the guard's own spelling so the refusal is greppable, and
+        // the tag every other startup diagnostic carries.
+        WriteStderr(
+            $"{Ghostty.Core.Config.TestConfigGuard.EnvVar}={Environment.GetEnvironmentVariable(Ghostty.Core.Config.TestConfigGuard.EnvVar)} " +
+            $"refusing to start: config root '{root}' is not under the temp " +
+            $"directory '{Path.GetTempPath()}'. Set XDG_CONFIG_HOME to a " +
+            $"directory under the temp directory and relaunch.");
+        WriteStartupDiagnostic(
+            $"config guard refused non-temp config root '{root}'");
+        Environment.Exit((int)ExitCode.TestConfigRefused);
     }
 
     /// <summary>

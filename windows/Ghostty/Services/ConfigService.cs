@@ -349,6 +349,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </remarks>
     private string? ConfigSourcePath => _noConfig ? null : ConfigFilePath;
 
+    /// <summary>
+    /// Whether this launch passed <c>--no-config</c>. The host branches on
+    /// it to hand out <see cref="Ghostty.Core.Config.NoConfigFileEditor"/>
+    /// instead of a real editor, and the startup migrator skips its config
+    /// appends under it: the flag must mean nothing reads AND nothing
+    /// writes the config file.
+    /// </summary>
+    public bool NoConfig => _noConfig;
+
     private Dictionary<string, List<string>>? _configFileCache;
 
     /// <summary>
@@ -429,6 +438,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // (backslash) so the path looks clean in UI and logs.
         ConfigFilePath = Path.GetFullPath(rawPath);
 
+        // Belt for a root the composition root's guard did not predict
+        // (Program.GuardTestConfigRoot checks the xdg root before
+        // libghostty runs; this checks what actually resolved). Covers
+        // every read below, which all key off ConfigFilePath, and the
+        // seed write that follows.
+        Ghostty.Core.Config.TestConfigGuard.AssertUnderTemp(
+            ConfigFilePath, "resolved config path");
+
         SeedConfigIfEmpty();
         CacheDiagnostics();
 
@@ -482,6 +499,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </summary>
     private void SeedConfigIfEmpty()
     {
+        // Outside the try on purpose: the catch below exists so a writable-
+        // config-dir hiccup cannot take startup down, and a guard refusal
+        // is the one failure that must not be smoothed over. The
+        // composition-root check normally refuses long before here; this
+        // is the write boundary's own belt.
+        Ghostty.Core.Config.TestConfigGuard.AssertUnderTemp(
+            ConfigFilePath, "seed write");
+
         try
         {
             // Nothing is being read from it, so nothing should be written to
