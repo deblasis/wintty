@@ -54,16 +54,16 @@ public class HarnessConfigIsolationScanTests
     };
 
     /// <summary>
-    /// justfile recipes that execute the exe directly, with the proof.
+    /// No justfile allowlist, on purpose. run-win and run-win-release are
+    /// the USER launcher (founder rule): real config by default for humans,
+    /// ISOLATED_CONFIG=1 to opt into a random temp root, isolated by
+    /// default inside an agent session (CLAUDECODE), REAL_CONFIG=1 to
+    /// override loudly. All of that lives in run-win-launch.ps1, which this
+    /// scan counts as armed because it contains the arming path. A bare
+    /// `./Wintty.exe` line in any recipe would bypass the agent-session
+    /// default, which is the exact April-taint path the launcher exists to
+    /// close, so it must fail this scan rather than be allowlisted.
     /// </summary>
-    private static readonly Dictionary<string, string> JustfileAllowlist = new()
-    {
-        // Interactive dev runs of the developer's own environment: the
-        // point of the recipe is the real config. Not a test; the fuzz and
-        // seam recipes all route through scripts that arm the guard.
-        ["run-win"] = "interactive dev launch, not a test",
-        ["run-win-release"] = "interactive dev launch, not a test",
-    };
 
     private static readonly Regex LaunchKeyword = new(
         @"Start-Process|ProcessStartInfo", RegexOptions.Compiled);
@@ -158,7 +158,7 @@ public class HarnessConfigIsolationScanTests
     }
 
     [Fact]
-    public void Justfile_Recipes_Execute_The_Exe_Only_Where_Isolation_Is_Intended()
+    public void Justfile_Recipes_Execute_The_Exe_Only_Through_A_Launcher()
     {
         var root = RepoRoot();
         var path = Path.Combine(root, "justfile");
@@ -186,16 +186,101 @@ public class HarnessConfigIsolationScanTests
             if (!firstToken.EndsWith("Wintty.exe", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            if (JustfileAllowlist.ContainsKey(recipe)) continue;
             violations.Add($"justfile:{index + 1} (recipe {recipe}): {trimmed}");
         }
 
         Assert.True(
             violations.Count == 0,
-            "justfile executes the app outside a script, without arming " +
-            "WINTTY_TEST_CONFIG. Route the launch through a harness script " +
-            "(they stage a random temp XDG root and arm the guard) or justify " +
-            "an allowlist entry:\n  " + string.Join("\n  ", violations));
+            "justfile executes the app outside a launcher script. Tests arm " +
+            "WINTTY_TEST_CONFIG through their harness; the user launcher " +
+            "(run-win / run-win-release) routes through run-win-launch.ps1, " +
+            "which isolates agent sessions by default. A bare exec line " +
+            "bypasses both:\n  " + string.Join("\n  ", violations));
+    }
+
+    [Fact]
+    public void Run_Win_Recipes_Route_Through_The_User_Launcher_Script()
+    {
+        var root = RepoRoot();
+        var justfile = File.ReadAllLines(Path.Combine(root, "justfile"));
+
+        foreach (var recipe in new[] { "run-win", "run-win-release" })
+        {
+            var start = Array.FindIndex(justfile,
+                l => l.StartsWith(recipe + ":", StringComparison.Ordinal));
+            Assert.True(start >= 0, $"no recipe '{recipe}' in the justfile");
+
+            var body = new List<string>();
+            for (var i = start + 1; i < justfile.Length; i++)
+            {
+                var line = justfile[i];
+                if (Regex.IsMatch(line, @"^[A-Za-z][\w-]*:") || line.StartsWith('['))
+                    break;
+                body.Add(line);
+            }
+
+            Assert.Contains(body, l =>
+                l.Contains("run-win-launch.ps1", StringComparison.Ordinal) &&
+                !l.TrimStart().StartsWith('#'));
+        }
+    }
+
+    [Fact]
+    public void Run_Win_Launcher_Pins_The_Founder_Rule_For_The_User_Launcher()
+    {
+        var root = RepoRoot();
+        var path = Path.Combine(root, "windows", "scripts", "run-win-launch.ps1");
+        Assert.True(File.Exists(path),
+            "run-win-launch.ps1 not found; the run-win recipes depend on it");
+
+        var lines = File.ReadAllLines(path);
+        var text = string.Join('\n', lines);
+
+        // The four markers of the rule: the explicit opt-ins, the agent
+        // detector, and the guard's own variable.
+        foreach (var marker in new[] { "CLAUDECODE", "ISOLATED_CONFIG",
+                                       "REAL_CONFIG", "WINTTY_TEST_CONFIG" })
+        {
+            Assert.Contains(lines, l =>
+                IsCode(l) && l.Contains(marker, StringComparison.Ordinal));
+        }
+
+        // Isolation rides the same helper every harness uses, and the mode
+        // resolution is a function the harness side can probe without
+        // launching anything.
+        Assert.Contains(lines, l =>
+            IsCode(l) && l.Contains("Enter-WinttyTestConfig", StringComparison.Ordinal));
+        Assert.Contains("function Get-RunWinMode", text,
+            StringComparison.Ordinal);
+
+        // Precedence, pinned by position inside the mode function: an
+        // explicit REAL_CONFIG beats everything, an explicit ISOLATED_CONFIG
+        // beats the agent default, and CLAUDECODE only fills the default.
+        // If the checks are reordered, this fails.
+        var functionStart = text.IndexOf("function Get-RunWinMode", StringComparison.Ordinal);
+        var functionEnd = text.IndexOf("function ", functionStart + 1, StringComparison.Ordinal);
+        if (functionEnd < 0) functionEnd = text.Length;
+        var body = text[functionStart..functionEnd];
+        var real = body.IndexOf("REAL_CONFIG", StringComparison.Ordinal);
+        var isolated = body.IndexOf("ISOLATED_CONFIG", StringComparison.Ordinal);
+        var agent = body.IndexOf("CLAUDECODE", StringComparison.Ordinal);
+        Assert.True(real >= 0 && isolated > real && agent > isolated,
+            "Get-RunWinMode must check REAL_CONFIG before ISOLATED_CONFIG " +
+            "before CLAUDECODE; found at " + $"{real}/{isolated}/{agent}");
+
+        // REAL_CONFIG is the one spelling that runs the app against the
+        // user's real config from inside an agent session, so it must be
+        // announced loudly, not accepted in silence.
+        Assert.Contains(lines, l =>
+            IsCode(l) &&
+            l.Contains("REAL_CONFIG", StringComparison.Ordinal) &&
+            l.Contains("ForegroundColor Red", StringComparison.Ordinal));
+
+        // The window outlives the recipe: exiting the test-config session
+        // would delete the root the live app is still holding. The helper's
+        // 24h sweep is what reaps it instead.
+        Assert.DoesNotContain(lines, l =>
+            IsCode(l) && l.Contains("Exit-WinttyTestConfig", StringComparison.Ordinal));
     }
 
     [Fact]
