@@ -225,6 +225,7 @@ function Stop-Launched {
 
 $results = [System.Collections.Generic.List[object]]::new()
 $previousXdg = $env:XDG_CONFIG_HOME
+$previousTestConfig = $env:WINTTY_TEST_CONFIG
 
 try {
     Write-Host "exe    : $ExePath"
@@ -241,12 +242,14 @@ try {
         # Set per launch: a child inherits the environment as it stands when
         # it is created, and the two roles can need different configs.
         $env:XDG_CONFIG_HOME = $primaryXdg
+        $env:WINTTY_TEST_CONFIG = '1'
         $primary = Start-Process -FilePath $ExePath -PassThru
         $launched.Add($primary)
 
         Start-Sleep -Milliseconds $DelayMs
 
         $env:XDG_CONFIG_HOME = $secondaryXdg
+        $env:WINTTY_TEST_CONFIG = '1'
         $secondary = Start-Process -FilePath $ExePath -PassThru
         $launched.Add($secondary)
         $t0 = [System.Diagnostics.Stopwatch]::StartNew()
@@ -375,6 +378,8 @@ try {
 finally {
     Stop-Launched
     $env:XDG_CONFIG_HOME = $previousXdg
+    if ($null -ne $previousTestConfig -and $previousTestConfig -ne '') { $env:WINTTY_TEST_CONFIG = $previousTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
 }
 

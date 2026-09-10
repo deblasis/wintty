@@ -263,6 +263,8 @@ $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc
 
 $originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
 $originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
+$originalTestConfigSet = Test-Path Env:WINTTY_TEST_CONFIG
+$originalTestConfig = if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG } else { $null }
 $tempXdg = New-IsolatedConfig
 $proc = $null
 $secondaryAlive = $false
@@ -286,6 +288,7 @@ Assert-NoWintty
 $script:WinttyStamp = Get-WinttyLaunchStamp
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
+    $env:WINTTY_TEST_CONFIG = '1'
     Start-Sleep -Milliseconds 500
     $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
     $pid32 = [uint32]$proc.Id
@@ -377,6 +380,8 @@ finally {
     }
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG = $originalTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     # After the env restores, not before: a throw in the sweep would otherwise
     # abandon them and leave the shell pointed at a temp profile.
     Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath

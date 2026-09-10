@@ -303,6 +303,8 @@ $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc
 
 $originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
 $originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
+$originalTestConfigSet = Test-Path Env:WINTTY_TEST_CONFIG
+$originalTestConfig = if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG } else { $null }
 
 # The quiet cases assert that NO banner appears, so every other thing that can
 # legitimately raise one has to be staged too, not just the config. NO_COLOR is
@@ -337,6 +339,7 @@ function Invoke-Case($Case, [int]$ExtraTabs, [string]$Exe) {
     $stamp = Get-WinttyLaunchStamp
     try {
         $env:XDG_CONFIG_HOME = $tempXdg
+        $env:WINTTY_TEST_CONFIG = '1'
         Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
         $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
         $pid32 = [uint32]$proc.Id
@@ -499,6 +502,8 @@ try {
 finally {
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG = $originalTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     if ($originalNoColorSet) { $env:NO_COLOR = $originalNoColor }
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue

@@ -49,13 +49,15 @@ param(
     [int]$Seed = 1337,
     [int]$Iterations = 40,
     [switch]$KeepOpen,
-    # Launching under a throwaway XDG_CONFIG_HOME turned out to make the app
-    # unstable at startup on this machine (repeated 0xc000027b stowed
-    # exceptions in CoreMessagingXP), while the user's own config dir is
-    # stable. Default to the real environment so the fuzz exercises the app
-    # the way it is actually run; -IsolatedConfig opts back into the
-    # throwaway dir when a controlled config matters more than stability.
-    [switch]$IsolatedConfig
+    # Isolation is the default: a per-run random temp XDG root plus
+    # WINTTY_TEST_CONFIG=1, so the fuzz cannot read or write the real
+    # per-user config and a lost root is a loud startup refusal rather
+    # than a silent taint. The old note that a throwaway root was unstable
+    # on one machine (0xc000027b stowed exceptions in CoreMessagingXP) is
+    # why -RealConfig exists: pass it to fuzz the user's own environment
+    # the way the app is actually run, accepting that any config write
+    # lands in the real file.
+    [switch]$RealConfig
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
@@ -719,6 +721,7 @@ window-theme = wintty
 '@ | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
 
 $origXdg = $env:XDG_CONFIG_HOME
+$origTestConfig = $env:WINTTY_TEST_CONFIG
 $script:Proc = $null
 $script:Iter = 0
 $script:ExitCode = 0
@@ -737,9 +740,12 @@ $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 if (Test-Path $crashPath) { $script:CrashBaseline = (Get-Item $crashPath).Length }
 
 try {
-    if ($IsolatedConfig) { $env:XDG_CONFIG_HOME = $tempXdg }
+    if (-not $RealConfig) {
+        $env:XDG_CONFIG_HOME = $tempXdg
+        $env:WINTTY_TEST_CONFIG = '1'
+    }
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
-    Write-Host ("config: {0}" -f $(if ($IsolatedConfig) { $tempXdg } else { 'user environment' }))
+    Write-Host ("config: {0}" -f $(if ($RealConfig) { 'user environment (-RealConfig)' } else { $tempXdg }))
 
     # Never kill by name: developers keep builds from several worktrees open
     # at once, and force-killing every Wintty takes down work this run has
@@ -1301,9 +1307,11 @@ finally {
         try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill($true) } } catch { }
         try { [void]$script:Proc.WaitForExit(3000) } catch { }
     }
-    if ($IsolatedConfig) {
+    if (-not $RealConfig) {
         if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
         else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+        if ($null -ne $origTestConfig) { $env:WINTTY_TEST_CONFIG = $origTestConfig }
+        else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     }
     # After the restore, not before: a throw here would otherwise abandon it
     # and leave the shell pointed at a temp profile.

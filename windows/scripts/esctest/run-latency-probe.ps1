@@ -48,9 +48,11 @@ New-Item -ItemType Directory -Force $cfgGhostty | Out-Null
     Set-Content -LiteralPath (Join-Path $cfgGhostty 'config') -Encoding utf8
 
 $prevXdg = $env:XDG_CONFIG_HOME
+$prevTestConfig = $env:WINTTY_TEST_CONFIG
 $proc = $null
 try {
     $env:XDG_CONFIG_HOME = $cfgDir
+    $env:WINTTY_TEST_CONFIG = '1'
     $proc = Start-Process -FilePath $WinttyExe -PassThru
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while (-not (Test-Path $doneWin) -and (Get-Date) -lt $deadline) {
@@ -60,6 +62,8 @@ try {
 }
 finally {
     $env:XDG_CONFIG_HOME = $prevXdg
+    if ($null -ne $prevTestConfig -and $prevTestConfig -ne '') { $env:WINTTY_TEST_CONFIG = $prevTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     if ($proc) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {} }
 }
 

@@ -792,6 +792,8 @@ $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc
 
 $originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
 $originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
+$originalTestConfigSet = Test-Path Env:WINTTY_TEST_CONFIG
+$originalTestConfig = if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG } else { $null }
 $originalNoColorSet = Test-Path Env:NO_COLOR
 $originalNoColor = if ($originalNoColorSet) { $env:NO_COLOR } else { $null }
 
@@ -891,6 +893,7 @@ function Get-ThemeCatalogue([string]$Exe) {
         # The child reads this dictionary rather than the harness process's
         # own environment, so the staging never leaks into anything else here.
         $psi.EnvironmentVariables['XDG_CONFIG_HOME'] = $tempXdg
+        $psi.EnvironmentVariables['WINTTY_TEST_CONFIG'] = '1'
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
@@ -1052,6 +1055,7 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
     $stamp = Get-WinttyLaunchStamp
     try {
         $env:XDG_CONFIG_HOME = $tempXdg
+        $env:WINTTY_TEST_CONFIG = '1'
         # NO_COLOR raises a banner that covers a third of the window and moves
         # the layout under it. Nothing this harness samples is behind it, but a
         # banner appearing on some machines and not others is a difference in
@@ -1936,6 +1940,8 @@ finally {
     # to delete.
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG = $originalTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     if ($originalNoColorSet) { $env:NO_COLOR = $originalNoColor }
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue

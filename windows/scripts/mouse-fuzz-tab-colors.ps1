@@ -597,6 +597,7 @@ no-color-override = strip
 
 $script:FatalWasProduct = $null
 $origXdg = $env:XDG_CONFIG_HOME
+$origTestConfig = $env:WINTTY_TEST_CONFIG
 $origNoColor = $env:NO_COLOR
 $proc = $null
 $result = [ordered]@{
@@ -624,6 +625,7 @@ $script:WinttyStamp = Get-WinttyLaunchStamp
 try {
     Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
     $env:XDG_CONFIG_HOME = $tempXdg
+    $env:WINTTY_TEST_CONFIG = '1'
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
     $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
     $pid32 = [uint32]$proc.Id
@@ -756,6 +758,8 @@ finally {
     }
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($null -ne $origTestConfig) { $env:WINTTY_TEST_CONFIG = $origTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     if ($null -ne $origNoColor) { $env:NO_COLOR = $origNoColor }
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     if ($null -ne $tempXdg -and (Test-Path $tempXdg)) {

@@ -209,12 +209,18 @@ function Start-SeamSession(
         Stamp     = Get-WinttyLaunchStamp
         Token     = New-SeamToken
         OrigXdg   = if (Test-Path Env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $null }
+        OrigTestConfig = if (Test-Path Env:WINTTY_TEST_CONFIG) { $env:WINTTY_TEST_CONFIG } else { $null }
         OrigSeam  = if (Test-Path Env:WINTTY_TEST_SEAM) { $env:WINTTY_TEST_SEAM } else { $null }
         OrigInput = if (Test-Path Env:WINTTY_TEST_SEAM_INPUT) { $env:WINTTY_TEST_SEAM_INPUT } else { $null }
         OrigTrace = if (Test-Path Env:WINTTY_TABDRAG_TRACE) { $env:WINTTY_TABDRAG_TRACE } else { $null }
         OrigNoColor = if (Test-Path Env:NO_COLOR) { $env:NO_COLOR } else { $null }
     }
     $env:XDG_CONFIG_HOME = $tempXdg
+    # The guard that makes a lost XDG root loud: armed, an app resolving a
+    # non-temp config refuses to start (exit code 4, both paths on stderr)
+    # instead of silently reading and writing the real config. Every seam
+    # consumer arms it here, which is what the source-scan test vouches for.
+    $env:WINTTY_TEST_CONFIG = '1'
     # The token travels in the environment block the child inherits, which is
     # readable only by something that could already open this process anyway.
     $env:WINTTY_TEST_SEAM = $session.Token
@@ -321,6 +327,8 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     }
     if ($null -ne $Session.OrigXdg) { $env:XDG_CONFIG_HOME = $Session.OrigXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigTestConfig) { $env:WINTTY_TEST_CONFIG = $Session.OrigTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigSeam) { $env:WINTTY_TEST_SEAM = $Session.OrigSeam }
     else { Remove-Item Env:WINTTY_TEST_SEAM -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigInput) { $env:WINTTY_TEST_SEAM_INPUT = $Session.OrigInput }

@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $exe = $ExePath
 $xdg = Join-Path $env:TEMP ("wintty-seam-bisect-" + [guid]::NewGuid().ToString('N'))
 $env:XDG_CONFIG_HOME = $xdg
+$env:WINTTY_TEST_CONFIG = '1'
 $token = New-SeamToken
 $env:WINTTY_TEST_SEAM = $token
 New-Item -ItemType Directory -Force -Path (Join-Path $xdg 'wintty') | Out-Null

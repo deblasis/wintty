@@ -46,13 +46,17 @@ New-Item -ItemType Directory -Force $cfgGhostty | Out-Null
 # Inherit the full environment and add only the XDG override (rather than
 # -Environment, whose merge-vs-replace semantics vary). Restore afterward.
 $prevXdg = $env:XDG_CONFIG_HOME
+$prevTestConfig = $env:WINTTY_TEST_CONFIG
 $proc = $null
 try {
     $env:XDG_CONFIG_HOME = $cfgDir
+    $env:WINTTY_TEST_CONFIG = '1'
     $proc = Start-Process -FilePath $WinttyExe -PassThru
 }
 finally {
     $env:XDG_CONFIG_HOME = $prevXdg
+    if ($null -ne $prevTestConfig -and $prevTestConfig -ne '') { $env:WINTTY_TEST_CONFIG = $prevTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
 }
 
 Write-Host "Wintty PID $($proc.Id) is hosting vttest ($Distro)."

@@ -28,6 +28,7 @@ $log = Join-Path $env:TEMP 'wintty-seam-cdb.log'
 $cmds = Join-Path $env:TEMP 'wintty-seam-cdb-cmds.txt'
 $xdg = Join-Path $env:TEMP ("wintty-seam-cdb-" + [guid]::NewGuid().ToString('N'))
 $env:XDG_CONFIG_HOME = $xdg
+$env:WINTTY_TEST_CONFIG = '1'
 # cdb inherits this and the app under it inherits it in turn, so the token
 # reaches the seam the same way a direct launch delivers it.
 $token = New-SeamToken
