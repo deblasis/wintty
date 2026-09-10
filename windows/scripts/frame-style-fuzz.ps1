@@ -123,6 +123,7 @@ param(
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/env-guard.ps1')
+. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 $ErrorActionPreference = 'Stop'
 
 # Same convention as the other harnesses here: a PRODUCT_FAIL throw is a defect
@@ -790,10 +791,6 @@ function Get-DesktopPolarity {
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-$originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
-$originalTestConfigSet = Test-Path Env:WINTTY_TEST_CONFIG
-$originalTestConfig = if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG } else { $null }
 $originalNoColorSet = Test-Path Env:NO_COLOR
 $originalNoColor = if ($originalNoColorSet) { $env:NO_COLOR } else { $null }
 
@@ -805,8 +802,11 @@ Write-Host "desktop=$polarity highContrast=$highContrast (both read, neither set
 #
 # Created before the catalogue below, because the catalogue is taken under it.
 
-$stage = Join-Path $env:TEMP ('wintty-frame-fuzz-{0:HHmmss}' -f (Get-Date))
-$tempXdg = Join-Path $stage 'xdg'
+# A per-run randomly named root from the shared helper (the old name was
+# HHmmss-keyed, so two runs inside a minute shared a stage). Entered
+# without a paired Exit here: the finally below pairs it.
+$script:TestConfig = Enter-WinttyTestConfig
+$tempXdg = $script:TestConfig.Dir
 New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
 $configPath = Join-Path $tempXdg 'wintty\config.wintty'
 
@@ -1054,8 +1054,6 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
     $handedOff = $false
     $stamp = Get-WinttyLaunchStamp
     try {
-        $env:XDG_CONFIG_HOME = $tempXdg
-        $env:WINTTY_TEST_CONFIG = '1'
         # NO_COLOR raises a banner that covers a third of the window and moves
         # the layout under it. Nothing this harness samples is behind it, but a
         # banner appearing on some machines and not others is a difference in
@@ -1935,16 +1933,9 @@ try {
     }
 }
 finally {
-    # Restored BEFORE the sweep, so a throw out of the sweep cannot leave the
-    # caller's environment pointing at a staging directory this block is about
-    # to delete.
-    if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG = $originalTestConfig }
-    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     if ($originalNoColorSet) { $env:NO_COLOR = $originalNoColor }
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
-    Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue
+    Exit-WinttyTestConfig $script:TestConfig
 
     $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
     if ($crashGrew) { $findings.Add('crash.log grew during the run') }

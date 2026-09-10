@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 $ErrorActionPreference = 'Stop'
 
 # A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
@@ -221,7 +222,10 @@ function Count-TabItems([uint32]$ProcId) {
 }
 
 function New-IsolatedConfig {
-    $tempXdg = Join-Path $env:TEMP ("wintty-fuzz-xdg-jl-{0:HHmmss}" -f (Get-Date))
+    # The shared helper's randomly named root; the session is kept
+    # script-scoped so the finally below can pair the Exit.
+    $script:TestConfig = Enter-WinttyTestConfig
+    $tempXdg = $script:TestConfig.Dir
     $winttyDir = Join-Path $tempXdg 'wintty'
     New-Item -ItemType Directory -Force -Path $winttyDir | Out-Null
     $dst = Join-Path $winttyDir 'config.wintty'
@@ -261,10 +265,8 @@ function Invoke-Secondary([string]$Cli) {
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-$originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
-$originalTestConfigSet = Test-Path Env:WINTTY_TEST_CONFIG
-$originalTestConfig = if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG } else { $null }
+# XDG_CONFIG_HOME and WINTTY_TEST_CONFIG are owned by the session that
+# New-IsolatedConfig enters; its Exit pairs in the finally below.
 $tempXdg = New-IsolatedConfig
 $proc = $null
 $secondaryAlive = $false
@@ -287,8 +289,6 @@ $tabsAfterProfile = 0
 Assert-NoWintty
 $script:WinttyStamp = Get-WinttyLaunchStamp
 try {
-    $env:XDG_CONFIG_HOME = $tempXdg
-    $env:WINTTY_TEST_CONFIG = '1'
     Start-Sleep -Milliseconds 500
     $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
     $pid32 = [uint32]$proc.Id
@@ -378,13 +378,11 @@ finally {
             try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
         }
     }
-    if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG = $originalTestConfig }
-    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
-    # After the env restores, not before: a throw in the sweep would otherwise
-    # abandon them and leave the shell pointed at a temp profile.
+    # The sweep first (it takes the app down), then the session exit:
+    # restoring env and deleting the staged root while the app still
+    # holds it would pull the config out from under a live window.
     Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
+    Exit-WinttyTestConfig $script:TestConfig
 }
 
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)

@@ -22,11 +22,16 @@ stop it with `Stop-Process -Id <pid>` when done.
     [Parameter(Mandatory)][string]$WinttyExe,
     [Parameter(Mandatory)][ValidatePattern('^\d+$')][string]$Section,  # vttest menu digits, e.g. "3"
     [int]$Pages = 0,                                    # paging RETURNs within the test
-    [string]$Distro = 'Ubuntu-24.04',
-    [string]$OutDir = "$env:TEMP\vttest-section"
+    [string]$Distro = 'Ubuntu-24.04'
 )
 $ErrorActionPreference = 'Stop'
-New-Item -ItemType Directory -Force $OutDir | Out-Null
+. (Join-Path $PSScriptRoot '../lib/test-config.ps1')
+
+# A per-run randomly named config root from the shared helper (the old
+# default was a fixed %TEMP%\vttest-section reused across runs).
+# No paired Exit: the launched Wintty stays up for screenshotting and
+# holds the root; the helper's 24h sweep reaps it.
+$testConfig = Enter-WinttyTestConfig
 
 # LF-normalize the committed driver into the distro: a Windows checkout may carry
 # CRLF, which bash rejects. Translate the script's own path to its /mnt mount.
@@ -38,25 +43,15 @@ wsl.exe -d $Distro -- bash -lc "tr -d '\r' < '$srcMnt' > /tmp/vttest-section.sh"
 # Temp ghostty config (same XDG harness as run-vttest.ps1; the `ghostty/` subdir
 # is required). The command splits on spaces into wsl.exe argv; Section/Pages are
 # bare digits.
-$cfgDir = Join-Path $OutDir 'cfg'
+$cfgDir = $testConfig.Dir
 $cfgGhostty = Join-Path $cfgDir 'ghostty'
 New-Item -ItemType Directory -Force $cfgGhostty | Out-Null
 "command = wsl.exe -d $Distro -- bash -l /tmp/vttest-section.sh $Section $Pages" |
     Set-Content -LiteralPath (Join-Path $cfgGhostty 'config') -Encoding utf8
 
-$prevXdg = $env:XDG_CONFIG_HOME
-$prevTestConfig = $env:WINTTY_TEST_CONFIG
-$proc = $null
-try {
-    $env:XDG_CONFIG_HOME = $cfgDir
-    $env:WINTTY_TEST_CONFIG = '1'
-    $proc = Start-Process -FilePath $WinttyExe -PassThru
-}
-finally {
-    $env:XDG_CONFIG_HOME = $prevXdg
-    if ($null -ne $prevTestConfig -and $prevTestConfig -ne '') { $env:WINTTY_TEST_CONFIG = $prevTestConfig }
-    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
-}
+# The helper entered above set XDG_CONFIG_HOME and armed
+# WINTTY_TEST_CONFIG for the child.
+$proc = Start-Process -FilePath $WinttyExe -PassThru
 
 Write-Host "Wintty PID $($proc.Id) hosting vttest section $Section ($Distro)."
 Write-Host "Move the window to the primary monitor, screenshot, then: Stop-Process -Id $($proc.Id)"

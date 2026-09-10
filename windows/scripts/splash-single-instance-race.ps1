@@ -180,7 +180,9 @@ function Get-OverlapArea($a, $b) {
 # the key off, which is what makes the two questions differ. The mutex name
 # is derived from the exe path, not the config, so the two still contend for
 # the same election.
-$scratch = Join-Path ([System.IO.Path]::GetTempPath()) "wintty-splash-race-$PID"
+# A GUID, not $PID: the founder rule wants a randomly generated name,
+# and a PID is reused across reboots, so two runs can collide.
+$scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-splash-race-" + [guid]::NewGuid().ToString('N'))
 
 function New-ScratchConfig([string]$name, [string]$value) {
     $root = Join-Path $scratch $name

@@ -283,6 +283,205 @@ public class HarnessConfigIsolationScanTests
             IsCode(l) && l.Contains("Exit-WinttyTestConfig", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Spellings that make a staging root random: the .NET GUID spellings
+    /// used across the harnesses, the crypto-random helpers, and the two
+    /// library entry points that own randomness themselves.
+    /// </summary>
+    private static readonly string[] RandomnessMarkers =
+    {
+        "[guid]::NewGuid", "New-Guid", "GetRandomFileName",
+        "RandomNumberGenerator", "Enter-WinttyTestConfig",
+        "Start-SeamSession", "New-WinttyTestConfigRoot", "New-SeamToken",
+    };
+
+    /// <summary>
+    /// Assignments of the config root: process-wide or per-child psi.
+    /// </summary>
+    private static readonly Regex XdgAssignment = new(
+        @"(?:\$env:XDG_CONFIG_HOME|EnvironmentVariables\['XDG_CONFIG_HOME'\])\s*=\s*(.+)$",
+        RegexOptions.Compiled);
+
+    private static readonly Regex VarRef = new(@"\$(\w+)", RegexOptions.Compiled);
+
+    private static readonly Regex FunctionDef = new(
+        @"^\s*function\s+([\w-]+)", RegexOptions.Compiled);
+
+    /// <summary>
+    /// A variable's definitions: plain assignments and parameter defaults
+    /// (`[string]$OutDir = ...`), which is where the fixed staging names
+    /// lived.
+    /// </summary>
+    private static List<(int Line, string Rhs)> DefinitionsOf(
+        string[] lines, string name)
+    {
+        // One pattern covers both plain assignments and parameter defaults
+        // (`[string]$OutDir = ...`), which is where the fixed names lived.
+        var definition = new Regex(
+            @"^\s*(?:\[[^\]]*\]\s*)?\$" + Regex.Escape(name) +
+            @"\s*=\s*(.+?)(?:\s*#.*)?$");
+        var found = new List<(int, string)>();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!IsCode(lines[i])) continue;
+            var m = definition.Match(lines[i]);
+            if (m.Success) found.Add((i + 1, m.Groups[1].Value));
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// The function bodies of one file, for following a helper that builds
+    /// the root (splash-race's New-ScratchConfig): the randomness may live
+    /// a call away from the assignment.
+    /// </summary>
+    private static Dictionary<string, List<string>> FunctionBodies(string[] lines)
+    {
+        var bodies = new Dictionary<string, List<string>>();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var header = FunctionDef.Match(lines[i]);
+            if (!header.Success) continue;
+            var body = new List<string>();
+            for (var j = i + 1; j < lines.Length; j++)
+            {
+                if (FunctionDef.Match(lines[j]).Success) break;
+                body.Add(lines[j]);
+            }
+            bodies[header.Groups[1].Value] = body;
+        }
+        return bodies;
+    }
+
+    /// <summary>
+    /// Whether the chain of definitions behind <paramref name="rhs"/> ever
+    /// reaches a randomness marker, or is provably inert (a restore of a
+    /// saved value, or an empty default). Returns the offending definition
+    /// when the chain reaches a temp path or literal without randomness.
+    /// </summary>
+    private static string? UnrandomizedStaging(
+        string rhs, string[] lines, Dictionary<string, List<string>> functions,
+        HashSet<string> visited, int hops)
+    {
+        if (RandomnessMarkers.Any(m => rhs.Contains(m, StringComparison.Ordinal)))
+            return null;
+
+        // Restores: the saved-original spellings, or reading the variable
+        // back from the environment.
+        if (rhs.Contains("$env:XDG_CONFIG_HOME", StringComparison.Ordinal) ||
+            Regex.IsMatch(rhs, @"(?:orig|prev|previous)", RegexOptions.IgnoreCase))
+            return null;
+
+        if (hops > 6) return $"{rhs.Trim()} (chain too deep to verify)";
+
+        // Follow variables assigned in this file.
+        foreach (var match in VarRef.Matches(rhs).Cast<System.Text.RegularExpressions.Match>())
+        {
+            var name = match.Groups[1].Value;
+            if (!visited.Add("$" + name)) continue;
+            var defs = DefinitionsOf(lines, name);
+            if (defs.Count == 0) continue;
+            foreach (var def in defs)
+            {
+                if (RandomnessMarkers.Any(m => def.Rhs.Contains(m, StringComparison.Ordinal)))
+                    return null;
+                // A definition that names a temp path with no randomness is
+                // the fixed/clock-keyed staging this rule exists for.
+                if (def.Rhs.Contains("$env:TEMP", StringComparison.Ordinal) ||
+                    def.Rhs.Contains("GetTempPath", StringComparison.Ordinal) ||
+                    Regex.IsMatch(def.Rhs, @"""\w+wintty[\w-]*"""))
+                {
+                    return $"line {def.Line}: {def.Rhs.Trim()}";
+                }
+                var verdict = UnrandomizedStaging(
+                    def.Rhs, lines, functions, visited, hops + 1);
+                if (verdict is not null) return $"line {def.Line}: {verdict}";
+            }
+        }
+
+        // Follow in-file functions the rhs calls.
+        foreach (var (name, body) in functions)
+        {
+            if (!rhs.Contains(name, StringComparison.Ordinal)) continue;
+            if (!visited.Add(name)) continue;
+            foreach (var bodyLine in body)
+            {
+                if (!IsCode(bodyLine)) continue;
+                if (RandomnessMarkers.Any(m =>
+                        bodyLine.Contains(m, StringComparison.Ordinal)))
+                    return null;
+                var verdict = UnrandomizedStaging(
+                    bodyLine, lines, functions, visited, hops + 1);
+                if (verdict is not null) return $"{name}: {verdict}";
+            }
+        }
+
+        // Inert rhs (empty default, $null): not a staging path.
+        return null;
+    }
+
+    [Fact]
+    public void Every_Staged_Config_Root_Is_Randomly_Named()
+    {
+        var root = RepoRoot();
+        var scriptDir = Path.Combine(root, "windows", "scripts");
+        var violations = new List<string>();
+
+        foreach (var file in Directory.EnumerateFiles(
+                     scriptDir, "*.ps1", SearchOption.AllDirectories)
+                     .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            if (file.Replace('\\', '/').Contains("/lib/fuzz-selftest/")) continue;
+            var rel = Path.GetRelativePath(scriptDir, file);
+            var lines = File.ReadAllLines(file);
+            var functions = FunctionBodies(lines);
+
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                if (!IsCode(line)) continue;
+                var assignment = XdgAssignment.Match(line);
+                if (!assignment.Success) continue;
+
+                var offending = UnrandomizedStaging(
+                    assignment.Groups[1].Value, lines, functions,
+                    new HashSet<string>(), 0);
+                if (offending is not null)
+                {
+                    violations.Add($"{rel}:{i + 1}: {line.Trim()}  <- {offending}");
+                }
+            }
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            "config staging root(s) with a fixed or clock-keyed name. The " +
+            "founder rule wants a randomly generated name per run (a fixed or " +
+            "HHmmss name collides across runs and leaks state between them). " +
+            "Stage through Enter-WinttyTestConfig / Start-SeamSession, or put " +
+            "[guid]::NewGuid() in the root's name:\n  " +
+            string.Join("\n  ", violations));
+    }
+
+    [Fact]
+    public void Search_Fuzz_Has_No_Real_Config_Escape()
+    {
+        // A test harness must not be able to point the app at the real
+        // config: the escape hatch was exactly how a stability workaround
+        // became a standing taint path. If the isolated root ever proves
+        // unstable (the historical 0xc000027b), that is a product bug to
+        // capture and fix, not a mode to keep.
+        var root = RepoRoot();
+        var path = Path.Combine(root, "windows", "scripts", "search-fuzz.ps1");
+        Assert.True(File.Exists(path), "search-fuzz.ps1 not found");
+
+        var lines = File.ReadAllLines(path);
+        Assert.DoesNotContain(lines, l =>
+            IsCode(l) && l.Contains("RealConfig", StringComparison.Ordinal));
+        Assert.Contains(lines, l =>
+            IsCode(l) && l.Contains("Enter-WinttyTestConfig", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Seam_Client_Itself_Arms_The_Guard()
     {
