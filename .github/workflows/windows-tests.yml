@@ -58,17 +58,29 @@ jobs:
 
       # Lock drift gate (#1085): an unlocked restore of a fresh checkout is
       # the fresh-machine resolution. --force-evaluate re-resolves even a
-      # warm tree. The check is a content diff against HEAD rather than
-      # `git status`, because NuGet rewrites lock files with CRLF while the
-      # repo stores them LF and status flags that EOL-only rewrite on every
-      # fresh checkout. Untracked locks are caught separately. If a restore
-      # would change any committed packages.lock.json (a package unlisted,
-      # a floor moved, a new stable version becoming the lowest
+      # warm tree, and covers the three non-solution helper projects, whose
+      # committed locks nothing else regenerates. The check is a content
+      # diff against HEAD rather than `git status`, because NuGet rewrites
+      # lock files with CRLF while the repo stores them LF and status flags
+      # that EOL-only rewrite on every fresh checkout. Untracked locks are
+      # caught separately. A failed restore fails the step with its own
+      # exit code (pwsh does not stop on native-command failure by itself,
+      # and a skipped gate here is a vacuous green: locks unchanged means
+      # no drift found) rather than letting the check run vacuously. If a
+      # restore would change any committed packages.lock.json (a package
+      # unlisted, a floor moved, a new stable version becoming the lowest
       # applicable), the run stops here instead of silently building
       # against different bits than the lock describes.
       - name: NuGet lock drift gate
         run: |
           dotnet restore windows/Ghostty.sln --force-evaluate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet restore windows/build/RasterizeIcons/RasterizeIcons.csproj --force-evaluate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet restore windows/scripts/lib/BackdropStage/BackdropStage.csproj --force-evaluate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet restore windows/scripts/lib/WindowCapture/WindowCapture.csproj --force-evaluate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git diff --quiet HEAD -- ':(glob)**/packages.lock.json'
           $drift = ($LASTEXITCODE -ne 0)
           $untracked = @(git ls-files --others --exclude-standard -- ':(glob)**/packages.lock.json')

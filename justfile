@@ -261,6 +261,12 @@ test-win:
     # because locked restore replays the committed lock without ever
     # asking what the sources would resolve today.
     dotnet restore windows/Ghostty.sln --force-evaluate
+    # The three non-solution helper projects have committed locks too, and
+    # nothing in the ladder builds them, so the gate force-evaluates them
+    # here or their drift would never be produced and caught (#1087 L3).
+    dotnet restore windows/build/RasterizeIcons/RasterizeIcons.csproj --force-evaluate
+    dotnet restore windows/scripts/lib/BackdropStage/BackdropStage.csproj --force-evaluate
+    dotnet restore windows/scripts/lib/WindowCapture/WindowCapture.csproj --force-evaluate
     # The check is a CONTENT diff against HEAD, not `git status`: NuGet
     # rewrites lock files with CRLF while the repo stores them LF, and
     # status flags that EOL-only rewrite as modified on any fresh
@@ -269,7 +275,7 @@ test-win:
     # (a lock regenerated for a new project and never committed) are
     # caught separately, and on a clean pass the checkout line below puts
     # the files back byte-for-byte as committed.
-    git diff --quiet HEAD -- ':(glob)**/packages.lock.json'; $drift = ($LASTEXITCODE -ne 0); $untracked = @(git ls-files --others --exclude-standard -- ':(glob)**/packages.lock.json'); if ($drift -or $untracked.Count -gt 0) { git --no-pager diff HEAD -- ':(glob)**/packages.lock.json' | Write-Host; if ($untracked) { ('UNTRACKED: ' + ($untracked -join ', ')) | Write-Host }; Write-Error 'packages.lock.json drift: a fresh restore would change a committed lock file. Regenerate with `dotnet restore`, review, and commit it with the change that caused it (#1085).'; exit 1 }
+    git diff --quiet HEAD -- ':(glob)**/packages.lock.json'; $drift = ($LASTEXITCODE -ne 0); $untracked = @(git ls-files --others --exclude-standard -- ':(glob)**/packages.lock.json'); if ($drift -or $untracked.Count -gt 0) { git --no-pager diff HEAD -- ':(glob)**/packages.lock.json' | Write-Host; if ($untracked) { ('UNTRACKED: ' + ($untracked -join ', ')) | Write-Host }; Write-Error 'packages.lock.json drift: a fresh restore would change a committed lock file. Regenerate with the restores at the top of this recipe (the solution plus the three helper projects), review, and commit the lock with the change that caused it (#1085).'; exit 1 }
     git checkout -- ':(glob)**/packages.lock.json'
     dotnet build windows/Ghostty.sln /p:Platform=x64 /p:RestoreLockedMode=true
     dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
@@ -279,6 +285,13 @@ test-win:
     # take no /p:Platform=x64 unlike the two above.
     dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
     dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
+    # The helper locks get a locked RESTORE, not a build: nothing in the
+    # ladder compiles them (the GUI harness scripts do, unlocked, when used),
+    # but a locked restore still refuses a helper lock that is out of sync
+    # with its csproj (NU1004), which is the project-side half of the gate.
+    dotnet restore windows/build/RasterizeIcons/RasterizeIcons.csproj /p:RestoreLockedMode=true
+    dotnet restore windows/scripts/lib/BackdropStage/BackdropStage.csproj /p:RestoreLockedMode=true
+    dotnet restore windows/scripts/lib/WindowCapture/WindowCapture.csproj /p:RestoreLockedMode=true
 
 # === Heavy job lanes (AGENTS.md) ===
 #
