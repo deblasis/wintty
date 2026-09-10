@@ -1,0 +1,12 @@
+<Project>
+  <!--
+    Same NuGet lock file policy as windows/Directory.Build.props (#1085).
+    IconGen, SplashGen and their test projects are members of
+    windows/Ghostty.sln, so `just test-win` restores them in locked mode
+    like the rest of the solution, and each needs a committed
+    packages.lock.json beside its csproj for that restore to lock against.
+  -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+</Project>

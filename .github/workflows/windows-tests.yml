@@ -44,10 +44,11 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
 
       # No version input: installs the SDK pinned by the root global.json.
-      # No cache: setup-dotnet's NuGet cache demands packages.lock.json
-      # files to hash and this repo has none - with `cache: true` the step
-      # hard-fails before anything builds ("Dependencies lock file is not
-      # found"). CI is rare now; a cold restore is fine.
+      # No cache: a warm NuGet cache would defeat part of what this workflow
+      # proves. A runner is the only truly fresh machine the repo builds on,
+      # and with the lock drift gate below it is the one place that catches
+      # "the same commit resolves differently today" (issue #1085) at its
+      # truest: nothing cached, everything downloaded from nuget.org.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
 
       # Ghostty.csproj hard-errors without zig-out/lib/ghostty.dll
@@ -55,21 +56,45 @@ jobs:
       - name: Build ghostty.dll
         run: zig build -Dapp-runtime=none
 
+      # Lock drift gate (#1085): an unlocked restore of a fresh checkout is
+      # the fresh-machine resolution. --force-evaluate re-resolves even a
+      # warm tree. The check is a content diff against HEAD rather than
+      # `git status`, because NuGet rewrites lock files with CRLF while the
+      # repo stores them LF and status flags that EOL-only rewrite on every
+      # fresh checkout. Untracked locks are caught separately. If a restore
+      # would change any committed packages.lock.json (a package unlisted,
+      # a floor moved, a new stable version becoming the lowest
+      # applicable), the run stops here instead of silently building
+      # against different bits than the lock describes.
+      - name: NuGet lock drift gate
+        run: |
+          dotnet restore windows/Ghostty.sln --force-evaluate
+          git diff --quiet HEAD -- ':(glob)**/packages.lock.json'
+          $drift = ($LASTEXITCODE -ne 0)
+          $untracked = @(git ls-files --others --exclude-standard -- ':(glob)**/packages.lock.json')
+          if ($drift -or $untracked.Count -gt 0) {
+            git --no-pager diff HEAD -- ':(glob)**/packages.lock.json'
+            if ($untracked) { 'UNTRACKED: ' + ($untracked -join ', ') }
+            Write-Error 'packages.lock.json drift: a fresh restore would change a committed lock file (#1085)'
+            exit 1
+          }
+
       # The whole solution, not just the test projects: neither test project
       # references Ghostty.csproj, so an app-only break is invisible to
-      # `dotnet test` on its own.
+      # `dotnet test` on its own. RestoreLockedMode: build exactly what the
+      # committed locks resolve, never what nuget.org serves today.
       - name: Build solution
-        run: dotnet build windows/Ghostty.sln /p:Platform=x64
+        run: dotnet build windows/Ghostty.sln /p:Platform=x64 /p:RestoreLockedMode=true
 
       - name: Ghostty.Tests
-        run: dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
+        run: dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
 
       - name: Ghostty.Tests.Windows
-        run: dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
+        run: dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
 
       # AnyCPU, so no /p:Platform=x64 - same asymmetry as the recipe.
       - name: IconGen.Tests
-        run: dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
+        run: dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
 
       - name: SplashGen.Tests
-        run: dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
+        run: dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m

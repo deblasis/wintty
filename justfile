@@ -183,19 +183,24 @@ build-dll-release:
 # === WinUI 3 app shell ===
 
 # Build the WinUI 3 app shell (expects ghostty.dll at zig-out/bin/).
+# RestoreLockedMode (#1085): restore exactly what the committed
+# packages.lock.json files resolve, so the Windows App SDK component set
+# (WinUI, AI, ML, Base, ... all open-floored by the 2.2.0 metapackage)
+# cannot move under a fresh restore. A PackageReference edit is refused
+# until `dotnet restore` regenerates the lock and it is committed.
 [windows]
 build-win:
-    dotnet build windows/Ghostty.sln /p:Platform=x64
+    dotnet build windows/Ghostty.sln /p:Platform=x64 /p:RestoreLockedMode=true
 
 # Recipe body has no shebang so it runs under the platform shell selected by
 # `set windows-shell` above (pwsh on Windows). The previous version used a
 # bash shebang to `exec` the .exe, which forced git-bash on Windows for no
 # reason - launching a Windows .exe works fine from pwsh.
 
-# Build the WinUI 3 app shell in Release.
+# Build the WinUI 3 app shell in Release. Locked restore, as build-win.
 [windows]
 build-win-release:
-    dotnet build windows/Ghostty.sln /p:Platform=x64 /p:Configuration=Release
+    dotnet build windows/Ghostty.sln /p:Platform=x64 /p:Configuration=Release /p:RestoreLockedMode=true
 
 # Build the DLL and the shell under the build lane, then launch it. The
 # launch itself is outside any lane on purpose: pwsh returns as soon as a
@@ -244,14 +249,36 @@ run-win-release: (_build-in-lane "run-win-release" "build-dll-release" "build-wi
 # missed the same way.
 [windows]
 test-win:
-    dotnet build windows/Ghostty.sln /p:Platform=x64
-    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
-    dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
+    # Lock drift gate (#1085), and it comes first so the leg never reports
+    # green off a graph the committed locks do not describe. An UNLOCKED
+    # restore is exactly the operation that floated the transitive Windows
+    # App SDK to WinUI 2.2.1 under the 2.2.0 pin, so it is run here on
+    # purpose: --force-evaluate makes it re-resolve and regenerate every
+    # packages.lock.json the way a fresh machine would, even on a warm
+    # tree whose incremental restore would otherwise be a no-op, and if
+    # that differs from what is committed the leg stops and says so.
+    # Locked mode below cannot catch this class of drift on its own,
+    # because locked restore replays the committed lock without ever
+    # asking what the sources would resolve today.
+    dotnet restore windows/Ghostty.sln --force-evaluate
+    # The check is a CONTENT diff against HEAD, not `git status`: NuGet
+    # rewrites lock files with CRLF while the repo stores them LF, and
+    # status flags that EOL-only rewrite as modified on any fresh
+    # checkout, which would false-RED the gate on every CI runner. diff
+    # applies the clean filter, so it sees content only. Untracked locks
+    # (a lock regenerated for a new project and never committed) are
+    # caught separately, and on a clean pass the checkout line below puts
+    # the files back byte-for-byte as committed.
+    git diff --quiet HEAD -- ':(glob)**/packages.lock.json'; $drift = ($LASTEXITCODE -ne 0); $untracked = @(git ls-files --others --exclude-standard -- ':(glob)**/packages.lock.json'); if ($drift -or $untracked.Count -gt 0) { git --no-pager diff HEAD -- ':(glob)**/packages.lock.json' | Write-Host; if ($untracked) { ('UNTRACKED: ' + ($untracked -join ', ')) | Write-Host }; Write-Error 'packages.lock.json drift: a fresh restore would change a committed lock file. Regenerate with `dotnet restore`, review, and commit it with the change that caused it (#1085).'; exit 1 }
+    git checkout -- ':(glob)**/packages.lock.json'
+    dotnet build windows/Ghostty.sln /p:Platform=x64 /p:RestoreLockedMode=true
+    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
+    dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
     # IconGen/SplashGen were compiled by the solution line above but executed
     # by nothing until a coverage audit caught it; AnyCPU in the sln, so they
     # take no /p:Platform=x64 unlike the two above.
-    dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
-    dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj --blame-hang --blame-hang-timeout 5m
+    dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
+    dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
 
 # === Heavy job lanes (AGENTS.md) ===
 #
