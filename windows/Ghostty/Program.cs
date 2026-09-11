@@ -61,6 +61,13 @@ public static partial class Program
         /// exit code come from <see cref="InitGhostty"/>.</summary>
         InitFailed = 2,
 
+        /// <summary>Startup refused because <c>WINTTY_TEST_CONFIG</c> is
+        /// armed and the config root resolved outside the temp directory.
+        /// Distinct from every other code so a harness can tell "the guard
+        /// did its job" from a usage error or a crash without parsing
+        /// stderr; the refusing line is on stderr either way.</summary>
+        TestConfigRefused = 4,
+
         /// <summary>Unhandled managed exception in the startup path, on the
         /// main thread or (via <see cref="FatalHandler"/>) on any other.
         /// <see cref="ReportFatal"/> appends <c>ghostty-crash.log</c> in
@@ -897,6 +904,18 @@ public static partial class Program
             Environment.Exit(0);
         }
 
+        // The test-config guard, ahead of everything that could touch a
+        // config file: the CLI actions below reach libghostty config
+        // parsing through InitGhostty, the GUI path reaches it through
+        // InitGhostty and ReadSingleInstanceSetting, and libghostty's own
+        // loadDefaultFiles/openPath can CREATE the config dir and a
+        // template file before any managed code sees a path. The one root
+        // all of that grows from is the xdg config dir, so checking the
+        // root here is the only placement that refuses before a native
+        // read or create, not after. Sits after the intercepts above
+        // (+version, +crash, help), none of which read config.
+        GuardTestConfigRoot(args);
+
         // CLI actions are delegated to libghostty, matching the macOS
         // architecture: ghostty_init parses argv, ghostty_cli_run_action
         // runs the action (if any). If no action, we start the WinUI app.
@@ -1005,6 +1024,160 @@ public static partial class Program
         // shell. The gate that used to live here existed because a
         // console-subsystem binary was handed a console it did not want.
         return StartGui();
+    }
+
+    /// <summary>
+    /// Refuse to run when <see cref="Ghostty.Core.Config.TestConfigGuard"/>
+    /// is armed and the config root is outside the temp directory, exiting
+    /// non-zero before any window opens and before libghostty reads or
+    /// creates a single config byte.
+    ///
+    /// The root comes from <see cref="Ghostty.Core.Config.TestConfigGuard.
+    /// ResolveConfigRoot"/> (the managed mirror of xdg.zig's dir(), parity-
+    /// pinned) and the anchor is the known-folder temp the environment
+    /// cannot move. Everything downstream, every read and every writer
+    /// including libghostty's own creates, derives from that one root, so
+    /// proving it is under temp proves all of them; the config-source
+    /// pre-pass below proves the same for includes and the --config-file
+    /// flag. The resolved-path and write-boundary checks in ConfigService,
+    /// SeedConfigIfEmpty and ConfigFileEditor.WriteAtomic remain as
+    /// belt-and-braces for a path that resolved somewhere the root check
+    /// did not predict.
+    /// </summary>
+    private static void GuardTestConfigRoot(string[] args)
+    {
+        if (!Ghostty.Core.Config.TestConfigGuard.IsArmed) return;
+
+        // A redirected TEMP/TMP is the one environment change that could
+        // move what the guard treats as temp, so it is refused before the
+        // root is even looked at. The anchor itself comes from the
+        // known-folder API and cannot be moved by the environment.
+        try
+        {
+            Ghostty.Core.Config.TestConfigGuard.AssertTempEnvironmentIntact();
+        }
+        catch (InvalidOperationException ex)
+        {
+            RefuseTestConfigStart(ex.Message);
+        }
+
+        var root = Ghostty.Core.Config.TestConfigGuard.ResolveConfigRoot();
+
+        if (Ghostty.Core.Config.TestConfigGuard.IsUnderTemp(root))
+        {
+            GuardTestConfigSources(root, args);
+            return;
+        }
+
+        RefuseTestConfigStart(
+            $"config root '{root}' is not under the temp directory " +
+            $"'{Ghostty.Core.Config.TestConfigGuard.TempAnchor}'. Set " +
+            $"XDG_CONFIG_HOME to a directory under the temp directory and " +
+            $"relaunch.");
+    }
+
+    /// <summary>
+    /// The one refusal path every guarded startup funnels through: the
+    /// guard's own spelling on stderr (greppable by harnesses), the tagged
+    /// startup diagnostic, and exit code 4.
+    /// </summary>
+    private static void RefuseTestConfigStart(string why)
+    {
+        WriteStderr(
+            $"{Ghostty.Core.Config.TestConfigGuard.EnvVar}={Environment.GetEnvironmentVariable(Ghostty.Core.Config.TestConfigGuard.EnvVar)} " +
+            $"refusing to start: {why}");
+        WriteStartupDiagnostic($"config guard refused: {why}");
+        Environment.Exit((int)ExitCode.TestConfigRefused);
+    }
+
+    /// <summary>
+    /// Under an armed guard, no config SOURCE may sit outside the temp
+    /// tree: a config-file include (or a --config-file flag) that reaches
+    /// outside couples a test run to the real config's CONTENT even when
+    /// every write stays inside temp, which is the xdg2 pattern the
+    /// isolation design named and shamed. This pre-pass runs ahead of
+    /// libghostty so the CLI actions (+show-config) are covered too, not
+    /// just the GUI path; ConfigService's resolved-path check remains the
+    /// belt for the default file itself.
+    /// </summary>
+    private static void GuardTestConfigSources(string root, string[] args)
+    {
+        // The CLI flag, in both spellings the fork's rewrite passes through.
+        for (var i = 0; i < args.Length; i++)
+        {
+            string? value = null;
+            if (args[i].StartsWith("--config-file=", StringComparison.Ordinal))
+                value = args[i]["--config-file=".Length..];
+            else if (args[i] == "--config-file" && i + 1 < args.Length)
+                value = args[i + 1];
+            if (string.IsNullOrEmpty(value)) continue;
+
+            var resolved = ResolveConfigSource(value, Environment.CurrentDirectory);
+            if (!Ghostty.Core.Config.TestConfigGuard.IsUnderTemp(resolved))
+                RefuseTestConfigStart(
+                    $"the --config-file flag names '{resolved}', which is not " +
+                    $"under the temp directory. An armed run may not read " +
+                    $"config from outside temp.");
+        }
+
+        // config-file = includes reachable from the root's default files,
+        // recursing into includes that stay under temp (an under-temp file
+        // may itself include one outside it). Zig expands a relative
+        // include against the INCLUDING file's directory (Config.zig
+        // expandPaths after each load), so the pre-pass does too.
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var scanned = 0;
+        ScanConfigIncludes(Path.Combine(root, "wintty", "config.wintty"));
+        ScanConfigIncludes(Path.Combine(root, "ghostty", "config.ghostty"));
+        ScanConfigIncludes(Path.Combine(root, "ghostty", "config"));
+        return;
+
+        void ScanConfigIncludes(string file)
+        {
+            if (!File.Exists(file)) return;
+            if (!visited.Add(Path.GetFullPath(file))) return;
+            // Bounded: the loader's own cycle handling caps the graph, and
+            // a harness staging a monster include tree is not a shape the
+            // pre-pass owes an unbounded walk to.
+            if (++scanned > 64) return;
+
+            string? raw;
+            using var reader = new StreamReader(file);
+            while ((raw = reader.ReadLine()) is not null)
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+                var match = ConfigIncludeLine.Match(line);
+                if (!match.Success) continue;
+
+                var resolved = ResolveConfigSource(
+                    match.Groups[1].Value.Trim('"', '\''),
+                    Path.GetDirectoryName(file)!);
+                if (!Ghostty.Core.Config.TestConfigGuard.IsUnderTemp(resolved))
+                    RefuseTestConfigStart(
+                        $"a config-file include in '{file}' names " +
+                        $"'{resolved}', which is not under the temp " +
+                        $"directory. An armed run may not read config from " +
+                        $"outside temp, even by include.");
+                ScanConfigIncludes(resolved);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The include key as the ini-shaped config files spell it. Matched per
+    /// trimmed line, after the comment filter, so a commented-out include
+    /// is not a refusal.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex ConfigIncludeLine =
+        new(@"^config-file\s*=\s*(.+?)\s*$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static string ResolveConfigSource(string value, string relativeTo)
+    {
+        // GetFullPath resolves relative to the process cwd, so join the
+        // including context first and let it normalize the rest.
+        return Path.GetFullPath(Path.Combine(relativeTo, value));
     }
 
     /// <summary>
@@ -1432,7 +1605,11 @@ public static partial class Program
     {
         try
         {
-            var pathStr = NativeMethods.ConfigOpenPath();
+            // --no-config names the path without creating it (same rule as
+            // ConfigService: the flag must not leave an empty file behind).
+            var pathStr = ConfigOverrides.NoConfig
+                ? NativeMethods.ConfigOpenPathNoCreate()
+                : NativeMethods.ConfigOpenPath();
             var rawPath = pathStr.Ptr != IntPtr.Zero
                 ? Marshal.PtrToStringUTF8(pathStr.Ptr, (int)pathStr.Len) ?? string.Empty
                 : string.Empty;

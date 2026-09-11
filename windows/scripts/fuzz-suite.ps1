@@ -1007,6 +1007,17 @@ function Start-HarnessProcess {
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = 'pwsh'
     foreach ($a in $Argv) { [void]$psi.ArgumentList.Add($a) }
+    # The guard arms the whole suite, not each leg: this launcher cannot
+    # see inside the legs it starts, and a leg that forgets its isolation
+    # must inherit an armed guard (and refuse loudly) rather than run
+    # silently against the real config. Every leg in the suite isolates,
+    # so arming here changes nothing for a healthy leg.
+    # The guard arms the whole suite, not each leg: this launcher cannot
+    # see inside the legs it starts, and a leg that forgets its isolation
+    # must inherit an armed guard (and refuse loudly) rather than run
+    # silently against the real config. Every leg in the suite isolates,
+    # so arming here changes nothing for a healthy leg.
+    $psi.EnvironmentVariables['WINTTY_TEST_CONFIG'] = '1'
     # No new window, which is what -NoNewWindow bought: the child inherits this
     # console. Redirecting is what requires it to be false at all.
     $psi.UseShellExecute = $false

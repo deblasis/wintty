@@ -11,6 +11,7 @@ param(
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 $ErrorActionPreference = 'Stop'
 
 # A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
@@ -255,6 +256,12 @@ $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc
 Assert-NoWintty
 $script:WinttyStamp = Get-WinttyLaunchStamp
 Start-Sleep -Milliseconds 400
+# A per-run random temp config root with the WINTTY_TEST_CONFIG guard armed
+# for the child. This harness used to launch against the user's real config
+# (reads and writes both). Enter without a paired Exit is deliberate: the
+# script process exits and takes the env with it, and the helper's sweep
+# reaps the staged root.
+$script:TestConfig = Enter-WinttyTestConfig
 $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
 $pid32 = [uint32]$proc.Id
 Start-Sleep -Seconds 3

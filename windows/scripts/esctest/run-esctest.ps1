@@ -3,7 +3,10 @@
     [Parameter(Mandatory)][string]$WinttyExe,       # path to built Wintty.exe
     [string]$Distro = 'Ubuntu-24.04',
     [string]$EsctestDir = '~/esctest2/esctest',     # path inside the distro
-    [string]$OutDir = "$env:TEMP\esctest-run",       # Windows-side output dir
+    # Results land here (markers, run.sh, report). Defaults to a
+    # per-run random name; the config root is separate, from the
+    # test-config helper below.
+    [string]$OutDir = (Join-Path $env:TEMP ("esctest-out-" + [guid]::NewGuid().ToString('N'))),
     [int]$ReadTimeoutSec = 1,                         # esctest per-read --timeout
     [int]$TimeoutSec = 900                            # overall wall-clock deadline
 )
@@ -43,7 +46,7 @@ $bash = @(
 # XDG_CONFIG_HOME + command= is the proven harness, see #494 OSC7 work). The
 # command splits cleanly on spaces into wsl.exe argv; the script path is
 # space-free (under $env:TEMP).
-$cfgDir = Join-Path $OutDir 'cfg'
+$cfgDir = $testConfig.Dir
 # ghostty reads $XDG_CONFIG_HOME/ghostty/config (the `ghostty/` subdir is
 # required; without it the surface falls back to the default shell).
 $cfgGhostty = Join-Path $cfgDir 'ghostty'
@@ -51,13 +54,13 @@ New-Item -ItemType Directory -Force $cfgGhostty | Out-Null
 "command = wsl.exe -d $Distro -- bash -l $scriptMnt" |
     Set-Content -LiteralPath (Join-Path $cfgGhostty 'config') -Encoding utf8
 
-# Inherit the full current environment (so Wintty finds its system deps) and add
-# only the XDG_CONFIG_HOME override, rather than -Environment (merge-vs-replace
-# semantics vary). Restore afterward.
-$prevXdg = $env:XDG_CONFIG_HOME
+. (Join-Path $PSScriptRoot '../lib/test-config.ps1')
+# The config root is the helper's per-run random root; OutDir above
+# holds only the results, which must outlive the app (the report is
+# written after the finally below kills it).
+$testConfig = Enter-WinttyTestConfig
 $proc = $null
 try {
-    $env:XDG_CONFIG_HOME = $cfgDir
     $proc = Start-Process -FilePath $WinttyExe -PassThru
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while (-not (Test-Path $doneWin) -and (Get-Date) -lt $deadline) {
@@ -69,9 +72,11 @@ try {
     }
 }
 finally {
-    $env:XDG_CONFIG_HOME = $prevXdg
+    # Kill first: the session exit deletes the config root, and that
+    # must not happen while the app still holds it.
     # Close ONLY the Wintty we launched (never a blind kill).
     if ($proc) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {} }
+    Exit-WinttyTestConfig $testConfig
 }
 $complete = Test-Path $doneWin
 
