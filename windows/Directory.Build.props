@@ -65,4 +65,21 @@
   <PropertyGroup>
     <WarningsAsErrors>$(WarningsAsErrors);CsWinRT1028</WarningsAsErrors>
   </PropertyGroup>
+  <!--
+    NuGet lock files (#1085). Every project under windows/ writes a
+    packages.lock.json beside its csproj, committed, and the ladder
+    restores in locked mode so the resolved graph is whatever the lock
+    says, never whatever nuget.org serves that day. Without this the
+    Windows App SDK 2.2.0 metapackage floors eight of its nine component
+    dependencies at open ranges (WinUI >= 2.2.1, AI >= 2.2.3, ML >= 2.1.70,
+    ...), so a fresh restore can pull different bits for the same commit;
+    Microsoft.DotNet.ILCompiler floats the same way through the SDK's
+    version map. Only RestorePackagesWithLockFile lives here: locked mode
+    is passed per invocation (justfile recipes, CI), because the wintty
+    release tiers patch package references onto this tree and must keep
+    restoring until their per-tier lock files exist.
+  -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
 </Project>
