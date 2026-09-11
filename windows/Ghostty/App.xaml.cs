@@ -1473,9 +1473,23 @@ public partial class App : Application
             return;
         }
 
-        HandleJumpListLaunch(
-            Ghostty.Core.JumpList.JumpListLaunch.Parse(req.Args),
-            req.WorkingDirectory);
+        var launch = Ghostty.Core.JumpList.JumpListLaunch.Parse(req.Args);
+        if (launch.Action == Ghostty.Core.JumpList.JumpListAction.None)
+        {
+            // The bare-launch arm, which is where a forwarded -e lands: a
+            // cold start makes the argv after -e the first surface's
+            // command, so the primary honours it here rather than degrading
+            // the launch to the default shell (#1094). Markers keep their
+            // existing priority in the arm below.
+            OpenJumpListWindow(
+                launch.ProfileId,
+                req.WorkingDirectory,
+                command: Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(req.Args));
+        }
+        else
+        {
+            HandleJumpListLaunch(launch, req.WorkingDirectory);
+        }
     }
 
     /// <summary>
@@ -1750,7 +1764,10 @@ public partial class App : Application
         return true;
     }
 
-    private void OpenJumpListWindow(string? profileId, string workingDirectory)
+    private void OpenJumpListWindow(
+        string? profileId,
+        string workingDirectory,
+        string? command = null)
     {
         Ghostty.Core.Profiles.ProfileSnapshot? snapshot = null;
         var registry = ProfileRegistry;
@@ -1761,6 +1778,10 @@ public partial class App : Application
                 resolved, registry.Version);
             if (!string.IsNullOrEmpty(workingDirectory))
                 snapshot = snapshot with { WorkingDirectory = workingDirectory };
+            // A forwarded -e command wins over the profile's, the same
+            // precedence a cold start gives it (#1094).
+            if (!string.IsNullOrEmpty(command))
+                snapshot = snapshot with { ResolvedCommand = command };
         }
 
         var window = MainWindow.CreateForNewTab(

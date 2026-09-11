@@ -24,9 +24,9 @@
     file you actually use.
 
     The election namespace is isolated per launch since #1094: the
-    single-instance identity is derived from the exe path AND the edition
-    AND, under WINTTY_TEST_CONFIG (armed for every launch below), the
-    resolved config root -- which is the scratch XDG root each role gets.
+    single-instance identity is derived from the exe path, the edition,
+    the terminal-services session, the test marker, and the resolved
+    config root -- which is the scratch XDG root each launch below gets.
     Two launches over ONE root still contend for one election (that is
     what this script measures); the founder's own running Wintty holds a
     different, unarmed identity and cannot receive either launch. The
@@ -191,10 +191,11 @@ function Get-OverlapArea($a, $b) {
 
 # Scratch config, one XDG root per role. Normally both roles point at the
 # same "on" config, which is what makes the two launches contend for ONE
-# election: since #1094 the identity hashes the config root under the test
-# marker, so a shared root is a shared election. -SecondaryFeatureOff gives
-# the second launch its own root with the key off; that launch then runs as
-# its own instance because of the root alone (see the parameter help).
+# election: since #1094 the identity hashes the resolved config root (and
+# the test marker), so a shared root is a shared election.
+# -SecondaryFeatureOff gives the second launch its own root with the key
+# off; that launch then runs as its own instance because of the root alone
+# (see the parameter help).
 # A GUID, not $PID: the founder rule wants a randomly generated name,
 # and a PID is reused across reboots, so two runs can collide.
 $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-splash-race-" + [guid]::NewGuid().ToString('N'))

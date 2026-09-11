@@ -58,20 +58,6 @@ public class SettingsIndexTests
         "log-filter",
     };
 
-    /// <summary>
-    /// Single-instance is the only product behaviour (#1094): the founder sees
-    /// no user use case for multi-process, so the key is a dev-only escape
-    /// hatch with no settings-UI surface. An indexed entry with no control
-    /// fails the parity suite, so this pins the intent rather than relying on
-    /// that fallout.
-    /// </summary>
-    [Fact]
-    public void WindowsSingleInstance_IsNotIndexedForUsers()
-    {
-        Assert.DoesNotContain(
-            SettingsIndex.All, e => e.Key == "windows-single-instance");
-    }
-
     [Fact]
     public void All_contains_entry_for_every_expected_key()
     {
@@ -113,5 +99,18 @@ public class SettingsIndexTests
         {
             Assert.NotEmpty(e.Tags);
         }
+    }
+
+    /// <summary>
+    /// Single-instance is the only product behaviour (#1094): the founder
+    /// sees no user use case for multi-process, so the key is a dev-only
+    /// escape hatch with no settings-UI surface. Kept at the class tail:
+    /// the ExpectedKeys array's closing lines are a tier-patch anchor.
+    /// </summary>
+    [Fact]
+    public void WindowsSingleInstance_IsNotIndexedForUsers()
+    {
+        Assert.DoesNotContain(
+            SettingsIndex.All, e => e.Key == "windows-single-instance");
     }
 }

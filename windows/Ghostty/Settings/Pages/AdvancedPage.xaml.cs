@@ -31,10 +31,9 @@ internal sealed partial class AdvancedPage : Page
 
         if (_cs is null) return;
 
-        // windows-single-instance is deliberately not loaded or written
-        // here anymore (#1094): single-instance is the one product
-        // behaviour, and the key is a dev-only escape hatch edited by
-        // hand in a config file.
+        SingleInstanceToggle.IsOn = WindowsOnlyKeyParsers.ParseBool(
+            _cs.GetRawFileValue("windows-single-instance"),
+            defaultValue: false);
 
         var quake = _cs.GetRawFileValue("quick-terminal-key");
         QuakeKeyBox.Text = string.IsNullOrWhiteSpace(quake) ? string.Empty : quake;
@@ -51,6 +50,14 @@ internal sealed partial class AdvancedPage : Page
     // value with trailing space would look changed on the first blur.
     private string _quakeKeyWritten = string.Empty;
     private string _logFilterWritten = string.Empty;
+
+    private void SingleInstanceToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        Ghostty.App.ConfigWriteScheduler?.Schedule(
+            "windows-single-instance",
+            SingleInstanceToggle.IsOn ? "true" : "false");
+    }
 
     private void HighContrastToggle_Toggled(object sender, RoutedEventArgs e)
     {

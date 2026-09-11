@@ -322,6 +322,88 @@ public sealed class SingleInstanceElectionTests
         Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
     }
 
+    /// <summary>
+    /// #1094 review M1: the same user logged on in two terminal-services
+    /// sessions (console plus RDP of one account). Each session's Local\
+    /// namespace elects its own primary, and the pipe name is machine-global,
+    /// so without the session id in the material session 2's launches would
+    /// connect into session 1's pipe and exit "served" with no window ever
+    /// appearing in session 2. Two session ids must be two elections.
+    /// </summary>
+    [Fact]
+    public void DifferentTerminalSessions_ElectSeparatePrimaries()
+    {
+        var path = UniqueExePath();
+
+        var previousSession = SingleInstanceNames.ReadSessionId;
+        try
+        {
+            using var env = new FakeEnvironment();
+            env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+
+            SingleInstanceNames.ReadSessionId = () => 1;
+            using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+            SingleInstanceNames.ReadSessionId = () => 2;
+            using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+            Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+            Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+        }
+        finally
+        {
+            SingleInstanceNames.ReadSessionId = previousSession;
+        }
+    }
+
+    /// <summary>
+    /// #1094 review L1: the misconfigured-harness direction. A launch with a
+    /// non-default XDG_CONFIG_HOME but NO test marker must be its own
+    /// process rather than forward into the real instance that holds the
+    /// default-root identity.
+    /// </summary>
+    [Fact]
+    public void UnarmedLaunch_WithANonDefaultRoot_IsItsOwnProcess()
+    {
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+        // No XDG override: the incumbent resolves the real default root,
+        // which is what the founder's running app holds.
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+        // The harness that redirected its config but forgot the marker.
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\forgotten");
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+    }
+
+    /// <summary>
+    /// The absolute form of the isolation rule: the marker alone keeps an
+    /// armed launch off an unarmed election even when both resolve the very
+    /// same config root.
+    /// </summary>
+    [Fact]
+    public void ArmedAndUnarmed_SharingARoot_NeverForwardToEachOther()
+    {
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\same");
+
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "1");
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+    }
+
     [Fact]
     public void ArmedLaunch_NeverForwardsToAnUnarmedIncumbent()
     {

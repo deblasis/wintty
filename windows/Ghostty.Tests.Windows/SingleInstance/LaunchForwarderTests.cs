@@ -109,11 +109,62 @@ public sealed class LaunchForwarderTests
     [Fact]
     public void AbsentPrimary_ConnectFailsAndReportsFailure()
     {
+        // Short injected connect budget: the production default (5s of
+        // retries) is exercised by the cold-start test below.
         var forwarded = LaunchForwarder.TryForward(
-            UniquePipeName(), SampleRequest(), out var failure);
+            UniquePipeName(), SampleRequest(), out var failure,
+            connectBudget: TimeSpan.FromMilliseconds(600));
 
         Assert.False(forwarded);
         Assert.NotNull(failure); // nobody home is an I/O failure, not a timeout
+        Assert.IsType<TimeoutException>(failure);
+    }
+
+    /// <summary>
+    /// #1094 review L2: the primary takes its mutex long before its pipe
+    /// server exists (the server starts deep in OnLaunched, after config,
+    /// profiles and jump-list work), so a second launch inside that window
+    /// used to burn its one 2-second connect attempt and fall back to a
+    /// standalone process. The forwarder must keep retrying within a small
+    /// total budget and reach a primary that comes up late.
+    /// </summary>
+    [Fact]
+    public async Task ColdStartPrimary_ComingUpAfterTwoSeconds_IsStillForwardedTo()
+    {
+        var pipe = UniquePipeName();
+        var request = SampleRequest();
+
+        // A primary whose pipe server appears 3 seconds from now: past the
+        // old single 2-second attempt, inside the retry budget.
+        var server = new SingleInstanceServer(
+            pipe,
+            _ => Task.CompletedTask,
+            NullLogger<SingleInstanceServer>.Instance);
+        var lateStart = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            server.Start();
+        });
+
+        try
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var forwarded = LaunchForwarder.TryForward(pipe, request, out var failure);
+            stopwatch.Stop();
+
+            Assert.True(
+                forwarded,
+                "a primary coming up inside the connect budget must still be forwarded to");
+            Assert.Null(failure);
+            Assert.True(
+                stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+                $"the connect budget must stay bounded (took {stopwatch.Elapsed})");
+        }
+        finally
+        {
+            await lateStart;
+            server.Dispose();
+        }
     }
 
     /// <summary>

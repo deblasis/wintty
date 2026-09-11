@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -39,12 +40,24 @@ public static class LaunchForwarder
     public static readonly TimeSpan DefaultAckTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// How long to wait for the primary's pipe to answer a connect. Two
-    /// seconds matches the pre-ACK behaviour: long enough for a primary
-    /// mid-accept-loop, short enough that a wedged one is not felt as a
-    /// hang.
+    /// How long to wait, in total, for the primary's pipe to answer a
+    /// connect. The primary takes its mutex long before its pipe server
+    /// exists (the server starts deep in OnLaunched, after config,
+    /// profiles and jump-list work), so a second launch inside that
+    /// cold-start window keeps retrying under this budget instead of
+    /// falling back to a standalone process (#1094 review L2). Five
+    /// seconds bounds the worst-case wait to something a human reads as
+    /// "it opened", and the first attempt is still a single two-second
+    /// wait so a healthy machine connects on the first try.
     /// </summary>
-    public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan ConnectTotalBudget = TimeSpan.FromSeconds(5);
+
+    // The first attempt keeps the historical two-second wait; later
+    // attempts poll briefly so a server appearing mid-retry is caught
+    // within a quarter second of existing.
+    private static readonly TimeSpan FirstConnectAttempt = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RetryConnectAttempt = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan RetryBackoff = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// Forward <paramref name="request"/> to the primary on
@@ -53,25 +66,21 @@ public static class LaunchForwarder
     /// carries the I/O failure when there was one, and stays null when the
     /// primary simply never acknowledged within
     /// <paramref name="ackTimeout"/> (the hung-primary case).
+    /// <paramref name="connectBudget"/> overrides the total connect wait
+    /// (tests).
     /// </summary>
     public static bool TryForward(
         string pipeName,
         LaunchRequest request,
         out Exception? failure,
-        TimeSpan? ackTimeout = null)
+        TimeSpan? ackTimeout = null,
+        TimeSpan? connectBudget = null)
     {
         var budget = ackTimeout ?? DefaultAckTimeout;
         failure = null;
         try
         {
-            // InOut for the acknowledgement; Asynchronous so every wait
-            // below is a true overlapped one the dispose at the end can
-            // abort; CurrentUserOnly for the same reason the server's
-            // side carries it.
-            using var client = new NamedPipeClientStream(
-                ".", pipeName, PipeDirection.InOut,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-            client.Connect((int)ConnectTimeout.TotalMilliseconds);
+            using var client = Connect(pipeName, connectBudget ?? ConnectTotalBudget);
 
             // Length-prefixed fields make the payload self-delimiting, so
             // quoting is not the secondary's problem: whatever the argv
@@ -93,6 +102,39 @@ public static class LaunchForwarder
         {
             failure = ex;
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Connect to the primary's pipe, retrying briefly within the total
+    /// budget. InOut for the acknowledgement; Asynchronous so every wait
+    /// below is a true overlapped one the dispose at the end can abort;
+    /// CurrentUserOnly for the same reason the server's side carries it.
+    /// </summary>
+    private static NamedPipeClientStream Connect(string pipeName, TimeSpan budget)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        for (var attempt = 1; ; attempt++)
+        {
+            var client = new NamedPipeClientStream(
+                ".", pipeName, PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            try
+            {
+                client.Connect((int)(attempt == 1
+                    ? FirstConnectAttempt
+                    : RetryConnectAttempt).TotalMilliseconds);
+                return client;
+            }
+            catch (TimeoutException)
+            {
+                client.Dispose();
+                if (stopwatch.Elapsed + RetryBackoff >= budget)
+                    throw new TimeoutException(
+                        $"the primary's forwarding pipe did not answer a " +
+                        $"connect within {budget}");
+                Thread.Sleep(RetryBackoff);
+            }
         }
     }
 
