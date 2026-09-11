@@ -32,12 +32,31 @@ internal static class TestHostArming
 
     private static string? Root;
 
+    /// <summary>
+    /// What the initializer decided, recorded at host start: the arming
+    /// tests assert on THIS snapshot, so nothing another test does to the
+    /// live environment mid-run can flip them (review finding M1).
+    /// </summary>
+    internal static bool Armed { get; private set; }
+
+    /// <summary>
+    /// The root the initializer created, for the arming tests' snapshot
+    /// asserts. Null under the escape hatch.
+    /// </summary>
+    internal static string? RootForTests => Root;
+
     [ModuleInitializer]
     public static void Arm()
     {
         if (Environment.GetEnvironmentVariable(UnarmedEnvVar) == "1")
         {
+            // Both sinks: stdout is swallowed by dotnet test at normal
+            // verbosity (review finding), stderr passes through there.
             Console.WriteLine(
+                "WINTTY_TEST_HOST_UNARMED=1: this test host runs WITHOUT " +
+                "config isolation. Anything it touches in a default config " +
+                "path reaches the REAL per-user config.");
+            Console.Error.WriteLine(
                 "WINTTY_TEST_HOST_UNARMED=1: this test host runs WITHOUT " +
                 "config isolation. Anything it touches in a default config " +
                 "path reaches the REAL per-user config.");
@@ -65,6 +84,7 @@ internal static class TestHostArming
             Environment.SetEnvironmentVariable("XDG_CONFIG_HOME", root);
             Environment.SetEnvironmentVariable("WINTTY_TEST_CONFIG", "1");
             Root = root;
+            Armed = true;
 
             // Best effort, and confined to THIS root by construction: the
             // path is anchor + our own random leaf, never a caller-supplied
