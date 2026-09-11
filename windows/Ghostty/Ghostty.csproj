@@ -598,6 +598,81 @@
   </Target>
 
   <!--
+    Ship Microsoft.WindowsAppRuntime.Insights.Resource.dll in every
+    self-contained publish (#1086, wintty-release #808).
+
+    Windows App SDK 2.x self-contained never lays this dll down: the
+    component packages copy only runtimes-framework\win-<arch>\native
+    (Foundation ships Microsoft.WindowsAppRuntime.dll there WITHOUT it),
+    and Base 2.0.4's targets deleted the framework-MSIX extraction path
+    1.8 had. The dll exists only inside the framework MSIX bundled in the
+    Microsoft.WindowsAppSDK.Runtime nupkg, and Microsoft.WindowsAppRuntime.
+    dll loads it by name when AppNotificationManager.Register() initialises
+    the notification platform's telemetry, so a publish without it is a
+    build whose toasts are all dead (microsoft/WindowsAppSDK#6071, fixed
+    upstream 2026-09-03 by #6725/#6737 but not in any stable package yet).
+
+    The dll is extracted from the framework MSIX of whatever Runtime
+    package THIS build restored ($(PkgMicrosoft_WindowsAppSDK_Runtime) is
+    NuGet-generated), so it stays in lockstep with the resolved version,
+    including under the NuGet lock files (#1085). The unzip lands in obj\
+    and is incremental (Inputs/Outputs on the MSIX vs its AppxManifest.
+    xml, the marker trick the 1.8 targets used); only the resource dll is
+    copied into the publish folder. A Runtime package whose MSIX drops or
+    renames the dll fails the build here instead of shipping dead toasts.
+  -->
+  <PropertyGroup>
+    <_WinAppSdkInsightsDllName>Microsoft.WindowsAppRuntime.Insights.Resource.dll</_WinAppSdkInsightsDllName>
+    <_WinAppSdkInsightsArch Condition="'$(Platform)' == 'x64'">x64</_WinAppSdkInsightsArch>
+    <_WinAppSdkInsightsArch Condition="'$(Platform)' == 'x86' or '$(Platform)' == 'Win32'">x86</_WinAppSdkInsightsArch>
+    <_WinAppSdkInsightsArch Condition="'$(Platform)' == 'arm64' or '$(Platform)' == 'ARM64'">arm64</_WinAppSdkInsightsArch>
+    <!-- Exe or WinExe: this project is WinExe (the WinUI props rewrite a
+         GUI app's Exe), and no Library project may grow the unzip. -->
+    <_WinAppSdkInsightsActive Condition="'$(WindowsAppSDKSelfContained)' == 'true' and ('$(OutputType)' == 'Exe' or '$(OutputType)' == 'WinExe') and '$(PkgMicrosoft_WindowsAppSDK_Runtime)' != '' and '$(_WinAppSdkInsightsArch)' != ''">true</_WinAppSdkInsightsActive>
+    <_WinAppSdkInsightsMsixDir Condition="'$(_WinAppSdkInsightsActive)' == 'true'">$([MSBuild]::NormalizeDirectory('$(PkgMicrosoft_WindowsAppSDK_Runtime)', 'tools', 'MSIX', 'win10-$(_WinAppSdkInsightsArch)'))</_WinAppSdkInsightsMsixDir>
+    <!-- Anchored on MSBuildProjectDirectory, not $(IntermediateOutputPath):
+         this PropertyGroup sits in the project body, where IntermediateOutputPath
+         is still empty (Common.CurrentVersion.targets computes it only after the
+         body), so a relative composition resolved against the dotnet CWD and
+         the unzip landed at the repo root. Absolute and stable for the
+         Inputs/Outputs marker either way. -->
+    <_WinAppSdkInsightsContentDir Condition="'$(_WinAppSdkInsightsActive)' == 'true'">$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', 'obj', 'WinAppSdkInsights', '$(Platform)', '$(Configuration)'))</_WinAppSdkInsightsContentDir>
+  </PropertyGroup>
+  <!--
+    The framework MSIX only, two glob shapes because the package name is
+    two-part in 1.8 (Microsoft.WindowsAppRuntime.1.8.msix) and one-part in
+    2.x (Microsoft.WindowsAppRuntime.2.msix). Main/DDLM/Singleton variants
+    are excluded by the literal extension-char prefix.
+  -->
+  <ItemGroup Condition="'$(_WinAppSdkInsightsActive)' == 'true'">
+    <_WinAppSdkInsightsMsix Include="$(_WinAppSdkInsightsMsixDir)Microsoft.WindowsAppRuntime.?.msix" />
+    <_WinAppSdkInsightsMsix Include="$(_WinAppSdkInsightsMsixDir)Microsoft.WindowsAppRuntime.?.?.msix" />
+  </ItemGroup>
+  <Target Name="_ExtractWinAppSdkFrameworkMsixContent"
+          Condition="'$(_WinAppSdkInsightsActive)' == 'true'"
+          Inputs="@(_WinAppSdkInsightsMsix)"
+          Outputs="$(_WinAppSdkInsightsContentDir)AppxManifest.xml">
+    <Error Condition="'@(_WinAppSdkInsightsMsix)' == ''"
+           Text="No Microsoft.WindowsAppRuntime framework MSIX found under $(_WinAppSdkInsightsMsixDir). The Windows App SDK runtime package layout changed; the Insights resource dll (#1086) cannot be extracted. Expected Microsoft.WindowsAppRuntime.?.msix or Microsoft.WindowsAppRuntime.?.?.msix." />
+    <Unzip SourceFiles="@(_WinAppSdkInsightsMsix)"
+           DestinationFolder="$(_WinAppSdkInsightsContentDir)"
+           SkipUnchangedFiles="true"
+           OverwriteReadOnlyFiles="true" />
+  </Target>
+  <Target Name="CopyWinAppSdkInsightsResourceDll"
+          AfterTargets="Publish"
+          DependsOnTargets="_ExtractWinAppSdkFrameworkMsixContent"
+          Condition="'$(_WinAppSdkInsightsActive)' == 'true' and '$(PublishDir)' != ''">
+    <Error Condition="!Exists('$(_WinAppSdkInsightsContentDir)$(_WinAppSdkInsightsDllName)')"
+           Text="$(_WinAppSdkInsightsDllName) is not inside the framework MSIX (@(_WinAppSdkInsightsMsix)). The Windows App SDK runtime payload changed; toast registration (#1086) would fail at launch. Check what the package now ships and update this target." />
+    <Copy SourceFiles="$(_WinAppSdkInsightsContentDir)$(_WinAppSdkInsightsDllName)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+    <Message Importance="high"
+             Text="Copied $(_WinAppSdkInsightsDllName) from the Windows App SDK framework MSIX into $(PublishDir) so AppNotificationManager.Register() can load it (#1086)." />
+  </Target>
+
+  <!--
     IconGen's sources and the master rasters become items at evaluation
     time because MSBuild does not expand wildcards inside an Inputs
     attribute: it takes the literal path, finds no such file, and rebuilds

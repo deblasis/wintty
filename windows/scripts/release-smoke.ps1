@@ -27,14 +27,53 @@ $testConfig = Enter-WinttyTestConfig
 $script:Launched = @()
 
 function Invoke-LaunchSmoke {
-    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Label)
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][string]$Label,
+        # The published exe must have loaded the Windows App SDK Insights
+        # resource dll (#1086): Register() runs on every launch and loads it
+        # by name, so its presence among the live process's modules is the
+        # direct observation that toast registration got past the resource
+        # load. Without the dll in the publish folder Register() throws
+        # "Unable to load resource dll" and every toast is dead.
+        [switch]$RequireInsightsDll
+    )
 
     $since = Get-WinttyLaunchStamp
     $script:Launched += [pscustomobject]@{ Since = $since; Exe = $Exe }
+    if ($RequireInsightsDll) {
+        $dll = Join-Path (Split-Path $Exe) 'Microsoft.WindowsAppRuntime.Insights.Resource.dll'
+        if (-not (Test-Path $dll)) {
+            throw ("publish folder lacks Microsoft.WindowsAppRuntime.Insights.Resource.dll " +
+                   "($dll): AppNotificationManager.Register() throws on every launch and " +
+                   "every toast is dead (#1086). The Ghostty.csproj publish target that " +
+                   "extracts it from the Windows App SDK runtime package did not run.")
+        }
+    }
     $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
-    Start-Sleep -Seconds 3
-    $proc.Refresh()
+    $insightsLoaded = $false
+    $deadline = (Get-Date).AddSeconds(10)
+    while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $proc.Refresh()
+        if (-not $RequireInsightsDll) { continue }
+        foreach ($m in $proc.Modules) {
+            if ($m.ModuleName -ieq 'Microsoft.WindowsAppRuntime.Insights.Resource.dll') {
+                $insightsLoaded = $true
+                break
+            }
+        }
+        if ($insightsLoaded) { break }
+    }
     if ($proc.HasExited) { throw "$Label Wintty exited early code=$($proc.ExitCode)" }
+    if ($RequireInsightsDll -and -not $insightsLoaded) {
+        try { $proc.Kill($true) } catch { }
+        Stop-WinttyStartedAfter -Since $since -ExePath $Exe
+        throw ("Microsoft.WindowsAppRuntime.Insights.Resource.dll was NOT loaded by the " +
+               "published app: AppNotificationManager.Register() threw and every toast " +
+               "from this build is dead (#1086). The dll file is present but WinAppRT " +
+               "did not load it.")
+    }
     # Kill the tree: the shell runs as a child and a wedged one outlives a
     # Stop-Process on the parent alone.
     try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
@@ -77,10 +116,21 @@ try {
         }
         if (-not $pubExe -or -not (Test-Path $pubExe)) { throw 'NativeAOT publish exe not found' }
         Write-Host "aot publish ok: $pubExe"
+        # #1086 gate, file half: the publish must carry the Insights
+        # resource dll before anything launches.
+        $insightsDll = Join-Path (Split-Path $pubExe) 'Microsoft.WindowsAppRuntime.Insights.Resource.dll'
+        if (-not (Test-Path $insightsDll)) {
+            throw ("publish folder lacks Microsoft.WindowsAppRuntime.Insights.Resource.dll " +
+                   "($insightsDll): AppNotificationManager.Register() throws on every " +
+                   "launch and every toast is dead (#1086, wintty-release #808). The " +
+                   "Ghostty.csproj publish target that extracts it from the Windows App " +
+                   "SDK runtime package did not run.")
+        }
+        Write-Host "insights resource dll ok: $insightsDll"
         if (-not $SkipLaunch) {
-            Write-Host '== launch NativeAOT smoke (3s) =='
+            Write-Host '== launch NativeAOT smoke (module check) =='
             Start-Sleep -Milliseconds 400
-            Invoke-LaunchSmoke -Exe $pubExe -Label 'aot'
+            Invoke-LaunchSmoke -Exe $pubExe -Label 'aot' -RequireInsightsDll
         }
     }
 
