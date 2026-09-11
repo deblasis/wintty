@@ -92,7 +92,10 @@ public class HarnessConfigIsolationScanTests
         // bare alias form rejects a hyphen continuation so Start-Job and
         // friends are not launches by mere word shape.
         new(@"Start-Process", RegexOptions.Compiled | RegexOptions.IgnoreCase),
-        new(@"\b(?:saps|start)\b(?!-)", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        // The bare alias, never a method call: (?<!\.) keeps $timer.Start()
+        // out, and (?!-) keeps Start-Job and friends out.
+        new(@"(?<!\.)\b(?:saps|start)\b(?!-)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"ProcessStartInfo", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"Process\]::Start\(", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"Process\.Start\(", RegexOptions.Compiled | RegexOptions.IgnoreCase),
@@ -452,13 +455,28 @@ public class HarnessConfigIsolationScanTests
 
         // No app and no tooling evidence: the variable's own name decides,
         // except the call-operator form, which is how scriptblocks are
-        // invoked and needs positive evidence.
+        // invoked and needs positive evidence. A MEMBER read whose member
+        // is not a target name ($latest.FullName, a file object's path)
+        // is not a launch target either: the launch shapes that matter set
+        // FileName/FilePath, and PropertyTargets already reads those.
         if (callOperatorOnly) return false;
-        if (sawEvidence) return true;
+        var memberBases = Regex.Matches(
+                varSource,
+                @"\$(\w+)\.(?!FileName|FilePath|ExePath)\w+")
+            .Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+        if (sawEvidence &&
+            AnyVar.Matches(varSource)
+                .Cast<System.Text.RegularExpressions.Match>()
+                .Select(m => m.Groups[1].Value)
+                .Any(n => !memberBases.Contains(n)))
+            return true;
         return AnyVar.Matches(varSource)
             .Cast<System.Text.RegularExpressions.Match>()
             .Select(m => m.Groups[1].Value)
-            .Any(n => ExeNamedVar.IsMatch("$" + n));
+            .Any(n => !memberBases.Contains(n) &&
+                      ExeNamedVar.IsMatch("$" + n));
     }
 
     /// <summary>
@@ -1371,5 +1389,220 @@ public class HarnessConfigIsolationScanTests
 
         Assert.Contains(File.ReadAllLines(path),
             l => IsCode(l) && ArmingLine.IsMatch(l));
+    }
+
+    // ---- the wider sweep (audit L3) ------------------------------------
+    //
+    // The main scan is PowerShell-shaped and windows/scripts-scoped. The
+    // same founder rule reaches every other tree that can launch the app:
+    // .agents, tools, test, dist, the repo root, and CI. PowerShell files
+    // reuse the full per-site machinery; every other language gets the
+    // simpler rule: a launch hint plus the app literal is a launch, and it
+    // is clean only when the file carries an in-file arming token for
+    // WINTTY_TEST_CONFIG (a set/assignment spelling, not a comment).
+
+    private static readonly string[] OutsideTrees =
+    {
+        ".agents", "tools", "test", "dist", ".github",
+    };
+
+    private static readonly string[] OutsideExtensions =
+    {
+        ".ps1", ".py", ".nu", ".sh", ".cmd", ".bat", ".yml",
+    };
+
+    /// <summary>
+    /// The words that make an app literal a LAUNCH in a non-PowerShell
+    /// file, per language family. Without a hint, an exe path sitting in
+    /// a variable or a config string is not a launch.
+    /// </summary>
+    private static readonly Regex[] NonPsLaunchHints =
+    {
+        new(@"subprocess|Popen|startfile|os\.system|check_output|check_call",
+            RegexOptions.Compiled),
+        new(@"(?i)\bstart\b|\bcall\b|\brun\b|\bexec\b|\binvoke\b|Popen|subprocess|\./",
+            RegexOptions.Compiled),
+    };
+
+    /// <summary>
+    /// The in-file arming token in any of its spellings: env-drive
+    /// assignment, psi dictionary, python os.environ, yaml env key.
+    /// </summary>
+    private static readonly Regex NonPsArmingToken = new(
+        @"WINTTY_TEST_CONFIG['""\]\s]*[:=]",
+        RegexOptions.Compiled);
+
+    private static bool IsComment(string line) =>
+        line.TrimStart().StartsWith('#') ||
+        line.TrimStart().StartsWith("rem ") ||
+        line.TrimStart().StartsWith("REM ");
+
+    /// <summary>
+    /// Whether a yml line sits inside a run: block: some earlier line at a
+    /// LOWER indentation introduced run:, and nothing at that indentation
+    /// or lower has intervened.
+    /// </summary>
+    private static bool InsideRunBlock(
+        List<(int Indent, string Text)> prior, int indent)
+    {
+        for (var i = prior.Count - 1; i >= 0; i--)
+        {
+            var trimmed = prior[i].Text.Trim();
+            if (trimmed.StartsWith("run:") || trimmed.StartsWith("- run:"))
+                return true;
+            if (prior[i].Indent <= indent) return false;
+        }
+        return false;
+    }
+
+    private static List<string> OutsideViolations(
+        string rel, string[] lines, string extension)
+    {
+        // PowerShell: the full per-site machinery, unchanged.
+        if (extension == ".ps1")
+            return UnarmedLaunches(rel, lines)
+                .Select(l => $"{l.File}:{l.Line}: {l.Text}").ToList();
+
+        var armed = lines.Any(l =>
+            !IsComment(l) && NonPsArmingToken.IsMatch(l));
+        if (armed) return new List<string>();
+
+        var prior = new List<(int Indent, string Text)>();
+        var violations = new List<string>();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (IsComment(line)) continue;
+
+            var consider = true;
+            var needHint = true;
+            if (extension == ".yml")
+            {
+                var indent = line.Length - line.TrimStart().Length;
+                // The run: block IS the launch form in yaml; a bare app
+                // literal inside it needs no second hint.
+                consider = InsideRunBlock(prior, indent);
+                needHint = false;
+                prior.Add((indent, line));
+            }
+
+            if (consider &&
+                AppLiteral.IsMatch(line) &&
+                (!needHint || NonPsLaunchHints.Any(h => h.IsMatch(line))))
+            {
+                violations.Add($"{rel}:{i + 1}: {line.Trim()}");
+            }
+        }
+        return violations;
+    }
+
+    [Fact]
+    public void Outside_Script_Trees_Arm_Their_App_Launches()
+    {
+        var root = RepoRoot();
+
+        // The fixture corpus first: the three unarmed shapes must be
+        // flagged and the two armed controls must not be.
+        var fixtureDir = Path.Combine(
+            root, "windows", "Ghostty.Tests", "Wiring", "ScanFixtures",
+            "outside-scripts");
+        Assert.True(Directory.Exists(fixtureDir), "outside-scripts fixtures not found");
+        var mustFlag = new[]
+        {
+            "outside-agents-launcher.py",
+            "outside-cmd-launcher.cmd",
+            "outside-ci-step.yml",
+        };
+        var mustPass = new[]
+        {
+            "outside-armed-launcher.py",
+            "outside-armed-ci.yml",
+        };
+        foreach (var file in Directory.EnumerateFiles(fixtureDir))
+        {
+            var name = Path.GetFileName(file);
+            var violations = OutsideViolations(
+                name, File.ReadAllLines(file), Path.GetExtension(file));
+            if (mustFlag.Contains(name))
+                Assert.True(violations.Count > 0,
+                    name + " was NOT flagged (the sweep went blind on it)");
+            else if (mustPass.Contains(name))
+                Assert.True(violations.Count == 0,
+                    name + " wrongly flagged:\n  " + string.Join("\n  ", violations));
+        }
+
+        // Then the real trees.
+        var all = new List<string>();
+        foreach (var tree in OutsideTrees)
+        {
+            var dir = Path.Combine(root, tree);
+            if (!Directory.Exists(dir)) continue;
+            foreach (var file in Directory.EnumerateFiles(
+                         dir, "*", SearchOption.AllDirectories))
+            {
+                var extension = Path.GetExtension(file).ToLowerInvariant();
+                if (!OutsideExtensions.Contains(extension)) continue;
+                // Third-party vendored sources are not our launch sites.
+                if (file.Replace('\\', '/').Contains("/vendor/")) continue;
+                all.Add(file);
+            }
+        }
+        // The repo root itself.
+        foreach (var file in Directory.EnumerateFiles(root))
+        {
+            var extension = Path.GetExtension(file).ToLowerInvariant();
+            if (OutsideExtensions.Contains(extension)) all.Add(file);
+        }
+
+        var violationsAll = new List<string>();
+        foreach (var file in all.OrderBy(f => f, StringComparer.Ordinal))
+        {
+            violationsAll.AddRange(OutsideViolations(
+                Path.GetRelativePath(root, file),
+                File.ReadAllLines(file),
+                Path.GetExtension(file).ToLowerInvariant()));
+        }
+
+        Assert.True(
+            violationsAll.Count == 0,
+            "app launch(es) outside windows/scripts that neither arm " +
+            "WINTTY_TEST_CONFIG nor go through an isolated-config helper " +
+            "(files: " + all.Count + " swept):\n  " +
+            string.Join("\n  ", violationsAll));
+    }
+
+    [Fact]
+    public void The_Unarmed_Host_Escape_Hatch_Is_Never_Committed()
+    {
+        // WINTTY_TEST_HOST_UNARMED exists for a human at a terminal with a
+        // genuinely clean-env test in mind; it must never become a default
+        // someone bakes into a script, recipe or CI file.
+        var root = RepoRoot();
+        var offenders = new List<string>();
+        foreach (var tree in OutsideTrees.Append("windows/scripts"))
+        {
+            var dir = Path.Combine(root, tree);
+            if (!Directory.Exists(dir)) continue;
+            foreach (var file in Directory.EnumerateFiles(
+                         dir, "*", SearchOption.AllDirectories))
+            {
+                var extension = Path.GetExtension(file).ToLowerInvariant();
+                if (!OutsideExtensions.Contains(extension) &&
+                    !file.EndsWith("justfile", StringComparison.Ordinal)) continue;
+                var rel = Path.GetRelativePath(root, file);
+                var hits = File.ReadAllLines(file)
+                    .Select((l, i) => (l, i))
+                    .Where(x => x.l.Contains(
+                        "WINTTY_TEST_HOST_UNARMED", StringComparison.Ordinal) &&
+                        !IsComment(x.l))
+                    .Select(x => $"{rel}:{x.i + 1}");
+                offenders.AddRange(hits);
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "WINTTY_TEST_HOST_UNARMED is a human-terminal escape hatch, " +
+            "never a committed default:\n  " + string.Join("\n  ", offenders));
     }
 }
