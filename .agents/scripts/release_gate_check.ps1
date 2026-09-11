@@ -65,6 +65,14 @@ $tests = Join-Path $repo 'windows/Ghostty.Tests/Ghostty.Tests.csproj'
 $target = 'RefuseAGateLeakIntoARelease'
 if (-not (Test-Path $app)) { Write-Host "HARNESS: missing $app"; exit 1 }
 
+# Every dotnet build/test here restores in LOCKED MODE (#1085, #1087): this
+# leg compiles Release against exactly the committed packages.lock.json, not
+# whatever nuget.org serves that day, same as the rest of the ladder. The
+# Get-Constants probe below runs `dotnet msbuild -getProperty`, which only
+# evaluates properties and never restores, so it needs no lock mode. The
+# refusal probes fail ON PURPOSE with WINTTY0001/2 after restore succeeds;
+# a locked restore of in-sync locks does not change that ordering.
+
 $script:failures = 0
 function Fail([string]$Text) { Write-Host "  FAIL  $Text"; $script:failures++ }
 function Pass([string]$Text) { Write-Host "  ok    $Text" }
@@ -87,7 +95,7 @@ function Invoke-Refusal {
         [Environment]::SetEnvironmentVariable($k, $WithEnv[$k])
     }
     try {
-        $out = & dotnet build $app -c Release /p:Platform=x64 -t:$target @BuildArgs 2>&1
+        $out = & dotnet build $app -c Release /p:Platform=x64 /p:RestoreLockedMode=true -t:$target @BuildArgs 2>&1
         $rc = $LASTEXITCODE
     }
     finally {
@@ -161,7 +169,7 @@ if (-not $NoTestRun) {
     Write-Host ''
     Write-Host 'release-gate 3/3: the compiled-result facts (#if !DEBUG, so Release only)'
     foreach ($fact in 'A_shipping_build_carries_no_demo_code', 'A_shipping_build_carries_no_test_seam') {
-        $out = & dotnet test $tests -c Release /p:Platform=x64 --nologo `
+        $out = & dotnet test $tests -c Release /p:Platform=x64 /p:RestoreLockedMode=true --nologo `
             --filter "FullyQualifiedName~$fact" 2>&1
         $rc = $LASTEXITCODE
         $m = $out | Select-String -Pattern 'Passed:\s+(\d+)' | Select-Object -First 1
