@@ -180,7 +180,9 @@ function Get-OverlapArea($a, $b) {
 # the key off, which is what makes the two questions differ. The mutex name
 # is derived from the exe path, not the config, so the two still contend for
 # the same election.
-$scratch = Join-Path ([System.IO.Path]::GetTempPath()) "wintty-splash-race-$PID"
+# A GUID, not $PID: the founder rule wants a randomly generated name,
+# and a PID is reused across reboots, so two runs can collide.
+$scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-splash-race-" + [guid]::NewGuid().ToString('N'))
 
 function New-ScratchConfig([string]$name, [string]$value) {
     $root = Join-Path $scratch $name
@@ -225,6 +227,7 @@ function Stop-Launched {
 
 $results = [System.Collections.Generic.List[object]]::new()
 $previousXdg = $env:XDG_CONFIG_HOME
+$previousTestConfig = $env:WINTTY_TEST_CONFIG
 
 try {
     Write-Host "exe    : $ExePath"
@@ -241,12 +244,14 @@ try {
         # Set per launch: a child inherits the environment as it stands when
         # it is created, and the two roles can need different configs.
         $env:XDG_CONFIG_HOME = $primaryXdg
+        $env:WINTTY_TEST_CONFIG = '1'
         $primary = Start-Process -FilePath $ExePath -PassThru
         $launched.Add($primary)
 
         Start-Sleep -Milliseconds $DelayMs
 
         $env:XDG_CONFIG_HOME = $secondaryXdg
+        $env:WINTTY_TEST_CONFIG = '1'
         $secondary = Start-Process -FilePath $ExePath -PassThru
         $launched.Add($secondary)
         $t0 = [System.Diagnostics.Stopwatch]::StartNew()
@@ -375,6 +380,8 @@ try {
 finally {
     Stop-Launched
     $env:XDG_CONFIG_HOME = $previousXdg
+    if ($null -ne $previousTestConfig -and $previousTestConfig -ne '') { $env:WINTTY_TEST_CONFIG = $previousTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
 }
 

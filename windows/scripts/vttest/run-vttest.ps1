@@ -24,12 +24,17 @@ prints the launched PID; stop it with `Stop-Process -Id <pid>` when done.
 [CmdletBinding()] param(
     [Parameter(Mandatory)][string]$WinttyExe,        # path to built Wintty.exe
     [string]$Distro = 'Ubuntu-24.04',
-    [string]$VttestPath = '~/vttest',                 # vttest path inside the distro
-    [string]$OutDir = "$env:TEMP\vttest-run"          # holds the temp ghostty config
+    [string]$VttestPath = '~/vttest'                  # vttest path inside the distro
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '../lib/test-config.ps1')
 
-New-Item -ItemType Directory -Force $OutDir | Out-Null
+# A per-run randomly named config root from the shared helper (the old
+# default was a fixed %TEMP%\vttest-run reused across runs). No
+# paired Exit: this harness leaves the Wintty running for an interactive
+# vttest pass, the app holds the root after this script exits, and the
+# helper's 24h sweep reaps it.
+$testConfig = Enter-WinttyTestConfig
 
 # The WinUI app ignores --command; XDG_CONFIG_HOME + `command =` is the proven
 # launch harness (see the esctest runner / #494 OSC7 work). ghostty reads
@@ -37,23 +42,15 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 # surface silently falls back to the default shell. The command splits on spaces
 # into wsl.exe argv; `bash -lc ~/vttest` runs vttest as a login shell so tilde
 # expansion and PATH are sane, and all paths here are space-free.
-$cfgDir = Join-Path $OutDir 'cfg'
+$cfgDir = $testConfig.Dir
 $cfgGhostty = Join-Path $cfgDir 'ghostty'
 New-Item -ItemType Directory -Force $cfgGhostty | Out-Null
 "command = wsl.exe -d $Distro -- bash -lc $VttestPath" |
     Set-Content -LiteralPath (Join-Path $cfgGhostty 'config') -Encoding utf8
 
-# Inherit the full environment and add only the XDG override (rather than
-# -Environment, whose merge-vs-replace semantics vary). Restore afterward.
-$prevXdg = $env:XDG_CONFIG_HOME
-$proc = $null
-try {
-    $env:XDG_CONFIG_HOME = $cfgDir
-    $proc = Start-Process -FilePath $WinttyExe -PassThru
-}
-finally {
-    $env:XDG_CONFIG_HOME = $prevXdg
-}
+# The helper entered above set XDG_CONFIG_HOME and armed
+# WINTTY_TEST_CONFIG for the child.
+$proc = Start-Process -FilePath $WinttyExe -PassThru
 
 Write-Host "Wintty PID $($proc.Id) is hosting vttest ($Distro)."
 Write-Host "Drive the menus from the keyboard and screenshot each section."

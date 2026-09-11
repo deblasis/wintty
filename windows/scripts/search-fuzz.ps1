@@ -48,16 +48,19 @@ param(
     [Parameter(Mandatory)][string]$OutDir,
     [int]$Seed = 1337,
     [int]$Iterations = 40,
-    [switch]$KeepOpen,
-    # Launching under a throwaway XDG_CONFIG_HOME turned out to make the app
-    # unstable at startup on this machine (repeated 0xc000027b stowed
-    # exceptions in CoreMessagingXP), while the user's own config dir is
-    # stable. Default to the real environment so the fuzz exercises the app
-    # the way it is actually run; -IsolatedConfig opts back into the
-    # throwaway dir when a controlled config matters more than stability.
-    [switch]$IsolatedConfig
+    [switch]$KeepOpen
+    # Isolation is unconditional: a per-run random temp XDG root plus
+    # WINTTY_TEST_CONFIG=1, so the fuzz cannot read or write the real
+    # per-user config and a lost root is a loud startup refusal rather
+    # than a silent taint. There is deliberately no real-config escape: a
+    # harness must not be able to point the app at the real config. If the
+    # historical 0xc000027b under an isolated root ever returns, that is a
+    # product bug (possibly the x:Load-overlay family, wintty-release
+    # #806): capture it with cdb on the window-owner PID (break on av and
+    # 40080201 first-chance) and fix it, never route around it.
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
@@ -707,18 +710,16 @@ function Get-CounterParts([string]$text) {
 # ---- run ------------------------------------------------------------------
 
 $rng = [System.Random]::new($Seed)
-$tempXdg = Join-Path $env:TEMP "wintty-search-fuzz-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-@'
+$configText = @'
 windows-single-instance = false
 window-save-state = never
 window-width = 120
 window-height = 34
 scrollback-limit = 10000000
 window-theme = wintty
-'@ | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
-
-$origXdg = $env:XDG_CONFIG_HOME
+'@
+$script:TestConfig = Enter-WinttyTestConfig -ConfigText $configText
+$tempXdg = $script:TestConfig.Dir
 $script:Proc = $null
 $script:Iter = 0
 $script:ExitCode = 0
@@ -737,9 +738,8 @@ $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 if (Test-Path $crashPath) { $script:CrashBaseline = (Get-Item $crashPath).Length }
 
 try {
-    if ($IsolatedConfig) { $env:XDG_CONFIG_HOME = $tempXdg }
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
-    Write-Host ("config: {0}" -f $(if ($IsolatedConfig) { $tempXdg } else { 'user environment' }))
+    Write-Host ("config: {0}" -f $tempXdg)
 
     # Never kill by name: developers keep builds from several worktrees open
     # at once, and force-killing every Wintty takes down work this run has
@@ -1301,17 +1301,15 @@ finally {
         try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill($true) } } catch { }
         try { [void]$script:Proc.WaitForExit(3000) } catch { }
     }
-    if ($IsolatedConfig) {
-        if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
-        else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    }
-    # After the restore, not before: a throw here would otherwise abandon it
-    # and leave the shell pointed at a temp profile.
+    # After the kill, not before: the sweep and the teardown below must not
+    # run while the app still holds the config root. -KeepOpen keeps the
+    # staged root on purpose (the app stays up with it); the helper's 24h
+    # sweep reaps it later.
     if (-not $KeepOpen -and $script:StartedAt) {
         Stop-WinttyStartedAfter -Since $script:StartedAt -ExePath $script:ExeFull
     }
     Start-Sleep -Milliseconds 500
-    if (-not $KeepOpen) { Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue }
+    if (-not $KeepOpen) { Exit-WinttyTestConfig $script:TestConfig }
 
     Write-Host ""
     if ($script:Findings.Count -eq 0) {

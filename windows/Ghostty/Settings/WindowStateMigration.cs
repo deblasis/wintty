@@ -63,8 +63,15 @@ internal static class WindowStateMigration
             // is missing. A key reaching the config through an include or
             // a conditional block is not visible here and gets appended
             // anyway, same as the scan this replaced.
-            var appends = LegacyUiSettingsMigrator.ComputeAppends(
-                legacy, configService.IsConfiguredInFile);
+            //
+            // Under --no-config the editor refuses writes by design, so
+            // the appends are skipped rather than attempted-and-logged:
+            // the placement-only half below still runs, and the first
+            // launch without the flag performs the config half.
+            var appends = configService.NoConfig
+                ? Array.Empty<(string Key, string Value)>()
+                : LegacyUiSettingsMigrator.ComputeAppends(
+                    legacy, configService.IsConfiguredInFile);
             if (appends.Count > 0)
             {
                 configService.SuppressWatcher(true);

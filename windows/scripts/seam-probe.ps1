@@ -9,6 +9,7 @@ $token = New-SeamToken
 $env:WINTTY_TEST_SEAM = $token
 $xdg = Join-Path $env:TEMP ("wintty-seam-probe-" + [guid]::NewGuid().ToString('N'))
 $env:XDG_CONFIG_HOME = $xdg
+$env:WINTTY_TEST_CONFIG = '1'
 New-Item -ItemType Directory -Force -Path (Join-Path $xdg 'wintty') | Out-Null
 @'
 windows-single-instance = true

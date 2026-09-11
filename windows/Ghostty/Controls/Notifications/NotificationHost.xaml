@@ -8,7 +8,7 @@
 
     The control collapses itself (Visibility.Collapsed, in code-behind) when
     it has no active bars. A Collapsed element reports (0,0) DesiredSize
-    regardless of its content's Margin -- unlike merely emptying the inner
+    regardless of its content's Margin: unlike merely emptying the inner
     StackPanel, whose own Margin is folded into DesiredSize even with zero
     children and would otherwise keep the Auto row, and this control's
     opaque background, permanently ~16px tall. MainWindow calls Attach()

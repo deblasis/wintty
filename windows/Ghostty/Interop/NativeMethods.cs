@@ -509,6 +509,10 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyString ConfigOpenPath();
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_open_path_no_create")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyString ConfigOpenPathNoCreate();
+
     // ---- app -----------------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_app_new")]

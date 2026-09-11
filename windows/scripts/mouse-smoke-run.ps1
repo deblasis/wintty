@@ -60,9 +60,12 @@ Copy-Item -LiteralPath $fixturePath -Destination $configPath -Force
 
 $originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
 $originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
+$originalTestConfigSet = Test-Path Env:WINTTY_TEST_CONFIG
+$originalTestConfig = if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG } else { $null }
 
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
+    $env:WINTTY_TEST_CONFIG = '1'
     Write-Host "Launching cell '$Cell' with XDG_CONFIG_HOME=$tempXdg"
     Write-Host "Click checklist for this cell is in windows/dev-configs/mouse-smoke/$Cell.conf header."
     Write-Host "Quit the TUI when done; the runner returns when Wintty exits."
@@ -87,6 +90,8 @@ finally {
     } else {
         Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue
     }
+    if ($originalTestConfigSet) { $env:WINTTY_TEST_CONFIG = $originalTestConfig }
+    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $tempXdg) {
         Remove-Item -LiteralPath $tempXdg -Recurse -Force -ErrorAction SilentlyContinue
     }

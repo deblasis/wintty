@@ -5,6 +5,7 @@ param(
     [switch]$SkipLaunch
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $repo
@@ -12,6 +13,12 @@ Push-Location $repo
 # is minutes of work to then be told to close a window, and dotnet cannot
 # overwrite a locked Wintty.exe anyway.
 Assert-NoWintty -Context 'The release smoke'
+
+# Both launch smokes run against a per-run random temp config root with the
+# WINTTY_TEST_CONFIG guard armed: a Release/AOT launch used to read and
+# write the user's real config. Entered before the builds so the finally
+# below always pairs it; nothing in the build reads XDG_CONFIG_HOME.
+$testConfig = Enter-WinttyTestConfig
 
 # One entry per launch, each with its own stamp. A single stamp taken at
 # script start would be minutes stale by the time anything launches, and
@@ -86,5 +93,6 @@ finally {
     foreach ($l in $script:Launched) {
         Stop-WinttyStartedAfter -Since $l.Since -ExePath $l.Exe
     }
+    Exit-WinttyTestConfig $testConfig
     Pop-Location
 }

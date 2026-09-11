@@ -44,6 +44,7 @@ param(
     [int]$Seed = 0
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 $ErrorActionPreference = 'Stop'
 
 # Same convention as the other harnesses here: a PRODUCT_FAIL throw is a
@@ -255,7 +256,8 @@ foreach ($f in @($validSrc, $invalidSrc)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "HARVEST_MISS: fixture shader missing: $f" }
 }
 
-$stage = Join-Path $env:TEMP ("wintty-shader-fuzz-{0:HHmmss}" -f (Get-Date))
+$script:TestConfig = Enter-WinttyTestConfig
+$stage = $script:TestConfig.Dir
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -LiteralPath $validSrc -Destination (Join-Path $stage 'valid.glsl')
 Copy-Item -LiteralPath $invalidSrc -Destination (Join-Path $stage 'invalid.glsl')
@@ -301,8 +303,8 @@ Write-Host ("order=" + (($order | ForEach-Object { $_.id }) -join ','))
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-$originalXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
+# XDG_CONFIG_HOME and WINTTY_TEST_CONFIG are owned by the test-config
+# session entered above; only NO_COLOR still needs save/restore here.
 
 # The quiet cases assert that NO banner appears, so every other thing that can
 # legitimately raise one has to be staged too, not just the config. NO_COLOR is
@@ -316,7 +318,9 @@ $originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
 $originalNoColorSet = Test-Path Env:NO_COLOR
 $originalNoColor = if ($originalNoColorSet) { $env:NO_COLOR } else { $null }
 
-$tempXdg = Join-Path $stage 'xdg'
+# The XDG root is the staged root itself; the helper already pointed
+# XDG_CONFIG_HOME at it and armed WINTTY_TEST_CONFIG.
+$tempXdg = $script:TestConfig.Dir
 New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
 $configPath = Join-Path $tempXdg 'wintty\config.wintty'
 
@@ -336,7 +340,6 @@ function Invoke-Case($Case, [int]$ExtraTabs, [string]$Exe) {
     $proc = $null
     $stamp = Get-WinttyLaunchStamp
     try {
-        $env:XDG_CONFIG_HOME = $tempXdg
         Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
         $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
         $pid32 = [uint32]$proc.Id
@@ -497,11 +500,9 @@ try {
     }
 }
 finally {
-    if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     if ($originalNoColorSet) { $env:NO_COLOR = $originalNoColor }
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
-    Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue
+    Exit-WinttyTestConfig $script:TestConfig
 
     # Written from the finally, so the report survives a throw from outside the
     # per-case catch above. The exit code is still decided below, on the paths

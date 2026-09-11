@@ -4409,18 +4409,35 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
 
         // If both files are not found, then we create a template file.
         // For macOS, we only create the template file in the app support
-        if (!app_support_loaded and !xdg_loaded) {
+        if (!app_support_loaded and !xdg_loaded and !cliDisablesDefaultFiles(alloc)) {
             writeConfigTemplate(app_support_path) catch |err| {
                 log.warn("error creating template config file err={}", .{err});
             };
         }
     } else {
-        if (!xdg_loaded) {
+        if (!xdg_loaded and !cliDisablesDefaultFiles(alloc)) {
             writeConfigTemplate(xdg_path) catch |err| {
                 log.warn("error creating template config file err={}", .{err});
             };
         }
     }
+}
+
+/// Whether the command line asked for the default files to be ignored.
+/// The Wintty spelling arrives here as `--config-default-files=false`
+/// (CliAliases rewrites before ghostty_init). A flag that ignores the
+/// default files must not create one where none existed: the template
+/// write was how a `--no-config` run still left a config file behind on
+/// a fresh root.
+fn cliDisablesDefaultFiles(alloc_gpa: Allocator) bool {
+    // The process argv is wide on Windows; the shared iterator decodes it,
+    // the same way loadCliArgs reads the flags that end up here.
+    var iter = cli.args.argsIterator(alloc_gpa, global.args()) catch return false;
+    defer iter.deinit();
+    while (iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--config-default-files=false")) return true;
+    }
+    return false;
 }
 
 /// Load and parse the CLI args.

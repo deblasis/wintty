@@ -202,17 +202,25 @@ build-win-release:
 # GUI process is up, so a lane held here would be released while the
 # window is still open. The harnesses' own Assert-NoWintty is what guards
 # the desktop against that window.
+#
+# run-win is the USER launcher: a human terminal gets the real config by
+# default, unchanged. Set ISOLATED_CONFIG=1 in the environment (e.g.
+# `$env:ISOLATED_CONFIG='1'; just run-win`) for a fresh random temp config
+# root. An agent session (Claude Code sets CLAUDECODE=1 in its children)
+# is isolated by default; REAL_CONFIG=1 overrides that, loudly. The modes
+# and their precedence live in windows/scripts/run-win-launch.ps1.
 [windows]
 run-win: (_build-in-lane "run-win" "build-dll" "build-win")
-    ./windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe
+    pwsh -NoProfile -File windows/scripts/run-win-launch.ps1 -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe
 
 # Same, optimized on both sides. Startup timings taken from `run-win` are
 # Debug timings and are not the ones users see: the C# shell carries no
 # optimization and libghostty is a Debug build. Use this before concluding
 # anything about how long startup, the launch splash, or a frame takes.
+# Same launcher and the same config modes as run-win.
 [windows]
 run-win-release: (_build-in-lane "run-win-release" "build-dll-release" "build-win-release")
-    ./windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/Wintty.exe
+    pwsh -NoProfile -File windows/scripts/run-win-launch.ps1 -ExePath windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/Wintty.exe
 
 # Run the C# test suites. Ghostty.Tests is pure logic and cross-platform;
 # Ghostty.Tests.Windows holds the tests that need real Windows semantics
