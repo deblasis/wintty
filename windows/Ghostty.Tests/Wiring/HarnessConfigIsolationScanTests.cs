@@ -292,7 +292,10 @@ public class HarnessConfigIsolationScanTests
             if (rhs.TrimStart().StartsWith("@{", StringComparison.Ordinal))
             {
                 // Hashtable literal: read members from this line onward,
-                // through the closing brace.
+                // stopping at the closing brace of THIS hashtable. A
+                // same-line close ends the scan on this line, so the
+                // window can never run on and read a member out of a
+                // different hashtable below.
                 for (var j = i; j < Math.Min(i + 40, lines.Length); j++)
                 {
                     var member = Regex.Match(
@@ -301,16 +304,21 @@ public class HarnessConfigIsolationScanTests
                         RegexOptions.IgnoreCase);
                     if (member.Success)
                         members.Add(member.Groups[1].Value);
-                    if (Regex.IsMatch(lines[j], @"^\s*\}") ||
-                        (Regex.IsMatch(lines[j], @"\}\s*$") && j > i))
-                        break;
+                    if (lines[j].Contains('}')) break;
                 }
                 continue;
             }
 
-            // Composition: every operand must itself resolve.
+            // Composition: every operand must itself resolve. An INLINE
+            // hashtable operand (`$a + @{ FilePath = ... }`) is read with
+            // the same member regex on this line; an operand that can be
+            // neither followed as a variable nor parsed as an inline
+            // hashtable makes the whole splat unresolved, so the caller
+            // keeps the whole-line fallback rather than trusting silence.
+            var sawOperand = false;
             foreach (var operand in Regex.Matches(rhs, @"\$(\w+)"))
             {
+                sawOperand = true;
                 var operandName =
                     ((System.Text.RegularExpressions.Match)operand).Groups[1].Value;
                 if (TrySplatMembers(operandName, lines, visited, hops + 1,
@@ -319,6 +327,29 @@ public class HarnessConfigIsolationScanTests
                 else
                     fullyResolved = false;
             }
+
+            if (rhs.Contains("@{", StringComparison.Ordinal))
+            {
+                sawOperand = true;
+                if (Regex.IsMatch(rhs, @"@\{\s*\}"))
+                {
+                    // An EMPTY inline hashtable resolves to nothing and
+                    // blesses nothing; it is not a parse failure.
+                }
+                else
+                {
+                    var inline = Regex.Match(
+                        lines[i],
+                        @"@\{\s*(?:FilePath|FileName|Path)\s*=\s*(.+?)(?:\s*[}\]].*)?(?:\s*#.*)?$",
+                        RegexOptions.IgnoreCase);
+                    if (inline.Success)
+                        members.Add(inline.Groups[1].Value);
+                    else
+                        fullyResolved = false;
+                }
+            }
+
+            if (!sawOperand) fullyResolved = false;
         }
 
         return sawDefinition && fullyResolved;
@@ -713,6 +744,8 @@ public class HarnessConfigIsolationScanTests
             "violation-cdb-launches-app.ps1",
             "violation-splatting.ps1",
             "violation-splat-composed.ps1",
+            "violation-splat-inline-operand.ps1",
+            "violation-splat-inline-only.ps1",
             "violation-splat-plus-equals.ps1",
             "violation-scriptblock-launch.ps1",
             "violation-mixed-case.ps1",
@@ -725,6 +758,7 @@ public class HarnessConfigIsolationScanTests
             "clean-cdb-attach.ps1",
             "clean-splatting-armed.ps1",
             "clean-splat-composed-armed.ps1",
+            "clean-splat-no-cross-hashtable.ps1",
         };
 
         var flagged = new HashSet<string>(StringComparer.Ordinal);
