@@ -114,7 +114,7 @@ public class HarnessConfigIsolationScanTests
     /// the spelling the ProcessStartInfo helpers use.
     /// </summary>
     private static readonly Regex ToolingBareQuoted = new(
-        @"^\s*['"](pwsh|powershell|cmd|wsl|cdb|windbg|procdump|python|node|npm|git|msbuild|bash)['"]\s*$",
+        "^\\s*['\"](pwsh|powershell|cmd|wsl|cdb|windbg|procdump|python|node|npm|git|msbuild|bash)['\"]\\s*$",
         RegexOptions.Compiled);
 
     /// <summary>
@@ -124,7 +124,7 @@ public class HarnessConfigIsolationScanTests
     /// arrives quoted more often than not.
     /// </summary>
     private static readonly Regex QuotedSpan = new(
-        @"'[^']*'|"[^"]*"", RegexOptions.Compiled);
+        "'[^']*'|\"[^\"]*\"", RegexOptions.Compiled);
 
     private static readonly Regex AnyVar = new(@"\$(\w+)", RegexOptions.Compiled);
 

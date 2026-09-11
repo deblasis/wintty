@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace Ghostty.Core.Config;
 
@@ -259,11 +258,13 @@ public static partial class TestConfigGuard
         uint dwFlagsAndAttributes,
         IntPtr hTemplateFile);
 
-    [LibraryImport("kernel32.dll", SetLastError = true,
-        StringMarshalling = StringMarshalling.Utf16)]
+    // An unmanaged buffer rather than StringBuilder: this assembly disables
+    // runtime marshalling, so the call goes through source-generated
+    // marshalling with a blittable IntPtr.
+    [LibraryImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW")]
     private static partial uint GetFinalPathNameByHandleW(
         IntPtr hFile,
-        StringBuilder lpszFilePath,
+        IntPtr lpszFilePath,
         uint cchFilePath,
         uint dwFlags);
 
@@ -308,28 +309,38 @@ public static partial class TestConfigGuard
 
         try
         {
-            var buffer = new StringBuilder(1024);
-            var length = GetFinalPathNameByHandleW(handle, buffer, 1024, 0);
-            if (length == 0) return null;
-            if (length > 1024)
+            var capacity = 1024u;
+            var buffer = Marshal.AllocHGlobal((int)(capacity * 2));
+            try
             {
-                buffer = new StringBuilder((int)length);
-                length = GetFinalPathNameByHandleW(handle, buffer, length, 0);
+                var length = GetFinalPathNameByHandleW(handle, buffer, capacity, 0);
                 if (length == 0) return null;
+                if (length > capacity)
+                {
+                    Marshal.FreeHGlobal(buffer);
+                    capacity = length;
+                    buffer = Marshal.AllocHGlobal((int)(capacity * 2));
+                    length = GetFinalPathNameByHandleW(handle, buffer, capacity, 0);
+                    if (length == 0) return null;
+                }
+
+                var final = Marshal.PtrToStringUni(buffer, (int)length)!;
+                if (final.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
+                    final = @"\\" + final.Substring(8);
+                else if (final.StartsWith(@"\\?\", StringComparison.Ordinal))
+                    final = final.Substring(4);
+
+                return string.IsNullOrEmpty(tail)
+                    ? final.TrimEnd(Path.DirectorySeparatorChar,
+                          Path.AltDirectorySeparatorChar)
+                    : final.TrimEnd(Path.DirectorySeparatorChar,
+                          Path.AltDirectorySeparatorChar)
+                        + Path.DirectorySeparatorChar + tail;
             }
-
-            var final = buffer.ToString();
-            if (final.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
-                final = @"\\" + final.Substring(8);
-            else if (final.StartsWith(@"\\?\", StringComparison.Ordinal))
-                final = final.Substring(4);
-
-            return string.IsNullOrEmpty(tail)
-                ? final.TrimEnd(Path.DirectorySeparatorChar,
-                      Path.AltDirectorySeparatorChar)
-                : final.TrimEnd(Path.DirectorySeparatorChar,
-                      Path.AltDirectorySeparatorChar)
-                    + Path.DirectorySeparatorChar + tail;
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
         }
         finally
         {

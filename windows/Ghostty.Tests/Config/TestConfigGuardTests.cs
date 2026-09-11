@@ -145,7 +145,7 @@ public class TestConfigGuardTests : IDisposable
     {
         // libghostty builds forward-slash paths; ConfigService normalizes
         // them, but the guard must not depend on that having happened.
-        var temp = TestConfigGuard.TempAnchor.Replace('\\', '/');
+        var temp = TestConfigGuard.TempAnchor.Replace('\\', '/') + "/";
         Assert.True(TestConfigGuard.IsUnderTemp(temp + "wintty-cfg-b2/wintty"));
 
         var upper = Temp("Wintty-Cfg-C3").ToUpperInvariant();
