@@ -56,6 +56,32 @@ public class TestConfigGuardWiringTests
             $"InitGhostty ({firstInit.Span.Start}) in MainImpl");
     }
 
+    /// <summary>
+    /// The env seam, pinned from the source (re-review finding 1): the
+    /// ReadEnvironment property must be declared INTERNAL - a public
+    /// settable static lets production code swap the guard's environment
+    /// source out from under the guard - and its initializer must be the
+    /// live ProcessEnvironment reader, not a constant or a snapshot. The
+    /// behaviour half of the pin lives in
+    /// <c>Config.TestConfigGuardDefaultReaderTests</c>.
+    /// </summary>
+    [Fact]
+    public void The_Env_Seam_Stays_Internal_And_Live()
+    {
+        var source = ShellSource.Load("Config.TestConfigGuard.cs");
+        var property = source.Root.DescendantNodes()
+            .OfType<PropertyDeclarationSyntax>()
+            .Single(p => p.Identifier.ValueText == "ReadEnvironment");
+
+        Assert.Contains("internal static", property.Modifiers.ToString(),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("public", property.Modifiers.ToString(),
+            StringComparison.Ordinal);
+        Assert.Equal(
+            "Environment.GetEnvironmentVariable",
+            property.Initializer?.Value.ToString());
+    }
+
     [Fact]
     public void GuardTestConfigRoot_Exits_With_Its_Own_Refusal_Code()
     {

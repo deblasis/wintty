@@ -1491,10 +1491,13 @@ public class HarnessConfigIsolationScanTests
     /// literal is empty or a shell separator. In cmd, sh and nu a BARE
     /// exe line is THE idiomatic launch (review finding M2), so the
     /// prefix test alone carries those languages; python and yaml keep
-    /// their own rules.
+    /// their own rules. The alternation spells every separator as its
+    /// own alternative - `;` and `||` included - because the previous
+    /// `\|\|;` token fused them into one literal that matched neither
+    /// alone (re-review finding 2).
     /// </summary>
     private static readonly Regex CommandPositionPrefix = new(
-        @"(?i)(?:&{1,2}|\\|\|\|;|call|start|exec|cmd\s+/c)\s*$",
+        @"(?i)(?:&{1,2}|\|\||\||;|\bcall\b|\bstart\b|\bexec\b|cmd\s+/c)\s*(?:""[^""]*""\s*|\s)*\S*\s*$",
         RegexOptions.Compiled);
 
     /// <summary>
@@ -1573,8 +1576,19 @@ public class HarnessConfigIsolationScanTests
                 if (match.Success)
                 {
                     var prefix = line[..match.Index].TrimEnd();
-                    isLaunch = prefix.Length == 0 ||
-                        CommandPositionPrefix.IsMatch(prefix + " ");
+                    // A pure PATH prefix (C:\b1\, no whitespace, no
+                    // separator) is still command position: a bare
+                    // full-path launch is as idiomatic as a bare name,
+                    // and the exe literal only matches the file name, so
+                    // the directory part shows up here. The space-free
+                    // test is what keeps an echo argument out: that
+                    // prefix carries a word.
+                    var purePath = prefix.Length > 0 &&
+                        !prefix.Contains(' ') &&
+                        (prefix.Contains(Path.DirectorySeparatorChar) ||
+                         prefix.Contains(Path.AltDirectorySeparatorChar));
+                    isLaunch = prefix.Length == 0 || purePath ||
+                        CommandPositionPrefix.IsMatch(prefix);
                 }
             }
 
@@ -1605,6 +1619,10 @@ public class HarnessConfigIsolationScanTests
             "outside-bare-nu.nu",
             "outside-posix-spawn.py",
             "outside-inline-run.yml",
+            "outside-semicolon-cmd.cmd",
+            "outside-orElse-cmd.cmd",
+            "outside-semicolon-sh.sh",
+            "outside-orElse-sh.sh",
         };
         var mustPass = new[]
         {

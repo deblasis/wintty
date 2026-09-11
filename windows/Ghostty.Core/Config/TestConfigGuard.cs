@@ -59,8 +59,15 @@ public static partial class TestConfigGuard
     /// running collection (and transiently disarms the armed test host,
     /// reopening exactly the hole this guard closes); an injected reader
     /// touches nothing outside the test itself.
+    ///
+    /// INTERNAL on purpose (re-review finding 1): the seam exists for the
+    /// test assemblies and nothing else. A public settable static would
+    /// let production code swap the guard's environment source out from
+    /// under the guard itself, which is the opposite of what the guard
+    /// is for. The test projects reach it through
+    /// InternalsVisibleTo (AssemblyAttributes.cs).
     /// </summary>
-    public static Func<string, string?> ReadEnvironment { get; set; } =
+    internal static Func<string, string?> ReadEnvironment { get; set; } =
         Environment.GetEnvironmentVariable;
 
     /// <summary>
