@@ -13,7 +13,7 @@
                 <ctrl:SettingsCard
                     Header="Single instance"
                     Description="Route a second launch into the already-running instance instead of starting a separate process. Takes effect on the next launch. Needed for jump-list New Tab to land in this window."
-                    ctrl:SettingsCard.ConfigKey="windows-single-instance">
+                    Visibility="Collapsed">
                     <ToggleSwitch
                         x:Name="SingleInstanceToggle"
                         OffContent="Separate processes"

@@ -223,11 +223,9 @@ public static class SettingsIndex
             SettingType.Toggle),
 
         // ----- Advanced / Windows -----
-        new("windows-single-instance", "Single instance",
-            "Route a second launch into the already-running instance instead of starting a separate process. Takes effect on the next launch.",
-            "Advanced", "Windows",
-            new[] { "single", "instance", "jumplist", "new-tab" },
-            SettingType.Toggle),
+        // windows-single-instance is intentionally absent: single-instance
+        // is the one product behaviour (#1094) and the key is a dev-only
+        // escape hatch with no settings surface.
         new("windows-high-contrast", "Follow High Contrast",
             "When Windows High Contrast is on, restyle the terminal surface to match. Off keeps your configured colors.",
             "Advanced", "Windows",
