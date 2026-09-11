@@ -1622,16 +1622,19 @@ public static partial class Program
             var configFile = ConfigIniFile.Load(ConfigOverrides.NoConfig ? null : path);
             return WindowsOnlyKeyParsers.ParseBool(
                 ConfigIniFile.First(configFile, "windows-single-instance"),
-                defaultValue: false);
+                defaultValue: true);
         }
         catch (Exception ex)
         {
-            // Off never routes a launch into a process that is not there, so it
-            // is the safe reading. Worth a line: the symptom otherwise is
-            // single-instance silently not working.
+            // On is the safe reading since #1094's fallback: a secondary that
+            // cannot read its config still forwards, and a primary that cannot
+            // serve it answers within the forward's acknowledgement timeout,
+            // after which the launch proceeds as an ordinary independent one.
+            // Worth a line: the symptom otherwise is single-instance silently
+            // not working.
             WriteStartupDiagnostic(
-                $"could not read windows-single-instance ({ex.Message}); treating it as off");
-            return false;
+                $"could not read windows-single-instance ({ex.Message}); treating it as on");
+            return true;
         }
     }
 }

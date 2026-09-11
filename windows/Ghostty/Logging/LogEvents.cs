@@ -100,12 +100,12 @@ internal static class LogEvents
         public const int DeleteFailed = 2802;
     }
 
-    // 2900-2999: Single-instance mode
+    // 2900-2999: Single-instance mode. The serving half's ids
+    // (PipeUnavailable / PipeError / BadPayload) moved to Ghostty.Core's
+    // 1500 range with SingleInstanceServer itself, so the test hosts can
+    // run against the real type; 2900-2902 are retired, not reused.
     internal static class SingleInstance
     {
-        public const int PipeUnavailable   = 2900;
-        public const int PipeError         = 2901;
-        public const int BadPayload        = 2902;
         public const int MutexFailed       = 2903;
         public const int ForwardFailed     = 2904;
         public const int ServerStartFailed = 2905;
@@ -113,6 +113,7 @@ internal static class LogEvents
         public const int LaunchDropped     = 2907;
         public const int LaunchDeferred    = 2908;
         public const int LaunchEvicted     = 2909;
+        public const int ForwardTimedOut   = 2910;
     }
 
     // 3000-3099: Inspector

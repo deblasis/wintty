@@ -49,6 +49,20 @@ internal static class LogEvents
         public const int QuakeFrameSubclassFailed = 1301;
     }
 
+    // 1600-1699: Single-instance serving (the primary's forwarding pipe
+    // server; moved out of the shell's 2900 range with the class itself,
+    // so the test hosts can run against the real type). NOT 1500-1599:
+    // the tier builds claim that range for Sponsor/Auth (their patches
+    // append an Auth class at this file's tail), so the fork must leave
+    // both the numbers and the tail alone. This block deliberately sits
+    // above ShaderPreview, mid-file, for the same reason.
+    internal static class SingleInstance
+    {
+        public const int PipeUnavailable = 1600;
+        public const int PipeError       = 1601;
+        public const int BadPayload      = 1602;
+    }
+
     // 1400-1499: Shader gallery preview (the picker's autoplay feed)
     internal static class ShaderPreview
     {

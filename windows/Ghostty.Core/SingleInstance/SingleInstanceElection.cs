@@ -90,7 +90,7 @@ public sealed class SingleInstanceElection : IDisposable
     /// </summary>
     public static SingleInstanceElection Run(bool enabled, string exePath)
     {
-        var names = SingleInstanceNames.For(exePath);
+        var names = SingleInstanceNames.ForProcess(exePath);
 
         if (!enabled)
             return new SingleInstanceElection(SingleInstanceRole.Disabled, null, names, null);

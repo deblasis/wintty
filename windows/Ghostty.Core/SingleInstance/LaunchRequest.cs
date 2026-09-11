@@ -24,6 +24,30 @@ public sealed record LaunchRequest(string WorkingDirectory, IReadOnlyList<string
     private const string Header = "V1";
 
     /// <summary>
+    /// The byte a primary writes back after it has SERVED a forwarded
+    /// launch (the window is open, the jump-list action ran), not merely
+    /// after it received one. A secondary that sees it may exit knowing
+    /// its launch landed; a secondary that does not times out and runs as
+    /// its own instance, so a hung primary cannot strand later launches
+    /// (#1094). A pre-ACK primary never writes it, which an upgrading
+    /// secondary answers with <see cref="Cancel"/> below.
+    /// </summary>
+    public const byte Ack = 0x06; // ASCII ACK
+
+    /// <summary>
+    /// The byte a secondary appends after giving up on the
+    /// <see cref="Ack"/>. The payload is self-delimiting and its parser
+    /// rejects trailing bytes, so against a primary from before the ACK
+    /// existed (the upgrade window: the running primary is the older
+    /// build) this turns the forward into an unparseable payload the old
+    /// primary drops, rather than a launch it opens a second window for
+    /// on top of the secondary's own fallback window. A current primary
+    /// has already stopped reading at the end of the payload, so the byte
+    /// reaches nobody.
+    /// </summary>
+    public const byte Cancel = 0x18; // ASCII CAN
+
+    /// <summary>
     /// Upper bound on the arg count the parser will honor. Real launches
     /// carry a shell command line (Windows caps it near 32 KiB, so a few
     /// hundred args at most) plus a handful of activation arguments; a

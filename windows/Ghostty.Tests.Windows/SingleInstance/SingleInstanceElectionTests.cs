@@ -13,8 +13,9 @@ namespace Ghostty.Tests.Windows.SingleInstance;
 public sealed class SingleInstanceElectionTests
 {
     /// <summary>
-    /// A path no other test (or leftover process) can be holding. The names are
-    /// a hash of the path, so a fresh path is a fresh election.
+    /// A path no other test (or leftover process) can be holding. The names
+    /// hash the path (plus the edition and, when armed, the config root --
+    /// constant within one host run), so a fresh path is a fresh election.
     /// </summary>
     private static string UniqueExePath()
         => $@"C:\wintty-tests\{Guid.NewGuid():N}\Wintty.exe";
@@ -188,7 +189,7 @@ public sealed class SingleInstanceElectionTests
         // namespace, and CreateMutexEx reports ERROR_INVALID_HANDLE for a kind
         // mismatch, which .NET surfaces as WaitHandleCannotBeOpenedException.
         var path = UniqueExePath();
-        var names = SingleInstanceNames.For(path);
+        var names = SingleInstanceNames.ForProcess(path);
         using var blocker = new Semaphore(1, 1, names.Mutex);
 
         using var election = SingleInstanceElection.Run(enabled: true, path);
@@ -269,6 +270,198 @@ public sealed class SingleInstanceElectionTests
         }
     }
 
+    // ---- test-marker scoping (issue #1094) ---------------------------
+    //
+    // Single-instance is on by default, so the identity has to keep a launch
+    // under WINTTY_TEST_CONFIG away from every instance that is NOT under it
+    // (the founder's real app above all), and away from other armed launches
+    // with their own throwaway config roots. These drive the real election
+    // against the real mutex with only the guard's environment swapped.
+
+    /// <summary>
+    /// The guard's env seam pointed at a dictionary, unset names still reading
+    /// the real environment. The same pattern Config.TestConfigGuardTests
+    /// uses: mutating the real process environment races every concurrently
+    /// running collection, and these tests live in this class precisely so
+    /// the swap is serialized against the elections above.
+    /// </summary>
+    private sealed class FakeEnvironment : IDisposable
+    {
+        private readonly Func<string, string?> _previous =
+            Ghostty.Core.Config.TestConfigGuard.ReadEnvironment;
+        private readonly Dictionary<string, string?> _values = new();
+
+        public FakeEnvironment() =>
+            Ghostty.Core.Config.TestConfigGuard.ReadEnvironment = Read;
+
+        private string? Read(string name) =>
+            _values.TryGetValue(name, out var value) ? value : _previous(name);
+
+        public void Set(string name, string? value) => _values[name] = value;
+
+        public void Dispose() =>
+            Ghostty.Core.Config.TestConfigGuard.ReadEnvironment = _previous;
+    }
+
+    [Fact]
+    public void ArmedLaunchesWithDifferentTestRoots_AreSeparateProcesses()
+    {
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "1");
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\a");
+
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+        // A second harness arms the same marker over its own random root.
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\b");
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+    }
+
+    /// <summary>
+    /// #1094 review M1: the same user logged on in two terminal-services
+    /// sessions (console plus RDP of one account). Each session's Local\
+    /// namespace elects its own primary, and the pipe name is machine-global,
+    /// so without the session id in the material session 2's launches would
+    /// connect into session 1's pipe and exit "served" with no window ever
+    /// appearing in session 2. Two session ids must be two elections.
+    /// </summary>
+    [Fact]
+    public void DifferentTerminalSessions_ElectSeparatePrimaries()
+    {
+        var path = UniqueExePath();
+
+        var previousSession = SingleInstanceNames.ReadSessionId;
+        try
+        {
+            using var env = new FakeEnvironment();
+            env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+
+            SingleInstanceNames.ReadSessionId = () => 1;
+            using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+            SingleInstanceNames.ReadSessionId = () => 2;
+            using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+            Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+            Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+        }
+        finally
+        {
+            SingleInstanceNames.ReadSessionId = previousSession;
+        }
+    }
+
+    /// <summary>
+    /// #1094 review L1: the misconfigured-harness direction. A launch with a
+    /// non-default XDG_CONFIG_HOME but NO test marker must be its own
+    /// process rather than forward into the real instance that holds the
+    /// default-root identity.
+    /// </summary>
+    [Fact]
+    public void UnarmedLaunch_WithANonDefaultRoot_IsItsOwnProcess()
+    {
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+        // No XDG override: the incumbent resolves the real default root,
+        // which is what the founder's running app holds.
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+        // The harness that redirected its config but forgot the marker.
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\forgotten");
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+    }
+
+    /// <summary>
+    /// The absolute form of the isolation rule: the marker alone keeps an
+    /// armed launch off an unarmed election even when both resolve the very
+    /// same config root.
+    /// </summary>
+    [Fact]
+    public void ArmedAndUnarmed_SharingARoot_NeverForwardToEachOther()
+    {
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\same");
+
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "1");
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+    }
+
+    [Fact]
+    public void ArmedLaunch_NeverForwardsToAnUnarmedIncumbent()
+    {
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        // The incumbent is the founder's real app: no test marker, no test
+        // root, the product default identity for this exe and edition.
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+
+        // The armed launch may share the exe, the edition and even the config
+        // root spelling; the marker alone must keep it off the incumbent's
+        // election, or a test harness hands its window to the real app.
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "1");
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\a");
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Primary, challenger.Role);
+    }
+
+    [Fact]
+    public void ArmedLaunchesSharingATestRoot_ForwardToEachOther()
+    {
+        // One harness, one root, two launches: the second must still forward
+        // (splash-single-instance-race.ps1 builds exactly this shape), so the
+        // test scope is the config root, not the marker alone.
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "1");
+        env.Set("XDG_CONFIG_HOME", @"C:\wintty-test-roots\a");
+
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Secondary, challenger.Role);
+    }
+
+    [Fact]
+    public void UnarmedLaunchesOfOneEdition_ForwardToEachOther()
+    {
+        // The product default with no test marker: one edition, one exe,
+        // one process. This is the behaviour a user installs.
+        var path = UniqueExePath();
+
+        using var env = new FakeEnvironment();
+        env.Set(Ghostty.Core.Config.TestConfigGuard.EnvVar, "0");
+
+        using var incumbent = SingleInstanceElection.Run(enabled: true, path);
+        using var challenger = SingleInstanceElection.Run(enabled: true, path);
+
+        Assert.Equal(SingleInstanceRole.Primary, incumbent.Role);
+        Assert.Equal(SingleInstanceRole.Secondary, challenger.Role);
+    }
+
     /// <summary>
     /// Drive a real election into <paramref name="role"/>, so the theory above
     /// tests reachable states rather than a hand-built object.
@@ -297,7 +490,7 @@ public sealed class SingleInstanceElectionTests
 
             case SingleInstanceRole.Failed:
                 // A kind mismatch on the name is what makes the mutex throw.
-                var blocker = new Semaphore(1, 1, SingleInstanceNames.For(path).Mutex);
+                var blocker = new Semaphore(1, 1, SingleInstanceNames.ForProcess(path).Mutex);
                 return (SingleInstanceElection.Run(enabled: true, path), blocker);
 
             default:
