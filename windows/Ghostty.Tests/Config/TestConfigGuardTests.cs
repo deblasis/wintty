@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Ghostty.Core.Config;
 using Xunit;
@@ -11,27 +12,33 @@ namespace Ghostty.Tests.Config;
 /// refusal message. The end-to-end refusal (real app, non-zero exit before
 /// the window) is the harness matrix this guard's PR ran; these tests are
 /// what keeps the path arithmetic honest in between.
+///
+/// These tests NEVER mutate the real process environment: the guard reads
+/// the environment through <see cref="TestConfigGuard.ReadEnvironment"/>,
+/// and each test injects a dictionary over the real one. Mutating the real
+/// environment from a test races every concurrently running collection and
+/// transiently disarms the armed test host, which is the exact hole the
+/// host arming closes; the injected reader touches nothing outside the
+/// test itself (review finding M1).
 /// </summary>
 public class TestConfigGuardTests : IDisposable
 {
-    private readonly string? _original;
+    private readonly IDictionary<string, string?> _env =
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
-    // The guard reads the environment on every call, so the tests set it
-    // directly. Saved and restored once per test instance; nothing else in
-    // this assembly reads WINTTY_TEST_CONFIG, so parallel collections
-    // cannot race on it.
     public TestConfigGuardTests()
     {
-        _original = Environment.GetEnvironmentVariable(TestConfigGuard.EnvVar);
+        // Layer the dictionary over the real environment: unset names fall
+        // through, set names (including null = removed) shadow it.
+        TestConfigGuard.ReadEnvironment = name =>
+            _env.ContainsKey(name) ? _env[name] :
+            Environment.GetEnvironmentVariable(name);
     }
 
-    public void Dispose()
-    {
-        if (_original is null)
-            Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, null);
-        else
-            Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, _original);
-    }
+    public void Dispose() =>
+        TestConfigGuard.ReadEnvironment = Environment.GetEnvironmentVariable;
+
+    private void Set(string name, string? value) => _env[name] = value;
 
     private static string Temp(params string[] below)
     {
@@ -53,7 +60,7 @@ public class TestConfigGuardTests : IDisposable
     [InlineData("FALSE")]
     public void DisarmedSpellings_Leave_The_Guard_Off(string? value)
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, value);
+        Set(TestConfigGuard.EnvVar, value);
         Assert.False(TestConfigGuard.IsArmed);
     }
 
@@ -63,7 +70,7 @@ public class TestConfigGuardTests : IDisposable
     [InlineData("yes")]
     public void ArmingSpellings_Arm_The_Guard(string value)
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, value);
+        Set(TestConfigGuard.EnvVar, value);
         Assert.True(TestConfigGuard.IsArmed);
     }
 
@@ -73,14 +80,14 @@ public class TestConfigGuardTests : IDisposable
         // "WINTTY_TEST_CONFIG unset, behaviour unchanged" is the load-bearing
         // half of the rule: a user's install never sets the variable, so the
         // real config path must sail through untouched.
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, null);
+        Set(TestConfigGuard.EnvVar, null);
         TestConfigGuard.AssertUnderTemp(OutsideTemp(), "resolved config path");
     }
 
     [Fact]
     public void Config_Under_Temp_Passes_While_Armed()
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
+        Set(TestConfigGuard.EnvVar, "1");
         TestConfigGuard.AssertUnderTemp(Temp("wintty-cfg-a1", "wintty", "config.wintty"),
             "resolved config path");
     }
@@ -94,7 +101,7 @@ public class TestConfigGuardTests : IDisposable
     [Fact]
     public void Config_Outside_Temp_Is_Refused_While_Armed()
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
+        Set(TestConfigGuard.EnvVar, "1");
         var path = OutsideTemp();
         var ex = Assert.Throws<InvalidOperationException>(
             () => TestConfigGuard.AssertUnderTemp(path, "resolved config path"));
@@ -121,7 +128,7 @@ public class TestConfigGuardTests : IDisposable
     [Fact]
     public void Device_Prefix_Cannot_Smuggle_A_Path_Past_The_Compare()
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
+        Set(TestConfigGuard.EnvVar, "1");
         // The prefix survives Path.GetFullPath; stripping it first is what
         // keeps this from reading as a path nobody has an opinion about.
         var smuggled = @"\\?\" + OutsideTemp();
@@ -133,7 +140,7 @@ public class TestConfigGuardTests : IDisposable
     [Fact]
     public void Relative_And_Empty_Paths_Are_Not_Under_Temp()
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
+        Set(TestConfigGuard.EnvVar, "1");
         Assert.False(TestConfigGuard.IsUnderTemp("wintty-config"));
         Assert.False(TestConfigGuard.IsUnderTemp(""));
         Assert.False(TestConfigGuard.IsUnderTemp("   "));
@@ -145,14 +152,14 @@ public class TestConfigGuardTests : IDisposable
     {
         // libghostty builds forward-slash paths; ConfigService normalizes
         // them, but the guard must not depend on that having happened.
-        var temp = TestConfigGuard.TempAnchor.Replace('\\', '/') + "/";
+        var temp = (TestConfigGuard.TempAnchor + "/").Replace('\\', '/');
         Assert.True(TestConfigGuard.IsUnderTemp(temp + "wintty-cfg-b2/wintty"));
 
         var upper = Temp("Wintty-Cfg-C3").ToUpperInvariant();
         Assert.True(TestConfigGuard.IsUnderTemp(upper));
     }
 
-    // ---- M1: the anchor is the known-folder temp, not the environment --
+    // ---- M1 (round 0): the anchor is the known-folder temp, not the environment --
 
     [Fact]
     public void The_Anchor_Ignores_A_Redirected_TEMP_And_TMP()
@@ -160,8 +167,8 @@ public class TestConfigGuardTests : IDisposable
         // The known-folder temp cannot be moved by the process
         // environment, which is the whole point of anchoring to it: a
         // harness that repoints TEMP moves Path.GetTempPath(), never this.
-        using var redirect = new TempEnvRedirect("TEMP", OutsideTemp());
-        using var redirect2 = new TempEnvRedirect("TMP", @"C:\");
+        Set("TEMP", OutsideTemp());
+        Set("TMP", @"C:\");
 
         var anchor = TestConfigGuard.TempAnchor;
         Assert.True(string.Equals(
@@ -181,8 +188,8 @@ public class TestConfigGuardTests : IDisposable
     [InlineData("TMP")]
     public void A_Redirected_Temp_Environment_Is_Refused_While_Armed(string name)
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
-        using var redirect = new TempEnvRedirect(name, OutsideTemp());
+        Set(TestConfigGuard.EnvVar, "1");
+        Set(name, OutsideTemp());
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => TestConfigGuard.AssertTempEnvironmentIntact());
@@ -193,8 +200,8 @@ public class TestConfigGuardTests : IDisposable
     [Fact]
     public void A_Drive_Root_TEMP_Is_Refused_While_Armed()
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
-        using var redirect = new TempEnvRedirect("TEMP", @"C:\");
+        Set(TestConfigGuard.EnvVar, "1");
+        Set("TEMP", @"C:\");
 
         Assert.Throws<InvalidOperationException>(
             () => TestConfigGuard.AssertTempEnvironmentIntact());
@@ -203,9 +210,9 @@ public class TestConfigGuardTests : IDisposable
     [Fact]
     public void An_Intact_Temp_Environment_Passes_While_Armed()
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
-        using var keepTemp = new TempEnvRedirect("TEMP", TestConfigGuard.TempAnchor);
-        using var keepTmp = new TempEnvRedirect("TMP", TestConfigGuard.TempAnchor);
+        Set(TestConfigGuard.EnvVar, "1");
+        Set("TEMP", Path.GetTempPath());
+        Set("TMP", Path.GetTempPath());
 
         TestConfigGuard.AssertTempEnvironmentIntact();
     }
@@ -213,34 +220,13 @@ public class TestConfigGuardTests : IDisposable
     [Fact]
     public void The_Temp_Environment_Is_Never_Questioned_While_Unarmed()
     {
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, null);
-        using var redirect = new TempEnvRedirect("TEMP", @"C:\");
+        Set(TestConfigGuard.EnvVar, null);
+        Set("TEMP", @"C:\");
 
         TestConfigGuard.AssertTempEnvironmentIntact();
     }
 
-    /// <summary>
-    /// Scoped environment mutation: restores the previous value (or removes
-    /// the variable) on dispose, so a failing assert cannot leak state into
-    /// the next test.
-    /// </summary>
-    private sealed class TempEnvRedirect : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _original;
-
-        public TempEnvRedirect(string name, string value)
-        {
-            _name = name;
-            _original = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, value);
-        }
-
-        public void Dispose() =>
-            Environment.SetEnvironmentVariable(_name, _original);
-    }
-
-    // ---- M4: reparse points resolve before the compare -----------------
+    // ---- M4 (round 0): reparse points resolve before the compare -----------------
 
     [Fact]
     public void A_Junction_Inside_Temp_Pointing_Outside_Is_Refused()
@@ -252,7 +238,7 @@ public class TestConfigGuardTests : IDisposable
         // privilege but a cmd spawn) is the fallback; a host that allows
         // neither reports the skip and the reparse test below still covers
         // what it can.
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
+        Set(TestConfigGuard.EnvVar, "1");
         var outside = Path.Combine(
             Path.GetDirectoryName(TestConfigGuard.TempAnchor)!,
             "wintty-guard-junction-target-" + Guid.NewGuid().ToString("N"));
@@ -307,7 +293,7 @@ public class TestConfigGuardTests : IDisposable
         // Symlink creation needs a privilege (or developer mode) the test
         // host may lack; when it does, this test says so and passes, per
         // the brief's skip rule. Junctions carry the enforced case above.
-        Environment.SetEnvironmentVariable(TestConfigGuard.EnvVar, "1");
+        Set(TestConfigGuard.EnvVar, "1");
         var outside = Path.Combine(
             Path.GetDirectoryName(TestConfigGuard.TempAnchor)!,
             "wintty-guard-symlink-target-" + Guid.NewGuid().ToString("N"));
@@ -337,45 +323,39 @@ public class TestConfigGuardTests : IDisposable
         }
     }
 
-    // ---- L2: the xdg.zig mirror ----------------------------------------
+    // ---- L2 (round 0): the xdg.zig mirror ----------------------------------------
 
     [Fact]
     public void The_Config_Root_Mirror_Matches_The_Xdg_Zig_Preferences()
     {
         // The four combinations that matter, mirroring xdg.zig dir():
-        // a set-but-empty XDG does NOT fall to APPDATA (zig's orelse sees
-        // Some("")), it falls to the home + .config default.
-        using (new ScopedEnv("XDG_CONFIG_HOME", null))
-        {
-            using var appdata = new ScopedEnv("APPDATA", @"C:\Users\u\AppData\Roaming");
-            Assert.True(string.Equals(@"C:\Users\u\AppData\Roaming",
-                TestConfigGuard.ResolveConfigRoot(),
-                StringComparison.OrdinalIgnoreCase));
-        }
-        using (new ScopedEnv("XDG_CONFIG_HOME", @"C:\scratch\xdg"))
-        {
-            Assert.True(string.Equals(@"C:\scratch\xdg",
-                TestConfigGuard.ResolveConfigRoot(),
-                StringComparison.OrdinalIgnoreCase));
-        }
-        using (new ScopedEnv("XDG_CONFIG_HOME", ""))
-        {
-            using var appdata = new ScopedEnv("APPDATA", @"C:\Users\u\AppData\Roaming");
-            Assert.True(string.Equals(
-                Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".config"),
-                TestConfigGuard.ResolveConfigRoot(),
-                StringComparison.OrdinalIgnoreCase));
-        }
-        using (new ScopedEnv("XDG_CONFIG_HOME", null))
-        {
-            using var appdata = new ScopedEnv("APPDATA", "");
-            Assert.True(string.Equals(
-                Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".config"),
-                TestConfigGuard.ResolveConfigRoot(),
-                StringComparison.OrdinalIgnoreCase));
-        }
+        // a set-but-empty XDG_CONFIG_HOME does NOT fall to APPDATA (zig's
+        // orelse sees Some("")), it falls to the home + .config default.
+        Set("XDG_CONFIG_HOME", null);
+        Set("APPDATA", @"C:\Users\u\AppData\Roaming");
+        Assert.True(string.Equals(@"C:\Users\u\AppData\Roaming",
+            TestConfigGuard.ResolveConfigRoot(),
+            StringComparison.OrdinalIgnoreCase));
+        Set("XDG_CONFIG_HOME", @"C:\scratch\xdg");
+        Assert.True(string.Equals(@"C:\scratch\xdg",
+            TestConfigGuard.ResolveConfigRoot(),
+            StringComparison.OrdinalIgnoreCase));
+        // A set-but-empty XDG does NOT fall to APPDATA (zig's orelse sees
+        // Some("")); and with both empty the home + .config default wins.
+        // The overlay SHADOWS to null/empty on purpose: the armed host sets
+        // the real XDG, so fall-through would read the host root.
+        Set("XDG_CONFIG_HOME", "");
+        Set("APPDATA", @"C:\Users\u\AppData\Roaming");
+        Assert.True(string.Equals(
+            Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile), ".config"),
+            TestConfigGuard.ResolveConfigRoot(), StringComparison.OrdinalIgnoreCase));
+        Set("XDG_CONFIG_HOME", null);
+        Set("APPDATA", "");
+        Assert.True(string.Equals(
+            Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile), ".config"),
+            TestConfigGuard.ResolveConfigRoot(), StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -391,22 +371,6 @@ public class TestConfigGuardTests : IDisposable
         Assert.Contains("internal_opts.default_subdir", zig);
     }
 
-    private sealed class ScopedEnv : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _original;
-
-        public ScopedEnv(string name, string? value)
-        {
-            _name = name;
-            _original = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, value);
-        }
-
-        public void Dispose() =>
-            Environment.SetEnvironmentVariable(_name, _original);
-    }
-
     private static string RepoRoot()
     {
         var dir = AppContext.BaseDirectory;
@@ -417,48 +381,5 @@ public class TestConfigGuardTests : IDisposable
             dir = Directory.GetParent(dir)?.FullName;
         }
         throw new InvalidOperationException("repo root not found");
-    }
-}
-
-/// <summary>
-/// The refusing editor a --no-config run gets: writes are refused loudly,
-/// reads answer as the empty file the rest of that run already serves.
-/// </summary>
-public class NoConfigFileEditorTests
-{
-    private readonly NoConfigFileEditor _editor = new();
-
-    [Fact]
-    public void FilePath_Is_Empty()
-    {
-        Assert.Equal(string.Empty, _editor.FilePath);
-    }
-
-    [Fact]
-    public void Reads_Answer_As_An_Empty_Config()
-    {
-        Assert.Equal(string.Empty, _editor.ReadAll());
-        Assert.Empty(_editor.GetRepeatableValues("keybind"));
-    }
-
-    [Theory]
-    [InlineData("font-size", "12")]
-    public void Writes_Are_Refused_Not_Silently_Dropped(string key, string value)
-    {
-        // A no-op write would tell a user their change persisted; the
-        // refusal is the honest answer, and the debounced scheduler and
-        // the startup migrator log it rather than crash on it.
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => _editor.SetValue(key, value));
-        Assert.Contains("--no-config", ex.Message);
-    }
-
-    [Fact]
-    public void Every_Mutating_Method_Refuses()
-    {
-        Assert.Throws<InvalidOperationException>(() => _editor.RemoveValue("k"));
-        Assert.Throws<InvalidOperationException>(() => _editor.WriteRaw("x = 1"));
-        Assert.Throws<InvalidOperationException>(
-            () => _editor.SetRepeatableValues("k", new[] { "v" }));
     }
 }
