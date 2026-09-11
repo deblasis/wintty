@@ -430,7 +430,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         NativeMethods.ConfigSetColorScheme(_config, ToScheme(isOsDark));
         NativeMethods.ConfigFinalize(_config);
 
-        var pathStr = NativeMethods.ConfigOpenPath();
+        // --no-config resolves without the create: the flag ignores the
+        // file, so it must not even leave an empty one behind (the native
+        // openPath creates dir + file when missing; the no-create variant
+        // performs the same resolution without that side effect).
+        var pathStr = _noConfig
+            ? NativeMethods.ConfigOpenPathNoCreate()
+            : NativeMethods.ConfigOpenPath();
         var rawPath = pathStr.Ptr != IntPtr.Zero
             ? Marshal.PtrToStringUTF8(pathStr.Ptr, (int)pathStr.Len) ?? string.Empty
             : string.Empty;

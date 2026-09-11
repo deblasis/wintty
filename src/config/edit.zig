@@ -27,48 +27,66 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
     // Get the path we should open
     const config_path = try configPath(alloc_arena);
 
-    if (!config_path.exists) {
-        if (std.fs.path.dirname(config_path.name)) |config_dir| check_dir: {
-            // Check to see if dir exists.
-            const dir = std.Io.Dir.cwd().openDir(global.io(), config_dir, .{ .follow_symlinks = true }) catch |err| {
-                switch (err) {
-                    error.FileNotFound => {
-                        // Create config directory recursively. Note that this does not
-                        // allow intermediate symlinks by design, see
-                        // std.Io.Threaded.dirCreateDirPath for why. If some sort of
-                        // complex symlink structure is needed, it will need to be created
-                        // manually.
-                        try std.Io.Dir.cwd().createDirPath(global.io(), config_dir);
-                        break :check_dir;
-                    },
-                    else => return err,
-                }
-            };
-            dir.close(global.io());
-        }
-
-        // Try to create file and go on if it already exists. The handle is
-        // closed immediately: all this call needs is for the file to exist.
-        //
-        // Leaking it costs nothing on POSIX. On Windows the create asks for
-        // GENERIC_WRITE, so while the handle lives the file cannot be opened
-        // by anyone requesting FILE_SHARE_READ alone, which is what .NET's
-        // File.ReadLines and friends default to. The host reads this file
-        // right after asking for its path, and on a first run that read is
-        // the one that creates it, so it denies itself.
-        if (std.Io.Dir.createFileAbsolute(
-            global.io(),
-            config_path.name,
-            .{ .exclusive = true },
-        )) |file| {
-            file.close(global.io());
-        } else |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        }
-    }
+    if (!config_path.exists) try createIfMissing(config_path.name);
 
     return try alloc_gpa.dupeZ(u8, config_path.name);
+}
+
+/// The path a caller should NAME, without the create: the same resolution
+/// openPath performs, minus its side effect. A `--no-config` run still
+/// resolves the path (the Settings UI, the raw editor and the "open config
+/// file" command all want to know where the file lives whether or not it is
+/// in force), but the flag exists to ignore the config, and a flag that
+/// ignores the file must not leave an empty one behind.
+pub fn openPathNoCreate(alloc_gpa: Allocator) ![:0]const u8 {
+    // Use an arena to make memory management easier in here.
+    var arena = ArenaAllocator.init(alloc_gpa);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    const config_path = try configPath(alloc_arena);
+    return try alloc_gpa.dupeZ(u8, config_path.name);
+}
+
+fn createIfMissing(name: []const u8) !void {
+    if (std.fs.path.dirname(name)) |config_dir| check_dir: {
+        // Check to see if dir exists.
+        const dir = std.Io.Dir.cwd().openDir(global.io(), config_dir, .{ .follow_symlinks = true }) catch |err| {
+            switch (err) {
+                error.FileNotFound => {
+                    // Create config directory recursively. Note that this does not
+                    // allow intermediate symlinks by design, see
+                    // std.Io.Threaded.dirCreateDirPath for why. If some sort of
+                    // complex symlink structure is needed, it will need to be created
+                    // manually.
+                    try std.Io.Dir.cwd().createDirPath(global.io(), config_dir);
+                    break :check_dir;
+                },
+                else => return err,
+            }
+        };
+        dir.close(global.io());
+    }
+
+    // Try to create file and go on if it already exists. The handle is
+    // closed immediately: all this call needs is for the file to exist.
+    //
+    // Leaking it costs nothing on POSIX. On Windows the create asks for
+    // GENERIC_WRITE, so while the handle lives the file cannot be opened
+    // by anyone requesting FILE_SHARE_READ alone, which is what .NET's
+    // File.ReadLines and friends default to. The host reads this file
+    // right after asking for its path, and on a first run that read is
+    // the one that creates it, so it denies itself.
+    if (std.Io.Dir.createFileAbsolute(
+        global.io(),
+        name,
+        .{ .exclusive = true },
+    )) |file| {
+        file.close(global.io());
+    } else |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    }
 }
 
 const ConfigPathResult = struct {

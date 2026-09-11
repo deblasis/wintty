@@ -62,10 +62,16 @@ public class TestConfigGuardWiringTests
         var source = ShellSource.Load("Program.cs");
         var guard = source.Method("GuardTestConfigRoot");
 
+        // Every refusal path funnels through RefuseTestConfigStart, so the
+        // exit code and the stderr line live in exactly one place.
+        var refusals = guard.Calls("RefuseTestConfigStart");
+        Assert.NotEmpty(refusals);
+
+        var refuse = source.Method("RefuseTestConfigStart");
         // The refusal must be an exit the harness can distinguish from a
         // crash, and the enum member is what keeps that exit code from
         // silently colliding with a different meaning later.
-        var exit = guard.Body!.Statements.OfType<ExpressionStatementSyntax>()
+        var exit = refuse.Body!.Statements.OfType<ExpressionStatementSyntax>()
             .Select(s => s.Expression).OfType<InvocationExpressionSyntax>()
             .SingleOrDefault(c => c.CalleeText() == "Environment.Exit");
         Assert.NotNull(exit);
@@ -73,7 +79,74 @@ public class TestConfigGuardWiringTests
 
         // A refusal nobody can see is a hang with extra steps: the method
         // must say why on stderr before it exits.
-        Assert.NotEmpty(guard.Calls("WriteStderr"));
+        Assert.NotEmpty(refuse.Calls("WriteStderr"));
+        Assert.NotEmpty(refuse.Calls("WriteStartupDiagnostic"));
+    }
+
+    [Fact]
+    public void GuardTestConfigRoot_Checks_The_Temp_Environment_Before_The_Root()
+    {
+        var source = ShellSource.Load("Program.cs");
+        var guard = source.Method("GuardTestConfigRoot");
+
+        // M1: a redirected TEMP/TMP is the one environment change that
+        // could move the guard's reference point, so it is the FIRST armed
+        // question, before the root is even resolved.
+        var envCheck = guard.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .FirstOrDefault(i => i.CalleeText().EndsWith(
+                "TestConfigGuard.AssertTempEnvironmentIntact",
+                StringComparison.Ordinal));
+        Assert.NotNull(envCheck);
+        var rootResolve = guard.DescendantNodes()
+            .OfType<IdentifierNameSyntax>()
+            .FirstOrDefault(i => i.Identifier.ValueText == "ResolveConfigRoot");
+        Assert.NotNull(rootResolve);
+        Assert.True(envCheck!.Span.Start < rootResolve!.Span.Start,
+            "the TEMP/TMP integrity check must precede the root resolution");
+    }
+
+    [Fact]
+    public void GuardTestConfigSources_Covers_The_Flag_And_The_Includes()
+    {
+        var source = ShellSource.Load("Program.cs");
+        var sources = source.Method("GuardTestConfigSources");
+
+        // The CLI flag form: both spellings the rewrite passes through.
+        Assert.Contains("--config-file=", sources.Body!.ToString());
+
+        // The include form: the ini-shaped key, scanned from the root's
+        // default files and recursed (the ScanConfigIncludes local
+        // function is the recursion).
+        Assert.Contains("config-file", sources.Body!.ToString());
+        Assert.Contains("ScanConfigIncludes", sources.Body!.ToString());
+
+        // GuardTestConfigRoot must call it, or none of this runs.
+        Assert.NotEmpty(source.Method("GuardTestConfigRoot")
+            .Calls("GuardTestConfigSources"));
+    }
+
+    [Fact]
+    public void NoConfig_Resolves_The_Path_Without_Creating_It()
+    {
+        var source = ShellSource.Load("Services.ConfigService.cs");
+        var ctor = source.Root.DescendantNodes()
+            .OfType<ConstructorDeclarationSyntax>()
+            .Single(c => c.Identifier.ValueText == "ConfigService");
+
+        // The create is native (edit.zig openPath); the no-create variant
+        // is the same resolution without it. A --no-config run must not
+        // even leave an empty file behind where none existed.
+        var conditional = ctor.Body!.Statements
+            .SelectMany(s => s.DescendantNodes().OfType<ConditionalExpressionSyntax>())
+            .Single(c => c.WhenTrue.ToString().Contains("ConfigOpenPathNoCreate"));
+        Assert.Contains("ConfigOpenPath", conditional.WhenFalse.ToString());
+
+        // The early single-instance read resolves too, under the same rule.
+        var program = ShellSource.Load("Program.cs");
+        var reader = program.Method("ReadSingleInstanceSetting");
+        Assert.Contains("ConfigOpenPathNoCreate", reader.Body!.ToString());
+        Assert.Contains("ConfigOpenPath", reader.Body!.ToString());
     }
 
     [Fact]

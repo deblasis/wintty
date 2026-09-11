@@ -221,6 +221,19 @@ export fn ghostty_config_open_path() String {
     return .fromSlice(path);
 }
 
+/// Same resolution as ghostty_config_open_path without its create side
+/// effect: the path a `--no-config` run should name. That run ignores the
+/// config, so it must not even leave an empty file behind where none
+/// existed.
+export fn ghostty_config_open_path_no_create() String {
+    const path = edit.openPathNoCreate(global.alloc()) catch |err| {
+        log.err("error resolving config path err={}", .{err});
+        return .empty;
+    };
+
+    return .fromSlice(path);
+}
+
 /// Sync with ghostty_diagnostic_s
 const Diagnostic = extern struct {
     message: [*:0]const u8 = "",

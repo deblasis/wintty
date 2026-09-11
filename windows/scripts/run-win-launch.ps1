@@ -54,6 +54,26 @@ if ($mode -eq 'real-forced') {
     Write-Host "  Root: $root" -ForegroundColor Red
     Write-Host ('*' * 72) -ForegroundColor Red
     Write-Host ''
+
+    # From inside an agent session the real config needs a human at the
+    # keyboard: the typed confirmation is something an agent cannot give
+    # (an agent shell's stdin is redirected or null, so the gate refuses
+    # before even asking). A human types it once; a human without
+    # CLAUDECODE never sees the prompt at all.
+    if ($env:CLAUDECODE -eq '1') {
+        if ([Console]::IsInputRedirected -or -not $Host.UI.IsInteractive) {
+            Write-Host '  REAL_CONFIG cannot be used from an agent session without a human' -ForegroundColor Red
+            Write-Host '  at the keyboard: the console is non-interactive, so the typed' -ForegroundColor Red
+            Write-Host '  confirmation cannot be given. Use the isolated default instead' -ForegroundColor Red
+            Write-Host '  (this is what an agent session gets without REAL_CONFIG).' -ForegroundColor Red
+            exit 3
+        }
+        $answer = Read-Host 'Type REAL to run against YOUR REAL config'
+        if ($answer -ne 'REAL') {
+            Write-Host 'not confirmed; aborting (nothing was launched).' -ForegroundColor Red
+            exit 3
+        }
+    }
 }
 
 # After the banner, not before: the announcement is the decision, and a
