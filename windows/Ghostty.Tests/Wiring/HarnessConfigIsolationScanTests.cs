@@ -72,15 +72,48 @@ public class HarnessConfigIsolationScanTests
     private static readonly Regex[] LaunchVerbs =
     {
         new(@"Start-Process", RegexOptions.Compiled),
+        // The Start-Process alias, and a bare lowercase 'start' (cmd style);
+        // both case-sensitive so prose and .Start( methods stay out.
+        new(@"\bsaps\b"),
+        new(@"\bstart\b"),
         new(@"ProcessStartInfo", RegexOptions.Compiled),
         new(@"Process\]::Start\(", RegexOptions.Compiled),
         new(@"Process\.Start\(", RegexOptions.Compiled),
         new(@"Invoke-Item", RegexOptions.Compiled),
-        new(@"(?<!\S)&\s*\$", RegexOptions.Compiled),
+        // The call operator, with a variable OR a literal/interpolated path:
+        // the verb matches the stripped line too ('& ' survives stripping),
+        // while target evidence reads the raw line where the path lives.
+        new(@"(?<!\S)&\s*"),
         new(@"explorer\.exe", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"\bcmd\b.*\bstart\b", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"dotnet\s+run", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        // COM launches, gated on the file actually creating a shell object
+        // (see UsesComShell); the method call is the verb.
+        new(@"\.(?:Run|Exec|ShellExecute)\s*\("),
     };
+
+    /// <summary>
+    /// Whether any line in the file creates the COM shell object whose
+    /// Run/Exec/ShellExecute methods launch programs.
+    /// </summary>
+    private static bool UsesComShell(string[] lines) =>
+        lines.Any(l => IsCode(l) && Regex.IsMatch(
+            l, @"WScript\.Shell|Shell\.Application",
+            RegexOptions.IgnoreCase));
+
+    /// <summary>
+    /// The debugger attach flags: a debugger whose arguments attach to an
+    /// existing process (-p pid, -pn name) launches nothing and is exempt.
+    /// </summary>
+    private static readonly Regex AttachFlag = new(
+        @"-(?:p|pn|pid)\b", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The debugger binaries themselves; a debugger that RUNS the app as
+    /// its debuggee is an app launch and must isolate like any other.
+    /// </summary>
+    private static readonly Regex DebuggerToken = new(
+        @"(?i)\b(cdb|windbg|procdump)", RegexOptions.Compiled);
 
     /// <summary>
     /// A variable whose name mentions the exe: $ExePath, $exe, $Exe,
@@ -146,11 +179,44 @@ public class HarnessConfigIsolationScanTests
     private sealed record LaunchSite(string File, int Line, string Text);
 
     /// <summary>
+    /// The positionally-decided target expressions of a launch line: the
+    /// value after -FilePath, the argument of the call operator, the first
+    /// argument of ::Start / Invoke-Item / a COM Run, the ProcessStartInfo
+    /// constructor argument, and the first positional token of the
+    /// Start-Process spellings. Target evidence is judged on THESE, not on
+    /// the whole line, so an app path sitting in a debugger's -ArgumentList
+    /// does not make the debugger an app launch (R1-4 runs the ruling the
+    /// other way below).
+    /// </summary>
+    private static List<string> TargetCandidates(string line, string stripped)
+    {
+        var candidates = new List<string>();
+        foreach (var m in Regex.Matches(
+                     stripped, @"-(?:FilePath|FileName|Path)\s+(\S+)"))
+            candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
+        foreach (var m in Regex.Matches(line, @"(?<!\S)&\s*(\S+)"))
+            candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
+        foreach (var m in Regex.Matches(
+                     line,
+                     @"(?:Process\]::Start|Process\.Start|\.Run|\.Exec|\.ShellExecute)\s*\(\s*([^,)]+)"))
+            candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
+        foreach (var m in Regex.Matches(
+                     line, @"ProcessStartInfo\]::new\(\s*([^,)]*)"))
+            candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
+        foreach (var m in Regex.Matches(stripped, @"(?:^|\s)(?:Start-Process|saps)\s+(?!-)(\S+)"))
+            candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
+        foreach (var m in Regex.Matches(stripped, @"Invoke-Item\s+(\S+)"))
+            candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
+        return candidates;
+    }
+
+    /// <summary>
     /// Whether the target a launch line names is the app. Resolution
-    /// follows same-line evidence first (an exe-named variable, a literal
-    /// app path), then the variable's assignment or the psi FileName /
-    /// FilePath property assignments, so a harness that launches through
-    /// an intermediate variable is judged by what the variable holds.
+    /// follows the positional candidates (an app literal among them, or a
+    /// candidate whose definitions/properties/functions reach one), then
+    /// the whole line when no position could be decided. A candidate that
+    /// resolves to a DEBUGGER is judged by the ruling: running the app as
+    /// its debuggee is an app launch; attaching to a pid is not.
     /// Anything the rules cannot resolve fails CLOSED: the harness must
     /// name its target legibly or arm the guard, and an unresolved launch
     /// is flagged rather than trusted.
@@ -159,19 +225,40 @@ public class HarnessConfigIsolationScanTests
         string line, string[] lines, Dictionary<string, List<string>> functions,
         bool callOperatorOnly)
     {
-        // Target evidence reads the raw line: the app exe arrives quoted
-        // more often than not.
-        if (AppLiteral.IsMatch(line)) return true;
         if (Regex.IsMatch(line, @"dotnet\s+run", RegexOptions.IgnoreCase) &&
             ProjectReference.IsMatch(line)) return true;
 
         var stripped = QuotedSpan.Replace(line, "");
+        var candidates = TargetCandidates(line, stripped);
+
+        // Literal app paths: among the candidates when a position was
+        // decided, on the whole line otherwise (fail closed).
+        if (candidates.Count > 0)
+        {
+            if (candidates.Any(c => AppLiteral.IsMatch(c))) return true;
+        }
+        else if (AppLiteral.IsMatch(line)) return true;
+
+        // The debugger ruling: a candidate that resolves to a debugger is
+        // an app launch exactly when the app is its debuggee (an app
+        // literal among the remaining arguments, with no attach flag).
+        foreach (var candidate in candidates)
+        {
+            if (!ResolvesToDebugger(candidate, lines, functions)) continue;
+            if (AppLiteral.IsMatch(line) && !AttachFlag.IsMatch(line))
+                return true;
+            return false;
+        }
+
+        var varSource = candidates.Count > 0
+            ? string.Join(" ", candidates)
+            : stripped;
         var sawAny = false;
         var sawApp = false;
         var sawTooling = false;
         var sawEvidence = false;
 
-        foreach (var name in AnyVar.Matches(stripped)
+        foreach (var name in AnyVar.Matches(varSource)
                      .Cast<System.Text.RegularExpressions.Match>()
                      .Select(m => m.Groups[1].Value)
                      .Distinct())
@@ -223,10 +310,32 @@ public class HarnessConfigIsolationScanTests
         // invoked and needs positive evidence.
         if (callOperatorOnly) return false;
         if (sawEvidence) return true;
-        return AnyVar.Matches(stripped)
+        return AnyVar.Matches(varSource)
             .Cast<System.Text.RegularExpressions.Match>()
             .Select(m => m.Groups[1].Value)
             .Any(n => ExeNamedVar.IsMatch("$" + n));
+    }
+
+    /// <summary>
+    /// Whether a positional candidate resolves to a debugger binary: the
+    /// candidate itself names one, or its definitions/properties do.
+    /// </summary>
+    private static bool ResolvesToDebugger(
+        string candidate, string[] lines,
+        Dictionary<string, List<string>> functions)
+    {
+        if (DebuggerToken.IsMatch(candidate)) return true;
+        foreach (var name in AnyVar.Matches(candidate)
+                     .Cast<System.Text.RegularExpressions.Match>()
+                     .Select(m => m.Groups[1].Value)
+                     .Distinct())
+        {
+            if (DefinitionsOf(lines, name).Any(d => DebuggerToken.IsMatch(d.Rhs)))
+                return true;
+            if (PropertyTargets(lines, name).Any(d => DebuggerToken.IsMatch(d)))
+                return true;
+        }
+        return false;
     }
 
     private static string StripLiterals(string line) =>
@@ -365,6 +474,13 @@ public class HarnessConfigIsolationScanTests
         if (lines.Length == 0) return found;
         var arms = UnconditionalArmLines(lines);
         var functions = FunctionBodiesFor(lines);
+        // The COM method verb only counts in a file that creates the COM
+        // shell object; .Run( exists on many innocuous objects.
+        var comVerbs = LaunchVerbs.Where(v =>
+            v.ToString().Contains("ShellExecute")).ToList();
+        var effectiveVerbs = UsesComShell(lines)
+            ? LaunchVerbs.ToList()
+            : LaunchVerbs.Except(comVerbs).ToList();
 
         for (var i = 0; i < lines.Length; i++)
         {
@@ -374,7 +490,7 @@ public class HarnessConfigIsolationScanTests
             // The verb must survive literal stripping: a manifest prose
             // string that mentions "cmd" and "start" is not a launch.
             var stripped = StripLiterals(line);
-            var matching = LaunchVerbs.Where(v => v.IsMatch(line)).ToList();
+            var matching = effectiveVerbs.Where(v => v.IsMatch(line)).ToList();
             if (matching.Count == 0) continue;
             if (!matching.Any(v => v.IsMatch(stripped))) continue;
 
@@ -474,12 +590,18 @@ public class HarnessConfigIsolationScanTests
             "violation-psi-indirect-literal.ps1",
             "violation-unresolved-var.ps1",
             "violation-conditional-arm.ps1",
+            "violation-call-operator-literal.ps1",
+            "violation-call-operator-interp.ps1",
+            "violation-saps.ps1",
+            "violation-com-run.ps1",
+            "violation-cdb-launches-app.ps1",
         };
         var expectedClean = new HashSet<string>(StringComparer.Ordinal)
         {
             "clean-armed-launch.ps1",
             "clean-tooling-psi.ps1",
             "clean-tooling-debugger.ps1",
+            "clean-cdb-attach.ps1",
         };
 
         var flagged = new HashSet<string>(StringComparer.Ordinal);
@@ -505,16 +627,73 @@ public class HarnessConfigIsolationScanTests
     }
 
     /// <summary>
-    /// Spellings that make a staging root random: the .NET GUID spellings
-    /// used across the harnesses, the crypto-random helpers, and the two
-    /// library entry points that own randomness themselves.
+    /// The staging side of the fixture corpus: every non-random shape the
+    /// re-review proved the chain-follower blessed (direct fixed names,
+    /// prev-named variables that are not restores, 'preview' literals, PID
+    /// keys, clock keys, and the classic intermediate variable), plus a
+    /// green control for each allowed form (guid, GetRandomFileName, the
+    /// helper, and a genuine paired save/restore).
     /// </summary>
-    private static readonly string[] RandomnessMarkers =
+    [Fact]
+    public void The_Scan_Still_Refuses_Every_NonRandom_Staging_Shape()
     {
-        "[guid]::NewGuid", "New-Guid", "GetRandomFileName",
-        "RandomNumberGenerator", "Enter-WinttyTestConfig",
-        "Start-SeamSession", "New-WinttyTestConfigRoot", "New-SeamToken",
-    };
+        var root = RepoRoot();
+        var fixtureDir = Path.Combine(
+            root, "windows", "Ghostty.Tests", "Wiring", "ScanFixtures");
+        Assert.True(Directory.Exists(fixtureDir), "ScanFixtures not found");
+
+        var expectedViolations = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "staging-direct-fixed.ps1",
+            "staging-prevname-var.ps1",
+            "staging-preview-literal.ps1",
+            "staging-pid.ps1",
+            "staging-clock.ps1",
+            "staging-classic-var.ps1",
+        };
+        var expectedClean = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "staging-green-guid.ps1",
+            "staging-green-randomfile.ps1",
+            "staging-green-helper.ps1",
+            "staging-green-restore.ps1",
+        };
+
+        var flagged = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in Directory.EnumerateFiles(fixtureDir, "staging-*.ps1")
+                     .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(file);
+            var lines = File.ReadAllLines(file);
+            var functions = FunctionBodies(lines);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                if (!IsCode(line)) continue;
+                var assignment = XdgAssignment.Match(line);
+                if (!assignment.Success) continue;
+                if (UnrandomizedStaging(
+                        assignment.Groups[1].Value, lines, functions,
+                        new HashSet<string>(), 0) is not null)
+                {
+                    flagged.Add(name);
+                    break;
+                }
+            }
+        }
+
+        var missing = expectedViolations.Except(flagged).ToList();
+        Assert.True(
+            missing.Count == 0,
+            "staging shape(s) the scan wrongly blesses (fixture not " +
+            "flagged): " + string.Join(", ", missing));
+
+        var falseFlags = expectedClean.Intersect(flagged).ToList();
+        Assert.True(
+            falseFlags.Count == 0,
+            "allowed staging shape(s) the scan flags: " +
+            string.Join(", ", falseFlags));
+    }
 
     /// <summary>
     /// Assignments of the config root: process-wide or per-child psi.
@@ -557,6 +736,93 @@ public class HarnessConfigIsolationScanTests
     /// saved value, or an empty default). Returns the offending definition
     /// when the chain reaches a temp path or literal without randomness.
     /// </summary>
+    /// <summary>
+    /// Sources that are proof of randomness in a staging name. Anything
+    /// else in the name-building position fails: the founder rule wants a
+    /// randomly generated name per run.
+    /// </summary>
+    private static readonly string[] RandomnessMarkers =
+    {
+        "[guid]::NewGuid", "New-Guid", "GetRandomFileName",
+        "RandomNumberGenerator", "Enter-WinttyTestConfig",
+        "Start-SeamSession", "New-WinttyTestConfigRoot", "New-SeamToken",
+    };
+
+    /// <summary>
+    /// Name sources that are positively NOT random, whatever else the line
+    /// spells: the process id (reused across reboots), and any clock
+    /// formatting (a within-a-minute collision class of its own).
+    /// </summary>
+    private static readonly Regex NonRandomNameSource = new(
+        @"\$PID\b|Get-Date|HHmmss|yyyyMMdd|mmss",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Whether the expression builds a path with a fixed NAME in it: a
+    /// quoted literal riding a temp base (the lazy direct form), or a
+    /// quoted literal that is itself a path. Bare quoted segments with no
+    /// path context ('primary', 'true', the fixed 'wintty' SUBDIRECTORY
+    /// under an already-random root) are not root names and must not fire
+    /// this.
+    /// </summary>
+    private static bool HasFixedName(string rhs)
+    {
+        var tempBase = rhs.Contains("$env:TEMP", StringComparison.Ordinal) ||
+                       rhs.Contains("GetTempPath", StringComparison.Ordinal);
+        foreach (System.Text.RegularExpressions.Match m in
+                     QuotedSpan.Matches(rhs))
+        {
+            var body = m.Value.Substring(1, m.Value.Length - 2);
+            if (body.Length == 0) continue;
+            if (tempBase) return true;
+            if (body.Contains('\\') || body.Contains('/') ||
+                body.Contains(':')) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the rhs is an exact save/restore: it assigns back a value
+    /// provably SAVED FROM $env:XDG_CONFIG_HOME earlier in the file, paired
+    /// by the variable or member, not by its name. A variable merely named
+    /// $previousSomething whose definition is a fixed path is not a
+    /// restore, and neither is a literal that happens to contain 'prev'.
+    /// </summary>
+    private static bool IsPairedRestore(string rhs, string[] lines)
+    {
+        var trimmed = rhs.Trim().TrimEnd('}', ';').Trim();
+        var plain = Regex.Match(trimmed, @"^\$([A-Za-z_]\w*)$");
+        if (plain.Success)
+        {
+            return DefinitionsOf(lines, plain.Groups[1].Value)
+                .Any(d => d.Rhs.Contains(
+                    "$env:XDG_CONFIG_HOME", StringComparison.Ordinal));
+        }
+
+        // The member shape ($Session.OrigXdg): the member was populated
+        // from the env var inside a hashtable or object assignment.
+        var member = Regex.Match(trimmed, @"^\$\w+[.:](\w+)$");
+        if (member.Success)
+        {
+            var name = member.Groups[1].Value;
+            var savedFrom = new Regex(
+                @"^\s*" + Regex.Escape(name) +
+                @"\s*=\s*(?:if\s*\(.*?\)\s*\{)?\s*[^#\r\n]*\$env:XDG_CONFIG_HOME");
+            return lines.Any(l => IsCode(l) && savedFrom.IsMatch(l));
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Randomness is a POSITIVE proof: the assigned expression, or every
+    /// chain it is built from, must reach a random-name source. The
+    /// assignment's own right-hand side carries the same tripwires the
+    /// followed definitions do (a temp or fixed-literal base with no
+    /// marker, a PID, a clock), so the direct lazy spelling cannot pass
+    /// just because no variable is involved. The one exemption is the
+    /// paired save/restore.
+    /// </summary>
     private static string? UnrandomizedStaging(
         string rhs, string[] lines, Dictionary<string, List<string>> functions,
         HashSet<string> visited, int hops)
@@ -564,13 +830,20 @@ public class HarnessConfigIsolationScanTests
         if (RandomnessMarkers.Any(m => rhs.Contains(m, StringComparison.Ordinal)))
             return null;
 
-        // Restores: the saved-original spellings, or reading the variable
-        // back from the environment.
-        if (rhs.Contains("$env:XDG_CONFIG_HOME", StringComparison.Ordinal) ||
-            Regex.IsMatch(rhs, @"(?:orig|prev|previous)", RegexOptions.IgnoreCase))
-            return null;
+        if (IsPairedRestore(rhs, lines)) return null;
 
         if (hops > 6) return $"{rhs.Trim()} (chain too deep to verify)";
+
+        // The own-RHS tripwires: reached without a marker, these are the
+        // non-random staging shapes exactly as the re-review spelled them.
+        if (NonRandomNameSource.IsMatch(rhs))
+            return $"not a random name source: {rhs.Trim()}";
+        if (rhs.Contains("$env:TEMP", StringComparison.Ordinal) ||
+            rhs.Contains("GetTempPath", StringComparison.Ordinal) ||
+            rhs.Contains("[System.IO.Path]::GetTempPath", StringComparison.Ordinal))
+            return $"temp base with no random name: {rhs.Trim()}";
+        if (HasFixedName(rhs))
+            return $"fixed literal name: {rhs.Trim()}";
 
         // Follow variables assigned in this file.
         foreach (var match in VarRef.Matches(rhs).Cast<System.Text.RegularExpressions.Match>())
@@ -581,16 +854,6 @@ public class HarnessConfigIsolationScanTests
             if (defs.Count == 0) continue;
             foreach (var def in defs)
             {
-                if (RandomnessMarkers.Any(m => def.Rhs.Contains(m, StringComparison.Ordinal)))
-                    return null;
-                // A definition that names a temp path with no randomness is
-                // the fixed/clock-keyed staging this rule exists for.
-                if (def.Rhs.Contains("$env:TEMP", StringComparison.Ordinal) ||
-                    def.Rhs.Contains("GetTempPath", StringComparison.Ordinal) ||
-                    Regex.IsMatch(def.Rhs, @"""\w+wintty[\w-]*"""))
-                {
-                    return $"line {def.Line}: {def.Rhs.Trim()}";
-                }
                 var verdict = UnrandomizedStaging(
                     def.Rhs, lines, functions, visited, hops + 1);
                 if (verdict is not null) return $"line {def.Line}: {verdict}";

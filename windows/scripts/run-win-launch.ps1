@@ -13,7 +13,7 @@
 #   - an agent session: isolated by default. Claude Code sets CLAUDECODE=1
 #     in every process it spawns, and CLAUDECODE is absent from the User
 #     and Machine environments, so a human terminal never carries it. The
-#     April config taint was an agent manual test pass through a dev build,
+#     April taint was an agent manual test pass through a dev build,
 #     which is exactly the path this closes without affecting users.
 #   - REAL_CONFIG=1: overrides every other spelling, runs against the real
 #     config, and announces itself loudly, because running an agent session
@@ -37,8 +37,51 @@ function Get-RunWinMode {
     return 'real'
 }
 
+# The confirmation's two effects are injectable so the decision table is
+# unit-testable without a console at all: a line reader and an
+# is-interactive predicate, both scriptblocks. The defaults are the real
+# console behaviors; probes pass fakes.
+$script:ReadRealConfigConfirmation = {
+    param([string]$Prompt)
+    Read-Host $Prompt
+}
+$script:TestRealConfigConsoleInteractive = {
+    -not [Console]::IsInputRedirected -and $Host.UI.IsInteractive
+}
+
+# The confirmation primitive: asks for the typed word whenever invoked and
+# refuses every non-interactive context. Returns $true only when a human
+# at an interactive console typed REAL.
+#
+# Boundary note (deliberate): the CALLER applies this only when CLAUDECODE
+# marks the session as an agent's. CLAUDECODE is self-reported by the same
+# process, so this gate is a VISIBILITY layer that makes agent misuse loud,
+# not a boundary. The boundary is the app-side WINTTY_TEST_CONFIG guard and
+# its env-independent known-folder temp anchor, which no environment
+# variable in this process can move.
+function Confirm-RealConfigUse {
+    param(
+        [Parameter(Mandatory)][scriptblock]$ReadInput,
+        [Parameter(Mandatory)][scriptblock]$IsInteractive
+    )
+    if (-not (& $IsInteractive)) {
+        Write-Host '  REAL_CONFIG cannot be used from an agent session without a human' -ForegroundColor Red
+        Write-Host '  at the keyboard: the console is non-interactive, so the typed' -ForegroundColor Red
+        Write-Host '  confirmation cannot be given. Use the isolated default instead' -ForegroundColor Red
+        Write-Host '  (this is what an agent session gets without REAL_CONFIG).' -ForegroundColor Red
+        return $false
+    }
+    $answer = & $ReadInput 'Type REAL to run against YOUR REAL config'
+    if ($answer -ne 'REAL') {
+        Write-Host 'not confirmed; aborting (nothing was launched).' -ForegroundColor Red
+        return $false
+    }
+    return $true
+}
+
 # Dot-sourced (InvocationName '.') means someone is probing Get-RunWinMode
-# without launching anything; the launch is for a real invocation only.
+# or Confirm-RealConfigUse without launching anything; the launch is for a
+# real invocation only.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 if (-not $ExePath) { throw 'run-win-launch.ps1 needs -ExePath <path to Wintty.exe>' }
@@ -59,18 +102,12 @@ if ($mode -eq 'real-forced') {
     # keyboard: the typed confirmation is something an agent cannot give
     # (an agent shell's stdin is redirected or null, so the gate refuses
     # before even asking). A human types it once; a human without
-    # CLAUDECODE never sees the prompt at all.
+    # CLAUDECODE never sees the prompt at all. Visibility layer, not a
+    # boundary: see the note on Confirm-RealConfigUse.
     if ($env:CLAUDECODE -eq '1') {
-        if ([Console]::IsInputRedirected -or -not $Host.UI.IsInteractive) {
-            Write-Host '  REAL_CONFIG cannot be used from an agent session without a human' -ForegroundColor Red
-            Write-Host '  at the keyboard: the console is non-interactive, so the typed' -ForegroundColor Red
-            Write-Host '  confirmation cannot be given. Use the isolated default instead' -ForegroundColor Red
-            Write-Host '  (this is what an agent session gets without REAL_CONFIG).' -ForegroundColor Red
-            exit 3
-        }
-        $answer = Read-Host 'Type REAL to run against YOUR REAL config'
-        if ($answer -ne 'REAL') {
-            Write-Host 'not confirmed; aborting (nothing was launched).' -ForegroundColor Red
+        if (-not (Confirm-RealConfigUse `
+                -ReadInput $script:ReadRealConfigConfirmation `
+                -IsInteractive $script:TestRealConfigConsoleInteractive)) {
             exit 3
         }
     }
