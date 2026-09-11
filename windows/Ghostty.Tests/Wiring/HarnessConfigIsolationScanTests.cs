@@ -243,16 +243,56 @@ public class HarnessConfigIsolationScanTests
         // Splatting: @name passes the parameters of a hashtable; the
         // launch target is that hashtable's FilePath/FileName/Path member,
         // literal or variable. The member sits on the opener line itself
-        // when the hashtable is written on one line, so the member pattern
-        // tolerates the `$name = @{` prefix.
+        // when the hashtable is written on one line, and a MERGED splat
+        // (`$sp = $common + $extra`, `$sp += @{ ... }`) is followed through
+        // each operand's own hashtable, one or more hops. An operand that
+        // resolves to nothing leaves the splat unresolved, and an
+        // unresolved splat contributes NO candidate: the whole-line
+        // fallback below stays in force, so a merged splat is never
+        // blessed silently.
         foreach (var m in Regex.Matches(line, @"@(\w+)"))
         {
             var name = ((System.Text.RegularExpressions.Match)m).Groups[1].Value;
-            var opener = new Regex(
-                @"^\s*\$" + Regex.Escape(name) + @"\s*=\s*@\{");
-            for (var i = 0; i < lines.Length; i++)
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            if (TrySplatMembers(name, lines, visited, 0, out var members))
+                candidates.AddRange(members);
+        }
+
+        return candidates
+            .Where(c => !Regex.IsMatch(c, @"^[)\}]+$"))
+            .ToList();
+    }
+
+    /// <summary>
+    /// The FilePath/FileName/Path members behind a splat variable, through
+    /// direct hashtable definitions, `+=` hashtable appends, and `$a + $b`
+    /// compositions whose operands each resolve the same way. False means
+    /// some operand resolved to nothing, and the caller must fall back to
+    /// the whole line rather than trust an empty member set.
+    /// </summary>
+    private static bool TrySplatMembers(
+        string name, string[] lines, HashSet<string> visited, int hops,
+        out List<string> members)
+    {
+        members = new List<string>();
+        if (hops > 4) return false;
+        if (!visited.Add(name)) return true;
+
+        var sawDefinition = false;
+        var fullyResolved = true;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            // A definition line: `= @{`, `+= @{`, or `= $a + $b`.
+            var definition = Regex.Match(lines[i],
+                @"^\s*\$" + Regex.Escape(name) + @"\s*(?:\+?=)\s*(.+?)(?:\s*#.*)?$");
+            if (!IsCode(lines[i]) || !definition.Success) continue;
+            sawDefinition = true;
+            var rhs = definition.Groups[1].Value;
+
+            if (rhs.TrimStart().StartsWith("@{", StringComparison.Ordinal))
             {
-                if (!opener.IsMatch(lines[i])) continue;
+                // Hashtable literal: read members from this line onward,
+                // through the closing brace.
                 for (var j = i; j < Math.Min(i + 40, lines.Length); j++)
                 {
                     var member = Regex.Match(
@@ -260,17 +300,28 @@ public class HarnessConfigIsolationScanTests
                         @"(?:^\s*|@\{\s*)(?:FilePath|FileName|Path)\s*=\s*(.+?)(?:\s*[}\]].*)?(?:\s*#.*)?$",
                         RegexOptions.IgnoreCase);
                     if (member.Success)
-                        candidates.Add(member.Groups[1].Value);
+                        members.Add(member.Groups[1].Value);
                     if (Regex.IsMatch(lines[j], @"^\s*\}") ||
-                        Regex.IsMatch(lines[j], @"\}\s*$") && j > i)
+                        (Regex.IsMatch(lines[j], @"\}\s*$") && j > i))
                         break;
                 }
+                continue;
+            }
+
+            // Composition: every operand must itself resolve.
+            foreach (var operand in Regex.Matches(rhs, @"\$(\w+)"))
+            {
+                var operandName =
+                    ((System.Text.RegularExpressions.Match)operand).Groups[1].Value;
+                if (TrySplatMembers(operandName, lines, visited, hops + 1,
+                        out var operandMembers))
+                    members.AddRange(operandMembers);
+                else
+                    fullyResolved = false;
             }
         }
 
-        return candidates
-            .Where(c => !Regex.IsMatch(c, @"^[)\}]+$"))
-            .ToList();
+        return sawDefinition && fullyResolved;
     }
 
     /// <summary>
@@ -661,6 +712,8 @@ public class HarnessConfigIsolationScanTests
             "violation-com-run.ps1",
             "violation-cdb-launches-app.ps1",
             "violation-splatting.ps1",
+            "violation-splat-composed.ps1",
+            "violation-splat-plus-equals.ps1",
             "violation-scriptblock-launch.ps1",
             "violation-mixed-case.ps1",
         };
@@ -671,6 +724,7 @@ public class HarnessConfigIsolationScanTests
             "clean-tooling-debugger.ps1",
             "clean-cdb-attach.ps1",
             "clean-splatting-armed.ps1",
+            "clean-splat-composed-armed.ps1",
         };
 
         var flagged = new HashSet<string>(StringComparer.Ordinal);
