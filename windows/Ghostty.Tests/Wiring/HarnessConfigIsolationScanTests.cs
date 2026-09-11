@@ -92,7 +92,10 @@ public class HarnessConfigIsolationScanTests
         // bare alias form rejects a hyphen continuation so Start-Job and
         // friends are not launches by mere word shape.
         new(@"Start-Process", RegexOptions.Compiled | RegexOptions.IgnoreCase),
-        new(@"\b(?:saps|start)\b(?!-)", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        // The bare alias, never a method call: (?<!\.) keeps $timer.Start()
+        // out, and (?!-) keeps Start-Job and friends out.
+        new(@"(?<!\.)\b(?:saps|start)\b(?!-)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"ProcessStartInfo", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"Process\]::Start\(", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"Process\.Start\(", RegexOptions.Compiled | RegexOptions.IgnoreCase),
@@ -452,13 +455,28 @@ public class HarnessConfigIsolationScanTests
 
         // No app and no tooling evidence: the variable's own name decides,
         // except the call-operator form, which is how scriptblocks are
-        // invoked and needs positive evidence.
+        // invoked and needs positive evidence. A MEMBER read whose member
+        // is not a target name ($latest.FullName, a file object's path)
+        // is not a launch target either: the launch shapes that matter set
+        // FileName/FilePath, and PropertyTargets already reads those.
         if (callOperatorOnly) return false;
-        if (sawEvidence) return true;
+        var memberBases = Regex.Matches(
+                varSource,
+                @"\$(\w+)\.(?!FileName|FilePath|ExePath)\w+")
+            .Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+        if (sawEvidence &&
+            AnyVar.Matches(varSource)
+                .Cast<System.Text.RegularExpressions.Match>()
+                .Select(m => m.Groups[1].Value)
+                .Any(n => !memberBases.Contains(n)))
+            return true;
         return AnyVar.Matches(varSource)
             .Cast<System.Text.RegularExpressions.Match>()
             .Select(m => m.Groups[1].Value)
-            .Any(n => ExeNamedVar.IsMatch("$" + n));
+            .Any(n => !memberBases.Contains(n) &&
+                      ExeNamedVar.IsMatch("$" + n));
     }
 
     /// <summary>
@@ -694,6 +712,11 @@ public class HarnessConfigIsolationScanTests
                 // it does; an allowlisted name that stopped launching would
                 // silently keep covering whatever replaced it.
                 Assert.NotEmpty(UnarmedLaunches(rel, lines));
+                // The +crash entries are safe ONLY while every launch is
+                // +crash-only; the user launcher is exempt by the founder
+                // rule, so the pin applies to the crash pair alone.
+                if (name.StartsWith("crash-", StringComparison.Ordinal))
+                    violations.AddRange(CrashOnlyViolations(rel, lines));
                 continue;
             }
 
@@ -708,6 +731,131 @@ public class HarnessConfigIsolationScanTests
             "Stage a random temp XDG root and set WINTTY_TEST_CONFIG=1 for the " +
             "child (unconditionally, before the launch), or add a justified " +
             "allowlist entry:\n  " + string.Join("\n  ", violations));
+    }
+
+    /// <summary>
+    /// The +crash-only allowlist entries (crash-canary, crash-matrix) are
+    /// safe ONLY because every launch is intercepted at Program.MainImpl
+    /// before InitGhostty and exits without touching config. A second leg
+    /// without +crash would ride the allowlist and run fully unguarded
+    /// against the real config. This pins the invariant: every app-launch
+    /// statement in those files must carry +crash (audit M2).
+    /// </summary>
+    private static List<string> CrashOnlyViolations(string rel, string[] lines)
+    {
+        var violations = new List<string>();
+        var functions = FunctionBodiesFor(lines);
+        foreach (var site in UnarmedLaunches(rel, lines))
+        {
+            // A statement continues over backtick lines; the +crash may sit
+            // on any of them.
+            var statement = new List<string> { lines[site.Line - 1] };
+            for (var j = site.Line; j < lines.Length; j++)
+            {
+                if (!statement[^1].TrimEnd().EndsWith('`')) break;
+                statement[^1] = statement[^1].TrimEnd().TrimEnd('`');
+                statement.Add(lines[j]);
+            }
+            // `+crash` counts only as an ARGUMENT of the launch command
+            // itself: comments stripped first, the statement split into
+            // command segments, and only the LAUNCH segment's tokens are
+            // examined. A +crash in a trailing comment, in an unrelated
+            // string, or in another command on the same line does not
+            // count (review finding M3).
+            var joined = string.Join("\n", statement);
+            var launchSegment = LaunchSegmentOf(joined);
+            if (!TokenContains(launchSegment, "+crash"))
+                violations.Add(
+                    $"{rel}:{site.Line}: launch without +crash: {site.Text}");
+        }
+        return violations;
+    }
+
+    /// <summary>
+    /// The command segment of a joined statement that performs this
+    /// launch: the semicolon-separated piece carrying a launch verb. The
+    /// line's FIRST word cannot identify it (a Write-Host sharing the
+    /// line pushes the launch into the second segment), and anything in
+    /// another command on the same statement is not this launch's
+    /// arguments.
+    /// </summary>
+    private static string LaunchSegmentOf(string joined)
+    {
+        foreach (var segment in joined.Split(';'))
+        {
+            if (LaunchVerbs.Any(v => v.IsMatch(segment)))
+                return segment;
+        }
+        return joined;
+    }
+
+    /// <summary>
+    /// Whether a command's whitespace tokens include the exact word,
+    /// after trailing-comment removal, quote stripping and comma
+    /// trimming. A word inside a longer string still fails: the tokens
+    /// of `'docs: +crash exits'"` are not the bare word.
+    /// </summary>
+    private static bool TokenContains(string command, string word)
+    {
+        // PowerShell comment: a # preceded by whitespace or line start.
+        var withoutComment = Regex.Replace(
+            command, @"(^|\s)#.*$", m => m.Groups[1].Value,
+            RegexOptions.Multiline);
+        foreach (var raw in withoutComment.Split(
+                     (char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var token = raw.Trim('\'', '"', ',', '`').Trim();
+            if (token == word) return true;
+        }
+        return false;
+    }
+
+    [Fact]
+    public void Crash_Only_Harnesses_Stay_Crash_Only()
+    {
+        var root = RepoRoot();
+        var fixtureDir = Path.Combine(
+            root, "windows", "Ghostty.Tests", "Wiring", "ScanFixtures",
+            "crash-only");
+        Assert.True(Directory.Exists(fixtureDir), "crash-only fixtures not found");
+
+        // The fixture pair, RED provenance: the with-crash shape must be
+        // clean and the without-crash shape must be flagged.
+        var clean = File.ReadAllLines(Path.Combine(
+            fixtureDir, "crash-fixture-with-crash.ps1"));
+        Assert.Empty(CrashOnlyViolations("crash-fixture-with-crash.ps1", clean));
+
+        var missing = File.ReadAllLines(Path.Combine(
+            fixtureDir, "crash-fixture-without-crash.ps1"));
+        Assert.NotEmpty(CrashOnlyViolations(
+            "crash-fixture-without-crash.ps1", missing));
+
+        // The reviewer's two textual-defeat mutations: +crash in a
+        // trailing comment, and +crash inside another command's string.
+        foreach (var name in new[]
+                 {
+                     "crash-fixture-comment-crash.ps1",
+                     "crash-fixture-string-crash.ps1",
+                 })
+        {
+            var offenders = CrashOnlyViolations(
+                name, File.ReadAllLines(Path.Combine(fixtureDir, name)));
+            Assert.True(offenders.Count > 0,
+                name + " was NOT flagged (the +crash pin went blind on it)");
+        }
+
+        // The two real files the allowlist vouches for.
+        var scriptDir = Path.Combine(root, "windows", "scripts");
+        foreach (var name in new[] { "crash-canary.ps1", "crash-matrix.ps1" })
+        {
+            var path = Path.Combine(scriptDir, name);
+            Assert.True(File.Exists(path), name + " not found");
+            var offenders = CrashOnlyViolations(
+                name, File.ReadAllLines(path));
+            Assert.True(offenders.Count == 0,
+                "a +crash-only harness grew a launch without +crash:\n  " +
+                string.Join("\n  ", offenders));
+        }
     }
 
     /// <summary>
@@ -1302,5 +1450,315 @@ public class HarnessConfigIsolationScanTests
 
         Assert.Contains(File.ReadAllLines(path),
             l => IsCode(l) && ArmingLine.IsMatch(l));
+    }
+
+    // ---- the wider sweep (audit L3) ------------------------------------
+    //
+    // The main scan is PowerShell-shaped and windows/scripts-scoped. The
+    // same founder rule reaches every other tree that can launch the app:
+    // .agents, tools, test, dist, the repo root, and CI. PowerShell files
+    // reuse the full per-site machinery; every other language gets the
+    // simpler rule: a launch hint plus the app literal is a launch, and it
+    // is clean only when the file carries an in-file arming token for
+    // WINTTY_TEST_CONFIG (a set/assignment spelling, not a comment).
+
+    private static readonly string[] OutsideTrees =
+    {
+        ".agents", "tools", "test", "dist", ".github",
+    };
+
+    private static readonly string[] OutsideExtensions =
+    {
+        ".ps1", ".py", ".nu", ".sh", ".cmd", ".bat", ".yml",
+    };
+
+    /// <summary>
+    /// The words that make an app literal a LAUNCH in a non-PowerShell
+    /// file, per language family. Without a hint, an exe path sitting in
+    /// a variable or a config string is not a launch.
+    /// </summary>
+    private static readonly Regex[] NonPsLaunchHints =
+    {
+        // Python: every spelling that turns a path into a process.
+        new(@"subprocess|Popen|startfile|os\.system|check_output|check_call|posix_spawn|os\.spawn|os\.exec|\bexecv|\bexecl|\bexece",
+            RegexOptions.Compiled),
+        new(@"(?i)\bstart\b|\bcall\b|\brun\b|\bexec\b|\binvoke\b|Popen|subprocess|\./",
+            RegexOptions.Compiled),
+    };
+
+    /// <summary>
+    /// A command-position prefix: the text ending right before the exe
+    /// literal is empty or a shell separator. In cmd, sh and nu a BARE
+    /// exe line is THE idiomatic launch (review finding M2), so the
+    /// prefix test alone carries those languages; python and yaml keep
+    /// their own rules. The alternation spells every separator as its
+    /// own alternative - `;` and `||` included - because the previous
+    /// `\|\|;` token fused them into one literal that matched neither
+    /// alone (re-review finding 2).
+    /// </summary>
+    private static readonly Regex CommandPositionPrefix = new(
+        @"(?i)(?:&{1,2}|\|\||\||;|\bcall\b|\bstart\b|\bexec\b|cmd\s+/c)\s*(?:""[^""]*""\s*|\s)*\S*\s*$",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// The in-file arming token in any of its spellings: env-drive
+    /// assignment, psi dictionary, python os.environ, yaml env key.
+    /// </summary>
+    private static readonly Regex NonPsArmingToken = new(
+        @"WINTTY_TEST_CONFIG['""\]\s]*[:=]",
+        RegexOptions.Compiled);
+
+    private static bool IsComment(string line) =>
+        line.TrimStart().StartsWith('#') ||
+        line.TrimStart().StartsWith("rem ") ||
+        line.TrimStart().StartsWith("REM ");
+
+    /// <summary>
+    /// Whether a yml line sits inside a run: block: some earlier line at a
+    /// LOWER indentation introduced run:, and nothing at that indentation
+    /// or lower has intervened.
+    /// </summary>
+    private static bool InsideRunBlock(
+        List<(int Indent, string Text)> prior, int indent)
+    {
+        for (var i = prior.Count - 1; i >= 0; i--)
+        {
+            var trimmed = prior[i].Text.Trim();
+            if (trimmed.StartsWith("run:") || trimmed.StartsWith("- run:"))
+                return true;
+            if (prior[i].Indent <= indent) return false;
+        }
+        return false;
+    }
+
+    private static List<string> OutsideViolations(
+        string rel, string[] lines, string extension)
+    {
+        // PowerShell: the full per-site machinery, unchanged.
+        if (extension == ".ps1")
+            return UnarmedLaunches(rel, lines)
+                .Select(l => $"{l.File}:{l.Line}: {l.Text}").ToList();
+
+        var armed = lines.Any(l =>
+            !IsComment(l) && NonPsArmingToken.IsMatch(l));
+        if (armed) return new List<string>();
+
+        var prior = new List<(int Indent, string Text)>();
+        var violations = new List<string>();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (IsComment(line)) continue;
+            var trimmed = line.TrimStart();
+
+            var isLaunch = false;
+            if (extension == ".yml")
+            {
+                var indent = line.Length - trimmed.Length;
+                // The run: block IS the launch form in yaml, and so is
+                // the run: line ITSELF (the inline form); both carry
+                // the launch, no second hint needed.
+                var inline = Regex.IsMatch(
+                    trimmed, @"^(?:- )?run:", RegexOptions.IgnoreCase);
+                isLaunch = InsideRunBlock(prior, indent) || inline;
+                prior.Add((indent, line));
+            }
+            else if (extension == ".py")
+            {
+                isLaunch = NonPsLaunchHints[0].IsMatch(line);
+            }
+            else
+            {
+                // cmd, bat, sh, nu: command position. The exe at the
+                // start of the line, or right after a shell separator;
+                // a bare exe line is THE idiomatic launch in these.
+                var match = AppLiteral.Match(line);
+                if (match.Success)
+                {
+                    var prefix = line[..match.Index].TrimEnd();
+                    // A pure PATH prefix (C:\b1\, no whitespace, no
+                    // separator) is still command position: a bare
+                    // full-path launch is as idiomatic as a bare name,
+                    // and the exe literal only matches the file name, so
+                    // the directory part shows up here. The space-free
+                    // test is what keeps an echo argument out: that
+                    // prefix carries a word.
+                    var purePath = prefix.Length > 0 &&
+                        !prefix.Contains(' ') &&
+                        (prefix.Contains(Path.DirectorySeparatorChar) ||
+                         prefix.Contains(Path.AltDirectorySeparatorChar));
+                    isLaunch = prefix.Length == 0 || purePath ||
+                        CommandPositionPrefix.IsMatch(prefix);
+                }
+            }
+
+            if (isLaunch && AppLiteral.IsMatch(line))
+                violations.Add($"{rel}:{i + 1}: {trimmed.Trim()}");
+        }
+        return violations;
+    }
+
+    [Fact]
+    public void Outside_Script_Trees_Arm_Their_App_Launches()
+    {
+        var root = RepoRoot();
+
+        // The fixture corpus first: the three unarmed shapes must be
+        // flagged and the two armed controls must not be.
+        var fixtureDir = Path.Combine(
+            root, "windows", "Ghostty.Tests", "Wiring", "ScanFixtures",
+            "outside-scripts");
+        Assert.True(Directory.Exists(fixtureDir), "outside-scripts fixtures not found");
+        var mustFlag = new[]
+        {
+            "outside-agents-launcher.py",
+            "outside-cmd-launcher.cmd",
+            "outside-ci-step.yml",
+            "outside-bare-cmd.cmd",
+            "outside-bare-sh.sh",
+            "outside-bare-nu.nu",
+            "outside-posix-spawn.py",
+            "outside-inline-run.yml",
+            "outside-semicolon-cmd.cmd",
+            "outside-orElse-cmd.cmd",
+            "outside-semicolon-sh.sh",
+            "outside-orElse-sh.sh",
+        };
+        var mustPass = new[]
+        {
+            "outside-armed-launcher.py",
+            "outside-armed-ci.yml",
+            "outside-armed-bare-cmd.cmd",
+            "outside-armed-bare-sh.sh",
+            "outside-armed-bare-nu.nu",
+            "outside-armed-posix-spawn.py",
+            "outside-armed-inline-run.yml",
+        };
+        foreach (var file in Directory.EnumerateFiles(fixtureDir))
+        {
+            var name = Path.GetFileName(file);
+            var violations = OutsideViolations(
+                name, File.ReadAllLines(file), Path.GetExtension(file));
+            if (mustFlag.Contains(name))
+                Assert.True(violations.Count > 0,
+                    name + " was NOT flagged (the sweep went blind on it)");
+            else if (mustPass.Contains(name))
+                Assert.True(violations.Count == 0,
+                    name + " wrongly flagged:\n  " + string.Join("\n  ", violations));
+        }
+
+        // Then the real trees.
+        var all = new List<string>();
+        foreach (var tree in OutsideTrees)
+        {
+            var dir = Path.Combine(root, tree);
+            if (!Directory.Exists(dir)) continue;
+            foreach (var file in Directory.EnumerateFiles(
+                         dir, "*", SearchOption.AllDirectories))
+            {
+                var extension = Path.GetExtension(file).ToLowerInvariant();
+                if (!OutsideExtensions.Contains(extension)) continue;
+                // Third-party vendored sources are not our launch sites.
+                if (file.Replace('\\', '/').Contains("/vendor/")) continue;
+                all.Add(file);
+            }
+        }
+        // The repo root itself.
+        foreach (var file in Directory.EnumerateFiles(root))
+        {
+            var extension = Path.GetExtension(file).ToLowerInvariant();
+            if (OutsideExtensions.Contains(extension)) all.Add(file);
+        }
+
+        var violationsAll = new List<string>();
+        foreach (var file in all.OrderBy(f => f, StringComparer.Ordinal))
+        {
+            violationsAll.AddRange(OutsideViolations(
+                Path.GetRelativePath(root, file),
+                File.ReadAllLines(file),
+                Path.GetExtension(file).ToLowerInvariant()));
+        }
+
+        Assert.True(
+            violationsAll.Count == 0,
+            "app launch(es) outside windows/scripts that neither arm " +
+            "WINTTY_TEST_CONFIG nor go through an isolated-config helper " +
+            "(files: " + all.Count + " swept):\n  " +
+            string.Join("\n  ", violationsAll));
+    }
+
+    /// <summary>
+    /// The hatch scan must see the ROOT justfile and every justfile in
+    /// the repo, which sit under no swept tree (review Low: the old
+    /// justfile clause was dead code). The fixture proves the justfile
+    /// pass bites before the real files are read.
+    /// </summary>
+    private static List<string> HatchOffendersIn(string root)
+    {
+        var offenders = new List<string>();
+        var justfiles = new List<string> {
+            Path.Combine(root, "justfile") };
+        justfiles.AddRange(Directory.EnumerateFiles(
+            root, "justfile", SearchOption.AllDirectories));
+        foreach (var justfile in justfiles.Where(j => !j
+            .Replace('\\', '/').Contains("/ScanFixtures/")))
+        {
+            if (!File.Exists(justfile)) continue;
+            offenders.AddRange(File.ReadAllLines(justfile)
+                .Select((l, i) => (l, i))
+                .Where(x => x.l.Contains(
+                    "WINTTY_TEST_HOST_UNARMED", StringComparison.Ordinal) &&
+                    !x.l.TrimStart().StartsWith("#"))
+                .Select(x => $"{Path.GetRelativePath(root, justfile)}:{x.i + 1}"));
+        }
+        return offenders;
+    }
+
+    [Fact]
+    public void The_Unarmed_Host_Escape_Hatch_Is_Never_Committed()
+    {
+        // WINTTY_TEST_HOST_UNARMED exists for a human at a terminal with a
+        // genuinely clean-env test in mind; it must never become a default
+        // someone bakes into a script, recipe or CI file.
+        var root = RepoRoot();
+        var offenders = new List<string>();
+
+        // The justfile fixture: a recipe baking in the hatch is flagged.
+        var fixture = Path.Combine(
+            root, "windows", "Ghostty.Tests", "Wiring", "ScanFixtures",
+            "hatch", "justfile");
+        Assert.True(File.Exists(fixture), "hatch justfile fixture not found");
+        var fixtureLines = File.ReadAllLines(fixture);
+        Assert.Contains(fixtureLines, l => l.Contains(
+            "WINTTY_TEST_HOST_UNARMED", StringComparison.Ordinal));
+
+        // Every real justfile, the root one included.
+        offenders.AddRange(HatchOffendersIn(root));
+
+        foreach (var tree in OutsideTrees.Append("windows/scripts"))
+        {
+            var dir = Path.Combine(root, tree);
+            if (!Directory.Exists(dir)) continue;
+            foreach (var file in Directory.EnumerateFiles(
+                         dir, "*", SearchOption.AllDirectories))
+            {
+                var extension = Path.GetExtension(file).ToLowerInvariant();
+                if (!OutsideExtensions.Contains(extension) &&
+                    !file.EndsWith("justfile", StringComparison.Ordinal)) continue;
+                var rel = Path.GetRelativePath(root, file);
+                var hits = File.ReadAllLines(file)
+                    .Select((l, i) => (l, i))
+                    .Where(x => x.l.Contains(
+                        "WINTTY_TEST_HOST_UNARMED", StringComparison.Ordinal) &&
+                        !IsComment(x.l))
+                    .Select(x => $"{rel}:{x.i + 1}");
+                offenders.AddRange(hits);
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "WINTTY_TEST_HOST_UNARMED is a human-terminal escape hatch, " +
+            "never a committed default:\n  " + string.Join("\n  ", offenders));
     }
 }

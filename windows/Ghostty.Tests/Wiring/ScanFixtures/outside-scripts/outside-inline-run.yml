@@ -1,0 +1,4 @@
+# Fixture: inline run step (RED: must be flagged).
+steps:
+  - name: smoke
+    run: C:1\Wintty.exe --flag

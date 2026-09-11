@@ -111,7 +111,7 @@ ENV_FOR_LEG = {
 # evidence for the fixed-seed digest every branch carries. The self-test
 # holds this table equal to what the test projects actually read.
 ENV_VARS_FOR_LEG = {
-    gate_scope.LEG_WIN: ("GHOSTTY_FUZZ_ITERATIONS", "WINTTY_MOTION_FUZZ_SEED"),
+    gate_scope.LEG_WIN: ("GHOSTTY_FUZZ_ITERATIONS", "WINTTY_MOTION_FUZZ_SEED", "XDG_CONFIG_HOME"),
 }
 ALL_ENV_VARS = sorted({v for vs in ENV_VARS_FOR_LEG.values() for v in vs})
 

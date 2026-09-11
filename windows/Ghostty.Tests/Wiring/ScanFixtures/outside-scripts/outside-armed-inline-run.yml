@@ -1,0 +1,6 @@
+# Control: inline run step with the job env token stays clean.
+env:
+  WINTTY_TEST_CONFIG: "1"
+steps:
+  - name: smoke
+    run: C:1\Wintty.exe --flag

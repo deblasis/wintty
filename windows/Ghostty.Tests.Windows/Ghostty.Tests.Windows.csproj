@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!-- Windows-only. Runs on the Windows CI job; does not build on Linux. -->
@@ -24,4 +24,8 @@
     <ProjectReference Include="..\Ghostty.Core\Ghostty.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- One shared file, linked: the four test hosts cannot drift. -->
+    <Compile Include="..\build\TestHostArming.cs" Link="TestHostArming.cs" />
+  </ItemGroup>
 </Project>

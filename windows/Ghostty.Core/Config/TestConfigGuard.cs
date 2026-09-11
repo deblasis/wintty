@@ -53,6 +53,24 @@ public static partial class TestConfigGuard
     public const string EnvVar = "WINTTY_TEST_CONFIG";
 
     /// <summary>
+    /// The one place environment variables are read, so tests can inject
+    /// a dictionary instead of mutating the real process environment.
+    /// Mutating the real environment from a test races every concurrently
+    /// running collection (and transiently disarms the armed test host,
+    /// reopening exactly the hole this guard closes); an injected reader
+    /// touches nothing outside the test itself.
+    ///
+    /// INTERNAL on purpose (re-review finding 1): the seam exists for the
+    /// test assemblies and nothing else. A public settable static would
+    /// let production code swap the guard's environment source out from
+    /// under the guard itself, which is the opposite of what the guard
+    /// is for. The test projects reach it through
+    /// InternalsVisibleTo (AssemblyAttributes.cs).
+    /// </summary>
+    internal static Func<string, string?> ReadEnvironment { get; set; } =
+        Environment.GetEnvironmentVariable;
+
+    /// <summary>
     /// Whether the guard is armed. Read from the environment on every call
     /// rather than cached: the decision belongs to whoever launched this
     /// process, and a test flipping the variable between calls is the
@@ -62,7 +80,7 @@ public static partial class TestConfigGuard
     {
         get
         {
-            var value = Environment.GetEnvironmentVariable(EnvVar);
+            var value = ReadEnvironment(EnvVar);
             return !string.IsNullOrEmpty(value)
                    && !value.Equals("0", StringComparison.OrdinalIgnoreCase)
                    && !value.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -99,8 +117,8 @@ public static partial class TestConfigGuard
     /// </summary>
     public static string ResolveConfigRoot()
     {
-        var pick = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
-        if (pick is null) pick = Environment.GetEnvironmentVariable("APPDATA");
+        var pick = ReadEnvironment("XDG_CONFIG_HOME");
+        if (pick is null) pick = ReadEnvironment("APPDATA");
         if (string.IsNullOrEmpty(pick))
         {
             pick = Path.Combine(
@@ -178,7 +196,7 @@ public static partial class TestConfigGuard
         if (!IsArmed) return;
         foreach (var name in new[] { "TEMP", "TMP" })
         {
-            var value = Environment.GetEnvironmentVariable(name);
+            var value = ReadEnvironment(name);
             if (string.IsNullOrEmpty(value)) continue;
             if (IsUnderTemp(value)) continue;
 

@@ -1,0 +1,3 @@
+# Fixture: a recipe baking in the hatch (RED: must be flagged).
+hatch-probe:
+    pwsh -NoProfile -Command "$env:WINTTY_TEST_HOST_UNARMED = '1'; dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj"

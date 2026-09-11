@@ -1,0 +1,5 @@
+# Fixture: an unarmed CI run step (RED: must be flagged).
+steps:
+  - name: smoke
+    run: |
+      C:\b1\Wintty.exe --flag
