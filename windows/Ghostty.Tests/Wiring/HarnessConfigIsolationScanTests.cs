@@ -35,6 +35,20 @@ namespace Ghostty.Tests.Wiring;
 /// The allowlist bar: the launch must be provably unable to reach the
 /// config, or provably not a test. "Stable when unisolated" is not on the
 /// bar.
+///
+/// KNOWN, ACCEPTED LIMITS (deliberately obfuscated spellings the scan does
+/// not chase; ruled acceptable because constructing them is evasion on
+/// purpose, and the BOUNDARY is the app-side WINTTY_TEST_CONFIG guard with
+/// its env-independent known-folder temp anchor, which no spelling here
+/// can move): helper-name shadowing (a local function redefining
+/// New-WinttyTestConfigRoot), same-line randomness-marker smuggling, and
+/// Invoke-Expression/iex on a built string; conhost.exe and rundll32 as
+/// launchers; launch through a scriptblock VARIABLE whose block references
+/// a variable rather than a literal; the COM object created in a
+/// dot-sourced helper so the file-level COM gate closes; and staging
+/// values arriving through dot-sourced files. If a shape on this list
+/// shows up in a harness review, treat it as a finding anyway: the list
+/// is what the AUTOMATION accepts, not what the project welcomes.
 /// </summary>
 public class HarnessConfigIsolationScanTests
 {
@@ -71,15 +85,18 @@ public class HarnessConfigIsolationScanTests
     /// </summary>
     private static readonly Regex[] LaunchVerbs =
     {
-        new(@"Start-Process", RegexOptions.Compiled),
-        // The Start-Process alias, and a bare lowercase 'start' (cmd style);
-        // both case-sensitive so prose and .Start( methods stay out.
-        new(@"\bsaps\b"),
-        new(@"\bstart\b"),
-        new(@"ProcessStartInfo", RegexOptions.Compiled),
-        new(@"Process\]::Start\(", RegexOptions.Compiled),
-        new(@"Process\.Start\(", RegexOptions.Compiled),
-        new(@"Invoke-Item", RegexOptions.Compiled),
+        // PowerShell itself is case-insensitive; mixed-case verbs and
+        // aliases (STArt-Process, START, SAPS) are ordinary spellings, not
+        // obfuscation, so every verb matches case-insensitively. Prose is
+        // kept out by matching the literal-stripped line only, and the
+        // bare alias form rejects a hyphen continuation so Start-Job and
+        // friends are not launches by mere word shape.
+        new(@"Start-Process", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        new(@"\b(?:saps|start)\b(?!-)", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        new(@"ProcessStartInfo", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        new(@"Process\]::Start\(", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        new(@"Process\.Start\(", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        new(@"Invoke-Item", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         // The call operator, with a variable OR a literal/interpolated path:
         // the verb matches the stripped line too ('& ' survives stripping),
         // while target evidence reads the raw line where the path lives.
@@ -89,7 +106,8 @@ public class HarnessConfigIsolationScanTests
         new(@"dotnet\s+run", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         // COM launches, gated on the file actually creating a shell object
         // (see UsesComShell); the method call is the verb.
-        new(@"\.(?:Run|Exec|ShellExecute)\s*\("),
+        new(@"\.(?:Run|Exec|ShellExecute)\s*\(",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase),
     };
 
     /// <summary>
@@ -188,26 +206,71 @@ public class HarnessConfigIsolationScanTests
     /// does not make the debugger an app launch (R1-4 runs the ruling the
     /// other way below).
     /// </summary>
-    private static List<string> TargetCandidates(string line, string stripped)
+    private static List<string> TargetCandidates(
+        string line, string stripped, string[] lines)
     {
+        // A candidate token ends at whitespace, a comma, a closing brace
+        // or paren (so the -FilePath inside a scriptblock literal does not
+        // swallow the block's closing brace), and tokens that are ONLY
+        // braces or parens are dropped: a dropped candidate never counts
+        // as a decided position, so the whole-line fallback still fires.
+        var token = @"[^,\s)}\]]+";
         var candidates = new List<string>();
         foreach (var m in Regex.Matches(
-                     stripped, @"-(?:FilePath|FileName|Path)\s+(\S+)"))
+                     stripped, @"-(?:FilePath|FileName|Path)\s+(" + token + @")",
+                     RegexOptions.IgnoreCase))
             candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
-        foreach (var m in Regex.Matches(line, @"(?<!\S)&\s*(\S+)"))
+        foreach (var m in Regex.Matches(line, @"(?<!\S)&\s*(" + token + @")"))
             candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
         foreach (var m in Regex.Matches(
                      line,
-                     @"(?:Process\]::Start|Process\.Start|\.Run|\.Exec|\.ShellExecute)\s*\(\s*([^,)]+)"))
+                     @"(?:Process\]::Start|Process\.Start|\.Run|\.Exec|\.ShellExecute)\s*\(\s*(" + token + @")",
+                     RegexOptions.IgnoreCase))
             candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
         foreach (var m in Regex.Matches(
-                     line, @"ProcessStartInfo\]::new\(\s*([^,)]*)"))
+                     line, @"ProcessStartInfo\]::new\(\s*(" + token + @")",
+                     RegexOptions.IgnoreCase))
             candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
-        foreach (var m in Regex.Matches(stripped, @"(?:^|\s)(?:Start-Process|saps)\s+(?!-)(\S+)"))
+        foreach (var m in Regex.Matches(
+                     stripped, @"(?:^|\s)(?:Start-Process|saps)\s+(?!-)(" + token + @")",
+                     RegexOptions.IgnoreCase))
             candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
-        foreach (var m in Regex.Matches(stripped, @"Invoke-Item\s+(\S+)"))
+        foreach (var m in Regex.Matches(
+                     stripped, @"Invoke-Item\s+(" + token + @")",
+                     RegexOptions.IgnoreCase))
             candidates.Add(((System.Text.RegularExpressions.Match)m).Groups[1].Value);
-        return candidates;
+
+        // Splatting: @name passes the parameters of a hashtable; the
+        // launch target is that hashtable's FilePath/FileName/Path member,
+        // literal or variable. The member sits on the opener line itself
+        // when the hashtable is written on one line, so the member pattern
+        // tolerates the `$name = @{` prefix.
+        foreach (var m in Regex.Matches(line, @"@(\w+)"))
+        {
+            var name = ((System.Text.RegularExpressions.Match)m).Groups[1].Value;
+            var opener = new Regex(
+                @"^\s*\$" + Regex.Escape(name) + @"\s*=\s*@\{");
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (!opener.IsMatch(lines[i])) continue;
+                for (var j = i; j < Math.Min(i + 40, lines.Length); j++)
+                {
+                    var member = Regex.Match(
+                        lines[j],
+                        @"(?:^\s*|@\{\s*)(?:FilePath|FileName|Path)\s*=\s*(.+?)(?:\s*[}\]].*)?(?:\s*#.*)?$",
+                        RegexOptions.IgnoreCase);
+                    if (member.Success)
+                        candidates.Add(member.Groups[1].Value);
+                    if (Regex.IsMatch(lines[j], @"^\s*\}") ||
+                        Regex.IsMatch(lines[j], @"\}\s*$") && j > i)
+                        break;
+                }
+            }
+        }
+
+        return candidates
+            .Where(c => !Regex.IsMatch(c, @"^[)\}]+$"))
+            .ToList();
     }
 
     /// <summary>
@@ -229,7 +292,7 @@ public class HarnessConfigIsolationScanTests
             ProjectReference.IsMatch(line)) return true;
 
         var stripped = QuotedSpan.Replace(line, "");
-        var candidates = TargetCandidates(line, stripped);
+        var candidates = TargetCandidates(line, stripped, lines);
 
         // Literal app paths: among the candidates when a position was
         // decided, on the whole line otherwise (fail closed).
@@ -363,10 +426,12 @@ public class HarnessConfigIsolationScanTests
     private static List<(int Line, string Rhs)> DefinitionsOf(
         string[] lines, string name)
     {
-        // One pattern covers both plain assignments and parameter defaults
-        // (`[string]$OutDir = ...`).
+        // One pattern covers plain assignments, parameter defaults
+        // (`[string]$OutDir = ...`), and the one-line param-block spelling
+        // `param([string]$OutDir = ...)` whose prefix is not a definition
+        // of its own.
         var definition = new Regex(
-            @"^\s*(?:\[[^\]]*\]\s*)?\$" + Regex.Escape(name) +
+            @"^\s*(?:param\s*\(\s*)?(?:\[[^\]]*\]\s*)?\$" + Regex.Escape(name) +
             @"\s*=\s*(.+?)(?:\s*#.*)?$");
         var found = new List<(int, string)>();
         for (var i = 0; i < lines.Length; i++)
@@ -595,6 +660,9 @@ public class HarnessConfigIsolationScanTests
             "violation-saps.ps1",
             "violation-com-run.ps1",
             "violation-cdb-launches-app.ps1",
+            "violation-splatting.ps1",
+            "violation-scriptblock-launch.ps1",
+            "violation-mixed-case.ps1",
         };
         var expectedClean = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -602,6 +670,7 @@ public class HarnessConfigIsolationScanTests
             "clean-tooling-psi.ps1",
             "clean-tooling-debugger.ps1",
             "clean-cdb-attach.ps1",
+            "clean-splatting-armed.ps1",
         };
 
         var flagged = new HashSet<string>(StringComparer.Ordinal);
@@ -650,6 +719,10 @@ public class HarnessConfigIsolationScanTests
             "staging-pid.ps1",
             "staging-clock.ps1",
             "staging-classic-var.ps1",
+            "staging-param-default.ps1",
+            "staging-set-item.ps1",
+            "staging-setenvvar.ps1",
+            "staging-member-wrong-restore.ps1",
         };
         var expectedClean = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -670,10 +743,9 @@ public class HarnessConfigIsolationScanTests
             {
                 var line = lines[i];
                 if (!IsCode(line)) continue;
-                var assignment = XdgAssignment.Match(line);
-                if (!assignment.Success) continue;
+                if (!TryXdgAssignment(line, out var rhs)) continue;
                 if (UnrandomizedStaging(
-                        assignment.Groups[1].Value, lines, functions,
+                        rhs, lines, functions,
                         new HashSet<string>(), 0) is not null)
                 {
                     flagged.Add(name);
@@ -696,11 +768,35 @@ public class HarnessConfigIsolationScanTests
     }
 
     /// <summary>
-    /// Assignments of the config root: process-wide or per-child psi.
+    /// Assignments of the config root, every spelling the process env can
+    /// be written with: the dollar-env drive (process-wide or per-child
+    /// psi), Set-Item on the env drive, and the .NET SetEnvironmentVariable
+    /// call. All go through the same positive-proof randomness rule.
     /// </summary>
-    private static readonly Regex XdgAssignment = new(
-        @"(?:\$env:XDG_CONFIG_HOME|EnvironmentVariables\['XDG_CONFIG_HOME'\])\s*=\s*(.+)$",
-        RegexOptions.Compiled);
+    private static readonly Regex[] XdgAssignments =
+    {
+        new(@"(?:\$env:XDG_CONFIG_HOME|EnvironmentVariables\['XDG_CONFIG_HOME'\])\s*=\s*(.+)$",
+            RegexOptions.Compiled),
+        new(@"Set-Item\s+Env:\\?XDG_CONFIG_HOME\s+(.+)$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        new(@"SetEnvironmentVariable\(\s*['""]XDG_CONFIG_HOME['""]\s*,\s*([^,)]+)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase),
+    };
+
+    private static bool TryXdgAssignment(string line, out string rhs)
+    {
+        foreach (var pattern in XdgAssignments)
+        {
+            var m = pattern.Match(line);
+            if (m.Success)
+            {
+                rhs = m.Groups[1].Value;
+                return true;
+            }
+        }
+        rhs = "";
+        return false;
+    }
 
     private static readonly Regex VarRef = new(@"\$(\w+)", RegexOptions.Compiled);
 
@@ -832,6 +928,33 @@ public class HarnessConfigIsolationScanTests
 
         if (IsPairedRestore(rhs, lines)) return null;
 
+        // A member access whose pairing failed: if the base object is a
+        // hashtable that SAVED the env var under a different member, this
+        // is a wrong-variable restore, not inert data (R2-3). A base whose
+        // definition is a randomness helper (the .Dir shape) is fine and
+        // falls through to the normal variable follow below.
+        var memberAccess = Regex.Match(
+            rhs.Trim().TrimEnd('}', ';').Trim(), @"^\$(\w+)[.:](\w+)$");
+        if (memberAccess.Success)
+        {
+            var baseName = memberAccess.Groups[1].Value;
+            var opener = new Regex(
+                @"^\s*\$" + Regex.Escape(baseName) + @"\s*=\s*@\{");
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (!opener.IsMatch(lines[i])) continue;
+                for (var j = i; j < Math.Min(i + 40, lines.Length); j++)
+                {
+                    if (lines[j].Contains(
+                            "$env:XDG_CONFIG_HOME", StringComparison.Ordinal))
+                        return $"member '{memberAccess.Groups[2].Value}' " +
+                               $"is not the member the env var was saved under " +
+                               $"(line {j + 1}: {lines[j].Trim()})";
+                    if (Regex.IsMatch(lines[j], @"^\s*\}")) break;
+                }
+            }
+        }
+
         if (hops > 6) return $"{rhs.Trim()} (chain too deep to verify)";
 
         // The own-RHS tripwires: reached without a marker, these are the
@@ -901,12 +1024,10 @@ public class HarnessConfigIsolationScanTests
             {
                 var line = lines[i];
                 if (!IsCode(line)) continue;
-                var assignment = XdgAssignment.Match(line);
-                if (!assignment.Success) continue;
+                if (!TryXdgAssignment(line, out var rhs)) continue;
 
                 var offending = UnrandomizedStaging(
-                    assignment.Groups[1].Value, lines, functions,
-                    new HashSet<string>(), 0);
+                    rhs, lines, functions, new HashSet<string>(), 0);
                 if (offending is not null)
                 {
                     violations.Add($"{rel}:{i + 1}: {line.Trim()}  <- {offending}");
