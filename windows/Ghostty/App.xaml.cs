@@ -94,11 +94,13 @@ public partial class App : Application
     // repeat press would otherwise stack a second menu on top.
     private bool _systemMenuOpen;
 
-    // Single-instance mode (opt-in via windows-single-instance). The election
-    // itself lives in Program, which holds it in a static for the process
-    // lifetime -- that static is what keeps the primary's mutex off the GC.
-    // This field is the forwarding pipe server, which only a primary runs.
-    private Ghostty.Hosting.SingleInstanceServer? _singleInstanceServer;
+    // Single-instance mode (on by default since #1094; the
+    // windows-single-instance key survives as a dev-only escape hatch). The
+    // election itself lives in Program, which holds it in a static for the
+    // process lifetime -- that static is what keeps the primary's mutex off
+    // the GC. This field is the forwarding pipe server, which only a
+    // primary runs.
+    private Ghostty.Core.SingleInstance.SingleInstanceServer? _singleInstanceServer;
 
     // Where a forwarded launch waits when nothing here can open a window for
     // it yet. UI-thread only, and drained once, from OnLaunched; see
@@ -1294,8 +1296,9 @@ public partial class App : Application
 
     /// <summary>
     /// Hand this launch to the running primary and exit the process. Returns
-    /// normally instead when the forward failed, so the caller continues into
-    /// an ordinary independent launch rather than dropping the user's launch.
+    /// normally instead when the primary never confirmed it served the
+    /// launch, so the caller continues into an ordinary independent launch
+    /// rather than dropping the user's launch.
     /// </summary>
     private void ForwardLaunchToPrimary(string pipeName)
     {
@@ -1312,31 +1315,30 @@ public partial class App : Application
         var request = new Ghostty.Core.SingleInstance.LaunchRequest(
             Program.LaunchWorkingDirectory, argv);
 
-        try
+        if (!Ghostty.Core.SingleInstance.LaunchForwarder.TryForward(
+                pipeName, request, out var failure))
         {
-            using var client = new System.IO.Pipes.NamedPipeClientStream(
-                ".", pipeName, System.IO.Pipes.PipeDirection.Out);
-            client.Connect(2000); // 2s: primary should answer promptly
-            using var writer = new System.IO.StreamWriter(client) { AutoFlush = true };
-            writer.Write(request.Serialize());
-            writer.Flush();
-            client.WaitForPipeDrain();
-        }
-        catch (Exception ex)
-        {
-            // Primary may be mid-shutdown or the pipe is wedged. Fall back to
-            // launching normally rather than dropping the user's launch. This
+            // The primary never answered with the post-service
+            // acknowledgement: it is gone, wedged mid-shutdown, hung on its
+            // UI thread, or an older build from before acknowledgements
+            // existed (the upgrade window). Fall back to launching
+            // independently rather than dropping the user's launch. This
             // process does not take the session over; it did not create the
-            // mutex, and the next launch elects a primary again.
-            Ghostty.Logging.StaticLoggers.App.LogSingleInstanceForwardFailed(ex);
+            // mutex, and a takeover would double-serve later forwards beside
+            // a primary that may merely be slow. A crashed primary needs no
+            // takeover at all: the OS releases the name with its last
+            // handle, and the next launch elects a primary again.
+            if (failure is not null)
+                Ghostty.Logging.StaticLoggers.App.LogSingleInstanceForwardFailed(failure);
+            else
+                Ghostty.Logging.StaticLoggers.App.LogSingleInstanceForwardTimedOut();
             return;
         }
 
-        // Deliberately outside the try above. Once the drain returns, the
-        // primary has the request and will act on it, so nothing here may
-        // divert back into a normal startup: a throw from Dispose inside that
-        // try used to log a forward failure and open a second window for a
-        // launch already on its way.
+        // Deliberately reached only on the acknowledged path: the primary
+        // answers after it opened the window (or ran the jump-list action),
+        // so nothing here may divert back into a normal startup for a launch
+        // that already landed.
         //
         // Dispose rather than leaving it to teardown, so the config file
         // watcher and the native config handle go now.
@@ -1359,20 +1361,30 @@ public partial class App : Application
 
         try
         {
-            _singleInstanceServer = new Ghostty.Hosting.SingleInstanceServer(
+            _singleInstanceServer = new Ghostty.Core.SingleInstance.SingleInstanceServer(
                 election.Names.Pipe,
                 req =>
                 {
+                    // The task the server awaits before acknowledging the
+                    // secondary: it completes when the UI thread has acted on
+                    // the launch, faults when the launch could not be acted
+                    // on (no acknowledgement, so the secondary falls back to
+                    // its own window instead of exiting with nothing).
+                    var served = new TaskCompletionSource(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+
                     // TryEnqueue answers false on a queue that is shutting
                     // down, and reads null when the dispatcher is already
                     // gone. Either way the request has nowhere to go, and
                     // this is the only place that would ever know: the
-                    // secondary has already exited believing it was served.
+                    // secondary is still waiting on the acknowledgement this
+                    // task gates.
                     var queued = _uiDispatcher?.TryEnqueue(() =>
                     {
                         try
                         {
                             OpenWindowFromLaunch(req);
+                            served.SetResult();
                         }
                         catch (Exception ex)
                         {
@@ -1380,15 +1392,24 @@ public partial class App : Application
                             // nothing above catches it: an escape here is an
                             // unhandled UI-thread exception and the process goes
                             // down. Losing one forwarded launch is the cheaper
-                            // failure.
+                            // failure -- and with the acknowledgement now
+                            // gated on this task, "lost" means the secondary
+                            // was told nothing and opened its own window.
                             Ghostty.Logging.StaticLoggers.App.LogInboundLaunchFailed(ex);
+                            served.SetException(ex);
                         }
                     }) == true;
 
                     if (!queued)
+                    {
                         Ghostty.Logging.StaticLoggers.App.LogSingleInstanceLaunchDropped();
+                        served.SetException(new InvalidOperationException(
+                            "the UI dispatcher could not accept the forwarded launch"));
+                    }
+
+                    return served.Task;
                 },
-                _loggerFactory.CreateLogger<Ghostty.Hosting.SingleInstanceServer>());
+                _loggerFactory.CreateLogger<Ghostty.Core.SingleInstance.SingleInstanceServer>());
             _singleInstanceServer.Start();
         }
         catch (Exception ex)
@@ -2509,6 +2530,11 @@ internal static partial class AppLogExtensions
                    Message = "Single-instance forward to the primary failed; launching as a normal independent process.")]
     internal static partial void LogSingleInstanceForwardFailed(
         this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.ForwardTimedOut,
+                   Level = LogLevel.Warning,
+                   Message = "Single-instance primary never acknowledged serving the launch; launching as a normal independent process.")]
+    internal static partial void LogSingleInstanceForwardTimedOut(this ILogger<App> logger);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.ServerStartFailed,
                    Level = LogLevel.Warning,

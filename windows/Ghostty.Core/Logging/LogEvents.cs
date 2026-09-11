@@ -54,4 +54,14 @@ internal static class LogEvents
     {
         public const int FeedStopped = 1400;
     }
+
+    // 1500-1599: Single-instance serving (the primary's forwarding pipe
+    // server; moved out of the shell's 2900 range with the class itself,
+    // so the test hosts can run against the real type)
+    internal static class SingleInstance
+    {
+        public const int PipeUnavailable = 1500;
+        public const int PipeError       = 1501;
+        public const int BadPayload      = 1502;
+    }
 }

@@ -11,17 +11,6 @@
             <ctrl:SettingsGroup Header="Windows"
                                 Description="Windows-only process and accessibility knobs.">
                 <ctrl:SettingsCard
-                    Header="Single instance"
-                    Description="Route a second launch into the already-running instance instead of starting a separate process. Takes effect on the next launch. Needed for jump-list New Tab to land in this window."
-                    ctrl:SettingsCard.ConfigKey="windows-single-instance">
-                    <ToggleSwitch
-                        x:Name="SingleInstanceToggle"
-                        OffContent="Separate processes"
-                        OnContent="One instance"
-                        Toggled="SingleInstanceToggle_Toggled" />
-                </ctrl:SettingsCard>
-
-                <ctrl:SettingsCard
                     Header="Follow High Contrast"
                     Description="When Windows High Contrast is on, restyle the terminal surface to match. Off keeps your configured colors."
                     ctrl:SettingsCard.ConfigKey="windows-high-contrast">

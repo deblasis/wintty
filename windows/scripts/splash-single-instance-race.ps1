@@ -23,10 +23,15 @@
     for the launched processes, so this never reads or writes the config
     file you actually use.
 
-    The election namespace is NOT isolated, and cannot be: the mutex name is
-    derived from the exe path. Any Wintty already running from the same
-    binary owns it, so the script refuses to run while one exists rather
-    than measure two launches that both forward to it.
+    The election namespace is isolated per launch since #1094: the
+    single-instance identity is derived from the exe path AND the edition
+    AND, under WINTTY_TEST_CONFIG (armed for every launch below), the
+    resolved config root -- which is the scratch XDG root each role gets.
+    Two launches over ONE root still contend for one election (that is
+    what this script measures); the founder's own running Wintty holds a
+    different, unarmed identity and cannot receive either launch. The
+    up-front refusal below is kept anyway: it is conservative, and a
+    Wintty from this exe lying around is still not a clean experiment.
 
     This demonstrates the defect; it does not certify its absence. Sampling
     is on the order of 30-40ms, so a splash shown for less than that would
@@ -54,11 +59,17 @@
     primary that has it on, and INVERT the expectation: that launch is an
     ordinary independent window and must show its splash.
 
-    This is the other half of the defect. "Does the mutex exist" and "is
-    single-instance on for this process" are different questions, and a
-    primary holds its mutex for its whole lifetime however the config is
-    edited afterwards. Anything answering the first question suppresses a
-    splash that should have appeared.
+    Since #1094 the second launch also gets its own config root in this
+    mode, and the single-instance identity is scoped to that root under the
+    test marker, so the launch runs as its own instance by isolation and
+    shows its splash for that reason. The pre-#1094 question this mode
+    asked ("does the mutex exist" versus "is single-instance on for THIS
+    process", with a primary holding its mutex for life however the config
+    is edited afterwards) is no longer constructible through configs alone:
+    the key is the dev-only escape hatch and two armed launches only ever
+    share an election by sharing a root. The mode stays because the
+    observable contract is unchanged: an independently-launched process
+    must put its splash up.
 
 .EXAMPLE
     ./windows/scripts/splash-single-instance-race.ps1 -Iterations 5
@@ -84,15 +95,18 @@ if (-not (Test-Path $ExePath)) {
 }
 $ExePath = (Resolve-Path $ExePath).Path
 
-# A Wintty already running from this exe path owns the single-instance mutex,
-# so BOTH launches below would forward to it and neither would ever show a
-# splash. That reports PASS while measuring nothing, which is the worst thing a
-# repro harness can do -- refuse instead.
+# Since #1094 the launches below run armed (WINTTY_TEST_CONFIG=1) over their
+# own scratch root, so their single-instance identity is not shared with any
+# Wintty that was already running: the founder's app elects under the
+# unarmed identity, and another harness's run under a different random root.
+# The refusal is kept anyway, conservative rather than load-bearing: a
+# Wintty from this exe lying around may hold the seam pipe and the desktop,
+# and a repro harness that measures through that noise is worse than one
+# that waits.
 # Path is unreadable for a process running elevated or as another user, and
-# those are filtered out rather than assumed to match. They would own the mutex
-# just the same, so a run that reports PASS with one of those around is still
-# measuring nothing -- this catches the case that actually happens (your own
-# Wintty, left open while working on Wintty), not every case.
+# those are filtered out rather than assumed to match. This catches the case
+# that actually happens (your own Wintty, left open while working on
+# Wintty), not every case.
 $alreadyRunning = @(
     Get-Process -Name 'Wintty' -ErrorAction SilentlyContinue |
         Where-Object { try { $_.Path -eq $ExePath } catch { $false } })
@@ -176,10 +190,11 @@ function Get-OverlapArea($a, $b) {
 }
 
 # Scratch config, one XDG root per role. Normally both roles point at the
-# same "on" config; -SecondaryFeatureOff gives the second launch its own with
-# the key off, which is what makes the two questions differ. The mutex name
-# is derived from the exe path, not the config, so the two still contend for
-# the same election.
+# same "on" config, which is what makes the two launches contend for ONE
+# election: since #1094 the identity hashes the config root under the test
+# marker, so a shared root is a shared election. -SecondaryFeatureOff gives
+# the second launch its own root with the key off; that launch then runs as
+# its own instance because of the root alone (see the parameter help).
 # A GUID, not $PID: the founder rule wants a randomly generated name,
 # and a PID is reused across reboots, so two runs can collide.
 $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-splash-race-" + [guid]::NewGuid().ToString('N'))

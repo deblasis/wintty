@@ -32,9 +32,21 @@ public static class SecureNamedPipe
     /// already held (the caller's retry policy decides stand-down).
     /// </summary>
     public static NamedPipeServerStream CreateServer(string pipeName) =>
+        CreateServer(pipeName, PipeDirection.In);
+
+    /// <summary>
+    /// Same server with the direction chosen by the caller: the
+    /// single-instance forwarding server answers its client with an
+    /// acknowledgement byte once it has served the launch, so it needs
+    /// <see cref="PipeDirection.InOut"/> while the write-only feeds stay
+    /// <see cref="PipeDirection.In"/>.
+    /// </summary>
+    public static NamedPipeServerStream CreateServer(
+        string pipeName,
+        PipeDirection direction) =>
         new(
             pipeName,
-            PipeDirection.In,
+            direction,
             1, // single instance: one session at a time
             PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance | PipeOptions.CurrentUserOnly,
