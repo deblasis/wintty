@@ -694,6 +694,11 @@ public class HarnessConfigIsolationScanTests
                 // it does; an allowlisted name that stopped launching would
                 // silently keep covering whatever replaced it.
                 Assert.NotEmpty(UnarmedLaunches(rel, lines));
+                // The +crash entries are safe ONLY while every launch is
+                // +crash-only; the user launcher is exempt by the founder
+                // rule, so the pin applies to the crash pair alone.
+                if (name.StartsWith("crash-", StringComparison.Ordinal))
+                    violations.AddRange(CrashOnlyViolations(rel, lines));
                 continue;
             }
 
@@ -708,6 +713,70 @@ public class HarnessConfigIsolationScanTests
             "Stage a random temp XDG root and set WINTTY_TEST_CONFIG=1 for the " +
             "child (unconditionally, before the launch), or add a justified " +
             "allowlist entry:\n  " + string.Join("\n  ", violations));
+    }
+
+    /// <summary>
+    /// The +crash-only allowlist entries (crash-canary, crash-matrix) are
+    /// safe ONLY because every launch is intercepted at Program.MainImpl
+    /// before InitGhostty and exits without touching config. A second leg
+    /// without +crash would ride the allowlist and run fully unguarded
+    /// against the real config. This pins the invariant: every app-launch
+    /// statement in those files must carry +crash (audit M2).
+    /// </summary>
+    private static List<string> CrashOnlyViolations(string rel, string[] lines)
+    {
+        var violations = new List<string>();
+        var functions = FunctionBodiesFor(lines);
+        foreach (var site in UnarmedLaunches(rel, lines))
+        {
+            // A statement continues over backtick lines; the +crash may sit
+            // on any of them.
+            var statement = new List<string> { lines[site.Line - 1] };
+            for (var j = site.Line; j < lines.Length; j++)
+            {
+                if (!statement[^1].TrimEnd().EndsWith('`')) break;
+                statement[^1] = statement[^1].TrimEnd().TrimEnd('`');
+                statement.Add(lines[j]);
+            }
+            if (!statement.Any(l => l.Contains("+crash", StringComparison.Ordinal)))
+                violations.Add(
+                    $"{rel}:{site.Line}: launch without +crash: {site.Text}");
+        }
+        return violations;
+    }
+
+    [Fact]
+    public void Crash_Only_Harnesses_Stay_Crash_Only()
+    {
+        var root = RepoRoot();
+        var fixtureDir = Path.Combine(
+            root, "windows", "Ghostty.Tests", "Wiring", "ScanFixtures",
+            "crash-only");
+        Assert.True(Directory.Exists(fixtureDir), "crash-only fixtures not found");
+
+        // The fixture pair, RED provenance: the with-crash shape must be
+        // clean and the without-crash shape must be flagged.
+        var clean = File.ReadAllLines(Path.Combine(
+            fixtureDir, "crash-fixture-with-crash.ps1"));
+        Assert.Empty(CrashOnlyViolations("crash-fixture-with-crash.ps1", clean));
+
+        var missing = File.ReadAllLines(Path.Combine(
+            fixtureDir, "crash-fixture-without-crash.ps1"));
+        Assert.NotEmpty(CrashOnlyViolations(
+            "crash-fixture-without-crash.ps1", missing));
+
+        // The two real files the allowlist vouches for.
+        var scriptDir = Path.Combine(root, "windows", "scripts");
+        foreach (var name in new[] { "crash-canary.ps1", "crash-matrix.ps1" })
+        {
+            var path = Path.Combine(scriptDir, name);
+            Assert.True(File.Exists(path), name + " not found");
+            var offenders = CrashOnlyViolations(
+                name, File.ReadAllLines(path));
+            Assert.True(offenders.Count == 0,
+                "a +crash-only harness grew a launch without +crash:\n  " +
+                string.Join("\n  ", offenders));
+        }
     }
 
     /// <summary>
