@@ -35,14 +35,48 @@ internal static class PngWriter
         WriteLadder(masters, outDir, SplashTargets, brand, nightly);
     }
 
+    // The PNG encoder, resolved from GDI+ once per process. Image.Save's
+    // (path/stream, ImageFormat) overloads re-run the codec lookup on
+    // every call, and under signoff-scale load that lookup has come back
+    // without the PNG entry (#1096): Save then died far from the cause
+    // with ArgumentNullException ('encoder'). One resolution serves every
+    // rung of every ladder and every .ico frame, and a GDI+ that
+    // genuinely has no PNG encoder fails at the lookup, with the cause
+    // in the message instead of an ArgumentNullException inside Save.
+    private static readonly Lazy<ImageCodecInfo> PngEncoderLazy = new(
+        () => ResolvePngEncoder(ImageCodecInfo.GetImageEncoders()));
+
+    internal static ImageCodecInfo PngEncoder => PngEncoderLazy.Value;
+
+    // Takes the codec enumeration as an argument rather than calling
+    // GetImageEncoders itself: that is the seam that lets a test stand in
+    // a GDI+ that reports no PNG entry -- the #1096 failure -- without
+    // breaking a machine to do it.
+    internal static ImageCodecInfo ResolvePngEncoder(
+        IEnumerable<ImageCodecInfo> encoders)
+    {
+        var png = encoders.FirstOrDefault(
+            codec => codec.FormatID.Equals(ImageFormat.Png.Guid));
+        if (png is null)
+            throw new InvalidOperationException(
+                "GDI+ reports no PNG encoder in this process, so the icon " +
+                "PNGs cannot be written: ImageCodecInfo.GetImageEncoders() " +
+                "returned no entry for the PNG format. This has been seen as " +
+                "a transient failure under heavy parallel build load (#1096); " +
+                "a re-run usually resolves it. If it persists, GDI+ on this " +
+                "machine is broken.");
+        return png;
+    }
+
     private static void WriteLadder(
         MasterRasters masters, string outDir, (string Name, int Px)[] targets,
         EditionBrand brand, bool nightly)
     {
+        var pngEncoder = PngEncoder;
         foreach (var (name, px) in targets)
         {
             using var resized = Resize(masters, px, brand, nightly);
-            resized.Save(Path.Combine(outDir, name), ImageFormat.Png);
+            resized.Save(Path.Combine(outDir, name), pngEncoder, null);
         }
     }
 

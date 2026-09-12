@@ -1,5 +1,4 @@
 using System.Drawing;
-using System.Drawing.Imaging;
 
 namespace Ghostty.IconGen;
 
@@ -16,11 +15,14 @@ internal static class IcoWriter
         MasterRasters masters, string outPath, EditionBrand brand, bool nightly)
     {
         var frames = new List<(int Px, byte[] PngBytes)>();
+        // Same encoder, same once-per-process resolution, as the PNG
+        // ladder: an .ico frame is a PNG saved to a stream (#1096).
+        var pngEncoder = PngWriter.PngEncoder;
         foreach (var px in FrameSizes)
         {
             using var resized = PngWriter.Resize(masters, px, brand, nightly);
             using var ms = new MemoryStream();
-            resized.Save(ms, ImageFormat.Png);
+            resized.Save(ms, pngEncoder, null);
             frames.Add((px, ms.ToArray()));
         }
 
