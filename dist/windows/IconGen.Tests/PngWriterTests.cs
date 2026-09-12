@@ -69,6 +69,40 @@ public class PngWriterTests
         Assert.Equal(expectedPx, img.Height);
     }
 
+    // #1096: the ladder saves through the PNG encoder resolved once from
+    // GDI+, not the per-call ImageFormat lookup that came back
+    // encoder-less under signoff load. This pins both halves: the
+    // resolved codec is the PNG one, and it is the same instance on
+    // every ask (resolved once, not per save).
+    [Fact]
+    public void PngEncoderIsTheGdiPlusPngCodecResolvedOnce()
+    {
+        var encoder = PngWriter.PngEncoder;
+
+        Assert.Equal(ImageFormat.Png.Guid, encoder.FormatID);
+        Assert.Same(encoder, PngWriter.PngEncoder);
+    }
+
+    // And when GDI+ reports no PNG entry, the #1096 failure, resolution
+    // fails loudly at the lookup instead of letting Save throw
+    // ArgumentNullException ('encoder') stack frames later. The codec
+    // enumeration passed in is the seam: the real GDI+ list with the PNG
+    // entry filtered out stands in for the loaded machine, so the
+    // failure is tested without engineering one.
+    [Fact]
+    public void MissingPngEncoderFailsLoudlyAtTheLookup()
+    {
+        var withoutPng = ImageCodecInfo.GetImageEncoders()
+            .Where(codec => !codec.FormatID.Equals(ImageFormat.Png.Guid))
+            .ToArray();
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => PngWriter.ResolvePngEncoder(withoutPng));
+
+        Assert.Contains("PNG", ex.Message);
+        Assert.Contains("GetImageEncoders", ex.Message);
+    }
+
     // The two theories above pin the names and sizes this tool writes.
     // This pins the shared table it writes them from, so moving
     // LaunchIconMetrics.MaxSizeDips (which the rungs derive from) is a
