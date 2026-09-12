@@ -98,6 +98,7 @@ internal static class LogEvents
         public const int LoadFailed   = 2800;
         public const int SaveFailed   = 2801;
         public const int DeleteFailed = 2802;
+        public const int RestoreDroppedLeaves = 2803;
     }
 
     // 2900-2999: Single-instance mode. The serving half's ids

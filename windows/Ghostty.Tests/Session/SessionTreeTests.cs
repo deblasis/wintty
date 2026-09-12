@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Profiles;
@@ -132,5 +133,141 @@ public class SessionTreeTests
 
         var rebuilt = (SplitPane)SessionTree.RebuildTree(dto, d => new LeafPane { Snapshot = Snap(d.ProfileId!) });
         Assert.Equal(expected, rebuilt.Ratio, precision: 6);
+    }
+
+    // makeLeaf returning null is a refusal: restore drops the leaf (a
+    // saved pane whose profile is gone AND whose fallback cannot be
+    // spawned). A split it empties collapses; a tree with nothing left
+    // refuses in turn so the caller can drop the tab.
+    private static LeafPane? KeepAllBut(LeafDto d) =>
+        d.ProfileId!.StartsWith("refuse", StringComparison.Ordinal)
+            ? null
+            : new LeafPane { Snapshot = Snap(d.ProfileId!) };
+
+    [Fact]
+    public void RebuildTree_RefusedLeaf_CollapsesItsSplit()
+    {
+        var dto = new SplitDto
+        {
+            Orientation = PaneOrientation.Vertical,
+            Child1 = new LeafDto { ProfileId = "keep" },
+            Child2 = new LeafDto { ProfileId = "refuse" },
+        };
+
+        var rebuilt = SessionTree.RebuildTree(dto, KeepAllBut);
+
+        // No one-pane split: the survivor IS the root now.
+        var leaf = Assert.IsType<LeafPane>(rebuilt);
+        Assert.Equal("keep", leaf.Snapshot!.ProfileId);
+    }
+
+    [Fact]
+    public void RebuildTree_NestedRefusals_PromoteTheSurvivor()
+    {
+        // (refuse - keep) - refuse-too: both splits lose a side.
+        var dto = new SplitDto
+        {
+            Orientation = PaneOrientation.Vertical,
+            Child1 = new SplitDto
+            {
+                Orientation = PaneOrientation.Horizontal,
+                Child1 = new LeafDto { ProfileId = "refuse" },
+                Child2 = new LeafDto { ProfileId = "keep" },
+            },
+            Child2 = new LeafDto { ProfileId = "refuse-too" },
+        };
+
+        var rebuilt = SessionTree.RebuildTree(dto, KeepAllBut);
+
+        var leaf = Assert.IsType<LeafPane>(rebuilt);
+        Assert.Equal("keep", leaf.Snapshot!.ProfileId);
+    }
+
+    [Fact]
+    public void RebuildTree_TwoSurvivors_KeepTheirSplit()
+    {
+        // keep - (refuse - keep): the outer split keeps both sides, the
+        // inner collapses. Refusals must never take a live split down.
+        var dto = new SplitDto
+        {
+            Orientation = PaneOrientation.Vertical,
+            Ratio = 0.7,
+            Child1 = new LeafDto { ProfileId = "keep-a" },
+            Child2 = new SplitDto
+            {
+                Orientation = PaneOrientation.Horizontal,
+                Child1 = new LeafDto { ProfileId = "refuse" },
+                Child2 = new LeafDto { ProfileId = "keep-b" },
+            },
+        };
+
+        var rebuilt = Assert.IsType<SplitPane>(SessionTree.RebuildTree(dto, KeepAllBut));
+
+        Assert.Equal(0.7, rebuilt.Ratio, precision: 6);
+        var a = Assert.IsType<LeafPane>(rebuilt.Child1);
+        var b = Assert.IsType<LeafPane>(rebuilt.Child2);
+        Assert.Equal("keep-a", a.Snapshot!.ProfileId);
+        Assert.Equal("keep-b", b.Snapshot!.ProfileId);
+    }
+
+    [Fact]
+    public void RebuildTree_AllLeavesRefused_ReturnsNull()
+    {
+        LeafPane? Refuse(LeafDto _) => null;
+
+        Assert.Null(SessionTree.RebuildTree(new LeafDto { ProfileId = "x" }, Refuse));
+        Assert.Null(SessionTree.RebuildTree(new SplitDto
+        {
+            Orientation = PaneOrientation.Vertical,
+            Child1 = new LeafDto { ProfileId = "x" },
+            Child2 = new LeafDto { ProfileId = "y" },
+        }, Refuse));
+    }
+
+    [Fact]
+    public void RebuildTree_ResolverDrivenDrop_RemovesTheStaleLeafFromTheNextSave()
+    {
+        // The restore the way SessionRestorer drives it: refuse exactly
+        // what SessionProfileResolver.ShouldDropLeaf refuses, spawn the
+        // rest through ResolveLeaf. A stale rc.1 Headless SSH leaf
+        // beside an ordinary custom leaf, on a machine where nothing
+        // resolves (Desktop: the preset is not offered at all).
+        IProfileRegistry? registry = null;
+        var dto = new SplitDto
+        {
+            Orientation = PaneOrientation.Horizontal,
+            Child1 = new LeafDto
+            {
+                ProfileId = "wintty.builtin.headless-ssh",
+                Fallback = new LeafCommand
+                {
+                    ResolvedCommand = "ssh ${env:WINTTY_SSH_TARGET}",
+                    DisplayName = "Headless SSH",
+                },
+            },
+            Child2 = new LeafDto
+            {
+                ProfileId = "my-dev-box",
+                Fallback = new LeafCommand
+                {
+                    ResolvedCommand = "cmd.exe /k echo hi",
+                    DisplayName = "dev",
+                },
+            },
+        };
+
+        var rebuilt = SessionTree.RebuildTree(dto, leaf =>
+            SessionProfileResolver.ShouldDropLeaf(registry, leaf)
+                ? null
+                : new LeafPane { Snapshot = SessionProfileResolver.ResolveLeaf(registry, leaf) });
+
+        var survivor = Assert.IsType<LeafPane>(rebuilt);
+        Assert.Equal("my-dev-box", survivor.Snapshot!.ProfileId);
+        Assert.Equal("cmd.exe /k echo hi", survivor.Snapshot.ResolvedCommand);
+
+        // The save after that restore cannot resurrect the leaf: the
+        // rebuilt tree, captured back, carries only the survivor.
+        var resaved = Assert.IsType<LeafDto>(SessionTree.CaptureTree(rebuilt));
+        Assert.Equal("my-dev-box", resaved.ProfileId);
     }
 }

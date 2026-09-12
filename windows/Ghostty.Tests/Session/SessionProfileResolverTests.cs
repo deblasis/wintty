@@ -239,4 +239,89 @@ public class SessionProfileResolverTests
             cwd,
             SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", cwd))!.WorkingDirectory);
     }
+
+    // ShouldDropLeaf carves one exception out of the fallback behaviour
+    // pinned above: a leaf whose id resolves to nothing offered AND whose
+    // saved fallback cannot be spawned as saved. rc.1 saved Headless SSH
+    // tabs exactly so (wintty-release #874 gates the preset off Desktop /
+    // Pro Legacy / target-less Enterprise; #823 is the bug), and they
+    // restored as local panes running the literal template, re-saving
+    // themselves on every launch.
+    [Fact]
+    public void ShouldDropLeaf_StaleBuiltInWithTemplateCommand_IsDropped()
+    {
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh ${env:WINTTY_SSH_TARGET}");
+
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_WithdrawnBuiltInEvenWithPlainCommand_IsDropped()
+    {
+        // Post-gate Enterprise saves carry the plain validated command; a
+        // target withdrawn later (the gate closing again) must not keep
+        // re-spawning it past the gate.
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh fleet-gw");
+
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    // THE boundary: the user's own command is spawnable as saved, so a
+    // profile that was merely renamed or deleted keeps the fallback.
+    [Fact]
+    public void ShouldDropLeaf_OrdinaryRenamedCustomProfile_IsKept()
+    {
+        var leaf = Leaf("my-dev-box", "cmd.exe /k echo hi");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_ResolvingIdIsNeverDropped_EvenWithTemplateCommand()
+    {
+        // An admin override claiming the built-in id resolves (user wins
+        // on id conflicts); the fresh profile is used and the fallback is
+        // never consulted.
+        var reg = new FakeProfileRegistry();
+        reg.Add(Profile("wintty.builtin.headless-ssh", "ssh ${env:WINTTY_SSH_TARGET}"));
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh ${env:WINTTY_SSH_TARGET}");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_LegacyNoProfileLeaf_IsKept()
+    {
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(
+            new FakeProfileRegistry(), Leaf(null, null)));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_UnresolvableCustomIdWithTemplateCommand_IsDropped()
+    {
+        // The dialect rule is general: nothing on any spawn path expands
+        // the retired template, so the pane would hand the literal token
+        // to its child process whatever profile wrote it.
+        var leaf = Leaf("custom", "pwsh -NoProfile -c echo ${env:BUILD_ID}");
+
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Theory]
+    [InlineData("WINTTY.BUILTIN.headless-ssh")] // ids compare without case, like the registry
+    [InlineData("wintty.builtin.")]             // degenerate bare prefix
+    public void ShouldDropLeaf_ReservedBuiltInNamespace_MatchesWithoutCase(string id)
+    {
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(
+            new FakeProfileRegistry(), Leaf(id, "whatever.exe")));
+    }
+
+    [Theory]
+    [InlineData("wintty.custom-box")]   // near the namespace, not in it
+    [InlineData("wintty-builtin.ssh")]  // a dash is not a dot
+    public void ShouldDropLeaf_IdsOutsideTheReservedNamespace_AreOrdinary(string id)
+    {
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(
+            new FakeProfileRegistry(), Leaf(id, "whatever.exe")));
+    }
 }

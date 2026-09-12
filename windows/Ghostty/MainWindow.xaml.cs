@@ -807,8 +807,11 @@ public sealed partial class MainWindow : Window
         List<TabModel>? restoredTabs = null;
         // One restorer for both halves: BuildTabs records the saved-tab
         // pairing the group restore reads back, so the seeding block and
-        // the group block must use the same instance.
-        var restorer = new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry);
+        // the group block must use the same instance. The logger is what
+        // makes dropped leaves (a preset this build does not offer) say
+        // so: exactly one notice per restore.
+        var restorer = new Ghostty.Session.SessionRestorer(
+            _factory, App.ProfileRegistry, loggerFactory.CreateLogger<Ghostty.Session.SessionRestorer>());
         if (restore is { Tabs.Count: > 0 })
         {
             var built = restorer.BuildTabs(restore);
