@@ -12,7 +12,11 @@ public class SessionProfileResolverTests
 {
     private sealed class FakeProfileRegistry : IProfileRegistry
     {
-        private readonly Dictionary<string, ResolvedProfile> _byId = new();
+        // The real registry compares ids OrdinalIgnoreCase (its resolve
+        // map is built with that comparer); the fake must match or its
+        // answers drift from production on case-variant saved ids.
+        private readonly Dictionary<string, ResolvedProfile> _byId =
+            new(StringComparer.OrdinalIgnoreCase);
         private readonly List<ResolvedProfile> _hidden = new();
         public long Version { get; } = 7;
         public IReadOnlyList<ResolvedProfile> Profiles => new List<ResolvedProfile>(_byId.Values);
@@ -327,6 +331,20 @@ public class SessionProfileResolverTests
         reg.Hide(Profile("my-dev-box", "cmd.exe /k echo hi"));
         var leaf = Leaf("my-dev-box", "cmd.exe /k echo hi");
 
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_MixedCaseSavedIdOfAnOfferedBuiltIn_ResolvesAndIsKept()
+    {
+        // Ids compare without case in the real registry, so a save in
+        // odd case still resolves to the offered profile; this row is
+        // what keeps the fake's comparer honest about that.
+        var reg = new FakeProfileRegistry();
+        reg.Add(Profile("wintty.builtin.headless-ssh", "ssh fleet-gw"));
+        var leaf = Leaf("WINTTY.BUILTIN.HEADLESS-SSH", "ssh fleet-gw");
+
+        Assert.NotNull(SessionProfileResolver.ResolveById(reg, leaf.ProfileId));
         Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
     }
 

@@ -163,7 +163,7 @@ internal sealed class SessionRestorer
 internal static partial class SessionRestorerLogExtensions
 {
     [LoggerMessage(EventId = LogEvents.Session.RestoreDroppedLeaves,
-                   Level = LogLevel.Warning, Message = "Session restore dropped {Count} saved pane(s) whose profile this build does not offer ({Names}); the next session save removes them for good. To get them back: enable or unhide the profile in Settings, or for Headless SSH set WINTTY_SSH_TARGET or launch with --ssh user@host")]
+                   Level = LogLevel.Warning, Message = "Session restore dropped {Count} saved pane(s) whose profile this build does not offer ({Names}); the next session save removes them for good. Headless SSH panes return once WINTTY_SSH_TARGET is set or you launch with --ssh user@host; any other withdrawn built-in has no restore path in this build")]
     internal static partial void LogSessionRestoreDroppedLeaves(
         this ILogger<SessionRestorer> logger, int count, string names);
 }
