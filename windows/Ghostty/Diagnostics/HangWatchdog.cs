@@ -152,7 +152,7 @@ internal static class HangWatchdog
     private static (string Log, string Dump) Paths(int pid)
     {
         var root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Ghostty.Core.AppStateBase.LocalRoot,
             Ghostty.Core.AppIdentity.StateDirName);
         return (
             Path.Combine(root, "crash.log"),
