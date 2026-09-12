@@ -121,4 +121,24 @@ public class SessionRestoreDropWiringTests
         Assert.NotNull(guard);
         Assert.Contains("built.Count", guard!.Condition.ToString());
     }
+
+    [Fact]
+    public void ReopenAndDuplicate_RideTheSameDropDecision()
+    {
+        var mainWindow = ShellSource.Load("MainWindow.xaml.cs");
+
+        // A leaf the rule KEEPS (an ordinary env-var one-liner, say)
+        // must still duplicate and reopen: both call sites go through
+        // the same BuildTab worker the restore does, so one
+        // ShouldDropLeaf decision covers all three paths. The chained
+        // spelling in DuplicateTab (restorer on one line, .BuildTab on
+        // the next) needs the suffix match.
+        var reopen = mainWindow.Method("ReopenClosedTab");
+        Assert.Single(reopen.Calls("restorer.BuildTab"));
+
+        var duplicate = mainWindow.Method("DuplicateTab");
+        Assert.Single(duplicate.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().EndsWith(".BuildTab", System.StringComparison.Ordinal)));
+    }
 }

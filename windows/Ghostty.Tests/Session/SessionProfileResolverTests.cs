@@ -13,13 +13,21 @@ public class SessionProfileResolverTests
     private sealed class FakeProfileRegistry : IProfileRegistry
     {
         private readonly Dictionary<string, ResolvedProfile> _byId = new();
+        private readonly List<ResolvedProfile> _hidden = new();
         public long Version { get; } = 7;
         public IReadOnlyList<ResolvedProfile> Profiles => new List<ResolvedProfile>(_byId.Values);
-        public IReadOnlyList<ResolvedProfile> HiddenProfiles => Array.Empty<ResolvedProfile>();
+        public IReadOnlyList<ResolvedProfile> HiddenProfiles => _hidden;
         public string? DefaultProfileId { get; set; }
         public event Action<IProfileRegistry>? ProfilesChanged { add { } remove { } }
 
         public void Add(ResolvedProfile p) => _byId[p.Id] = p;
+
+        /// <summary>
+        /// Hide a profile the way the real composition does: it stays
+        /// carried (HiddenProfiles) but is NOT resolvable, because the
+        /// real registry builds its id map from the visible list only.
+        /// </summary>
+        public void Hide(ResolvedProfile p) => _hidden.Add(p);
         public ResolvedProfile? Resolve(string profileId) =>
             _byId.TryGetValue(profileId, out var p) ? p : null;
         public Task RefreshDiscoveryAsync(CancellationToken ct) => Task.CompletedTask;
@@ -296,15 +304,66 @@ public class SessionProfileResolverTests
             new FakeProfileRegistry(), Leaf(null, null)));
     }
 
+    // Hidden is a menu choice about a profile the composition still
+    // carries, not a withdrawal: hiding the offered preset from the
+    // flyout must not delete the saved tabs that ran it. Only a
+    // built-in id the registry does not know AT ALL (visible or
+    // hidden) is withdrawn -- the release gate omits a refused preset
+    // from both lists rather than hiding it.
     [Fact]
-    public void ShouldDropLeaf_UnresolvableCustomIdWithTemplateCommand_IsDropped()
+    public void ShouldDropLeaf_HiddenOfferedBuiltIn_IsKept()
     {
-        // The dialect rule is general: nothing on any spawn path expands
-        // the retired template, so the pane would hand the literal token
-        // to its child process whatever profile wrote it.
+        var reg = new FakeProfileRegistry();
+        reg.Hide(Profile("wintty.builtin.headless-ssh", "ssh fleet-gw"));
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh fleet-gw");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_HiddenCustomProfile_IsKept()
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Hide(Profile("my-dev-box", "cmd.exe /k echo hi"));
+        var leaf = Leaf("my-dev-box", "cmd.exe /k echo hi");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    // ${env:NAME} is live PowerShell (the env: drive): the child shell
+    // expands it, so a user's own one-liner runs as written and a leaf
+    // carrying it keeps the fallback behaviour.
+    [Fact]
+    public void ShouldDropLeaf_OrdinaryEnvVarOneLiner_IsKept()
+    {
         var leaf = Leaf("custom", "pwsh -NoProfile -c echo ${env:BUILD_ID}");
 
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    // The one token that is NOT the user's: the retired Headless SSH
+    // preset's own template, compared without case like every profile
+    // comparison here.
+    [Theory]
+    [InlineData("ssh ${env:WINTTY_SSH_TARGET}")]
+    [InlineData("ssh ${ENV:WINTTY_SSH_TARGET}")]
+    [InlineData("pwsh -c ${env:wintty_ssh_target}")]
+    public void ShouldDropLeaf_ExactRetiredTemplateCommand_IsDropped(string command)
+    {
+        var leaf = Leaf("custom", command);
+
         Assert.True(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_CustomIdWithNoFallback_IsKept()
+    {
+        // A save old enough to predate fallback recording: the leaf
+        // resolves to nothing, names no built-in, and has no command to
+        // judge -- it keeps the legacy default-shell spawn.
+        var leaf = new LeafDto { ProfileId = "custom" };
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
     }
 
     [Theory]

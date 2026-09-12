@@ -270,4 +270,33 @@ public class SessionTreeTests
         var resaved = Assert.IsType<LeafDto>(SessionTree.CaptureTree(rebuilt));
         Assert.Equal("my-dev-box", resaved.ProfileId);
     }
+
+    [Fact]
+    public void RebuildTree_ResolverDrivenKeep_OrdinaryOneLinerSurvives()
+    {
+        // The same driven shape, keep side: an unresolvable custom
+        // profile whose command embeds ${env:BUILD_ID} is the user's
+        // own live PowerShell, not the retired template, so restore,
+        // duplicate and reopen all rebuild it with its command intact.
+        IProfileRegistry? registry = null;
+        var dto = new LeafDto
+        {
+            ProfileId = "custom",
+            Fallback = new LeafCommand
+            {
+                ResolvedCommand = "pwsh -NoProfile -c echo ${env:BUILD_ID}",
+                DisplayName = "build",
+            },
+        };
+
+        var rebuilt = SessionTree.RebuildTree(dto, leaf =>
+            SessionProfileResolver.ShouldDropLeaf(registry, leaf)
+                ? null
+                : new LeafPane { Snapshot = SessionProfileResolver.ResolveLeaf(registry, leaf) });
+
+        var survivor = Assert.IsType<LeafPane>(rebuilt);
+        Assert.Equal("custom", survivor.Snapshot!.ProfileId);
+        Assert.Equal("pwsh -NoProfile -c echo ${env:BUILD_ID}",
+            survivor.Snapshot.ResolvedCommand);
+    }
 }
