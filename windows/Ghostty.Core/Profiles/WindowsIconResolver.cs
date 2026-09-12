@@ -216,7 +216,10 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
 
     private string? CachePathFor(string sha)
     {
+        // The root comes from the injected fs (tests fake the known
+        // folder), so the state-base override is applied to that value
+        // rather than read through AppStateBase.LocalRoot.
         var local = fs.GetKnownFolder(KnownFolderId.LocalAppData);
-        return local is null ? null : Path.Combine(local, AppIdentity.StateDirName, "IconCache", sha + ".png");
+        return local is null ? null : Path.Combine(AppStateBase.ApplyOverride(local), AppIdentity.StateDirName, "IconCache", sha + ".png");
     }
 }

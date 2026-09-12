@@ -263,7 +263,7 @@ public static partial class Program
     /// combine and can only turn a failure into a success.
     /// </remarks>
     private static string GpuLogPath => _gpuLogPath ??= Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        AppStateBase.LocalRoot,
         AppIdentity.StateDirName, "gpu.log");
 
     /// <summary>
@@ -741,22 +741,26 @@ public static partial class Program
     /// </summary>
     /// <remarks>
     /// Its own method, and its own try, because
-    /// <c>Environment.GetFolderPath</c> is the call that fails on a broken
-    /// profile - the same call the lazy <see cref="GpuLogPath"/> exists to keep
-    /// out of the type initializer. An empty result is rejected rather than
-    /// combined, because Path.Combine would turn it into a relative path and
-    /// scatter crash logs across whatever the current directory happened to be.
+    /// <c>AppStateBase.LocalRoot</c>'s known-folder read is the call that
+    /// fails on a broken profile - the same call the lazy
+    /// <see cref="GpuLogPath"/> exists to keep out of the type initializer.
+    /// An empty result is rejected rather than combined, because
+    /// Path.Combine would turn it into a relative path and scatter crash
+    /// logs across whatever the current directory happened to be.
     /// </remarks>
     private static string? TryGetFallbackCrashLogPath()
     {
         try
         {
-            var localAppData = Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData);
+            var localAppData = AppStateBase.LocalRoot;
             if (string.IsNullOrEmpty(localAppData))
                 return null;
 
-            return Path.Combine(localAppData, AppIdentity.StateDirName, CrashLogFileName);
+            // ApplyOverride rather than a second LocalRoot read: the root
+            // is already resolved above and only needs the override
+            // stamped on it for the state-base wiring rule, which wants
+            // the combine itself to name the helper.
+            return Path.Combine(AppStateBase.ApplyOverride(localAppData), AppIdentity.StateDirName, CrashLogFileName);
         }
         catch
         {

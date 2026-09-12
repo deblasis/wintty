@@ -24,7 +24,7 @@ internal sealed class SessionStore
     // thread whose whole job is to be on screen first. Save creates the
     // directory, because writing is the only operation that needs one.
     private static string Dir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppStateBase.RoamingRoot,
         AppIdentity.StateDirName);
 
     internal static string FilePath => Path.Combine(Dir, "session.json");

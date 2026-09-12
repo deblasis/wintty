@@ -41,7 +41,38 @@ public class FileLoggerProviderTests : IDisposable
         Assert.Single(files);
         Assert.Equal("ghostty-20260417.log", Path.GetFileName(files[0]));
         var body = ReadAllTextShared(files[0]);
-        Assert.Contains(" | Warn  | 42 | TestCategory | hello", body);
+        // The pid is part of the pinned line shape (#854 item 8); the
+        // dedicated test covers why. This assert keeps the whole format
+        // honest, so it spells the field out rather than matching a
+        // prefix that would survive a field being dropped.
+        Assert.Contains($" | Warn  | {Environment.ProcessId} | 42 | TestCategory | hello", body);
+    }
+
+    [Fact]
+    public async Task EveryLineNamesTheProcessId()
+    {
+        // Multi-instance attribution (#854 item 8): every process of an
+        // edition appends to the same ghostty-YYYYMMDD.log (the writer
+        // coexists with a live second instance by design), so a line
+        // without a pid cannot be attributed to the process that wrote
+        // it -- "which instance warned?" is unanswerable, both for a
+        // human reading the file and for the #847 app-run health check,
+        // which cannot tell the launched instance's warnings from a
+        // stray one still running. The pid rides between the level and
+        // the event id: the health check's line regex anchors on
+        // `timestamp | level |`, so a field there is invisible to it.
+        var clock = new FakeClock(new DateTime(2026, 4, 17, 14, 0, 0, DateTimeKind.Utc));
+        await using var sink = new FileLoggerProvider(
+            NewOptions(_tempDir), clock, RealFileSystem.Instance);
+        var logger = sink.CreateLogger("TestCategory");
+
+        logger.LogWarning(new EventId(42, "TestEvent"), "hello");
+
+        await DrainAsync(sink);
+        var body = ReadAllTextShared(Path.Combine(_tempDir, "ghostty-20260417.log"));
+        Assert.Contains(
+            $" | Warn  | {Environment.ProcessId} | 42 | TestCategory | hello",
+            body);
     }
 
     [Fact]

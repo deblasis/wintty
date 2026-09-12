@@ -32,7 +32,7 @@ internal static partial class NativeStderrCapture
     private const long MaxBytes = 8 * 1024 * 1024;
 
     private static string LogPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        Ghostty.Core.AppStateBase.LocalRoot,
         Ghostty.Core.AppIdentity.StateDirName,
         "native-stderr.log");
 
