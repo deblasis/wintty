@@ -42,16 +42,29 @@ public sealed class SecureNamedPipeTests
     // no test, so the half that cannot be slow no longer sits behind the half
     // that can.
     [Fact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public void CreateServer_DaclGrantsOnlyTheCreatingUser()
     {
+        // xunit 2.9 has no runtime skip. The suite is Windows-only in
+        // practice, so this guard is for a hypothetical host rather than
+        // a configuration anyone runs (same shape as
+        // TestSeamWiringTests.ThePipeAclAdmitsThisUserAlone).
+        if (!OperatingSystem.IsWindows()) return;
+
         var name = TestPipeName();
         using var server = SecureNamedPipe.CreateServer(name);
 
         var sddl = PipeSecurityProbe.Sddl(server.SafePipeHandle);
 
-        // The kernel's own record of who the creating user is: the
-        // descriptor's owner.
-        var owner = OwnerSid(sddl);
+        // The user CurrentUserOnly grants is the token user, and the
+        // token user is who must be the DACL's only grantee. Not the
+        // descriptor's owner: an elevated creator's objects are owned by
+        // Administrators (BA) while the pipe stays correctly locked to
+        // the token user, so the owner would false-red an elevated run
+        // of this suite against a correct pipe.
+        var creatingUser =
+            System.Security.Principal.WindowsIdentity.GetCurrent().User!
+            .Value;
 
         // Every ACE the DACL carries must grant that user and nobody
         // else. These checks replaced three substring bans ("S-1-1-0",
@@ -65,9 +78,9 @@ public sealed class SecureNamedPipeTests
         // default DACL, which is the failure this test exists to catch.
         var trustees = DaclTrustees(sddl);
         Assert.True(trustees.Length > 0, $"the pipe carries no DACL: {sddl}");
-        Assert.Contains(owner, trustees);
+        Assert.Contains(creatingUser, trustees);
         var strangers = trustees
-            .Where(t => !t.Equals(owner, StringComparison.Ordinal))
+            .Where(t => !t.Equals(creatingUser, StringComparison.Ordinal))
             .ToArray();
         Assert.True(strangers.Length == 0,
             $"the pipe DACL grants access beyond the creating user "
@@ -75,30 +88,52 @@ public sealed class SecureNamedPipeTests
     }
 
     /// <summary>
-    /// The owner SID out of an SDDL string ("O:sidG:...").
-    /// </summary>
-    private static string OwnerSid(string sddl)
-    {
-        var start = sddl.IndexOf("O:", StringComparison.Ordinal);
-        var end = sddl.IndexOf("G:", StringComparison.Ordinal);
-        Assert.True(start == 0 && end > start,
-            $"unexpected SDDL shape: {sddl}");
-        return sddl[2..end];
-    }
-
-    /// <summary>
     /// The trustee SID of every ACE in the SDDL's DACL. An ACE is
     /// "type;flags;rights;objguid;inheritguid;trustee", so the trustee
-    /// is the last semicolon-separated field.
+    /// is the last semicolon-separated field. Between "D:" and the
+    /// first "(" sit the DACL's control flags (P protected, AR/AI
+    /// auto-inherited), which are not ACEs and must not be read as a
+    /// phantom trustee.
     /// </summary>
     private static string[] DaclTrustees(string sddl)
     {
         var d = sddl.IndexOf("D:", StringComparison.Ordinal);
         Assert.True(d >= 0, $"no DACL section in SDDL: {sddl}");
-        return sddl[(d + 2)..]
+        var section = sddl[(d + 2)..];
+        var firstAce = section.IndexOf('(');
+        if (firstAce < 0)
+            return Array.Empty<string>();
+        return section[firstAce..]
             .Split(new[] { '(', ')' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(ace => ace.Split(';')[^1])
             .ToArray();
+    }
+
+    // The parser half of the above, on synthetic SDDL. The kernel this
+    // suite runs against renders a bare "D:(...)" for both the locked
+    // and the default pipe, so the control-flag shapes cannot be
+    // produced through the probe on demand; the rows pin that the
+    // parser skips the flags instead of reporting a phantom stranger
+    // "P" or "AR" and false-reding a correct descriptor.
+    [Theory]
+    [InlineData(
+        "O:S-1-5-1G:S-1-5-1D:(A;;FA;;;SY)(A;;0x1f019f;;;S-1-5-1)",
+        "SY|S-1-5-1")]
+    [InlineData("O:S-1-5-1G:S-1-5-1D:P(A;;FA;;;S-1-5-1)", "S-1-5-1")]
+    [InlineData(
+        "O:S-1-5-1G:S-1-5-1D:AR(A;;FA;;;S-1-5-1)(A;;FR;;;WD)",
+        "S-1-5-1|WD")]
+    [InlineData("O:S-1-5-1G:S-1-5-1D:", "")]
+    public void DaclTrusteesParsesAcesAndSkipsControlFlags(
+        string sddl, string expected)
+    {
+        var trustees = DaclTrustees(sddl);
+
+        Assert.Equal(
+            expected.Length == 0
+                ? Array.Empty<string>()
+                : expected.Split('|'),
+            trustees);
     }
 
     // The other half of "only the creating user": the creating user must
