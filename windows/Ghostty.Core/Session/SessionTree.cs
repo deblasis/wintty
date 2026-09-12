@@ -52,22 +52,37 @@ internal static class SessionTree
     /// Rebuild a <see cref="PaneNode"/> tree from a dto. <paramref name="makeLeaf"/>
     /// turns a <see cref="LeafDto"/> into a <see cref="LeafPane"/> (the app
     /// layer re-resolves the profile and sets <see cref="LeafPane.Snapshot"/>;
-    /// <see cref="LeafPane.Tag"/> is left null for the host to populate).
+    /// <see cref="LeafPane.Tag"/> is left null for the host to populate), or
+    /// returns null to refuse the leaf (restore drops it -- see
+    /// <see cref="SessionProfileResolver.ShouldDropLeaf"/>). A split whose
+    /// children were all refused is refused in turn, and a split left with
+    /// one survivor collapses to that survivor: a divider around a single
+    /// pane is not a split the user made. Splits that survive keep their
+    /// saved orientation and clamped ratio.
     /// </summary>
-    public static PaneNode RebuildTree(PaneNodeDto dto, Func<LeafDto, LeafPane> makeLeaf)
+    public static PaneNode? RebuildTree(PaneNodeDto dto, Func<LeafDto, LeafPane?> makeLeaf)
     {
         ArgumentNullException.ThrowIfNull(dto);
         ArgumentNullException.ThrowIfNull(makeLeaf);
         return dto switch
         {
-            SplitDto s => new SplitPane(
-                s.Orientation,
-                RebuildTree(s.Child1, makeLeaf),
-                RebuildTree(s.Child2, makeLeaf),
-                Math.Clamp(s.Ratio, SplitPane.MinRatio, SplitPane.MaxRatio)),
+            SplitDto s => SplitOrCollapse(s, makeLeaf),
             LeafDto l => makeLeaf(l),
             _ => throw new ArgumentException($"Unknown PaneNodeDto type: {dto.GetType()}"),
         };
+
+        static PaneNode? SplitOrCollapse(SplitDto s, Func<LeafDto, LeafPane?> makeLeaf)
+        {
+            var child1 = RebuildTree(s.Child1, makeLeaf);
+            var child2 = RebuildTree(s.Child2, makeLeaf);
+            if (child1 is null) return child2;
+            if (child2 is null) return child1;
+            return new SplitPane(
+                s.Orientation,
+                child1,
+                child2,
+                Math.Clamp(s.Ratio, SplitPane.MinRatio, SplitPane.MaxRatio));
+        }
     }
 
     /// <summary>Path of Child1(false)/Child2(true) steps from root to target; empty if target is root.</summary>

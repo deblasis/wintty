@@ -12,14 +12,26 @@ public class SessionProfileResolverTests
 {
     private sealed class FakeProfileRegistry : IProfileRegistry
     {
-        private readonly Dictionary<string, ResolvedProfile> _byId = new();
+        // The real registry compares ids OrdinalIgnoreCase (its resolve
+        // map is built with that comparer); the fake must match or its
+        // answers drift from production on case-variant saved ids.
+        private readonly Dictionary<string, ResolvedProfile> _byId =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<ResolvedProfile> _hidden = new();
         public long Version { get; } = 7;
         public IReadOnlyList<ResolvedProfile> Profiles => new List<ResolvedProfile>(_byId.Values);
-        public IReadOnlyList<ResolvedProfile> HiddenProfiles => Array.Empty<ResolvedProfile>();
+        public IReadOnlyList<ResolvedProfile> HiddenProfiles => _hidden;
         public string? DefaultProfileId { get; set; }
         public event Action<IProfileRegistry>? ProfilesChanged { add { } remove { } }
 
         public void Add(ResolvedProfile p) => _byId[p.Id] = p;
+
+        /// <summary>
+        /// Hide a profile the way the real composition does: it stays
+        /// carried (HiddenProfiles) but is NOT resolvable, because the
+        /// real registry builds its id map from the visible list only.
+        /// </summary>
+        public void Hide(ResolvedProfile p) => _hidden.Add(p);
         public ResolvedProfile? Resolve(string profileId) =>
             _byId.TryGetValue(profileId, out var p) ? p : null;
         public Task RefreshDiscoveryAsync(CancellationToken ct) => Task.CompletedTask;
@@ -238,5 +250,155 @@ public class SessionProfileResolverTests
         Assert.Equal(
             cwd,
             SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", cwd))!.WorkingDirectory);
+    }
+
+    // ShouldDropLeaf carves one exception out of the fallback behaviour
+    // pinned above: a leaf whose id resolves to nothing offered AND whose
+    // saved fallback cannot be spawned as saved. rc.1 saved Headless SSH
+    // tabs exactly so (wintty-release #874 gates the preset off Desktop /
+    // Pro Legacy / target-less Enterprise; #823 is the bug), and they
+    // restored as local panes running the literal template, re-saving
+    // themselves on every launch.
+    [Fact]
+    public void ShouldDropLeaf_StaleBuiltInWithTemplateCommand_IsDropped()
+    {
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh ${env:WINTTY_SSH_TARGET}");
+
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_WithdrawnBuiltInEvenWithPlainCommand_IsDropped()
+    {
+        // Post-gate Enterprise saves carry the plain validated command; a
+        // target withdrawn later (the gate closing again) must not keep
+        // re-spawning it past the gate.
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh fleet-gw");
+
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    // THE boundary: the user's own command is spawnable as saved, so a
+    // profile that was merely renamed or deleted keeps the fallback.
+    [Fact]
+    public void ShouldDropLeaf_OrdinaryRenamedCustomProfile_IsKept()
+    {
+        var leaf = Leaf("my-dev-box", "cmd.exe /k echo hi");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_ResolvingIdIsNeverDropped_EvenWithTemplateCommand()
+    {
+        // An admin override claiming the built-in id resolves (user wins
+        // on id conflicts); the fresh profile is used and the fallback is
+        // never consulted.
+        var reg = new FakeProfileRegistry();
+        reg.Add(Profile("wintty.builtin.headless-ssh", "ssh ${env:WINTTY_SSH_TARGET}"));
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh ${env:WINTTY_SSH_TARGET}");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_LegacyNoProfileLeaf_IsKept()
+    {
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(
+            new FakeProfileRegistry(), Leaf(null, null)));
+    }
+
+    // Hidden is a menu choice about a profile the composition still
+    // carries, not a withdrawal: hiding the offered preset from the
+    // flyout must not delete the saved tabs that ran it. Only a
+    // built-in id the registry does not know AT ALL (visible or
+    // hidden) is withdrawn -- the release gate omits a refused preset
+    // from both lists rather than hiding it.
+    [Fact]
+    public void ShouldDropLeaf_HiddenOfferedBuiltIn_IsKept()
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Hide(Profile("wintty.builtin.headless-ssh", "ssh fleet-gw"));
+        var leaf = Leaf("wintty.builtin.headless-ssh", "ssh fleet-gw");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_HiddenCustomProfile_IsKept()
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Hide(Profile("my-dev-box", "cmd.exe /k echo hi"));
+        var leaf = Leaf("my-dev-box", "cmd.exe /k echo hi");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_MixedCaseSavedIdOfAnOfferedBuiltIn_ResolvesAndIsKept()
+    {
+        // Ids compare without case in the real registry, so a save in
+        // odd case still resolves to the offered profile; this row is
+        // what keeps the fake's comparer honest about that.
+        var reg = new FakeProfileRegistry();
+        reg.Add(Profile("wintty.builtin.headless-ssh", "ssh fleet-gw"));
+        var leaf = Leaf("WINTTY.BUILTIN.HEADLESS-SSH", "ssh fleet-gw");
+
+        Assert.NotNull(SessionProfileResolver.ResolveById(reg, leaf.ProfileId));
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(reg, leaf));
+    }
+
+    // ${env:NAME} is live PowerShell (the env: drive): the child shell
+    // expands it, so a user's own one-liner runs as written and a leaf
+    // carrying it keeps the fallback behaviour.
+    [Fact]
+    public void ShouldDropLeaf_OrdinaryEnvVarOneLiner_IsKept()
+    {
+        var leaf = Leaf("custom", "pwsh -NoProfile -c echo ${env:BUILD_ID}");
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    // The one token that is NOT the user's: the retired Headless SSH
+    // preset's own template, compared without case like every profile
+    // comparison here.
+    [Theory]
+    [InlineData("ssh ${env:WINTTY_SSH_TARGET}")]
+    [InlineData("ssh ${ENV:WINTTY_SSH_TARGET}")]
+    [InlineData("pwsh -c ${env:wintty_ssh_target}")]
+    public void ShouldDropLeaf_ExactRetiredTemplateCommand_IsDropped(string command)
+    {
+        var leaf = Leaf("custom", command);
+
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Fact]
+    public void ShouldDropLeaf_CustomIdWithNoFallback_IsKept()
+    {
+        // A save old enough to predate fallback recording: the leaf
+        // resolves to nothing, names no built-in, and has no command to
+        // judge -- it keeps the legacy default-shell spawn.
+        var leaf = new LeafDto { ProfileId = "custom" };
+
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(new FakeProfileRegistry(), leaf));
+    }
+
+    [Theory]
+    [InlineData("WINTTY.BUILTIN.headless-ssh")] // ids compare without case, like the registry
+    [InlineData("wintty.builtin.")]             // degenerate bare prefix
+    public void ShouldDropLeaf_ReservedBuiltInNamespace_MatchesWithoutCase(string id)
+    {
+        Assert.True(SessionProfileResolver.ShouldDropLeaf(
+            new FakeProfileRegistry(), Leaf(id, "whatever.exe")));
+    }
+
+    [Theory]
+    [InlineData("wintty.custom-box")]   // near the namespace, not in it
+    [InlineData("wintty-builtin.ssh")]  // a dash is not a dot
+    public void ShouldDropLeaf_IdsOutsideTheReservedNamespace_AreOrdinary(string id)
+    {
+        Assert.False(SessionProfileResolver.ShouldDropLeaf(
+            new FakeProfileRegistry(), Leaf(id, "whatever.exe")));
     }
 }
