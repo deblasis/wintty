@@ -23,7 +23,7 @@ internal static class HighContrastOverrideFile
         try
         {
             var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                AppStateBase.LocalRoot,
                 AppIdentity.StateDirName);
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, "high-contrast.conf");

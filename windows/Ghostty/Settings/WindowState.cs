@@ -65,7 +65,7 @@ internal sealed class WindowState
         get
         {
             var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                AppStateBase.RoamingRoot,
                 AppIdentity.StateDirName);
             Directory.CreateDirectory(dir);
             return dir;

@@ -42,6 +42,13 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
     // Dispose() on every registered provider.
     private int _disposed;
 
+    // Read once: the pid is constant for the life of the process, and the
+    // writer loop is the hot path this class already allocates carefully
+    // for. It lands on every line (#854 item 8) because every process of
+    // an edition appends to the same day file, so an unattributable line
+    // is one nobody can act on when several instances are interleaved.
+    private readonly int _pid = Environment.ProcessId;
+
     // Reused across FormatRecord calls on the single writer task. Not
     // thread-safe, which is fine: only WriterLoopAsync touches it.
     // Caching it removes the per-record StringBuilder allocation the
@@ -414,8 +421,12 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
 
     private int FormatRecord(in LogRecord r, byte[] buffer)
     {
-        // 2026-04-17T14:23:17.042Z | Warn  | 2100 | Category | Message\r\n
+        // 2026-04-17T14:23:17.042Z | Warn  | 4312 | 2100 | Category | Message\r\n
         //   [indented stack lines on exception]
+        // The pid sits between the level and the event id, not before the
+        // level, because downstream line parsers anchor on the head:
+        // scripts/app-run-health.ps1 (#847) matches `timestamp | level |`
+        // and a field there is invisible to it.
         var sb = _formatBuilder;
         sb.Clear();
         // AppendFormat writes the timestamp directly into sb's buffer,
@@ -424,6 +435,8 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
         sb.AppendFormat(CultureInfo.InvariantCulture, "{0:yyyy-MM-ddTHH:mm:ss.fffZ}", r.Timestamp)
           .Append(" | ")
           .Append(LevelTag(r.Level))
+          .Append(" | ")
+          .Append(_pid)
           .Append(" | ")
           .Append(r.EventId.Id)
           .Append(" | ")

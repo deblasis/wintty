@@ -450,9 +450,7 @@ public partial class App : Application
         // `%LOCALAPPDATA%\Wintty\`.
         try
         {
-            var localAppData = Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData);
-            var dir = Path.Combine(localAppData, AppIdentity.StateDirName);
+            var dir = Path.Combine(AppStateBase.LocalRoot, AppIdentity.StateDirName);
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, "crash.log");
             lock (_crashLogLock)
@@ -493,7 +491,7 @@ public partial class App : Application
         try
         {
             var root = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Ghostty.Core.AppStateBase.LocalRoot,
                 Ghostty.Core.AppIdentity.StateDirName);
             var markerPath = Path.Combine(root, "last-launch");
 
@@ -765,7 +763,7 @@ public partial class App : Application
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
         // one folder to attach.
         var logDir = System.IO.Path.Combine(
-            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+            Ghostty.Core.AppStateBase.LocalRoot,
             Ghostty.Core.AppIdentity.StateDirName, "logs");
         var (factory, fileSink, filters) = Ghostty.Core.Logging.LoggingBootstrap.Build(
             logLevel: _configService.LogLevel,
@@ -944,7 +942,7 @@ public partial class App : Application
         // command-palette consumers can plug in without touching this
         // file again.
         var discoveryCachePath = System.IO.Path.Combine(
-            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+            Ghostty.Core.AppStateBase.LocalRoot,
             Ghostty.Core.AppIdentity.StateDirName, "DiscoveryCache", "v2.json");
         var winttyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "dev";
 

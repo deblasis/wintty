@@ -63,7 +63,7 @@ internal sealed partial class FrecencyStore
     }
 
     private static string FilePath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppStateBase.RoamingRoot,
         AppIdentity.StateDirName,
         "command-frecency.json");
 
