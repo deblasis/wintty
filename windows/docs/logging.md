@@ -37,8 +37,14 @@ boundary, so a long-running session prunes itself.
 Line format is pipe-separated, easy to grep:
 
 ```
-2026-04-17T14:23:17.042Z | Warn  | 2100 | Ghostty.Clipboard.WinUiClipboardBackend | clipboard read failed: 0x8001010E
+2026-04-17T14:23:17.042Z | Warn  | 4312 | 2100 | Ghostty.Clipboard.WinUiClipboardBackend | clipboard read failed: 0x8001010E
 ```
+
+The third field is the process id: every process of an edition appends to
+the same day file, so it is what keeps a line attributable when several
+instances interleave (# 854 item 8). It sits after the level because
+downstream parsers, including the app-run health check, anchor on
+`timestamp | level |`.
 
 When a log call includes an exception, the record line is followed by
 indented frames (up to 10) so the stack is readable in the same file.
