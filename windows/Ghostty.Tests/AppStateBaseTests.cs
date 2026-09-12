@@ -1,9 +1,20 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Ghostty.Core;
 using Xunit;
 
 namespace Ghostty.Tests;
+
+/// <summary>
+/// Collections that swap <see cref="AppStateBase.ReadEnvironment"/>
+/// serialize here, so no parallel collection resolving a state root can
+/// observe the shadow mid-test. Marker class only; see
+/// <see cref="AppStateBaseTests"/> and
+/// <see cref="AppStateBaseSeamIsolationTests"/> for the contract.
+/// </summary>
+[CollectionDefinition("AppStateBaseSeamSerial", DisableParallelization = true)]
+public class AppStateBaseSeamSerialCollection { }
 
 /// <summary>
 /// The state-base override's behaviour (#854 item 9): unset it changes
@@ -19,7 +30,18 @@ namespace Ghostty.Tests;
 /// <c>Config.TestConfigGuardTests</c> uses. Mutating the real
 /// environment from a test races every concurrently running collection
 /// and transiently redirects every other test's state paths.
+///
+/// The injected reader is still a process-wide static, so the class sits
+/// in the <c>AppStateBaseSeamSerial</c> collection: without the
+/// serialization, a concurrently running collection that resolves a
+/// state root (any reader, not just a swapper) observes the shadow for
+/// the duration of each test method here. That leak was shown red by
+/// <see cref="AppStateBaseSeamIsolationTests"/> before the collection
+/// was adopted, and that test stays as the pin that the serialization
+/// holds. Every future test that swaps the seam joins this collection;
+/// the pattern is #1093's <c>EnvironmentSerial</c>.
 /// </summary>
+[Collection("AppStateBaseSeamSerial")]
 public class AppStateBaseTests : IDisposable
 {
     private readonly IDictionary<string, string?> _env =
@@ -98,5 +120,21 @@ public class AppStateBaseTests : IDisposable
         // trees reads it. A rename here breaks both with no compile-time
         // signal, so the spelling is pinned.
         Assert.Equal("WINTTY_STATE_BASE", AppStateBase.EnvVar);
+    }
+
+    [Fact]
+    public void TheShadowIsHeld_ForTheParallelIsolationReader()
+    {
+        // Driver for AppStateBaseSeamIsolationTests: this class is the
+        // AppStateBaseSeamSerial collection, so holding a shadowed seam
+        // here is safe only if that serialization is real. The parallel
+        // reader samples OverrideRoot for its whole window and fails if
+        // the shadow leaks out of this collection, which is the red
+        // state the serialization was adopted to remove (#1093's
+        // EnvironmentSerial is the precedent). The hold must outlast the
+        // reader's sampling window; Dispose restores the real reader.
+        Set(@"C:\wintty-seam-shadow");
+        Assert.Equal(@"C:\wintty-seam-shadow", AppStateBase.OverrideRoot);
+        Thread.Sleep(3000);
     }
 }
