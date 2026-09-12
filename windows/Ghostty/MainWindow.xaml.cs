@@ -681,6 +681,32 @@ public sealed partial class MainWindow : Window
                 Activated -= OnFirstActivationAnnounceRestore;
                 AnnounceSessionRestored();
             }
+
+            // #815: that same splash-hidden stretch is why a restored
+            // window's panes came up with no keyboard focus in any of
+            // them. The restore path asks for focus only at load time
+            // (TerminalControl.OnLoaded), which a window that is not yet
+            // foreground cannot take, and which lands on whichever
+            // restored leaf happened to load last rather than the active
+            // one -- so every chord was dead until the user clicked a
+            // pane. First activation is the first moment the window is
+            // foreground and focus can land (the announce seam's own
+            // measurement), so hand focus to the active pane once, there.
+            // Armed for every regular window, not just a restored one,
+            // because the same gap hits any window that appears without a
+            // click: a reopened closed window, a tab detached to a new
+            // window, and a window a single-instance forward opened in
+            // the running primary (#1095). FocusActiveLeaf resolves the
+            // active leaf at fire time and defers through the dispatcher,
+            // so this never fights the activation churn it fires inside.
+            // The quake window is excluded: its Show() owns its focus.
+            Activated += OnFirstActivationFocusActiveLeaf;
+            void OnFirstActivationFocusActiveLeaf(object s, WindowActivatedEventArgs e)
+            {
+                if (e.WindowActivationState == Microsoft.UI.Xaml.WindowActivationState.Deactivated) return;
+                Activated -= OnFirstActivationFocusActiveLeaf;
+                FocusActiveLeaf();
+            }
         }
 
         if (!IsQuickTerminal)
