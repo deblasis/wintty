@@ -1,5 +1,6 @@
 using System;
 using System.IO.Pipes;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,8 +28,9 @@ public sealed class SecureNamedPipeTests
 
     // The kernel, not .NET, is the authority on what the DACL grants: this
     // asks the OS for the SDDL actually held on the handle. The default
-    // pipe DACL grants Everyone (S-1-1-0) and Anonymous Logon; the factory
-    // must produce neither.
+    // pipe DACL grants Everyone and Anonymous Logon read access; the
+    // factory must produce a DACL whose only grantee is the creating
+    // user.
     //
     // Nothing in here waits on anything: create the server, ask the kernel,
     // assert. That is deliberate. This assertion and the round trip that
@@ -46,9 +48,57 @@ public sealed class SecureNamedPipeTests
         using var server = SecureNamedPipe.CreateServer(name);
 
         var sddl = PipeSecurityProbe.Sddl(server.SafePipeHandle);
-        Assert.DoesNotContain("S-1-1-0", sddl, StringComparison.Ordinal); // Everyone
-        Assert.DoesNotContain(";AU;", sddl, StringComparison.Ordinal); // Anonymous Logon
-        Assert.DoesNotContain("(AU;", sddl, StringComparison.Ordinal);
+
+        // The kernel's own record of who the creating user is: the
+        // descriptor's owner.
+        var owner = OwnerSid(sddl);
+
+        // Every ACE the DACL carries must grant that user and nobody
+        // else. These checks replaced three substring bans ("S-1-1-0",
+        // ";AU;", "(AU;") that never fired: SDDL abbreviates Everyone as
+        // WD and Anonymous as AN, and a default pipe DACL carries no
+        // Authenticated Users ACE and no audit ACE, so none of the
+        // banned substrings appeared even in the descriptor with the
+        // lockdown removed -- verified by dumping the locked and default
+        // descriptors side by side (#1072). A mutation that drops
+        // PipeOptions.CurrentUserOnly now fails on the SY ACE of the
+        // default DACL, which is the failure this test exists to catch.
+        var trustees = DaclTrustees(sddl);
+        Assert.True(trustees.Length > 0, $"the pipe carries no DACL: {sddl}");
+        Assert.Contains(owner, trustees);
+        var strangers = trustees
+            .Where(t => !t.Equals(owner, StringComparison.Ordinal))
+            .ToArray();
+        Assert.True(strangers.Length == 0,
+            $"the pipe DACL grants access beyond the creating user "
+            + $"({string.Join(", ", strangers)}): {sddl}");
+    }
+
+    /// <summary>
+    /// The owner SID out of an SDDL string ("O:sidG:...").
+    /// </summary>
+    private static string OwnerSid(string sddl)
+    {
+        var start = sddl.IndexOf("O:", StringComparison.Ordinal);
+        var end = sddl.IndexOf("G:", StringComparison.Ordinal);
+        Assert.True(start == 0 && end > start,
+            $"unexpected SDDL shape: {sddl}");
+        return sddl[2..end];
+    }
+
+    /// <summary>
+    /// The trustee SID of every ACE in the SDDL's DACL. An ACE is
+    /// "type;flags;rights;objguid;inheritguid;trustee", so the trustee
+    /// is the last semicolon-separated field.
+    /// </summary>
+    private static string[] DaclTrustees(string sddl)
+    {
+        var d = sddl.IndexOf("D:", StringComparison.Ordinal);
+        Assert.True(d >= 0, $"no DACL section in SDDL: {sddl}");
+        return sddl[(d + 2)..]
+            .Split(new[] { '(', ')' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(ace => ace.Split(';')[^1])
+            .ToArray();
     }
 
     // The other half of "only the creating user": the creating user must
