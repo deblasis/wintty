@@ -85,14 +85,14 @@ memory-heavy builds have taken one down with no warning, and two GUI harness
 runs corrupt each other by fighting over focus, the foreground window and
 the desktop. Every session, in every worktree, routes heavy jobs through
 named lanes with [incoda](https://github.com/deblasis/incoda), one lane per
-resource class. The keys are shared with `wintty-release`, which builds the
+resource class. The keys are shared with the private release repo, which builds the
 same thing under the same three names:
 
 | key | slots | guards | what goes there |
 | --- | --- | --- | --- |
 | `wintty-build` | 3 | CPU and RAM | `zig build` in any form (`just build-dll`, `build-dll-release`, `just test` and the `test-*` recipes it runs), `just test-win` and any `dotnet build` or `dotnet test` of the solutions, `just signoff` and its whole ladder |
 | `wintty-desktop` | 1 | the interactive desktop: focus, the foreground window, pixel capture, the env guard's theme flips, the shared Wintty state | every GUI harness under `windows/scripts/`, `just splash-race` |
-| `wintty-publish` | 1 | release channels, signing, the installed app | nothing in this repo; `wintty-release` cuts and uploads under it |
+| `wintty-publish` | 1 | release channels, signing, the installed app | nothing in this repo; the private release repo cuts and uploads under it |
 
 There is no quiet key. A job whose finding is a duration takes the build and
 desktop lanes together and alone, `incoda run --queue

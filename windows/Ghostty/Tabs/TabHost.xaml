@@ -97,7 +97,7 @@
                          strip: the twin of MainWindow's SponsorOverlayHost,
                          and the half that did not exist, which is why the
                          update pill only ever rendered under
-                         vertical-tabs (deblasis/wintty-release#655). Read
+                         vertical-tabs (a release-side finding). Read
                          the contract on MainWindow.SponsorOverlayContent.
 
                          In its own cell BESIDE the drag region, never

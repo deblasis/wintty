@@ -16,7 +16,7 @@ namespace Ghostty.Tests.Wiring;
 /// which is Collapsed unless <c>vertical-tabs</c> is on, so on the default
 /// layout the pill was never rendered at all: not Checking, not Update
 /// Available, not Restart to Complete Update
-/// (deblasis/wintty-release#655).
+/// (a release-side finding).
 ///
 /// So there are two presenters, one per title row, and the shell moves the
 /// content to whichever row is on screen. These guards hold that shape: that

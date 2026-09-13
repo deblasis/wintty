@@ -7,12 +7,12 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// The state-base override's wiring (#854 item 9): every path the shell
+/// The state-base override's wiring: every path the shell
 /// derives from <c>AppIdentity.StateDirName</c> must take its root from
 /// <c>AppStateBase</c> (the <c>WINTTY_STATE_BASE</c> override), never
 /// straight from <c>Environment.GetFolderPath</c> or an injected
 /// <c>GetKnownFolder</c> call, or the override cannot move it and the
-/// multi-instance GUI tests (#822) that rely on it write into the real
+/// multi-instance GUI tests that rely on it write into the real
 /// per-user state tree.
 ///
 /// These are wiring guards, not behaviour tests (the resolution behaviour

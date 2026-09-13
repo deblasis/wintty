@@ -55,7 +55,7 @@ internal readonly record struct ToastRegistrationRepair(
 /// wrong are the ones nothing else ever corrects. The <c>CustomActivator</c>
 /// CLSID's <c>LocalServer32</c> still names the exe that first registered, so
 /// once that install is gone a toast click launches a path that is not there
-/// (deblasis/wintty-release#656, and the click half of #317); and the
+/// (a release-side finding, plus the click half of an earlier one); and the
 /// <c>DisplayName</c> still reads whatever that install called itself, so a
 /// tier installed over another one keeps the other one's name over every
 /// toast it sends.
