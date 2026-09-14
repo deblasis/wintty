@@ -68,6 +68,9 @@ namespace Ghostty.Logging;
 internal static partial class StaticLoggers
 {
     private static ILogger<Ghostty.Services.ConfigService>? _configService;
+    // The config watcher's timer is built inside ConfigService, so it shares
+    // ConfigService's reason for living here.
+    private static ILogger<Ghostty.Core.Config.SystemSchedulerTimer>? _configWatcherTimer;
 
     // WindowStateMigration is a static class, so it uses the non-generic
     // ILogger with an explicit category name; see class docstring.
@@ -84,6 +87,8 @@ internal static partial class StaticLoggers
 
     internal static ILogger<Ghostty.Services.ConfigService> ConfigService
         => _configService ?? NullLogger<Ghostty.Services.ConfigService>.Instance;
+    internal static ILogger<Ghostty.Core.Config.SystemSchedulerTimer> ConfigWatcherTimer
+        => _configWatcherTimer ?? NullLogger<Ghostty.Core.Config.SystemSchedulerTimer>.Instance;
     internal static ILogger WindowStateMigration
         => _windowStateMigration ?? NullLogger.Instance;
     internal static ILogger<Ghostty.Settings.WindowState> WindowState
@@ -106,6 +111,7 @@ internal static partial class StaticLoggers
     internal static void Initialize(ILoggerFactory factory)
     {
         _configService = factory.CreateLogger<Ghostty.Services.ConfigService>();
+        _configWatcherTimer = factory.CreateLogger<Ghostty.Core.Config.SystemSchedulerTimer>();
         _windowStateMigration = factory.CreateLogger(WindowStateMigrationCategory);
         _windowState = factory.CreateLogger<Ghostty.Settings.WindowState>();
         _generalPage = factory.CreateLogger<Ghostty.Settings.Pages.GeneralPage>();
@@ -125,11 +131,12 @@ internal static partial class StaticLoggers
     }
 
     private static Snapshot CaptureSnapshot() => new(
-        _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage,
+        _configService, _configWatcherTimer, _windowStateMigration, _windowState, _generalPage, _keybindingsPage,
         _cheatSheet, _settingsConfigWriter, _shaderPreviewFeed, _app, _bellAudio);
 
     private readonly record struct Snapshot(
         ILogger<Ghostty.Services.ConfigService>? ConfigService,
+        ILogger<Ghostty.Core.Config.SystemSchedulerTimer>? ConfigWatcherTimer,
         ILogger? WindowStateMigration,
         ILogger<Ghostty.Settings.WindowState>? WindowState,
         ILogger<Ghostty.Settings.Pages.GeneralPage>? GeneralPage,
@@ -148,6 +155,7 @@ internal static partial class StaticLoggers
         public void Dispose()
         {
             _configService = _prior.ConfigService;
+            _configWatcherTimer = _prior.ConfigWatcherTimer;
             _windowStateMigration = _prior.WindowStateMigration;
             _windowState = _prior.WindowState;
             _generalPage = _prior.GeneralPage;
