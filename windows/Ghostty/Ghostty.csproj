@@ -571,7 +571,7 @@
     pdb was installed (or by a target that installs none) drops the pdb
     copy item with zero signal, and every dump that build ever produces
     is unsymbolizable. A warning, not an error: the app runs fine
-    without symbols, and release packaging (wintty-release's symbol
+    without symbols, and release packaging (the release repo's symbol
     archive step) is where absence becomes fatal.
   -->
   <Target Name="WarnIfNoLibghosttyPdb" BeforeTargets="Build"
@@ -599,7 +599,7 @@
 
   <!--
     Ship Microsoft.WindowsAppRuntime.Insights.Resource.dll in every
-    self-contained publish (#1086, wintty-release #808).
+    self-contained publish (#1086).
 
     Windows App SDK 2.x self-contained never lays this dll down: the
     component packages copy only runtimes-framework\win-<arch>\native

@@ -122,7 +122,7 @@ try {
         if (-not (Test-Path $insightsDll)) {
             throw ("publish folder lacks Microsoft.WindowsAppRuntime.Insights.Resource.dll " +
                    "($insightsDll): AppNotificationManager.Register() throws on every " +
-                   "launch and every toast is dead (#1086, wintty-release #808). The " +
+                   "launch and every toast is dead (#1086). The " +
                    "Ghostty.csproj publish target that extracts it from the Windows App " +
                    "SDK runtime package did not run.")
         }

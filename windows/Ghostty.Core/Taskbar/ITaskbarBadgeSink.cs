@@ -6,7 +6,7 @@ namespace Ghostty.Core.Taskbar;
 /// and the producer assembly that constructs the arbiter is not guaranteed
 /// to be a friend assembly of Ghostty.Core (see AssemblyAttributes.cs)
 /// everywhere this type ships, notably a sponsor-tier producer built in
-/// wintty-release rather than in this repo.</summary>
+/// the release repo rather than in this repo.</summary>
 public interface ITaskbarBadgeSink
 {
     void Show(TaskbarBadgeKind kind, string description);

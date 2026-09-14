@@ -22,7 +22,7 @@ internal static class AppIdentity
     /// Baked in at build time rather than written here, because every
     /// tier and variant needs its own: the Shell merges installs that
     /// share an AUMID into one taskbar button whatever their pack id
-    /// says. The public build gets the default below; wintty-release
+    /// says. The public build gets the default below; the release build
     /// overrides <c>_WinttyAumId</c> per variant. It stays a
     /// <see langword="const"/> so call sites can keep using it in
     /// constant contexts and nothing reflects at startup.

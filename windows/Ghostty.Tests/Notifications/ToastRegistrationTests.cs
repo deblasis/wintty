@@ -14,7 +14,7 @@ namespace Ghostty.Tests.Notifications;
 /// never revisits it, so an install that follows another one re-registers
 /// against the first one's values: a <c>CustomActivator</c> whose
 /// <c>LocalServer32</c> names an exe that is gone, and a <c>DisplayName</c>
-/// that is the other install's (deblasis/wintty-release#656). Nothing in the
+/// that is the other install's (a release-side finding). Nothing in the
 /// process notices, because <c>Show()</c> keeps working against the stale
 /// registration and only the click is dead.
 ///

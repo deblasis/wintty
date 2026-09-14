@@ -16,7 +16,7 @@ namespace Ghostty.Taskbar;
 /// The bell dot is drawn by this assembly and cached for the lifetime of
 /// the facade. Every other <see cref="TaskbarBadgeKind"/> is a producer
 /// this assembly does not know about (the sponsor update overlay, wired
-/// from another assembly in wintty-release); <see cref="IconProvider"/>
+/// from another assembly in the release repo); <see cref="IconProvider"/>
 /// is the hook that lets such a producer register its own icon without
 /// this class needing to know its shape. A kind with no registered icon
 /// keeps its notice and shows no overlay dot.

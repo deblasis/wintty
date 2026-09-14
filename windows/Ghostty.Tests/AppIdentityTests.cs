@@ -8,7 +8,7 @@ namespace Ghostty.Tests;
 /// The AUMID is baked in per tier and variant, so these assert the shape
 /// of whatever the build produced rather than one fixed string. Only the
 /// OSS default is pinned to an exact value, guarded on the edition, so a
-/// wintty-release build overriding it does not have to patch this file.
+/// release build overriding it does not have to patch this file.
 /// StateDirName is guarded the same way, since the shared tiering patch
 /// sets Edition per tier and is expected to make the state dir per-flavour
 /// too.
