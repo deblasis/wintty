@@ -8,10 +8,19 @@ namespace Ghostty.Interop;
 /// Thin wrapper around a single process-wide
 /// <see cref="StrategyBasedComWrappers"/> instance. Used for
 /// cross-interface QI across <c>[GeneratedComInterface]</c>
-/// types - for example queueing a jump-list <c>IShellLinkW</c> up
-/// for its <c>IPropertyStore</c> facet, where
-/// <c>Marshal.GetIUnknownForObject</c> is a runtime-only SYSLIB1099
-/// against generated COM types.
+/// types - for example reaching <c>IObjectCollection</c>'s
+/// <c>IObjectArray</c> facet, where <c>Marshal.GetIUnknownForObject</c>
+/// is a runtime-only SYSLIB1099 against generated COM types.
+///
+/// NOT a substitute for a plain interface cast when the target type
+/// is unrelated to the source's own managed interface declarations
+/// (e.g. IShellLinkW to IPropertyStore): GetOrCreateComInterfaceForObject
+/// builds a COM-callable wrapper that only advertises the interfaces
+/// the *managed* type declares, so QueryInterface for a facet the
+/// underlying native object supports but the managed type does not
+/// declare fails with E_NOINTERFACE. See
+/// Ghostty.Core.JumpList.ShellLinkTitleHelper for the case that hit
+/// this and the fix (cast the original RCW directly).
 ///
 /// CoCreateInstance callers migrated to CsWin32 coclass factories
 /// (DestinationList, ShellLink, EnumerableObjectCollection,

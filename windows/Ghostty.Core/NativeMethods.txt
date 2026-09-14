@@ -13,6 +13,23 @@ IDWriteFontFamily
 IDWriteFontList
 IDWriteLocalizedStrings
 
+// shell COM for jump list entry titles (ShellLinkTitleHelper.SetTitle).
+// Lives here, not in windows/Ghostty/NativeMethods.txt, so
+// ShellLinkTitleHelperTests in Ghostty.Tests can create a real ShellLink
+// COM object and drive it without pulling in the WinUI 3 Ghostty assembly
+// (same reason as the dwrite block above).
+IPropertyStore
+IShellLinkW
+ShellLink
+
+// property system (System.Title on a shell link)
+PROPERTYKEY
+PROPVARIANT
+VARENUM
+
+// ole32 (PROPVARIANT cleanup)
+PropVariantClear
+
 // shell32 for profiles discovery
 SHGetKnownFolderPath
 KNOWN_FOLDER_FLAG

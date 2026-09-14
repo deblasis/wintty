@@ -2462,6 +2462,15 @@ internal static partial class AppLogExtensions
     internal static partial void LogJumpListFailed(
         this ILogger<App> logger, System.Exception ex);
 
+    // One bad entry (e.g. the shell COM object rejecting a path or the
+    // title) must not abort the whole jump list build; the entry is
+    // skipped and the rest still commits. See CustomDestinationListFacade.
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.JumpListItemSkipped,
+                   Level = LogLevel.Warning,
+                   Message = "Skipped a jump list entry for {ExePath}: could not build its shell link")]
+    internal static partial void LogJumpListItemSkipped(
+        this ILogger<App> logger, System.Exception ex, string exePath);
+
     // The reason is spelled into the message rather than left to the
     // exception: this is a WinRT HRESULT arriving through a projected
     // interface, and the frames alone say only which method threw. Whoever

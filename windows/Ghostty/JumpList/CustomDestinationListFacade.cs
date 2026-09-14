@@ -54,7 +54,8 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
         var collection = CreateCollection();
         foreach (var e in entries)
         {
-            var link = CreateShellLink(e.exePath, e.args, e.title);
+            var link = TryCreateShellLink(e.exePath, e.args, e.title);
+            if (link is null) continue;
             AddObjectToCollection(collection, link);
         }
         // The IObjectCollection IUnknown is also queryable as
@@ -71,13 +72,33 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
             var collection = CreateCollection();
             foreach (var t in _pendingTasks)
             {
-                var link = CreateShellLink(t.exe, t.args, t.title);
+                var link = TryCreateShellLink(t.exe, t.args, t.title);
+                if (link is null) continue;
                 AddObjectToCollection(collection, link);
             }
             _list.AddUserTasks(QueryAsObjectArray(collection));
             _pendingTasks.Clear();
         }
         _list.CommitList();
+    }
+
+    /// <summary>
+    /// Builds one shell link, or logs and returns null on failure.
+    /// A single bad entry (a shell COM call rejecting a path, an
+    /// argument string, or the title) must not abort the whole jump
+    /// list build - the caller skips just this entry and keeps going.
+    /// </summary>
+    private static IShellLinkW? TryCreateShellLink(string exePath, string arguments, string title)
+    {
+        try
+        {
+            return CreateShellLink(exePath, arguments, title);
+        }
+        catch (Exception ex)
+        {
+            Ghostty.Logging.StaticLoggers.App.LogJumpListItemSkipped(ex, exePath);
+            return null;
+        }
     }
 
     private static IShellLinkW CreateShellLink(string exePath, string arguments, string title)
