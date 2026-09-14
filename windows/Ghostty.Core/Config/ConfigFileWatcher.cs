@@ -84,9 +84,11 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// <summary>The watcher <see cref="CreateWatcher"/> is enabling right
     /// now, so <see cref="HandleWatcherError"/> can recognize a synchronous
     /// failure raised from inside that call, before the watcher is
-    /// published anywhere. Only ever touched while <see cref="_lock"/> is
-    /// held by <see cref="CreateWatcher"/>'s caller, so it needs no lock of
-    /// its own.</summary>
+    /// published anywhere. Written only while <see cref="_lock"/> is held
+    /// by <see cref="CreateWatcher"/>'s caller, and read only under the
+    /// same lock in <see cref="HandleWatcherError"/>: an async error can
+    /// still land on another thread during that window, and without the
+    /// lock that read would race the write.</summary>
     private FileSystemWatcher? _startingWatcher;
     private Exception? _startFailure;
 
@@ -237,16 +239,23 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// buffer overflow without flooding a directory.</summary>
     internal void HandleWatcherError(object? sender, Exception ex)
     {
-        if (_startingWatcher is not null && ReferenceEquals(sender, _startingWatcher))
+        lock (_lock)
         {
-            // Raised synchronously from inside CreateWatcher, before this
-            // watcher is published anywhere (not yet _watcher, and if this
-            // is a rebuild, _rebuildPending is still true). Report it back
-            // there; CreateWatcher disposes it and returns the failure, so
-            // Start or TryRebuild treats this exactly like a construction
-            // failure instead of publishing a dead watcher as healthy.
-            _startFailure = ex;
-            return;
+            if (_startingWatcher is not null && ReferenceEquals(sender, _startingWatcher))
+            {
+                // Raised synchronously from inside CreateWatcher, before this
+                // watcher is published anywhere (not yet _watcher, and if this
+                // is a rebuild, _rebuildPending is still true). Report it back
+                // there; CreateWatcher disposes it and returns the failure, so
+                // Start or TryRebuild treats this exactly like a construction
+                // failure instead of publishing a dead watcher as healthy.
+                // Taking the lock here (CreateWatcher's caller already holds
+                // it for the synchronous case) also covers the narrow window
+                // where an async error for the same watcher arrives on
+                // another thread while CreateWatcher is still running.
+                _startFailure = ex;
+                return;
+            }
         }
 
         if (ex is InternalBufferOverflowException)
