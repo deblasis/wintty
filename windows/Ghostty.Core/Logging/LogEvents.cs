@@ -20,6 +20,8 @@ internal static class LogEvents
         public const int SnapshotRefreshFailed = 1006;
         public const int ChangedHandlerFailed  = 1007;
         public const int UnknownBackdropStyle  = 1008;
+        public const int WatcherError          = 1009;
+        public const int WatcherFileMissing    = 1010;
     }
 
     // 1100-1199: Frecency / command history

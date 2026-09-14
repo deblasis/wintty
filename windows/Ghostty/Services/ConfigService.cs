@@ -34,9 +34,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 {
     private GhosttyConfig _config;
     private GhosttyApp _app;
-    private FileSystemWatcher? _watcher;
-    private Timer? _debounceTimer;
-    private readonly Lock _timerLock = new();
+    private ConfigFileWatcher? _watcher;
     private readonly DispatcherQueue _dispatcher;
     private volatile bool _suppressWatcher;
 
@@ -1753,44 +1751,55 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // keystroke in the user's editor on rebuilding the same config.
         if (_noConfig) return;
         if (_watcher != null) return;
-        var dir = Path.GetDirectoryName(ConfigFilePath);
-        var file = Path.GetFileName(ConfigFilePath);
-        if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(file)) return;
-        if (!Directory.Exists(dir)) return;
 
-        _watcher = new FileSystemWatcher(dir, file)
+        // Editors save by swapping a temp file in, so the file is briefly
+        // absent and one save arrives as a burst of events. ConfigFileWatcher
+        // collapses the burst into one settle and never settles while the
+        // file is missing: a reload in that gap would load no user config,
+        // and libghostty's default-file loader writes its template to the
+        // config path when it finds none, right where the editor's rename is
+        // about to land.
+        //
+        // Suppression is decided when each event arrives, not when the
+        // debounce fires, so a write bracketed by SuppressWatcher stays
+        // ignored even though its settle would land after the bracket.
+        //
+        // The timer's own slow-dispose warning is not wired: the settle only
+        // enqueues onto the UI thread, so there is nothing for the bounded
+        // dispose wait to time out on.
+        var watcher = new ConfigFileWatcher(
+            ConfigFilePath,
+            new SystemSchedulerTimer(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<SystemSchedulerTimer>.Instance),
+            TimeSpan.FromMilliseconds(300),
+            ignoreEvents: () => _suppressWatcher || _shuttingDown,
+            onSettled: OnConfigFileSettled,
+            StaticLoggers.ConfigService);
+        if (!watcher.Start())
         {
-            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.CreationTime,
-            EnableRaisingEvents = true,
-        };
-        _watcher.Changed += OnFileChanged;
-        _watcher.Created += OnFileChanged;
-        _watcher.Renamed += (s, e) => OnFileChanged(s, e);
+            watcher.Dispose();
+            return;
+        }
+        _watcher = watcher;
     }
 
     private void StopWatcher()
     {
-        if (_watcher == null) return;
-        _watcher.EnableRaisingEvents = false;
-        _watcher.Dispose();
+        var watcher = _watcher;
         _watcher = null;
+        watcher?.Dispose();
     }
 
-    private void OnFileChanged(object? sender, FileSystemEventArgs e)
+    /// <summary>
+    /// One settled edit of the config file, on the debounce timer's thread.
+    /// BeginShutdown disposes the watcher, which cancels a pending settle and
+    /// waits out one already running; a reload enqueued before that is
+    /// fenced by Reload's own <c>_shuttingDown</c> check (issue #208).
+    /// </summary>
+    private void OnConfigFileSettled()
     {
-        if (_suppressWatcher || _shuttingDown) return;
-        lock (_timerLock)
-        {
-            // Re-check under the lock: BeginShutdown may have run between the
-            // unguarded check above and here, and we must not re-arm a
-            // debounce timer after shutdown disposed it (issue #208).
-            if (_shuttingDown) return;
-            _debounceTimer?.Dispose();
-            _debounceTimer = new Timer(_ =>
-            {
-                _dispatcher.TryEnqueue(() => Reload());
-            }, null, 300, Timeout.Infinite);
-        }
+        if (_shuttingDown) return;
+        _dispatcher.TryEnqueue(() => Reload());
     }
 
     /// <summary>
@@ -1805,11 +1814,6 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         _shuttingDown = true;
         StopWatcher();
-        lock (_timerLock)
-        {
-            _debounceTimer?.Dispose();
-            _debounceTimer = null;
-        }
     }
 
     /// <summary>
