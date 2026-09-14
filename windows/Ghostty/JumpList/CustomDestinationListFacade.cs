@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using Ghostty.Core.JumpList;
-using Ghostty.Interop;
 using Windows.Win32;
 using Windows.Win32.UI.Shell;
 using Windows.Win32.UI.Shell.Common;
@@ -18,6 +16,10 @@ namespace Ghostty.JumpList;
 /// One instance per process is typical; <see cref="JumpListBuilder"/>
 /// calls <see cref="BeginList"/> and <see cref="Commit"/> in pairs
 /// to replace the list wholesale.
+///
+/// The shell links and the IObjectArray that carries them are built by
+/// <see cref="ShellLinkCollection"/> in Ghostty.Core, where tests can
+/// run that code against real shell COM objects.
 /// </summary>
 internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
 {
@@ -27,7 +29,7 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
     // store and a second invocation returns 0x800700B7 ALREADY_EXISTS.
     // So we buffer every AddTask call and flush a single AddUserTasks
     // in Commit.
-    private readonly List<(string exe, string args, string title)> _pendingTasks = new();
+    private readonly List<(string exePath, string args, string title)> _pendingTasks = new();
 
     public CustomDestinationListFacade()
     {
@@ -50,81 +52,18 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
         => _pendingTasks.Add((exePath, arguments, title));
 
     public void AddCategory(string categoryName, IReadOnlyList<(string exePath, string args, string title)> entries)
-    {
-        var collection = CreateCollection();
-        foreach (var e in entries)
-        {
-            var link = CreateShellLink(e.exePath, e.args, e.title);
-            AddObjectToCollection(collection, link);
-        }
-        // The IObjectCollection IUnknown is also queryable as
-        // IObjectArray; cross-interface QI happens through the
-        // shared ComWrappers strategy.
-        var array = QueryAsObjectArray(collection);
-        _list.AppendCategory(categoryName, array);
-    }
+        => _list.AppendCategory(categoryName, ShellLinkCollection.Build(entries, LogSkipped));
 
     public void Commit()
     {
         if (_pendingTasks.Count > 0)
         {
-            var collection = CreateCollection();
-            foreach (var t in _pendingTasks)
-            {
-                var link = CreateShellLink(t.exe, t.args, t.title);
-                AddObjectToCollection(collection, link);
-            }
-            _list.AddUserTasks(QueryAsObjectArray(collection));
+            _list.AddUserTasks(ShellLinkCollection.Build(_pendingTasks, LogSkipped));
             _pendingTasks.Clear();
         }
         _list.CommitList();
     }
 
-    private static IShellLinkW CreateShellLink(string exePath, string arguments, string title)
-    {
-        var link = ShellLink.CreateInstance<IShellLinkW>();
-        link.SetPath(exePath);
-        link.SetArguments(arguments);
-        link.SetDescription(title);
-        // Title shown in the jump list comes from System.Title, not
-        // the description. Set it via the IPropertyStore side of the
-        // same object.
-        ShellLinkTitleHelper.SetTitle(link, title);
-        return link;
-    }
-
-    private static IObjectCollection CreateCollection()
-        => EnumerableObjectCollection.CreateInstance<IObjectCollection>();
-
-    /// <summary>
-    /// AddObject takes a raw IUnknown* under [GeneratedComInterface]
-    /// (the runtime-marshalled <c>UnmanagedType.IUnknown</c> path is
-    /// trim-unsafe). The CsWin32 generated signature wraps this
-    /// behind <c>[MarshalAs(UnmanagedType.Interface)] object punk</c>
-    /// where the COM source generator handles QI internally, so we
-    /// can pass the typed RCW directly.
-    /// </summary>
-    private static void AddObjectToCollection(IObjectCollection collection, object com)
-    {
-        collection.AddObject(com);
-    }
-
-    /// <summary>
-    /// QueryInterface the IObjectCollection's underlying IUnknown
-    /// for IObjectArray and return the typed wrapper. The shared
-    /// ComWrappers strategy hands out a wrapper that implements both
-    /// interfaces against the same RCW identity.
-    /// </summary>
-    private static IObjectArray QueryAsObjectArray(IObjectCollection collection)
-    {
-        var unknown = ComCreate.GetComInterfaceForObject(collection);
-        try
-        {
-            return (IObjectArray)ComCreate.Wrap(unknown);
-        }
-        finally
-        {
-            Marshal.Release(unknown);
-        }
-    }
+    private static void LogSkipped(Exception error, string exePath, string arguments, string title)
+        => Ghostty.Logging.StaticLoggers.App.LogJumpListItemSkipped(error, title, arguments, exePath);
 }

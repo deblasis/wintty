@@ -19,6 +19,7 @@ internal static class LogEvents
         public const int ToastRegistrationRecreated = 2007;
         public const int ToastRegistrationRewritten = 2008;
         public const int ToastRegistrationRemoveRefused = 2009;
+        public const int JumpListItemSkipped = 2010;
     }
 
     // 2100-2199: Clipboard

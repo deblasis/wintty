@@ -78,23 +78,17 @@ SetCurrentProcessExplicitAppUserModelID
 SHQueryUserNotificationState
 QUERY_USER_NOTIFICATION_STATE
 
-// ole32
-PropVariantClear
-
 // shell COM
 ICustomDestinationList
-IObjectArray
-IObjectCollection
-IPropertyStore
-IShellLinkW
 DestinationList
-EnumerableObjectCollection
-ShellLink
 
-// property system
-PROPERTYKEY
-PROPVARIANT
-VARENUM
+// Note: IShellLinkW, ShellLink, IPropertyStore, PROPERTYKEY, PROPVARIANT,
+// VARENUM, PropVariantClear, IObjectArray, IObjectCollection and
+// EnumerableObjectCollection are listed in
+// windows/Ghostty.Core/NativeMethods.txt (not here) because
+// ShellLinkTitleHelper and ShellLinkCollection live in Ghostty.Core so
+// tests in Ghostty.Tests can drive them against real shell COM objects
+// without pulling in the WinUI 3 Ghostty assembly.
 
 // xaml interop: ISwapChainPanelNative is hand-written. CsWin32
 // generates an ISwapChainPanelNative under
