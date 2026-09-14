@@ -229,7 +229,7 @@ public class SessionTreeTests
     {
         // The restore the way SessionRestorer drives it: refuse exactly
         // what SessionProfileResolver.ShouldDropLeaf refuses, spawn the
-        // rest through ResolveLeaf. A stale rc.1 Headless SSH leaf
+        // rest through ResolveLeaf. A stale legacy Headless SSH leaf
         // beside an ordinary custom leaf, on a machine where nothing
         // resolves (Desktop: the preset is not offered at all).
         IProfileRegistry? registry = null;

@@ -55,8 +55,8 @@ param(
     # than a silent taint. There is deliberately no real-config escape: a
     # harness must not be able to point the app at the real config. If the
     # historical 0xc000027b under an isolated root ever returns, that is a
-    # product bug (possibly the x:Load-overlay family, wintty-release
-    # #806): capture it with cdb on the window-owner PID (break on av and
+    # product bug (possibly the x:Load-overlay family, tracked on the
+    # release side): capture it with cdb on the window-owner PID (break on av and
     # 40080201 first-chance) and fix it, never route around it.
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')

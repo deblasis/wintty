@@ -219,8 +219,8 @@ public sealed class StaleAppUserModelRegistrationsTests : IDisposable
     /// the list growing.
     ///
     /// Both families, not one. An untiered or public build registers under com.deblasis.wintty;
-    /// every RELEASE build registers under ShipDigital.&lt;pack id&gt;, which wintty-release composes in
-    /// builds/_common/patches from the resolved pack id. The first version of this guard named only
+    /// every RELEASE build registers under ShipDigital.&lt;pack id&gt;, which the release build composes in
+    /// its shared patch set from the resolved pack id. The first version of this guard named only
     /// the default family, so the one every shipped flavour actually uses was the one it did not
     /// cover - and comparing against AppIdentity.AumId does not close that, because it is the single
     /// variant this assembly happened to compile as.

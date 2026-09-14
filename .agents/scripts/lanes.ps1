@@ -15,7 +15,7 @@
     matches it changes nothing and writes no config event into any lane's
     log. -Check reads `incoda status --all --json` and changes nothing.
 
-    These three keys are shared with wintty-release, which builds the same
+    These three keys are shared with the private release repo, which builds the same
     thing on the same box under the same names. Description equality is a
     drift trigger, so if that repo ever grows its own applier it must carry
     these strings character for character: two appliers with different prose

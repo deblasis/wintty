@@ -26,14 +26,14 @@ internal static class SessionProfileResolver
     internal const string BuiltInProfileIdPrefix = "wintty.builtin.";
 
     /// <summary>
-    /// The exact template rc.1's Headless SSH preset carried as its
+    /// The exact template an earlier release's Headless SSH preset carried as its
     /// command (<c>ssh ${env:WINTTY_SSH_TARGET}</c>), compared without
     /// case like every id and profile comparison here. It is the only
     /// <c>${env:...}</c> token a shipped profile has ever embedded, and
     /// it is not the user's syntax: <c>${env:NAME}</c> is live
     /// PowerShell the spawned shell expands itself, so a user's own
     /// one-liner runs as written -- but nothing anywhere expands THIS
-    /// token (the preset is retired, wintty-release #874), so a saved
+    /// token (the preset is retired on some tiers), so a saved
     /// leaf still carrying it can only spawn it literally.
     /// </summary>
     internal const string RetiredHeadlessSshTemplate = "${env:WINTTY_SSH_TARGET}";

@@ -17,7 +17,7 @@ The replay still happens, on a separate lineage:
   the upstream of its day. Conflicts are resolved here, and `sync-verify`
   measures here.
 - **`windows`** is what everything consumes: PRs squash-merge into it, the
-  nightly tracks it, wintty-release pins point into it.
+  nightly tracks it, the release repo's pins point into it.
 
 The invariant tying them together: the last snapshot merge on `windows`
 carries the tree of the latest `series/vN` tag. `just sync` checks it before

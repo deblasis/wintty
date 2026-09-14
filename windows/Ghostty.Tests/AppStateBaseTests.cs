@@ -17,7 +17,7 @@ namespace Ghostty.Tests;
 public class AppStateBaseSeamSerialCollection { }
 
 /// <summary>
-/// The state-base override's behaviour (#854 item 9): unset it changes
+/// The state-base override's behaviour: unset it changes
 /// nothing, set it replaces the known-folder root, and the blank and
 /// padded spellings a hand-written `set` produces are normalized rather
 /// than combined into the path. The wiring half -- that every state path

@@ -164,7 +164,7 @@
         they are one tier off one patch series, split only by ProVariant,
         so nothing patch-shaped can tell them apart.
 
-        Overridable so wintty-release can set it per variant. The default
+        Overridable so the release build can set it per variant. The default
         is what the public build ships. Escaped like BuildLabel above.
       -->
       <_WinttyAumId Condition="'$(_WinttyAumId)' == ''">com.deblasis.wintty</_WinttyAumId>

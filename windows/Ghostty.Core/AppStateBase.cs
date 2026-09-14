@@ -9,7 +9,7 @@ namespace Ghostty.Core;
 ///
 /// The override exists for processes, not users: Wintty is multi-process
 /// and every process of an edition shares one set of state files, so a
-/// harness that needs two instances with separate state (#822's
+/// harness that needs two instances with separate state (the
 /// GUI-level multi-instance tests) or a launch that must not touch the
 /// real per-user tree has no other lever -- the paths were resolved
 /// straight from the known-folder API at each call site, compile-time in

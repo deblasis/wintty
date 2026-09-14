@@ -41,7 +41,7 @@ public class FileLoggerProviderTests : IDisposable
         Assert.Single(files);
         Assert.Equal("ghostty-20260417.log", Path.GetFileName(files[0]));
         var body = ReadAllTextShared(files[0]);
-        // The pid is part of the pinned line shape (#854 item 8); the
+        // The pid is part of the pinned line shape; the
         // dedicated test covers why. This assert keeps the whole format
         // honest, so it spells the field out rather than matching a
         // prefix that would survive a field being dropped.
@@ -51,12 +51,12 @@ public class FileLoggerProviderTests : IDisposable
     [Fact]
     public async Task EveryLineNamesTheProcessId()
     {
-        // Multi-instance attribution (#854 item 8): every process of an
+        // Multi-instance attribution: every process of an
         // edition appends to the same ghostty-YYYYMMDD.log (the writer
         // coexists with a live second instance by design), so a line
         // without a pid cannot be attributed to the process that wrote
         // it -- "which instance warned?" is unanswerable, both for a
-        // human reading the file and for the #847 app-run health check,
+        // human reading the file and for the app-run health check,
         // which cannot tell the launched instance's warnings from a
         // stray one still running. The pid rides between the level and
         // the event id: the health check's line regex anchors on

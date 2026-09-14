@@ -682,7 +682,7 @@ public sealed partial class MainWindow : Window
                 AnnounceSessionRestored();
             }
 
-            // #815: that same splash-hidden stretch is why a restored
+            // The focus bug: that same splash-hidden stretch is why a restored
             // window's panes came up with no keyboard focus in any of
             // them. The restore path asks for focus only at load time
             // (TerminalControl.OnLoaded), which a window that is not yet
@@ -1636,7 +1636,7 @@ public sealed partial class MainWindow : Window
 
     // --- Sponsor overlay host contract -------------------------------
     //
-    // A downstream build tier (wintty-release's sponsor-update overlay)
+    // A downstream build tier (the sponsor-update overlay)
     // renders an update pill in the title row. This shell owns where that
     // pill lives; the overlay owns what it is.
     //
@@ -1660,7 +1660,7 @@ public sealed partial class MainWindow : Window
     // A FindName("SponsorOverlayHost") on the window content resolves to
     // the VERTICAL presenter only, and that presenter is Collapsed with the
     // row that carries it unless vertical-tabs is on. That is exactly the
-    // bug in deblasis/wintty-release#655: with the default horizontal
+    // bug: with the default horizontal
     // layout no update state was ever visible. A caller that wants the pill
     // in both layouts uses the property below, not the name.
     private object? _sponsorOverlayContent;

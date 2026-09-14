@@ -118,7 +118,7 @@ public class ToastRegistrationWiringTests
     /// projected interface leaves frames that name the method and nothing that
     /// names the fault, which is how "Failed to register for toast
     /// notifications" stood in the log for a whole rehearsal saying nothing
-    /// (deblasis/wintty-release#656).
+    /// (a release-side finding).
     /// </summary>
     [Fact]
     public void The_registration_failure_logs_the_exception_message()

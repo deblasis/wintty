@@ -7,7 +7,7 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// #815: a window whose panes were rebuilt by a session restore came up
+/// The focus bug: a window whose panes were rebuilt by a session restore came up
 /// with no keyboard focus in any of them, so every chord -- palette, new
 /// tab -- was dead until the user clicked a pane. The restore path makes
 /// no focus call of its own; the only ask is the load-time

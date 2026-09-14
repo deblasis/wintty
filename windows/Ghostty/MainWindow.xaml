@@ -121,7 +121,7 @@
                 each presenter lives in the title row its own layout
                 hides, so the shell moves the content between them and a
                 lookup of one name alone only ever renders in one layout
-                (deblasis/wintty-release#655).
+                (a release-side finding).
 
                 In its own cell BETWEEN the drag region and the caption
                 column, never inside the drag region, on the same terms

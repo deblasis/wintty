@@ -254,9 +254,9 @@ public class SessionProfileResolverTests
 
     // ShouldDropLeaf carves one exception out of the fallback behaviour
     // pinned above: a leaf whose id resolves to nothing offered AND whose
-    // saved fallback cannot be spawned as saved. rc.1 saved Headless SSH
-    // tabs exactly so (wintty-release #874 gates the preset off Desktop /
-    // Pro Legacy / target-less Enterprise; #823 is the bug), and they
+    // saved fallback cannot be spawned as saved. An earlier release saved Headless SSH
+    // tabs exactly so (the preset is gated off Desktop /
+    // Pro Legacy / target-less Enterprise), and they
     // restored as local panes running the literal template, re-saving
     // themselves on every launch.
     [Fact]

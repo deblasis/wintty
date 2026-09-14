@@ -142,7 +142,7 @@ human) working in this repo uses the same contract:
 - `lanes.ps1` - the heavy job lanes' configuration (AGENTS.md), applied by
   `just lanes` and checked by `just doctor`. incoda keeps queue config in
   its own state dir where the repo cannot see it, so this table is the
-  record; the descriptions are shared verbatim with `wintty-release`. Its
+  record; the descriptions are shared verbatim with the private release repo. Its
   `-SelfTest` covers the drift rules and the apply argv without touching a
   machine, and runs in `gates-selftest`.
 

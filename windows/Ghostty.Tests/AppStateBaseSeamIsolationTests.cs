@@ -6,7 +6,7 @@ using Xunit;
 namespace Ghostty.Tests;
 
 /// <summary>
-/// The isolation half of the seam serialization pin (#854 item 9 review):
+/// The isolation half of the seam serialization pin (state-base review):
 /// while a test in the <c>AppStateBaseSeamSerial</c> collection holds a
 /// shadowed <see cref="AppStateBase.ReadEnvironment"/>, this collection,
 /// which only reads state roots the way every ordinary parallel

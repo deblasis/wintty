@@ -44,7 +44,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
 
     // Read once: the pid is constant for the life of the process, and the
     // writer loop is the hot path this class already allocates carefully
-    // for. It lands on every line (#854 item 8) because every process of
+    // for. It lands on every line because every process of
     // an edition appends to the same day file, so an unattributable line
     // is one nobody can act on when several instances are interleaved.
     private readonly int _pid = Environment.ProcessId;
@@ -425,7 +425,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
         //   [indented stack lines on exception]
         // The pid sits between the level and the event id, not before the
         // level, because downstream line parsers anchor on the head:
-        // scripts/app-run-health.ps1 (#847) matches `timestamp | level |`
+        // scripts/app-run-health.ps1 matches `timestamp | level |`
         // and a field there is invisible to it.
         var sb = _formatBuilder;
         sb.Clear();
