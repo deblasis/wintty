@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using Xunit;
 
 namespace Ghostty.Tests.Wiring;
@@ -686,6 +688,202 @@ public class HarnessConfigIsolationScanTests
         throw new InvalidOperationException("repo root not found");
     }
 
+    /// <summary>
+    /// Options shared by every recursive walk in this file. A build tree
+    /// can contain a directory junction pointing back at one of its own
+    /// ancestors (for example a packaged build layout that junctions its
+    /// output directory to the tree root); the plain SearchOption.AllDirectories
+    /// walk follows a cycle like that forever and eventually dies with
+    /// PathTooLongException, which is what turned this into a ~30 minute
+    /// hang the first time a build tree shaped like that got scanned.
+    /// Skipping reparse points is also the semantically correct choice
+    /// here, not just the safe one: a junction is never itself committed
+    /// content in a git checkout, so a file reachable ONLY through one
+    /// cannot be a committed offender these scans exist to catch, and
+    /// every real, committed file stays reachable through its own
+    /// on-disk directory entry regardless. Hidden and System are
+    /// deliberately NOT added to AttributesToSkip: the legacy
+    /// Directory.EnumerateFiles(..., SearchOption.AllDirectories) call
+    /// this replaces does not skip Hidden- or System-attributed files or
+    /// directories (that default only lives on a freshly-constructed,
+    /// unconfigured EnumerationOptions, not on the old overload), and
+    /// these scans are security-relevant, so silently exempting anything
+    /// Hidden or System would be a real, unstated narrowing of what they
+    /// catch. Reparse points are the only thing that changes here.
+    /// </summary>
+    private static readonly EnumerationOptions RecursiveScanOptions = new()
+    {
+        RecurseSubdirectories = true,
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        IgnoreInaccessible = false,
+    };
+
+    /// <summary>
+    /// The recursive-scan replacement for
+    /// Directory.EnumerateFiles(path, searchPattern, SearchOption.AllDirectories):
+    /// every scan in this file that walks a whole tree goes through this
+    /// so a self-referencing junction cannot hang it. The shipped scans
+    /// always use this two-argument overload, which carries no
+    /// cancellation and behaves exactly as before; only the test below
+    /// uses the cancellable overload to bound its own leaked work.
+    /// </summary>
+    private static IEnumerable<string> EnumerateFilesRecursively(
+        string path, string searchPattern) =>
+        EnumerateFilesRecursively(path, searchPattern, CancellationToken.None);
+
+    /// <summary>
+    /// Same walk, cancellable between yielded entries. Not used by any
+    /// shipped scan: it exists so
+    /// Recursive_Scan_Terminates_Through_A_Self_Referencing_Junction can
+    /// stop its own background walk on a regression instead of leaving it
+    /// to run for as long as the underlying bug takes to resolve on its
+    /// own.
+    /// </summary>
+    private static IEnumerable<string> EnumerateFilesRecursively(
+        string path, string searchPattern, CancellationToken cancellationToken)
+    {
+        foreach (var file in Directory.EnumerateFiles(
+                     path, searchPattern, RecursiveScanOptions))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return file;
+        }
+    }
+
+    /// <summary>
+    /// Recreates the trap with a real temp tree: a junction inside the
+    /// tree pointing back at the tree's own root, exactly the shape a
+    /// packaged build layout can produce. Proves the shared recursive
+    /// helper still terminates and still finds a justfile placed in a
+    /// genuine subdirectory. The scan runs on a background task behind a
+    /// bounded wait rather than being awaited directly, using the
+    /// cancellable overload: reverting the fix (a bare
+    /// Directory.EnumerateFiles(..., SearchOption.AllDirectories) call, or
+    /// widening RecursiveScanOptions back to following reparse points)
+    /// makes the walk follow the junction forever, and the 20s Wait alone
+    /// would only fail the assertion, not stop the task. On that
+    /// timeout the finally block cancels the token and joins the task
+    /// before deleting the tree, so a regression here fails the test
+    /// without leaving an orphaned background walk racing the cleanup
+    /// (or outliving the test process on a shared build lane) -- the
+    /// real-subdir/justfile match repeats at every level of the cycle, so
+    /// the per-yielded-entry cancellation check fires promptly rather than
+    /// waiting on a match that might never come.
+    /// </summary>
+    [Fact]
+    public void Recursive_Scan_Terminates_Through_A_Self_Referencing_Junction()
+    {
+        var tempRoot = Directory.CreateTempSubdirectory(
+            "wintty-scan-junction-").FullName;
+        var junction = Path.Combine(tempRoot, "loop-back-to-root");
+        using var cts = new CancellationTokenSource();
+        Task? scanTask = null;
+        try
+        {
+            var realSubdir = Path.Combine(tempRoot, "real-subdir");
+            Directory.CreateDirectory(realSubdir);
+            var justfile = Path.Combine(realSubdir, "justfile");
+            File.WriteAllText(justfile, "# fixture justfile\n");
+
+            // Junctions need no elevated privilege, unlike symlinks (see
+            // the symlink tests in Config/TestConfigGuardTests.cs), so no
+            // host-capability skip is needed here.
+            var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe")
+            {
+                Arguments = $"/c mklink /J \"{junction}\" \"{tempRoot}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var mklink = System.Diagnostics.Process.Start(psi)!;
+            Assert.True(mklink.WaitForExit(15000), "mklink /J did not exit");
+            Assert.True(Directory.Exists(junction), "junction was not created");
+
+            List<string> found = null!;
+            scanTask = Task.Run(() =>
+                found = EnumerateFilesRecursively(tempRoot, "justfile", cts.Token)
+                    .ToList());
+            var completed = scanTask.Wait(TimeSpan.FromSeconds(20));
+
+            Assert.True(completed,
+                "the recursive scan did not terminate within 20s; a " +
+                "self-referencing junction is being followed instead of " +
+                "skipped");
+            Assert.Contains(justfile, found);
+        }
+        finally
+        {
+            // On a regression the Wait above times out but leaves the
+            // task running: cancel it and join before touching the tree
+            // it may still be walking, so a failing run cannot race its
+            // own cleanup or leak a background scan for as long as the
+            // underlying bug takes to resolve on its own (up to ~30
+            // minutes to PathTooLongException).
+            if (scanTask is { IsCompleted: false })
+            {
+                cts.Cancel();
+                try
+                {
+                    scanTask.Wait(TimeSpan.FromSeconds(30));
+                }
+                catch (AggregateException)
+                {
+                    // Expected: the task observes the cancellation and
+                    // faults. Only that it has stopped matters here.
+                }
+            }
+
+            // The junction only, and never recursively: deleting it
+            // recursively would walk right back into tempRoot through the
+            // same cycle this test exists to catch.
+            if (Directory.Exists(junction))
+                Directory.Delete(junction, recursive: false);
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Guards Medium 1 from the reparse-points review: the legacy
+    /// Directory.EnumerateFiles(..., SearchOption.AllDirectories) call this
+    /// helper replaces does NOT skip Hidden- or System-attributed files, so
+    /// neither does the replacement. These scans are security-relevant
+    /// (they sweep hidden-looking trees like .github for unarmed
+    /// launches); silently exempting a Hidden or System file from them
+    /// would be a real weakening, not a neutral side effect of the
+    /// reparse-point fix.
+    /// </summary>
+    [Fact]
+    public void Recursive_Scan_Still_Finds_Hidden_And_System_Files()
+    {
+        var tempRoot = Directory.CreateTempSubdirectory(
+            "wintty-scan-hidden-").FullName;
+        try
+        {
+            var hiddenFile = Path.Combine(tempRoot, "hidden.ps1");
+            File.WriteAllText(hiddenFile, "# hidden fixture\n");
+            File.SetAttributes(hiddenFile,
+                File.GetAttributes(hiddenFile) | FileAttributes.Hidden);
+
+            var systemFile = Path.Combine(tempRoot, "system.ps1");
+            File.WriteAllText(systemFile, "# system fixture\n");
+            File.SetAttributes(systemFile,
+                File.GetAttributes(systemFile) | FileAttributes.System);
+
+            var found = EnumerateFilesRecursively(tempRoot, "*.ps1").ToList();
+
+            Assert.Contains(hiddenFile, found);
+            Assert.Contains(systemFile, found);
+        }
+        finally
+        {
+            // Clear the attributes before delete: some filesystem/AV
+            // combinations refuse to remove a Hidden or System file, and
+            // this is a throwaway temp tree either way.
+            foreach (var file in Directory.GetFiles(tempRoot))
+                File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
     [Fact]
     public void Every_App_Launch_In_Scripts_Arms_The_Test_Config_Guard()
     {
@@ -694,8 +892,7 @@ public class HarnessConfigIsolationScanTests
         Assert.True(Directory.Exists(scriptDir), "windows/scripts not found");
 
         var violations = new List<string>();
-        foreach (var file in Directory.EnumerateFiles(
-                     scriptDir, "*.ps1", SearchOption.AllDirectories)
+        foreach (var file in EnumerateFilesRecursively(scriptDir, "*.ps1")
                      .OrderBy(f => f, StringComparer.Ordinal))
         {
             // The selftest fixtures are config-fragment corpora for
@@ -1247,8 +1444,7 @@ public class HarnessConfigIsolationScanTests
         var scriptDir = Path.Combine(root, "windows", "scripts");
         var violations = new List<string>();
 
-        foreach (var file in Directory.EnumerateFiles(
-                     scriptDir, "*.ps1", SearchOption.AllDirectories)
+        foreach (var file in EnumerateFilesRecursively(scriptDir, "*.ps1")
                      .OrderBy(f => f, StringComparer.Ordinal))
         {
             if (file.Replace('\\', '/').Contains("/lib/fuzz-selftest/")) continue;
@@ -1653,8 +1849,7 @@ public class HarnessConfigIsolationScanTests
         {
             var dir = Path.Combine(root, tree);
             if (!Directory.Exists(dir)) continue;
-            foreach (var file in Directory.EnumerateFiles(
-                         dir, "*", SearchOption.AllDirectories))
+            foreach (var file in EnumerateFilesRecursively(dir, "*"))
             {
                 var extension = Path.GetExtension(file).ToLowerInvariant();
                 if (!OutsideExtensions.Contains(extension)) continue;
@@ -1698,8 +1893,7 @@ public class HarnessConfigIsolationScanTests
         var offenders = new List<string>();
         var justfiles = new List<string> {
             Path.Combine(root, "justfile") };
-        justfiles.AddRange(Directory.EnumerateFiles(
-            root, "justfile", SearchOption.AllDirectories));
+        justfiles.AddRange(EnumerateFilesRecursively(root, "justfile"));
         foreach (var justfile in justfiles.Where(j => !j
             .Replace('\\', '/').Contains("/ScanFixtures/")))
         {
@@ -1739,8 +1933,7 @@ public class HarnessConfigIsolationScanTests
         {
             var dir = Path.Combine(root, tree);
             if (!Directory.Exists(dir)) continue;
-            foreach (var file in Directory.EnumerateFiles(
-                         dir, "*", SearchOption.AllDirectories))
+            foreach (var file in EnumerateFilesRecursively(dir, "*"))
             {
                 var extension = Path.GetExtension(file).ToLowerInvariant();
                 if (!OutsideExtensions.Contains(extension) &&
