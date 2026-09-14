@@ -22,6 +22,10 @@ internal static class LogEvents
         public const int UnknownBackdropStyle  = 1008;
         public const int WatcherError          = 1009;
         public const int WatcherFileMissing    = 1010;
+        public const int WatcherOverflow       = 1011;
+        public const int WatcherErrorRepeat    = 1012;
+        public const int WatcherRebuilt        = 1013;
+        public const int WatcherRebuildRetry   = 1014;
     }
 
     // 1100-1199: Frecency / command history
