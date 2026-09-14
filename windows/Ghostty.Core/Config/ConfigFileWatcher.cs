@@ -81,6 +81,23 @@ public sealed partial class ConfigFileWatcher : IDisposable
     private bool _overflowLogged;
     private bool _disposed;
 
+    /// <summary>The watcher <see cref="CreateWatcher"/> is enabling right
+    /// now, so <see cref="HandleWatcherError"/> can recognize a synchronous
+    /// failure raised from inside that call, before the watcher is
+    /// published anywhere. Only ever touched while <see cref="_lock"/> is
+    /// held by <see cref="CreateWatcher"/>'s caller, so it needs no lock of
+    /// its own.</summary>
+    private FileSystemWatcher? _startingWatcher;
+    private Exception? _startFailure;
+
+    /// <summary>Test-only replacement for <c>watcher.EnableRaisingEvents =
+    /// true</c>, so a test can simulate the synchronous <see
+    /// cref="FileSystemWatcher.Error"/> the real implementation raises on
+    /// the calling thread when the underlying watch fails immediately (an
+    /// unsupported filesystem, or the directory vanishing right there).
+    /// Null in production.</summary>
+    internal Action<FileSystemWatcher>? TestEnable;
+
     /// <param name="path">The config file. Its directory must exist for
     /// <see cref="Start"/> to arm anything.</param>
     /// <param name="timer">Debounce and rebuild timer. Owned: disposed with
@@ -148,7 +165,10 @@ public sealed partial class ConfigFileWatcher : IDisposable
     }
 
     /// <summary>Builds and enables a watcher. Call under the lock, so an
-    /// event it raises cannot be handled before it is published.</summary>
+    /// event it raises cannot be handled before it is published. Returns
+    /// null, with <paramref name="error"/> set, both when construction
+    /// throws and when enabling it fails synchronously: either way nothing
+    /// here is published as a working watcher.</summary>
     private FileSystemWatcher? CreateWatcher(out Exception? error)
     {
         FileSystemWatcher? watcher = null;
@@ -165,7 +185,33 @@ public sealed partial class ConfigFileWatcher : IDisposable
             watcher.Deleted += OnFileEvent;
             watcher.Renamed += OnFileRenamed;
             watcher.Error += OnWatcherError;
-            watcher.EnableRaisingEvents = true;
+
+            // The underlying watch (ReadDirectoryChangesW) can fail right
+            // here, and .NET raises Error synchronously, on this thread,
+            // when it does: an unsupported filesystem, or the directory
+            // vanishing between the existence check and this call.
+            // _startingWatcher lets the handler report that failure back to
+            // us instead of silently treating it as the current watcher
+            // dying later, which would publish a dead watcher as healthy.
+            _startingWatcher = watcher;
+            _startFailure = null;
+            try
+            {
+                if (TestEnable is not null) TestEnable(watcher);
+                else watcher.EnableRaisingEvents = true;
+            }
+            finally
+            {
+                _startingWatcher = null;
+            }
+
+            if (_startFailure is not null)
+            {
+                DisposeQuietly(watcher);
+                error = _startFailure;
+                return null;
+            }
+
             error = null;
             return watcher;
         }
@@ -173,6 +219,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
         {
             // The directory can vanish, or deny access, between the
             // existence check and the watch being opened.
+            _startingWatcher = null;
             DisposeQuietly(watcher);
             error = ex;
             return null;
@@ -190,6 +237,18 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// buffer overflow without flooding a directory.</summary>
     internal void HandleWatcherError(object? sender, Exception ex)
     {
+        if (_startingWatcher is not null && ReferenceEquals(sender, _startingWatcher))
+        {
+            // Raised synchronously from inside CreateWatcher, before this
+            // watcher is published anywhere (not yet _watcher, and if this
+            // is a rebuild, _rebuildPending is still true). Report it back
+            // there; CreateWatcher disposes it and returns the failure, so
+            // Start or TryRebuild treats this exactly like a construction
+            // failure instead of publishing a dead watcher as healthy.
+            _startFailure = ex;
+            return;
+        }
+
         if (ex is InternalBufferOverflowException)
         {
             bool first;
@@ -265,8 +324,10 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// <summary>
     /// One attempt to replace a failed watcher. On failure schedules the
     /// next attempt with a doubled delay, capped, and returns false.
+    /// Internal so a test can call it directly, back to back, to exercise
+    /// the overlap guard below without racing real threads.
     /// </summary>
-    private bool TryRebuild()
+    internal bool TryRebuild()
     {
         var present = Directory.Exists(_dir);
         Exception? error = null;
@@ -274,7 +335,14 @@ public sealed partial class ConfigFileWatcher : IDisposable
         TimeSpan retry;
         lock (_lock)
         {
-            if (_disposed) return false;
+            // Two timer callbacks can overlap (OnTimerFired's own read of
+            // _rebuildPending is not atomic with this method), and each
+            // would otherwise reach here believing it owns the rebuild.
+            // Re-checking under the lock means only the first one through
+            // creates a watcher; the loser leaves the winner's watcher and
+            // its already-posted catch-up delivery alone instead of
+            // silently overwriting _watcher and leaking the winner's.
+            if (_disposed || !_rebuildPending || _watcher is not null) return false;
             if (present) created = CreateWatcher(out error);
             if (created is not null)
             {

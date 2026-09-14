@@ -292,6 +292,42 @@ public sealed class ConfigFileWatcherTests : IDisposable
     }
 
     [Fact]
+    public void A_second_overlapping_rebuild_attempt_does_not_leak_a_watcher()
+    {
+        using var watcher = NewWatcher();
+
+        // Kill the watcher and let one attempt fail while the directory is
+        // still missing. That leaves _rebuildPending true and _watcher null,
+        // the exact state two overlapping timer callbacks would both see
+        // right before calling TryRebuild: OnTimerFired reads
+        // _rebuildPending and nulls _watcher under its own lock, separate
+        // from TryRebuild's.
+        DeleteDirectory(_dir);
+        WaitUntil(() => _log.Count(WatcherError) == 1, "the watcher reported no error for its deleted directory");
+        Assert.True(_timer.Armed);
+        _timer.Fire();
+        Assert.Equal(0, _log.Count(WatcherRebuilt));
+        Assert.True(_timer.Armed);
+
+        RecreateDirectory(_dir);
+        File.WriteAllText(_path, "font-size = 20\n");
+
+        // Two callbacks calling TryRebuild back to back, as if they had
+        // raced into it: only the first should create a watcher.
+        Assert.True(watcher.TryRebuild());
+        Assert.Equal(1, _log.Count(WatcherRebuilt));
+
+        Assert.False(watcher.TryRebuild());
+        Assert.Equal(1, _log.Count(WatcherRebuilt));
+
+        // The surviving watcher is the winner's: a real save still reaches
+        // it and settles once, not twice.
+        _timer.WaitForBurst(() => Save("move-overwrite", "font-size = 25\n"));
+        _timer.Fire();
+        Assert.Equal("font-size = 25\n", _contentAtSettle);
+    }
+
+    [Fact]
     public void A_buffer_overflow_rearms_and_warns_once_per_settle()
     {
         using var watcher = NewWatcher();
@@ -325,6 +361,39 @@ public sealed class ConfigFileWatcherTests : IDisposable
 
         Assert.Equal(0, _timer.ScheduleCount);
         Assert.False(_timer.Armed);
+    }
+
+    [Fact]
+    public void A_synchronous_start_failure_is_warned_and_does_not_publish_a_dead_watcher()
+    {
+        // EnableRaisingEvents can itself raise Error synchronously, on the
+        // calling thread, when the underlying watch fails right there (an
+        // unsupported filesystem, or the directory vanishing between the
+        // existence check and the watch being opened). TestEnable stands in
+        // for that.
+        using var w = new ConfigFileWatcher(
+            _path,
+            _timer,
+            TimeSpan.FromMilliseconds(300),
+            () => false,
+            deliver => deliver(),
+            () => Interlocked.Increment(ref _settled),
+            _log);
+        w.TestEnable = fsw => w.HandleWatcherError(fsw, new IOException("simulated ReadDirectoryChangesW failure"));
+
+        Assert.False(w.Start());
+
+        Assert.Equal(1, _log.Count(WatcherError, LogLevel.Warning));
+        Assert.Equal(0, _log.Count(WatcherRebuilt));
+        Assert.Equal(0, _log.Count(WatcherErrorRepeat, LogLevel.Debug));
+        Assert.False(_timer.Armed);
+
+        // Not left half-started: a real attempt right after still works.
+        w.TestEnable = null;
+        Assert.True(w.Start());
+        _timer.WaitForBurst(() => File.WriteAllText(_path, "font-size = 24\n"));
+        _timer.Fire();
+        Assert.Equal(1, _settled);
     }
 
     [Fact]
