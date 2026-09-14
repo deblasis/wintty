@@ -2464,12 +2464,14 @@ internal static partial class AppLogExtensions
 
     // One bad entry (e.g. the shell COM object rejecting a path or the
     // title) must not abort the whole jump list build; the entry is
-    // skipped and the rest still commits. See CustomDestinationListFacade.
+    // skipped and the rest still commits. When every entry of a batch
+    // fails, the build throws instead and JumpListFailed carries it.
+    // See Ghostty.Core.JumpList.ShellLinkCollection.
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.JumpListItemSkipped,
                    Level = LogLevel.Warning,
-                   Message = "Skipped a jump list entry for {ExePath}: could not build its shell link")]
+                   Message = "Skipped jump list entry \"{Title}\" ({Arguments}) for {ExePath}: could not build its shell link")]
     internal static partial void LogJumpListItemSkipped(
-        this ILogger<App> logger, System.Exception ex, string exePath);
+        this ILogger<App> logger, System.Exception ex, string title, string arguments, string exePath);
 
     // The reason is spelled into the message rather than left to the
     // exception: this is a WinRT HRESULT arriving through a projected

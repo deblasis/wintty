@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace Ghostty.Tests.JumpList;
@@ -57,11 +58,34 @@ public class JumpListAppWiringTests
         Assert.Contains("honorJumpList", source);
     }
 
-    private static string ReadEmbedded(string suffix)
+    [Fact]
+    public void SkippedEntryLog_NamesTheEntrysTitleAndArguments()
+    {
+        // Every jump list entry shares the same exe path, so a skip line
+        // that logs only the path cannot say WHICH entry was dropped.
+        var app = ReadEmbedded("App.xaml.cs");
+        var decl = Regex.Match(
+            app,
+            @"LogEvents\.Startup\.JumpListItemSkipped,.*?LogJumpListItemSkipped\(",
+            RegexOptions.Singleline).Value;
+        Assert.NotEmpty(decl);
+        Assert.Contains("{Title}", decl);
+        Assert.Contains("{Arguments}", decl);
+        Assert.Contains("{ExePath}", decl);
+
+        // The facade must forward the entry's own title and arguments.
+        // (The name filter skips Core's ICustomDestinationListFacade.cs.)
+        var facade = ReadEmbedded(
+            "CustomDestinationListFacade.cs",
+            n => !n.EndsWith("ICustomDestinationListFacade.cs", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("LogJumpListItemSkipped(error, title, arguments, exePath)", facade);
+    }
+
+    private static string ReadEmbedded(string suffix, Func<string, bool>? also = null)
     {
         var asm = Assembly.GetExecutingAssembly();
         var name = asm.GetManifestResourceNames()
-            .Single(n => n.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+            .Single(n => n.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) && (also is null || also(n)));
         using var stream = asm.GetManifestResourceStream(name);
         Assert.NotNull(stream);
         using var reader = new StreamReader(stream!);

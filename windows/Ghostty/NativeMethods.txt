@@ -80,17 +80,15 @@ QUERY_USER_NOTIFICATION_STATE
 
 // shell COM
 ICustomDestinationList
-IObjectArray
-IObjectCollection
 DestinationList
-EnumerableObjectCollection
 
 // Note: IShellLinkW, ShellLink, IPropertyStore, PROPERTYKEY, PROPVARIANT,
-// VARENUM and PropVariantClear are listed in
+// VARENUM, PropVariantClear, IObjectArray, IObjectCollection and
+// EnumerableObjectCollection are listed in
 // windows/Ghostty.Core/NativeMethods.txt (not here) because
-// ShellLinkTitleHelper.SetTitle lives in Ghostty.Core so
-// ShellLinkTitleHelperTests in Ghostty.Tests can create a real ShellLink
-// COM object and call it without pulling in the WinUI 3 Ghostty assembly.
+// ShellLinkTitleHelper and ShellLinkCollection live in Ghostty.Core so
+// tests in Ghostty.Tests can drive them against real shell COM objects
+// without pulling in the WinUI 3 Ghostty assembly.
 
 // xaml interop: ISwapChainPanelNative is hand-written. CsWin32
 // generates an ISwapChainPanelNative under

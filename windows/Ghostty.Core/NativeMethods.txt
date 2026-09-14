@@ -22,6 +22,15 @@ IPropertyStore
 IShellLinkW
 ShellLink
 
+// shell COM for the collection jump list entries go into
+// (ShellLinkCollection.Build). Same reason as the block above. Ghostty's
+// ICustomDestinationList takes IObjectArray; CsWin32 in Ghostty reuses
+// this generated type through InternalsVisibleTo instead of emitting a
+// second copy.
+IObjectArray
+IObjectCollection
+EnumerableObjectCollection
+
 // property system (System.Title on a shell link)
 PROPERTYKEY
 PROPVARIANT

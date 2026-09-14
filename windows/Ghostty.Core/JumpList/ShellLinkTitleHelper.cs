@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.System.Com.StructuredStorage;
@@ -41,16 +42,16 @@ namespace Ghostty.Core.JumpList;
 /// GetOrCreateComInterfaceForObject / GetOrCreateObjectForComInstance).
 /// That pair is for the OPPOSITE direction: fabricating a
 /// COM-callable wrapper (CCW) that exposes a *managed* object out to
-/// native code. Handed an RCW like `link`, ComputeVtables only
-/// advertises the interfaces link's own managed type declares
-/// (IShellLinkW), not whatever the underlying native object would
-/// separately answer to QueryInterface. The resulting CCW therefore
-/// never supported IID_IPropertyStore, and casting it threw
+/// native code. A CCW built over an RCW like `link` answers
+/// QueryInterface only for IUnknown, not for what the underlying
+/// native object supports. It therefore never supported
+/// IID_IPropertyStore, and casting it threw
 /// InvalidCastException / E_NOINTERFACE - on every launch, since
 /// SetTitle ran unconditionally as part of building every jump list
 /// entry. Casting `link` itself has no such problem: it QIs the real
 /// native object, which genuinely does support IPropertyStore.
 /// </summary>
+[SupportedOSPlatform("windows6.1")]
 internal static class ShellLinkTitleHelper
 {
     public static unsafe void SetTitle(IShellLinkW link, string title)
@@ -109,26 +110,4 @@ internal static class ShellLinkTitleHelper
         fmtid = new Guid("f29f85e0-4ff9-1068-ab91-08002b27b3d9"),
         pid = 2,
     };
-
-    /// <summary>
-    /// Test-only: reads back the title <see cref="SetTitle"/> wrote,
-    /// via the same IPropertyStore facet, so ShellLinkTitleHelperTests
-    /// can assert the value actually stuck rather than merely trusting
-    /// that SetTitle did not throw. Not called by production code.
-    /// PROPERTYKEY/PROPVARIANT stay internal to this file rather than
-    /// also being driven from Ghostty.Tests directly.
-    /// </summary>
-    internal static unsafe string? GetTitleForTests(IShellLinkW link)
-    {
-        var store = (IPropertyStore)link;
-        store.GetValue(in s_pkeyTitle, out var pv);
-        try
-        {
-            return pv.Anonymous.Anonymous.Anonymous.pwszVal.ToString();
-        }
-        finally
-        {
-            DWritePInvoke.PropVariantClear(ref pv);
-        }
-    }
 }
