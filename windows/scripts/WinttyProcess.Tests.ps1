@@ -56,8 +56,16 @@ function Invoke-DecisionCases([string]$LibPath) {
             XDG_CONFIG_HOME    = (Join-Path $temp 'wintty-seam-case')
             WINTTY_STATE_BASE  = (Join-Path $temp 'wintty-seam-case\state')
         }
-        $isolatedConfig = "window-save-state = never`nwindows-single-instance = false`n"
+        $chord = Get-WinttyHarnessQuickTerminalKey
+        $isolatedConfig = "window-save-state = never`nwindows-single-instance = false`nquick-terminal-key = $chord`n"
         $userRegistrations = @{ 'Vendor.Wintty.User' = $userPath }
+        # A Velopack install nobody runs: Update.exe in the install root,
+        # the app in current\ (the exe itself need not exist).
+        $vpkRoot = Join-Path $temp "wintty-vpk-case-$PID"
+        New-Item -ItemType Directory -Force -Path $vpkRoot | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $vpkRoot 'Update.exe'), [byte[]]@())
+        # A sibling of the temp directory whose name starts with temp's own.
+        $tempSibling = $temp.TrimEnd('\') + '-evil'
 
         function EnvWith([hashtable]$Changes) {
             $e = $isolatedEnv.Clone()
@@ -108,12 +116,50 @@ function Invoke-DecisionCases([string]$LibPath) {
             Instances = @($user, [pscustomobject]@{ Id = 8; Path = $null }) }
         Case 'exe inside the running install' $false @{
             ExePath = 'C:\Users\someone\AppData\Local\Vendor\Wintty.User\app-2\Wintty.exe' }
-        Case 'single-instance left at its default' $false @{ ConfigText = 'window-save-state = never' }
-        Case 'single-instance on' $false @{ ConfigText = 'windows-single-instance = true' }
-        Case 'single-instance: the last line wins (on)' $false @{
-            ConfigText = "windows-single-instance = false`nwindows-single-instance = true" }
-        Case 'single-instance: the last line wins (off)' $true @{
-            ConfigText = "windows-single-instance = true`r`nwindows-single-instance = false" }
+        Case 'exe in a Velopack install nobody runs' $false @{ ExePath = (Join-Path $vpkRoot 'current\Wintty.exe') }
+        Case 'exe under Program Files, not running' $false @{
+            ExePath = (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Wintty\Wintty.exe') }
+        Case 'exe under an install base' $false @{
+            ExePath = 'D:\Apps\Wintty\Wintty.exe'; InstallBases = @('D:\Apps') }
+        Case 'single-instance left at its default' $false @{ ConfigText = "quick-terminal-key = $chord" }
+        Case 'single-instance on' $false @{ ConfigText = "windows-single-instance = true`nquick-terminal-key = $chord" }
+        # The app's election reads the FIRST line; the guard requires every one.
+        Case 'single-instance: a later line turns it on' $false @{
+            ConfigText = "windows-single-instance = false`nwindows-single-instance = true`nquick-terminal-key = $chord" }
+        Case 'single-instance: an earlier line turns it on' $false @{
+            ConfigText = "windows-single-instance = true`r`nwindows-single-instance = false`nquick-terminal-key = $chord" }
+        Case 'single-instance: the key in another case turns it on' $false @{
+            ConfigText = "Windows-Single-Instance=true`nwindows-single-instance = false`nquick-terminal-key = $chord" }
+        Case 'single-instance: a bare CR ends a line, as in the app (on)' $false @{
+            ConfigText = "windows-single-instance = true`rwindows-single-instance = false`nquick-terminal-key = $chord" }
+        Case 'single-instance: a bare CR ends a line, as in the app (off)' $true @{
+            ConfigText = "windows-single-instance = false`rquick-terminal-key = $chord" }
+        Case 'single-instance: every line off, any spelling of the key' $true @{
+            ConfigText = "  WINDOWS-single-instance=false`r`n# windows-single-instance = true`nwindows-single-instance = `nwindows-single-instance = false`nquick-terminal-key = $chord" }
+        Case 'quick-terminal-key left at its default' $false @{ ConfigText = 'windows-single-instance = false' }
+        Case 'quick-terminal-key on the default chord' $false @{
+            ConfigText = "windows-single-instance = false`nquick-terminal-key = ctrl+backquote" }
+        Case 'quick-terminal-key: an earlier line binds the default chord' $false @{
+            ConfigText = "windows-single-instance = false`nquick-terminal-key = ctrl+backquote`nquick-terminal-key = $chord" }
+        Case 'quick-terminal-key: a later line binds another chord' $false @{
+            ConfigText = "windows-single-instance = false`nquick-terminal-key = $chord`nQuick-Terminal-Key = alt+space" }
+        Case 'quick-terminal-key: the harness chord in another case' $true @{
+            ConfigText = "windows-single-instance = false`nQuick-Terminal-Key = $($chord.ToUpperInvariant())" }
+        # What Start-SeamSession stages: the harness chord appended when the
+        # config binds none, the harness's own chord kept when it does.
+        Case 'a harness config with the defaults added' $true @{
+            ConfigText = (Add-WinttyHarnessConfigDefaults "window-save-state = never`r`nwindows-single-instance = false`r`n") }
+        Case 'an empty harness config with the defaults added still needs single-instance off' $false @{
+            ConfigText = (Add-WinttyHarnessConfigDefaults '') }
+        $own = "windows-single-instance = false`nquick-terminal-key = alt+space`n"
+        if ((Add-WinttyHarnessConfigDefaults $own) -cne $own) {
+            $failed.Add('Add-WinttyHarnessConfigDefaults changed a config that binds its own chord')
+        }
+        # No @() around it: the reader returns its List as one object.
+        $staged = (Get-WinttyConfigValues (Add-WinttyHarnessConfigDefaults 'x = 1') 'quick-terminal-key') -join '|'
+        if ($staged -cne $chord) {
+            $failed.Add('Add-WinttyHarnessConfigDefaults did not stage exactly the harness chord')
+        }
         Case 'test marker missing' $false @{ Environment = (EnvWith @{ WINTTY_TEST_CONFIG = $null }) }
         Case 'test marker not 1' $false @{ Environment = (EnvWith @{ WINTTY_TEST_CONFIG = 'yes' }) }
         Case 'XDG_CONFIG_HOME missing' $false @{ Environment = (EnvWith @{ XDG_CONFIG_HOME = $null }) }
@@ -122,6 +168,14 @@ function Invoke-DecisionCases([string]$LibPath) {
         Case 'state base missing' $false @{ Environment = (EnvWith @{ WINTTY_STATE_BASE = $null }) }
         Case 'state base outside temp' $false @{
             Environment = (EnvWith @{ WINTTY_STATE_BASE = 'C:\Users\someone\AppData\Local' }) }
+        # "Under temp" means under temp's directory, separator included: a
+        # sibling whose name merely starts with temp's is outside.
+        Case 'XDG_CONFIG_HOME in a sibling of temp' $false @{
+            Environment = (EnvWith @{ XDG_CONFIG_HOME = (Join-Path $tempSibling 'cfg') }) }
+        Case 'state base in a sibling of temp' $false @{
+            Environment = (EnvWith @{ WINTTY_STATE_BASE = (Join-Path $tempSibling 'state') }) }
+        Case 'daemon data dir in a sibling of temp' $false @{
+            Environment = (EnvWith @{ WINTTY_SESSIOND_DATA_DIR = (Join-Path $tempSibling 'd') }) }
         Case 'per-user daemon pipe' $false @{
             Environment = (EnvWith @{ WINTTY_SESSIOND_PIPE = '\\.\pipe\winttyd-Vendor.Wintty.User-S-1-5-21-11-22-33-1001' }) }
         Case 'per-user daemon pipe, versioned' $false @{
@@ -173,7 +227,10 @@ function Invoke-DecisionCases([string]$LibPath) {
             }
         }
         catch { $failed.Add("sweep threw: $($_.Exception.Message)") }
-        finally { Remove-Item -LiteralPath $sweepRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        finally {
+            Remove-Item -LiteralPath $sweepRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $vpkRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
 
         return , $failed
     } $LibPath
@@ -208,18 +265,31 @@ $isolated = @{
     WINTTY_STATE_BASE  = (Join-Path $root 'state')
     WINTTY_SESSIOND_PIPE = '\\.\pipe\winttyd-test-' + [guid]::NewGuid().ToString('N')
 }
-$config = "windows-single-instance = false`n"
+$config = "windows-single-instance = false`nquick-terminal-key = $(Get-WinttyHarnessQuickTerminalKey)`n"
 # Live process table, narrowed to this run's stand-ins: the cases must not
 # depend on which real instances happen to be open on the machine (the live
 # end-to-end run beside a real one is a separate check).
 $standIns = { @(Get-WinttyInstances | Where-Object { $_.Path -and (ConvertTo-WinttyPathKey $_.Path).StartsWith((ConvertTo-WinttyPathKey $root) + '\') }) }
 $userRegistration = @{ 'com.example.user' = $userImage }
 
+# A just-started process is in the table before its image path can be
+# read (the path comes off its module list, which the loader has not
+# finished): wait for it, or a check reads "unreadable" instead of the
+# case under test.
+function Wait-StandInReadable([int]$Id) {
+    $until = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $until) {
+        if (@(Get-WinttyInstances | Where-Object { $_.Id -eq $Id -and $_.Path }).Count -gt 0) { return }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "stand-in pid $Id never showed a readable image path"
+}
+
 $userProc = $null; $mineProc = $null
 try {
     $userProc = Start-Process -FilePath $userImage -ArgumentList '-n', '120', '127.0.0.1' -WindowStyle Hidden -PassThru
     $userStarted = $userProc.StartTime
-    Start-Sleep -Milliseconds 300
+    Wait-StandInReadable $userProc.Id
 
     Assert-True ((Get-WinttyBuildAumid $mineImage) -ceq 'com.example.fixture') 'the build AUMID is read out of Ghostty.Core.dll metadata'
 
@@ -252,7 +322,7 @@ try {
 
     $mineStamp = Get-Date
     $mineProc = Start-Process -FilePath $mineImage -ArgumentList '-n', '120', '127.0.0.1' -WindowStyle Hidden -PassThru
-    Start-Sleep -Milliseconds 300
+    Wait-StandInReadable $mineProc.Id
 
     $threw = $false
     try { Assert-NoWinttyFrom -ExePath $mineImage }
@@ -291,7 +361,35 @@ $mutations = @(
     @{ Name = 'no early allow when alone'
        Find = 'if ($running.Count -eq 0) { return $verdict }'; Replace = '' },
     @{ Name = 'single-instance not checked'
-       Find = 'if ($single -cne ''false'') {'; Replace = 'if ($false) {' },
+       Find = 'if ($single.Count -eq 0 -or $notOff.Count -gt 0) {'; Replace = 'if ($false) {' },
+    @{ Name = 'single-instance: only the last line read (the old rule)'
+       Find = '$notOff = @($single | Where-Object'; Replace = '$notOff = @($single | Select-Object -Last 1 | Where-Object' },
+    @{ Name = 'single-instance: only the first line read'
+       Find = '$notOff = @($single | Where-Object'; Replace = '$notOff = @($single | Select-Object -First 1 | Where-Object' },
+    @{ Name = 'single-instance may be left at its default'
+       Find = 'if ($single.Count -eq 0 -or $notOff'; Replace = 'if ($false -or $notOff' },
+    @{ Name = 'config keys matched case-sensitively'
+       Find = '.Equals($Key, [StringComparison]::OrdinalIgnoreCase)'; Replace = '.Equals($Key, [StringComparison]::Ordinal)' },
+    @{ Name = 'a bare CR does not end a config line'
+       Find = '($ConfigText -split "\r\n|\r|\n")'; Replace = '($ConfigText -split "\r?\n")' },
+    @{ Name = 'quick-terminal-key not checked'
+       Find = 'if ($chords.Count -eq 0 -or @($chords | Where-Object { $_ -ine $chord }).Count -gt 0) {'; Replace = 'if ($false) {' },
+    @{ Name = 'quick-terminal-key may be left at its default'
+       Find = 'if ($chords.Count -eq 0 -or @($chords'; Replace = 'if ($false -or @($chords' },
+    @{ Name = 'quick-terminal-key: only the last line read'
+       Find = '@($chords | Where-Object { $_ -ine $chord })'; Replace = '@($chords | Select-Object -Last 1 | Where-Object { $_ -ine $chord })' },
+    @{ Name = 'the harness stages no chord'
+       Find = 'return $text + "quick-terminal-key = $(Get-WinttyHarnessQuickTerminalKey)`n"'; Replace = 'return $text' },
+    @{ Name = 'the harness chord overrides the config''s own'
+       Find = "if ((Get-WinttyConfigValues `$ConfigText 'quick-terminal-key').Count -gt 0) { return `$ConfigText }"; Replace = '' },
+    @{ Name = 'a Velopack install may be launched'
+       Find = 'if ($installDir -and [System.IO.File]::Exists('; Replace = 'if ($false -and [System.IO.File]::Exists(' },
+    @{ Name = 'install bases not checked'
+       Find = 'foreach ($base in @($InstallBases)) {'; Replace = 'foreach ($base in @()) {' },
+    @{ Name = 'Program Files is not a default install base'
+       Find = "[Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86')"; Replace = "'Z:\nowhere'" },
+    @{ Name = 'the under-temp check drops the separator'
+       Find = '$p.StartsWith($r + ''\'', [StringComparison]::Ordinal)'; Replace = '$p.StartsWith($r, [StringComparison]::Ordinal)' },
     @{ Name = 'same edition allowed'
        Find = 'elseif (@($owned | Where-Object { $_ -ieq $AumId }).Count -gt 0) {'; Replace = 'elseif ($false) {' },
     @{ Name = 'AUMID compared case-sensitively'

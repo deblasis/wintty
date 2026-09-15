@@ -164,6 +164,49 @@ function Test-WinttyPathUnder([string]$Path, [string]$Root) {
     return $p -eq $r -or $p.StartsWith($r + '\', [StringComparison]::Ordinal)
 }
 
+# ---- the staged config, read the way the app reads it -------------------------
+
+# Every value the config text gives $Key, in file order, by the rules of the
+# app's own reader (Ghostty.Core ConfigIniFile): a line ends at CR, LF or
+# CRLF, leading blanks are dropped, '#' lines and lines without '=' are
+# skipped, the key before the first '=' is trimmed and matched
+# case-insensitively, and an empty value is ignored. The app acts on the
+# FIRST value, so a rule that must hold has to hold for every one of them.
+function Get-WinttyConfigValues([AllowEmptyString()][string]$ConfigText, [Parameter(Mandatory)][string]$Key) {
+    $values = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($ConfigText -split "\r\n|\r|\n")) {
+        $t = $line.TrimStart()
+        if ($t.Length -eq 0 -or $t.StartsWith('#')) { continue }
+        $eq = $t.IndexOf('=')
+        if ($eq -lt 0) { continue }
+        if (-not $t.Substring(0, $eq).Trim().Equals($Key, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $v = $t.Substring($eq + 1).Trim()
+        if ($v.Length -gt 0) { $values.Add($v) }
+    }
+    return , $values
+}
+
+# The quick-terminal chord every harness launch stages: Ctrl+Alt+Shift+F24.
+# The quick terminal's hotkey is session-global (RegisterHotKey), keyed by
+# neither the AUMID nor any environment variable, and it defaults to
+# Ctrl+`. A harness left at the default would take the user's chord when
+# it starts first, or fail to register it and log a warning when the user's
+# instance holds it. F24 has no key on a real keyboard, so nobody binds it.
+# There is no "off" value: a value the app cannot parse falls back to
+# Ctrl+`, which is why this must stay a chord QuickTerminalKeyChord.Parse
+# accepts (Ghostty.Tests pins that).
+function Get-WinttyHarnessQuickTerminalKey { return 'ctrl+alt+shift+f24' }
+
+# The config text a harness launch stages: the harness's own text plus the
+# harness quick-terminal chord when the text binds none. A text that binds
+# its own chord keeps it, and the coexistence guard then refuses to launch
+# it beside another instance.
+function Add-WinttyHarnessConfigDefaults([AllowEmptyString()][string]$ConfigText) {
+    if ((Get-WinttyConfigValues $ConfigText 'quick-terminal-key').Count -gt 0) { return $ConfigText }
+    $text = if ([string]::IsNullOrEmpty($ConfigText)) { '' } else { $ConfigText.TrimEnd("`r", "`n") + "`n" }
+    return $text + "quick-terminal-key = $(Get-WinttyHarnessQuickTerminalKey)`n"
+}
+
 # ---- what is running, and as which edition ----------------------------------
 
 # Every running Wintty as { Id, Path, StartTime }. Path and StartTime are
@@ -248,17 +291,26 @@ function Get-WinttyBuildAumid([Parameter(Mandatory)][string]$ExePath) {
     when, every one of these holds. All are checked BEFORE the launch, against
     the environment the child is about to inherit:
 
-      - its own exe: no running instance was started from it, and it does
-        not sit inside a running instance's install directory (a build
-        output or a temp publish, never the installed app);
+      - its own exe: no running instance was started from it, and it is
+        not an installed app, running or not (a build output or a temp
+        publish): not inside a running instance's install directory, not
+        under Program Files, and not in a Velopack install, which keeps
+        Update.exe in the directory above the app's own (a per-user
+        install sits at %LOCALAPPDATA%\<pack id>, the app in its current\);
       - config: XDG_CONFIG_HOME under the temp directory and
         WINTTY_TEST_CONFIG=1, so the app itself refuses any config outside
         temp;
       - state: WINTTY_STATE_BASE set and under the temp directory, so logs,
         crash.log, session and window state are the run's own;
-      - single instance: the staged config turns windows-single-instance
-        off, so the launch neither forwards to nor takes forwards from
-        anybody else's instance;
+      - single instance: every windows-single-instance line of the staged
+        config is false, so the launch neither forwards to nor takes
+        forwards from anybody else's instance (the app acts on the first
+        line, key matched case-insensitively; requiring every line makes
+        the order moot);
+      - quick terminal: every quick-terminal-key line of the staged config
+        is the harness chord (Get-WinttyHarnessQuickTerminalKey), so the
+        launch neither takes the user's session-global hotkey nor fails to
+        register it beside the user's instance;
       - session daemon, for builds that carry one: a daemon pipe named in
         the environment (WINTTY_SESSIOND_PIPE) is a private name, never a
         per-user one (those end in the user's SID), and the daemon's
@@ -278,12 +330,16 @@ function Get-WinttyBuildAumid([Parameter(Mandatory)][string]$ExePath) {
 
     Nothing here stops, signals or opens another process: it reads the
     process table and the registry, and expands only paths the run owns.
+
+    It is a check at launch time. An instance somebody starts after it
+    passed is not seen; the one thing such an instance and the run then
+    share is the toast registration and jump list of their AUMID, and only
+    when both are the same edition, which the next launch refuses again.
 #>
 function Test-WinttyCoexistence {
     param(
         [Parameter(Mandatory)][string]$ExePath,
-        # The config text the launch stages (the last windows-single-instance
-        # line wins, as in the app).
+        # The config text the launch stages.
         [Parameter(Mandatory)][AllowEmptyString()][string]$ConfigText,
         # The AUMID the build runs as; read from its Ghostty.Core.dll when
         # omitted.
@@ -295,13 +351,19 @@ function Test-WinttyCoexistence {
         [object[]]$Instances,
         # AUMID -> activator exe; the live registry when omitted.
         [System.Collections.IDictionary]$Registrations,
-        [string]$TempRoot
+        [string]$TempRoot,
+        # Where machine-wide installs live; Program Files when omitted.
+        [string[]]$InstallBases
     )
     if (-not $PSBoundParameters.ContainsKey('Environment')) {
         $Environment = [System.Environment]::GetEnvironmentVariables()
     }
     if (-not $PSBoundParameters.ContainsKey('Instances')) { $Instances = Get-WinttyInstances }
     if (-not $TempRoot) { $TempRoot = [System.IO.Path]::GetTempPath() }
+    if (-not $PSBoundParameters.ContainsKey('InstallBases')) {
+        $InstallBases = @([Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86')) |
+            Where-Object { $_ }
+    }
 
     $running = @($Instances | Where-Object { $null -ne $_ })
     $why = [System.Collections.Generic.List[string]]::new()
@@ -332,6 +394,21 @@ function Test-WinttyCoexistence {
             $why.Add("the exe under test sits inside the install of running pid $($p.Id) ($installRoot); launch a build output or a temp publish, never the installed app")
         }
     }
+    # Nor any installed app that is not running: under Program Files, or a
+    # Velopack install (Update.exe in the directory above the exe's own).
+    # Both are read off the run's own exe path only.
+    foreach ($base in @($InstallBases)) {
+        $b = ConvertTo-WinttyPathKey $base
+        if ($b -and @($mine | Where-Object { $_.StartsWith($b + '\', [StringComparison]::Ordinal) }).Count -gt 0) {
+            $why.Add("the exe under test sits under $base, where installed apps live; launch a build output or a temp publish")
+        }
+    }
+    # String work plus one existence probe: Join-Path and Split-Path would
+    # throw on a drive that does not exist, and a throw is not a verdict.
+    $installDir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ExePath)))
+    if ($installDir -and [System.IO.File]::Exists([System.IO.Path]::Combine($installDir, 'Update.exe'))) {
+        $why.Add("the exe under test is an installed app: $installDir holds Velopack's Update.exe; launch a build output or a temp publish")
+    }
 
     $read = { param($name) $v = $Environment[$name]; if ($null -eq $v) { '' } else { [string]$v } }
     if ((& $read 'WINTTY_TEST_CONFIG') -cne '1') {
@@ -348,12 +425,22 @@ function Test-WinttyCoexistence {
         $why.Add("WINTTY_STATE_BASE '$stateBase' is not under the temp directory")
     }
 
-    $single = $null
-    foreach ($line in ($ConfigText -split "\r?\n")) {
-        if ($line -match '^\s*windows-single-instance\s*=\s*(.*?)\s*$') { $single = $Matches[1] }
+    # Every line, not the one the app happens to act on: the election reads
+    # the first, and a guard reading any single line proves nothing about
+    # the others.
+    $single = Get-WinttyConfigValues $ConfigText 'windows-single-instance'
+    $notOff = @($single | Where-Object { $_ -cne 'false' })
+    if ($single.Count -eq 0 -or $notOff.Count -gt 0) {
+        $why.Add("the staged config sets windows-single-instance to '$(if ($single.Count -eq 0) { '(default: true)' } else { $single -join "', '" })', so the launch could forward to, or take forwards from, another instance; stage 'windows-single-instance = false' and no other value for it")
     }
-    if ($single -cne 'false') {
-        $why.Add("the staged config leaves windows-single-instance at '$(if ($null -eq $single) { '(default)' } else { $single })', so the launch could forward to, or take forwards from, another instance; stage 'windows-single-instance = false'")
+
+    # The quick terminal's hotkey is session-global: left at Ctrl+`, the
+    # launch takes the user's chord when it registers first, and fails to
+    # register (and logs a warning) when the user's instance holds it.
+    $chord = Get-WinttyHarnessQuickTerminalKey
+    $chords = Get-WinttyConfigValues $ConfigText 'quick-terminal-key'
+    if ($chords.Count -eq 0 -or @($chords | Where-Object { $_ -ine $chord }).Count -gt 0) {
+        $why.Add("the staged config binds quick-terminal-key to '$(if ($chords.Count -eq 0) { '(default: ctrl+backquote)' } else { $chords -join "', '" })', a session-global hotkey the user's Wintty holds; stage 'quick-terminal-key = $chord' and no other value for it (Start-SeamSession does when the config binds none)")
     }
 
     $pipe = & $read 'WINTTY_SESSIOND_PIPE'

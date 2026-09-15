@@ -212,6 +212,11 @@ function Start-SeamSession(
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
+    # The quick terminal's hotkey is session-global and defaults to the
+    # user's Ctrl+`, so every launch stages the harness chord unless its
+    # config binds one (lib/wintty-process.ps1). The text staged here is
+    # the text the coexistence guard reads below.
+    $ConfigText = Add-WinttyHarnessConfigDefaults $ConfigText
     $ConfigText | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
 
     $session = @{
