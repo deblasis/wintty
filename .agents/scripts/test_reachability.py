@@ -423,7 +423,10 @@ def qualified_name(path, root_dir):
     return path[: -len(".zig")].replace("/", ".")
 
 
-TEST_MARKER = re.compile(r"\.(?:test|decltest)\.")
+# A lookahead, so matches may overlap: in `io.test.test.reads` the file's own
+# `.test` and the marker share a dot, and a match that consumed it would never
+# offer `io.test` at all.
+TEST_MARKER = re.compile(r"(?=\.(?:test|decltest)\.)")
 ANON_TEST = re.compile(r"(.+)\.test_\d+\Z")
 
 
@@ -432,7 +435,7 @@ def owners_in_name(name):
 
     `<file>.test.<name>` for a named test, `<file>.decltest.<decl>` for a decl
     test, `<file>.test_<n>` for an anonymous one. Every split point is offered
-    rather than one, because both a directory called `test` and a test whose
+    rather than one, because a directory or file called `test` and a test whose
     own name contains `.test.` would otherwise pick the wrong one. Which of
     them is real is settled by the caller, against the files that exist.
     """
@@ -663,6 +666,16 @@ def self_test():
     )
     expect("a file called test.zig matches its own anonymous test", covered, files)
     expect("with no finding", dead, [])
+
+    # A named test in a file called test.zig is spelled `<dir>.test.test.<name>`:
+    # the file's own `.test` and the marker share a dot, so a search that
+    # consumes that dot offers only `<dir>` and reports the file as never run.
+    files = ["src/io/test.zig"]
+    covered, dead, _ = evaluate(
+        dict.fromkeys(files, 1), files, [("src", ["io.test.test.reads a file"])]
+    )
+    expect("a file called test.zig matches its own named test", covered, files)
+    expect("and is not a finding either", dead, [])
 
     # `foo/test.zig`'s anonymous test and `foo.zig`'s test called `test_0`
     # are spelled identically. Refusing beats crediting the wrong one.
