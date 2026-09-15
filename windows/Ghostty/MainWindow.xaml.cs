@@ -4739,7 +4739,7 @@ public sealed partial class MainWindow : Window
         {
             var hwnd = WindowNative.GetWindowHandle(this);
             var bounds = QuickTerminalMonitorResolver.Resolve(
-                hwnd, _configService.QuickTerminalScreen);
+                QuakeMonitorAnchor(hwnd), _configService.QuickTerminalScreen);
             var position = _configService.QuickTerminalPosition;
             var rect = Ghostty.Core.Hosting.QuickTerminalGeometry.Resolve(
                 position,
@@ -4770,6 +4770,26 @@ public sealed partial class MainWindow : Window
             // own MoveAndResize is still guarded (it can fire after this returns).
             DispatcherQueue.TryEnqueue(() => _movingQuake = false);
         }
+    }
+
+    // False until MoveToQuakePosition has placed the quick terminal once.
+    private bool _quakePlacedOnce;
+
+    /// <summary>
+    /// The window whose monitor the quick terminal is placed on. Once it has
+    /// been placed, that is its own window, so a summon comes back where the
+    /// last one was. Before that, its own window says nothing: the constructor
+    /// takes no saved placement, so the hidden window sits wherever the OS
+    /// created it, usually the primary monitor. The first summon therefore
+    /// follows the last regular window the user activated.
+    /// </summary>
+    private IntPtr QuakeMonitorAnchor(IntPtr own)
+    {
+        if (_quakePlacedOnce) return own;
+        _quakePlacedOnce = true;
+        return App.LastRegularWindow is { } regular
+            ? WindowNative.GetWindowHandle(regular)
+            : own;
     }
 
     /// <summary>
