@@ -1159,6 +1159,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Release swap chain and shaders.
                 self.releaseGpuResources();
 
+                // `releaseGpuResources` keeps the shaders of a surface that
+                // is still realized, and only the GTK apprt ever unrealizes
+                // one before it closes, so on the embedded apprt every closed
+                // surface would keep its pipeline objects. Nothing draws after
+                // this, so free them here, idling the GPU first because an
+                // in-flight command list may still reference them. Every
+                // backend's deinit is a no-op on a set already freed.
+                self.api.waitGpu();
+                self.shaders.deinit(self.alloc);
+
                 // We don't release images in `releaseGpuResources`
                 // since it can be called whenever the terminal is
                 // occluded or unrealized, and we don't want to
