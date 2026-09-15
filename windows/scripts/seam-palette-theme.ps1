@@ -968,15 +968,19 @@ try {
     $bytes3 = [System.IO.File]::ReadAllBytes($cfg3)
 
     # The watcher's reload: preview released, terminal on the new committed
-    # background, chrome derived from it, palette still open.
+    # background, chrome derived from it, palette still open. The strip is
+    # part of "the reload landed": it moves on the reload's deferred
+    # ConfigChanged fan-out, a dispatcher item after the reload itself, so
+    # the poll waits for it too rather than snapshooting the gap between
+    # the two.
     $reloaded = $null
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $reloaded = Seam $s @{ op = 'get-theme' }
-        if (-not $reloaded.previewing -and $reloaded.nativeBackground -eq $ReloadBg) { break }
+        if (-not $reloaded.previewing -and $reloaded.nativeBackground -eq $ReloadBg -and $reloaded.stripFill -eq $ReloadBg) { break }
         Start-Sleep -Milliseconds 150
     } while ((Get-Date) -lt $deadline)
-    Check 'mid-reload/the-reload-lands' (-not $reloaded.previewing -and $reloaded.nativeBackground -eq $ReloadBg) "previewing $($reloaded.previewing), native $($reloaded.nativeBackground), want $ReloadBg"
+    Check 'mid-reload/the-reload-lands' (-not $reloaded.previewing -and $reloaded.nativeBackground -eq $ReloadBg -and $reloaded.stripFill -eq $ReloadBg) "previewing $($reloaded.previewing), native $($reloaded.nativeBackground), strip $($reloaded.stripFill), want $ReloadBg"
     Check 'mid-reload/chrome-follows-the-reload' ($reloaded.background -eq $ReloadBg) "chrome $($reloaded.background)"
     Check 'mid-reload/palette-stays-open' ($reloaded.paletteUi.open) "open $($reloaded.paletteUi.open)"
     Check-Pixels $s 'mid-reload' $ReloadBg
