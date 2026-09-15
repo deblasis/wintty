@@ -269,6 +269,40 @@ markdown is what gets pasted into #937, one comment per run.
   path. Anything that cannot be positively identified is skipped: an
   unreadable path or start time is a reason to leave a process alone, never a
   reason to kill it.
+- `Test-WinttyCoexistence` / `Assert-WinttyCoexistence` - the one way to run
+  beside a Wintty somebody else started. A launch may, when and only when it
+  proves before launching that it is fully isolated: its own exe (no instance
+  running from it, and no installed app, running or not: not inside a running
+  install, not under Program Files, not in a Velopack install with `Update.exe`
+  above it), `XDG_CONFIG_HOME` under temp with `WINTTY_TEST_CONFIG=1`,
+  `WINTTY_STATE_BASE` under temp, every `windows-single-instance` line of the
+  staged config `false` (the app reads the first one), every
+  `quick-terminal-key` line the harness chord `ctrl+alt+shift+f24` (the quick
+  terminal's hotkey is session-global; `Start-SeamSession` stages it when the
+  config binds none), a private session daemon pipe when one is named (never a
+  per-user name, which carries the user's SID), and a different edition from
+  every running instance. That last
+  rule exists because every launch re-points the toast registration of its
+  AUMID at itself and rebuilds that AUMID's jump list, and no variable moves
+  either: beside an instance of the same edition there is no isolated launch.
+  A running instance's AUMID is read off the toast registration naming its
+  image, and the build's own out of its `Ghostty.Core.dll`; anything that
+  cannot be told apart refuses. The guard only reads the process table and the
+  registry. `Start-SeamSession` runs it right before every launch, so a seam
+  harness that is not isolated still refuses beside a running Wintty. It
+  checks at launch time only: a Wintty somebody starts after the check is not
+  seen. With the rules above the only thing such an instance can share with
+  the run is the toast registration and jump list of a same-edition AUMID,
+  which the next launch refuses again.
+- `Assert-NoWinttyFrom` - the narrow up-front gate for a harness that isolates
+  itself: it refuses only an instance of the exe under test.
+
+To make a seam harness coexist: call `Assert-NoWinttyFrom -ExePath` instead of
+`Assert-NoWintty`, stage `windows-single-instance = false`, pass
+`Start-SeamSession -PrivateStateBase`, and read crash.log from
+`$session.StateBase` rather than the per-user path. `seam-acceptance.ps1` is
+converted; the rest keep `Assert-NoWintty` until each is converted and its
+scenario checked against single-instance being off.
 
 Most scripts here used to open with `Get-Process Wintty | Stop-Process -Force`,
 which takes down builds from other worktrees and the window the developer is

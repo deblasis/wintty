@@ -29,11 +29,20 @@
     that sets it (Claude Code's PowerShell tool does) otherwise turns into a
     focus-stealing infobar across a third of the window. Both were #942.
 
+    It runs beside a Wintty somebody else is using. The launch is fully
+    isolated (temp config, a private state base, single-instance off) and
+    Start-SeamSession proves that before it starts anything, through the
+    coexistence guard in lib/wintty-process.ps1; the crash oracle reads
+    this run's own state base, never the per-user crash.log. It still
+    refuses an instance running from the exe under test, and beside an
+    instance of the same edition, whose toast registration and jump list a
+    launch would take over.
+
     Exits 0 on pass, 2 on a product finding (the app died, refused a
     command, never showed a window or never dropped its splash, or landed in
     a state the assertions reject), 1 when the harness could not run and
-    nothing is known about the product (the exe is missing, a Wintty is
-    already running, the seam pipe never appeared).
+    nothing is known about the product (the exe is missing, the guard
+    refused the launch, the seam pipe never appeared).
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
@@ -68,17 +77,16 @@ if (-not (Test-Path $ExePath)) {
     Write-Host "HARNESS: missing exe: $ExePath"
     exit 1
 }
-Assert-NoWintty -Context 'The seam acceptance run'
+# Only an instance of THIS exe is refused up front. Whether the launch may
+# run beside anything else is decided by Start-SeamSession, right before it
+# launches, through the coexistence guard.
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The seam acceptance run'
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) {
-    (Get-Item $crashPath).LastWriteTimeUtc
-} else {
-    [datetime]::MinValue
-}
-
+# Single-instance off: the scenario is one window in one process, and with
+# it off the launch can neither forward to nor take a forward from another
+# instance, which the coexistence guard requires.
 $config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = true
 '@
@@ -155,7 +163,10 @@ function Assert-SeamGroup {
 # ---- run -----------------------------------------------------------------
 
 try {
-    $script:Session = Start-SeamSession -ExePath $ExePath -ConfigText $config
+    # A private state base: the app's crash.log, logs and session state land
+    # under this run's temp root, which is both what lets it run beside
+    # somebody else's Wintty and where the crash oracle below reads.
+    $script:Session = Start-SeamSession -ExePath $ExePath -ConfigText $config -PrivateStateBase
     $proc = $script:Session.Proc
     Write-Host ("pid={0} pipe={1} iterations={2}" -f
         $proc.Id, (Get-SeamPipeName $script:Session.Token), $Iterations)
@@ -224,11 +235,12 @@ try {
     }
     Write-Host 'PASS drag leg'
 
-    if (Test-Path $crashPath) {
-        $now = (Get-Item $crashPath).LastWriteTimeUtc
-        if ($now -gt $crashStamp) {
-            throw 'PRODUCT_FAIL: crash.log grew during the run'
-        }
+    # The state base is fresh, so any non-empty crash.log in it was written
+    # by this run.
+    $crashes = @(Get-ChildItem -LiteralPath $script:Session.StateBase -Recurse -Filter crash.log `
+            -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 })
+    if ($crashes.Count -gt 0) {
+        throw ("PRODUCT_FAIL: crash.log written during the run: {0}" -f ($crashes.FullName -join ', '))
     }
 
     Write-Host (("SEAM-ACCEPTANCE PASS: {0} iterations + drag leg, " +

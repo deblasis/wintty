@@ -16,7 +16,8 @@
 # Debug build, or a Release built with -p:TestSeam=true.
 #
 # Dot-source after lib/wintty-process.ps1 (Assert-NoWintty and the stamp
-# helpers live there and are the caller's own preamble).
+# helpers live there and are the caller's own preamble; Start-SeamSession
+# also calls its coexistence guard right before every launch).
 
 # 128 bits of hex: the shape TestSeam.IsSessionToken accepts, and the reason
 # the pipe name is unguessable. RandomNumberGenerator rather than Get-Random,
@@ -197,10 +198,25 @@ function Start-SeamSession(
     # send-text hands arbitrary bytes to a live shell, so a harness that only
     # drags tabs should not be launching an app that can be told to run
     # commands. Only a harness asserting on shell output needs this.
-    [switch]$AllowInput
+    [switch]$AllowInput,
+    # Give the app a state tree of its own: WINTTY_STATE_BASE at a fresh
+    # directory inside this session's temp root, so logs, crash.log, session
+    # and window state are the run's, and $session.StateBase names it for
+    # the harness's crash oracle. Off by default because a harness that
+    # reads crash.log from the per-user path would otherwise go blind. A
+    # WINTTY_STATE_BASE the caller already set under the temp directory is
+    # adopted as it is (and left for the caller to remove). Either one is
+    # what the coexistence guard asks for before it lets a launch run beside
+    # somebody else's Wintty.
+    [switch]$PrivateStateBase
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
+    # The quick terminal's hotkey is session-global and defaults to the
+    # user's Ctrl+`, so every launch stages the harness chord unless its
+    # config binds one (lib/wintty-process.ps1). The text staged here is
+    # the text the coexistence guard reads below.
+    $ConfigText = Add-WinttyHarnessConfigDefaults $ConfigText
     $ConfigText | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
 
     $session = @{
@@ -214,6 +230,17 @@ function Start-SeamSession(
         OrigInput = if (Test-Path Env:WINTTY_TEST_SEAM_INPUT) { $env:WINTTY_TEST_SEAM_INPUT } else { $null }
         OrigTrace = if (Test-Path Env:WINTTY_TABDRAG_TRACE) { $env:WINTTY_TABDRAG_TRACE } else { $null }
         OrigNoColor = if (Test-Path Env:NO_COLOR) { $env:NO_COLOR } else { $null }
+        OrigStateBase = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
+        StateBase = $null
+    }
+    if ($PrivateStateBase) {
+        $session.StateBase = Join-Path $tempXdg 'state'
+        New-Item -ItemType Directory -Force -Path $session.StateBase | Out-Null
+        $env:WINTTY_STATE_BASE = $session.StateBase
+    }
+    elseif ($session.OrigStateBase -and
+            (Test-WinttyPathUnder $session.OrigStateBase ([System.IO.Path]::GetTempPath()))) {
+        $session.StateBase = $session.OrigStateBase
     }
     $env:XDG_CONFIG_HOME = $tempXdg
     # The guard that makes a lost XDG root loud: armed, an app resolving a
@@ -237,6 +264,24 @@ function Start-SeamSession(
     Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
     if ($TraceFile) { $env:WINTTY_TABDRAG_TRACE = $TraceFile }
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
+
+    # The last word before anything starts: beside a Wintty somebody else is
+    # running, only a launch that proves it is fully isolated from it goes
+    # ahead (lib/wintty-process.ps1, the coexistence guard). With nothing
+    # running this always passes. A refusal starts and stops nothing, and
+    # puts the environment back as the caller had it.
+    try {
+        $coexist = Assert-WinttyCoexistence -ExePath $session.ExePath -ConfigText $ConfigText -Context 'Start-SeamSession'
+        if (@($coexist.Running).Count -gt 0) {
+            Write-Host ("Start-SeamSession: launching beside Wintty pid(s) {0}; isolation and a different edition proven" -f
+                ((@($coexist.Running) | ForEach-Object { $_.Id }) -join ', '))
+        }
+    }
+    catch {
+        $refusal = $_.Exception.Message
+        Stop-SeamSession $session
+        throw "HARNESS: $refusal"
+    }
 
     $startArgs = @{
         FilePath         = $session.ExePath
@@ -320,6 +365,12 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     if ($Session.Writer) { try { $Session.Writer.Dispose() } catch { } }
     if ($Session.Reader) { try { $Session.Reader.Dispose() } catch { } }
     if ($Session.Pipe)   { try { $Session.Pipe.Dispose() } catch { } }
+    # The process this session started, by its exact pid, first; then the
+    # sweep for anything else it started (matched on start time AND this
+    # exe's path, so an instance from any other exe is never touched).
+    if ($Session.Proc -and -not $Session.Proc.HasExited) {
+        try { $Session.Proc.Kill($true); [void]$Session.Proc.WaitForExit(3000) } catch { }
+    }
     try {
         Stop-WinttyStartedAfter -Since $Session.Stamp -ExePath $Session.ExePath
     } catch {
@@ -337,5 +388,7 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigNoColor) { $env:NO_COLOR = $Session.OrigNoColor }
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigStateBase) { $env:WINTTY_STATE_BASE = $Session.OrigStateBase }
+    else { Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue }
     Remove-Item $Session.TempXdg -Recurse -Force -ErrorAction SilentlyContinue
 }
