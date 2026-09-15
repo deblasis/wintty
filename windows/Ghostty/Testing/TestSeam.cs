@@ -1063,8 +1063,36 @@ internal static class TestSeam
             {
                 if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
                 // Into the search box, so the view model hears it the way it
-                // hears typing.
-                window.TestSeamPaletteUI.TestSeamType(ArgString(args, "text") ?? "");
+                // hears typing. perCharMs > 0 types it a character at a time,
+                // from what the box already holds when the text extends it,
+                // the way a typist's keys land; the theme list's filter then
+                // waits for the pause after the last one.
+                var text = ArgString(args, "text") ?? "";
+                var perChar = Math.Clamp(ArgInt(args, "perCharMs", 0), 0, 1000);
+                var ui = window.TestSeamPaletteUI;
+                if (perChar == 0)
+                {
+                    ui.TestSeamType(text);
+                }
+                else
+                {
+                    var current = ui.TestSeamSearchText;
+                    var from = text.StartsWith(current, StringComparison.Ordinal) ? current.Length : 0;
+                    for (var i = from + 1; i <= text.Length; i++)
+                    {
+                        ui.TestSeamType(text[..i]);
+                        if (i < text.Length) await Task.Delay(perChar);
+                    }
+                }
+
+                // settle (the default) waits for the filter and the preview
+                // it moves to, so the answer is the settled list; settle=false
+                // answers at once, to read the list before the pause ends.
+                if (ArgBool(args, "settle", true)
+                    && !await WaitForPaletteSettledAsync(window))
+                {
+                    return Error(op, "the theme filter did not settle within 5s");
+                }
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
                 return PaletteThemeJson(window, op);
             }
@@ -1080,10 +1108,11 @@ internal static class TestSeam
                     "pagedown" => Windows.System.VirtualKey.PageDown,
                     "enter" => Windows.System.VirtualKey.Enter,
                     "escape" => Windows.System.VirtualKey.Escape,
+                    "backspace" => Windows.System.VirtualKey.Back,
                     _ => null,
                 };
                 if (key is not { } pressed)
-                    return Error(op, "key must be up, down, pageup, pagedown, enter or escape");
+                    return Error(op, "key must be up, down, pageup, pagedown, enter, escape or backspace");
                 // repeat > 1 is a held key: the presses arrive back to back,
                 // which is what the browse's throttle is for. intervalMs
                 // spaces them out instead, the way a fast typist's arrow
@@ -1093,23 +1122,24 @@ internal static class TestSeam
                 var interval = Math.Clamp(ArgInt(args, "intervalMs", 0), 0, 1000);
                 for (var i = 0; i < repeat; i++)
                 {
-                    window.TestSeamPaletteUI.TestSeamKey(pressed);
+                    // Backspace is the TextBox's own key, not one the search
+                    // box's handler takes: it edits the text, which the view
+                    // model hears as typing.
+                    if (pressed == Windows.System.VirtualKey.Back)
+                        window.TestSeamPaletteUI.TestSeamBackspace();
+                    else
+                        window.TestSeamPaletteUI.TestSeamKey(pressed);
                     if (interval > 0 && i < repeat - 1) await Task.Delay(interval);
                 }
 
                 // The preview lands on a later dispatcher turn, and a burst
-                // lands at the end of the throttle interval. The ack waits
-                // for it, so what the driver reads back is the settled theme.
-                var deadline = Environment.TickCount64 + 5_000;
-                while (window.TestSeamThemeBrowse is { HasPendingPreview: true }
-                       && Environment.TickCount64 < deadline)
-                {
-                    await Task.Delay(15);
-                }
+                // lands at the end of the throttle interval; an edit of the
+                // text lands when typing pauses. The ack waits for both, so
+                // what the driver reads back is the settled theme.
+                if (!await WaitForPaletteSettledAsync(window))
+                    return Error(op, "the theme preview did not settle within 5s");
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return window.TestSeamThemeBrowse is { HasPendingPreview: true }
-                    ? Error(op, "the theme preview did not settle within 5s")
-                    : PaletteThemeJson(window, op);
+                return PaletteThemeJson(window, op);
             }
 
             case "get-theme":
@@ -1157,6 +1187,23 @@ internal static class TestSeam
             else json.WriteNull("selectedTheme");
             json.WriteNumber("count", vm?.FilteredCommands.Count ?? 0);
             json.WriteString("status", vm?.StatusText ?? "");
+            // The theme list's filter: the text in the box, whether a
+            // filter is still waiting for typing to pause, the list before
+            // and after filtering, the no-match line, and how many previews
+            // this browse has applied (typing a word should add one).
+            json.WriteString("searchText", window.TestSeamPaletteUI.TestSeamSearchText);
+            json.WriteBoolean("filterPending", vm?.IsThemeFilterPending ?? false);
+            json.WriteNumber("total", vm?.ThemeCount ?? 0);
+            json.WriteStartArray("names");
+            if (vm?.Mode == Commands.PaletteMode.Theme)
+            {
+                foreach (var item in vm.FilteredCommands)
+                    if (item.ThemeName is { } name) json.WriteStringValue(name);
+            }
+            json.WriteEndArray();
+            if (window.TestSeamPaletteUI.TestSeamNoMatch is { } noMatch) json.WriteString("noMatch", noMatch);
+            else json.WriteNull("noMatch");
+            json.WriteNumber("previewApplies", vm?.ThemePreviewApplies ?? 0);
             WritePaletteLook(json, window);
             json.WriteEndObject();
             // Where the active terminal is on screen, in the physical pixels
@@ -1837,6 +1884,24 @@ internal static class TestSeam
     /// scheduled -- crossings included -- has already run. This is what
     /// makes a seam drag deterministic without sleeps.
     /// </summary>
+    /// <summary>
+    /// Waits, up to 5 s, until the palette's theme list has nothing left in
+    /// flight: no filter waiting for typing to pause, and no preview waiting
+    /// for its apply. False when it did not settle in time.
+    /// </summary>
+    private static async Task<bool> WaitForPaletteSettledAsync(MainWindow window)
+    {
+        var deadline = Environment.TickCount64 + 5_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            var filtering = window.TestSeamPaletteVm is { IsThemeFilterPending: true };
+            var previewing = window.TestSeamThemeBrowse is { HasPendingPreview: true };
+            if (!filtering && !previewing) return true;
+            await Task.Delay(15);
+        }
+        return false;
+    }
+
     internal static Task WaitForLowPriorityAsync(DispatcherQueue queue)
     {
         var done = new TaskCompletionSource(

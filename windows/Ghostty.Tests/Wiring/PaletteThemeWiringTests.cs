@@ -150,6 +150,100 @@ public class PaletteThemeWiringTests
         Assert.Empty(commit.Calls("_editor.WriteRaw"));
     }
 
+    // -- One theme list --------------------------------------------------
+
+    /// <summary>
+    /// The palette, the Settings Colors page and the chrome's theme lookup
+    /// all read ThemeProvider.Directories, and it names the bundled themes
+    /// after the user's directories. Dropping the bundled directory from it
+    /// would hide every theme the app ships from all three at once.
+    /// </summary>
+    [Fact]
+    public void EveryThemeReaderSharesOneListThatIncludesTheBundledThemes()
+    {
+        var provider = ShellSource.Load("Services.ThemeProvider.cs");
+        var directories = provider.Method("Directories");
+        var search = Assert.Single(directories.Calls("ThemeSearchPath.Directories"));
+        Assert.Equal("ThemeSearchPath.BundledDirectoryForThisProcess()", search.Arg(2));
+        Assert.Single(provider.Method("Refresh").Calls("Directories"));
+
+        var resolve = ShellSource.Load("Services.ConfigService.cs").Method("ResolveThemePath");
+        Assert.Single(resolve.Calls("ThemeProvider.Directories"));
+        Assert.Empty(resolve.Calls("ThemeSearchPath.UserDirectories"));
+
+        // The palette's list and its swatches.
+        Assert.Equal(2, Window().Root.Calls("Services.ThemeProvider.Directories").Count);
+    }
+
+    // -- Filter debounce -------------------------------------------------
+
+    /// <summary>
+    /// Typing in the theme list refilters through the debounce, never
+    /// directly: a direct refilter moves the highlight, and so the preview,
+    /// on every keystroke. PaletteFilterDebounceTests pins the timing; this
+    /// pins that the view model asks it.
+    /// </summary>
+    [Fact]
+    public void TypingInTheThemeListRefiltersThroughTheDebounce()
+    {
+        var changed = ViewModel().Method("OnSearchTextChanged");
+        var theme = Assert.Single(changed.DescendantNodes().OfType<IfStatementSyntax>(), s => IsThemeModeTest(s.Condition));
+        var request = Assert.Single(CallsEndingWith(theme.Statement, "Filter.Request"));
+        Assert.Single(request.ArgumentList.Arguments[0].Calls("ApplyThemeFilter"));
+
+        // The only other refilter is the fallback for a palette with no theme
+        // mode wired, under an explicit null test.
+        var direct = theme.Statement.Calls("ApplyThemeFilter")
+            .Where(c => !c.Ancestors().Contains(request))
+            .ToList();
+        var fallback = Assert.Single(direct);
+        var guard = Assert.IsType<IfStatementSyntax>(fallback.Ancestors().OfType<IfStatementSyntax>().First());
+        Assert.Equal("_themeMode is null", guard.Condition.ToString());
+    }
+
+    /// <summary>
+    /// A key that acts on the list acts on the list the typed text describes:
+    /// every mover and Enter apply a waiting filter before anything else.
+    /// </summary>
+    [Theory]
+    [InlineData("MoveSelectionUp")]
+    [InlineData("MoveSelectionDown")]
+    [InlineData("MoveSelectionBy")]
+    [InlineData("ConfirmSelectedTheme")]
+    public void ListKeysApplyAWaitingFilterFirst(string method)
+    {
+        var body = ViewModel().Method(method).Body!;
+        Assert.Single(body.Statements[0].Calls("FlushThemeFilter"));
+        Assert.Single(CallsEndingWith(ViewModel().Method("FlushThemeFilter"), "Filter.Flush"));
+    }
+
+    /// <summary>
+    /// Entering and leaving the theme list drop a waiting filter, so one
+    /// never lands on the next list the palette shows.
+    /// </summary>
+    [Theory]
+    [InlineData("EnterThemeMode")]
+    [InlineData("LeaveThemeMode")]
+    public void EnteringAndLeavingTheThemeListDropAWaitingFilter(string method)
+        => Assert.Single(CallsEndingWith(ViewModel().Method(method), "Filter.Cancel"));
+
+    /// <summary>
+    /// The debounce has a timer of its own. Sharing the browse's one-slot
+    /// timer would let a keystroke replace the browse's pending cooldown, or
+    /// the cooldown a keystroke's wait.
+    /// </summary>
+    [Fact]
+    public void TheFilterWaitsOnItsOwnTimer()
+    {
+        var window = Window();
+        Assert.Contains(window.Root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>(),
+            o => o.Type.ToString().EndsWith("PaletteFilterDebounce", System.StringComparison.Ordinal)
+                 && o.ArgumentList?.Arguments.Single().ToString() == "SchedulePaletteFilterWork");
+        var schedule = window.Method("SchedulePaletteFilterWork");
+        Assert.DoesNotContain(schedule.DescendantNodes().OfType<IdentifierNameSyntax>(),
+            n => n.Identifier.ValueText.StartsWith("_paletteThemeTimer", System.StringComparison.Ordinal));
+    }
+
     // -- Look and feel ---------------------------------------------------
 
     /// <summary>

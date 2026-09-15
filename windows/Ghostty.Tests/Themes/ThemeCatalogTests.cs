@@ -19,6 +19,44 @@ public class ThemeCatalogTests
     };
 
     [Fact]
+    public void AUsersCopyOfABundledThemeIsListedOnceAndBothSetsAreMerged()
+    {
+        // The user's directories come first in libghostty's search order and
+        // the bundled themes last, so the user's copy is the file that loads
+        // and the name appears once; names only one side has all appear.
+        IEnumerable<string> Disk(string directory) => directory switch
+        {
+            "user" => new[] { "nord", "My Theme" },
+            "bundled" => new[] { "Nord", "Dracula", "3024 Day" },
+            _ => Array.Empty<string>(),
+        };
+        Assert.Equal(
+            new[] { "3024 Day", "Dracula", "My Theme", "nord" },
+            ThemeCatalog.Enumerate(new[] { "user", "bundled" }, Disk));
+    }
+
+    [Theory]
+    [InlineData("Nord", "nord", 0)]
+    [InlineData("Nord Light", "nord", 1)]
+    [InlineData("Arctic Nord", "nord", 2)]
+    [InlineData("Arctic-nord", "nord", 2)]
+    [InlineData("Fjordnord", "nord", 3)]
+    [InlineData("Snordic Nord", "nord", 2)]
+    [InlineData("Dracula", "nord", ThemeCatalog.MatchNone)]
+    public void MatchRankPrefersTheWholeNameThenItsStartThenAWordStart(string name, string query, int rank)
+        => Assert.Equal(rank, ThemeCatalog.MatchRank(name, query));
+
+    [Fact]
+    public void FilterPutsTheBestMatchFirstAndKeepsCatalogOrderWithinARank()
+    {
+        var themes = new[] { "Arctic Nord", "Fjordnord", "Nord", "Nord Light", "Nordic", "Solarized" };
+        Assert.Equal(
+            new[] { "Nord", "Nord Light", "Nordic", "Arctic Nord", "Fjordnord" },
+            ThemeCatalog.Filter(themes, "nord"));
+        Assert.Equal(new[] { "Solarized" }, ThemeCatalog.Filter(themes, "LAR"));
+    }
+
+    [Fact]
     public void EnumeratesInSearchOrderShadowingLaterDirectoriesAndSortsByName()
     {
         var themes = ThemeCatalog.Enumerate(new[] { "first", "second", "absent" }, Listing);

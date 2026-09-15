@@ -521,6 +521,22 @@
   </ItemGroup>
 
   <!--
+    The bundled themes, which the library build installs to
+    zig-out/share/ghostty/themes. They land at share\ghostty\themes beside
+    the exe, the one place libghostty looks for them when there is no
+    resources directory (bundledThemesDir in src/config/theme.zig), and the
+    place the palette and the Settings Colors page list them from
+    (ThemeSearchPath.BundledDirectory). A wildcard, so a library built
+    without themes (-Demit-themes=false) simply ships none.
+  -->
+  <ItemGroup>
+    <None Include="..\..\zig-out\share\ghostty\themes\*">
+      <Link>share\ghostty\themes\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!--
     Demo mode files compile only when the DEMO constant is set (see
     windows/Directory.Build.targets, NOT the props file beside it: the gate
     reads $(Configuration), which is still empty while props is being

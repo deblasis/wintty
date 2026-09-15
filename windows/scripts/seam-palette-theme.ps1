@@ -2,10 +2,15 @@
 <#
     The command palette's theme mode, seam-actuated end to end (issue #1081).
 
-    One app on a temp config root and a temp state base, four staged themes
-    with distinctive colours (three dark, one light), and no theme configured
-    (the case where the user never set one). Each step reads the theme back
-    three ways:
+    One app on a temp config root and a temp state base, the themes the build
+    ships (share\ghostty\themes beside the exe) plus two user themes staged in
+    the temp config root: a user copy of one bundled theme, in colours of its
+    own, and one theme only the user has. No theme is configured (the case
+    where the user never set one). The browse itself runs over a small group
+    of real bundled themes that one filter word narrows the list to, picked
+    from the shipped set at run time (two dark first, a light one last, every
+    background distinct), with the user's copy in the middle of it. Each step
+    reads the theme back three ways:
 
       - the terminal's config, as the live native config states it (the
         preview's while one is up): what every surface renders from;
@@ -21,7 +26,14 @@
 
     Scenario:
 
-      1. open the palette, run "Change Theme", arrow down twice and back up:
+      0. open the palette, run "Change Theme": the list holds every bundled
+         and user theme on disk, once each (the user's copy wins), in catalog
+         order, virtualized; type the filter word a key at a time: nothing
+         narrows or previews while the keys land, then the list narrows once
+         to the expected names, the highlight is on the best match and it is
+         previewed exactly once, and the screen never shows anything but the
+         baseline or that theme;
+      1. arrow down twice and back up:
          every move re-themes the live terminal, the config file is untouched;
       2. a held key (30 presses back to back) settles on the last row, and
          Page Up / Page Down move a screenful;
@@ -29,19 +41,24 @@
          while the keys land: the terminal only ever shows one of the themes
          (never a default or an in-between frame) and the palette never flips
          between its light and dark surface;
-      4. Escape: every readout equals the pre-palette baseline exactly, and the
+      4. a filter that matches nothing: an empty list that says so, the
+         preview left where it was, Enter keeps nothing; Backspace widens
+         back to the group and then to every theme;
+      5. Escape: every readout equals the pre-palette baseline exactly, and the
          config file is byte for byte what it was;
-      5. reopen, pick a theme, Enter: the file gains exactly one line,
-         `theme = <name>`, and the live views stay on it;
-      6. relaunch on that exact file: the theme is still there at startup, the
+      6. reopen, type a theme's name and press Enter before typing pauses: the
+         file gains exactly one line, `theme = <name>`, and the live views
+         stay on it;
+      7. relaunch on that exact file: the theme is still there at startup, the
          highlight opens on it (marked Current), and a browse-then-Escape
          returns to it exactly;
-      7. two short launches with window-theme = dark and = light, each
+      8. two short launches with window-theme = dark and = light, each
          previewing a dark and then a light theme.
 
     Screenshots of the palette theme mode (window captures of this run's own
-    instance, PNG) land in -ShotsDir: both app themes with both a dark and a
-    light previewed theme, the auto case, and the Current/Previewing pair.
+    instance, PNG) land in -ShotsDir: the full list, the filtered list, the
+    no-match state, both app themes with both a dark and a light previewed
+    theme, the auto case, and the Current/Previewing pair.
 
     Zero OS input is synthesized. The single-instance election is off in the
     staged config and the state base is private, so a Wintty the user is
@@ -107,29 +124,8 @@ New-Item -ItemType Directory -Force -Path $stateBase | Out-Null
 $origStateBase = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
 $env:WINTTY_STATE_BASE = $stateBase
 
-# Names that sort Alpha < Beta < Gamma < Omega and cannot collide with a
-# real theme. Alpha to Gamma are dark, Omega is light, so a browse crosses
-# the light/dark boundary the window chrome resolves its variant on.
-$Themes = [ordered]@{
-    'Wintty Probe Alpha' = @{ bg = '#102030'; fg = '#E0E0E0'; cursor = '#F5A524'
-        p = @('#202020', '#E0555A', '#5BC67A', '#E8C55A', '#4F8FE0', '#B77EE0', '#46C1C9', '#C8CDD3') }
-    'Wintty Probe Beta'  = @{ bg = '#304050'; fg = '#F0E0D0'; cursor = '#FF7A59'
-        p = @('#404040', '#FF6B6B', '#7BD88F', '#FFD166', '#6AA9FF', '#C792EA', '#5CE1E6', '#E6E6E6') }
-    'Wintty Probe Gamma' = @{ bg = '#506070'; fg = '#D0F0E0'; cursor = '#9BE564'
-        p = @('#606060', '#F07178', '#A8E6A3', '#F9E27D', '#82AAFF', '#D4A5F5', '#89DDFF', '#F2F2F2') }
-    'Wintty Probe Omega' = @{ bg = '#FAF4E8'; fg = '#2B2B2B'; cursor = '#D9480F'
-        p = @('#3B3B3B', '#C0392B', '#2E8B57', '#B7791F', '#2B6CB0', '#8E44AD', '#1B8A8F', '#8A8175') }
-}
-$Alpha, $Beta, $Gamma, $Omega = @($Themes.Keys)
-$Last = $Omega
-
-$extra = @{}
-foreach ($name in $Themes.Keys) {
-    $t = $Themes[$name]
-    $lines = @("background = $($t.bg)", "foreground = $($t.fg)", "cursor-color = $($t.cursor)")
-    for ($i = 0; $i -lt $t.p.Count; $i++) { $lines += "palette = $i=$($t.p[$i])" }
-    $extra["wintty/themes/$name"] = ($lines -join "`n") + "`n"
-}
+# The themes this run browses are picked from the shipped set further down,
+# once the helpers they need are defined (see "The theme set").
 
 $config = @"
 windows-single-instance = false
@@ -420,6 +416,194 @@ function Wait-Variant($s, [string]$Want) {
     return $r
 }
 
+# ---- The theme set ----------------------------------------------------
+#
+# What a theme row's swatch is read from, parsed the way ThemeSwatch.Parse
+# reads it: later lines win, what is unset falls back to libghostty's
+# defaults, and an unset cursor colour is the foreground.
+$DefaultPalette = @('#1D1F21', '#CC6666', '#B5BD68', '#F0C674', '#81A2BE', '#B294BB', '#8ABEB7', '#C5C8C6')
+function Norm-Hex([string]$v) {
+    $v = $v.Trim().Trim('"')
+    if ($v -match '^#?([0-9a-fA-F]{6})$') { return '#' + $Matches[1].ToUpperInvariant() }
+    return $null
+}
+function Read-Theme([string]$Path) {
+    $t = @{ bg = '#282C34'; fg = '#FFFFFF'; cursor = $null; p = [string[]]$DefaultPalette.Clone() }
+    foreach ($line in [System.IO.File]::ReadLines($Path)) {
+        $l = $line.Trim()
+        if (-not $l -or $l[0] -eq '#') { continue }
+        $eq = $l.IndexOf('=')
+        if ($eq -le 0) { continue }
+        $k = $l.Substring(0, $eq).Trim()
+        $v = $l.Substring($eq + 1).Trim()
+        $h = $null
+        switch -CaseSensitive ($k) {
+            'background' { if ($h = Norm-Hex $v) { $t.bg = $h } }
+            'foreground' { if ($h = Norm-Hex $v) { $t.fg = $h } }
+            'cursor-color' { if ($h = Norm-Hex $v) { $t.cursor = $h } }
+            'palette' {
+                if ($v -match '^(\d+)\s*=\s*(.+)$') {
+                    $i = [int]$Matches[1]
+                    if ($i -lt 8 -and ($h = Norm-Hex $Matches[2])) { $t.p[$i] = $h }
+                }
+            }
+        }
+    }
+    if (-not $t.cursor) { $t.cursor = $t.fg }
+    return $t
+}
+function Theme-Text($t) {
+    $lines = @("background = $($t.bg)", "foreground = $($t.fg)", "cursor-color = $($t.cursor)")
+    for ($i = 0; $i -lt $t.p.Count; $i++) { $lines += "palette = $i=$($t.p[$i])" }
+    return ($lines -join "`n") + "`n"
+}
+
+# ThemeCatalog.IsPersistableName: what the app lists.
+function Is-Persistable([string]$n) {
+    if (-not $n -or $n -ne $n.Trim() -or $n -eq '.DS_Store') { return $false }
+    if ($n[0] -in '\', '/' -or [System.IO.Path]::GetFileName($n) -ne $n) { return $false }
+    if ($n -match '[,="]' -or $n -match '[\x00-\x1F\x7F-\x9F]') { return $false }
+    return $true
+}
+
+# ThemeCatalog's order: case-insensitive, ties broken ordinally.
+function Sort-Catalog([string[]]$Names) {
+    $list = [System.Collections.Generic.List[string]]::new([string[]]$Names)
+    $list.Sort([System.Comparison[string]] {
+            param($a, $b)
+            $c = [StringComparer]::OrdinalIgnoreCase.Compare($a, $b)
+            if ($c -ne 0) { $c } else { [StringComparer]::Ordinal.Compare($a, $b) }
+        })
+    return , $list.ToArray()
+}
+
+# ThemeCatalog.MatchRank and Filter: best match first, catalog order within.
+function Match-Rank([string]$Name, [string]$Q) {
+    if ($Name.Equals($Q, [StringComparison]::OrdinalIgnoreCase)) { return 0 }
+    $best = [int]::MaxValue
+    $at = $Name.IndexOf($Q, [StringComparison]::OrdinalIgnoreCase)
+    while ($at -ge 0) {
+        $r = if ($at -eq 0) { 1 } elseif (-not [char]::IsLetterOrDigit($Name[$at - 1])) { 2 } else { 3 }
+        if ($r -lt $best) { $best = $r }
+        if ($best -eq 1 -or $at + 1 -ge $Name.Length) { break }
+        $at = $Name.IndexOf($Q, $at + 1, [StringComparison]::OrdinalIgnoreCase)
+    }
+    return $best
+}
+function Filter-Themes([string[]]$Catalog, [string]$Q) {
+    $Q = $Q.Trim()
+    if (-not $Q) { return , $Catalog }
+    $hits = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $Catalog.Count; $i++) {
+        $r = Match-Rank $Catalog[$i] $Q
+        if ($r -ne [int]::MaxValue) { $hits.Add([pscustomobject]@{ n = $Catalog[$i]; i = $i; r = $r }) }
+    }
+    return , [string[]]@($hits | Sort-Object r, i | ForEach-Object n)
+}
+
+$BundledDir = Join-Path (Split-Path $exeFull) 'share\ghostty\themes'
+if (-not (Test-Path -LiteralPath $BundledDir)) {
+    Write-Host "FAIL source/bundled-themes-shipped: no $BundledDir beside the exe" -ForegroundColor Red
+    [ordered]@{ checks = @([pscustomobject]@{ name = 'source/bundled-themes-shipped'; ok = $false; detail = "no $BundledDir" }) } |
+        ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
+    exit 2
+}
+$bundled = @{}   # persistable name -> path; keys compare case-insensitively
+# -Force: the app lists hidden files too (Directory.EnumerateFiles).
+foreach ($f in Get-ChildItem -LiteralPath $BundledDir -File -Force) {
+    if (Is-Persistable $f.Name) { $bundled[$f.Name] = $f.FullName }
+}
+$BundledCatalog = Sort-Catalog @($bundled.Keys)
+$parsed = @{}
+function Theme-Of([string]$Name) {
+    if (-not $parsed.ContainsKey($Name)) { $parsed[$Name] = Read-Theme $bundled[$Name] }
+    return $parsed[$Name]
+}
+
+# The user's two themes. The copy's colours are its own, so every readout of
+# that name proves which file loaded; the other name exists only for the user.
+$UserOnly = 'Wintty Harness Fixture'
+$UserOnlyTheme = @{ bg = '#20302A'; fg = '#E8F5EE'; cursor = '#F0B429'
+    p = @('#1B2420', '#E5534B', '#57AB5A', '#C69026', '#539BF5', '#B083F0', '#39C5CF', '#D1D7E0') }
+$CopyCandidates = @(
+    @{ bg = '#3A1F4D'; fg = '#F2E9FF'; cursor = '#FFB000'
+        p = @('#241430', '#FF5C8A', '#7CE38B', '#FFD866', '#78A9FF', '#D291FF', '#5FE0D6', '#EDE4F7') },
+    @{ bg = '#1F4D3A'; fg = '#E9FFF2'; cursor = '#FF7A00'
+        p = @('#14301F', '#FF6B6B', '#9BE564', '#FFE066', '#6CB6FF', '#C792EA', '#63E6BE', '#E4F7EC') })
+
+# A filter word that narrows the shipped set to a group this scenario can
+# browse: four to six names, the first two dark and the last light, every
+# background clear of the others, of the untouched baseline and of the
+# user's copy. Picked from the set on disk, so a refresh of the bundled
+# themes changes the group, not the harness.
+$avoid = @('#F4F6FB', '#282C34', '#FFFFFF', '#000000', $UserOnlyTheme.bg)
+$tokens = @($BundledCatalog | ForEach-Object { $_ -split '[^A-Za-z0-9]+' } |
+    Where-Object { $_.Length -ge 4 } | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
+$Group = $null; $Token = $null; $Copy = $null
+foreach ($tok in $tokens) {
+    if ((Match-Rank $UserOnly $tok) -ne [int]::MaxValue) { continue }
+    $count = 0
+    foreach ($n in $BundledCatalog) { if ($n.IndexOf($tok, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $count++ } }
+    if ($count -lt 4 -or $count -gt 6) { continue }
+    $m = Filter-Themes $BundledCatalog $tok
+    $bgs = @($m | ForEach-Object { (Theme-Of $_).bg })
+    if (-not (Is-DarkHex $bgs[0]) -or -not (Is-DarkHex $bgs[1]) -or (Is-DarkHex $bgs[-1])) { continue }
+    $ok = $true
+    for ($i = 0; $i -lt $bgs.Count -and $ok; $i++) {
+        foreach ($a in $avoid) { if (Near $bgs[$i] $a 24) { $ok = $false } }
+        for ($j = $i + 1; $j -lt $bgs.Count; $j++) { if (Near $bgs[$i] $bgs[$j] 24) { $ok = $false } }
+    }
+    if (-not $ok) { continue }
+    # The user's copy replaces the third name's colours; they must stay clear too.
+    $others = @($bgs[0], $bgs[1]) + @($bgs | Select-Object -Skip 3)
+    $Copy = $CopyCandidates | Where-Object { $c = $_; -not ($others | Where-Object { Near $_ $c.bg 24 }) } | Select-Object -First 1
+    if ($null -eq $Copy) { continue }
+    $Group = $m; $Token = $tok
+    break
+}
+if ($null -eq $Group) {
+    Write-Host "HARNESS: no filter word narrows the $($BundledCatalog.Count) shipped themes to a usable group"
+    exit 1
+}
+
+$Alpha = $Group[0]; $Beta = $Group[1]; $Gamma = $Group[2]; $Omega = $Group[-1]; $Last = $Omega
+$Themes = [ordered]@{}
+foreach ($n in $Group) { $Themes[$n] = if ($n -eq $Gamma) { $Copy } else { Theme-Of $n } }
+
+$extra = @{
+    "wintty/themes/$Gamma" = Theme-Text $Copy
+    "wintty/themes/$UserOnly" = Theme-Text $UserOnlyTheme
+}
+
+# What the list should hold: every persistable name on disk, once, the
+# user's spelling first (user directories are searched first).
+$merged = @{}
+foreach ($n in @($Gamma, $UserOnly) + $BundledCatalog) { if (-not $merged.ContainsKey($n)) { $merged[$n] = $true } }
+$Catalog = Sort-Catalog @($merged.Keys)
+$ExpectedTotal = $Catalog.Count
+$UserCount = 2
+$Shadowed = 1
+Write-Host "theme set: $($BundledCatalog.Count) bundled + $UserCount user ($Shadowed shadowing a bundled one) = $ExpectedTotal; filter '$Token' -> [$($Group -join ', ')]"
+
+# The palette's own scale, from a realized row (44 DIPs tall).
+function Row-Scale($r) {
+    $rows = @($r.paletteUi.rows)
+    if ($rows.Count -gt 0 -and $rows[0].row) { return $rows[0].row.h / 44.0 }
+    return 1.0
+}
+
+# The screen samples of a typing run: the terminal may show only the
+# themes this browse can land on, and the palette's surface never flips.
+function Check-Samples([string]$Name, $Samples, [string[]]$Allowed, [string]$OpenVariant) {
+    if ($NoPixels) { return }
+    $foreign = @($Samples | Where-Object { $sample = $_.terminal; -not ($Allowed | Where-Object { Near $sample $_ }) })
+    Check "$Name/samples-taken" (@($Samples).Count -ge 8) "$(@($Samples).Count) samples"
+    Check "$Name/terminal-only-ever-shows-a-candidate" ($foreign.Count -eq 0) "foreign [$(@($foreign | ForEach-Object terminal | Select-Object -Unique) -join ', ')], allowed [$($Allowed -join ', ')]"
+    $wantLight = $OpenVariant -eq 'Light'
+    $flips = @($Samples | Where-Object { ($_.luma -ge 128) -ne $wantLight })
+    Check "$Name/palette-surface-never-flips" ($flips.Count -eq 0) "opened $OpenVariant, $($flips.Count) off"
+}
+
 $crashBefore = @(Get-ChildItem $stateBase -Recurse -Filter crash.log -ErrorAction SilentlyContinue)
 $s = $null
 try {
@@ -437,14 +621,52 @@ try {
 
     $list = Open-ThemeList $s
     Check 'enter/theme-mode' ($list.paletteUi.mode -eq 'Theme') "mode $($list.paletteUi.mode)"
-    Check 'enter/lists-the-staged-themes' ($list.paletteUi.count -ge $Themes.Count) "count $($list.paletteUi.count)"
-    Check 'enter/highlight-starts-at-top' ($list.paletteUi.selectedTheme -eq $Alpha) "selected '$($list.paletteUi.selectedTheme)'"
+    $names = @($list.paletteUi.names)
+    Check 'source/lists-every-bundled-and-user-theme' ($list.paletteUi.count -eq $ExpectedTotal -and $list.paletteUi.total -eq $ExpectedTotal) "count $($list.paletteUi.count), total $($list.paletteUi.total), on disk $($BundledCatalog.Count) bundled + $UserCount user - $Shadowed shadowed = $ExpectedTotal"
+    Check 'source/in-catalog-order' (($names -join "`n") -ceq ($Catalog -join "`n")) "first [$(@($names | Select-Object -First 3) -join ', ')], want [$(@($Catalog | Select-Object -First 3) -join ', ')]"
+    Check 'source/user-copy-listed-once' (@($names | Where-Object { $_ -eq $Gamma }).Count -eq 1) "'$Gamma'"
+    Check 'source/user-only-theme-listed' ($names -ccontains $UserOnly)
+    Check 'enter/highlight-starts-at-top' ($list.paletteUi.selectedTheme -ceq $Catalog[0]) "selected '$($list.paletteUi.selectedTheme)'"
     Check 'enter/opening-the-list-previews-nothing' (-not $list.previewing)
     $openVariant = $list.paletteUi.elementTheme
+    $full = Wait-Rows $s 5
+    $fullRows = @($full.paletteUi.rows)
+    Check 'full-list/virtualized' ($fullRows.Count -ge 5 -and $fullRows.Count -le 40 -and $fullRows.Count -lt $ExpectedTotal) "$($fullRows.Count) of $ExpectedTotal rows realized"
+    Check 'full-list/rows-painted' ($fullRows.Count -gt 0 -and @($fullRows | Where-Object { -not $_.painted }).Count -eq 0)
+    Check-ThemeChrome $full 'enter'
+    Check-Badges $full 'enter/no-row-claims-a-preview'
+    Save-Shot $s 'full-list.png'
+
+    # Typing the filter word a key at a time, faster than the debounce: the
+    # answer comes right after the last key, before typing has paused.
+    $scale = Row-Scale $full
+    $typing = if ($NoPixels) {
+        @{ Response = (Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40; settle = $false }); Samples = @() }
+    } else {
+        Run-Sampled $s @{ op = 'palette-type'; text = $Token; perCharMs = 40; settle = $false } $full.terminalRect $full.paletteUi.card $scale
+    }
+    $mid = $typing.Response
+    Check 'filter/waits-for-typing-to-pause' ($mid.paletteUi.filterPending -and $mid.paletteUi.count -eq $ExpectedTotal -and $mid.paletteUi.previewApplies -eq 0 -and -not $mid.previewing) "pending $($mid.paletteUi.filterPending), count $($mid.paletteUi.count), previews $($mid.paletteUi.previewApplies), text '$($mid.paletteUi.searchText)'"
+    # Then the pause: the same text again changes nothing, and the answer
+    # waits for the filter and the preview it leads to.
+    $settling = if ($NoPixels) {
+        @{ Response = (Seam $s @{ op = 'palette-type'; text = $Token }); Samples = @() }
+    } else {
+        Run-Sampled $s @{ op = 'palette-type'; text = $Token } $full.terminalRect $full.paletteUi.card $scale
+    }
+    $filtered = $settling.Response
+    Check 'filter/narrows-to-the-expected-names' ((@($filtered.paletteUi.names) -join "`n") -ceq ($Group -join "`n") -and $filtered.paletteUi.total -eq $ExpectedTotal) "names [$(@($filtered.paletteUi.names) -join ', ')], want [$($Group -join ', ')]"
+    Check 'filter/highlight-on-the-best-match' ($filtered.paletteUi.selectedTheme -ceq $Alpha) "'$($filtered.paletteUi.selectedTheme)'"
+    Check 'filter/preview-follows-the-highlight' ($filtered.previewing -and $filtered.previewTheme -ceq $Alpha -and $filtered.nativeBackground -eq $Themes[$Alpha].bg) "previewTheme '$($filtered.previewTheme)', native $($filtered.nativeBackground)"
+    Check 'filter/one-preview-for-the-word' ($filtered.paletteUi.previewApplies -eq 1) "$($filtered.paletteUi.previewApplies) previews for $($Token.Length) keys"
+    Check 'filter/file-untouched' (Same-Bytes $cfgPath $bytes0)
+    Check-Samples 'filter/typing' (@($typing.Samples) + @($settling.Samples)) @($basePixel, $Themes[$Alpha].bg) $openVariant
+    Check-Pixels $s 'filter' $Themes[$Alpha].bg
+
     $opened = Wait-Rows $s $Themes.Count
-    Check-ThemeChrome $opened 'enter'
-    Check-Rows $s $opened 'enter'
-    Check-Badges $opened 'enter/no-row-claims-a-preview'
+    Check-Rows $s $opened 'filtered'
+    Check-Badges $opened 'filtered' -Previewing $Alpha
+    Save-Shot $s 'filtered-list.png'
 
     foreach ($step in @(
             @{ key = 'down'; want = $Beta },
@@ -504,6 +726,24 @@ try {
         Check 'fast-run/palette-holds-its-variant' ($final.paletteUi.elementTheme -eq $openVariant) "'$($final.paletteUi.elementTheme)'"
     }
 
+    # A filter that matches nothing, typed onto the word.
+    $noMatchText = $Token + 'zqxj'
+    $nm = Seam $s @{ op = 'palette-type'; text = $noMatchText; perCharMs = 30 }
+    $wantNoMatch = "No themes match $([char]0x201C)$noMatchText$([char]0x201D)"
+    Check 'no-match/empty-list' ($nm.paletteUi.count -eq 0 -and @($nm.paletteUi.names).Count -eq 0 -and $null -eq $nm.paletteUi.selectedTheme) "count $($nm.paletteUi.count)"
+    Check 'no-match/says-so' ($nm.paletteUi.noMatch -ceq $wantNoMatch -and $nm.paletteUi.status -ceq 'No themes match') "noMatch '$($nm.paletteUi.noMatch)', status '$($nm.paletteUi.status)'"
+    Check 'no-match/preview-stays' ($nm.previewTheme -ceq $Last -and $nm.nativeBackground -eq $Themes[$Last].bg) "previewTheme '$($nm.previewTheme)'"
+    Check 'no-match/card-keeps-its-size' ($nm.paletteUi.card.h -eq $filtered.paletteUi.card.h) "card h $($nm.paletteUi.card.h), filtered $($filtered.paletteUi.card.h)"
+    Save-Shot $s 'no-match.png'
+    $nothing = Seam $s @{ op = 'palette-key'; key = 'enter' }
+    Check 'no-match/enter-keeps-nothing' ($nothing.paletteUi.open -and $nothing.configTheme -eq '' -and (Same-Bytes $cfgPath $bytes0)) "open $($nothing.paletteUi.open), configTheme '$($nothing.configTheme)'"
+
+    # Backspace widens: back to the group, then to every theme.
+    $back = Seam $s @{ op = 'palette-key'; key = 'backspace'; repeat = 4; intervalMs = 30 }
+    Check 'backspace/widens-back-to-the-group' ((@($back.paletteUi.names) -join "`n") -ceq ($Group -join "`n") -and $null -eq $back.paletteUi.noMatch -and $back.paletteUi.selectedTheme -ceq $Alpha -and $back.previewTheme -ceq $Alpha) "text '$($back.paletteUi.searchText)', names [$(@($back.paletteUi.names) -join ', ')], selected '$($back.paletteUi.selectedTheme)'"
+    $wide = Seam $s @{ op = 'palette-key'; key = 'backspace'; repeat = $Token.Length; intervalMs = 30 }
+    Check 'backspace/widens-to-every-theme' ($wide.paletteUi.count -eq $ExpectedTotal -and $wide.paletteUi.searchText -eq '' -and $wide.paletteUi.selectedTheme -ceq $Catalog[0]) "count $($wide.paletteUi.count), text '$($wide.paletteUi.searchText)'"
+
     $esc = Seam $s @{ op = 'palette-key'; key = 'escape' }
     Check 'escape/closes' (-not $esc.paletteUi.open)
     $diff = Same $baseSnap (Snapshot $esc)
@@ -516,10 +756,13 @@ try {
 
     # Reopen: nothing left over from the browse that was cancelled.
     $again = Open-ThemeList $s
-    Check 'reopen/clean' (-not $again.previewing -and $again.paletteUi.selectedTheme -eq $Alpha) "previewing $($again.previewing), selected '$($again.paletteUi.selectedTheme)'"
+    Check 'reopen/clean' (-not $again.previewing -and $again.paletteUi.selectedTheme -ceq $Catalog[0] -and $again.paletteUi.searchText -eq '' -and $again.paletteUi.count -eq $ExpectedTotal) "previewing $($again.previewing), selected '$($again.paletteUi.selectedTheme)', text '$($again.paletteUi.searchText)'"
     # Closing unloaded the palette; a reopened one follows the window again.
     Check 'reopen/palette-tracks-the-window-theme' ($again.paletteUi.tracksWindowTheme -eq $true) "tracksWindowTheme $($again.paletteUi.tracksWindowTheme)"
-    [void](Seam $s @{ op = 'palette-key'; key = 'down' })
+    # A theme's name typed and Enter pressed before typing pauses: Enter
+    # keeps what the typed text describes, not the list from before it.
+    $early = Seam $s @{ op = 'palette-type'; text = $Beta; settle = $false }
+    Check 'confirm/typed-before-the-pause' ($early.paletteUi.filterPending -and $early.paletteUi.count -eq $ExpectedTotal) "pending $($early.paletteUi.filterPending), count $($early.paletteUi.count)"
     $kept = Seam $s @{ op = 'palette-key'; key = 'enter' }
     Check 'confirm/closes' (-not $kept.paletteUi.open)
     Check 'confirm/no-preview-left' (-not $kept.previewing)
@@ -527,12 +770,11 @@ try {
     Check 'confirm/terminal-stays' ($kept.nativeBackground -eq $Themes[$Beta].bg) "native $($kept.nativeBackground)"
     Check 'confirm/chrome-stays' ($kept.background -eq $Themes[$Beta].bg) "chrome $($kept.background)"
     Check-Pixels $s 'confirm' $Themes[$Beta].bg
-    # The palette caught up with the dark theme it was held off during the
-    # browse (vacuous when it opened dark already; the detail says which).
-    $caught = Wait-Variant $s 'Dark'
-    Check 'confirm/palette-catches-up-after-the-browse' ($caught.paletteUi.elementTheme -eq 'Dark') "'$($caught.paletteUi.elementTheme)', opened '$openVariant'"
-    # And what the user sees next: the palette opened again over the dark
-    # window it now floats over is drawn dark, and still tracks the window.
+    # The palette was held on its opening variant during the browse; what
+    # the user sees next is the palette opened again over the dark window it
+    # now floats over, drawn dark, and still tracking the window. (A closed
+    # palette is unloaded and drawn nowhere, so there is nothing to read
+    # before this open.)
     [void](Seam $s @{ op = 'palette-open' })
     $reopened = Wait-Variant $s 'Dark'
     Check 'confirm/reopened-palette-matches-the-window' ($reopened.paletteUi.open -and $reopened.paletteUi.elementTheme -eq 'Dark' -and $reopened.paletteUi.tracksWindowTheme -eq $true) "open $($reopened.paletteUi.open), '$($reopened.paletteUi.elementTheme)', tracksWindowTheme $($reopened.paletteUi.tracksWindowTheme)"
@@ -567,9 +809,14 @@ try {
     $bootSnap = Snapshot $boot
     $list2 = Open-ThemeList $s
     Check 'restart/highlight-opens-on-the-configured-theme' ($list2.paletteUi.selectedTheme -eq $Beta) "'$($list2.paletteUi.selectedTheme)'"
+    # The filter lands on its best match and previews it; the configured
+    # theme keeps its Current mark beside the preview.
+    $f2 = Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40 }
+    Check 'restart/filter-lands-on-the-best-match' ($f2.paletteUi.selectedTheme -ceq $Alpha -and $f2.previewTheme -ceq $Alpha -and $f2.paletteUi.previewApplies -eq 1) "selected '$($f2.paletteUi.selectedTheme)', previewTheme '$($f2.previewTheme)', previews $($f2.paletteUi.previewApplies)"
     $opened2 = Wait-Rows $s $Themes.Count
     Check-Rows $s $opened2 'restart' -Current $Beta
-    Check-Badges $opened2 'restart/opens' -Current $Beta
+    Check-Badges $opened2 'restart/opens' -Current $Beta -Previewing $Alpha
+    [void](Seam $s @{ op = 'palette-key'; key = 'down' })
     $moved = Seam $s @{ op = 'palette-key'; key = 'down' }
     Check 'restart/browse-previews' ($moved.nativeBackground -eq $Themes[$Gamma].bg) "native $($moved.nativeBackground)"
     Check-Badges $moved 'restart/browsing' -Current $Beta -Previewing $Gamma
@@ -587,6 +834,7 @@ try {
         $want = if ($appTheme -eq 'dark') { 'Dark' } else { 'Light' }
         $s = Start-SeamSession -ExePath $ExePath -ConfigText ($config + "`nwindow-theme = $appTheme`n") -ExtraFiles $extra
         [void](Open-ThemeList $s)
+        [void](Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40 })
         $look = Wait-Rows $s $Themes.Count
         Check "$appTheme-app/palette-variant" ($look.paletteUi.elementTheme -eq $want) "'$($look.paletteUi.elementTheme)'"
         Check-ThemeChrome $look "$appTheme-app"

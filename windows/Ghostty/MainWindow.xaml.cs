@@ -447,6 +447,8 @@ public sealed partial class MainWindow : Window
     private Ghostty.Core.Themes.PaletteThemeBrowse? _paletteThemeBrowse;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _paletteThemeTimer;
     private Action? _paletteThemeTimerWork;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _paletteFilterTimer;
+    private Action? _paletteFilterTimerWork;
     private Controls.TerminalControl? _previousFocusSurface;
     // Cold-start launch icon. Null on every window that was not opened
     // by App.OnLaunched -- a warm-process window reaches first render
@@ -2273,6 +2275,7 @@ public sealed partial class MainWindow : Window
         // tree is part-way through teardown right now. Once the app itself is
         // shutting down the config service fences the revert to a no-op.
         _paletteThemeTimer?.Stop();
+        _paletteFilterTimer?.Stop();
         if (_paletteThemeBrowse is { IsActive: true } themeBrowse)
             DispatcherQueue.TryEnqueue(() => themeBrowse.Cancel());
         // The detach also unregisters the tab from App's process tracker,
@@ -5290,6 +5293,7 @@ public sealed partial class MainWindow : Window
             // for each name: the same directories, in the same order.
             Swatches = Ghostty.Core.Themes.ThemeSwatchCache.ForDirectories(
                 () => Services.ThemeProvider.Directories(_configService.ConfigFilePath)),
+            Filter = new Ghostty.Core.Themes.PaletteFilterDebounce(SchedulePaletteFilterWork),
         };
 
         // Deliberate crash triggers, the same kinds and the same
@@ -5398,6 +5402,35 @@ public sealed partial class MainWindow : Window
         _paletteThemeTimerWork = work;
         _paletteThemeTimer.Interval = delay;
         _paletteThemeTimer.Start();
+    }
+
+    /// <summary>
+    /// The theme filter's debounce scheduler: one reusable one-shot timer of
+    /// its own, restarted by every keystroke, so its wait never shares a slot
+    /// with the browse's throttle. Restarting drops the previous keystroke's
+    /// callback, which the debounce would drop as stale anyway.
+    /// </summary>
+    private void SchedulePaletteFilterWork(TimeSpan delay, Action work)
+    {
+        if (_isClosed) return;
+        if (_paletteFilterTimer is null)
+        {
+            var timer = DispatcherQueue.CreateTimer();
+            timer.IsRepeating = false;
+            timer.Tick += (t, _) =>
+            {
+                t.Stop();
+                if (_isClosed) return;
+                var due = _paletteFilterTimerWork;
+                _paletteFilterTimerWork = null;
+                due?.Invoke();
+            };
+            _paletteFilterTimer = timer;
+        }
+        _paletteFilterTimer.Stop();
+        _paletteFilterTimerWork = work;
+        _paletteFilterTimer.Interval = delay > TimeSpan.Zero ? delay : TimeSpan.FromMilliseconds(1);
+        _paletteFilterTimer.Start();
     }
 
     // Toggle the inspector window for the active surface. v1: one inspector

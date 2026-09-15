@@ -342,6 +342,10 @@ internal sealed partial class CommandPaletteControl : UserControl
                 case nameof(CommandPaletteViewModel.StatusText):
                     PublishStatus(_announcer.StatusChanged(_vm.StatusText));
                     break;
+
+                case nameof(CommandPaletteViewModel.ThemeNoMatchText):
+                    SyncNoMatch();
+                    break;
             }
         });
     }
@@ -465,6 +469,20 @@ internal sealed partial class CommandPaletteControl : UserControl
             : "Search commands or type > for actions...";
         AutomationProperties.SetName(SearchBox, theme ? "Filter themes" : "Search commands");
         AutomationProperties.SetName(ResultsList, theme ? "Themes" : "Command results");
+
+        // The theme list keeps its full height while a filter narrows it, so
+        // the card does not shrink and grow under the pointer as the user
+        // types; the command list sizes to its results as it always has.
+        ResultsList.MinHeight = theme ? ResultsList.MaxHeight : 0;
+        SyncNoMatch();
+    }
+
+    // The theme list's "no themes match" line, in place of the rows.
+    private void SyncNoMatch()
+    {
+        var text = _vm?.Mode == PaletteMode.Theme ? _vm.ThemeNoMatchText : null;
+        NoMatchText.Text = text ?? "";
+        NoMatchRow.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     // ── ContainerContentChanging: populate DataTemplate elements ─────────────
@@ -880,6 +898,23 @@ internal sealed partial class CommandPaletteControl : UserControl
         SearchBox.Text = text;
         if (_vm is not null) _vm.SearchText = text;
     }
+
+    /// <summary>
+    /// Backspace in the search box: what the TextBox does with the key itself
+    /// (it is not one HandleSearchKey takes), the last character removed.
+    /// </summary>
+    internal void TestSeamBackspace()
+    {
+        var text = SearchBox.Text;
+        if (text.Length > 0) TestSeamType(text[..^1]);
+    }
+
+    /// <summary>The search box's text.</summary>
+    internal string TestSeamSearchText => SearchBox.Text;
+
+    /// <summary>The "no themes match" line, when it is on screen, else null.</summary>
+    internal string? TestSeamNoMatch =>
+        NoMatchRow.Visibility == Visibility.Visible ? NoMatchText.Text : null;
 
     /// <summary>The light/dark variant the palette is drawn in.</summary>
     internal string TestSeamElementTheme => ActualTheme.ToString();

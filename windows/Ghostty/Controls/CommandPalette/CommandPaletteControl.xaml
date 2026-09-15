@@ -442,6 +442,34 @@
                       ScrollViewer.HorizontalScrollMode="Disabled"
                       ScrollViewer.HorizontalScrollBarVisibility="Hidden"/>
 
+            <!--
+                The theme list's empty state: shown over the (then empty)
+                list when the filter matched nothing, so the list reads as
+                "nothing matches" rather than as broken. The status line
+                below speaks it; this is the visible half. A row's height,
+                so the card keeps its size while it shows.
+            -->
+            <StackPanel x:Name="NoMatchRow"
+                        Grid.Row="3"
+                        Orientation="Horizontal"
+                        Spacing="10"
+                        Height="44"
+                        Padding="18,0,12,0"
+                        VerticalAlignment="Top"
+                        Visibility="Collapsed">
+                <!-- Segoe Fluent Icons: U+E721 = Search -->
+                <FontIcon Glyph="&#xE721;"
+                          FontFamily="{StaticResource SymbolThemeFontFamily}"
+                          FontSize="14"
+                          Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                          VerticalAlignment="Center"/>
+                <TextBlock x:Name="NoMatchText"
+                           FontSize="{StaticResource BodyTextBlockFontSize}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+
             <!-- ── Row 4: Separator (only shown when footer has content) ── -->
             <Border x:Name="FooterSeparator"
                     Grid.Row="4"

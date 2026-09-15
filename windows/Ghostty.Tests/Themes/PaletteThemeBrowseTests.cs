@@ -349,6 +349,32 @@ public class PaletteThemeBrowseTests
         Assert.Equal("alpha", browse.PreviewedTheme);
     }
 
+    /// <summary>
+    /// The apply count the test seam reads: one per preview actually put on
+    /// the live views in this browse, so a throttled burst counts once per
+    /// apply, and nothing once the browse is over.
+    /// </summary>
+    [Fact]
+    public void ApplyCountCountsThePreviewsOfThisBrowse()
+    {
+        var (browse, _, clock, _) = Make();
+        Assert.Equal(0, browse.ApplyCount);
+
+        browse.Begin();
+        foreach (var theme in new[] { "t1", "t2", "t3" }) browse.Select(theme);
+        clock.Turn();
+        Assert.Equal(1, browse.ApplyCount);
+
+        foreach (var theme in new[] { "t4", "t5" }) browse.Select(theme);
+        clock.Elapse();
+        Assert.Equal(2, browse.ApplyCount);
+
+        browse.Cancel();
+        Assert.Equal(0, browse.ApplyCount);
+        browse.Begin();
+        Assert.Equal(0, browse.ApplyCount);
+    }
+
     /// <summary>Selections outside a browse, or of nothing, are ignored.</summary>
     [Fact]
     public void SelectionsOutsideABrowseOrOfNothingAreIgnored()

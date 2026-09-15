@@ -71,6 +71,86 @@ public static class ThemeSearchPath
     private static readonly string[] AppDirectoryNames = ["wintty", "ghostty"];
 
     /// <summary>
+    /// Every directory libghostty searches for a named theme, in its order:
+    /// the user directories, then the bundled themes. A name in an earlier
+    /// directory hides the same name in a later one, so a user's copy of a
+    /// bundled theme is the one that loads.
+    /// </summary>
+    /// <param name="configDirectory">See <see cref="UserDirectories"/>.</param>
+    /// <param name="appData">See <see cref="UserDirectories"/>.</param>
+    /// <param name="bundledDirectory">
+    /// <see cref="BundledDirectory(string?, string?)"/>'s answer, or null.
+    /// </param>
+    public static IEnumerable<string> Directories(
+        string? configDirectory, string? appData, string? bundledDirectory)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dir in UserDirectories(configDirectory, appData))
+        {
+            if (seen.Add(dir)) yield return dir;
+        }
+        if (!string.IsNullOrEmpty(bundledDirectory) && seen.Add(bundledDirectory))
+            yield return bundledDirectory;
+    }
+
+    /// <summary>
+    /// The directory holding the themes that ship with the app, as theme.zig's
+    /// resources location resolves it on Windows, or null when there is none.
+    /// </summary>
+    /// <param name="resourcesDirectory">
+    /// The GHOSTTY_RESOURCES_DIR environment value. libghostty takes it as the
+    /// resources directory when it names an existing absolute directory, and
+    /// then looks for themes in its <c>themes</c> subdirectory and nowhere
+    /// else, whether or not that subdirectory exists.
+    /// </param>
+    /// <param name="appDirectory">
+    /// The directory holding the executable. Without a resources directory,
+    /// theme.zig looks for <c>share\ghostty\themes</c> beside the executable,
+    /// which is where the build copies the bundled themes.
+    /// </param>
+    /// <remarks>
+    /// The resources directory is also found by climbing from the executable
+    /// to a <c>share\terminfo\ghostty.terminfo</c>. The Windows app ships no
+    /// terminfo, so that detection never succeeds and is not mirrored here;
+    /// shipping the full resources tree would put the themes at the same
+    /// <c>share\ghostty\themes</c> path anyway.
+    /// </remarks>
+    public static string? BundledDirectory(string? resourcesDirectory, string? appDirectory)
+        => BundledDirectory(resourcesDirectory, appDirectory, Directory.Exists);
+
+    /// <summary>
+    /// <see cref="BundledDirectory(string?, string?)"/> over an injected
+    /// existence check, so the rule is testable without a disk.
+    /// </summary>
+    public static string? BundledDirectory(
+        string? resourcesDirectory, string? appDirectory, Func<string, bool> directoryExists)
+    {
+        ArgumentNullException.ThrowIfNull(directoryExists);
+
+        // theme.zig's validResourcesDir: non-empty, absolute, and a directory
+        // that opens. A relative or missing value is ignored with a warning.
+        if (!string.IsNullOrEmpty(resourcesDirectory)
+            && IsAbsolute(resourcesDirectory)
+            && directoryExists(resourcesDirectory))
+        {
+            return Path.Combine(resourcesDirectory, "themes");
+        }
+
+        if (string.IsNullOrEmpty(appDirectory)) return null;
+        var beside = Path.Combine(Path.TrimEndingDirectorySeparator(appDirectory), "share", "ghostty", "themes");
+        return directoryExists(beside) ? beside : null;
+    }
+
+    /// <summary>
+    /// <see cref="BundledDirectory(string?, string?)"/> for this process: its
+    /// environment and the directory the app runs from.
+    /// </summary>
+    public static string? BundledDirectoryForThisProcess()
+        => BundledDirectory(
+            Environment.GetEnvironmentVariable("GHOSTTY_RESOURCES_DIR"),
+            AppContext.BaseDirectory);
+
+    /// <summary>
     /// True when a theme value is a bare file name to look up in the
     /// search directories. False for an absolute path, which is used
     /// as-is, and for a relative name with a directory component, which

@@ -36,10 +36,13 @@ internal sealed partial class ThemeProvider : IThemeProvider, IDisposable
 
     /// <summary>
     /// The theme directories for a config file path, in libghostty's search
-    /// order. Shared with the palette so both enumerate one list.
+    /// order: the user's, then the themes bundled with the app. Shared with
+    /// the palette and with the chrome's theme lookup, so all three read one
+    /// list.
     /// </summary>
     internal static IEnumerable<string> Directories(string configFilePath)
-        => ThemeSearchPath.UserDirectories(
+        => ThemeSearchPath.Directories(
             Path.GetDirectoryName(configFilePath),
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            ThemeSearchPath.BundledDirectoryForThisProcess());
 }

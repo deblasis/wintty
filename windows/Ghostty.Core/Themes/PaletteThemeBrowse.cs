@@ -80,6 +80,7 @@ public sealed class PaletteThemeBrowse
     private bool _flushQueued;
     private bool _coolingDown;
     private bool _recorded;
+    private int _applyCount;
 
     /// <param name="target">What the previews are applied to.</param>
     /// <param name="session">
@@ -123,6 +124,13 @@ public sealed class PaletteThemeBrowse
     /// waits on this so what it reads back is the settled preview.
     /// </summary>
     public bool HasPendingPreview => _active && (_pending is not null || _flushQueued);
+
+    /// <summary>
+    /// How many previews this browse has put on the live views. The test seam
+    /// reads it to prove that typing a filter previews once, when it settles,
+    /// and not once per keystroke.
+    /// </summary>
+    public int ApplyCount => _active ? _applyCount : 0;
 
     /// <summary>Start a browse. A browse already in progress is left alone.</summary>
     public void Begin()
@@ -193,6 +201,7 @@ public sealed class PaletteThemeBrowse
         // before this browse, or any other, first changed it.
         _session.NotePreview(_target.CaptureColors);
         _recorded = true;
+        _applyCount++;
         if (_target.ApplyPreview(name)) _applied = name;
 
         _coolingDown = true;
@@ -214,5 +223,6 @@ public sealed class PaletteThemeBrowse
         _flushQueued = false;
         _coolingDown = false;
         _recorded = false;
+        _applyCount = 0;
     }
 }

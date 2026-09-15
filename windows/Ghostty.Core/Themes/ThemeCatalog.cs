@@ -10,12 +10,12 @@ namespace Ghostty.Core.Themes;
 /// The themes a user can pick, as one list every picker in the shell reads:
 /// the Settings Colors page and the command palette's theme mode.
 ///
-/// The directories are <see cref="ThemeSearchPath.UserDirectories"/>, the C#
-/// mirror of the lookup theme.zig uses to resolve a configured theme and that
-/// +list-themes walks, so a name offered here is a name libghostty will find
-/// when it is written to the config. The resources directory the CLI also
-/// walks ships no themes in the Windows build (see ConfigService's
-/// ResolveThemePath), so there is nothing there to disagree about.
+/// The directories are <see cref="ThemeSearchPath.Directories"/>, the C#
+/// mirror of the lookup theme.zig uses to resolve a configured theme: the
+/// user's theme directories, then the themes bundled with the app. A name
+/// offered here is therefore a name libghostty will find when it is written
+/// to the config, and a user's copy of a bundled theme is listed once, as
+/// the file that loads.
 /// </summary>
 public static class ThemeCatalog
 {
@@ -81,16 +81,58 @@ public static class ThemeCatalog
 
     /// <summary>
     /// The themes whose name contains <paramref name="query"/>,
-    /// case-insensitively, in catalog order. An empty query is every theme.
+    /// case-insensitively (the palette's command search matches the same
+    /// way), best match first: the name itself, then names that start with
+    /// the query, then names with a word that does, then the rest. Within
+    /// each of those, catalog order. An empty query is every theme, in
+    /// catalog order.
     /// </summary>
+    /// <remarks>
+    /// Best first because the highlight lands on the top row and the preview
+    /// follows the highlight: typing "nord" shows Nord, not the first name
+    /// that happens to contain it alphabetically.
+    /// </remarks>
     public static IReadOnlyList<string> Filter(IReadOnlyList<string> themes, string? query)
     {
         ArgumentNullException.ThrowIfNull(themes);
         if (string.IsNullOrWhiteSpace(query)) return themes;
         var trimmed = query.Trim();
         return themes
-            .Where(t => t.Contains(trimmed, StringComparison.OrdinalIgnoreCase))
+            .Select((name, index) => (name, index, rank: MatchRank(name, trimmed)))
+            .Where(m => m.rank != MatchNone)
+            // OrderBy is stable, and the index keeps catalog order explicit.
+            .OrderBy(m => m.rank)
+            .ThenBy(m => m.index)
+            .Select(m => m.name)
             .ToList();
+    }
+
+    /// <summary>The rank <see cref="MatchRank"/> gives a name that does not match.</summary>
+    public const int MatchNone = int.MaxValue;
+
+    /// <summary>
+    /// How well <paramref name="name"/> matches <paramref name="query"/>,
+    /// case-insensitively, lower being better: 0 the whole name, 1 its start,
+    /// 2 the start of a later word (after a character that is not a letter or
+    /// a digit), 3 anywhere else, <see cref="MatchNone"/> nowhere.
+    /// </summary>
+    public static int MatchRank(string name, string query)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(query);
+        if (query.Length == 0) return 3;
+        if (string.Equals(name, query, StringComparison.OrdinalIgnoreCase)) return 0;
+
+        var best = MatchNone;
+        var at = name.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+        while (at >= 0)
+        {
+            var rank = at == 0 ? 1 : !char.IsLetterOrDigit(name[at - 1]) ? 2 : 3;
+            if (rank < best) best = rank;
+            if (best == 1 || at + 1 >= name.Length) break;
+            at = name.IndexOf(query, at + 1, StringComparison.OrdinalIgnoreCase);
+        }
+        return best;
     }
 
     /// <summary>

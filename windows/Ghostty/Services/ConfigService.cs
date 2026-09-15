@@ -1610,13 +1610,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// <remarks>
     /// Search order and name rules live in
     /// <see cref="ThemeSearchPath"/>, which documents why they have to
-    /// track theme.zig. The resources directory theme.zig searches last is
-    /// not probed: those themes reach the chrome through libghostty's own
-    /// resolved values instead. The one case that would miss -- a
-    /// conditional light:/dark: pair in dark mode, where libghostty's
-    /// handle is finalized light -- is unreachable while the Windows build
-    /// ships no resources themes (emit_themes defaults off), and would
-    /// need this list extended if that changes.
+    /// track theme.zig. The bundled themes are searched last, as theme.zig
+    /// searches them, so a bundled theme in a light:/dark: pair resolves
+    /// its dark half here too, where libghostty's handle is finalized light.
     /// </remarks>
     private string? ResolveThemePath(string themeName)
     {
@@ -1628,9 +1624,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
         if (!ThemeSearchPath.IsSearchableName(themeName)) return null;
 
-        var dirs = ThemeSearchPath.UserDirectories(
-            Path.GetDirectoryName(ConfigFilePath),
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+        var dirs = ThemeProvider.Directories(ConfigFilePath);
 
         foreach (var dir in dirs)
         {
