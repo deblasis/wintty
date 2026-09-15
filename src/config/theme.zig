@@ -59,12 +59,12 @@ pub const Location = enum {
         ) catch return null];
         const exe_dir = std.fs.path.dirname(exe) orelse return null;
 
-        const dir = try std.fs.path.join(
+        const themes_dir = try std.fs.path.join(
             arena_alloc,
             &.{ exe_dir, "share", "ghostty", "themes" },
         );
-        std.Io.Dir.accessAbsolute(global.io(), dir, .{}) catch return null;
-        return dir;
+        std.Io.Dir.accessAbsolute(global.io(), themes_dir, .{}) catch return null;
+        return themes_dir;
     }
 
     /// The `themes` subdirectory of an XDG config directory, for the given

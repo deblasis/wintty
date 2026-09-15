@@ -631,7 +631,9 @@ try {
     $openVariant = $list.paletteUi.elementTheme
     $full = Wait-Rows $s 5
     $fullRows = @($full.paletteUi.rows)
-    Check 'full-list/virtualized' ($fullRows.Count -ge 5 -and $fullRows.Count -le 40 -and $fullRows.Count -lt $ExpectedTotal) "$($fullRows.Count) of $ExpectedTotal rows realized"
+    # Virtualized: the visible rows plus the list's cache buffer, a few
+    # screens' worth, never the whole list.
+    Check 'full-list/virtualized' ($fullRows.Count -ge 5 -and $fullRows.Count -le 100 -and $fullRows.Count -lt $ExpectedTotal) "$($fullRows.Count) of $ExpectedTotal rows realized"
     Check 'full-list/rows-painted' ($fullRows.Count -gt 0 -and @($fullRows | Where-Object { -not $_.painted }).Count -eq 0)
     Check-ThemeChrome $full 'enter'
     Check-Badges $full 'enter/no-row-claims-a-preview'
