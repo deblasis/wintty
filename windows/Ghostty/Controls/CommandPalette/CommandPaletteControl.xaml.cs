@@ -304,7 +304,7 @@ internal sealed partial class CommandPaletteControl : UserControl
         // the raises that come from off the UI thread.
         if (DispatcherQueue is null) return;
 
-        void Apply() =>
+        void Apply()
         {
             if (_vm is null) return;
 
