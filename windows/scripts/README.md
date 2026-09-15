@@ -269,6 +269,31 @@ markdown is what gets pasted into #937, one comment per run.
   path. Anything that cannot be positively identified is skipped: an
   unreadable path or start time is a reason to leave a process alone, never a
   reason to kill it.
+- `Test-WinttyCoexistence` / `Assert-WinttyCoexistence` - the one way to run
+  beside a Wintty somebody else started. A launch may, when and only when it
+  proves before launching that it is fully isolated: its own exe (no instance
+  running from it, not inside a running install), `XDG_CONFIG_HOME` under temp
+  with `WINTTY_TEST_CONFIG=1`, `WINTTY_STATE_BASE` under temp,
+  `windows-single-instance = false` in the staged config, a private session
+  daemon pipe when one is named (never a per-user name, which carries the
+  user's SID), and a different edition from every running instance. That last
+  rule exists because every launch re-points the toast registration of its
+  AUMID at itself and rebuilds that AUMID's jump list, and no variable moves
+  either: beside an instance of the same edition there is no isolated launch.
+  A running instance's AUMID is read off the toast registration naming its
+  image, and the build's own out of its `Ghostty.Core.dll`; anything that
+  cannot be told apart refuses. The guard only reads the process table and the
+  registry. `Start-SeamSession` runs it right before every launch, so a seam
+  harness that is not isolated still refuses beside a running Wintty.
+- `Assert-NoWinttyFrom` - the narrow up-front gate for a harness that isolates
+  itself: it refuses only an instance of the exe under test.
+
+To make a seam harness coexist: call `Assert-NoWinttyFrom -ExePath` instead of
+`Assert-NoWintty`, stage `windows-single-instance = false`, pass
+`Start-SeamSession -PrivateStateBase`, and read crash.log from
+`$session.StateBase` rather than the per-user path. `seam-acceptance.ps1` is
+converted; the rest keep `Assert-NoWintty` until each is converted and its
+scenario checked against single-instance being off.
 
 Most scripts here used to open with `Get-Process Wintty | Stop-Process -Force`,
 which takes down builds from other worktrees and the window the developer is
