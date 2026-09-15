@@ -56,6 +56,16 @@ public class TabManagerProfileSnapshotTests
     }
 
     [Fact]
+    public void Ctor_InitialSnapshot_SetsTheSeedTabsProfileId()
+    {
+        var mgr = new TabManager(
+            _ => new FakePaneHost(),
+            initialSnapshot: SampleSnapshot());
+
+        Assert.Equal("foo", mgr.ActiveTab.ProfileId);
+    }
+
+    [Fact]
     public void Ctor_InitialSnapshot_PassesToFactoryAndAttaches()
     {
         ProfileSnapshot? captured = null;
@@ -71,6 +81,15 @@ public class TabManagerProfileSnapshotTests
         Assert.Same(snapshot, captured);
         Assert.Same(snapshot, mgr.ActiveTab.ProfileSnapshot);
         Assert.Single(mgr.Tabs);
+    }
+
+    [Fact]
+    public void NewTab_WithSnapshot_SetsTheTabsProfileId()
+    {
+        var mgr = NewManager();
+        var tab = mgr.NewTab(SampleSnapshot());
+
+        Assert.Equal("foo", tab.ProfileId);
     }
 
     [Fact]

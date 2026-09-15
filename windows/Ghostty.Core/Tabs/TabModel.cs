@@ -22,8 +22,13 @@ internal sealed class TabModel : INotifyPropertyChanged
     public Guid Id { get; } = Guid.NewGuid();
     public IPaneHost PaneHost { get; }
 
-    /// <summary>Profile id, set when this tab was created from a
-    /// jump-list profile or context-menu duplicate.</summary>
+    /// <summary>Profile id of the profile this tab runs, populated when
+    /// the snapshot is attached (and by the session-restore rebuild, which
+    /// carries the saved id). The reopen-closed-tab, duplicate-tab and
+    /// session-save captures read it so the rebuild can re-resolve the
+    /// tab's profile (its icon, its title, its icon-tracking opt-out);
+    /// null only on the legacy no-profile path, which has nothing to
+    /// re-resolve.</summary>
     public string? ProfileId { get; set; }
 
     /// <summary>
@@ -49,6 +54,15 @@ internal sealed class TabModel : INotifyPropertyChanged
                 "TabModel.ProfileSnapshot is set exactly once for V1; " +
                 "PR 6 introduces a hot-apply path that replaces this guard.");
         ProfileSnapshot = snapshot;
+
+        // The snapshot is the tab's own record of the profile it runs, and
+        // live-created tabs (NewTab, the window's seed) set nothing else:
+        // without the id here, every capture saves a tab the rebuild
+        // cannot re-resolve, so a reopened or restored tab comes back
+        // without its profile. A restore rebuild sets the saved id first,
+        // and an explicitly kept id wins over the snapshot's either way.
+        if (!string.IsNullOrEmpty(snapshot.ProfileId))
+            ProfileId ??= snapshot.ProfileId;
 
         // Keep the cached TabIcon's subscribers attached across snapshot
         // attaches; cheaper than tearing down and rebuilding the VM, and

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Profiles;
 using Ghostty.Core.Session;
 using Ghostty.Core.Tabs;
 using Xunit;
@@ -8,6 +9,15 @@ namespace Ghostty.Tests.Tabs;
 
 public class TabManagerCloseCaptureTests
 {
+    private static ProfileSnapshot SampleSnapshot() =>
+        ProfileSnapshotStore.From(
+            new ResolvedProfile(
+                Id: "rep", Name: "Repro cmd", Command: "cmd.exe",
+                WorkingDirectory: null, Icon: new IconSpec.BundledKey("default"),
+                TabTitle: "Repro cmd", Visuals: EffectiveVisualOverrides.Empty,
+                ProbeId: null, OrderIndex: 0, IsDefault: true),
+            version: 1);
+
     private static TabManager NewManager(
         ClosedStack<TabSession> closed,
         out List<FakePaneHost> hosts)
@@ -48,6 +58,23 @@ public class TabManagerCloseCaptureTests
         mgr.CloseTab(mgr.Tabs[0]); // last tab -> window would close
 
         Assert.Equal(1, closed.Count);
+    }
+
+    [Fact]
+    public void Closing_a_profile_tab_captures_its_profile_id()
+    {
+        var closed = new ClosedStack<TabSession>(25);
+        var mgr = NewManager(closed, out _);
+        mgr.NewTab(SampleSnapshot()); // a live-created profile tab
+
+        mgr.CloseTab(mgr.Tabs[1]);
+
+        // The reopen rebuild re-resolves the tab's profile (its icon, its
+        // title, its icon-tracking opt-out) from this id. A live-created
+        // tab carries its profile only on the snapshot, so a null id here
+        // is the reopened tab coming back without its profile.
+        Assert.True(closed.TryPop(out var snap));
+        Assert.Equal("rep", snap.ProfileId);
     }
 
     [Fact]

@@ -35,6 +35,27 @@ public class TabModelProfileSnapshotTests
     }
 
     [Fact]
+    public void AttachProfileSnapshot_PopulatesProfileId()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.AttachProfileSnapshot(SampleSnapshot());
+
+        // The snapshot is the tab's own record of the profile it runs, and
+        // every capture (reopen-closed-tab, duplicate tab, session save)
+        // reads ProfileId to re-resolve it on the rebuild.
+        Assert.Equal("foo", tab.ProfileId);
+    }
+
+    [Fact]
+    public void AttachProfileSnapshot_KeepsAnAlreadySetProfileId()
+    {
+        var tab = new TabModel(new FakePaneHost()) { ProfileId = "saved" };
+        tab.AttachProfileSnapshot(SampleSnapshot());
+
+        Assert.Equal("saved", tab.ProfileId);
+    }
+
+    [Fact]
     public void AttachProfileSnapshot_CalledTwice_Throws()
     {
         var tab = new TabModel(new FakePaneHost());
