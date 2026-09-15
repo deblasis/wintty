@@ -102,6 +102,36 @@ public class PaletteThemeBrowseTests
         }
     }
 
+    /// <summary>
+    /// The palette's "Previewing" badge and announcement read this: nothing
+    /// for the highlight a fresh list opens on, the newest selection as soon
+    /// as it is made, what is actually on screen when an apply fails, and
+    /// nothing once the browse is over.
+    /// </summary>
+    [Fact]
+    public void TheTargetIsWhatTheBrowseShowsOrIsAboutToShow()
+    {
+        var (browse, target, clock, _) = Make();
+        Assert.Null(browse.TargetTheme);
+
+        browse.Begin();
+        Assert.Null(browse.TargetTheme);
+
+        browse.Select("Alpha");
+        Assert.Equal("Alpha", browse.TargetTheme);
+        clock.Turn();
+        Assert.Equal("Alpha", browse.TargetTheme);
+
+        target.Missing.Add("Broken");
+        browse.Select("Broken");
+        Assert.Equal("Broken", browse.TargetTheme);
+        clock.Elapse();
+        Assert.Equal("Alpha", browse.TargetTheme);
+
+        browse.Cancel();
+        Assert.Null(browse.TargetTheme);
+    }
+
     private static (PaletteThemeBrowse Browse, Target Target, Clock Clock, InlineThemePreviewSession Session) Make()
     {
         var target = new Target();

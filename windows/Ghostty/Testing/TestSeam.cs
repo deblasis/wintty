@@ -1076,17 +1076,26 @@ internal static class TestSeam
                 {
                     "up" => Windows.System.VirtualKey.Up,
                     "down" => Windows.System.VirtualKey.Down,
+                    "pageup" => Windows.System.VirtualKey.PageUp,
+                    "pagedown" => Windows.System.VirtualKey.PageDown,
                     "enter" => Windows.System.VirtualKey.Enter,
                     "escape" => Windows.System.VirtualKey.Escape,
                     _ => null,
                 };
                 if (key is not { } pressed)
-                    return Error(op, "key must be up, down, enter or escape");
+                    return Error(op, "key must be up, down, pageup, pagedown, enter or escape");
                 // repeat > 1 is a held key: the presses arrive back to back,
-                // which is what the browse's throttle is for.
+                // which is what the browse's throttle is for. intervalMs
+                // spaces them out instead, the way a fast typist's arrow
+                // presses land: the dispatcher runs between them, so previews
+                // apply mid-run while a driver samples the screen.
                 var repeat = Math.Clamp(ArgInt(args, "repeat", 1), 1, 200);
+                var interval = Math.Clamp(ArgInt(args, "intervalMs", 0), 0, 1000);
                 for (var i = 0; i < repeat; i++)
+                {
                     window.TestSeamPaletteUI.TestSeamKey(pressed);
+                    if (interval > 0 && i < repeat - 1) await Task.Delay(interval);
+                }
 
                 // The preview lands on a later dispatcher turn, and a burst
                 // lands at the end of the throttle interval. The ack waits
@@ -1148,6 +1157,7 @@ internal static class TestSeam
             else json.WriteNull("selectedTheme");
             json.WriteNumber("count", vm?.FilteredCommands.Count ?? 0);
             json.WriteString("status", vm?.StatusText ?? "");
+            WritePaletteLook(json, window);
             json.WriteEndObject();
             // Where the active terminal is on screen, in the physical pixels
             // a capture is taken in, so a pixel oracle can check that the
@@ -1156,6 +1166,136 @@ internal static class TestSeam
             WriteState(json, window, window.TabManager);
             json.WriteEndObject();
         });
+
+    /// <summary>
+    /// How the palette looks, inside paletteUi: the light/dark variant it is
+    /// drawn in, the footer hint and the search box's and list's names, the
+    /// card's rect, and every realized theme row as drawn (badge, accessible
+    /// name, hint, swatch colours and the screen rects of its swatch parts),
+    /// so a pixel oracle can check the row against the theme file.
+    /// </summary>
+    private static void WritePaletteLook(Utf8JsonWriter json, MainWindow window)
+    {
+        var ui = window.TestSeamPaletteUI;
+
+        // Everything is read before anything is written, so a readout that
+        // cannot be taken is reported beside the rest (lookError, with its
+        // whole stack) instead of failing the op and hiding every other one.
+        string? elementTheme = null, hint = null, searchName = null, placeholder = null, listName = null;
+        (int X, int Y, int W, int H)? card = null;
+        IReadOnlyList<Controls.CommandPalette.CommandPaletteControl.TestSeamThemeRow> rows = [];
+        string? lookError = null;
+        try
+        {
+            elementTheme = ui.TestSeamElementTheme;
+            hint = ui.TestSeamFooterHint;
+            (searchName, placeholder) = ui.TestSeamSearchBox;
+            listName = ui.TestSeamListName;
+            // Geometry only while the palette is up: a closed popup's card
+            // and rows have no place on screen to report.
+            if (window.TestSeamPaletteOpen)
+            {
+                card = ElementRect(window, ui.TestSeamCard);
+                rows = ui.TestSeamThemeRows();
+            }
+        }
+        catch (Exception ex)
+        {
+            // Describe names the type even when the message is empty; the
+            // whole stack follows, because a WinRT failure's top frame is
+            // only the throw helper.
+            lookError = Describe(ex) + " | " + ex.StackTrace;
+        }
+
+        json.WriteString("elementTheme", elementTheme);
+        json.WriteBoolean("tracksWindowTheme", ui.TestSeamTracksWindowTheme);
+        json.WriteString("hint", hint);
+        json.WriteString("searchName", searchName);
+        json.WriteString("placeholder", placeholder);
+        json.WriteString("listName", listName);
+        if (lookError is not null) json.WriteString("lookError", lookError);
+        if (card is { } cardPx)
+        {
+            json.WritePropertyName("card");
+            WriteRectValue(json, cardPx);
+        }
+        else json.WriteNull("card");
+
+        json.WriteStartArray("rows");
+        foreach (var row in rows)
+        {
+            json.WriteStartObject();
+            json.WriteString("theme", row.Theme);
+            json.WriteBoolean("current", row.Current);
+            json.WriteBoolean("selected", row.Selected);
+            json.WriteString("badge", row.Badge);
+            json.WriteString("automationName", row.AutomationName);
+            if (row.HelpText is { } help) json.WriteString("helpText", help);
+            else json.WriteNull("helpText");
+            json.WriteString("hint", row.Hint);
+            json.WriteBoolean("painted", row.Painted);
+            if (row.Swatch is { } swatch)
+            {
+                json.WriteStartObject("colors");
+                json.WriteString("background", $"#{swatch.Background:X6}");
+                json.WriteString("foreground", $"#{swatch.Foreground:X6}");
+                json.WriteString("cursor", $"#{swatch.Cursor:X6}");
+                json.WriteStartArray("palette");
+                foreach (var entry in swatch.Palette) json.WriteStringValue($"#{entry:X6}");
+                json.WriteEndArray();
+                json.WriteEndObject();
+            }
+            else json.WriteNull("colors");
+            WriteElementRect(json, "row", window, row.Container);
+            WriteElementRect(json, "swatch", window, row.Tile);
+            WriteElementRect(json, "sample", window, row.Sample);
+            WriteElementRect(json, "cursor", window, row.Cursor);
+            json.WriteStartArray("strip");
+            foreach (var cell in row.Strip)
+            {
+                if (ElementRect(window, cell) is { } px) WriteRectValue(json, px);
+                else json.WriteNullValue();
+            }
+            json.WriteEndArray();
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+    }
+
+    private static (int X, int Y, int W, int H)? ElementRect(MainWindow window, Microsoft.UI.Xaml.FrameworkElement element)
+    {
+        if (element.ActualWidth <= 0 || element.ActualHeight <= 0) return null;
+        try
+        {
+            return window.TestSeamToScreenPixels(
+                new Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight), element);
+        }
+        catch (System.Runtime.InteropServices.COMException)
+        {
+            // An element between layouts (a recycled row) has no rect yet.
+            return null;
+        }
+    }
+
+    private static void WriteElementRect(Utf8JsonWriter json, string name, MainWindow window, Microsoft.UI.Xaml.FrameworkElement element)
+    {
+        if (ElementRect(window, element) is { } px)
+        {
+            json.WritePropertyName(name);
+            WriteRectValue(json, px);
+        }
+        else json.WriteNull(name);
+    }
+
+    private static void WriteRectValue(Utf8JsonWriter json, (int X, int Y, int W, int H) px)
+    {
+        json.WriteStartObject();
+        json.WriteNumber("x", px.X);
+        json.WriteNumber("y", px.Y);
+        json.WriteNumber("w", px.W);
+        json.WriteNumber("h", px.H);
+        json.WriteEndObject();
+    }
 
     private static void WriteHex(Utf8JsonWriter json, string name, uint? rgb)
     {

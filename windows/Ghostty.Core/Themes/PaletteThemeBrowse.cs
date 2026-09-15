@@ -111,6 +111,14 @@ public sealed class PaletteThemeBrowse
     public string? PreviewedTheme => _active ? _applied : null;
 
     /// <summary>
+    /// The theme this browse is showing or about to show: the newest selection
+    /// still waiting for its apply, else the one applied. Null before the first
+    /// move, so the highlight a fresh list opens on is not reported as a
+    /// preview, and null once the browse ends.
+    /// </summary>
+    public string? TargetTheme => _active ? _pending ?? _applied : null;
+
+    /// <summary>
     /// Whether a selection is still waiting for its apply. The test seam
     /// waits on this so what it reads back is the settled preview.
     /// </summary>

@@ -28,6 +28,9 @@ internal sealed class PaletteThemeMode
     public required Func<IReadOnlyList<string>> Themes { get; init; }
     public required Func<string?> ActiveTheme { get; init; }
     public required PaletteThemeBrowse Browse { get; init; }
+
+    /// <summary>The rows' swatch colours, read on first use and dropped per browse.</summary>
+    public required ThemeSwatchCache Swatches { get; init; }
 }
 
 /// <summary>
@@ -261,6 +264,8 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
 
         _themes = _themeMode.Themes();
         _activeTheme = _themeMode.ActiveTheme();
+        // Theme files can change between browses; within one they are read once.
+        _themeMode.Swatches.Clear();
         _themeMode.Browse.Begin();
 
         _placingThemeSelection = true;
@@ -343,14 +348,38 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
     {
         Id = ThemeItemPrefix + name,
         Title = name,
-        Description = string.Equals(name, _activeTheme, StringComparison.OrdinalIgnoreCase)
-            ? "Current theme"
-            : "",
+        // The row draws its own "Current" badge and says "current theme" in
+        // its accessible name (ThemeRowPresentation), so no description.
+        Description = "",
+        ThemeName = name,
+        IsCurrentTheme = string.Equals(name, _activeTheme, StringComparison.OrdinalIgnoreCase),
         Category = CommandCategory.Config,
         // Enter on a theme row is handled by the view model (it confirms the
         // browse), so the row itself does nothing when executed.
         Execute = static _ => { },
     };
+
+    /// <summary>
+    /// The swatch for a theme row if it has been read already, without
+    /// reading anything: what a row realized during a filter keystroke or a
+    /// scroll is painted from, synchronously, so it never blinks.
+    /// </summary>
+    internal bool TryGetCachedThemeSwatch(string themeName, out ThemeSwatch? swatch)
+    {
+        swatch = null;
+        return _themeMode is not null && _themeMode.Swatches.TryGetCached(themeName, out swatch);
+    }
+
+    /// <summary>The swatch for a theme row, reading its file the first time.</summary>
+    internal ThemeSwatch? LoadThemeSwatch(string themeName) => _themeMode?.Swatches.Get(themeName);
+
+    /// <summary>
+    /// Whether the browse is showing, or about to show, this theme. False for
+    /// the highlight a fresh list opens on, which previews nothing.
+    /// </summary>
+    internal bool IsThemePreviewed(string themeName)
+        => Mode == PaletteMode.Theme
+           && string.Equals(_themeMode?.Browse.TargetTheme, themeName, StringComparison.Ordinal);
 
     private static string? ThemeNameOf(CommandItem? item)
         => item is not null && item.Id.StartsWith(ThemeItemPrefix, StringComparison.Ordinal)
@@ -478,6 +507,10 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
 
     public void MoveSelectionDown() =>
         SelectedCommand = PaletteSelection.Step(FilteredCommands, SelectedCommand, +1);
+
+    /// <summary>Page Up / Page Down: a screenful at a time, clamped at the ends.</summary>
+    public void MoveSelectionBy(int delta) =>
+        SelectedCommand = PaletteSelection.Step(FilteredCommands, SelectedCommand, delta);
 
     // ── INotifyPropertyChanged ───────────────────────────────────────────────
 

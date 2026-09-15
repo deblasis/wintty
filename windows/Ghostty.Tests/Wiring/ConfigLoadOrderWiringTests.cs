@@ -47,9 +47,14 @@ public class ConfigLoadOrderWiringTests
             .Where(name => ExpectedOrder.Contains(name))
             .ToList();
 
+    /// <summary>
+    /// The constructor assembles its own config; every later one (a reload,
+    /// a palette theme preview) is built by BuildLiveConfig, which is the
+    /// second site.
+    /// </summary>
     [Theory]
     [InlineData("ConfigService")]
-    [InlineData("Reload")]
+    [InlineData("BuildLiveConfig")]
     public void BothSitesAssembleTheConfigInUpstreamOrder(string member)
     {
         var source = ShellSource.Load(ConfigService);
@@ -64,19 +69,47 @@ public class ConfigLoadOrderWiringTests
     }
 
     /// <summary>
+    /// Reload and the palette's theme preview both get their config from
+    /// BuildLiveConfig and assemble nothing of their own: a second assembly
+    /// in either is a second order that can drift from the first, and a
+    /// preview that could differ from what confirming it produces.
+    /// </summary>
+    [Theory]
+    [InlineData("Reload")]
+    [InlineData("PreviewTheme")]
+    public void LiveConfigsAreBuiltByTheOneHelper(string member)
+    {
+        var method = ShellSource.Load(ConfigService).Method(member);
+        Assert.Single(method.Calls("BuildLiveConfig"));
+        Assert.Empty(LoadSequence(method));
+        Assert.Empty(method.Calls("NativeMethods.ConfigLoadFile"));
+    }
+
+    /// <summary>
     /// High Contrast is an accessibility override and outranks everything the
-    /// user asked for, a file named with --config-file included. That is only
-    /// true while it loads after the recursive files.
+    /// user asked for, a file named with --config-file included, and a theme
+    /// the palette is previewing. That is only true while it loads after the
+    /// recursive files and after the preview's overlay.
     /// </summary>
     [Fact]
     public void HighContrastOverrideLoadsAfterEverythingElse()
     {
-        var reload = ShellSource.Load(ConfigService).Method("Reload");
+        var build = ShellSource.Load(ConfigService).Method("BuildLiveConfig");
 
-        var recursive = reload.Call("NativeMethods.ConfigLoadRecursiveFiles");
-        var hc = reload.Call("NativeMethods.ConfigLoadFile");
-        var finalize = reload.Call("NativeMethods.ConfigFinalize");
+        var recursive = build.Call("NativeMethods.ConfigLoadRecursiveFiles");
+        var loads = build.Calls("NativeMethods.ConfigLoadFile");
+        var overlay = Assert.Single(loads, l => l.Arg(1) == "overlayPath");
+        var hc = Assert.Single(loads, l => l.Arg(1) == "hcPath");
+        Assert.Equal(2, loads.Count);
+        var finalize = build.Call("NativeMethods.ConfigFinalize");
 
+        Assert.True(
+            recursive.SpanStart < overlay.SpanStart,
+            "the preview overlay loads before the user's files, so a theme line of theirs "
+                + "would win over the theme being previewed");
+        Assert.True(
+            overlay.SpanStart < hc.SpanStart,
+            "the preview overlay loads after the High Contrast override and would overwrite it");
         Assert.True(
             recursive.SpanStart < hc.SpanStart,
             "the High Contrast override loads before the config-file includes, so a "

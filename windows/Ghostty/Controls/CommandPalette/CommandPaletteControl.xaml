@@ -110,6 +110,155 @@
                          Visibility="Collapsed">
                     <PathIcon Data="F1 M100,190 A90,90 0 1 1 280,190 A90,90 0 1 1 100,190 Z M132,170 A58,58 0 1 0 248,170 A58,58 0 1 0 132,170 Z M186,206 L206,186 L276,276 Z"/>
                 </Viewbox>
+
+                <!--
+                    Theme row, shown instead of everything above while the
+                    palette is its theme list:
+                    [swatch] [name / light-dark hint] [Current | Previewing]
+
+                    Part of this one template rather than a template of its
+                    own: a DataTemplateSelector over these CLR records throws
+                    inside MeasureOverride (KeybindListWinUiAbiTests), so the
+                    code-behind toggles the two parts per item instead.
+
+                    Every size here is fixed, so a row is the same size before
+                    and after its swatch colours are read: the list never moves
+                    under the highlight while swatches fill in.
+                -->
+                <Grid x:Name="ThemeRow"
+                      Grid.Column="0" Grid.ColumnSpan="4"
+                      Padding="4,0,0,0"
+                      ColumnSpacing="12"
+                      Visibility="Collapsed">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!--
+                        Swatch: a thumbnail of the terminal in that theme. Its
+                        background, "Aa" in the foreground, a cursor block, and
+                        a strip of the eight normal ANSI colours. The neutral
+                        tile underneath is what shows until the colours are
+                        read, at the same size. The colours are the theme's
+                        own and are left as they are in High Contrast, like
+                        the tab colour swatches; the edge is a theme resource.
+                    -->
+                    <Grid Grid.Column="0"
+                          Width="60" Height="34"
+                          VerticalAlignment="Center">
+                        <Border CornerRadius="4"
+                                Background="{ThemeResource ControlFillColorSecondaryBrush}"
+                                BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
+                                BorderThickness="1"/>
+                        <Border x:Name="SwatchTile"
+                                CornerRadius="4"
+                                BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                Padding="5,4"
+                                Opacity="0">
+                            <Grid RowSpacing="3">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="4"/>
+                                </Grid.RowDefinitions>
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="2"
+                                            VerticalAlignment="Center">
+                                    <TextBlock x:Name="SwatchSample"
+                                               Text="Aa"
+                                               FontFamily="Cascadia Mono, Consolas, Courier New"
+                                               FontSize="12"
+                                               VerticalAlignment="Center"
+                                               AutomationProperties.AccessibilityView="Raw"/>
+                                    <Rectangle x:Name="SwatchCursor"
+                                               Width="6" Height="13"
+                                               VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <StackPanel x:Name="SwatchStrip"
+                                            Grid.Row="1"
+                                            Orientation="Horizontal">
+                                    <Rectangle Width="6" Height="4"/>
+                                    <Rectangle Width="6" Height="4"/>
+                                    <Rectangle Width="6" Height="4"/>
+                                    <Rectangle Width="6" Height="4"/>
+                                    <Rectangle Width="6" Height="4"/>
+                                    <Rectangle Width="6" Height="4"/>
+                                    <Rectangle Width="6" Height="4"/>
+                                    <Rectangle Width="6" Height="4"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </Grid>
+
+                    <!-- Name, and the light/dark hint under it. The hint line
+                         keeps its height while empty, so the name does not
+                         shift when the hint arrives with the swatch. -->
+                    <StackPanel Grid.Column="1"
+                                VerticalAlignment="Center"
+                                Spacing="1">
+                        <TextBlock x:Name="ThemeName"
+                                   FontSize="{StaticResource BodyTextBlockFontSize}"
+                                   Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <StackPanel Orientation="Horizontal"
+                                    Spacing="4"
+                                    Height="16">
+                            <FontIcon x:Name="ThemeHintGlyph"
+                                      FontFamily="{StaticResource SymbolThemeFontFamily}"
+                                      FontSize="10"
+                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                      VerticalAlignment="Center"/>
+                            <TextBlock x:Name="ThemeHintText"
+                                       FontSize="{StaticResource CaptionTextBlockFontSize}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <!-- Badge column, a fixed width so the name keeps its room
+                         whichever badge a row shows. "Current" is the theme
+                         the config names; "Previewing" is the one on the
+                         terminals now. Both brushes carry High Contrast
+                         mappings of their own. -->
+                    <Grid Grid.Column="2"
+                          Width="92"
+                          VerticalAlignment="Center">
+                        <StackPanel x:Name="ThemeCurrentBadge"
+                                    Orientation="Horizontal"
+                                    Spacing="4"
+                                    HorizontalAlignment="Right"
+                                    Visibility="Collapsed">
+                            <!-- Segoe Fluent Icons: U+E73E = CheckMark -->
+                            <FontIcon Glyph="&#xE73E;"
+                                      FontFamily="{StaticResource SymbolThemeFontFamily}"
+                                      FontSize="12"
+                                      Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                      VerticalAlignment="Center"/>
+                            <TextBlock Text="Current"
+                                       FontSize="{StaticResource CaptionTextBlockFontSize}"
+                                       Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel x:Name="ThemePreviewBadge"
+                                    Orientation="Horizontal"
+                                    Spacing="4"
+                                    HorizontalAlignment="Right"
+                                    Visibility="Collapsed">
+                            <!-- Segoe Fluent Icons: U+E890 = View -->
+                            <FontIcon Glyph="&#xE890;"
+                                      FontFamily="{StaticResource SymbolThemeFontFamily}"
+                                      FontSize="12"
+                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                      VerticalAlignment="Center"/>
+                            <TextBlock Text="Previewing"
+                                       FontSize="{StaticResource CaptionTextBlockFontSize}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
             </Grid>
         </DataTemplate>
 

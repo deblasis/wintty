@@ -149,4 +149,125 @@ public class PaletteThemeWiringTests
         Assert.Contains(set.Ancestors(), a => a == write);
         Assert.Empty(commit.Calls("_editor.WriteRaw"));
     }
+
+    // -- Look and feel ---------------------------------------------------
+
+    /// <summary>
+    /// Every preview re-resolves the window's light/dark variant from the
+    /// previewed background. A browse holds the palette on the variant it
+    /// opened in, or a held arrow key across light and dark themes flips
+    /// the whole palette surface at every boundary; it lets go when the
+    /// browse ends, whichever way it ends. The seam harness's fast arrow run
+    /// is the pixel proof; this pins where the hold lives.
+    /// </summary>
+    [Fact]
+    public void ABrowseHoldsThePaletteOnTheVariantItOpenedIn()
+    {
+        var palette = Palette();
+        var changed = palette.Method("OnThemeChanged");
+        var hold = Assert.IsType<IfStatementSyntax>(changed.Body!.Statements[0]);
+        Assert.Contains("PaletteMode.Theme", hold.Condition.ToString(), System.StringComparison.Ordinal);
+        Assert.Contains(hold.Statement.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.ToString() == "_themeSyncDeferred = true");
+        Assert.True(hold.Statement.DescendantNodes().OfType<ReturnStatementSyntax>().Any(),
+            "the hold must return before ApplyTheme");
+        Assert.Single(changed.Calls("ApplyTheme"));
+
+        Assert.Single(palette.Case("OnViewModelPropertyChanged", "ModeLabel").Calls("ResumeThemeSync"));
+        Assert.Single(palette.Case("OnViewModelPropertyChanged", "IsOpen").Calls("ResumeThemeSync"));
+        Assert.Single(palette.Method("ResumeThemeSync").Calls("ApplyTheme"));
+    }
+
+    /// <summary>
+    /// Closing the palette's Popup unloads the palette, and Unloaded disposes
+    /// its theme manager. Loaded has to build a new one, or every open after
+    /// the first keeps the variant the first close left behind: the hold
+    /// above would have nothing to catch up from, and a system light/dark
+    /// flip would never reach the palette again.
+    /// </summary>
+    [Fact]
+    public void EveryOpenFollowsTheWindowThemeAgain()
+    {
+        var palette = Palette();
+        var unloaded = palette.Method("OnPaletteUnloaded");
+        Assert.Single(unloaded.Calls("_themeManager.Dispose"));
+
+        var loaded = palette.Method("OnPaletteLoaded");
+        var rebuild = Assert.Single(loaded.DescendantNodes().OfType<IfStatementSyntax>(),
+            s => s.Condition.ToString().Contains("_themeManager is null", System.StringComparison.Ordinal));
+        Assert.Single(rebuild.Statement.Calls("SubscribeThemeManager"));
+        Assert.Single(loaded.Calls("ApplyTheme"));
+
+        Assert.Single(palette.Method("Configure").Calls("SubscribeThemeManager"));
+        Assert.Contains(palette.Method("Configure").DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.ToString() == "_configService = configService");
+    }
+
+    /// <summary>
+    /// A theme row's accessible name comes from ThemeRowPresentation, which
+    /// says "current theme", through the same one SetName every row takes.
+    /// </summary>
+    [Fact]
+    public void ThemeRowsAreNamedByThemeRowPresentation()
+    {
+        var method = Palette().Method("OnContainerContentChanging");
+        var row = method.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "row");
+        Assert.Contains(row.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "ThemeRowPresentation.Automation");
+    }
+
+    /// <summary>
+    /// A long theme list stays responsive: phase 0 paints only a swatch that
+    /// is already cached (so a refilter or a scroll never blinks) and reads
+    /// no theme file; an unread swatch is read in phase 1, and a container
+    /// already on its way to the recycle queue reads nothing.
+    /// </summary>
+    [Fact]
+    public void ARowNeverReadsAThemeFileInPhaseZero()
+    {
+        var palette = Palette();
+        var phase0 = palette.Method("OnContainerContentChanging");
+        Assert.Single(phase0.Calls("_vm.TryGetCachedThemeSwatch"));
+        Assert.Empty(phase0.Calls("_vm.LoadThemeSwatch"));
+        var register = Assert.Single(phase0.Calls("args.RegisterUpdateCallback"));
+        Assert.Equal("OnThemeRowSwatchPhase", register.Arg(0));
+
+        var phase1 = palette.Method("OnThemeRowSwatchPhase");
+        Assert.Single(phase1.Calls("_vm.LoadThemeSwatch"));
+        Assert.Contains("args.InRecycleQueue", phase1.Body!.Statements[0].ToString(), System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The theme list's footer reads like the other modes' ("verb" per key),
+    /// and the search box and list are named for what they hold there.
+    /// </summary>
+    [Fact]
+    public void TheThemeListSaysApplyAndCancelAndFilterThemes()
+    {
+        var chrome = Palette().Method("UpdateModeChrome");
+        var literals = chrome.DescendantNodes().OfType<LiteralExpressionSyntax>()
+            .Select(l => l.Token.ValueText).ToList();
+        Assert.Contains("↑↓ preview   ↵ apply   Esc cancel", literals);
+        Assert.Contains("Filter themes", literals);
+        Assert.Contains("Themes", literals);
+        Assert.Single(Palette().Case("OnViewModelPropertyChanged", "ModeLabel").Calls("UpdateModeChrome"));
+    }
+
+    /// <summary>
+    /// The palette never moves focus off its search box, so the selection
+    /// announcement is how a reader hears which theme is on the terminals;
+    /// and the highlight carries the "Previewing" badge with it.
+    /// </summary>
+    [Fact]
+    public void TheHighlightAnnouncesTheThemeRowAndMovesTheBadge()
+    {
+        var palette = Palette();
+        var sync = palette.Method("SyncSelectedItem");
+        var announce = Assert.Single(sync.Calls("UiaAnnouncer.Announce"));
+        Assert.StartsWith("SelectionAnnouncement(", announce.Arg(1), System.StringComparison.Ordinal);
+        Assert.Single(sync.Calls("RefreshThemeBadges"));
+        Assert.Single(palette.Method("SelectionAnnouncement").Calls("ThemeRowPresentation.Announcement"));
+        Assert.Single(palette.Method("RefreshBadge").Calls("ThemeRowPresentation.Badge"));
+    }
 }

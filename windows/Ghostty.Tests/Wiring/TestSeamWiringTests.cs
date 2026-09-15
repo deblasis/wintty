@@ -650,11 +650,19 @@ public class TestSeamWiringTests
         var general = seam.Root.DescendantNodes().OfType<CatchClauseSyntax>()
             .Where(c => c.Filter is null && c.Declaration?.Type.ToString() == "Exception")
             .ToList();
-        Assert.Equal(5, general.Count);
+        // A third shape reports beside the rest of an answer: the palette
+        // readout keeps every other field when one cannot be taken, and puts
+        // Describe's text in the answer's lookError instead of failing it.
+        Assert.Equal(6, general.Count);
         var answering = general.Where(h => h.Calls("Error").Any()).ToList();
-        var recording = general.Where(h => !h.Calls("Error").Any()).ToList();
+        var recording = general.Where(h => !h.Calls("Error").Any() && h.Calls("Diag").Any()).ToList();
+        var readout = general.Where(h => !h.Calls("Error").Any() && !h.Calls("Diag").Any()).ToList();
         Assert.Equal(3, answering.Count);
         Assert.Equal(2, recording.Count);
+        var inAnswer = Assert.Single(readout);
+        Assert.Contains(inAnswer.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Right.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()
+                .Any(i => i.ToString() == "Describe(ex)"));
         foreach (var handler in answering)
         {
             Assert.Equal("Describe(ex)", handler.Call("Error").Arg(1));

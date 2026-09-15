@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.ComponentModel;
 using Ghostty.Accessibility;
 using Ghostty.Commands;
 using Ghostty.Core.Accessibility;
 using Ghostty.Core.Config;
+using Ghostty.Core.Themes;
 using Ghostty.Core.Windows;
 using Ghostty.Services;
 using Microsoft.UI;
@@ -56,6 +58,24 @@ internal sealed partial class CommandPaletteControl : UserControl
     // so it lives with the control rather than being created per update.
     private readonly CommandPaletteAnnouncer _announcer = new();
 
+    // A theme browse holds the palette on the light or dark variant it opened
+    // in. Each preview re-resolves the window's variant from the previewed
+    // background, so without the hold a held arrow key across light and dark
+    // themes flips the whole palette surface on every boundary. The window
+    // chrome still previews; the palette catches up when the browse ends.
+    private bool _themeSyncDeferred;
+
+    // Kept from Configure, so a Loaded after an Unloaded can rebuild the
+    // theme manager the Unloaded disposed.
+    private IConfigService? _configService;
+
+    // Swatch fills, one brush per colour. Rows are realized and recycled as
+    // the list scrolls or refilters, and the same few dozen colours recur.
+    private readonly Dictionary<uint, SolidColorBrush> _swatchBrushes = new();
+
+    // The row template's fixed height, which Page Up/Down counts screens in.
+    private const double RowHeight = 44;
+
     public CommandPaletteControl()
     {
         InitializeComponent();
@@ -68,7 +88,20 @@ internal sealed partial class CommandPaletteControl : UserControl
         Unloaded += OnPaletteUnloaded;
     }
 
-    private void OnPaletteLoaded(object sender, RoutedEventArgs e) => ApplyTheme();
+    private void OnPaletteLoaded(object sender, RoutedEventArgs e)
+    {
+        // The palette lives in a Popup, and closing the Popup unloads it, which
+        // disposes the theme manager (OnPaletteUnloaded). Without a new one
+        // here, every open after the first would keep whatever variant the
+        // first close left behind, and a browse that ends in Enter could not
+        // catch up with the theme it just applied.
+        if (_themeManager is null && _configService is not null)
+        {
+            _themeSyncDeferred = false;
+            SubscribeThemeManager(_configService);
+        }
+        ApplyTheme();
+    }
 
     // Up/Down are handled in OnSearchKeyDown and marked handled, so focus
     // never leaves the search box while the user walks the list. That is
@@ -101,10 +134,16 @@ internal sealed partial class CommandPaletteControl : UserControl
             _themeManager.Dispose();
         }
 
+        _configService = configService;
+        SubscribeThemeManager(configService);
+        ApplyTheme();
+    }
+
+    private void SubscribeThemeManager(IConfigService configService)
+    {
         _themeManager = new WindowThemeManager(
             configService, DispatcherQueue, ThemeFallbackStyle.Palette);
         _themeManager.ThemeChanged += OnThemeChanged;
-        ApplyTheme();
     }
 
     private void OnPaletteUnloaded(object sender, RoutedEventArgs e)
@@ -115,7 +154,25 @@ internal sealed partial class CommandPaletteControl : UserControl
         _themeManager = null;
     }
 
-    private void OnThemeChanged(bool _) => ApplyTheme();
+    private void OnThemeChanged(bool _)
+    {
+        if (_vm is { IsOpen: true, Mode: PaletteMode.Theme })
+        {
+            _themeSyncDeferred = true;
+            return;
+        }
+        ApplyTheme();
+    }
+
+    // The browse is over (Escape, Enter, any close): take whatever variant the
+    // window settled on while the palette was holding still.
+    private void ResumeThemeSync()
+    {
+        if (!_themeSyncDeferred) return;
+        if (_vm is { IsOpen: true, Mode: PaletteMode.Theme }) return;
+        _themeSyncDeferred = false;
+        ApplyTheme();
+    }
 
     private void ApplyTheme()
     {
@@ -254,11 +311,13 @@ internal sealed partial class CommandPaletteControl : UserControl
                     // view model suppresses same-value changes, so the open
                     // itself has to be what speaks.
                     if (_vm.IsOpen) _announcer.Opening();
+                    else ResumeThemeSync();
                     break;
 
                 case nameof(CommandPaletteViewModel.ModeLabel):
                     SetModeLabel(_vm.ModeLabel);
-                    UpdateFooterHints();
+                    UpdateModeChrome();
+                    ResumeThemeSync();
                     break;
 
                 case nameof(CommandPaletteViewModel.IsPinned):
@@ -325,7 +384,7 @@ internal sealed partial class CommandPaletteControl : UserControl
         SearchBox.Text = _vm.SearchText;
         StatusLabel.Text = _vm.StatusText;
         SyncFilteredCommands();
-        UpdateFooterHints();
+        UpdateModeChrome();
     }
 
     private void SyncFilteredCommands()
@@ -367,20 +426,45 @@ internal sealed partial class CommandPaletteControl : UserControl
             // row names below are invisible on the one path a screen-reader
             // user actually takes through the palette. Announce is gated on a
             // listener existing, so nobody else pays for it.
-            UiaAnnouncer.Announce(SearchBox, _vm.SelectedCommand.Title, "palette-selection");
+            UiaAnnouncer.Announce(SearchBox, SelectionAnnouncement(_vm.SelectedCommand), "palette-selection");
         }
+
+        // The highlight is the preview: move the "Previewing" badge with it.
+        RefreshThemeBadges();
     }
 
-    private void UpdateFooterHints()
+    // What is spoken when the highlight lands on a row. A theme row says
+    // whether it is the configured theme or the one now on the terminals.
+    private string SelectionAnnouncement(CommandItem item)
+    {
+        if (_vm is null || item.ThemeName is not { } theme) return item.Title;
+        return ThemeRowPresentation.Announcement(
+            theme,
+            item.IsCurrentTheme,
+            _vm.IsThemePreviewed(theme),
+            _vm.LoadThemeSwatch(theme)?.IsDark);
+    }
+
+    // The footer hint, and what the search box and the list are called, per
+    // mode. The accessible names follow the mode for the same reason the mode
+    // label's does: a reader in the theme list that hears "Search commands"
+    // is told the wrong thing about what typing does.
+    private void UpdateModeChrome()
     {
         if (_vm is null) return;
 
+        var theme = _vm.Mode == PaletteMode.Theme;
         ShortcutHints.Text = _vm.Mode switch
         {
             PaletteMode.CommandLine => "Tab autocomplete   ↑↓ navigate   ↵ run   Esc close",
-            PaletteMode.Theme => "↑↓ preview   ↵ keep   Esc revert",
+            PaletteMode.Theme => "↑↓ preview   ↵ apply   Esc cancel",
             _ => "↑↓ navigate   ↵ run   Esc close",
         };
+        SearchBox.PlaceholderText = theme
+            ? "Filter themes..."
+            : "Search commands or type > for actions...";
+        AutomationProperties.SetName(SearchBox, theme ? "Filter themes" : "Search commands");
+        AutomationProperties.SetName(ResultsList, theme ? "Themes" : "Command results");
     }
 
     // ── ContainerContentChanging: populate DataTemplate elements ─────────────
@@ -400,13 +484,24 @@ internal sealed partial class CommandPaletteControl : UserControl
     {
         if (args.Item is not CommandItem item) return;
 
+        // A theme row's swatch, when it has been read already. Painted now,
+        // in this phase, so a row that refilters or scrolls back never shows
+        // the blank tile for a frame; an unread one is read in phase 1.
+        ThemeSwatch? swatch = null;
+        var swatchKnown = item.ThemeName is { } themeName
+            && _vm is not null
+            && _vm.TryGetCachedThemeSwatch(themeName, out swatch);
+
         // Name the container before anything below can bail out; the
         // decision of what each property should hold (and which of them
-        // are absent for this item) is CommandRowAutomation's.
-        var row = CommandRowAutomation.For(
-            item.Title,
-            item.Description,
-            item.Shortcut is { } binding ? FormatKeyBinding(binding) : null);
+        // are absent for this item) is CommandRowAutomation's, or for a
+        // theme row ThemeRowPresentation's, which says "current theme".
+        var row = item.ThemeName is { } theme
+            ? ThemeRowPresentation.Automation(theme, item.IsCurrentTheme, swatch?.IsDark)
+            : CommandRowAutomation.For(
+                item.Title,
+                item.Description,
+                item.Shortcut is { } binding ? FormatKeyBinding(binding) : null);
 
         AutomationProperties.SetName(args.ItemContainer, row.Name);
         SetOrClear(args.ItemContainer, AutomationProperties.HelpTextProperty, row.HelpText);
@@ -415,8 +510,26 @@ internal sealed partial class CommandPaletteControl : UserControl
         // Phase 0 fires synchronously during measure; grab the template root.
         // Children are indexed by column order in the DataTemplate:
         //   [0] Ellipse  [1] FontIcon  [2] StackPanel  [3] Border>TextBlock
+        // and the theme row part after them (found by name, see ThemeRowParts).
         if (args.ItemContainer.ContentTemplateRoot is not Grid root || root.Children.Count < 4)
             return;
+
+        var parts = ThemeRowParts.Of(root);
+        if (item.ThemeName is { } rowTheme && parts is not null)
+        {
+            ShowThemeRow(root, parts, true);
+            parts.Theme = rowTheme;
+            parts.Name.Text = rowTheme;
+            if (swatchKnown) PaintSwatch(parts, swatch);
+            else
+            {
+                ClearSwatch(parts);
+                args.RegisterUpdateCallback(OnThemeRowSwatchPhase);
+            }
+            RefreshBadge(parts, item);
+            return;
+        }
+        ShowThemeRow(root, parts, false);
 
         // Color dot (column 0)
         if (root.Children[0] is Ellipse dot)
@@ -489,6 +602,166 @@ internal sealed partial class CommandPaletteControl : UserControl
             {
                 shortcutBorder.Visibility = Visibility.Collapsed;
             }
+        }
+    }
+
+    // ── Theme rows ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The named parts of one realized row's theme half, looked up once per
+    /// template instance and kept on its root. Null when the template has no
+    /// theme half (it always has; the null keeps a bad edit from crashing).
+    /// </summary>
+    private sealed class ThemeRowParts
+    {
+        public required Grid Row { get; init; }
+        public required Border Tile { get; init; }
+        public required TextBlock Sample { get; init; }
+        public required Rectangle Cursor { get; init; }
+        public required Rectangle[] Strip { get; init; }
+        public required TextBlock Name { get; init; }
+        public required FontIcon HintGlyph { get; init; }
+        public required TextBlock HintText { get; init; }
+        public required FrameworkElement CurrentBadge { get; init; }
+        public required FrameworkElement PreviewBadge { get; init; }
+        public string? Theme { get; set; }
+        public bool Painted { get; set; }
+        public ThemeSwatch? Swatch { get; set; }
+
+        public static ThemeRowParts? Of(Grid root)
+        {
+            if (root.Tag is ThemeRowParts known) return known;
+            if (root.FindName("ThemeRow") is not Grid row
+                || root.FindName("SwatchTile") is not Border tile
+                || root.FindName("SwatchSample") is not TextBlock sample
+                || root.FindName("SwatchCursor") is not Rectangle cursor
+                || root.FindName("SwatchStrip") is not StackPanel strip
+                || root.FindName("ThemeName") is not TextBlock name
+                || root.FindName("ThemeHintGlyph") is not FontIcon glyph
+                || root.FindName("ThemeHintText") is not TextBlock hint
+                || root.FindName("ThemeCurrentBadge") is not FrameworkElement current
+                || root.FindName("ThemePreviewBadge") is not FrameworkElement preview)
+                return null;
+            var parts = new ThemeRowParts
+            {
+                Row = row,
+                Tile = tile,
+                Sample = sample,
+                Cursor = cursor,
+                Strip = strip.Children.OfType<Rectangle>().ToArray(),
+                Name = name,
+                HintGlyph = glyph,
+                HintText = hint,
+                CurrentBadge = current,
+                PreviewBadge = preview,
+            };
+            root.Tag = parts;
+            return parts;
+        }
+    }
+
+    // One template carries both kinds of row; show the half this item needs.
+    // The command half's own elements are set per item by the code below it,
+    // except the title stack, which a theme row collapsed.
+    private static void ShowThemeRow(Grid root, ThemeRowParts? parts, bool theme)
+    {
+        if (parts is not null)
+            parts.Row.Visibility = theme ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var child in root.Children)
+        {
+            if (parts is not null && ReferenceEquals(child, parts.Row)) continue;
+            if (theme) child.Visibility = Visibility.Collapsed;
+        }
+        if (!theme) root.Children[2].Visibility = Visibility.Visible;
+    }
+
+    // Phase 1: read the swatch this row did not find cached. Deferred so a
+    // long list realizes and shows its rows before any theme file is read.
+    private void OnThemeRowSwatchPhase(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.InRecycleQueue || _vm is null) return;
+        if (args.Item is not CommandItem { ThemeName: { } theme }) return;
+        if (args.ItemContainer.ContentTemplateRoot is not Grid root) return;
+        if (ThemeRowParts.Of(root) is not { } parts || parts.Theme != theme) return;
+
+        var swatch = _vm.LoadThemeSwatch(theme);
+        PaintSwatch(parts, swatch);
+        SetOrClear(args.ItemContainer, AutomationProperties.HelpTextProperty,
+            ThemeRowPresentation.HelpText(swatch?.IsDark));
+    }
+
+    // Fill the swatch and the hint. A theme with no readable file keeps the
+    // neutral tile and no hint: nothing about it is known.
+    private void PaintSwatch(ThemeRowParts parts, ThemeSwatch? swatch)
+    {
+        parts.Painted = true;
+        parts.Swatch = swatch;
+        if (swatch is null)
+        {
+            ClearSwatch(parts);
+            parts.Painted = true;
+            return;
+        }
+
+        parts.Tile.Background = SwatchBrush(swatch.Background);
+        parts.Sample.Foreground = SwatchBrush(swatch.Foreground);
+        parts.Cursor.Fill = SwatchBrush(swatch.Cursor);
+        for (var i = 0; i < parts.Strip.Length && i < swatch.Palette.Count; i++)
+            parts.Strip[i].Fill = SwatchBrush(swatch.Palette[i]);
+        parts.Tile.Opacity = 1;
+
+        // Segoe Fluent Icons: U+E708 = QuietHours (moon), U+E706 = Brightness (sun).
+        parts.HintGlyph.Glyph = swatch.IsDark ? "\uE708" : "\uE706";
+        parts.HintText.Text = ThemeRowPresentation.Hint(swatch.IsDark) ?? "";
+    }
+
+    // Back to the neutral tile, for a recycled container whose next theme has
+    // not been read yet. Opacity only: sizes never change, so nothing moves.
+    private static void ClearSwatch(ThemeRowParts parts)
+    {
+        parts.Painted = false;
+        parts.Swatch = null;
+        parts.Tile.Opacity = 0;
+        parts.HintGlyph.Glyph = "";
+        parts.HintText.Text = "";
+    }
+
+    private SolidColorBrush SwatchBrush(uint rgb)
+    {
+        if (_swatchBrushes.TryGetValue(rgb, out var brush)) return brush;
+        brush = new SolidColorBrush(Color.FromArgb(
+            0xFF, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb));
+        _swatchBrushes[rgb] = brush;
+        return brush;
+    }
+
+    private void RefreshBadge(ThemeRowParts parts, CommandItem item)
+    {
+        if (_vm is null || item.ThemeName is not { } theme) return;
+        var badge = ThemeRowPresentation.Badge(item.IsCurrentTheme, _vm.IsThemePreviewed(theme));
+        parts.CurrentBadge.Visibility = badge == ThemeRowBadge.Current ? Visibility.Visible : Visibility.Collapsed;
+        parts.PreviewBadge.Visibility = badge == ThemeRowBadge.Previewing ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // Every realized theme row, re-badged for where the highlight is now.
+    private void RefreshThemeBadges()
+    {
+        if (_vm?.Mode != PaletteMode.Theme) return;
+        foreach (var (item, parts, _) in RealizedThemeRows())
+            RefreshBadge(parts, item);
+    }
+
+    private IEnumerable<(CommandItem Item, ThemeRowParts Parts, ListViewItem Container)> RealizedThemeRows()
+    {
+        if (ResultsList.ItemsPanelRoot is not Panel panel) yield break;
+        foreach (var child in panel.Children)
+        {
+            if (child is ListViewItem { Content: CommandItem { ThemeName: not null } item } container
+                && container.ContentTemplateRoot is Grid root
+                && root.Tag is ThemeRowParts parts
+                && parts.Theme == item.ThemeName
+                && parts.Row.Visibility == Visibility.Visible)
+                yield return (item, parts, container);
         }
     }
 
@@ -572,10 +845,24 @@ internal sealed partial class CommandPaletteControl : UserControl
                 _vm.MoveSelectionDown();
                 return true;
 
+            // A screenful at a time, for a long theme list. A single-line
+            // search box has no use of its own for either key.
+            case VirtualKey.PageUp:
+                _vm.MoveSelectionBy(-PageStep());
+                return true;
+
+            case VirtualKey.PageDown:
+                _vm.MoveSelectionBy(PageStep());
+                return true;
+
             default:
                 return false;
         }
     }
+
+    // One row short of what the list shows, so the row the highlight left is
+    // still on screen after the page turns.
+    private int PageStep() => Math.Max(1, (int)(ResultsList.ActualHeight / RowHeight) - 1);
 
     // ---- test seam accessors (compiled into every build, reachable only
     // through the seam's pipe, which exists only in a TESTSEAM build) ------
@@ -592,6 +879,72 @@ internal sealed partial class CommandPaletteControl : UserControl
     {
         SearchBox.Text = text;
         if (_vm is not null) _vm.SearchText = text;
+    }
+
+    /// <summary>The light/dark variant the palette is drawn in.</summary>
+    internal string TestSeamElementTheme => ActualTheme.ToString();
+
+    /// <summary>Whether the palette is following the window's light/dark variant.</summary>
+    internal bool TestSeamTracksWindowTheme => _themeManager is not null;
+
+    /// <summary>The footer's key hint.</summary>
+    internal string TestSeamFooterHint => ShortcutHints.Text;
+
+    /// <summary>The search box's accessible name and placeholder.</summary>
+    internal (string Name, string Placeholder) TestSeamSearchBox =>
+        (AutomationProperties.GetName(SearchBox), SearchBox.PlaceholderText);
+
+    /// <summary>The results list's accessible name.</summary>
+    internal string TestSeamListName => AutomationProperties.GetName(ResultsList);
+
+    /// <summary>The palette's card, for a rect a pixel oracle can sample.</summary>
+    internal FrameworkElement TestSeamCard => OuterBorder;
+
+    /// <summary>One realized theme row, as drawn.</summary>
+    internal sealed record TestSeamThemeRow(
+        string Theme,
+        bool Current,
+        bool Selected,
+        string Badge,
+        string AutomationName,
+        string? HelpText,
+        string Hint,
+        bool Painted,
+        ThemeSwatch? Swatch,
+        FrameworkElement Container,
+        FrameworkElement Tile,
+        FrameworkElement Sample,
+        FrameworkElement Cursor,
+        IReadOnlyList<FrameworkElement> Strip);
+
+    /// <summary>The theme rows the list has realized, top to bottom.</summary>
+    internal IReadOnlyList<TestSeamThemeRow> TestSeamThemeRows()
+    {
+        var rows = new List<TestSeamThemeRow>();
+        foreach (var (item, parts, container) in RealizedThemeRows())
+        {
+            var badge = parts.CurrentBadge.Visibility == Visibility.Visible ? "Current"
+                : parts.PreviewBadge.Visibility == Visibility.Visible ? "Previewing"
+                : "";
+            rows.Add(new TestSeamThemeRow(
+                item.ThemeName!,
+                item.IsCurrentTheme,
+                ReferenceEquals(ResultsList.SelectedItem, item) || container.IsSelected,
+                badge,
+                AutomationProperties.GetName(container),
+                container.ReadLocalValue(AutomationProperties.HelpTextProperty) as string,
+                parts.HintText.Text,
+                parts.Painted,
+                parts.Swatch,
+                container,
+                parts.Tile,
+                parts.Sample,
+                parts.Cursor,
+                parts.Strip));
+        }
+        return rows
+            .OrderBy(r => ResultsList.IndexFromContainer(r.Container))
+            .ToList();
     }
 
     private void OnItemClick(object sender, ItemClickEventArgs e)

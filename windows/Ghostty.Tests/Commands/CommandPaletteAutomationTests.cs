@@ -123,6 +123,65 @@ public class CommandPaletteAutomationTests
         }
     }
 
+    // -- Theme rows ------------------------------------------------------
+
+    [Fact]
+    public void ThemeRows_LiveInTheOneRowTemplate()
+    {
+        // A DataTemplateSelector over the palette's CLR rows throws inside
+        // MeasureOverride (KeybindListWinUiAbiTests); the theme half has to
+        // be part of the single template the list already uses.
+        var list = Named("ResultsList");
+        Assert.Equal("{StaticResource CommandItemTemplate}", (string?)list.Attribute("ItemTemplate"));
+        Assert.DoesNotContain(Markup().Descendants().Attributes(), a => a.Name.LocalName == "ItemTemplateSelector");
+
+        var template = Markup().Descendants()
+            .Single(e => e.Name.LocalName == "DataTemplate" && (string?)e.Attribute(X + "Key") == "CommandItemTemplate");
+        Assert.Contains(template.Descendants(), e => (string?)e.Attribute(X + "Name") == "ThemeRow");
+    }
+
+    [Fact]
+    public void ThemeSwatch_HasTheSameFixedSizeLoadedOrNot()
+    {
+        // The neutral tile and the painted swatch share one fixed-size host,
+        // and the hint line keeps its height while empty: a row that fills
+        // in never changes size, so the list never moves under the highlight.
+        var tile = Named("SwatchTile");
+        var host = tile.Parent!;
+        Assert.Equal("60", (string?)host.Attribute("Width"));
+        Assert.Equal("34", (string?)host.Attribute("Height"));
+        Assert.Equal("0", (string?)tile.Attribute("Opacity"));
+        Assert.Null(tile.Attribute("Width"));
+        Assert.Null(tile.Attribute("Visibility"));
+
+        var cells = Named("SwatchStrip").Elements().ToList();
+        Assert.Equal(8, cells.Count);
+        Assert.All(cells, c =>
+        {
+            Assert.Equal("6", (string?)c.Attribute("Width"));
+            Assert.Equal("4", (string?)c.Attribute("Height"));
+        });
+
+        var hintLine = Named("ThemeHintText").Parent!;
+        Assert.Equal("16", (string?)hintLine.Attribute("Height"));
+
+        // Both badges share one fixed-width host (one document, so the two
+        // lookups can be compared as the same element).
+        var doc = Markup();
+        XElement InDoc(string name) => doc.Descendants().Single(e => (string?)e.Attribute(X + "Name") == name);
+        var badges = InDoc("ThemeCurrentBadge").Parent!;
+        Assert.NotNull(badges.Attribute("Width"));
+        Assert.Same(badges, InDoc("ThemePreviewBadge").Parent);
+    }
+
+    [Fact]
+    public void ThemeSwatch_SampleTextIsNotReadOut()
+    {
+        // "Aa" is a picture of the foreground, not content; the row's name
+        // already says which theme it is.
+        Assert.Equal("Raw", (string?)Named("SwatchSample").Attribute("AutomationProperties.AccessibilityView"));
+    }
+
     private static List<XElement> LiveRegions() =>
         Markup().Descendants().Where(e => e.Attribute(LiveSetting) is not null).ToList();
 

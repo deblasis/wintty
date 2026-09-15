@@ -5286,6 +5286,10 @@ public sealed partial class MainWindow : Window
             ActiveTheme = () => Ghostty.Core.Config.ThemeParser.SelectForScheme(
                 _configService.CurrentTheme, Services.OsTheme.IsDark()),
             Browse = themeBrowse,
+            // The rows' swatches, read from the file libghostty would load
+            // for each name: the same directories, in the same order.
+            Swatches = Ghostty.Core.Themes.ThemeSwatchCache.ForDirectories(
+                () => Services.ThemeProvider.Directories(_configService.ConfigFilePath)),
         };
 
         // Deliberate crash triggers, the same kinds and the same
@@ -5382,9 +5386,12 @@ public sealed partial class MainWindow : Window
             timer.Tick += (t, _) =>
             {
                 t.Stop();
+                // The DispatcherQueue outlives the window, and Stop on the
+                // close path does not recall a tick already queued.
+                if (_isClosed) return;
                 var due = _paletteThemeTimerWork;
                 _paletteThemeTimerWork = null;
-                if (!_isClosed) due?.Invoke();
+                due?.Invoke();
             };
             _paletteThemeTimer = timer;
         }

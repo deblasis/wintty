@@ -35,5 +35,11 @@ internal record CommandItem
     public bool Emphasis { get; init; }
     public string? Badge { get; init; }
     public string? PreviewText { get; init; }
+    // Set on the rows of the palette's theme list only: the theme the row
+    // stands for, and whether it is the one the config names now. The row
+    // template draws a swatch and a badge from these instead of the icon,
+    // description and key-cap a command row shows.
+    public string? ThemeName { get; init; }
+    public bool IsCurrentTheme { get; init; }
     public required Action<CommandItem> Execute { get; init; }
 }
