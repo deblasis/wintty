@@ -8,8 +8,9 @@
     own, and one theme only the user has. No theme is configured (the case
     where the user never set one). The browse itself runs over a small group
     of real bundled themes that one filter word narrows the list to, picked
-    from the shipped set at run time (two dark first, a light one last, every
-    background distinct), with the user's copy in the middle of it. Each step
+    from the shipped set at run time (the second dark, the last light, the
+    ones the pixel oracle compares clearly apart), with the user's copy
+    third. Each step
     reads the theme back three ways:
 
       - the terminal's config, as the live native config states it (the
@@ -532,11 +533,15 @@ $CopyCandidates = @(
         p = @('#14301F', '#FF6B6B', '#9BE564', '#FFE066', '#6CB6FF', '#C792EA', '#63E6BE', '#E4F7EC') })
 
 # A filter word that narrows the shipped set to a group this scenario can
-# browse: four to six names, the first two dark and the last light, every
-# background clear of the others, of the untouched baseline and of the
-# user's copy. Picked from the set on disk, so a refresh of the bundled
-# themes changes the group, not the harness.
-$avoid = @('#F4F6FB', '#282C34', '#FFFFFF', '#000000', $UserOnlyTheme.bg)
+# browse: four to seven names (all on screen at once), the second dark and
+# the last light. The first, the second and the last are the ones the pixel
+# oracle tells apart, so their backgrounds must be clear of each other and
+# of the untouched baseline by more than twice the oracle's tolerance; the
+# third is replaced by the user's copy, in colours clear of the whole group.
+# Picked from the set on disk, so a refresh of the bundled themes changes
+# the group, not the harness.
+$Apart = 16
+$avoid = @('#F4F6FB', $UserOnlyTheme.bg)
 $tokens = @($BundledCatalog | ForEach-Object { $_ -split '[^A-Za-z0-9]+' } |
     Where-Object { $_.Length -ge 4 } | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
 $Group = $null; $Token = $null; $Copy = $null
@@ -544,19 +549,21 @@ foreach ($tok in $tokens) {
     if ((Match-Rank $UserOnly $tok) -ne [int]::MaxValue) { continue }
     $count = 0
     foreach ($n in $BundledCatalog) { if ($n.IndexOf($tok, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $count++ } }
-    if ($count -lt 4 -or $count -gt 6) { continue }
+    if ($count -lt 4 -or $count -gt 7) { continue }
     $m = Filter-Themes $BundledCatalog $tok
     $bgs = @($m | ForEach-Object { (Theme-Of $_).bg })
-    if (-not (Is-DarkHex $bgs[0]) -or -not (Is-DarkHex $bgs[1]) -or (Is-DarkHex $bgs[-1])) { continue }
+    if (-not (Is-DarkHex $bgs[1]) -or (Is-DarkHex $bgs[-1])) { continue }
+    $told = @($bgs[0], $bgs[1], $bgs[-1])
     $ok = $true
-    for ($i = 0; $i -lt $bgs.Count -and $ok; $i++) {
-        foreach ($a in $avoid) { if (Near $bgs[$i] $a 24) { $ok = $false } }
-        for ($j = $i + 1; $j -lt $bgs.Count; $j++) { if (Near $bgs[$i] $bgs[$j] 24) { $ok = $false } }
+    for ($i = 0; $i -lt $told.Count -and $ok; $i++) {
+        foreach ($a in $avoid) { if (Near $told[$i] $a $Apart) { $ok = $false } }
+        for ($j = $i + 1; $j -lt $told.Count; $j++) { if (Near $told[$i] $told[$j] $Apart) { $ok = $false } }
     }
     if (-not $ok) { continue }
-    # The user's copy replaces the third name's colours; they must stay clear too.
+    # The user's copy replaces the third name's colours; they must stay clear
+    # of every other name in the group.
     $others = @($bgs[0], $bgs[1]) + @($bgs | Select-Object -Skip 3)
-    $Copy = $CopyCandidates | Where-Object { $c = $_; -not ($others | Where-Object { Near $_ $c.bg 24 }) } | Select-Object -First 1
+    $Copy = $CopyCandidates | Where-Object { $c = $_; -not ($others | Where-Object { Near $_ $c.bg $Apart }) } | Select-Object -First 1
     if ($null -eq $Copy) { continue }
     $Group = $m; $Token = $tok
     break
