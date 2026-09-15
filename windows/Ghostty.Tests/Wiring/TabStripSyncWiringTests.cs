@@ -101,6 +101,75 @@ public sealed class TabStripSyncWiringTests
             "The moved path must reconcile after its own mutations.");
     }
 
+    // --- MoveItem: the swap's own selection raise ---
+
+    [Fact]
+    public void MoveItem_fences_its_swap_and_lands_the_selection_afterwards()
+    {
+        var moveItem = ShellSource.Load(TabHostSource).Method("MoveItem");
+
+        // The moved row usually holds the strip's selection: a pin
+        // relocates the ACTIVE tab, so the swap's Remove takes the
+        // SELECTED item out of TabItems, and WinUI re-targets the
+        // selection synchronously inside that Remove. Unfenced, the
+        // raise reaches OnSelectionChanged, reads as intent, and
+        // Activate reconciles against a strip that is one row short:
+        // the projection's presence refusal, its Err, and the
+        // mass-reparenting rebuild (the layout-pass AV hazard). The
+        // drag engine stands its own remove-then-insert raises down
+        // with _stripDragActive; a manager-driven relocation is the
+        // same raise class and owes the same fence.
+        var swapRemove = moveItem.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("TabItems.Remove", StringComparison.Ordinal))
+            .ToList();
+        Assert.True(swapRemove.Count == 1,
+            $"MoveItem owns exactly one TabItems.Remove (its swap); found {swapRemove.Count}.");
+
+        var fence = moveItem.DescendantNodes().OfType<TryStatementSyntax>()
+            .Where(t => t.Block.Span.Contains(swapRemove[0].Span))
+            .ToList();
+        Assert.True(
+            fence.Count == 1 && fence[0].Finally is not null,
+            "MoveItem's remove-then-insert must sit inside a try with a finally: " +
+            "the fence has to survive the swap's own throws.");
+
+        var arms = moveItem.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left is IdentifierNameSyntax id
+                        && id.Identifier.ValueText == "_suppressSelectionEvent")
+            .ToList();
+        Assert.True(
+            arms.Count == 2,
+            $"MoveItem must arm and restore _suppressSelectionEvent exactly twice; found {arms.Count}.");
+        Assert.True(
+            arms.Any(a => a.Right is LiteralExpressionSyntax
+                        && a.Span.End < fence[0].SpanStart),
+            "The fence must be armed before the swap's try begins.");
+        var restore = arms.Single(a => a.Right is IdentifierNameSyntax);
+        Assert.True(
+            fence[0].Finally!.Span.Contains(restore.Span),
+            "The fence's restore must live in the finally and hand back the " +
+            "saved value: a naive disarm would cut short a reconcile fence " +
+            "window this method can run inside (the ReconcileChips lesson).");
+
+        // The fence swallows the swap's raise, so the strip's selection is
+        // left wherever WinUI's re-target moved it while the manager's
+        // active tab never changed. The landing is the debt the fence
+        // owes, once, after the strip has settled: the same shape the
+        // drag release pays.
+        var insert = moveItem.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .FirstOrDefault(c => c.CalleeText().EndsWith("TabItems.Insert", StringComparison.Ordinal));
+        var landing = moveItem.Calls("SelectActive").ToList();
+        Assert.True(
+            insert is not null && landing.Count == 1
+                && landing[0].SpanStart > insert.Span.End,
+            "MoveItem must land the manager's active tab with SelectActive after " +
+            "its swap: a relocation is not a tab switch, and the strip must not " +
+            $"keep saying it was one. Found {landing.Count} landing(s).");
+    }
+
     // --- Drag lifecycle: seam cover and the drop reconcile ---
 
     [Fact]
