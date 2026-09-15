@@ -715,7 +715,8 @@ try {
         $all = [System.Collections.Generic.List[object]]::new()
         $final = $null
         foreach ($run in @('up', 'down', 'up', 'down')) {
-            $out = Run-Sampled $s @{ op = 'palette-key'; key = $run; repeat = 3; intervalMs = 40 } $look.terminalRect $look.paletteUi.card $scale
+            # Each run spans the whole group, first row to last.
+            $out = Run-Sampled $s @{ op = 'palette-key'; key = $run; repeat = ($Group.Count - 1); intervalMs = 40 } $look.terminalRect $look.paletteUi.card $scale
             $all.AddRange($out.Samples)
             $final = $out.Response
         }
@@ -768,11 +769,11 @@ try {
     Check 'reopen/clean' (-not $again.previewing -and $again.paletteUi.selectedTheme -ceq $Catalog[0] -and $again.paletteUi.searchText -eq '' -and $again.paletteUi.count -eq $ExpectedTotal) "previewing $($again.previewing), selected '$($again.paletteUi.selectedTheme)', text '$($again.paletteUi.searchText)'"
     # Closing unloaded the palette; a reopened one follows the window again.
     Check 'reopen/palette-tracks-the-window-theme' ($again.paletteUi.tracksWindowTheme -eq $true) "tracksWindowTheme $($again.paletteUi.tracksWindowTheme)"
-    # A theme's name typed and Enter pressed before typing pauses: Enter
-    # keeps what the typed text describes, not the list from before it.
-    $early = Seam $s @{ op = 'palette-type'; text = $Beta; settle = $false }
-    Check 'confirm/typed-before-the-pause' ($early.paletteUi.filterPending -and $early.paletteUi.count -eq $ExpectedTotal) "pending $($early.paletteUi.filterPending), count $($early.paletteUi.count)"
-    $kept = Seam $s @{ op = 'palette-key'; key = 'enter' }
+    # A theme's name typed and Enter pressed before typing pauses (in the
+    # same dispatcher turn as the last key): Enter keeps what the typed text
+    # describes, not the full list's top row from before it.
+    $kept = Seam $s @{ op = 'palette-type'; text = $Beta; thenKey = 'enter' }
+    Check 'confirm/enter-landed-before-the-pause' ($kept.pendingBeforeKey -eq $true) "filter pending when Enter landed: $($kept.pendingBeforeKey)"
     Check 'confirm/closes' (-not $kept.paletteUi.open)
     Check 'confirm/no-preview-left' (-not $kept.previewing)
     Check 'confirm/config-names-the-theme' ($kept.configTheme -eq $Beta) "configTheme '$($kept.configTheme)'"

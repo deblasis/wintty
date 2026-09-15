@@ -1085,6 +1085,18 @@ internal static class TestSeam
                     }
                 }
 
+                // thenKey presses a key right after the last character, in
+                // the same dispatcher turn, so the filter's wait cannot have
+                // ended: Enter pressed before typing pauses. The answer says
+                // whether a filter was indeed still waiting when it landed.
+                bool? pendingBeforeKey = null;
+                if (ArgString(args, "thenKey") is { } thenKey)
+                {
+                    if (thenKey != "enter") return Error(op, "thenKey must be enter");
+                    pendingBeforeKey = window.TestSeamPaletteVm?.IsThemeFilterPending ?? false;
+                    ui.TestSeamKey(Windows.System.VirtualKey.Enter);
+                }
+
                 // settle (the default) waits for the filter and the preview
                 // it moves to, so the answer is the settled list; settle=false
                 // answers at once, to read the list before the pause ends.
@@ -1094,7 +1106,7 @@ internal static class TestSeam
                     return Error(op, "the theme filter did not settle within 5s");
                 }
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return PaletteThemeJson(window, op);
+                return PaletteThemeJson(window, op, pendingBeforeKey);
             }
 
             case "palette-key":
@@ -1158,7 +1170,7 @@ internal static class TestSeam
     /// up and which, the terminal's colours as the live native config states
     /// them, the chrome's resolved colours, and the palette UI's own state.
     /// </summary>
-    private static string PaletteThemeJson(MainWindow window, string op)
+    private static string PaletteThemeJson(MainWindow window, string op, bool? pendingBeforeKey = null)
         => Json(json =>
         {
             var config = window.TestSeamConfig;
@@ -1166,6 +1178,7 @@ internal static class TestSeam
             json.WriteStartObject();
             json.WriteBoolean("ok", true);
             json.WriteString("op", op);
+            if (pendingBeforeKey is { } pending) json.WriteBoolean("pendingBeforeKey", pending);
             json.WriteString("configTheme", config.CurrentTheme);
             json.WriteBoolean("previewing", config.IsPreviewingTheme);
             if (config.PreviewThemeName is { } previewed) json.WriteString("previewTheme", previewed);

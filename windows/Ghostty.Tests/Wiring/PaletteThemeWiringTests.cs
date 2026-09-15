@@ -228,6 +228,26 @@ public class PaletteThemeWiringTests
         => Assert.Single(CallsEndingWith(ViewModel().Method(method), "Filter.Cancel"));
 
     /// <summary>
+    /// Entering the theme list resets the search text, which in theme mode
+    /// asks the debounce for a refilter; the initial filter applied right
+    /// after the reset is that refilter. The request has to be dropped after
+    /// both, or it lands a moment later, moves the highlight off the theme on
+    /// screen to the top row and previews that (the seam harness's relaunch
+    /// check caught exactly this).
+    /// </summary>
+    [Fact]
+    public void EnteringTheThemeListDropsTheRefilterItsOwnResetAskedFor()
+    {
+        var enter = ViewModel().Method("EnterThemeMode");
+        var cancel = Assert.Single(CallsEndingWith(enter, "Filter.Cancel"));
+        var initial = Assert.Single(enter.Calls("ApplyThemeFilter"));
+        var reset = Assert.Single(enter.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "SearchText");
+        Assert.True(reset.SpanStart < cancel.SpanStart, "the cancel must come after the search text reset that asked for a refilter");
+        Assert.True(initial.SpanStart < cancel.SpanStart, "the cancel must come after the initial filter");
+    }
+
+    /// <summary>
     /// The debounce has a timer of its own. Sharing the browse's one-slot
     /// timer would let a keystroke replace the browse's pending cooldown, or
     /// the cooldown a keystroke's wait.

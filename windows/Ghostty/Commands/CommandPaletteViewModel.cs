@@ -291,7 +291,6 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         _activeTheme = _themeMode.ActiveTheme();
         // Theme files can change between browses; within one they are read once.
         _themeMode.Swatches.Clear();
-        _themeMode.Filter.Cancel();
         _themeMode.Browse.Begin();
 
         _placingThemeSelection = true;
@@ -302,6 +301,11 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
             GhostText = null;
             SearchText = "";
             ApplyThemeFilter(initial: true);
+            // The reset above is a text change in theme mode, so it asked for
+            // a refilter; the initial filter just applied is that refilter.
+            // Left waiting, it would land a moment later and move the
+            // highlight off the theme on screen to the top row, and preview it.
+            _themeMode.Filter.Cancel();
         }
         finally
         {
