@@ -656,7 +656,29 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void RemoveItem(TabModel tab)
     {
         if (!_itemByModel.TryGetValue(tab, out var item)) return;
-        TabViewControl.TabItems.Remove(item);
+        // The row leaving is the SELECTED one whenever the closing tab is
+        // the active tab, and CloseTab raises TabRemoved before it picks
+        // the next active tab, so WinUI's synchronous re-target raise
+        // inside this Remove would reach OnSelectionChanged as if a user
+        // had clicked: Activate runs for whatever the re-target picked,
+        // ahead of the manager's own next-choice rule (the steal happens
+        // while _activeTab still names the closing tab), and a re-target
+        // onto a collapsed run's chip is read as the expand gesture. The
+        // manager row and the strip row leave together, so counts agree
+        // and the presence refusal never fires: the damage is silent.
+        // Fenced saved-and-restored like MoveItem's swap; the manager's
+        // own ActiveTabChanged, raised once CloseTab picks the next tab,
+        // lands the selection.
+        var outerSuppress = _suppressSelectionEvent;
+        _suppressSelectionEvent = true;
+        try
+        {
+            TabViewControl.TabItems.Remove(item);
+        }
+        finally
+        {
+            _suppressSelectionEvent = outerSuppress;
+        }
         _itemByModel.Remove(tab);
         _headerTextByModel.Remove(tab);
         _iconRowByModel.Remove(tab);

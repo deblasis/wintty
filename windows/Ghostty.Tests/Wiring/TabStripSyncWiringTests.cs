@@ -170,6 +170,58 @@ public sealed class TabStripSyncWiringTests
             $"keep saying it was one. Found {landing.Count} landing(s).");
     }
 
+    // --- RemoveItem: the close's own selection raise ---
+
+    [Fact]
+    public void RemoveItem_fences_its_remove_so_a_close_cannot_steal_activation()
+    {
+        var removeItem = ShellSource.Load(TabHostSource).Method("RemoveItem");
+
+        // The row leaving is the SELECTED one whenever the closing tab is
+        // the active tab, and CloseTab raises TabRemoved before it picks
+        // the next active tab, so WinUI's synchronous re-target raise
+        // inside the remove reads as a user's click: Activate runs for
+        // whatever the re-target picked, ahead of the manager's own
+        // next-choice rule, and a re-target onto a collapsed run's chip
+        // is read as the expand gesture. Counts agree during the window,
+        // so the presence refusal never fires and the steal is silent.
+        var removes = removeItem.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("TabItems.Remove", StringComparison.Ordinal))
+            .ToList();
+        Assert.True(removes.Count == 1,
+            $"RemoveItem owns exactly one TabItems.Remove; found {removes.Count}.");
+
+        var fence = removeItem.DescendantNodes().OfType<TryStatementSyntax>()
+            .Where(t => t.Block.Span.Contains(removes[0].Span))
+            .ToList();
+        Assert.True(
+            fence.Count == 1 && fence[0].Finally is not null,
+            "RemoveItem's TabItems.Remove must sit inside a try with a finally: " +
+            "the fence has to survive the remove's own throws.");
+
+        var arms = removeItem.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left is IdentifierNameSyntax id
+                        && id.Identifier.ValueText == "_suppressSelectionEvent")
+            .ToList();
+        Assert.True(
+            arms.Count == 2,
+            $"RemoveItem must arm and restore _suppressSelectionEvent exactly twice; found {arms.Count}.");
+        Assert.True(
+            arms.Any(a => a.Right is LiteralExpressionSyntax
+                        && a.Span.End < fence[0].SpanStart),
+            "The fence must be armed before the remove's try begins.");
+        var restore = arms.Single(a => a.Right is IdentifierNameSyntax);
+        Assert.True(
+            fence[0].Finally!.Span.Contains(restore.Span),
+            "The fence's restore must live in the finally and hand back the " +
+            "saved value: the manager's own ActiveTabChanged, raised once " +
+            "CloseTab picks the next tab, is what lands the selection after " +
+            "a close, and a naive disarm would cut short a fence window " +
+            "this method could run inside.");
+    }
+
     // --- Drag lifecycle: seam cover and the drop reconcile ---
 
     [Fact]
