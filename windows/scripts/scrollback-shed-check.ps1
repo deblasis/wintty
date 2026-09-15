@@ -2,14 +2,17 @@
 <#
     Scrollback shedding, measured against the running app.
 
-    The Windows decommit primitives in terminal/mem.zig turn scrollback
-    compression on for our platform. Nothing in the shell drives the
+    terminal/mem.zig's shed primitive turns scrollback compression on
+    for our platform: on Windows it is DiscardVirtualMemory, which
+    releases a compressed page's physical (working-set) backing while
+    leaving the range committed, so the shed never lowers commit
+    charge, only resident memory. Nothing in the shell drives the
     scheduling -- it is entirely in-product -- so what this harness
     proves is the OUTCOME, and it does so through the terminal's own
     page census (the surface-mem seam op): a tab handed a large
     scrollback and hidden while it still parses must end with most
-    pages compressed and real bytes decommitted, and must come back
-    alive when revisited and scrolled.
+    pages compressed and real bytes released from the working set,
+    and must come back alive when revisited and scrolled.
 
     Hiding BEFORE the parse finishes is deliberate: a hidden surface
     has no output-driven render wakes (the occlusion work dropped
@@ -17,11 +20,14 @@
     in the .visible/.focus mailbox transitions. A regression in those
     kicks reads here as zero compressed pages.
 
-    Process byte counters are printed as an informational echo only: a
-    slow dump lets the scheduler compress pages as fast as they are
-    created, so creation's +commit and the decommit's -commit cancel
-    inside one sampling interval and the counter reads flat while the
-    shed is real.
+    Process working-set size is printed as an informational echo
+    only, not commit / private bytes: DiscardVirtualMemory keeps the
+    shed range committed, so private bytes stay flat across a shed and
+    would misreport a real shed as a 0% drop. Working set is what
+    actually falls when pages are shed, and it is still only
+    corroborating -- every other allocation in the process moves it
+    too, so a slow dump can also mask a real shed inside one sampling
+    interval if allocation and reclaim overlap.
 
     send-text is armed for this harness (it hands the shell a command
     that generates the scrollback). Exits 0 clean, 2 finding, 1
@@ -103,7 +109,7 @@ try {
     # broken shed.
     $proc = Get-Process -Id $session.Proc.Id
     $proc.Refresh()
-    $baseline = $proc.PrivateMemorySize64
+    $baseline = $proc.WorkingSet64
 
     # One tiny command; the shell does the volume. What the shed cares
     # about is ROWS -- pages are row-based and page memory is fixed per
@@ -157,15 +163,18 @@ try {
     }
     Write-Host "dump settled: $dumpPages pages (baseline $([Math]::Round($baseline/1MB))MB)"
 
-    # Let the hidden parse finish and the pages settle: poll private
-    # bytes until two samples 5s apart move by <2%, then one more beat.
+    # Let the hidden parse finish and the pages settle: poll the
+    # working set (not commit -- DiscardVirtualMemory never lowers it,
+    # see below) until two samples 5s apart move by <2%, then one more
+    # beat. $peak below is drawn from this same sampling, so it has to
+    # track the metric the shed actually moves.
     $proc = Get-Process -Id $session.Proc.Id
     $samples = [System.Collections.Generic.List[long]]::new()
     $deadline = [DateTime]::UtcNow.AddSeconds(120)
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Seconds 5
         $proc.Refresh()
-        $samples.Add($proc.PrivateMemorySize64)
+        $samples.Add($proc.WorkingSet64)
         if ($samples.Count -ge 3) {
             $a = $samples[$samples.Count - 3]; $b = $samples[$samples.Count - 1]
             if ([Math]::Abs($b - $a) -le $a * 0.02) { break }
@@ -175,10 +184,10 @@ try {
 
     # The terminal's own page census, before and after: the shed is a
     # fact about pages (compressed count, decommitted bytes), and the
-    # process byte counter is only the corroborating echo -- every other
-    # allocation in the process moves it too. The tab has been hidden
-    # since the dump started, so every compressed page from here on is
-    # the kicks' work.
+    # process working-set counter is only the corroborating echo -- every
+    # other allocation in the process moves it too. The tab has been
+    # hidden since the dump started, so every compressed page from here
+    # on is the kicks' work.
     $pre = Invoke-SeamCommand $session @{ op = 'surface-mem'; index = 1 }
     Write-Host ("pre-shed: pages={0} compressed={1} resident={2:N0}MB" -f `
         $pre.totalPages, $pre.compressedPages, ($pre.residentRawBytes / 1MB))
@@ -188,7 +197,7 @@ try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Seconds 5
         $proc.Refresh()
-        $after.Add($proc.PrivateMemorySize64)
+        $after.Add($proc.WorkingSet64)
     }
     $floor = ($after | Measure-Object -Minimum).Minimum
     $post = Invoke-SeamCommand $session @{ op = 'surface-mem'; index = 1 }
@@ -211,13 +220,18 @@ try {
     $after | ForEach-Object { "shed $_" } | Set-Content (Join-Path $OutDir 'shed.txt')
     $dropPct = if ($peak -gt 0) { 100.0 * ($peak - $floor) / $peak } else { 0.0 }
     $proc.Refresh()
-    # Informational only. The process byte counter is NOT the shed
-    # oracle: a slow dump lets the scheduler compress pages as fast as
-    # they are created, so the +commit of creation and the -commit of
-    # the decommit cancel inside one sampling interval (observed live:
-    # 62MB of pages created and shed with the counter moving 6MB). The
-    # census above is the assert.
-    Write-Host ("process bytes: peak={0:N0}MB floor={1:N0}MB drop={2:N1}% (now: commit={3:N0}MB ws={4:N0}MB)" -f `
+    # Informational only. The process working set is NOT the shed
+    # oracle: every other allocation in the process moves it too, and a
+    # slow dump can let the scheduler compress pages as fast as they
+    # are created, masking a real shed inside one sampling interval.
+    # It is working set and not commit because DiscardVirtualMemory
+    # keeps the shed range committed -- commit stays with the process
+    # from creation onward and would read a flat ~0% drop here even
+    # while the census above shows a real shed. The trailing commit
+    # figure is printed alongside it for exactly that contrast: expect
+    # it to hold roughly steady while ws falls. The census above is
+    # the assert.
+    Write-Host ("process working set: peak={0:N0}MB floor={1:N0}MB drop={2:N1}% (now: commit={3:N0}MB ws={4:N0}MB)" -f `
         ($peak / 1MB), ($floor / 1MB), $dropPct,
         ($proc.PrivateMemorySize64 / 1MB), ($proc.WorkingSet64 / 1MB))
 
