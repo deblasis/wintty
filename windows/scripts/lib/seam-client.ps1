@@ -208,7 +208,14 @@ function Start-SeamSession(
     # adopted as it is (and left for the caller to remove). Either one is
     # what the coexistence guard asks for before it lets a launch run beside
     # somebody else's Wintty.
-    [switch]$PrivateStateBase
+    [switch]$PrivateStateBase,
+    # Files to stage under the config root before launch, keyed by a path
+    # relative to it ('wintty/themes/Name' = text). Written as exact UTF-8
+    # bytes with nothing appended, after the config text, so a key naming
+    # 'wintty/config.wintty' replaces it byte for byte: that is how a harness
+    # relaunches on the very file a previous run wrote. A path that resolves
+    # outside the root is refused.
+    [hashtable]$ExtraFiles = @{}
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
@@ -218,6 +225,26 @@ function Start-SeamSession(
     # the text the coexistence guard reads below.
     $ConfigText = Add-WinttyHarnessConfigDefaults $ConfigText
     $ConfigText | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
+    # Both sides through GetFullPath: it expands an 8.3 %TEMP%
+    # (C:\Users\ALESSA~1\...) to the long form, so comparing a normalized
+    # target against the raw root would refuse every file.
+    $rootFull = [System.IO.Path]::GetFullPath($tempXdg)
+    foreach ($relative in $ExtraFiles.Keys) {
+        $target = [System.IO.Path]::GetFullPath((Join-Path $tempXdg $relative))
+        if (-not $target.StartsWith($rootFull + [System.IO.Path]::DirectorySeparatorChar,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item $tempXdg -Recurse -Force -ErrorAction SilentlyContinue
+            throw "HARNESS: extra file '$relative' resolves outside the config root"
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        [System.IO.File]::WriteAllText($target, [string]$ExtraFiles[$relative],
+            [System.Text.UTF8Encoding]::new($false))
+    }
+    # An ExtraFiles entry may have replaced wintty/config.wintty byte for
+    # byte, so the guard below reads the config the launch will actually
+    # read: the file as it now sits, not the variable it was first written
+    # from.
+    $ConfigText = [System.IO.File]::ReadAllText((Join-Path $tempXdg 'wintty\config.wintty'))
 
     $session = @{
         TempXdg   = $tempXdg

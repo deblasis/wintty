@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using Ghostty.Core.Config;
+using Ghostty.Core.Themes;
 
 namespace Ghostty.Services;
 
@@ -28,28 +28,18 @@ internal sealed partial class ThemeProvider : IThemeProvider, IDisposable
 
     private void Refresh()
     {
-        // Enumerate theme files from the user themes directory.
-        // Ghostty looks for themes in <config_dir>/themes/<name>.
-        var configDir = Path.GetDirectoryName(_configService.ConfigFilePath);
-        if (string.IsNullOrEmpty(configDir))
-        {
-            AvailableThemes = Array.Empty<string>();
-            return;
-        }
-
-        var themesDir = Path.Combine(configDir, "themes");
-        if (!Directory.Exists(themesDir))
-        {
-            AvailableThemes = Array.Empty<string>();
-            return;
-        }
-
-        // Each file in the themes directory is a theme. The filename
-        // (without extension) is the theme name.
-        AvailableThemes = Directory.EnumerateFiles(themesDir)
-            .Select(Path.GetFileName)
-            .Where(n => n is not null)
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-            .ToList()!;
+        // The same list the command palette's theme mode offers, from the
+        // same directories libghostty resolves a configured theme in, so the
+        // two pickers cannot disagree about which themes exist.
+        AvailableThemes = ThemeCatalog.Enumerate(Directories(_configService.ConfigFilePath));
     }
+
+    /// <summary>
+    /// The theme directories for a config file path, in libghostty's search
+    /// order. Shared with the palette so both enumerate one list.
+    /// </summary>
+    internal static IEnumerable<string> Directories(string configFilePath)
+        => ThemeSearchPath.UserDirectories(
+            Path.GetDirectoryName(configFilePath),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
 }

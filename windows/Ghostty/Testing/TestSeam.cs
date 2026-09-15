@@ -1050,9 +1050,150 @@ internal static class TestSeam
                 return RectJson(op, part, px, host.TestSeamTagForegroundRgb(tab));
             }
 
+            case "palette-open":
+            {
+                // The palette chord's own toggle, opening only: a driver that
+                // asks for an open palette gets one whether or not it was.
+                if (!window.TestSeamPaletteOpen) window.TestSeamTogglePalette();
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return PaletteThemeJson(window, op);
+            }
+
+            case "palette-type":
+            {
+                if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
+                // Into the search box, so the view model hears it the way it
+                // hears typing.
+                window.TestSeamPaletteUI.TestSeamType(ArgString(args, "text") ?? "");
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return PaletteThemeJson(window, op);
+            }
+
+            case "palette-key":
+            {
+                if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
+                Windows.System.VirtualKey? key = ArgString(args, "key") switch
+                {
+                    "up" => Windows.System.VirtualKey.Up,
+                    "down" => Windows.System.VirtualKey.Down,
+                    "enter" => Windows.System.VirtualKey.Enter,
+                    "escape" => Windows.System.VirtualKey.Escape,
+                    _ => null,
+                };
+                if (key is not { } pressed)
+                    return Error(op, "key must be up, down, enter or escape");
+                // repeat > 1 is a held key: the presses arrive back to back,
+                // which is what the browse's throttle is for.
+                var repeat = Math.Clamp(ArgInt(args, "repeat", 1), 1, 200);
+                for (var i = 0; i < repeat; i++)
+                    window.TestSeamPaletteUI.TestSeamKey(pressed);
+
+                // The preview lands on a later dispatcher turn, and a burst
+                // lands at the end of the throttle interval. The ack waits
+                // for it, so what the driver reads back is the settled theme.
+                var deadline = Environment.TickCount64 + 5_000;
+                while (window.TestSeamThemeBrowse is { HasPendingPreview: true }
+                       && Environment.TickCount64 < deadline)
+                {
+                    await Task.Delay(15);
+                }
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return window.TestSeamThemeBrowse is { HasPendingPreview: true }
+                    ? Error(op, "the theme preview did not settle within 5s")
+                    : PaletteThemeJson(window, op);
+            }
+
+            case "get-theme":
+                // What every live view is showing, read from the config the
+                // app was handed (the preview's while one is up), next to what
+                // the chrome resolved and what the file says.
+                return PaletteThemeJson(window, op);
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
+    }
+
+    /// <summary>
+    /// The theme readout: the file's `theme`, whether a palette preview is
+    /// up and which, the terminal's colours as the live native config states
+    /// them, the chrome's resolved colours, and the palette UI's own state.
+    /// </summary>
+    private static string PaletteThemeJson(MainWindow window, string op)
+        => Json(json =>
+        {
+            var config = window.TestSeamConfig;
+            var vm = window.TestSeamPaletteVm;
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            json.WriteString("configTheme", config.CurrentTheme);
+            json.WriteBoolean("previewing", config.IsPreviewingTheme);
+            if (config.PreviewThemeName is { } previewed) json.WriteString("previewTheme", previewed);
+            else json.WriteNull("previewTheme");
+            WriteHex(json, "nativeBackground", config.GetLiveNativeColor("background"));
+            WriteHex(json, "nativeForeground", config.GetLiveNativeColor("foreground"));
+            WriteHex(json, "background", config.BackgroundColor);
+            WriteHex(json, "foreground", config.ForegroundColor);
+            WriteHex(json, "cursor", config.CursorColor);
+            WriteHex(json, "cursorText", config.CursorTextColor);
+            json.WriteStartArray("palette");
+            foreach (var entry in config.AnsiPalette) json.WriteStringValue($"#{entry:X6}");
+            json.WriteEndArray();
+            json.WriteStartObject("paletteUi");
+            json.WriteBoolean("open", vm?.IsOpen ?? false);
+            json.WriteString("mode", vm?.Mode.ToString() ?? "");
+            json.WriteString("selected", vm?.SelectedCommand?.Title ?? "");
+            if (vm?.SelectedThemeName is { } highlighted) json.WriteString("selectedTheme", highlighted);
+            else json.WriteNull("selectedTheme");
+            json.WriteNumber("count", vm?.FilteredCommands.Count ?? 0);
+            json.WriteString("status", vm?.StatusText ?? "");
+            json.WriteEndObject();
+            // Where the active terminal is on screen, in the physical pixels
+            // a capture is taken in, so a pixel oracle can check that the
+            // terminal itself repainted and not only the config handed to it.
+            WriteTerminalRect(json, window);
+            WriteState(json, window, window.TabManager);
+            json.WriteEndObject();
+        });
+
+    private static void WriteHex(Utf8JsonWriter json, string name, uint? rgb)
+    {
+        if (rgb is { } value) json.WriteString(name, $"#{value:X6}");
+        else json.WriteNull(name);
+    }
+
+    /// <summary>
+    /// The active leaf's rect in physical screen pixels, or null when it
+    /// cannot be placed (no content root yet, or the conversion refused).
+    /// </summary>
+    private static void WriteTerminalRect(Utf8JsonWriter json, MainWindow window)
+    {
+        Windows.Foundation.Rect? leaf = null;
+        if (window.TestSeamRoot is { } root)
+        {
+            var host = window.TestSeamActivePaneHost;
+            var wanted = host.TestSeamActiveLeafIndex;
+            var index = 0;
+            foreach (var rect in host.TestSeamLeafRects)
+            {
+                // The first leaf stands in until the active one is reached.
+                if (leaf is null || index == wanted) leaf = rect;
+                if (index == wanted) break;
+                index++;
+            }
+            if (leaf is { } dip && window.TestSeamToScreenPixels(dip, root) is { } px)
+            {
+                json.WriteStartObject("terminalRect");
+                json.WriteNumber("x", px.X);
+                json.WriteNumber("y", px.Y);
+                json.WriteNumber("w", px.W);
+                json.WriteNumber("h", px.H);
+                json.WriteEndObject();
+                return;
+            }
+        }
+        json.WriteNull("terminalRect");
     }
 
     // ---- responses ---------------------------------------------------

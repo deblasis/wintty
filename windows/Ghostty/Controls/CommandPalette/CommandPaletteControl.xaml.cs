@@ -375,9 +375,12 @@ internal sealed partial class CommandPaletteControl : UserControl
     {
         if (_vm is null) return;
 
-        ShortcutHints.Text = _vm.Mode == PaletteMode.CommandLine
-            ? "Tab autocomplete   ↑↓ navigate   ↵ run   Esc close"
-            : "↑↓ navigate   ↵ run   Esc close";
+        ShortcutHints.Text = _vm.Mode switch
+        {
+            PaletteMode.CommandLine => "Tab autocomplete   ↑↓ navigate   ↵ run   Esc close",
+            PaletteMode.Theme => "↑↓ preview   ↵ keep   Esc revert",
+            _ => "↑↓ navigate   ↵ run   Esc close",
+        };
     }
 
     // ── ContainerContentChanging: populate DataTemplate elements ─────────────
@@ -520,17 +523,27 @@ internal sealed partial class CommandPaletteControl : UserControl
         var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control);
         var isCtrl = ctrl.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
 
-        switch (e.Key)
+        if (HandleSearchKey(e.Key, isCtrl)) e.Handled = true;
+    }
+
+    /// <summary>
+    /// What a key pressed in the search box does, and whether it was
+    /// consumed. The one decision both the real KeyDown and the test seam's
+    /// palette-key op go through, so the seam cannot drift from the keyboard.
+    /// </summary>
+    private bool HandleSearchKey(VirtualKey key, bool isCtrl)
+    {
+        if (_vm is null) return false;
+
+        switch (key)
         {
             case VirtualKey.Escape:
                 _vm.Close();
-                e.Handled = true;
-                break;
+                return true;
 
             case VirtualKey.Enter:
                 _vm.ExecuteSelectedCommand();
-                e.Handled = true;
-                break;
+                return true;
 
             case VirtualKey.Tab:
                 if (_vm.Mode == PaletteMode.CommandLine)
@@ -539,30 +552,46 @@ internal sealed partial class CommandPaletteControl : UserControl
                     // Sync the TextBox immediately so the cursor lands at end.
                     SearchBox.Text = _vm.SearchText;
                     SearchBox.SelectionStart = SearchBox.Text.Length;
-                    e.Handled = true;
+                    return true;
                 }
-                break;
+                return false;
 
             case VirtualKey.Up:
                 _vm.MoveSelectionUp();
-                e.Handled = true;
-                break;
+                return true;
 
             case VirtualKey.Down:
                 _vm.MoveSelectionDown();
-                e.Handled = true;
-                break;
+                return true;
 
             case VirtualKey.P when isCtrl:
                 _vm.MoveSelectionUp();
-                e.Handled = true;
-                break;
+                return true;
 
             case VirtualKey.N when isCtrl:
                 _vm.MoveSelectionDown();
-                e.Handled = true;
-                break;
+                return true;
+
+            default:
+                return false;
         }
+    }
+
+    // ---- test seam accessors (compiled into every build, reachable only
+    // through the seam's pipe, which exists only in a TESTSEAM build) ------
+
+    /// <summary>A key pressed in the search box, through the real handler.</summary>
+    internal bool TestSeamKey(VirtualKey key) => HandleSearchKey(key, isCtrl: false);
+
+    /// <summary>
+    /// Text typed into the search box. The box's TextChanged reaches the view
+    /// model a turn later, so the view model is told now as well; the second
+    /// assignment of the same text is a no-op there.
+    /// </summary>
+    internal void TestSeamType(string text)
+    {
+        SearchBox.Text = text;
+        if (_vm is not null) _vm.SearchText = text;
     }
 
     private void OnItemClick(object sender, ItemClickEventArgs e)

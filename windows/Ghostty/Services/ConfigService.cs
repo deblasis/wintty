@@ -8,6 +8,7 @@ using Ghostty.Core.Accessibility;
 using Ghostty.Core.Config;
 using Ghostty.Core.Env;
 using Ghostty.Core.Shell;
+using Ghostty.Core.Themes;
 using Ghostty.Interop;
 using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
@@ -45,6 +46,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     // switch immediately followed by close left a debounced Reload to run
     // AppUpdateConfig on the freed app -> native access violation.
     private volatile bool _shuttingDown;
+
+    // The config the live views are showing while the command palette
+    // previews a theme, or zero. Never replaces _config: the committed
+    // config stays exactly what the file says, which is what makes a revert
+    // exact (show _config again) rather than a re-read that could differ.
+    // Owned here and freed as soon as the app has been handed anything else,
+    // since the app clones what it is given and keeps no pointer to it.
+    private GhosttyConfig _previewConfig;
+    private string? _previewThemeName;
 
     public event Action<IConfigService>? ConfigChanged;
     public string ConfigFilePath { get; }
@@ -582,27 +592,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         GhosttyConfig newConfig;
         try
         {
-            newConfig = NativeMethods.ConfigNew();
-            NativeMethods.ConfigLoadDefaultFiles(newConfig);
-            NativeMethods.ConfigLoadCliArgs(newConfig);
-            NativeMethods.ConfigLoadRecursiveFiles(newConfig);
-            // Layer the High Contrast override last so it wins over the
-            // user's colors while HC is active. Skipped when HC is off or
-            // opted-out, restoring the user's config.
-            //
-            // Still last now that the CLI and its config-file includes load
-            // above it: High Contrast is an accessibility override and has to
-            // outrank anything the user asked for, a file named on the command
-            // line included.
-            if (_highContrastOverrideColors is { } hcColors)
-            {
-                var hcBody = Ghostty.Core.Accessibility.HighContrastConfigWriter.Render(hcColors);
-                var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
-                if (hcPath is not null)
-                    NativeMethods.ConfigLoadFile(newConfig, hcPath);
-            }
-            NativeMethods.ConfigSetColorScheme(newConfig, ToScheme(isOsDark));
-            NativeMethods.ConfigFinalize(newConfig);
+            // The same build a palette theme preview uses, without the
+            // preview's overlay: see BuildLiveConfig for the layering.
+            newConfig = BuildLiveConfig(overlayPath: null, isOsDark);
         }
         catch (Exception ex)
         {
@@ -630,6 +622,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         }
 
         NativeMethods.AppUpdateConfig(_app, newConfig);
+
+        // Any palette theme preview is over: the app now holds a clone of
+        // the committed config, so the preview config is no longer
+        // referenced by anything and a later revert has nothing to take back.
+        ReleaseThemePreviewConfig();
 
         _config = newConfig;
         try
@@ -1091,35 +1088,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // theme has already supplied both.
         BackgroundColor = ResolveThemedColor("background", 0x00282C34);
         ForegroundColor = ResolveThemedColor("foreground", 0x00FFFFFF);
-
-        // cursor-color is a TerminalColor (tagged union) in the Zig
-        // config, so it can't be read via ghostty_config_get as a
-        // simple color. Read from the resolved config files instead.
-        var cursorHex = GetThemeValue("cursor-color");
-        if (!string.IsNullOrEmpty(cursorHex))
-        {
-            var parsed = ParseHexColor(cursorHex);
-            CursorColor = parsed is not null
-                ? ((uint)parsed.Value.R << 16) | ((uint)parsed.Value.G << 8) | parsed.Value.B
-                : ForegroundColor;
-        }
-        else
-        {
-            CursorColor = ForegroundColor;
-        }
-
-        var cursorTextHex = GetThemeValue("cursor-text");
-        if (!string.IsNullOrEmpty(cursorTextHex))
-        {
-            var parsed = ParseHexColor(cursorTextHex);
-            CursorTextColor = parsed is not null
-                ? ((uint)parsed.Value.R << 16) | ((uint)parsed.Value.G << 8) | parsed.Value.B
-                : BackgroundColor;
-        }
-        else
-        {
-            CursorTextColor = BackgroundColor;
-        }
+        (CursorColor, CursorTextColor) = ResolveCursorColors(ForegroundColor, BackgroundColor);
 
         // accent-color is a Windows-only key (no Zig schema entry).
         // Read from the user's config file only -- not the active theme
@@ -1251,6 +1220,222 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // calls this once per arrow key, so a subscriber that throws would
         // kill the app on a keystroke.
         ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault);
+    }
+
+    // ---- command palette theme preview --------------------------------
+    //
+    // The palette's theme mode shows the highlighted theme on what the user
+    // is actually looking at: every terminal in every window, and the chrome.
+    // The terminal half needs a native config, because libghostty renders
+    // from nothing else, so a preview builds one exactly the way Reload does
+    // with a one-line `theme = <name>` layered after the user's files. That
+    // makes the preview identical to what confirming would produce: the
+    // user's own explicit colour keys still win over the theme, the
+    // light/dark scheme is resolved the same way, High Contrast still wins
+    // over everything. The committed _config is never replaced, so undoing a
+    // preview is handing the app _config again, with no re-read that could
+    // come out different.
+
+    /// <summary>Whether a palette theme preview is on the live views.</summary>
+    internal bool IsPreviewingTheme => _previewConfig.Handle != IntPtr.Zero;
+
+    /// <summary>The theme a palette preview is showing, or null.</summary>
+    internal string? PreviewThemeName => _previewThemeName;
+
+    /// <summary>
+    /// Show <paramref name="themeName"/> on every live terminal and on the
+    /// chrome, without writing the config file or replacing the committed
+    /// config. UI thread only. False when nothing changed: a name the config
+    /// cannot carry, a theme file that is not there, teardown, or a failure
+    /// building the config (logged).
+    /// </summary>
+    internal bool PreviewTheme(string themeName)
+    {
+        if (_shuttingDown || _app.Handle == IntPtr.Zero) return false;
+        if (!ThemeCatalog.IsPersistableName(themeName)) return false;
+        if (ResolveThemePath(themeName) is not { } themePath) return false;
+
+        var isOsDark = OsTheme.IsDark();
+        Dictionary<string, List<string>>? themeCache;
+        GhosttyConfig preview;
+        try
+        {
+            themeCache = LoadIniFile(themePath);
+            var overlay = WriteThemePreviewOverlay(themeName);
+            if (overlay is null) return false;
+            preview = BuildLiveConfig(overlay, isOsDark);
+        }
+        catch (Exception ex)
+        {
+            StaticLoggers.ConfigService.LogThemePreviewFailed(ex, themeName);
+            return false;
+        }
+
+        // The same last-moment fence Reload takes before the native call.
+        if (_shuttingDown)
+        {
+            NativeMethods.ConfigFree(preview);
+            return false;
+        }
+
+        NativeMethods.AppUpdateConfig(_app, preview);
+        // The previous preview (if any) is no longer referenced: the app
+        // cloned the one it was just given.
+        ReleaseThemePreviewConfig();
+        _previewConfig = preview;
+        _previewThemeName = themeName;
+
+        // The chrome's half, resolved with the same precedence ReadFlags
+        // uses (user keys, then the theme, then libghostty's value) but
+        // against the previewed theme and config.
+        var colors = ResolveThemeColors(themeCache, preview);
+        ApplyThemeColors(colors.Foreground, colors.Background, colors.Cursor, colors.CursorText, colors.Palette);
+        return true;
+    }
+
+    /// <summary>
+    /// Undo a palette preview: the committed config goes back on every live
+    /// view, and, when <paramref name="colors"/> is not null, the chrome gets
+    /// exactly those colours back (assigned, not re-derived). UI thread only.
+    /// A no-op once teardown has begun; Dispose frees what is left.
+    /// </summary>
+    internal void RevertThemePreview(ThemePreviewColors? colors)
+    {
+        if (_shuttingDown) return;
+
+        if (_previewConfig.Handle != IntPtr.Zero && _app.Handle != IntPtr.Zero)
+        {
+            NativeMethods.AppUpdateConfig(_app, _config);
+            ReleaseThemePreviewConfig();
+        }
+
+        if (colors is { } c)
+        {
+            ForegroundColor = c.Foreground;
+            BackgroundColor = c.Background;
+            CursorColor = c.Cursor;
+            CursorTextColor = c.CursorText;
+            if (c.Palette.Length >= 16 && AnsiPalette.Length >= 16)
+                Array.Copy(c.Palette, AnsiPalette, 16);
+        }
+
+        ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault);
+    }
+
+    /// <summary>
+    /// A colour from the config the live views are showing right now: the
+    /// preview's while one is up, the committed one otherwise. The test seam
+    /// reads the applied theme back through this.
+    /// </summary>
+    internal uint? GetLiveNativeColor(string key)
+        => GetColorFrom(_previewConfig.Handle != IntPtr.Zero ? _previewConfig : _config, key);
+
+    private void ReleaseThemePreviewConfig()
+    {
+        var preview = _previewConfig;
+        _previewConfig = default;
+        _previewThemeName = null;
+        if (preview.Handle != IntPtr.Zero) NativeMethods.ConfigFree(preview);
+    }
+
+    /// <summary>
+    /// A finalized config built the way every live config is: defaults, the
+    /// CLI, the user's files, then <paramref name="overlayPath"/> when given,
+    /// then the High Contrast override, resolved against
+    /// <paramref name="isOsDark"/>. Freed here if any step throws.
+    /// </summary>
+    private GhosttyConfig BuildLiveConfig(string? overlayPath, bool isOsDark)
+    {
+        var config = NativeMethods.ConfigNew();
+        try
+        {
+            NativeMethods.ConfigLoadDefaultFiles(config);
+            NativeMethods.ConfigLoadCliArgs(config);
+            NativeMethods.ConfigLoadRecursiveFiles(config);
+            // A palette preview's theme sits above the user's files, which is
+            // where a `theme` line they wrote themselves would take effect.
+            if (overlayPath is not null)
+                NativeMethods.ConfigLoadFile(config, overlayPath);
+            // Layer the High Contrast override last so it wins over the
+            // user's colors while HC is active. Skipped when HC is off or
+            // opted-out, restoring the user's config.
+            //
+            // Still last now that the CLI and its config-file includes load
+            // above it: High Contrast is an accessibility override and has to
+            // outrank anything the user asked for, a file named on the command
+            // line included.
+            if (_highContrastOverrideColors is { } hcColors)
+            {
+                var hcBody = Ghostty.Core.Accessibility.HighContrastConfigWriter.Render(hcColors);
+                var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
+                if (hcPath is not null)
+                    NativeMethods.ConfigLoadFile(config, hcPath);
+            }
+            NativeMethods.ConfigSetColorScheme(config, ToScheme(isOsDark));
+            NativeMethods.ConfigFinalize(config);
+            return config;
+        }
+        catch
+        {
+            NativeMethods.ConfigFree(config);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The one-line config a preview layers: exactly the line a confirm then
+    /// writes into the user's file. Kept in the state directory beside the
+    /// High Contrast override, never in the config directory, so the config
+    /// watcher cannot see it and the config write guard has nothing to guard.
+    /// </summary>
+    private static string? WriteThemePreviewOverlay(string themeName)
+    {
+        if (string.IsNullOrEmpty(Ghostty.Core.AppStateBase.LocalRoot)) return null;
+        var dir = Path.Combine(Ghostty.Core.AppStateBase.LocalRoot, Ghostty.Core.AppIdentity.StateDirName);
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "theme-preview.conf");
+        File.WriteAllText(path, $"theme = {themeName}\n");
+        return path;
+    }
+
+    /// <summary>
+    /// The chrome colours <paramref name="themeCache"/> and
+    /// <paramref name="source"/> resolve to, by ReadFlags' precedence.
+    /// </summary>
+    private ThemePreviewColors ResolveThemeColors(
+        Dictionary<string, List<string>>? themeCache, GhosttyConfig source)
+    {
+        var committedTheme = _activeThemeFileCache;
+        _activeThemeFileCache = themeCache;
+        try
+        {
+            var background = ResolveThemedColor("background", 0x00282C34, source);
+            var foreground = ResolveThemedColor("foreground", 0x00FFFFFF, source);
+            var (cursor, cursorText) = ResolveCursorColors(foreground, background);
+            return new ThemePreviewColors(foreground, background, cursor, cursorText, GetAllPaletteColors());
+        }
+        finally
+        {
+            _activeThemeFileCache = committedTheme;
+        }
+    }
+
+    /// <summary>
+    /// cursor-color and cursor-text are TerminalColor tagged unions in the Zig
+    /// config, so they cannot be read through ghostty_config_get as simple
+    /// colours; they come from the user's file, then the active theme file,
+    /// and follow the foreground and background when neither sets them.
+    /// </summary>
+    private (uint Cursor, uint CursorText) ResolveCursorColors(uint foreground, uint background)
+        => (PackHex(GetThemeValue("cursor-color")) ?? foreground,
+            PackHex(GetThemeValue("cursor-text")) ?? background);
+
+    private static uint? PackHex(string? hex)
+    {
+        if (string.IsNullOrEmpty(hex)) return null;
+        return ParseHexColor(hex) is { } parsed
+            ? ((uint)parsed.R << 16) | ((uint)parsed.G << 8) | parsed.B
+            : null;
     }
 
     private unsafe bool GetBool(string key)
@@ -1461,7 +1646,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// _config is finalized with the default (.light) conditional state,
     /// so for pair themes in dark mode it returns the wrong colors.
     /// </summary>
-    private uint ResolveThemedColor(string key, uint defaultValue)
+    /// <param name="source">
+    /// The native config the last-resort lookup reads: the committed one
+    /// unless a palette preview is resolving against its own.
+    /// </param>
+    private uint ResolveThemedColor(string key, uint defaultValue, GhosttyConfig? source = null)
     {
         // 1. User config override.
         var userVal = GetFileValue(key, "");
@@ -1477,7 +1666,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
         // 3. Fall back to libghostty's resolved value (light variant or
         // hard default).
-        return GetColor(key, defaultValue);
+        return GetColorFrom(source ?? _config, key) ?? defaultValue;
     }
 
     /// <summary>
@@ -1595,34 +1784,30 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     }
 
     /// <summary>
-    /// Read a color config value. libghostty returns colors as
-    /// <c>ghostty_config_color_s { r: u8, g: u8, b: u8 }</c>.
-    /// We pack it into 0x00RRGGBB for easy consumption.
+    /// A simple colour from <paramref name="config"/>, packed 0x00RRGGBB, or
+    /// null when the key is not found or is not a simple colour. libghostty
+    /// returns colours as <c>ghostty_config_color_s { r: u8, g: u8, b: u8 }</c>
+    /// (3 bytes, no padding).
     /// </summary>
-    private unsafe uint GetColor(string key, uint defaultValue)
+    private static unsafe uint? GetColorFrom(GhosttyConfig config, string key)
     {
-        // ghostty_config_color_s is 3 bytes: r, g, b (no padding).
-        byte r = 0, g = 0, b = 0;
-        // Stack a 3-byte buffer for the color struct.
+        if (config.Handle == IntPtr.Zero) return null;
         byte* colorBuf = stackalloc byte[3];
         var keyBytes = System.Text.Encoding.UTF8.GetBytes(key);
         fixed (byte* keyPtr = keyBytes)
         {
             var found = NativeMethods.ConfigGet(
-                _config,
+                config,
                 (IntPtr)colorBuf,
                 (IntPtr)keyPtr,
                 (UIntPtr)keyBytes.Length);
-            if (!found) return defaultValue;
-            r = colorBuf[0];
-            g = colorBuf[1];
-            b = colorBuf[2];
+            if (!found) return null;
         }
-        return ((uint)r << 16) | ((uint)g << 8) | b;
+        return ((uint)colorBuf[0] << 16) | ((uint)colorBuf[1] << 8) | colorBuf[2];
     }
 
     /// <summary>
-    /// Like <see cref="GetColor"/> but returns null when the key is
+    /// Like <see cref="GetColorFrom"/> on the committed config: null when the key is
     /// not found or not a simple color.
     /// </summary>
     private unsafe uint? GetColorOrNull(string key)
@@ -1836,6 +2021,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public void Dispose()
     {
         BeginShutdown();
+        // A preview still up at teardown: the revert is fenced off once
+        // shutdown starts, so whatever preview config is left is freed here,
+        // after the app that cloned it.
+        if (_previewConfig.Handle != IntPtr.Zero)
+        {
+            NativeMethods.ConfigFree(_previewConfig);
+            _previewConfig = default;
+        }
         if (_config.Handle != IntPtr.Zero)
             NativeMethods.ConfigFree(_config);
     }
@@ -1843,6 +2036,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
 internal static partial class ConfigServiceLogExtensions
 {
+    // Warning: the palette keeps showing whatever it showed before, and the
+    // theme can still be chosen from Settings or the config file.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ThemePreviewFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigService] Could not preview theme {ThemeName} on the live views")]
+    internal static partial void LogThemePreviewFailed(
+        this ILogger<ConfigService> logger, System.Exception ex, string themeName);
+
     // LogLevel.Error (not Warning) because a failed reload leaves the
     // previous config in place; the user's edit silently stops being
     // applied, which is a genuine functional degradation.

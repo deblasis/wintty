@@ -115,6 +115,25 @@ public sealed partial class MainWindow : Window
     // Named TestSeam* so the seam's footprint on this class is greppable
     // and removable as one shape.
     internal Input.PaneActionRouter TestSeamRouter => _router;
+
+    /// <summary>The config service, for the seam's theme readout.</summary>
+    internal ConfigService TestSeamConfig => _configService;
+
+    /// <summary>The palette's view model, null before the window finished building it.</summary>
+    internal CommandPaletteViewModel? TestSeamPaletteVm => _commandPaletteVm;
+
+    /// <summary>The palette control, whose key and text handlers the seam drives.</summary>
+    internal Controls.CommandPalette.CommandPaletteControl TestSeamPaletteUI => CommandPaletteUI;
+
+    /// <summary>Whether the palette is up, as the view model knows it.</summary>
+    internal bool TestSeamPaletteOpen => _commandPaletteVm?.IsOpen ?? false;
+
+    /// <summary>The palette chord's own toggle.</summary>
+    internal void TestSeamTogglePalette() => ToggleCommandPalette();
+
+    /// <summary>This window's palette theme browse, for the seam's settle wait.</summary>
+    internal Ghostty.Core.Themes.PaletteThemeBrowse? TestSeamThemeBrowse => _paletteThemeBrowse;
+
     internal bool TestSeamVerticalTabs => _verticalTabsVisible;
     internal bool TestSeamLayoutSwitching => _layout.IsSwitching;
 
@@ -422,6 +441,12 @@ public sealed partial class MainWindow : Window
 
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
+
+    // The palette's theme browse (#1081) and the one-shot timer its throttle
+    // rides. The browse's state is per window; what it previews is the app's.
+    private Ghostty.Core.Themes.PaletteThemeBrowse? _paletteThemeBrowse;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _paletteThemeTimer;
+    private Action? _paletteThemeTimerWork;
     private Controls.TerminalControl? _previousFocusSurface;
     // Cold-start launch icon. Null on every window that was not opened
     // by App.OnLaunched -- a warm-process window reaches first render
@@ -2240,6 +2265,16 @@ public sealed partial class MainWindow : Window
         // above DisposeAllLeaves, not after it.
         ClosePicker();
         _cyclePopupTimer?.Stop();
+
+        // A palette theme browse still live in this window: its preview is on
+        // every window, and this one's palette Close is never reached on the
+        // way out, so undo it here. Dispatched for the reason the picker's
+        // revert is: the revert fans ConfigChanged out, and this window's
+        // tree is part-way through teardown right now. Once the app itself is
+        // shutting down the config service fences the revert to a no-op.
+        _paletteThemeTimer?.Stop();
+        if (_paletteThemeBrowse is { IsActive: true } themeBrowse)
+            DispatcherQueue.TryEnqueue(() => themeBrowse.Cancel());
         // The detach also unregisters the tab from App's process tracker,
         // which is process-global. Teardown frees the leaves without ever
         // removing a tab, so TabRemoved -- the only other caller -- never
@@ -5230,6 +5265,29 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
+        // The theme list (#1081). The browse previews on the live views
+        // through the config service and records against the process's one
+        // snapshot slot, the same one the inline +list-themes picker uses, so
+        // the two cannot restore over each other. The entry itself enters
+        // theme mode synchronously: the view model checks right after
+        // executing whether to stay open.
+        var themeBrowse = new Ghostty.Core.Themes.PaletteThemeBrowse(
+            new Services.PaletteThemeTarget(_configService, _configWriter, _configEditor),
+            Ghostty.App.ThemePreviewSession,
+            SchedulePaletteThemeWork);
+        _paletteThemeBrowse = themeBrowse;
+        sources.Add(new ThemeCommandSource(() => _commandPaletteVm?.EnterThemeMode()));
+        var themeMode = new PaletteThemeMode
+        {
+            Themes = () => Ghostty.Core.Themes.ThemeCatalog.Enumerate(
+                Services.ThemeProvider.Directories(_configService.ConfigFilePath)),
+            // The half of a light/dark pair on screen now, which is where the
+            // highlight starts.
+            ActiveTheme = () => Ghostty.Core.Config.ThemeParser.SelectForScheme(
+                _configService.CurrentTheme, Services.OsTheme.IsDark()),
+            Browse = themeBrowse,
+        };
+
         // Deliberate crash triggers, the same kinds and the same
         // implementation as `wintty +crash <kind>`. Registered in every
         // build: the shipped installer is the configuration whose capture
@@ -5295,7 +5353,44 @@ public sealed partial class MainWindow : Window
             // binding-action path BuiltInCommandSource uses, deferred to the
             // next tick so the palette closes before the action runs.
             commandLineDispatch: actionKey =>
-                DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)));
+                DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)),
+            themeMode: themeMode);
+    }
+
+    /// <summary>
+    /// The theme browse's scheduler: zero delay is the next low-priority
+    /// dispatcher turn, after the input that caused it has been handled, so
+    /// a burst of key repeats lands as one apply; anything longer rides one
+    /// reusable one-shot timer (the browse keeps at most one such callback
+    /// outstanding, and a stale one it drops by itself).
+    /// </summary>
+    private void SchedulePaletteThemeWork(TimeSpan delay, Action work)
+    {
+        if (_isClosed) return;
+        if (delay <= TimeSpan.Zero)
+        {
+            DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => { if (!_isClosed) work(); });
+            return;
+        }
+
+        if (_paletteThemeTimer is null)
+        {
+            var timer = DispatcherQueue.CreateTimer();
+            timer.IsRepeating = false;
+            timer.Tick += (t, _) =>
+            {
+                t.Stop();
+                var due = _paletteThemeTimerWork;
+                _paletteThemeTimerWork = null;
+                if (!_isClosed) due?.Invoke();
+            };
+            _paletteThemeTimer = timer;
+        }
+        _paletteThemeTimerWork = work;
+        _paletteThemeTimer.Interval = delay;
+        _paletteThemeTimer.Start();
     }
 
     // Toggle the inspector window for the active surface. v1: one inspector

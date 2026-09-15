@@ -26,6 +26,7 @@ internal static class LogEvents
         public const int WatcherErrorRepeat    = 1012;
         public const int WatcherRebuilt        = 1013;
         public const int WatcherRebuildRetry   = 1014;
+        public const int ThemePreviewFailed    = 1015;
     }
 
     // 1100-1199: Frecency / command history
