@@ -266,7 +266,11 @@ function Start-SeamSession(
     # running this always passes. A refusal starts and stops nothing, and
     # puts the environment back as the caller had it.
     try {
-        [void](Assert-WinttyCoexistence -ExePath $session.ExePath -ConfigText $ConfigText -Context 'Start-SeamSession')
+        $coexist = Assert-WinttyCoexistence -ExePath $session.ExePath -ConfigText $ConfigText -Context 'Start-SeamSession'
+        if (@($coexist.Running).Count -gt 0) {
+            Write-Host ("Start-SeamSession: launching beside Wintty pid(s) {0}; isolation and a different edition proven" -f
+                ((@($coexist.Running) | ForEach-Object { $_.Id }) -join ', '))
+        }
     }
     catch {
         $refusal = $_.Exception.Message
