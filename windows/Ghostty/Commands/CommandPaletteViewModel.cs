@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using Ghostty.Core.Commands;
+using Ghostty.Core.Themes;
 
 namespace Ghostty.Commands;
 
@@ -11,6 +12,31 @@ internal enum PaletteMode
 {
     Search,
     CommandLine,
+    // The theme list: the highlight previews on the live views, Enter keeps
+    // it, Escape (or any other close) puts back what was there.
+    Theme,
+}
+
+/// <summary>
+/// What the palette's theme list needs from its window: the themes to offer,
+/// the one on screen when the list opens, and the browse that previews,
+/// reverts and commits. Null on the view model means the palette has no
+/// theme list.
+/// </summary>
+internal sealed class PaletteThemeMode
+{
+    public required Func<IReadOnlyList<string>> Themes { get; init; }
+    public required Func<string?> ActiveTheme { get; init; }
+    public required PaletteThemeBrowse Browse { get; init; }
+
+    /// <summary>The rows' swatch colours, read on first use and dropped per browse.</summary>
+    public required ThemeSwatchCache Swatches { get; init; }
+
+    /// <summary>
+    /// Typing refilters the list once it pauses, so the preview that follows
+    /// the highlight is asked for once per word, not once per keystroke.
+    /// </summary>
+    public required PaletteFilterDebounce Filter { get; init; }
 }
 
 /// <summary>
@@ -21,12 +47,23 @@ internal enum PaletteMode
 /// </summary>
 internal partial class CommandPaletteViewModel : INotifyPropertyChanged
 {
+    /// <summary>Id prefix of a theme row, followed by the theme's name.</summary>
+    private const string ThemeItemPrefix = "theme-item:";
+
     private readonly IReadOnlyList<ICommandSource> _sources;
     private readonly FrecencyStore _frecency;
     private readonly ActionAutoCompleter? _autoCompleter;
     private readonly bool _groupByCategory;
     private readonly Action<string>? _commandLineDispatch;
+    private readonly PaletteThemeMode? _themeMode;
     private List<CommandItem> _allCommands = [];
+    private IReadOnlyList<string> _themes = [];
+    private string? _activeTheme;
+
+    // True while the theme list places its own initial highlight, which is
+    // where the user already is: that placement is not a browse, and must
+    // not preview (or snapshot) anything.
+    private bool _placingThemeSelection;
 
     public bool IsOpen
     {
@@ -61,7 +98,22 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
     public CommandItem? SelectedCommand
     {
         get;
-        set { if (field != value) { field = value; Raise(); } }
+        set
+        {
+            if (field == value) return;
+            field = value;
+            // In the theme list, moving the highlight IS the preview. A null
+            // (a filter that matched nothing) leaves the preview where it is.
+            //
+            // Before the raise, not after: the raise reaches the control in
+            // the same turn now, and the badge it refreshes asks the browse
+            // what is being previewed, a question that only has the right
+            // answer once the browse has heard the move. The deferred badge
+            // used to hide the ordering by running a turn later.
+            if (Mode == PaletteMode.Theme && !_placingThemeSelection)
+                _themeMode?.Browse.Select(ThemeNameOf(value));
+            Raise();
+        }
     }
 
     public List<CommandItem> FilteredCommands
@@ -90,18 +142,42 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         set { if (field != value) { field = value; Raise(); } }
     } = "Search";
 
+    /// <summary>The highlighted theme while the theme list is up, else null.</summary>
+    public string? SelectedThemeName => Mode == PaletteMode.Theme ? ThemeNameOf(SelectedCommand) : null;
+
+    /// <summary>
+    /// The line the theme list shows in place of rows when the filter matched
+    /// nothing, else null.
+    /// </summary>
+    public string? ThemeNoMatchText
+    {
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    }
+
+    /// <summary>Whether typing has changed the theme filter and it has not applied yet.</summary>
+    internal bool IsThemeFilterPending => Mode == PaletteMode.Theme && _themeMode?.Filter.IsPending == true;
+
+    /// <summary>How many themes the theme list holds before filtering, else 0.</summary>
+    internal int ThemeCount => Mode == PaletteMode.Theme ? _themes.Count : 0;
+
+    /// <summary>How many previews the current theme browse has applied, else 0.</summary>
+    internal int ThemePreviewApplies => Mode == PaletteMode.Theme ? _themeMode?.Browse.ApplyCount ?? 0 : 0;
+
     public CommandPaletteViewModel(
         IReadOnlyList<ICommandSource> sources,
         FrecencyStore frecency,
         ActionAutoCompleter? autoCompleter,
         bool groupByCategory = false,
-        Action<string>? commandLineDispatch = null)
+        Action<string>? commandLineDispatch = null,
+        PaletteThemeMode? themeMode = null)
     {
         _sources = sources;
         _frecency = frecency;
         _autoCompleter = autoCompleter;
         _groupByCategory = groupByCategory;
         _commandLineDispatch = commandLineDispatch;
+        _themeMode = themeMode;
     }
 
     public void Open()
@@ -149,6 +225,17 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
 
     public void Close()
     {
+        // Every way the palette goes away funnels through here: Escape, the
+        // toggle chord, a click outside, the window closing. So this is where
+        // an unconfirmed theme browse is undone -- and it has to happen
+        // before the resets below, which would otherwise rebuild a theme
+        // list for a palette that is closing.
+        if (Mode == PaletteMode.Theme)
+        {
+            _themeMode?.Browse.Cancel();
+            LeaveThemeMode();
+        }
+
         IsOpen = false;
         SearchText = "";
         IsPinned = false;
@@ -166,10 +253,20 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
 
     public void ExecuteSelectedCommand()
     {
+        if (Mode == PaletteMode.Theme)
+        {
+            ConfirmSelectedTheme();
+            return;
+        }
+
         if (SelectedCommand is null) return;
 
         _frecency.RecordUse(SelectedCommand.Id);
         SelectedCommand.Execute(SelectedCommand);
+
+        // The command turned this palette into its theme list, in place.
+        // Closing now would throw the list away before anyone saw it.
+        if (Mode == PaletteMode.Theme) return;
 
         if (IsPinned)
         {
@@ -188,8 +285,79 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Replace the command list with the theme list, highlighting the theme
+    /// on screen. Nothing is previewed until the highlight moves.
+    /// </summary>
+    public void EnterThemeMode()
+    {
+        if (_themeMode is null || !IsOpen || Mode == PaletteMode.Theme) return;
+
+        _themes = _themeMode.Themes();
+        _activeTheme = _themeMode.ActiveTheme();
+        // Theme files can change between browses; within one they are read once.
+        _themeMode.Swatches.Clear();
+        _themeMode.Browse.Begin();
+
+        _placingThemeSelection = true;
+        try
+        {
+            Mode = PaletteMode.Theme;
+            ModeLabel = "Theme";
+            GhostText = null;
+            SearchText = "";
+            ApplyThemeFilter(initial: true);
+            // The reset above is a text change in theme mode, so it asked for
+            // a refilter; the initial filter just applied is that refilter.
+            // Left waiting, it would land a moment later and move the
+            // highlight off the theme on screen to the top row, and preview it.
+            _themeMode.Filter.Cancel();
+        }
+        finally
+        {
+            _placingThemeSelection = false;
+        }
+    }
+
+    private void ConfirmSelectedTheme()
+    {
+        // Enter keeps what the typed text describes, even when it was pressed
+        // before typing paused.
+        FlushThemeFilter();
+
+        // Enter on an empty filter has nothing to keep; the list stays up.
+        if (ThemeNameOf(SelectedCommand) is not { } chosen) return;
+
+        _themeMode?.Browse.Confirm(chosen);
+        LeaveThemeMode();
+        Close();
+    }
+
+    private void LeaveThemeMode()
+    {
+        // A filter still waiting for typing to pause must not land on the
+        // command list that comes back.
+        _themeMode?.Filter.Cancel();
+        ThemeNoMatchText = null;
+        Mode = PaletteMode.Search;
+        ModeLabel = "Search";
+        _themes = [];
+        _activeTheme = null;
+    }
+
     private void OnSearchTextChanged(string value)
     {
+        if (Mode == PaletteMode.Theme)
+        {
+            // Typing filters the theme list once it pauses; the highlight
+            // then lands on the best match, which previews it like any other
+            // move. Per keystroke, the preview would show a theme for every
+            // prefix of the name on the way to the one being typed.
+            if (_themeMode is null) ApplyThemeFilter(initial: false);
+            else _themeMode.Filter.Request(() => ApplyThemeFilter(initial: false));
+            return;
+        }
+
         if (value.StartsWith('>'))
         {
             Mode = PaletteMode.CommandLine;
@@ -203,6 +371,73 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
             ApplyFilter();
         }
     }
+
+    private void ApplyThemeFilter(bool initial)
+    {
+        var names = ThemeCatalog.Filter(_themes, SearchText);
+        FilteredCommands = names.Select(ThemeItem).ToList();
+        GhostText = null;
+        // The status line is the palette's live region, so "no match" is
+        // spoken as well as shown in the empty list.
+        StatusText = _themes.Count == 0
+            ? "No themes found"
+            : names.Count == 0 ? "No themes match"
+            : names.Count == 1 ? "1 theme" : $"{names.Count} themes";
+        ThemeNoMatchText = _themes.Count > 0 && names.Count == 0
+            ? $"No themes match “{SearchText.Trim()}”"
+            : null;
+
+        CommandItem? highlight = null;
+        if (initial && ThemeCatalog.InitialSelection(names, _activeTheme) is { } active)
+            highlight = FilteredCommands.FirstOrDefault(c => ThemeNameOf(c) == active);
+
+        // Set for the empty case too, for the reason ApplyFilter gives: a
+        // stale selection behind a filter that matched nothing would be what
+        // Enter keeps.
+        SelectedCommand = highlight ?? PaletteSelection.SelectTop(FilteredCommands);
+    }
+
+    private CommandItem ThemeItem(string name) => new()
+    {
+        Id = ThemeItemPrefix + name,
+        Title = name,
+        // The row draws its own "Current" badge and says "current theme" in
+        // its accessible name (ThemeRowPresentation), so no description.
+        Description = "",
+        ThemeName = name,
+        IsCurrentTheme = string.Equals(name, _activeTheme, StringComparison.OrdinalIgnoreCase),
+        Category = CommandCategory.Config,
+        // Enter on a theme row is handled by the view model (it confirms the
+        // browse), so the row itself does nothing when executed.
+        Execute = static _ => { },
+    };
+
+    /// <summary>
+    /// The swatch for a theme row if it has been read already, without
+    /// reading anything: what a row realized during a filter keystroke or a
+    /// scroll is painted from, synchronously, so it never blinks.
+    /// </summary>
+    internal bool TryGetCachedThemeSwatch(string themeName, out ThemeSwatch? swatch)
+    {
+        swatch = null;
+        return _themeMode is not null && _themeMode.Swatches.TryGetCached(themeName, out swatch);
+    }
+
+    /// <summary>The swatch for a theme row, reading its file the first time.</summary>
+    internal ThemeSwatch? LoadThemeSwatch(string themeName) => _themeMode?.Swatches.Get(themeName);
+
+    /// <summary>
+    /// Whether the browse is showing, or about to show, this theme. False for
+    /// the highlight a fresh list opens on, which previews nothing.
+    /// </summary>
+    internal bool IsThemePreviewed(string themeName)
+        => Mode == PaletteMode.Theme
+           && string.Equals(_themeMode?.Browse.TargetTheme, themeName, StringComparison.Ordinal);
+
+    private static string? ThemeNameOf(CommandItem? item)
+        => item is not null && item.Id.StartsWith(ThemeItemPrefix, StringComparison.Ordinal)
+            ? item.Id[ThemeItemPrefix.Length..]
+            : null;
 
     private void ApplyFilter()
     {
@@ -320,11 +555,31 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         SearchText += GhostText;
     }
 
-    public void MoveSelectionUp() =>
+    // Every mover acts on the list the typed text describes: a filter still
+    // waiting for typing to pause is applied first.
+    public void MoveSelectionUp()
+    {
+        FlushThemeFilter();
         SelectedCommand = PaletteSelection.Step(FilteredCommands, SelectedCommand, -1);
+    }
 
-    public void MoveSelectionDown() =>
+    public void MoveSelectionDown()
+    {
+        FlushThemeFilter();
         SelectedCommand = PaletteSelection.Step(FilteredCommands, SelectedCommand, +1);
+    }
+
+    /// <summary>Page Up / Page Down: a screenful at a time, clamped at the ends.</summary>
+    public void MoveSelectionBy(int delta)
+    {
+        FlushThemeFilter();
+        SelectedCommand = PaletteSelection.Step(FilteredCommands, SelectedCommand, delta);
+    }
+
+    private void FlushThemeFilter()
+    {
+        if (Mode == PaletteMode.Theme) _themeMode?.Filter.Flush();
+    }
 
     // ── INotifyPropertyChanged ───────────────────────────────────────────────
 

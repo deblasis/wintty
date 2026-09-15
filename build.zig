@@ -256,6 +256,11 @@ pub fn build(b: *std.Build) !void {
         if (!config.target.result.os.tag.isDarwin()) {
             lib_shared.installHeader(); // Only need one header
             if (config.target.result.os.tag == .windows) {
+                // The Windows app ships the bundled themes beside its
+                // executable, and only the themes: a full resources tree
+                // would also turn on terminfo and shell integration for
+                // every child (see bundledThemesDir in config/theme.zig).
+                if (resources.themes) |themes| b.getInstallStep().dependOn(themes);
                 lib_shared.install("ghostty.dll");
                 if (lib_shared.implib) |implib| {
                     b.getInstallStep().dependOn(&b.addInstallLibFile(

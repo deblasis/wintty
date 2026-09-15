@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const args = @import("args.zig");
 const Action = @import("ghostty.zig").Action;
 const Config = @import("../config/Config.zig");
@@ -136,8 +137,13 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     var stderr_writer = std.Io.File.stderr().writer(global.io(), &stderr_buf);
     const stderr = &stderr_writer.interface;
 
+    // A Windows build ships its themes beside the executable rather than in
+    // a resources directory (see theme.Location.bundledThemesDir), so a
+    // missing resources directory there is expected rather than a broken
+    // install. If nothing can be found at all, the "no themes found"
+    // message below says so.
     const resources_dir = global.resourcesDir().app();
-    if (resources_dir == null)
+    if (resources_dir == null and builtin.os.tag != .windows)
         try stderr.print("Could not find the Ghostty resources directory. Please ensure " ++
             "that Ghostty is installed correctly.\n", .{});
 

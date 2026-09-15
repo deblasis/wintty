@@ -487,6 +487,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     // Pushed in for the same reason the flag above is: frame-style is a
     // window-level answer and the strip must not re-derive it.
     private uint? _chromeFillRgb;
+
+    /// <summary>
+    /// The selected row's fill as packed RGB, for the test seam: the
+    /// terminal background the active tab is painted with, whichever path
+    /// last set it, so a driver can assert the strip and the terminal
+    /// content describe the same theme in one readout.
+    /// </summary>
+    internal uint? TestSeamSelectedTabFill
+        => _selectedTabFillBrush is { } fill ? PackColor(fill.Color) : null;
     private SolidColorBrush? _rowSeparatorBrush;
     private readonly List<Border> _rowSeparators = new();
 

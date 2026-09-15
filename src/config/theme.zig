@@ -31,11 +31,40 @@ pub const Location = enum {
             .user => try xdgThemesDir(arena_alloc, &environ_map, "wintty"),
             .user_ghostty => try xdgThemesDir(arena_alloc, &environ_map, "ghostty"),
 
-            .resources => try std.fs.path.join(arena_alloc, &.{
-                global.resourcesDir().app() orelse return null,
-                "themes",
-            }),
+            .resources => if (global.resourcesDir().app()) |resources|
+                try std.fs.path.join(arena_alloc, &.{ resources, "themes" })
+            else
+                try bundledThemesDir(arena_alloc),
         };
+    }
+
+    /// The bundled themes a Windows build ships beside its executable, at
+    /// `share/ghostty/themes`, when no resources directory was found.
+    ///
+    /// The Windows app ships the themes without the rest of the resources
+    /// tree. A resources directory is detected by its terminfo, and finding
+    /// one changes far more than themes: every child gets TERM=xterm-ghostty
+    /// and the shell integration scripts. The themes alone are only a list
+    /// of colours, so they get a lookup of their own that turns on nothing
+    /// else. The path is the one a full resources tree would put them at,
+    /// so shipping that tree later finds the same files through the branch
+    /// above instead.
+    fn bundledThemesDir(arena_alloc: Allocator) error{OutOfMemory}!?[]const u8 {
+        if (comptime builtin.os.tag != .windows) return null;
+
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe = exe_buf[0 .. std.process.executablePath(
+            global.io(),
+            &exe_buf,
+        ) catch return null];
+        const exe_dir = std.fs.path.dirname(exe) orelse return null;
+
+        const themes_dir = try std.fs.path.join(
+            arena_alloc,
+            &.{ exe_dir, "share", "ghostty", "themes" },
+        );
+        std.Io.Dir.accessAbsolute(global.io(), themes_dir, .{}) catch return null;
+        return themes_dir;
     }
 
     /// The `themes` subdirectory of an XDG config directory, for the given

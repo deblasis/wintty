@@ -88,6 +88,78 @@ public class ThemeSearchPathTests
         Assert.Empty(ThemeSearchPath.UserDirectories(null, null));
     }
 
+    // -- Bundled themes -----------------------------------------------------
+
+    private const string AppDir = @"C:\Program Files\Wintty";
+    private static readonly string Beside = Path.Combine(AppDir, "share", "ghostty", "themes");
+
+    [Fact]
+    public void Bundled_themes_are_found_beside_the_executable()
+    {
+        // theme.zig's Windows fallback when there is no resources directory.
+        Assert.Equal(Beside, ThemeSearchPath.BundledDirectory(null, AppDir, d => d == Beside));
+        Assert.Equal(Beside, ThemeSearchPath.BundledDirectory(null, AppDir + @"\", d => d == Beside));
+    }
+
+    [Fact]
+    public void No_bundled_directory_when_nothing_is_shipped()
+    {
+        Assert.Null(ThemeSearchPath.BundledDirectory(null, AppDir, _ => false));
+        Assert.Null(ThemeSearchPath.BundledDirectory(null, null, _ => true));
+    }
+
+    [Fact]
+    public void A_valid_resources_directory_replaces_the_one_beside_the_executable()
+    {
+        // libghostty takes the environment's directory as the resources
+        // directory and then looks for themes in it and nowhere else, whether
+        // or not a themes subdirectory exists there.
+        const string res = @"D:\ghostty\share\ghostty";
+        var dir = ThemeSearchPath.BundledDirectory(res, AppDir, d => d == res || d == Beside);
+        Assert.Equal(Path.Combine(res, "themes"), dir);
+    }
+
+    [Theory]
+    [InlineData("share\\ghostty")]
+    [InlineData(@"D:\missing\share\ghostty")]
+    [InlineData("")]
+    public void An_unusable_resources_directory_is_ignored(string res)
+    {
+        // validResourcesDir: relative or missing values fall back to detection.
+        var dir = ThemeSearchPath.BundledDirectory(res, AppDir, d => d == Beside);
+        Assert.Equal(Beside, dir);
+    }
+
+    [Fact]
+    public void Bundled_themes_are_searched_after_every_user_directory()
+    {
+        var dirs = ThemeSearchPath.Directories(@"D:\dotfiles\wintty", AppData, Beside).ToList();
+        Assert.Equal(
+            new[]
+            {
+                Path.Combine(@"D:\dotfiles", "wintty", "themes"),
+                Path.Combine(@"D:\dotfiles", "ghostty", "themes"),
+                Beside,
+            },
+            dirs);
+    }
+
+    [Fact]
+    public void No_bundled_directory_leaves_the_user_directories()
+    {
+        Assert.Equal(
+            ThemeSearchPath.UserDirectories(null, AppData),
+            ThemeSearchPath.Directories(null, AppData, null));
+    }
+
+    [Fact]
+    public void A_bundled_directory_that_is_also_a_user_directory_is_listed_once()
+    {
+        var user = Path.Combine(AppData, "wintty", "themes");
+        var dirs = ThemeSearchPath.Directories(null, AppData, user.ToUpperInvariant()).ToList();
+        Assert.Equal(ThemeSearchPath.UserDirectories(null, AppData), dirs);
+    }
+
     [Theory]
     [InlineData("Catppuccin Mocha")]
     [InlineData("3024 Night")]

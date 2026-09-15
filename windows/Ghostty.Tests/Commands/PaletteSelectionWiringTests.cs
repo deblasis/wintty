@@ -78,11 +78,16 @@ public class PaletteSelectionWiringTests
     /// <summary>
     /// A method emptied to `{ }` passes every guard above and takes the
     /// whole Step unit-test suite with it, since nothing else calls it.
+    /// Checked per mover rather than as a total, so a new mover cannot hide
+    /// an emptied one: the arrows and Page Up / Page Down.
     /// </summary>
-    [Fact]
-    public void BothMoversStillGoThroughStep()
+    [Theory]
+    [InlineData("MoveSelectionUp")]
+    [InlineData("MoveSelectionDown")]
+    [InlineData("MoveSelectionBy")]
+    public void EveryMoverStillGoesThroughStep(string mover)
     {
-        Assert.Equal(2, ShellSource.Load(ViewModel).Root.Calls("PaletteSelection.Step").Count);
+        Assert.Single(ShellSource.Load(ViewModel).Method(mover).Calls("PaletteSelection.Step"));
     }
 
     // The guard that used to live here -- "no disabled #if region assigns

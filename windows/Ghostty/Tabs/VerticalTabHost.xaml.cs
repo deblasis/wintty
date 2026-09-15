@@ -414,6 +414,9 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     internal void SetSelectedTabColors(Windows.UI.Color background, Windows.UI.Color foreground)
         => _strip.SetSelectedTabColors(background, foreground);
 
+    /// <summary>The selected row's fill as packed RGB, for the test seam.</summary>
+    internal uint? TestSeamSelectedTabFill => _strip.TestSeamSelectedTabFill;
+
     /// <summary>
     /// The filled row behind the selected tab, for MainWindow's seam cover.
     /// </summary>

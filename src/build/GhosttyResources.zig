@@ -8,9 +8,15 @@ const SharedDeps = @import("SharedDeps.zig");
 
 steps: []*std.Build.Step,
 
+/// The bundled themes' install step on its own, when themes are emitted.
+/// The Windows library build installs just this (see build.zig): the app
+/// ships the themes without the rest of the resources tree.
+themes: ?*std.Build.Step = null,
+
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !GhosttyResources {
     var steps: std.ArrayList(*std.Build.Step) = .empty;
     errdefer steps.deinit(b.allocator);
+    var themes_step: ?*std.Build.Step = null;
 
     // This is the exe used to generate some build data.
     const build_data_exe = b.addExecutable(.{
@@ -135,6 +141,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
                 .exclude_extensions = &.{".md"},
             });
             try steps.append(b.allocator, &install_step.step);
+            themes_step = &install_step.step;
         }
     }
 
@@ -250,7 +257,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         &steps,
     );
 
-    return .{ .steps = steps.items };
+    return .{ .steps = steps.items, .themes = themes_step };
 }
 
 /// Add the resource files needed to make Ghostty a proper

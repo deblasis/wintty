@@ -1050,9 +1050,371 @@ internal static class TestSeam
                 return RectJson(op, part, px, host.TestSeamTagForegroundRgb(tab));
             }
 
+            case "palette-open":
+            {
+                // The palette chord's own toggle, opening only: a driver that
+                // asks for an open palette gets one whether or not it was.
+                if (!window.TestSeamPaletteOpen) window.TestSeamTogglePalette();
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return PaletteThemeJson(window, op);
+            }
+
+            case "palette-type":
+            {
+                if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
+                // Into the search box, so the view model hears it the way it
+                // hears typing. perCharMs > 0 types it a character at a time,
+                // from what the box already holds when the text extends it,
+                // the way a typist's keys land; the theme list's filter then
+                // waits for the pause after the last one.
+                var text = ArgString(args, "text") ?? "";
+                var perChar = Math.Clamp(ArgInt(args, "perCharMs", 0), 0, 1000);
+                var ui = window.TestSeamPaletteUI;
+                if (perChar == 0)
+                {
+                    ui.TestSeamType(text);
+                }
+                else
+                {
+                    var current = ui.TestSeamSearchText;
+                    var from = text.StartsWith(current, StringComparison.Ordinal) ? current.Length : 0;
+                    for (var i = from + 1; i <= text.Length; i++)
+                    {
+                        ui.TestSeamType(text[..i]);
+                        if (i < text.Length) await Task.Delay(perChar);
+                    }
+                }
+
+                // The list the moment the last key landed, read in that same
+                // dispatcher turn, before anything else can run: whether a
+                // filter is still waiting, how many rows are listed, and how
+                // many previews the browse has applied. The answer below
+                // comes a turn or more later, by when the wait may be over.
+                var vmNow = window.TestSeamPaletteVm;
+                var atLastKey = (
+                    Pending: vmNow?.IsThemeFilterPending ?? false,
+                    Count: vmNow?.FilteredCommands.Count ?? 0,
+                    Applies: vmNow?.ThemePreviewApplies ?? 0);
+
+                // thenKey presses a key right after the last character, in
+                // the same dispatcher turn, so the filter's wait cannot have
+                // ended: Enter pressed before typing pauses.
+                if (ArgString(args, "thenKey") is { } thenKey)
+                {
+                    if (thenKey != "enter") return Error(op, "thenKey must be enter");
+                    ui.TestSeamKey(Windows.System.VirtualKey.Enter);
+                }
+
+                // settle (the default) waits for the filter and the preview
+                // it moves to, so the answer is the settled list; settle=false
+                // answers at once, to read the list before the pause ends.
+                if (ArgBool(args, "settle", true)
+                    && !await WaitForPaletteSettledAsync(window))
+                {
+                    return Error(op, "the theme filter did not settle within 5s");
+                }
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return PaletteThemeJson(window, op, atLastKey);
+            }
+
+            case "palette-key":
+            {
+                if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
+                Windows.System.VirtualKey? key = ArgString(args, "key") switch
+                {
+                    "up" => Windows.System.VirtualKey.Up,
+                    "down" => Windows.System.VirtualKey.Down,
+                    "pageup" => Windows.System.VirtualKey.PageUp,
+                    "pagedown" => Windows.System.VirtualKey.PageDown,
+                    "enter" => Windows.System.VirtualKey.Enter,
+                    "escape" => Windows.System.VirtualKey.Escape,
+                    "backspace" => Windows.System.VirtualKey.Back,
+                    _ => null,
+                };
+                if (key is not { } pressed)
+                    return Error(op, "key must be up, down, pageup, pagedown, enter, escape or backspace");
+                // repeat > 1 is a held key: the presses arrive back to back,
+                // which is what the browse's throttle is for. intervalMs
+                // spaces them out instead, the way a fast typist's arrow
+                // presses land: the dispatcher runs between them, so previews
+                // apply mid-run while a driver samples the screen.
+                var repeat = Math.Clamp(ArgInt(args, "repeat", 1), 1, 200);
+                var interval = Math.Clamp(ArgInt(args, "intervalMs", 0), 0, 1000);
+                for (var i = 0; i < repeat; i++)
+                {
+                    // Backspace is the TextBox's own key, not one the search
+                    // box's handler takes: it edits the text, which the view
+                    // model hears as typing.
+                    if (pressed == Windows.System.VirtualKey.Back)
+                        window.TestSeamPaletteUI.TestSeamBackspace();
+                    else
+                        window.TestSeamPaletteUI.TestSeamKey(pressed);
+                    if (interval > 0 && i < repeat - 1) await Task.Delay(interval);
+                }
+
+                // The preview lands on a later dispatcher turn, and a burst
+                // lands at the end of the throttle interval; an edit of the
+                // text lands when typing pauses. The ack waits for both, so
+                // what the driver reads back is the settled theme.
+                if (!await WaitForPaletteSettledAsync(window))
+                    return Error(op, "the theme preview did not settle within 5s");
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return PaletteThemeJson(window, op);
+            }
+
+            case "get-theme":
+                // What every live view is showing, read from the config the
+                // app was handed (the preview's while one is up), next to what
+                // the chrome resolved and what the file says.
+                return PaletteThemeJson(window, op);
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
+    }
+
+    /// <summary>
+    /// The theme readout: the file's `theme`, whether a palette preview is
+    /// up and which, the terminal's colours as the live native config states
+    /// them, the chrome's resolved colours, and the palette UI's own state.
+    /// </summary>
+    private static string PaletteThemeJson(
+        MainWindow window, string op, (bool Pending, int Count, int Applies)? atLastKey = null)
+        => Json(json =>
+        {
+            var config = window.TestSeamConfig;
+            var vm = window.TestSeamPaletteVm;
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            if (atLastKey is { } last)
+            {
+                json.WriteStartObject("atLastKey");
+                json.WriteBoolean("filterPending", last.Pending);
+                json.WriteNumber("count", last.Count);
+                json.WriteNumber("previewApplies", last.Applies);
+                json.WriteEndObject();
+            }
+            json.WriteString("configTheme", config.CurrentTheme);
+            json.WriteBoolean("previewing", config.IsPreviewingTheme);
+            if (config.PreviewThemeName is { } previewed) json.WriteString("previewTheme", previewed);
+            else json.WriteNull("previewTheme");
+            WriteHex(json, "nativeBackground", config.GetLiveNativeColor("background"));
+            WriteHex(json, "nativeForeground", config.GetLiveNativeColor("foreground"));
+            WriteHex(json, "background", config.BackgroundColor);
+            WriteHex(json, "foreground", config.ForegroundColor);
+            WriteHex(json, "cursor", config.CursorColor);
+            WriteHex(json, "cursorText", config.CursorTextColor);
+            // The strip's selected tab is painted with the terminal
+            // background, so beside the values above it says whether the
+            // strip and the content describe the same theme in this one
+            // readout (issue #1121: they used to land visibly apart).
+            WriteHex(json, "stripFill", window.TestSeamStripSelectionFill);
+            json.WriteStartArray("palette");
+            foreach (var entry in config.AnsiPalette) json.WriteStringValue($"#{entry:X6}");
+            json.WriteEndArray();
+            json.WriteStartObject("paletteUi");
+            json.WriteBoolean("open", vm?.IsOpen ?? false);
+            json.WriteString("mode", vm?.Mode.ToString() ?? "");
+            json.WriteString("selected", vm?.SelectedCommand?.Title ?? "");
+            if (vm?.SelectedThemeName is { } highlighted) json.WriteString("selectedTheme", highlighted);
+            else json.WriteNull("selectedTheme");
+            json.WriteNumber("count", vm?.FilteredCommands.Count ?? 0);
+            json.WriteString("status", vm?.StatusText ?? "");
+            // The theme list's filter: the text in the box, whether a
+            // filter is still waiting for typing to pause, the list before
+            // and after filtering, the no-match line, and how many previews
+            // this browse has applied (typing a word should add one).
+            json.WriteString("searchText", window.TestSeamPaletteUI.TestSeamSearchText);
+            json.WriteBoolean("filterPending", vm?.IsThemeFilterPending ?? false);
+            json.WriteNumber("total", vm?.ThemeCount ?? 0);
+            json.WriteStartArray("names");
+            if (vm?.Mode == Commands.PaletteMode.Theme)
+            {
+                foreach (var item in vm.FilteredCommands)
+                    if (item.ThemeName is { } name) json.WriteStringValue(name);
+            }
+            json.WriteEndArray();
+            if (window.TestSeamPaletteUI.TestSeamNoMatch is { } noMatch) json.WriteString("noMatch", noMatch);
+            else json.WriteNull("noMatch");
+            json.WriteNumber("previewApplies", vm?.ThemePreviewApplies ?? 0);
+            WritePaletteLook(json, window);
+            json.WriteEndObject();
+            // Where the active terminal is on screen, in the physical pixels
+            // a capture is taken in, so a pixel oracle can check that the
+            // terminal itself repainted and not only the config handed to it.
+            WriteTerminalRect(json, window);
+            WriteState(json, window, window.TabManager);
+            json.WriteEndObject();
+        });
+
+    /// <summary>
+    /// How the palette looks, inside paletteUi: the light/dark variant it is
+    /// drawn in, the footer hint and the search box's and list's names, the
+    /// card's rect, and every realized theme row as drawn (badge, accessible
+    /// name, hint, swatch colours and the screen rects of its swatch parts),
+    /// so a pixel oracle can check the row against the theme file.
+    /// </summary>
+    private static void WritePaletteLook(Utf8JsonWriter json, MainWindow window)
+    {
+        var ui = window.TestSeamPaletteUI;
+
+        // Everything is read before anything is written, so a readout that
+        // cannot be taken is reported beside the rest (lookError, with its
+        // whole stack) instead of failing the op and hiding every other one.
+        string? elementTheme = null, hint = null, searchName = null, placeholder = null, listName = null;
+        (int X, int Y, int W, int H)? card = null;
+        IReadOnlyList<Controls.CommandPalette.CommandPaletteControl.TestSeamThemeRow> rows = [];
+        string? lookError = null;
+        try
+        {
+            elementTheme = ui.TestSeamElementTheme;
+            hint = ui.TestSeamFooterHint;
+            (searchName, placeholder) = ui.TestSeamSearchBox;
+            listName = ui.TestSeamListName;
+            // Geometry only while the palette is up: a closed popup's card
+            // and rows have no place on screen to report.
+            if (window.TestSeamPaletteOpen)
+            {
+                card = ElementRect(window, ui.TestSeamCard);
+                rows = ui.TestSeamThemeRows();
+            }
+        }
+        catch (Exception ex)
+        {
+            // Describe names the type even when the message is empty; the
+            // whole stack follows, because a WinRT failure's top frame is
+            // only the throw helper.
+            lookError = Describe(ex) + " | " + ex.StackTrace;
+        }
+
+        json.WriteString("elementTheme", elementTheme);
+        json.WriteBoolean("tracksWindowTheme", ui.TestSeamTracksWindowTheme);
+        json.WriteString("hint", hint);
+        json.WriteString("searchName", searchName);
+        json.WriteString("placeholder", placeholder);
+        json.WriteString("listName", listName);
+        if (lookError is not null) json.WriteString("lookError", lookError);
+        if (card is { } cardPx)
+        {
+            json.WritePropertyName("card");
+            WriteRectValue(json, cardPx);
+        }
+        else json.WriteNull("card");
+
+        json.WriteStartArray("rows");
+        foreach (var row in rows)
+        {
+            json.WriteStartObject();
+            json.WriteString("theme", row.Theme);
+            json.WriteBoolean("current", row.Current);
+            json.WriteBoolean("selected", row.Selected);
+            json.WriteString("badge", row.Badge);
+            json.WriteString("automationName", row.AutomationName);
+            if (row.HelpText is { } help) json.WriteString("helpText", help);
+            else json.WriteNull("helpText");
+            json.WriteString("hint", row.Hint);
+            json.WriteBoolean("painted", row.Painted);
+            if (row.Swatch is { } swatch)
+            {
+                json.WriteStartObject("colors");
+                json.WriteString("background", $"#{swatch.Background:X6}");
+                json.WriteString("foreground", $"#{swatch.Foreground:X6}");
+                json.WriteString("cursor", $"#{swatch.Cursor:X6}");
+                json.WriteStartArray("palette");
+                foreach (var entry in swatch.Palette) json.WriteStringValue($"#{entry:X6}");
+                json.WriteEndArray();
+                json.WriteEndObject();
+            }
+            else json.WriteNull("colors");
+            WriteElementRect(json, "row", window, row.Container);
+            WriteElementRect(json, "swatch", window, row.Tile);
+            WriteElementRect(json, "sample", window, row.Sample);
+            WriteElementRect(json, "cursor", window, row.Cursor);
+            json.WriteStartArray("strip");
+            foreach (var cell in row.Strip)
+            {
+                if (ElementRect(window, cell) is { } px) WriteRectValue(json, px);
+                else json.WriteNullValue();
+            }
+            json.WriteEndArray();
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+    }
+
+    private static (int X, int Y, int W, int H)? ElementRect(MainWindow window, Microsoft.UI.Xaml.FrameworkElement element)
+    {
+        if (element.ActualWidth <= 0 || element.ActualHeight <= 0) return null;
+        try
+        {
+            return window.TestSeamToScreenPixels(
+                new Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight), element);
+        }
+        catch (System.Runtime.InteropServices.COMException)
+        {
+            // An element between layouts (a recycled row) has no rect yet.
+            return null;
+        }
+    }
+
+    private static void WriteElementRect(Utf8JsonWriter json, string name, MainWindow window, Microsoft.UI.Xaml.FrameworkElement element)
+    {
+        if (ElementRect(window, element) is { } px)
+        {
+            json.WritePropertyName(name);
+            WriteRectValue(json, px);
+        }
+        else json.WriteNull(name);
+    }
+
+    private static void WriteRectValue(Utf8JsonWriter json, (int X, int Y, int W, int H) px)
+    {
+        json.WriteStartObject();
+        json.WriteNumber("x", px.X);
+        json.WriteNumber("y", px.Y);
+        json.WriteNumber("w", px.W);
+        json.WriteNumber("h", px.H);
+        json.WriteEndObject();
+    }
+
+    private static void WriteHex(Utf8JsonWriter json, string name, uint? rgb)
+    {
+        if (rgb is { } value) json.WriteString(name, $"#{value:X6}");
+        else json.WriteNull(name);
+    }
+
+    /// <summary>
+    /// The active leaf's rect in physical screen pixels, or null when it
+    /// cannot be placed (no content root yet, or the conversion refused).
+    /// </summary>
+    private static void WriteTerminalRect(Utf8JsonWriter json, MainWindow window)
+    {
+        Windows.Foundation.Rect? leaf = null;
+        if (window.TestSeamRoot is { } root)
+        {
+            var host = window.TestSeamActivePaneHost;
+            var wanted = host.TestSeamActiveLeafIndex;
+            var index = 0;
+            foreach (var rect in host.TestSeamLeafRects)
+            {
+                // The first leaf stands in until the active one is reached.
+                if (leaf is null || index == wanted) leaf = rect;
+                if (index == wanted) break;
+                index++;
+            }
+            if (leaf is { } dip && window.TestSeamToScreenPixels(dip, root) is { } px)
+            {
+                json.WriteStartObject("terminalRect");
+                json.WriteNumber("x", px.X);
+                json.WriteNumber("y", px.Y);
+                json.WriteNumber("w", px.W);
+                json.WriteNumber("h", px.H);
+                json.WriteEndObject();
+                return;
+            }
+        }
+        json.WriteNull("terminalRect");
     }
 
     // ---- responses ---------------------------------------------------
@@ -1540,6 +1902,24 @@ internal static class TestSeam
         null => "none",
         _ => icon.GetType().Name,
     };
+
+    /// <summary>
+    /// Waits, up to 5 s, until the palette's theme list has nothing left in
+    /// flight: no filter waiting for typing to pause, and no preview waiting
+    /// for its apply. False when it did not settle in time.
+    /// </summary>
+    private static async Task<bool> WaitForPaletteSettledAsync(MainWindow window)
+    {
+        var deadline = Environment.TickCount64 + 5_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            var filtering = window.TestSeamPaletteVm is { IsThemeFilterPending: true };
+            var previewing = window.TestSeamThemeBrowse is { HasPendingPreview: true };
+            if (!filtering && !previewing) return true;
+            await Task.Delay(15);
+        }
+        return false;
+    }
 #endif
 
     // ---- outside the build gate ---------------------------------------
