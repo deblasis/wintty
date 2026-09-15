@@ -215,12 +215,20 @@ function Dominant($bmp) {
 }
 
 # The dominant colour of a patch near the bottom-right of the active
-# terminal: shell output starts top-left, so this is background.
-function Sample-TerminalBackground($s) {
+# terminal: shell output starts top-left, so this is background. The rect
+# can be passed in (Check-Pixels fetches it once) so the z-order-sensitive
+# part is nothing but topmost-then-capture: a pipe roundtrip between the
+# two was a wide-open gap for another window on a shared desktop to land
+# in, and the oracle read a stranger's terminal.
+function Sample-TerminalBackground($s, $TerminalRect = $null) {
     [SeamWin]::PlaceOnTop($s.Hwnd64)
-    $r = Seam $s @{ op = 'get-theme' }
-    $rect = $r.terminalRect
-    if ($null -eq $rect) { throw 'HARNESS: the seam reported no terminal rect' }
+    $rect = $TerminalRect
+    if ($null -eq $rect) {
+        $r = Seam $s @{ op = 'get-theme' }
+        $rect = $r.terminalRect
+        if ($null -eq $rect) { throw 'HARNESS: the seam reported no terminal rect' }
+        [SeamWin]::PlaceOnTop($s.Hwnd64)
+    }
     $bmp = Capture ([int]($rect.x + $rect.w - 40)) ([int]($rect.y + $rect.h - 40)) 24 24
     try { return Dominant $bmp } finally { $bmp.Dispose() }
 }
@@ -244,14 +252,20 @@ function Is-DarkHex([string]$hex) {
 }
 
 # The renderer repaints on its own frame after the config lands, so the
-# pixel oracle polls briefly rather than sampling once.
+# pixel oracle polls briefly rather than sampling once. The terminal rect
+# is fetched once and reused for the whole poll (the window is pinned and
+# nothing resizes it mid-poll), so every sample is a tight
+# raise-then-capture.
 function Check-Pixels($s, [string]$Name, [string]$Want) {
     if ($NoPixels) { return }
+    $r = Seam $s @{ op = 'get-theme' }
+    $rect = $r.terminalRect
+    if ($null -eq $rect) { throw 'HARNESS: the seam reported no terminal rect' }
     $seen = ''
     $deadline = (Get-Date).AddSeconds(3)
     do {
         Start-Sleep -Milliseconds 200
-        $seen = Sample-TerminalBackground $s
+        $seen = Sample-TerminalBackground $s $rect
         if (Near $seen $Want) { break }
     } while ((Get-Date) -lt $deadline)
     Check "$Name/pixels" (Near $seen $Want) "screen $seen, want $Want"
