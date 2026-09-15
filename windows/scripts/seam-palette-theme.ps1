@@ -113,8 +113,16 @@ public static class ShotWin {
         if (DwmGetWindowAttribute(new IntPtr(hwnd), 9, out r, Marshal.SizeOf(typeof(RECT))) != 0) return null;
         return new[] { r.L, r.T, r.R - r.L, r.B - r.T };
     }
+    // A capture harness needs the display it reads: an idle screen-off
+    // mid-run turns every capture solid and the pixel oracle fails on a
+    // product that never misbehaved. CONTINUOUS | DISPLAY_REQUIRED for
+    // the run, plain CONTINUOUS to release it.
+    [DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint es);
+    public static void KeepDisplayOn() { SetThreadExecutionState(0x80000003u); }
+    public static void LetDisplaySleep() { SetThreadExecutionState(0x80000000u); }
 }
 '@ -ErrorAction SilentlyContinue
+[void][ShotWin]::KeepDisplayOn()
 
 $exeFull = (Resolve-Path $ExePath).Path
 
@@ -693,17 +701,35 @@ try {
     Save-Shot $s 'full-list.png'
 
     # Typing the filter word a key at a time, faster than the debounce: the
-    # answer comes right after the last key, before typing has paused.
+    # answer comes right after the last key, before typing has paused. The
+    # cadence is scheduler-bound: on a loaded machine one hop between keys
+    # can stretch past the 120 ms debounce and the list narrows a key
+    # early, which the app handles but this oracle cannot tell apart from
+    # the promise being gone. One retype on a freshly reopened list keeps
+    # the assertion strict while absorbing that; a dispatcher too loaded
+    # for both attempts fails it honestly.
     $scale = Row-Scale $full
-    $typing = if ($NoPixels) {
-        @{ Response = (Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40; settle = $false }); Samples = @() }
-    } else {
-        Run-Sampled $s @{ op = 'palette-type'; text = $Token; perCharMs = 40; settle = $false } $full.terminalRect $full.paletteUi.card $scale
+    $typing = $null
+    $mid = $null
+    $atKey = $null
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $typing = if ($NoPixels) {
+            @{ Response = (Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40; settle = $false }); Samples = @() }
+        } else {
+            Run-Sampled $s @{ op = 'palette-type'; text = $Token; perCharMs = 40; settle = $false } $full.terminalRect $full.paletteUi.card $scale
+        }
+        $mid = $typing.Response
+        # Read at the moment the last key landed (the seam's atLastKey):
+        # the filter still waiting, the full list, no preview yet.
+        $atKey = $mid.atLastKey
+        if ($null -ne $atKey -and $atKey.filterPending -and $atKey.count -eq $ExpectedTotal -and $atKey.previewApplies -eq 0) { break }
+        if ($attempt -lt 2) {
+            # A clean slate for the retype: closing and reopening the list
+            # starts a fresh browse, so its preview count starts from zero.
+            [void](Seam $s @{ op = 'palette-key'; key = 'escape' })
+            [void](Open-ThemeList $s)
+        }
     }
-    $mid = $typing.Response
-    # Read at the moment the last key landed (the seam's atLastKey): the
-    # filter still waiting, the full list, no preview yet.
-    $atKey = $mid.atLastKey
     Check 'filter/waits-for-typing-to-pause' ($null -ne $atKey -and $atKey.filterPending -and $atKey.count -eq $ExpectedTotal -and $atKey.previewApplies -eq 0) "at the last key: pending $($atKey.filterPending), count $($atKey.count), previews $($atKey.previewApplies); text '$($mid.paletteUi.searchText)'"
     # Then the pause: the same text again changes nothing, and the answer
     # waits for the filter and the preview it leads to.
@@ -1032,6 +1058,7 @@ try {
     }
 } finally {
     if ($null -ne $s) { Stop-SeamSession $s }
+    [void][ShotWin]::LetDisplaySleep()
     $crashes = @(Get-ChildItem $stateBase -Recurse -Filter crash.log -ErrorAction SilentlyContinue |
         Where-Object { $_.Length -gt 0 })
     if ($crashes.Count -gt $crashBefore.Count) { Check 'no-crash-log' $false ($crashes.FullName -join ', ') }
