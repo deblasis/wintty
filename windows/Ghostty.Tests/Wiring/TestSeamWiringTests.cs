@@ -565,6 +565,37 @@ public class TestSeamWiringTests
     }
 
     /// <summary>
+    /// The palette settle wait is seam-only code: it exists so the palette
+    /// ops can answer once the theme list has nothing in flight, and it
+    /// reads the window's seam accessors to know that. It spent a commit
+    /// outside the build gate, compiled into every shipping build as dead
+    /// private code against the file's own header contract, and its
+    /// insertion stacked a second summary onto the drag handoff's doc
+    /// comment, leaving THAT method undocumented with no compiler warning
+    /// to say so (doc generation is off). Both shapes are pinned here.
+    /// </summary>
+    [Fact]
+    public void ThePaletteSettleWait_IsSeamOnly_AndTheDragHandoffKeepsItsOwnDoc()
+    {
+        var source = ShellSource.Load("Testing.TestSeam.cs");
+        var wait = source.Method("WaitForPaletteSettledAsync");
+        AssertInsideTheBuildGate(
+            source.Root, wait.Span, "WaitForPaletteSettledAsync");
+
+        // The drag handoff is the one deliberate resident outside the gate
+        // (the strip's own walkers call it, so gating it would take the
+        // strip down in a build with no seam): it stays after the gated
+        // helpers and carries exactly one summary of its own.
+        var low = source.Method("WaitForLowPriorityAsync");
+        Assert.True(
+            low.Span.Start > wait.Span.End,
+            "WaitForLowPriorityAsync belongs outside the build gate, after "
+            + "the gated helpers");
+        Assert.Equal(1, low.GetLeadingTrivia().Count(t =>
+            t.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)));
+    }
+
+    /// <summary>
     /// The filming driver aligns frames to the paced walk's own clock, so
     /// the commit timestamp must come from the manager index moving --
     /// gesture truth, not a schedule -- and the drag response must carry

@@ -54,7 +54,16 @@
          highlight opens on it (marked Current), and a browse-then-Escape
          returns to it exactly;
       8. two short launches with window-theme = dark and = light, each
-         previewing a dark and then a light theme.
+         previewing a dark and then a light theme;
+      9. an external config change landing mid-browse: the reload puts the
+         committed config on every view and derives the chrome from it, and
+         Escape leaves those colours alone (the pre-browse chrome snapshot
+         is not painted back over them); no theme-preview.conf is left in
+         the state tree afterwards;
+     10. a light/dark theme pair configured: the list opens on the half the
+         OS scheme has live (marked Current), the other half previews, and
+         Escape returns to the live half exactly with the pair still in
+         the file.
 
     Screenshots of the palette theme mode (window captures of this run's own
     instance, PNG) land in -ShotsDir: the full list, the filtered list, the
@@ -863,7 +872,102 @@ try {
     Stop-SeamSession $s
     $s = $null
 
-    # ---- runs 3 and 4: explicit light and dark app themes ---------------
+    # ---- run 3: a config change landing mid-browse ----------------------
+    # The reload an external edit triggers does the revert's job itself:
+    # committed config on every view, chrome derived from it, preview
+    # handle released. Escape after that must not paint the browse-open
+    # chrome snapshot back over the colours the reload derived, or the
+    # chrome disagrees with the terminals until the next config event.
+    $known = @($Themes.Values | ForEach-Object bg) +
+        @('#282C34', '#F4F6FB', '#FFFFFF', '#000000', $UserOnlyTheme.bg) +
+        @($CopyCandidates | ForEach-Object bg)
+    $ReloadBg = @('#5A2D0A', '#123F66', '#5E0A3C', '#2D5E0A', '#66235A') |
+        Where-Object { $c = $_; -not (@($known | Where-Object { Near $_ $c 24 })) } |
+        Select-Object -First 1
+    if (-not $ReloadBg) { Write-Host 'HARNESS: no reload background clear of the theme set'; exit 1 }
+
+    $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -ExtraFiles $extra
+    $cfg3 = Join-Path $s.TempXdg 'wintty\config.wintty'
+    [void](Boot-Theme $s)
+    [void](Open-ThemeList $s)
+    $pv3 = Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40 }
+    Check 'mid-reload/previewing-when-the-edit-lands' ($pv3.previewing -and $pv3.previewTheme -ceq $Alpha) "previewTheme '$($pv3.previewTheme)'"
+
+    # The external edit: one background line appended to the config file,
+    # the way a save from any editor lands.
+    $text3 = [System.IO.File]::ReadAllText($cfg3)
+    if (-not $text3.EndsWith("`n")) { $text3 += "`r`n" }
+    [System.IO.File]::WriteAllText($cfg3, $text3 + "background = $ReloadBg`r`n", [System.Text.UTF8Encoding]::new($false))
+    $bytes3 = [System.IO.File]::ReadAllBytes($cfg3)
+
+    # The watcher's reload: preview released, terminal on the new committed
+    # background, chrome derived from it, palette still open.
+    $reloaded = $null
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $reloaded = Seam $s @{ op = 'get-theme' }
+        if (-not $reloaded.previewing -and $reloaded.nativeBackground -eq $ReloadBg) { break }
+        Start-Sleep -Milliseconds 150
+    } while ((Get-Date) -lt $deadline)
+    Check 'mid-reload/the-reload-lands' (-not $reloaded.previewing -and $reloaded.nativeBackground -eq $ReloadBg) "previewing $($reloaded.previewing), native $($reloaded.nativeBackground), want $ReloadBg"
+    Check 'mid-reload/chrome-follows-the-reload' ($reloaded.background -eq $ReloadBg) "chrome $($reloaded.background)"
+    Check 'mid-reload/palette-stays-open' ($reloaded.paletteUi.open) "open $($reloaded.paletteUi.open)"
+    Check-Pixels $s 'mid-reload' $ReloadBg
+    $reloadedSnap = Snapshot $reloaded
+
+    $esc3 = Seam $s @{ op = 'palette-key'; key = 'escape' }
+    Check 'mid-reload/escape-closes' (-not $esc3.paletteUi.open)
+    $diff3 = Same $reloadedSnap (Snapshot $esc3)
+    Check 'mid-reload/escape-keeps-the-reloads-colours' ($diff3.Count -eq 0) ($diff3 -join '; ')
+    Check 'mid-reload/chrome-still-the-new-background' ($esc3.background -eq $ReloadBg) "chrome $($esc3.background), want $ReloadBg"
+    Check 'mid-reload/file-untouched-by-the-escape' (Same-Bytes $cfg3 $bytes3)
+    Check-Pixels $s 'mid-reload-escape' $ReloadBg
+
+    # The preview overlay is written beside the state, never in the config
+    # directory; once the preview it fed is gone nothing reads it again, so
+    # nothing is left behind in the state tree.
+    Start-Sleep -Milliseconds 250
+    $overlay = @(Get-ChildItem $stateBase -Recurse -Filter 'theme-preview.conf' -ErrorAction SilentlyContinue)
+    Check 'mid-reload/no-preview-overlay-left' ($overlay.Count -eq 0) ($overlay.FullName -join ', ')
+    Stop-SeamSession $s
+    $s = $null
+
+    # ---- run 4: a light/dark pair ---------------------------------------
+    # theme = light:X,dark:Y picks its half when the config is read, so the
+    # list opens on the half the OS scheme has live, and Escape returns to
+    # that half with the pair still in the file.
+    $pairLight = $Omega
+    $pairDark = $Beta
+    $pairText = "theme = light:$pairLight,dark:$pairDark"
+    $s = Start-SeamSession -ExePath $ExePath -ConfigText ($config + "`n$pairText`n") -ExtraFiles $extra
+    $cfg4 = Join-Path $s.TempXdg 'wintty\config.wintty'
+    $bytes4 = [System.IO.File]::ReadAllBytes($cfg4)
+    $pairBoot = Boot-Theme $s
+    $pairSnap = Snapshot $pairBoot
+    Check 'pair/config-names-both-halves' ($pairBoot.configTheme -ceq $pairText) "configTheme '$($pairBoot.configTheme)'"
+    $live = $null
+    if ($pairBoot.nativeBackground -eq $Themes[$pairDark].bg) { $live = $pairDark }
+    elseif ($pairBoot.nativeBackground -eq $Themes[$pairLight].bg) { $live = $pairLight }
+    Check 'pair/terminal-on-a-half' ($null -ne $live) "native $($pairBoot.nativeBackground), dark $($Themes[$pairDark].bg), light $($Themes[$pairLight].bg)"
+    $other = if ($live -eq $pairDark) { $pairLight } else { $pairDark }
+
+    $pairList = Open-ThemeList $s
+    Check 'pair/highlight-opens-on-the-live-half' ($pairList.paletteUi.selectedTheme -ceq $live) "selected '$($pairList.paletteUi.selectedTheme)', live '$live'"
+    $pairRows = Wait-Rows $s $Themes.Count
+    Check-Badges $pairRows 'pair/opens' -Current $live
+
+    # Preview the half the OS scheme did not pick, by typing its whole name.
+    $pairPrev = Seam $s @{ op = 'palette-type'; text = $other }
+    Check 'pair/previews-the-other-half' ($pairPrev.previewing -and $pairPrev.previewTheme -ceq $other -and $pairPrev.nativeBackground -eq $Themes[$other].bg) "previewTheme '$($pairPrev.previewTheme)', native $($pairPrev.nativeBackground)"
+    $pairEsc = Seam $s @{ op = 'palette-key'; key = 'escape' }
+    $diff4 = Same $pairSnap (Snapshot $pairEsc)
+    Check 'pair/escape-returns-to-the-live-half-exactly' ($diff4.Count -eq 0) ($diff4 -join '; ')
+    Check 'pair/file-still-names-the-pair' (([System.IO.File]::ReadAllText($cfg4) -split "\r?\n" -contains $pairText) -and (Same-Bytes $cfg4 $bytes4)) 'the pair line moved or the file changed'
+    if ($s.Proc.HasExited) { Check 'pair/alive' $false "exit code $($s.Proc.ExitCode)" }
+    Stop-SeamSession $s
+    $s = $null
+
+    # ---- runs 5 and 6: explicit light and dark app themes ---------------
     foreach ($appTheme in @('dark', 'light')) {
         $want = if ($appTheme -eq 'dark') { 'Dark' } else { 'Light' }
         $s = Start-SeamSession -ExePath $ExePath -ConfigText ($config + "`nwindow-theme = $appTheme`n") -ExtraFiles $extra

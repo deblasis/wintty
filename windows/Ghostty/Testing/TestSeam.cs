@@ -1897,22 +1897,7 @@ internal static class TestSeam
         null => "none",
         _ => icon.GetType().Name,
     };
-#endif
 
-    // ---- outside the build gate ---------------------------------------
-    //
-    // The strip's own drag walkers call this, and they are ordinary internal
-    // methods on VerticalTabStrip rather than seam code. Guarding it with the
-    // rest would take the strip down with it in a build that has no seam, so
-    // this one handoff stays. It opens nothing: a dispatcher hop no caller
-    // outside this process can reach.
-
-    /// <summary>
-    /// A handoff one priority below the strip's Normal-priority drag tick:
-    /// when the awaited task completes, everything the last synthetic move
-    /// scheduled -- crossings included -- has already run. This is what
-    /// makes a seam drag deterministic without sleeps.
-    /// </summary>
     /// <summary>
     /// Waits, up to 5 s, until the palette's theme list has nothing left in
     /// flight: no filter waiting for typing to pause, and no preview waiting
@@ -1930,7 +1915,22 @@ internal static class TestSeam
         }
         return false;
     }
+#endif
 
+    // ---- outside the build gate ---------------------------------------
+    //
+    // The strip's own drag walkers call this, and they are ordinary internal
+    // methods on VerticalTabStrip rather than seam code. Guarding it with the
+    // rest would take the strip down with it in a build that has no seam, so
+    // this one handoff stays. It opens nothing: a dispatcher hop no caller
+    // outside this process can reach.
+
+    /// <summary>
+    /// A handoff one priority below the strip's Normal-priority drag tick:
+    /// when the awaited task completes, everything the last synthetic move
+    /// scheduled -- crossings included -- has already run. This is what
+    /// makes a seam drag deterministic without sleeps.
+    /// </summary>
     internal static Task WaitForLowPriorityAsync(DispatcherQueue queue)
     {
         var done = new TaskCompletionSource(
