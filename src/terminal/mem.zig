@@ -4,9 +4,15 @@
 //! discard the physical pages behind one of those mappings without releasing
 //! its virtual address range, then prepare the same range for reuse. It does
 //! not allocate memory or decide which terminal pages should be discarded.
+//!
+//! Decommit releases physical pages only. The address range and its memory
+//! accounting (the Linux VMA, the Windows commit charge) stay with the
+//! process, so a read after decommit returns zeros or the old contents rather
+//! than faulting, and recommit has nothing to acquire that could fail.
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
+const windows = @import("../os/windows.zig");
 
 const log = std.log.scoped(.terminal_mem);
 
@@ -58,11 +64,11 @@ pub inline fn canReclaim(comptime mode: DecommitMode) bool {
             // dependency to libghostty-vt.
             if (builtin.target.os.tag.isDarwin()) break :supported true;
 
-            // Windows pairs MEM_DECOMMIT with MEM_COMMIT over the retained
-            // MEM_RESERVE range. Every terminal-page backing is a dedicated
-            // reservation (page.zig AllocWindows), so a range decommit cannot
-            // disturb unrelated memory, and the reserved range keeps the same
-            // address across the decommit/recommit pair.
+            // Windows provides DiscardVirtualMemory, which releases the
+            // physical pages behind a committed range while keeping it
+            // committed, so nothing has to be committed again before reuse.
+            // Page memory is already a VirtualAlloc region (see page.zig)
+            // and kernel32 is linked by every Windows build.
             if (builtin.target.os.tag == .windows) break :supported true;
 
             // Other targets have no retained-mapping reclamation contract in
@@ -119,46 +125,6 @@ pub fn decommit(
         }
     }
 
-    // Windows discards with MEM_DECOMMIT and restores with MEM_COMMIT over
-    // the still-reserved range: the physical pages drop immediately, and a
-    // later commit faults them back in zeroed at the same address. Unlike
-    // MADV_DONTNEED, a decommitted page cannot be read at all until it is
-    // recommitted, so zero mode commits here to honor its read-as-zero
-    // contract; strict mode leaves the range decommitted for its caller's
-    // explicit recommit, the discipline PageList's restore paths keep.
-    if (comptime builtin.os.tag == .windows) {
-        const windows = @import("../os/windows.zig");
-        const addr: windows.LPVOID = @ptrCast(memory.ptr);
-        const discarded = windows.exp.kernel32.VirtualFree(
-            addr,
-            memory.len,
-            windows.MEM_DECOMMIT,
-        ) == windows.TRUE;
-        if (!discarded) {
-            log.warn("VirtualFree(MEM_DECOMMIT) failed", .{});
-            if (comptime mode == .strict) return false;
-            // Zero mode falls through to the memset below, which is safe:
-            // the discard failed, so the mapping was never touched.
-        } else if (comptime mode == .strict) {
-            return true;
-        } else if (windows.exp.kernel32.VirtualAlloc(
-            addr,
-            memory.len,
-            windows.MEM_COMMIT,
-            windows.PAGE_READWRITE,
-        ) != null) {
-            return true;
-        } else {
-            // The commit-charge was refused. The pages stay decommitted --
-            // unreadable until a successful recommit faults them in, at
-            // which point they read as zero, so the zero-mode guarantee
-            // arrives one recommit late rather than being lost. The pool
-            // callers ignore this result and always recommit on take.
-            log.warn("VirtualAlloc(MEM_COMMIT) after decommit failed", .{});
-            return false;
-        }
-    }
-
     // FREE_REUSABLE removes the range from the Darwin process footprint while
     // retaining its mapping. Zero mode clears its dirty prefix first because
     // the kernel may preserve the contents. Strict mode avoids that write
@@ -191,46 +157,47 @@ pub fn decommit(
         }
     }
 
+    // DiscardVirtualMemory releases the physical pages behind the range but
+    // leaves it committed, so the commit charge stays with the process and a
+    // later access finds a zero page or the old contents instead of faulting.
+    // Zero mode clears its dirty prefix first, as on Darwin: the bytes read
+    // as zero afterward whether or not the discard took. Strict mode skips
+    // that write because its caller replaces the entire mapping after
+    // recommit. The call reports failure through its return value rather
+    // than the thread's last error.
+    if (comptime builtin.os.tag == .windows) {
+        if (comptime mode == .zero) @memset(memory[0..dirty_len], 0);
+
+        const rc = windows.exp.kernel32.DiscardVirtualMemory(
+            memory.ptr,
+            memory.len,
+        );
+        if (rc == windows.ERROR_SUCCESS) return true;
+
+        // Zero mode has already cleared its bytes and strict callers must
+        // leave the still-resident mapping alone, so there is nothing more
+        // to do for either mode.
+        log.warn("DiscardVirtualMemory failed err={d}", .{rc});
+        return false;
+    }
+
     if (comptime mode == .zero) @memset(memory[0..dirty_len], 0);
     return false;
 }
 
 /// Prepare a mapping previously passed to decommit for reuse.
 ///
-/// Linux and test builds need no explicit operation. Darwin pairs
-/// FREE_REUSABLE with FREE_REUSE so pages touched by the caller are
-/// accounted to the process again (a failure there is accounting-only
-/// and the mapping stays readable, reported as success). Windows
-/// commits the still-reserved range, faulting the discarded pages back
-/// in zeroed -- and on Windows a refused commit leaves the range
-/// decommitted and UNREADABLE, so failure is reported to the caller
-/// and must not be followed by any access to the mapping.
-///
-/// Returns whether the mapping is readable and writable on return.
-pub fn recommit(memory: []align(std.heap.page_size_min) u8) bool {
+/// Linux, Windows, and test builds need no explicit operation because their
+/// mappings stay committed through decommit. Darwin pairs FREE_REUSABLE with
+/// FREE_REUSE so pages touched by the caller are accounted to the process
+/// again. Failure does not invalidate the retained mapping, so reuse can
+/// continue after logging the accounting failure.
+pub fn recommit(memory: []align(std.heap.page_size_min) u8) void {
     assert(memory.len > 0);
     assert(@intFromPtr(memory.ptr) % std.heap.page_size_min == 0);
     assert(memory.len % std.heap.page_size_min == 0);
 
-    if (comptime builtin.is_test) return true;
-    if (comptime builtin.os.tag == .windows) {
-        const windows = @import("../os/windows.zig");
-        const addr: windows.LPVOID = @ptrCast(memory.ptr);
-        if (windows.exp.kernel32.VirtualAlloc(
-            addr,
-            memory.len,
-            windows.MEM_COMMIT,
-            windows.PAGE_READWRITE,
-        ) == null) {
-            // The reservation is intact; the pages are simply still
-            // decommitted. A retry can succeed (a commit-charge refusal
-            // is usually pressure, not permanence), but the caller must
-            // treat this mapping as untouchable until one does.
-            log.warn("VirtualAlloc(MEM_COMMIT) recommit failed", .{});
-            return false;
-        }
-        return true;
-    }
+    if (comptime builtin.is_test) return;
     if (comptime builtin.os.tag.isDarwin()) {
         std.posix.madvise(
             memory.ptr,
@@ -240,7 +207,6 @@ pub fn recommit(memory: []align(std.heap.page_size_min) u8) bool {
             log.warn("madvise(FREE_REUSE) failed err={}", .{err});
         };
     }
-    return true;
 }
 
 test "decommit with zero fallback clears the dirty prefix" {
@@ -282,7 +248,7 @@ test "strict decommit retains the mapping for recommit" {
     try testing.expectEqual(original_len, memory.len);
     try testing.expect(std.mem.allEqual(u8, memory, 0));
 
-    _ = recommit(memory);
+    recommit(memory);
     @memset(memory, 0xBB);
     try testing.expect(std.mem.allEqual(u8, memory, 0xBB));
 }

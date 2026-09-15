@@ -167,6 +167,9 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// Renderer pushed a new frame, redraw this surface.
+    redraw,
+
     /// Release anything the message owns. A mailbox push calls this when
     /// it has to give the message up, so a variant that starts owning
     /// memory has to free it here or it leaks on that path.
@@ -218,6 +221,7 @@ pub const Message = union(enum) {
             .scrollbar,
             .search_total,
             .search_selected,
+            .redraw,
             => {},
         }
     }
@@ -280,6 +284,7 @@ pub const Message = union(enum) {
             .scrollbar,
             .search_total,
             .search_selected,
+            .redraw,
             => true,
         };
     }
@@ -553,7 +558,7 @@ test "surface message variants are all accounted for by the push give-up path" {
     // Make that decision, then bump this count. Without the guard a new
     // owning variant compiles and leaks silently on every drop.
     const fields = @typeInfo(Message).@"union".fields;
-    try std.testing.expectEqual(@as(usize, 27), fields.len);
+    try std.testing.expectEqual(@as(usize, 28), fields.len);
 }
 
 test "the child-exit notice is the one message push may not carry" {

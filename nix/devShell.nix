@@ -50,6 +50,7 @@
   adwaita-icon-theme,
   hicolor-icon-theme,
   harfbuzz,
+  libglvnd,
   libpng,
   libxkbcommon,
   libX11,
@@ -189,6 +190,7 @@ in
         simdutf
         zlib
 
+        libglvnd
         libxkbcommon
         libX11
         libXcursor

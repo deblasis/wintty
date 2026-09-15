@@ -1561,7 +1561,7 @@ pub const Handler = struct {
 
     fn requestModeUnknown(self: *Handler, mode_raw: u16, ansi: bool) void {
         const report = self.terminal.modes.getReport(.{
-            .value = @truncate(mode_raw),
+            .value = mode_raw,
             .ansi = ansi,
         });
         self.sendModeReport(report);
@@ -4644,6 +4644,7 @@ test "request mode DECRQM with write_pty callback" {
 
         // DECRQM for mode 7 (wraparound) — should be silently ignored
         s.nextSlice("\x1B[?7$p");
+        s.nextSlice("\x1B[4$p");
     }
 
     t.fullReset();
@@ -4675,6 +4676,12 @@ test "request mode DECRQM with write_pty callback" {
         s.nextSlice("\x1B[?7$p");
         try testing.expectEqualStrings("\x1B[?7;2$y", S.last_response.?);
 
+        // A large unknown mode must not alias wraparound mode 7.
+        const before = t.modes;
+        s.nextSlice("\x1B[?32775$p");
+        try testing.expectEqualStrings("\x1B[?32775;0$y", S.last_response.?);
+        try testing.expectEqualDeep(before, t.modes);
+
         // Query an unknown mode
         s.nextSlice("\x1B[?9999$p");
         try testing.expectEqualStrings("\x1B[?9999;0$y", S.last_response.?);
@@ -4685,31 +4692,63 @@ test "request mode DECRQM with write_pty callback" {
     }
 }
 
-test "request mode DECRQM ANSI form with write_pty callback" {
+test "request mode DECRQM ANSI responses" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
     const S = struct {
-        var last_response: ?[:0]const u8 = null;
+        var response: [32]u8 = undefined;
+        var len: usize = 0;
+        var calls: usize = 0;
+
         fn writePty(_: *Handler, data: []const u8) void {
-            if (last_response) |old| testing.allocator.free(old);
-            last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+            @memcpy(response[0..data.len], data);
+            len = data.len;
+            calls += 1;
         }
     };
-    S.last_response = null;
-    defer if (S.last_response) |old| testing.allocator.free(old);
-
     var handler: Handler = .init(&t);
     handler.effects.write_pty = &S.writePty;
-
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
-    // ANSI-form DECRQM (CSI Ps $ p, no '?') must reply like the DEC form, not be
-    // silently dropped. Insert mode (IRM, 4) is reset by default -> Pm=2.
-    s.nextSlice("\x1B[4$p");
-    try testing.expect(S.last_response != null);
-    try testing.expectEqualStrings("\x1B[4;2$y", S.last_response.?);
+    inline for (.{
+        .{ "2", modes.Mode.disable_keyboard },
+        .{ "4", modes.Mode.insert },
+        .{ "12", modes.Mode.send_receive_mode },
+        .{ "20", modes.Mode.linefeed },
+    }) |mode| {
+        inline for (.{ false, true, false }) |enabled| {
+            s.nextSlice("\x1b[" ++ mode[0] ++ (if (enabled) "h" else "l"));
+            try testing.expectEqual(enabled, t.modes.get(mode[1]));
+            const query = "\x1b[" ++ mode[0] ++ "$p";
+            for (0..query.len + 1) |split| {
+                S.calls = 0;
+                S.len = 0;
+                s.nextSlice(query[0..split]);
+                if (split < query.len) try testing.expectEqual(0, S.calls);
+                s.nextSlice(query[split..]);
+                try testing.expectEqual(1, S.calls);
+                try testing.expectEqualStrings("\x1b[" ++ mode[0] ++ (if (enabled) ";1$y" else ";2$y"), S.response[0..S.len]);
+                try testing.expectEqual(enabled, t.modes.get(mode[1]));
+            }
+        }
+    }
+
+    // The two namespaces must report independent states for mode 4.
+    s.nextSlice("\x1b[4h\x1b[?4l");
+    const cases = .{
+        .{ "\x1b[4$p", "\x1b[4;1$y" },
+        .{ "\x1b[?4$p", "\x1b[?4;2$y" },
+        .{ "\x1b[9999$p", "\x1b[9999;0$y" },
+    };
+    inline for (cases) |case| {
+        S.calls = 0;
+        S.len = 0;
+        s.nextSlice(case[0]);
+        try testing.expectEqual(1, S.calls);
+        try testing.expectEqualStrings(case[1], S.response[0..S.len]);
+    }
 }
 
 test "device status DECXCPR extended cursor position with write_pty callback" {

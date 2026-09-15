@@ -314,13 +314,17 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
                     const rgb = color.toTerminalRGB() orelse break :cursor .unset;
                     break :cursor .init(rgb);
                 },
-                .palette = .init(opts.config.palette),
+                .palette = .default,
             },
             .kitty_image_storage_limit = opts.config.image_storage_limit,
             .kitty_image_loading_limits = .allWithTempDir(global.tmpDirPath()),
         };
     });
     errdefer term.deinit(alloc);
+
+    // The default palette may be an allocator-owned copy, so it is set
+    // once the terminal owns its memory and can release it on deinit.
+    try term.colors.palette.changeDefault(alloc, opts.config.palette);
 
     // Setup our terminal size in pixels for certain requests.
     term.width_px = term.cols * opts.size.cell.width;
@@ -562,8 +566,16 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     //   - command, working-directory: we never restart the underlying
     //   process so we don't care or need to know about these.
 
-    // Update the default palette.
-    self.terminal.colors.palette.changeDefault(config.palette);
+    // Update the default palette. A config change must not fail here, so
+    // if we can't allocate the copy of the configured palette we fall back
+    // to the built-in default, which never allocates.
+    self.terminal.colors.palette.changeDefault(
+        self.alloc,
+        config.palette,
+    ) catch |err| {
+        log.warn("error changing default palette, using built-in default err={}", .{err});
+        self.terminal.colors.palette.resetDefault(self.alloc);
+    };
     self.terminal.flags.dirty.palette = true;
 
     // Update all our other colors

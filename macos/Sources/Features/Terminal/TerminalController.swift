@@ -297,9 +297,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 if !window.styleMask.contains(.fullScreen) {
                     let hasFixedPos = c.derivedConfig.windowPositionX != nil && c.derivedConfig.windowPositionY != nil
                     // We're dispatching this async because otherwise the lastCascadePoint doesn't
-                    // take effect. Our best theory is there is some next-event-loop-tick logic
-                    // that Cocoa is doing that we need to be after.
-                    Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
+                    // take effect after positioning in `showWindow`. Our best theory is there is
+                    // some next-event-loop-tick logic that Cocoa is doing that we need to be after.
+                    DispatchQueue.main.async {
+                        Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
+                    }
                 }
             }
 
@@ -1276,6 +1278,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Whenever we resize save our last position and size for the next start.
         LastWindowPosition.shared.save(window)
+
+        if let window = self.window as? TerminalWindow {
+            // Expand the title frame to new width.
+            // This is needed because when the new window size becomes bigger,
+            // window's title will be clipped again.
+            window.syncWindowTitleAppearance()
+        }
     }
 
     func windowDidBecomeMain(_ notification: Notification) {

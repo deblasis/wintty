@@ -150,11 +150,13 @@ hakonhagland
 halosatrio
 heaths
 heddxh heddxh
+helium777
 -highimpact-dev Disrespectful AI user
 hlcfan
 hqnna
 hulet
 i999rri
+ibaios
 icodesign
 illiakrauchanka
 j-c-m
@@ -191,6 +193,7 @@ kloneets
 knu
 -kody-w
 koranir
+korikhin
 kostich
 kristina8888
 kristofersoler
@@ -239,6 +242,7 @@ mustafa0x
 nagato-yuzuru
 natesmyth
 neo773
+neoto
 neurosnap
 nicholas-ochoa
 nicosuave
@@ -258,6 +262,7 @@ pan93412
 pangoraw
 pauley-unsaturated
 pearkes
+pedronaugusto
 peilingjiang
 peterdavehello
 philocalyst
@@ -303,6 +308,7 @@ sghng
 shorsher
 silveirapf
 simonbcn
+slowdub
 slsrepo
 steven-tk
 sunshine-syz

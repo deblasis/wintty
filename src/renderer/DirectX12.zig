@@ -823,10 +823,10 @@ pub fn drawFrameStart(self: *DirectX12) void {
     // A removed device's fence reports a value that means nothing; the
     // recovery path tears the whole queue down instead.
     //
-    // Say so on the way out rather than dropping the answer. With
-    // `presentLastTarget` a no-op here, this is the only thing that
-    // touches the device on a wakeup that draws nothing, so it is the
-    // only place an idle TDR can be noticed before the next real frame.
+    // Say so on the way out rather than dropping the answer. A wakeup
+    // that draws nothing presents nothing, so this is the only thing
+    // that touches the device then, and the only place an idle TDR can
+    // be noticed before the next real frame.
     // `deviceLost` is polled a few lines below the call to this, so
     // recovery starts in the same `drawFrame`. Only the first wakeup
     // announces it: attempts between recovery retries would otherwise
@@ -1254,31 +1254,6 @@ pub inline fn beginFrame(
     api.pending_frame_index = frame_idx;
 
     return frame;
-}
-
-/// Show the last frame again, for a wakeup that produced nothing new.
-/// Nothing to do here, the same as Metal.
-///
-/// Presenting without rendering does not repeat the last frame. `Present`
-/// on a flip-model chain queues the *current back buffer*, which with three
-/// buffers is the one last written three presents ago, so the screen jumps
-/// back to a stale frame (or to whatever an untouched buffer holds, early
-/// on). It also advances the swap chain's back buffer index without the
-/// renderer advancing its own frame state, which leaves the two paired up
-/// differently from then on -- see the note in directx12/Texture.zig about
-/// staging buffers outliving the wait that was supposed to cover them.
-///
-/// Nothing needs the repeat anyway: the frame we last presented stays
-/// composited by DWM until we present another one.
-///
-/// What is lost with it: that Present was the only thing checking for
-/// DXGI_ERROR_DEVICE_REMOVED on a surface with nothing to draw, so a TDR
-/// while the terminal sits idle is now noticed on the first frame after
-/// it rather than within a draw interval of the reset. Every path that
-/// touches the GPU still checks, so nothing is drawn against a lost
-/// device; the loss is only in how early we hear about it.
-pub fn presentLastTarget(self: *DirectX12) !void {
-    _ = self;
 }
 
 fn handleDeviceRemoved(self: *DirectX12) void {

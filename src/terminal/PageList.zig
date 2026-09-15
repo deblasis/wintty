@@ -32,13 +32,21 @@ const log = std.log.scoped(.page_list);
 const native_freestanding = builtin.os.tag == .freestanding and
     !builtin.target.cpu.arch.isWasm();
 
-/// The number of PageList.Nodes we preheat the pool with. A node is
-/// a very small struct so we can afford to preheat many, but the exact
-/// number is uncertain. Any number too large is wasting memory, any number
-/// too small will cause the pool to have to allocate more memory later.
-/// This should be set to some reasonable minimum that we expect a terminal
-/// window to scroll into quickly.
+/// The number of pages we preheat the page pool with. For operating systems
+/// that support it, pages are demand-paged (see PagePool) so this only
+/// costs us address space. For other operating systems, we don't preheat.
 const page_preheat = 4;
+
+/// The number of nodes we preheat the node pool with. Unlike pages, nodes
+/// are ordinary heap memory so every idle preheated node costs real
+/// memory. A new PageList needs exactly one node for its first page, so
+/// we preheat that one and let the pool grow on demand.
+const node_preheat = 1;
+
+/// The number of pins we preheat the pin pool with: the viewport pin that
+/// every PageList tracks and the cursor pin that every Screen tracks.
+/// Selections, searches, and so on grow the pool on demand.
+const pin_preheat = 2;
 
 /// The list of pages in the screen. These are expected to be in order
 /// where the first page is the topmost page (scrollback) and the last is
@@ -258,13 +266,8 @@ const Node = struct {
         };
 
         // Decommit only discarded the physical pages. Recommit prepares the
-        // still-reserved mapping for decoding or reuse by the caller. On
-        // Windows a refused commit leaves the range unreadable, and the
-        // encoded block is the only remaining copy of these contents --
-        // there is nowhere else to put them -- so like the decode-failure
-        // path below, this is unrecoverable in place.
-        if (!terminal_mem.recommit(compressed.page.memory))
-            @panic("failed to recommit a compressed terminal page");
+        // still-reserved mapping for decoding or reuse by the caller.
+        terminal_mem.recommit(compressed.page.memory);
 
         const restored = switch (mode) {
             .preserve => compressed.restore() catch |err| {
@@ -304,7 +307,14 @@ const Node = struct {
 };
 
 /// The memory pool we get page nodes from.
-const NodePool = std.heap.memory_pool.Managed(List.Node);
+///
+/// We don't use a std memory pool here because it is backed by an arena
+/// and we end up paying a lot of wasted memory for the growth factor when
+/// in practice we don't usually use many nodes.
+///
+/// We don't need the "untouched" property of our UntouchedPool but
+/// this gives us a GPA-allocated pool so we reuse it here.
+const NodePool = datastruct.UntouchedPool(List.Node, .of(List.Node));
 
 /// The standard page capacity that we use as a starting point for
 /// all pages. This is chosen as a sane default that fits most terminal
@@ -361,11 +371,11 @@ pub const MemoryPool = struct {
         page_alloc: Allocator,
         preheat: usize,
     ) Allocator.Error!MemoryPool {
-        var node_pool = try NodePool.initCapacity(gen_alloc, preheat);
+        var node_pool = try NodePool.initCapacity(gen_alloc, gen_alloc, node_preheat);
         errdefer node_pool.deinit();
         var page_pool = try PagePool.initCapacity(gen_alloc, page_alloc, preheat);
         errdefer page_pool.deinit();
-        var pin_pool = try PinPool.initCapacity(gen_alloc, 8);
+        var pin_pool = try PinPool.initCapacity(gen_alloc, pin_preheat);
         errdefer pin_pool.deinit();
         return .{
             .alloc = gen_alloc,
@@ -659,11 +669,10 @@ pub fn init(
     try tw.check(.viewport_pin);
     const viewport_pin = try pool.pins.create();
     viewport_pin.* = .{ .node = page_list.first.? };
-    var tracked_pins: PinSet = .{};
-    errdefer tracked_pins.deinit(pool.alloc);
 
     try tw.check(.viewport_pin_track);
-    try tracked_pins.putNoClobber(pool.alloc, viewport_pin, {});
+    var tracked_pins = try initTrackedPins(pool.alloc, viewport_pin);
+    errdefer tracked_pins.deinit(pool.alloc);
 
     errdefer comptime unreachable;
     const result: PageList = .{
@@ -683,6 +692,17 @@ pub fn init(
     };
     result.assertIntegrity();
     return result;
+}
+
+/// Create the tracked pin set for a new PageList with the viewport pin
+/// already tracked. The set is sized for exactly the viewport pin and the
+/// cursor pin that every Screen tracks.
+fn initTrackedPins(alloc: Allocator, viewport_pin: *Pin) Allocator.Error!PinSet {
+    var set: PinSet = .{};
+    errdefer set.deinit(alloc);
+    try set.entries.setCapacity(alloc, pin_preheat);
+    set.putAssumeCapacityNoClobber(viewport_pin, {});
+    return set;
 }
 
 const initPages_tw = tripwire.module(enum {
@@ -724,10 +744,7 @@ fn initPages(
         const page_buf = if (pooled) buf: {
             try tw.check(.page_buf_std);
             const buf = try pool.pages.create();
-            // A refused recommit leaves the pooled item unreadable; the
-            // caller is about to write the page into it.
-            if (!terminal_mem.recommit(buf))
-                @panic("failed to recommit a pooled page buffer");
+            terminal_mem.recommit(buf);
             break :buf buf;
         } else buf: {
             try tw.check(.page_buf_non_std);
@@ -907,18 +924,19 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
 
 /// Release every page in the list during a teardown walk (deinit,
 /// reset, or an errdefer unwinding a partially built list): heap-owned
-/// pages go back to the page allocator and pool-owned pages back to the
-/// page pool. The nodes themselves are not touched; they live in the
-/// node pool.
+/// pages go back to the page allocator, pool-owned pages back to the
+/// page pool, and the nodes back to the node pool's free list.
 fn releasePages(pool: *MemoryPool, list: List) void {
     const page_alloc = pool.pages.allocator;
     var it = list.first;
-    while (it) |node| : (it = node.next) {
+    while (it) |node| {
+        it = node.next;
         const page = node.restore(.discard);
         switch (node.owned) {
             .pool => releasePoolPage(pool, page),
             .heap => page_alloc.free(page.memory),
         }
+        pool.nodes.destroy(node);
     }
 }
 
@@ -951,8 +969,7 @@ pub fn deinit(self: *PageList) void {
     // Always deallocate our hashmap.
     self.tracked_pins.deinit(self.pool.alloc);
 
-    // Release every page. We don't need to deallocate the list or
-    // nodes because they all reside in the pool.
+    // Release every page and node back to the pools, then free the pools.
     releasePages(&self.pool, self.pages);
     self.pool.deinit();
 }
@@ -1096,9 +1113,8 @@ pub fn clone(
     // Create our viewport. In a clone, the viewport always goes
     // to the top.
     const viewport_pin = try pool.pins.create();
-    var tracked_pins: PinSet = .{};
+    var tracked_pins = try initTrackedPins(pool.alloc, viewport_pin);
     errdefer tracked_pins.deinit(pool.alloc);
-    try tracked_pins.putNoClobber(pool.alloc, viewport_pin, {});
 
     // Our list of pages
     var page_list: List = .{};
@@ -4577,10 +4593,7 @@ inline fn createPageExt(
     // dispenses. Otherwise, we use the heap allocator to allocate.
     const page_buf = if (pooled) buf: {
         const buf = try pool.pages.create();
-        // A refused recommit leaves the pooled item unreadable; the
-        // caller is about to write the page into it.
-        if (!terminal_mem.recommit(buf))
-            @panic("failed to recommit a pooled page buffer");
+        terminal_mem.recommit(buf);
         break :buf buf;
     } else try page_alloc.alignedAlloc(
         u8,
@@ -4625,6 +4638,10 @@ inline fn createPageExt(
 /// Standard-sized output borrows a page-pool item so repeated compression can
 /// reuse the same virtual mapping. Oversized pages use a temporary allocation
 /// from the page allocator and release it immediately after compression.
+///
+/// A borrowed item goes back to the pool through zero-mode decommit, which
+/// only has to clear the bytes the encoder wrote. Callers therefore pass the
+/// dirty length to `deinit` rather than paying to clear the whole item.
 const CompressionScratch = union(enum) {
     pooled: *align(std.heap.page_size_min) [std_size]u8,
     allocated: []align(std.heap.page_size_min) u8,
@@ -4638,10 +4655,7 @@ const CompressionScratch = union(enum) {
 
         if (required <= std_size) {
             const memory = try pool.pages.create();
-            // A refused recommit leaves the pooled item unreadable; the
-            // codec is about to write the scratch into it.
-            if (!terminal_mem.recommit(memory))
-                @panic("failed to recommit a pooled scratch buffer");
+            terminal_mem.recommit(memory);
             return .{ .pooled = memory };
         }
 
@@ -4660,10 +4674,14 @@ const CompressionScratch = union(enum) {
         };
     }
 
-    fn deinit(self: *CompressionScratch, pool: *MemoryPool) void {
+    fn deinit(
+        self: *CompressionScratch,
+        pool: *MemoryPool,
+        dirty_len: usize,
+    ) void {
         switch (self.*) {
             .pooled => |memory| {
-                _ = terminal_mem.decommit(.zero, memory, memory.len);
+                _ = terminal_mem.decommit(.zero, memory, dirty_len);
                 pool.pages.destroy(memory);
             },
             .allocated => |memory| {
@@ -4983,10 +5001,15 @@ fn compressPage(self: *PageList, node: *List.Node) bool {
         ) catch |err| switch (err) {
             error.OutOfMemory => return false,
         };
-        defer scratch.deinit(&self.pool);
+
+        // The encoder writes at most `required` bytes and reports exactly
+        // how many on success. Track that so returning the scratch only
+        // clears the prefix it dirtied instead of the whole item.
+        var dirty_len: usize = required;
+        defer scratch.deinit(&self.pool, dirty_len);
 
         var table: compression.lz4.HashTable = undefined;
-        break :candidate compression.Page.init(
+        const result = compression.Page.init(
             self.pool.alloc,
             page,
             scratch.bytes()[0..required],
@@ -4997,6 +5020,8 @@ fn compressPage(self: *PageList, node: *List.Node) bool {
             error.OutputTooSmall,
             => return false,
         };
+        if (result) |compressed| dirty_len = compressed.encoded.len;
+        break :candidate result;
     };
 
     // Null means compression crossed the break-even point. The node and its
@@ -7615,9 +7640,8 @@ pub const Builder = struct {
         viewport_pin.* = active_top;
 
         // Setup our one viewport tracked pin
-        var tracked_pins: PinSet = .{};
+        var tracked_pins = try initTrackedPins(self.pool.alloc, viewport_pin);
         errdefer tracked_pins.deinit(self.pool.alloc);
-        try tracked_pins.putNoClobber(self.pool.alloc, viewport_pin, {});
 
         // Initialize limits
         var limits: Limits = .init(self.options.cols, self.options.rows);
