@@ -417,6 +417,27 @@ function Wait-Variant($s, [string]$Want) {
     return $r
 }
 
+# The first readout of a freshly launched instance. The seam answers as
+# soon as its pipe is up, which can be before the window has drawn its
+# first frame; a readout that lands then can fail inside WinRT (seen once
+# as a COMException on a still-black relaunched window). Retried until the
+# window answers with its terminal on screen, so what the checks after it
+# read is the started app, not its first frames. A failure that persists
+# past the deadline is still reported as the product failure it is.
+function Boot-Theme($s) {
+    $deadline = (Get-Date).AddSeconds(15)
+    while ($true) {
+        try {
+            $r = Seam $s @{ op = 'get-theme' }
+            if ($null -ne $r.terminalRect -or (Get-Date) -ge $deadline) { return $r }
+        } catch {
+            if ("$($_.Exception.Message)" -notlike 'PRODUCT_*' -or (Get-Date) -ge $deadline) { throw }
+            Write-Host "boot readout retried: $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
 # ---- The theme set ----------------------------------------------------
 #
 # What a theme row's swatch is read from, parsed the way ThemeSwatch.Parse
@@ -619,7 +640,7 @@ try {
     $cfgPath = Join-Path $s.TempXdg 'wintty\config.wintty'
     $bytes0 = [System.IO.File]::ReadAllBytes($cfgPath)
 
-    $base = Seam $s @{ op = 'get-theme' }
+    $base = Boot-Theme $s
     $baseSnap = Snapshot $base
     Check 'baseline/not-previewing' (-not $base.previewing)
     Check 'baseline/no-theme-configured' ($base.configTheme -eq '') "configTheme '$($base.configTheme)'"
@@ -655,7 +676,10 @@ try {
         Run-Sampled $s @{ op = 'palette-type'; text = $Token; perCharMs = 40; settle = $false } $full.terminalRect $full.paletteUi.card $scale
     }
     $mid = $typing.Response
-    Check 'filter/waits-for-typing-to-pause' ($mid.paletteUi.filterPending -and $mid.paletteUi.count -eq $ExpectedTotal -and $mid.paletteUi.previewApplies -eq 0 -and -not $mid.previewing) "pending $($mid.paletteUi.filterPending), count $($mid.paletteUi.count), previews $($mid.paletteUi.previewApplies), text '$($mid.paletteUi.searchText)'"
+    # Read at the moment the last key landed (the seam's atLastKey): the
+    # filter still waiting, the full list, no preview yet.
+    $atKey = $mid.atLastKey
+    Check 'filter/waits-for-typing-to-pause' ($null -ne $atKey -and $atKey.filterPending -and $atKey.count -eq $ExpectedTotal -and $atKey.previewApplies -eq 0) "at the last key: pending $($atKey.filterPending), count $($atKey.count), previews $($atKey.previewApplies); text '$($mid.paletteUi.searchText)'"
     # Then the pause: the same text again changes nothing, and the answer
     # waits for the filter and the preview it leads to.
     $settling = if ($NoPixels) {
@@ -773,7 +797,7 @@ try {
     # same dispatcher turn as the last key): Enter keeps what the typed text
     # describes, not the full list's top row from before it.
     $kept = Seam $s @{ op = 'palette-type'; text = $Beta; thenKey = 'enter' }
-    Check 'confirm/enter-landed-before-the-pause' ($kept.pendingBeforeKey -eq $true) "filter pending when Enter landed: $($kept.pendingBeforeKey)"
+    Check 'confirm/enter-landed-before-the-pause' ($kept.atLastKey.filterPending -eq $true -and $kept.atLastKey.count -eq $ExpectedTotal) "when Enter landed: pending $($kept.atLastKey.filterPending), count $($kept.atLastKey.count)"
     Check 'confirm/closes' (-not $kept.paletteUi.open)
     Check 'confirm/no-preview-left' (-not $kept.previewing)
     Check 'confirm/config-names-the-theme' ($kept.configTheme -eq $Beta) "configTheme '$($kept.configTheme)'"
@@ -808,7 +832,7 @@ try {
     $relaunch = @{} + $extra
     $relaunch['wintty/config.wintty'] = $persisted
     $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -ExtraFiles $relaunch
-    $boot = Seam $s @{ op = 'get-theme' }
+    $boot = Boot-Theme $s
     Check 'restart/config-still-names-the-theme' ($boot.configTheme -eq $Beta) "configTheme '$($boot.configTheme)'"
     Check 'restart/terminal-starts-themed' ($boot.nativeBackground -eq $Themes[$Beta].bg) "native $($boot.nativeBackground)"
     Check 'restart/chrome-starts-themed' ($boot.background -eq $Themes[$Beta].bg) "chrome $($boot.background)"
@@ -843,6 +867,7 @@ try {
     foreach ($appTheme in @('dark', 'light')) {
         $want = if ($appTheme -eq 'dark') { 'Dark' } else { 'Light' }
         $s = Start-SeamSession -ExePath $ExePath -ConfigText ($config + "`nwindow-theme = $appTheme`n") -ExtraFiles $extra
+        [void](Boot-Theme $s)
         [void](Open-ThemeList $s)
         [void](Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40 })
         $look = Wait-Rows $s $Themes.Count

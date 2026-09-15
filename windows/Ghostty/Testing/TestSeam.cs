@@ -1085,15 +1085,23 @@ internal static class TestSeam
                     }
                 }
 
+                // The list the moment the last key landed, read in that same
+                // dispatcher turn, before anything else can run: whether a
+                // filter is still waiting, how many rows are listed, and how
+                // many previews the browse has applied. The answer below
+                // comes a turn or more later, by when the wait may be over.
+                var vmNow = window.TestSeamPaletteVm;
+                var atLastKey = (
+                    Pending: vmNow?.IsThemeFilterPending ?? false,
+                    Count: vmNow?.FilteredCommands.Count ?? 0,
+                    Applies: vmNow?.ThemePreviewApplies ?? 0);
+
                 // thenKey presses a key right after the last character, in
                 // the same dispatcher turn, so the filter's wait cannot have
-                // ended: Enter pressed before typing pauses. The answer says
-                // whether a filter was indeed still waiting when it landed.
-                bool? pendingBeforeKey = null;
+                // ended: Enter pressed before typing pauses.
                 if (ArgString(args, "thenKey") is { } thenKey)
                 {
                     if (thenKey != "enter") return Error(op, "thenKey must be enter");
-                    pendingBeforeKey = window.TestSeamPaletteVm?.IsThemeFilterPending ?? false;
                     ui.TestSeamKey(Windows.System.VirtualKey.Enter);
                 }
 
@@ -1106,7 +1114,7 @@ internal static class TestSeam
                     return Error(op, "the theme filter did not settle within 5s");
                 }
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return PaletteThemeJson(window, op, pendingBeforeKey);
+                return PaletteThemeJson(window, op, atLastKey);
             }
 
             case "palette-key":
@@ -1170,7 +1178,8 @@ internal static class TestSeam
     /// up and which, the terminal's colours as the live native config states
     /// them, the chrome's resolved colours, and the palette UI's own state.
     /// </summary>
-    private static string PaletteThemeJson(MainWindow window, string op, bool? pendingBeforeKey = null)
+    private static string PaletteThemeJson(
+        MainWindow window, string op, (bool Pending, int Count, int Applies)? atLastKey = null)
         => Json(json =>
         {
             var config = window.TestSeamConfig;
@@ -1178,7 +1187,14 @@ internal static class TestSeam
             json.WriteStartObject();
             json.WriteBoolean("ok", true);
             json.WriteString("op", op);
-            if (pendingBeforeKey is { } pending) json.WriteBoolean("pendingBeforeKey", pending);
+            if (atLastKey is { } last)
+            {
+                json.WriteStartObject("atLastKey");
+                json.WriteBoolean("filterPending", last.Pending);
+                json.WriteNumber("count", last.Count);
+                json.WriteNumber("previewApplies", last.Applies);
+                json.WriteEndObject();
+            }
             json.WriteString("configTheme", config.CurrentTheme);
             json.WriteBoolean("previewing", config.IsPreviewingTheme);
             if (config.PreviewThemeName is { } previewed) json.WriteString("previewTheme", previewed);
