@@ -102,11 +102,17 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         {
             if (field == value) return;
             field = value;
-            Raise();
             // In the theme list, moving the highlight IS the preview. A null
             // (a filter that matched nothing) leaves the preview where it is.
+            //
+            // Before the raise, not after: the raise reaches the control in
+            // the same turn now, and the badge it refreshes asks the browse
+            // what is being previewed, a question that only has the right
+            // answer once the browse has heard the move. The deferred badge
+            // used to hide the ordering by running a turn later.
             if (Mode == PaletteMode.Theme && !_placingThemeSelection)
                 _themeMode?.Browse.Select(ThemeNameOf(value));
+            Raise();
         }
     }
 
