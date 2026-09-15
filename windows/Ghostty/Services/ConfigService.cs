@@ -1278,18 +1278,28 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             return false;
         }
 
+        // The chrome's half first, resolved with the same precedence
+        // ReadFlags uses (user keys, then the theme, then libghostty's
+        // value) but against the previewed theme and config. Order matters
+        // for what the user sees: AppUpdateConfig hands the config to the
+        // native renderer, which repaints the terminals on its own thread
+        // without waiting for this one, while the chrome below only lands
+        // when this thread finishes and composes. Pushing the config first
+        // gave the terminals a head start of exactly this whole chrome
+        // pass (colour derivation plus every ConfigChanged subscriber),
+        // which read on screen as the tab strip recolouring a moment
+        // after the content beside it. The XAML side queues its
+        // compositor updates first and the terminals follow, so a preview
+        // arrives as one visible step (issue #1121).
+        var colors = ResolveThemeColors(themeCache, preview);
+        ApplyThemeColors(colors.Foreground, colors.Background, colors.Cursor, colors.CursorText, colors.Palette);
+
         NativeMethods.AppUpdateConfig(_app, preview);
         // The previous preview (if any) is no longer referenced: the app
         // cloned the one it was just given.
         ReleaseThemePreviewConfig();
         _previewConfig = preview;
         _previewThemeName = themeName;
-
-        // The chrome's half, resolved with the same precedence ReadFlags
-        // uses (user keys, then the theme, then libghostty's value) but
-        // against the previewed theme and config.
-        var colors = ResolveThemeColors(themeCache, preview);
-        ApplyThemeColors(colors.Foreground, colors.Background, colors.Cursor, colors.CursorText, colors.Palette);
         return true;
     }
 
@@ -1316,12 +1326,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // reload already announced its own.
         if (_previewConfig.Handle == IntPtr.Zero) return;
 
-        if (_app.Handle != IntPtr.Zero)
-        {
-            NativeMethods.AppUpdateConfig(_app, _config);
-            ReleaseThemePreviewConfig();
-        }
-
+        // Chrome first, native config second, for the same reason the
+        // preview applies them in that order: the terminals repaint on the
+        // renderer's own thread the moment they are handed the config,
+        // while the chrome lands when this thread has finished and
+        // composes, so a revert that pushed the config first spent its
+        // whole chrome pass with the strip still wearing the preview
+        // (issue #1121).
         if (colors is { } c)
         {
             ForegroundColor = c.Foreground;
@@ -1333,6 +1344,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         }
 
         ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault);
+
+        if (_app.Handle != IntPtr.Zero)
+        {
+            NativeMethods.AppUpdateConfig(_app, _config);
+            ReleaseThemePreviewConfig();
+        }
     }
 
     /// <summary>

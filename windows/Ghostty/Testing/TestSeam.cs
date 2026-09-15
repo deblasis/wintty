@@ -1205,6 +1205,11 @@ internal static class TestSeam
             WriteHex(json, "foreground", config.ForegroundColor);
             WriteHex(json, "cursor", config.CursorColor);
             WriteHex(json, "cursorText", config.CursorTextColor);
+            // The strip's selected tab is painted with the terminal
+            // background, so beside the values above it says whether the
+            // strip and the content describe the same theme in this one
+            // readout (issue #1121: they used to land visibly apart).
+            WriteHex(json, "stripFill", window.TestSeamStripSelectionFill);
             json.WriteStartArray("palette");
             foreach (var entry in config.AnsiPalette) json.WriteStringValue($"#{entry:X6}");
             json.WriteEndArray();

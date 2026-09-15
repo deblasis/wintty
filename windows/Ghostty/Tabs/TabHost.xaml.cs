@@ -4005,6 +4005,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private uint? _chromeFillRgb;
 
     /// <summary>
+    /// The selected tab's fill as packed RGB, for the test seam: the
+    /// terminal background the active tab is painted with, whichever path
+    /// last set it, so a driver can assert the strip and the terminal
+    /// content describe the same theme in one readout.
+    /// </summary>
+    internal uint? TestSeamSelectedTabFill
+        => _selectedTabFillBrush is { } fill ? PackColor(fill.Color) : null;
+
+    /// <summary>
     /// Set the default-path selected-tab background and active-title colours.
     /// The selected tab is painted with the terminal background so the active
     /// tab visually connects to the pane below it; the active title uses the

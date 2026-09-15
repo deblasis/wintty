@@ -138,6 +138,17 @@ public sealed partial class MainWindow : Window
     internal bool TestSeamLayoutSwitching => _layout.IsSwitching;
 
     /// <summary>
+    /// The active layout's selected-tab fill as packed RGB, for the test
+    /// seam: what the strip is wearing for the active tab right now, so a
+    /// driver can assert the strip and the terminal content describe the
+    /// same theme in one readout (issue #1121).
+    /// </summary>
+    internal uint? TestSeamStripSelectionFill
+        => _verticalTabsVisible
+            ? _verticalTabHost.TestSeamSelectedTabFill
+            : _horizontalTabHost.TestSeamSelectedTabFill;
+
+    /// <summary>
     /// The vertical strip when it is this window's active host, else null:
     /// the seam's drag driver speaks the vertical engine only.
     /// </summary>

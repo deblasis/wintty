@@ -35,7 +35,9 @@
          previewed exactly once, and the screen never shows anything but the
          baseline or that theme;
       1. arrow down twice and back up:
-         every move re-themes the live terminal, the config file is untouched;
+         every move re-themes the live terminal and the tab strip in the
+         same step (the selected tab's fill is the terminal background),
+         the config file is untouched;
       2. a held key (30 presses back to back) settles on the last row, and
          Page Up / Page Down move a screenful;
       3. a fast arrow run across dark and light themes, sampled on screen
@@ -185,6 +187,7 @@ function Snapshot($r) {
         foreground = $r.foreground
         cursor = $r.cursor
         cursorText = $r.cursorText
+        stripFill = $r.stripFill
         palette = ($r.palette -join ',')
     }
 }
@@ -776,6 +779,10 @@ try {
         Check "browse/$($step.want)/previewing" ($r.previewing -and $r.previewTheme -eq $step.want) "previewTheme '$($r.previewTheme)'"
         Check "browse/$($step.want)/terminal" ($r.nativeBackground -eq $t.bg -and $r.nativeForeground -eq $t.fg) "native $($r.nativeBackground)/$($r.nativeForeground)"
         Check "browse/$($step.want)/chrome" ($r.background -eq $t.bg -and $r.palette[0] -eq $t.p[0]) "chrome $($r.background) palette0 $($r.palette[0])"
+        # The strip in the SAME readout as the terminal: the selected tab is
+        # painted with the terminal background, so one preview step has to
+        # leave all three describing the same theme.
+        Check "browse/$($step.want)/strip-in-the-same-step" ($r.stripFill -eq $t.bg) "strip $($r.stripFill), terminal $($r.nativeBackground)"
         Check "browse/$($step.want)/file-untouched" (Same-Bytes $cfgPath $bytes0)
         Check-Badges $r "browse/$($step.want)" -Previewing $step.want
         Check "browse/$($step.want)/palette-holds-its-variant" ($r.paletteUi.elementTheme -eq $openVariant) "'$($r.paletteUi.elementTheme)', opened '$openVariant'"

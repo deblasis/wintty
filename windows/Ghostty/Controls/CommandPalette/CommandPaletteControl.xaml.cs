@@ -295,10 +295,16 @@ internal sealed partial class CommandPaletteControl : UserControl
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        // All UI updates must happen on the UI thread.
+        // All UI updates must happen on the UI thread -- and in the same
+        // dispatcher turn as the change when that thread is already this
+        // one. Every raise that arrived on the UI thread used to pay a
+        // TryEnqueue hop anyway, which landed each update a turn after the
+        // thing it describes: the "Previewing" badge trailing the
+        // highlight was exactly that (issue #1121). The enqueue stays for
+        // the raises that come from off the UI thread.
         if (DispatcherQueue is null) return;
 
-        DispatcherQueue.TryEnqueue(() =>
+        void Apply() =>
         {
             if (_vm is null) return;
 
@@ -347,7 +353,10 @@ internal sealed partial class CommandPaletteControl : UserControl
                     SyncNoMatch();
                     break;
             }
-        });
+        };
+
+        if (DispatcherQueue.HasThreadAccess) Apply();
+        else DispatcherQueue.TryEnqueue(Apply);
     }
 
     // Put the current count on screen, and speak it when the announcer
