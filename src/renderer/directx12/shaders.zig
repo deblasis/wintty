@@ -353,12 +353,16 @@ comptime {
 }
 
 pub const Shaders = struct {
-    /// What the generic renderer holds between deiniting a set and
-    /// building the next one, so a failure in between leaves something
-    /// safe to deinit again rather than `undefined`. Defunct, so a draw
-    /// that reaches it is caught by the same assert a failed reinit
-    /// always tripped.
-    pub const empty: Shaders = .{ .defunct = true };
+    /// A set that holds nothing. The generic renderer starts every backend
+    /// here (shaders are built lazily on the render thread), and `deinit`
+    /// leaves one behind, so a failure between deiniting a set and building
+    /// the next leaves something safe to deinit again rather than
+    /// `undefined`. Defunct, so a draw that reaches it is caught by the same
+    /// assert a failed reinit always tripped, and `deinit` on it is a no-op.
+    pub const uninit: Shaders = .{ .defunct = true };
+
+    /// The same placeholder under the name the device-recovery path uses.
+    pub const empty: Shaders = uninit;
 
     /// Shared root signature owned by this struct. Pipelines reference it
     /// for draw-time binding but do not own it -- deinit releases it here.
@@ -571,6 +575,8 @@ pub const Shaders = struct {
     }
 
     pub fn deinit(self: *Shaders, alloc: std.mem.Allocator) void {
+        if (self.defunct) return;
+
         for (self.post_pipelines) |p| {
             p.deinit();
         }
@@ -589,7 +595,7 @@ pub const Shaders = struct {
         if (self.post_root_signature) |rs| _ = rs.Release();
         self.post_root_signature = null;
 
-        self.* = undefined;
+        self.* = uninit;
     }
 };
 
