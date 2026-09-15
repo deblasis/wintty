@@ -102,7 +102,6 @@ pub const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
 pub const MAX_PATH = windows.MAX_PATH;
 pub const FALSE: windows.BOOL = .fromBool(false);
 pub const TRUE: windows.BOOL = .fromBool(true);
-pub const SYNCHRONIZE = windows.SYNCHRONIZE;
 pub const WAIT_OBJECT_0: DWORD = 0x00000000;
 pub const DUPLICATE_SAME_ACCESS = windows.DUPLICATE_SAME_ACCESS;
 
