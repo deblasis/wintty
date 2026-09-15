@@ -1297,13 +1297,26 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// Undo a palette preview: the committed config goes back on every live
     /// view, and, when <paramref name="colors"/> is not null, the chrome gets
     /// exactly those colours back (assigned, not re-derived). UI thread only.
-    /// A no-op once teardown has begun; Dispose frees what is left.
+    /// A no-op once teardown has begun, and a no-op when a reload already
+    /// ended the preview; Dispose frees what is left.
     /// </summary>
     internal void RevertThemePreview(ThemePreviewColors? colors)
     {
         if (_shuttingDown) return;
 
-        if (_previewConfig.Handle != IntPtr.Zero && _app.Handle != IntPtr.Zero)
+        // A reload since the preview did this method's whole job already: it
+        // put the committed config on every view and re-derived the chrome
+        // from it, releasing the preview handle on the way. The colours on
+        // screen are the reload's then, not a preview's, so the browse's
+        // snapshot is not put back over them: restoring it would repaint the
+        // chrome with what the config said before whatever the reload picked
+        // up (an external edit, an OS scheme flip, a High Contrast change)
+        // and leave it disagreeing with the terminals until the next config
+        // event. Nothing changed here, so there is nothing to fan out; the
+        // reload already announced its own.
+        if (_previewConfig.Handle == IntPtr.Zero) return;
+
+        if (_app.Handle != IntPtr.Zero)
         {
             NativeMethods.AppUpdateConfig(_app, _config);
             ReleaseThemePreviewConfig();
@@ -1336,6 +1349,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         _previewConfig = default;
         _previewThemeName = null;
         if (preview.Handle != IntPtr.Zero) NativeMethods.ConfigFree(preview);
+        DeleteThemePreviewOverlay();
     }
 
     /// <summary>
@@ -1390,12 +1404,42 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </summary>
     private static string? WriteThemePreviewOverlay(string themeName)
     {
-        if (string.IsNullOrEmpty(Ghostty.Core.AppStateBase.LocalRoot)) return null;
-        var dir = Path.Combine(Ghostty.Core.AppStateBase.LocalRoot, Ghostty.Core.AppIdentity.StateDirName);
-        Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, "theme-preview.conf");
+        if (ThemePreviewOverlayPath() is not { } path) return null;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, $"theme = {themeName}\n");
         return path;
+    }
+
+    /// <summary>
+    /// Where the preview overlay lives, or null with no state root. The file
+    /// is only read while a preview config is being built from it; the next
+    /// preview overwrites it.
+    /// </summary>
+    private static string? ThemePreviewOverlayPath()
+        => string.IsNullOrEmpty(Ghostty.Core.AppStateBase.LocalRoot)
+            ? null
+            : Path.Combine(
+                Ghostty.Core.AppStateBase.LocalRoot,
+                Ghostty.Core.AppIdentity.StateDirName,
+                "theme-preview.conf");
+
+    /// <summary>
+    /// Remove the preview overlay once no preview config is fed by it. The
+    /// next preview rewrites the file, and nothing else reads it, so the
+    /// state directory is not left holding the name of the last theme
+    /// somebody browsed past. Best effort: a locked or half-gone file costs
+    /// a stale entry, nothing more.
+    /// </summary>
+    private static void DeleteThemePreviewOverlay()
+    {
+        try
+        {
+            if (ThemePreviewOverlayPath() is { } path) File.Delete(path);
+        }
+        catch (Exception)
+        {
+            // Swallowed on purpose; see the summary.
+        }
     }
 
     /// <summary>

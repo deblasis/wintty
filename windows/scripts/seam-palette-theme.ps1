@@ -249,6 +249,21 @@ function Check-Pixels($s, [string]$Name, [string]$Want) {
     Check "$Name/pixels" (Near $seen $Want) "screen $seen, want $Want"
 }
 
+# Every session's window at the same known place, before anything samples
+# the screen: the desktop's window cascade walks each new window a step
+# along from the last, and once a session's window lands far enough from
+# the primary origin the seam's DIP-to-screen rects and a screen capture
+# disagree about where it is, so the pixel oracle reads a foreign window
+# (seen live: a shared desktop with another terminal running beside the
+# run). Pinning the window keeps every run's geometry the first run's.
+function Place-SessionWindow($s, [int]$X = 40, [int]$Y = 40) {
+    if ($NoPixels) { return }
+    $r = [SeamWin]::RectOf($s.Hwnd64)
+    if ($r) {
+        [void][SeamWin]::MoveWindow([SeamWin]::P($s.Hwnd64), $X, $Y, $r.W, $r.Hh, $true)
+    }
+}
+
 function Open-ThemeList($s) {
     [void](Seam $s @{ op = 'palette-open' })
     $typed = Seam $s @{ op = 'palette-type'; text = 'Change Theme' }
@@ -646,6 +661,7 @@ $s = $null
 try {
     # ---- run 1: browse, revert, confirm --------------------------------
     $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -ExtraFiles $extra
+    Place-SessionWindow $s
     $cfgPath = Join-Path $s.TempXdg 'wintty\config.wintty'
     $bytes0 = [System.IO.File]::ReadAllBytes($cfgPath)
 
@@ -841,6 +857,7 @@ try {
     $relaunch = @{} + $extra
     $relaunch['wintty/config.wintty'] = $persisted
     $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -ExtraFiles $relaunch
+    Place-SessionWindow $s
     $boot = Boot-Theme $s
     Check 'restart/config-still-names-the-theme' ($boot.configTheme -eq $Beta) "configTheme '$($boot.configTheme)'"
     Check 'restart/terminal-starts-themed' ($boot.nativeBackground -eq $Themes[$Beta].bg) "native $($boot.nativeBackground)"
@@ -886,7 +903,10 @@ try {
         Select-Object -First 1
     if (-not $ReloadBg) { Write-Host 'HARNESS: no reload background clear of the theme set'; exit 1 }
 
-    $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -ExtraFiles $extra
+    # auto-reload-config is off by default in this fork, and the scenario is
+    # an edit that lands: the watcher has to be on for this run only.
+    $s = Start-SeamSession -ExePath $ExePath -ConfigText ($config + "`nauto-reload-config = true`n") -ExtraFiles $extra
+    Place-SessionWindow $s
     $cfg3 = Join-Path $s.TempXdg 'wintty\config.wintty'
     [void](Boot-Theme $s)
     [void](Open-ThemeList $s)
@@ -938,13 +958,15 @@ try {
     # that half with the pair still in the file.
     $pairLight = $Omega
     $pairDark = $Beta
-    $pairText = "theme = light:$pairLight,dark:$pairDark"
+    $pairValue = "light:$pairLight,dark:$pairDark"
+    $pairText = "theme = $pairValue"
     $s = Start-SeamSession -ExePath $ExePath -ConfigText ($config + "`n$pairText`n") -ExtraFiles $extra
+    Place-SessionWindow $s
     $cfg4 = Join-Path $s.TempXdg 'wintty\config.wintty'
     $bytes4 = [System.IO.File]::ReadAllBytes($cfg4)
     $pairBoot = Boot-Theme $s
     $pairSnap = Snapshot $pairBoot
-    Check 'pair/config-names-both-halves' ($pairBoot.configTheme -ceq $pairText) "configTheme '$($pairBoot.configTheme)'"
+    Check 'pair/config-names-both-halves' ($pairBoot.configTheme -ceq $pairValue) "configTheme '$($pairBoot.configTheme)', want '$pairValue'"
     $live = $null
     if ($pairBoot.nativeBackground -eq $Themes[$pairDark].bg) { $live = $pairDark }
     elseif ($pairBoot.nativeBackground -eq $Themes[$pairLight].bg) { $live = $pairLight }
@@ -971,6 +993,7 @@ try {
     foreach ($appTheme in @('dark', 'light')) {
         $want = if ($appTheme -eq 'dark') { 'Dark' } else { 'Light' }
         $s = Start-SeamSession -ExePath $ExePath -ConfigText ($config + "`nwindow-theme = $appTheme`n") -ExtraFiles $extra
+        Place-SessionWindow $s
         [void](Boot-Theme $s)
         [void](Open-ThemeList $s)
         [void](Seam $s @{ op = 'palette-type'; text = $Token; perCharMs = 40 })
