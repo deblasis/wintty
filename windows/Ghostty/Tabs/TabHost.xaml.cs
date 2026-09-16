@@ -656,7 +656,29 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void RemoveItem(TabModel tab)
     {
         if (!_itemByModel.TryGetValue(tab, out var item)) return;
-        TabViewControl.TabItems.Remove(item);
+        // The row leaving is the SELECTED one whenever the closing tab is
+        // the active tab, and CloseTab raises TabRemoved before it picks
+        // the next active tab, so WinUI's synchronous re-target raise
+        // inside this Remove would reach OnSelectionChanged as if a user
+        // had clicked: Activate runs for whatever the re-target picked,
+        // ahead of the manager's own next-choice rule (the steal happens
+        // while _activeTab still names the closing tab), and a re-target
+        // onto a collapsed run's chip is read as the expand gesture. The
+        // manager row and the strip row leave together, so counts agree
+        // and the presence refusal never fires: the damage is silent.
+        // Fenced saved-and-restored like MoveItem's swap; the manager's
+        // own ActiveTabChanged, raised once CloseTab picks the next tab,
+        // lands the selection.
+        var outerSuppress = _suppressSelectionEvent;
+        _suppressSelectionEvent = true;
+        try
+        {
+            TabViewControl.TabItems.Remove(item);
+        }
+        finally
+        {
+            _suppressSelectionEvent = outerSuppress;
+        }
         _itemByModel.Remove(tab);
         _headerTextByModel.Remove(tab);
         _iconRowByModel.Remove(tab);
@@ -1169,8 +1191,32 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
         if (slot >= 0)
         {
-            TabViewControl.TabItems.Remove(item);
-            TabViewControl.TabItems.Insert(slot, item);
+            // The moved row is usually the SELECTED one: a pin relocates
+            // the active tab, and a keyboard move relocates whatever holds
+            // selection. WinUI re-targets the strip selection synchronously
+            // when the selected item leaves TabItems, so an unfenced swap
+            // raises SelectionChanged between the Remove and the Insert;
+            // that raise is not intent, but OnSelectionChanged reads it as
+            // one, Activate runs its whole reconcile pass against a strip
+            // that is one row short, and the projection's presence refusal
+            // fires: the "strip order reconcile failed" Err and the
+            // mass-reparenting rebuild that follows it. The drag engine
+            // stands these raises down with _stripDragActive for its own
+            // remove-then-insert commits; a manager-driven relocation is
+            // the same raise class and owes the same fence. Saved and
+            // restored, not disarmed: this can run inside the reconcile's
+            // own fence window, and a naive disarm would cut it short.
+            var outerSuppress = _suppressSelectionEvent;
+            _suppressSelectionEvent = true;
+            try
+            {
+                TabViewControl.TabItems.Remove(item);
+                TabViewControl.TabItems.Insert(slot, item);
+            }
+            finally
+            {
+                _suppressSelectionEvent = outerSuppress;
+            }
         }
         // _paneHostContainer order does not matter — Visibility picks
         // the active one. No reorder needed there.
@@ -1179,6 +1225,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // repaired further than the op asked; the reconcile re-derives
         // the strip from the manager's state and owns the last word.
         ReconcileStripOrder();
+
+        // The fence swallowed the swap's own raise, so the strip selection
+        // sits wherever WinUI's re-target left it while the manager's
+        // active tab never moved. Land it once the strip has settled, the
+        // same debt the drag release pays after its own commits: a
+        // relocation is not a tab switch, and the strip must not keep
+        // saying it was one.
+        SelectActive();
     }
 
     /// <summary>A row's trace name: which kind, and whose. A chip and a
