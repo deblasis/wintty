@@ -932,9 +932,24 @@ public sealed partial class MainWindow : Window
             onIdleFlip: (tab, idle) => tab.PaneHost.SetSurfaceIdle(idle));
         _idleTracker.Start();
         _windowState = WindowState.Load();
+        if (IsQuickTerminal)
+        {
+            // The quick terminal is built hidden: App activates it once, so its
+            // content loads before the first summon, and hides it straight away.
+            // Cloaked here, before anything can put it on screen, so that stretch
+            // never paints over the window the user is looking at. Show() lifts
+            // the cloak once the window sits at its quake position.
+            //
+            // And no saved placement: window-state.json describes the regular
+            // window, so applying it parked this one exactly on top of that
+            // window, maximized along with it (ApplyGeometry shows a maximized
+            // window on the spot). The quick terminal's geometry belongs to
+            // MoveToQuakePosition.
+            CloakUntilFirstShow();
+        }
         // Apply the restored window geometry when restoring; otherwise use
         // the window-state.json fallback placement.
-        if (restoredTabs is not null)
+        else if (restoredTabs is not null)
             ApplyGeometry(restore!.Geometry);
         else
             RestoreWindowPlacement();
@@ -4724,7 +4739,7 @@ public sealed partial class MainWindow : Window
         {
             var hwnd = WindowNative.GetWindowHandle(this);
             var bounds = QuickTerminalMonitorResolver.Resolve(
-                hwnd, _configService.QuickTerminalScreen);
+                QuakeMonitorAnchor(hwnd), _configService.QuickTerminalScreen);
             var position = _configService.QuickTerminalPosition;
             var rect = Ghostty.Core.Hosting.QuickTerminalGeometry.Resolve(
                 position,
@@ -4757,6 +4772,26 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // False until MoveToQuakePosition has placed the quick terminal once.
+    private bool _quakePlacedOnce;
+
+    /// <summary>
+    /// The window whose monitor the quick terminal is placed on. Once it has
+    /// been placed, that is its own window, so a summon comes back where the
+    /// last one was. Before that, its own window says nothing: the constructor
+    /// takes no saved placement, so the hidden window sits wherever the OS
+    /// created it, usually the primary monitor. The first summon therefore
+    /// follows the last regular window the user activated.
+    /// </summary>
+    private IntPtr QuakeMonitorAnchor(IntPtr own)
+    {
+        if (_quakePlacedOnce) return own;
+        _quakePlacedOnce = true;
+        return App.LastRegularWindow is { } regular
+            ? WindowNative.GetWindowHandle(regular)
+            : own;
+    }
+
     /// <summary>
     /// Show the window at its quake position with focus on the active
     /// terminal, or hide it if currently visible. The global hotkey
@@ -4774,6 +4809,29 @@ public sealed partial class MainWindow : Window
             return;
         }
         Show();
+    }
+
+    // True from the quick terminal's constructor until its first Show(): the
+    // window is DWM-cloaked for that stretch. See the constructor.
+    private bool _cloakedUntilFirstShow;
+
+    private void CloakUntilFirstShow() => _cloakedUntilFirstShow = SetCloaked(true);
+
+    /// <summary>
+    /// DWM-cloak or uncloak this window. A cloaked window is still laid out,
+    /// rendered and composed; DWM just never puts it on screen. Returns
+    /// whether DWM took it. A refusal leaves the window uncloaked, the state
+    /// it had before the cloak existed, so it is safe to ignore.
+    /// </summary>
+    private unsafe bool SetCloaked(bool cloaked)
+    {
+        BOOL value = cloaked;
+        var hr = PInvoke.DwmSetWindowAttribute(
+            new HWND(WindowNative.GetWindowHandle(this)),
+            Windows.Win32.Graphics.Dwm.DWMWINDOWATTRIBUTE.DWMWA_CLOAK,
+            &value,
+            (uint)sizeof(BOOL));
+        return hr.Succeeded;
     }
 
     private void Show()
@@ -4796,6 +4854,15 @@ public sealed partial class MainWindow : Window
                     _configService.QuickTerminalPosition,
                     AppWindow.Size.Width,
                     AppWindow.Size.Height);
+
+            // The constructor's cloak comes off only here, with the window
+            // already at its quake position and the reveal seeded, so its first
+            // visible frame is the one the reveal expects.
+            if (_cloakedUntilFirstShow)
+            {
+                SetCloaked(false);
+                _cloakedUntilFirstShow = false;
+            }
 
             AppWindow.Show();
         }
