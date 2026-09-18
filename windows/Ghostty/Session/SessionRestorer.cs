@@ -117,7 +117,11 @@ internal sealed class SessionRestorer
                 dropped.Add(DroppedLeafName(leaf));
                 return null;
             }
-            return new LeafPane { Snapshot = SessionProfileResolver.ResolveLeaf(_registry, leaf) };
+            return new LeafPane
+            {
+                Snapshot = SessionProfileResolver.ResolveLeaf(_registry, leaf),
+                PersistentSessionId = leaf.SessionId,
+            };
         });
         if (root is null) return null;
 

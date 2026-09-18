@@ -34,6 +34,7 @@ internal static class SessionTree
                 {
                     ProfileId = snap?.ProfileId,
                     Cwd = leaf.LastCwd,
+                    SessionId = leaf.PersistentSessionId,
                     Fallback = snap is null
                         ? null
                         : new LeafCommand

@@ -103,6 +103,15 @@ internal sealed class LeafDto : PaneNodeDto
     /// preference to the profile's static working-directory.
     /// </summary>
     public string? Cwd { get; set; }
+
+    /// <summary>
+    /// The pane's persisted session identity
+    /// (<see cref="Ghostty.Core.Panes.LeafPane.PersistentSessionId"/> at
+    /// capture), or null for panes without a hosted session and on layouts
+    /// saved before the field existed. A restore replays it onto the
+    /// rebuilt leaf verbatim.
+    /// </summary>
+    public string? SessionId { get; set; }
 }
 
 internal sealed class SplitDto : PaneNodeDto

@@ -13,7 +13,7 @@ public class SessionSerializerTests
             Orientation = PaneOrientation.Vertical,
             Ratio = 0.4,
             Child1 = new LeafDto { ProfileId = "pwsh", Fallback = new LeafCommand { ResolvedCommand = "pwsh.exe", DisplayName = "PowerShell" } },
-            Child2 = new LeafDto { ProfileId = "cmd", Fallback = new LeafCommand { ResolvedCommand = "cmd.exe", DisplayName = "Command Prompt" } },
+            Child2 = new LeafDto { ProfileId = "cmd", Fallback = new LeafCommand { ResolvedCommand = "cmd.exe", DisplayName = "Command Prompt" }, SessionId = "01HM9RZK4N5R3XQF9VV2H8GJ8E" },
         };
         return new SessionState
         {
@@ -52,6 +52,11 @@ public class SessionSerializerTests
         Assert.Equal(0.4, split.Ratio, precision: 6);
         Assert.Equal("pwsh", Assert.IsType<LeafDto>(split.Child1).ProfileId);
         Assert.Equal("cmd.exe", Assert.IsType<LeafDto>(split.Child2).Fallback!.ResolvedCommand);
+        Assert.Equal("01HM9RZK4N5R3XQF9VV2H8GJ8E", Assert.IsType<LeafDto>(split.Child2).SessionId);
+        // The sibling without a hosted session round-trips the null, not
+        // an empty string: null is what "no session identity" means all
+        // the way through capture, serialize and restore.
+        Assert.Null(Assert.IsType<LeafDto>(split.Child1).SessionId);
     }
 
     [Fact]

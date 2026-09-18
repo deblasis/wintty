@@ -33,6 +33,18 @@ internal sealed class LeafPane : PaneNode
     /// and restore. Nothing else reads it.
     /// </summary>
     public string? LastCwd { get; set; }
+
+    /// <summary>
+    /// Opaque identity of the long-lived session this pane's shell runs
+    /// in, when something other than this process hosts it. Null for a
+    /// pane whose shell is a local child. The pane's transport assigns it
+    /// while the pane lives; session capture persists it and a restore
+    /// replays it onto the rebuilt leaf, so whatever hosts the shell can
+    /// rejoin the exact session the closed pane drove instead of guessing
+    /// one. The value is opaque here: this layer never mints it and never
+    /// interprets it.
+    /// </summary>
+    public string? PersistentSessionId { get; set; }
 }
 
 internal sealed class SplitPane : PaneNode

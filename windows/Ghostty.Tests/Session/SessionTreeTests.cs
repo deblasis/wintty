@@ -75,6 +75,46 @@ public class SessionTreeTests
     }
 
     [Fact]
+    public void CaptureLeaf_CarriesThePanesPersistentSessionId()
+    {
+        var leaf = Leaf("pwsh");
+        leaf.PersistentSessionId = "01HM9RZK4N5R3XQF9VV2H8GJ8E";
+
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(leaf));
+
+        Assert.Equal("01HM9RZK4N5R3XQF9VV2H8GJ8E", dto.SessionId);
+    }
+
+    [Fact]
+    public void CaptureLeaf_NoHostedSession_StaysNull()
+    {
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(Leaf("pwsh")));
+
+        Assert.Null(dto.SessionId);
+    }
+
+    [Fact]
+    public void RebuildTree_HandsTheSavedSessionIdToTheLeafFactory()
+    {
+        // Capture and rebuild round-trip the identity: the factory the
+        // restorer supplies receives each leaf's saved id, so it can put
+        // the pane back onto the session it drove. The factory decides
+        // what to do with it; the tree only carries it.
+        var leaf = Leaf("pwsh");
+        leaf.PersistentSessionId = "01HM9RZK4N5R3XQF9VV2H8GJ8E";
+        var dto = SessionTree.CaptureTree(leaf);
+
+        string? seen = null;
+        SessionTree.RebuildTree(dto, d =>
+        {
+            seen = d.SessionId;
+            return new LeafPane { Snapshot = Snap(d.ProfileId!) };
+        });
+
+        Assert.Equal("01HM9RZK4N5R3XQF9VV2H8GJ8E", seen);
+    }
+
+    [Fact]
     public void PathOf_AndResolve_RoundTrip()
     {
         var b = Leaf("b");
