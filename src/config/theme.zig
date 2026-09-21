@@ -41,14 +41,12 @@ pub const Location = enum {
     /// The bundled themes a Windows build ships beside its executable, at
     /// `share/ghostty/themes`, when no resources directory was found.
     ///
-    /// The Windows app ships the themes without the rest of the resources
-    /// tree. A resources directory is detected by its terminfo, and finding
-    /// one changes far more than themes: every child gets TERM=xterm-ghostty
-    /// and the shell integration scripts. The themes alone are only a list
-    /// of colours, so they get a lookup of their own that turns on nothing
-    /// else. The path is the one a full resources tree would put them at,
-    /// so shipping that tree later finds the same files through the branch
-    /// above instead.
+    /// A Windows build installs the whole resources tree, so the branch above
+    /// normally finds these same files and this one never runs. It stays as
+    /// the floor for an install whose tree is incomplete: the tree is
+    /// detected by its terminfo, so an install that lost only that file would
+    /// otherwise lose its themes with it, and a list of colours needs none of
+    /// what the terminfo is evidence for.
     fn bundledThemesDir(arena_alloc: Allocator) error{OutOfMemory}!?[]const u8 {
         if (comptime builtin.os.tag != .windows) return null;
 

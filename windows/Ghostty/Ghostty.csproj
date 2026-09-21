@@ -523,15 +523,42 @@
   <!--
     The bundled themes, which the library build installs to
     zig-out/share/ghostty/themes. They land at share\ghostty\themes beside
-    the exe, the one place libghostty looks for them when there is no
-    resources directory (bundledThemesDir in src/config/theme.zig), and the
-    place the palette and the Settings Colors page list them from
-    (ThemeSearchPath.BundledDirectory). A wildcard, so a library built
-    without themes (-Demit-themes=false) simply ships none.
+    the exe, where libghostty finds them through the resources directory
+    below (and, if that is ever missing, through bundledThemesDir in
+    src/config/theme.zig), and where the palette and the Settings Colors page
+    list them from (ThemeSearchPath.BundledDirectory). A wildcard, so a
+    library built without themes (-Demit-themes=false) simply ships none.
   -->
   <ItemGroup>
     <None Include="..\..\zig-out\share\ghostty\themes\*">
       <Link>share\ghostty\themes\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!--
+    The rest of the resources tree. Two separate things ride here and the
+    order they are found in matters.
+
+    share\terminfo\ghostty.terminfo is what libghostty detects the whole tree
+    by on Windows (the sentinel in src/os/resourcesdir.zig). Without it there
+    is no resources directory at all, so the shell-integration scripts below
+    are never looked for however faithfully they are copied.
+
+    share\ghostty\shell-integration is the scripts themselves, resolved as
+    <resources dir>\shell-integration\... when a shell is spawned.
+
+    Both are wildcards for the same reason the themes above are: a library
+    built without them ships none rather than failing the build. RecursiveDir
+    preserves the per-shell subdirectories, which the lookups name directly.
+  -->
+  <ItemGroup>
+    <None Include="..\..\zig-out\share\ghostty\shell-integration\**\*">
+      <Link>share\ghostty\shell-integration\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\zig-out\share\terminfo\ghostty.terminfo">
+      <Link>share\terminfo\ghostty.terminfo</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

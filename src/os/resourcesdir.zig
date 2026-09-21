@@ -5,6 +5,25 @@ const global = @import("../global.zig");
 
 const log = std.log.scoped(.resources_dir);
 
+/// The directory, relative to the install root, that the resources tree is
+/// installed under.
+const share_dir = if (builtin.target.os.tag == .freebsd) "local/share" else "share";
+
+/// The paths, relative to the share directory, that tell us we have found the
+/// resources tree rather than some unrelated `share`.
+///
+/// Every platform but Windows names a compiled terminfo entry, so finding the
+/// tree also proves a child can resolve `xterm-ghostty` from it. Windows names
+/// the uncompiled source, because that is all a Windows build can produce
+/// without `tic`; finding the tree there proves only that the tree is ours.
+/// `termio.Exec` accounts for that difference when it chooses a TERM.
+const sentinels = switch (builtin.target.os.tag) {
+    .windows => .{"terminfo/ghostty.terminfo"},
+    .macos => .{"terminfo/78/xterm-ghostty"},
+    .freebsd => .{ "site-terminfo/g/ghostty", "site-terminfo/x/xterm-ghostty" },
+    else => .{ "terminfo/g/ghostty", "terminfo/x/xterm-ghostty" },
+};
+
 pub const ResourcesDir = struct {
     /// Avoid accessing these directly, use the app() and host() methods instead.
     app_path: ?[]const u8 = null,
@@ -65,24 +84,44 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
         alloc.free(dir);
     }
 
-    // This is the sentinel value we look for in the path to know
-    // we've found the resources directory.
-    const sentinels = switch (comptime builtin.target.os.tag) {
-        .windows => .{"terminfo/ghostty.terminfo"},
-        .macos => .{"terminfo/78/xterm-ghostty"},
-        .freebsd => .{ "site-terminfo/g/ghostty", "site-terminfo/x/xterm-ghostty" },
-        else => .{ "terminfo/g/ghostty", "terminfo/x/xterm-ghostty" },
-    };
-
     // Get the path to our running binary
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var exe: []const u8 = exe_buf[0 .. std.process.executablePath(
+    const exe: []const u8 = exe_buf[0 .. std.process.executablePath(
         global.io(),
         &exe_buf,
     ) catch return .{}];
 
-    // We have an exe path! Climb the tree looking for the terminfo
-    // bundle as we expect it.
+    if (try resourcesDirFromExe(alloc, exe)) |v| return v;
+
+    // If terminfo detection failed in debug builds (somehow),
+    // fallback and use the provided resources dir.
+    if (comptime builtin.mode == .Debug) {
+        if (global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
+            if (validResourcesDir(dir)) return .{ .app_path = dir };
+
+            log.warn(
+                "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
+                .{dir},
+            );
+            alloc.free(dir);
+        } else |err| switch (err) {
+            error.InvalidWtf8, error.EnvironmentVariableMissing => {},
+            else => return err,
+        }
+    }
+
+    return .{};
+}
+
+/// Climb from `exe_path` towards the filesystem root looking for the bundled
+/// resources tree the way an install lays it out, and return it if found.
+///
+/// Split out from `resourcesDir` so a test can point it at a real packaged
+/// layout on disk. The climb is what makes one layout serve executables at
+/// different depths: an app at `<root>/app.exe` and a helper at
+/// `<root>/bin/helper.exe` both arrive at `<root>/share/ghostty`.
+fn resourcesDirFromExe(alloc: Allocator, exe_path: []const u8) !?ResourcesDir {
+    var exe = exe_path;
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     while (std.fs.path.dirname(exe)) |dir| {
         exe = dir;
@@ -108,7 +147,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
             if (try maybeDir(
                 &dir_buf,
                 dir,
-                if (builtin.target.os.tag == .freebsd) "local/share" else "share",
+                share_dir,
                 sentinel,
             )) |v| {
                 return .{ .app_path = try std.fs.path.join(alloc, &.{ v, "ghostty" }) };
@@ -116,24 +155,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
         }
     }
 
-    // If terminfo detection failed in debug builds (somehow),
-    // fallback and use the provided resources dir.
-    if (comptime builtin.mode == .Debug) {
-        if (global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
-            if (validResourcesDir(dir)) return .{ .app_path = dir };
-
-            log.warn(
-                "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
-                .{dir},
-            );
-            alloc.free(dir);
-        } else |err| switch (err) {
-            error.InvalidWtf8, error.EnvironmentVariableMissing => {},
-            else => return err,
-        }
-    }
-
-    return .{};
+    return null;
 }
 
 /// Returns true if a GHOSTTY_RESOURCES_DIR value is usable as the resources
@@ -214,6 +236,105 @@ test "validResourcesDir rejects an absolute path that does not exist" {
         "/ghostty-does-not-exist/share/ghostty";
 
     try testing.expect(!validResourcesDir(missing));
+}
+
+/// Lay out a packaged install under `dir`: the app executable at the root, a
+/// helper executable one level down in `bin`, and the resources tree in
+/// `share` beside them. Mirrors what the Windows build installs and what the
+/// packaging copies beside the app.
+fn createPackagedLayout(dir: std.Io.Dir) !void {
+    const io = std.testing.io;
+
+    try dir.writeFile(io, .{ .sub_path = "Wintty.exe", .data = "" });
+    try dir.createDirPath(io, "bin");
+    try dir.writeFile(io, .{ .sub_path = "bin/wintty.exe", .data = "" });
+
+    // The sentinel, whatever this platform detects the tree by.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sentinel_path = try std.fmt.bufPrint(
+        &buf,
+        share_dir ++ "/{s}",
+        .{sentinels[0]},
+    );
+    if (std.fs.path.dirname(sentinel_path)) |parent| try dir.createDirPath(io, parent);
+    try dir.writeFile(io, .{ .sub_path = sentinel_path, .data = "" });
+
+    // The tree itself.
+    try dir.createDirPath(io, share_dir ++ "/ghostty/shell-integration/bash");
+    try dir.createDirPath(io, share_dir ++ "/ghostty/themes");
+}
+
+/// The resources directory `createPackagedLayout` puts under `root`, spelled
+/// the way the lookup spells it: `maybeDir` builds its half with `/` and
+/// `std.fs.path.join` appends with the native separator, so on Windows the
+/// result mixes the two. Windows accepts that and every consumer goes through
+/// the filesystem, so this mirrors it rather than normalising it.
+fn packagedResourcesDir(alloc: Allocator, root: []const u8) ![]const u8 {
+    const share = try std.fmt.allocPrint(alloc, "{s}/" ++ share_dir, .{root});
+    return try std.fs.path.join(alloc, &.{ share, "ghostty" });
+}
+
+test "resourcesDirFromExe finds the tree from an app beside it in a packaged layout" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createPackagedLayout(tmp.dir);
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    const exe = try std.fmt.allocPrint(alloc, "{s}/Wintty.exe", .{root});
+    const found = (try resourcesDirFromExe(alloc, exe)) orelse
+        return error.ResourcesDirNotFound;
+
+    try testing.expectEqualStrings(
+        try packagedResourcesDir(alloc, root),
+        found.app().?,
+    );
+}
+
+test "resourcesDirFromExe climbs out of bin to the tree in a packaged layout" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The CLI executable ships one level deeper than the app. It has to reach
+    // the same tree, otherwise `+list-themes` and friends run resourceless in
+    // an install where the app is fine.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createPackagedLayout(tmp.dir);
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    const exe = try std.fmt.allocPrint(alloc, "{s}/bin/wintty.exe", .{root});
+    const found = (try resourcesDirFromExe(alloc, exe)) orelse
+        return error.ResourcesDirNotFound;
+
+    try testing.expectEqualStrings(
+        try packagedResourcesDir(alloc, root),
+        found.app().?,
+    );
+}
+
+test "resourcesDirFromExe finds nothing when the tree is absent" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A layout with the executables but no share tree: what a Windows build
+    // produced before it installed one. Detection must come up empty rather
+    // than latch onto an unrelated `share` up the tree.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "Wintty.exe", .data = "" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    const exe = try std.fmt.allocPrint(alloc, "{s}/Wintty.exe", .{root});
+    try testing.expect(try resourcesDirFromExe(alloc, exe) == null);
 }
 
 test "validResourcesDir accepts an existing absolute directory" {

@@ -40,6 +40,14 @@ const log_validate = std.log.scoped(.validate_transport);
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 
+/// The TERM handed to a child when `term` has no terminfo it could read.
+///
+/// Not a guess: this is the entry every terminfo database carries, so it is
+/// the floor a session can always be driven from. What we lose by naming it,
+/// we lose in capabilities the child negotiates anyway, not in a session that
+/// fails to start. See `terminfoHasEntry` for when it is chosen.
+const fallback_term = "xterm-256color";
+
 /// If we build with flatpak support then we have to keep track of
 /// a potential execution on the host.
 const FlatpakHostCommand = if (!build_config.flatpak) struct {
@@ -895,8 +903,45 @@ const Subprocess = struct {
         // also load the terminfo database and look for it.
         var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (terminfoDir(&terminfo_buf, cfg.resources_dir)) |dir| {
-            try env.put("TERM", cfg.term);
+            // Windows: a resources directory is NOT evidence that the child
+            // can resolve `cfg.term`. Every other platform detects the tree by
+            // a compiled terminfo entry, so finding the tree already proves
+            // the entry is there; Windows detects it by the uncompiled
+            // `terminfo/ghostty.terminfo` source, which no terminfo reader can
+            // use, and ships no compiled database beside it.
+            //
+            // Handing a child a TERM it cannot resolve is worse than the
+            // generic TERM we ship today: ncurses does not degrade, it fails
+            // (`tput: unknown terminal "xterm-ghostty"`), taking `clear`,
+            // `tput` and every curses program in that session with it. That is
+            // the failure this gate exists to prevent, so the default is the
+            // conservative TERM until a compiled entry is actually on disk.
+            //
+            // The gate is self-clearing: ship a compiled database beside the
+            // resources directory and `terminfoHasEntry` starts answering true
+            // with no change here. A user who wants the name regardless can
+            // force it with `env-override = TERM=...`, which is applied after
+            // this block and wins.
+            const resolvable = if (comptime builtin.os.tag == .windows)
+                terminfoHasEntry(dir, cfg.term)
+            else
+                true;
+
+            if (resolvable) {
+                try env.put("TERM", cfg.term);
+            } else {
+                log.warn(
+                    "no compiled terminfo entry for {s} under {s}, using {s}",
+                    .{ cfg.term, dir, fallback_term },
+                );
+                try env.put("TERM", fallback_term);
+            }
+
             try env.put("COLORTERM", "truecolor");
+
+            // Set regardless: a TERMINFO naming a directory with no database
+            // is harmless (ncurses falls through to its own), and it is what
+            // lets the entry be found the moment one is installed there.
             try env.put("TERMINFO", dir);
         } else {
             if (cfg.resources_dir) |base| {
@@ -908,7 +953,7 @@ const Subprocess = struct {
                 log.warn("you're using a valid app bundle.", .{});
             }
 
-            try env.put("TERM", "xterm-256color");
+            try env.put("TERM", fallback_term);
             try env.put("COLORTERM", "truecolor");
         }
 
@@ -2715,6 +2760,48 @@ fn terminfoDir(buf: []u8, resources_dir: ?[]const u8) ?[]const u8 {
     const base = resources_dir orelse return null;
     const parent = std.fs.path.dirname(base) orelse return null;
     return std.fmt.bufPrint(buf, "{s}/terminfo", .{parent}) catch null;
+}
+
+/// Whether `term` resolves to a compiled terminfo entry under `dir`.
+///
+/// ncurses keeps a compiled entry at `<dir>/<subdir>/<name>`, where `subdir`
+/// is the first byte of the name: its literal character on a case-sensitive
+/// filesystem, and its two-digit lowercase hex on a case-insensitive one
+/// (macOS, and the MSYS2/Cygwin ncurses that Git Bash ships). Which one is on
+/// disk is decided by the machine that compiled the database, not the one
+/// reading it, so both count.
+///
+/// This only answers whether the entry is in the directory we are about to
+/// hand the child as TERMINFO. It deliberately says nothing about the child's
+/// own database: a child that would have resolved the name from
+/// /usr/share/terminfo answers "false" here, which is why the caller consults
+/// this only where our directory is the sole evidence available.
+fn terminfoHasEntry(dir: []const u8, term: []const u8) bool {
+    if (term.len == 0) return false;
+
+    // accessAbsolute asserts that its argument is absolute, and that assert
+    // is a panic rather than an error. Everything that reaches here is
+    // absolute (the resources directory is either climbed from the executable
+    // path or passed through validResourcesDir), so this guard should never
+    // fire; it is here so that a future caller cannot turn a relative path
+    // into a crash. Same reason maybeWrapGitBashWithWinpty checks before its
+    // own accessAbsolute.
+    if (!std.fs.path.isAbsolute(dir)) return false;
+
+    const first = term[0];
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // Hex first: it is the layout of every case-insensitive filesystem, which
+    // is every filesystem this check runs on today.
+    if (std.fmt.bufPrint(&buf, "{s}/{x:0>2}/{s}", .{ dir, first, term })) |path| {
+        if (std.Io.Dir.accessAbsolute(global.io(), path, .{})) return true else |_| {}
+    } else |_| {}
+
+    if (std.fmt.bufPrint(&buf, "{s}/{c}/{s}", .{ dir, first, term })) |path| {
+        if (std.Io.Dir.accessAbsolute(global.io(), path, .{})) return true else |_| {}
+    } else |_| {}
+
+    return false;
 }
 
 /// Append a value to an environment variable such as PATH.
@@ -4818,6 +4905,88 @@ test "terminfoDir has nothing to derive from a bare resources dir" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expect(terminfoDir(&buf, null) == null);
     try testing.expect(terminfoDir(&buf, "ghostty") == null);
+}
+
+test "terminfoHasEntry finds a compiled entry in a hex subdirectory" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The layout a case-insensitive filesystem gets: macOS, and the
+    // MSYS2/Cygwin ncurses that Git Bash ships, store `xterm-ghostty` under
+    // the two-digit hex of its first byte ('x' == 0x78).
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "78/xterm-ghostty", .data = "" });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry finds a compiled entry in a letter subdirectory" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The layout a case-sensitive filesystem gets. Which of the two is on
+    // disk is decided by the machine that compiled the database, not by the
+    // one reading it, so both have to count.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "x");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "x/xterm-ghostty", .data = "" });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a directory holding only the terminfo source" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Exactly what a Windows build ships: the uncompiled source, which is
+    // also the sentinel resourcesDir detects the tree by. No terminfo reader
+    // can use it, so it must not count as an entry.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "ghostty.terminfo",
+        .data = "xterm-ghostty|stub,\n\tcolors#256,\n",
+    });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a missing directory and an empty term" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!terminfoHasEntry(dir, ""));
+
+    const missing = try std.fmt.allocPrint(alloc, "{s}/nope", .{dir});
+    try testing.expect(!terminfoHasEntry(missing, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a relative dir without reaching accessAbsolute" {
+    const testing = std.testing;
+
+    // accessAbsolute asserts an absolute path, so a relative one has to be
+    // turned away before it gets there rather than panic.
+    for ([_][]const u8{ "share/terminfo", "terminfo", ".", "" }) |dir| {
+        try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+    }
 }
 
 test "ReadThread windows: a quit request during output processing stops the loop" {

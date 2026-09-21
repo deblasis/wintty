@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const args = @import("args.zig");
 const Action = @import("ghostty.zig").Action;
 const Config = @import("../config/Config.zig");
@@ -137,16 +136,6 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     var stderr_writer = std.Io.File.stderr().writer(global.io(), &stderr_buf);
     const stderr = &stderr_writer.interface;
 
-    // A Windows build ships its themes beside the executable rather than in
-    // a resources directory (see theme.Location.bundledThemesDir), so a
-    // missing resources directory there is expected rather than a broken
-    // install. If nothing can be found at all, the "no themes found"
-    // message below says so.
-    const resources_dir = global.resourcesDir().app();
-    if (resources_dir == null and builtin.os.tag != .windows)
-        try stderr.print("Could not find the Ghostty resources directory. Please ensure " ++
-            "that Ghostty is installed correctly.\n", .{});
-
     var count: usize = 0;
 
     var themes: std.ArrayList(ThemeListElement) = .empty;
@@ -189,7 +178,13 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     }
 
     if (count == 0) {
-        try stderr.print("No themes found, check to make sure that the themes were installed correctly.", .{});
+        // Only now do we know whether a missing resources directory is worth
+        // reporting. Themes are searched for in the user's config directory
+        // too, so a missing resources directory explains nothing as long as
+        // something was found; saying otherwise told users their install was
+        // broken while the list printed fine underneath.
+        try stderr.print("{s}\n", .{emptyThemesMessage(global.resourcesDir().app() != null)});
+        try stderr.flush();
         return 1;
     }
 
@@ -216,6 +211,19 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     // Don't forget to flush!
     try stdout.flush();
     return 0;
+}
+
+/// What to tell a user whose theme list came back empty.
+///
+/// The two cases have different fixes, so they get different sentences: with
+/// no resources directory the install is missing the tree the bundled themes
+/// live in, and with one the tree is there but empty.
+fn emptyThemesMessage(has_resources_dir: bool) []const u8 {
+    return if (has_resources_dir)
+        "No themes found, check to make sure that the themes were installed correctly."
+    else
+        "Could not find the Ghostty resources directory. Please ensure " ++
+            "that Ghostty is installed correctly.";
 }
 
 fn resolveAutoThemePath(alloc: std.mem.Allocator) ![]u8 {
@@ -1875,4 +1883,28 @@ fn shouldIncludeTheme(theme_filter: ColorScheme, theme_config: Config) bool {
     const luminance = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
     const is_dark = luminance < 0.5;
     return (theme_filter == .all) or (theme_filter == .dark and is_dark) or (theme_filter == .light and !is_dark);
+}
+
+test "emptyThemesMessage blames the resources directory only when there is none" {
+    const testing = std.testing;
+
+    // The regression this pins: the resources-directory sentence used to be
+    // printed from the absence of the directory alone, before anything had
+    // been searched, so it appeared above a perfectly good list of themes.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        emptyThemesMessage(false),
+        "Could not find the Ghostty resources directory",
+    ) != null);
+
+    try testing.expect(std.mem.indexOf(
+        u8,
+        emptyThemesMessage(true),
+        "Could not find the Ghostty resources directory",
+    ) == null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        emptyThemesMessage(true),
+        "No themes found",
+    ) != null);
 }

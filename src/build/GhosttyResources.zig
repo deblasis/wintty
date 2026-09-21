@@ -8,15 +8,22 @@ const SharedDeps = @import("SharedDeps.zig");
 
 steps: []*std.Build.Step,
 
-/// The bundled themes' install step on its own, when themes are emitted.
-/// The Windows library build installs just this (see build.zig): the app
-/// ships the themes without the rest of the resources tree.
-themes: ?*std.Build.Step = null,
+/// The resources a Windows build installs, as individual steps.
+///
+/// Windows builds a library rather than an executable, so `install()` (which
+/// only the executable build depends on) never runs there and build.zig has
+/// to depend on the shippable steps one by one. What belongs here is every
+/// resource that is just files: the themes, the shell-integration scripts and
+/// the terminfo source. What does not is everything produced by shelling out
+/// to `tic`, `infotocap`, `mkdir -p` or `cp -R`, none of which a Windows
+/// build host has.
+windows: []*std.Build.Step,
 
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !GhosttyResources {
     var steps: std.ArrayList(*std.Build.Step) = .empty;
     errdefer steps.deinit(b.allocator);
-    var themes_step: ?*std.Build.Step = null;
+    var windows_steps: std.ArrayList(*std.Build.Step) = .empty;
+    errdefer windows_steps.deinit(b.allocator);
 
     // This is the exe used to generate some build data.
     const build_data_exe = b.addExecutable(.{
@@ -57,6 +64,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             );
 
             try steps.append(b.allocator, &source_install.step);
+            try windows_steps.append(b.allocator, &source_install.step);
         }
 
         // Windows doesn't have the binaries below.
@@ -129,6 +137,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             .exclude_extensions = &.{".md"},
         });
         try steps.append(b.allocator, &install_step.step);
+        try windows_steps.append(b.allocator, &install_step.step);
     }
 
     // Themes
@@ -141,7 +150,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
                 .exclude_extensions = &.{".md"},
             });
             try steps.append(b.allocator, &install_step.step);
-            themes_step = &install_step.step;
+            try windows_steps.append(b.allocator, &install_step.step);
         }
     }
 
@@ -257,7 +266,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         &steps,
     );
 
-    return .{ .steps = steps.items, .themes = themes_step };
+    return .{ .steps = steps.items, .windows = windows_steps.items };
 }
 
 /// Add the resource files needed to make Ghostty a proper
