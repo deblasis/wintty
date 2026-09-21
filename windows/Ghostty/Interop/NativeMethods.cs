@@ -384,9 +384,45 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void ConfigFree(GhosttyConfig config);
 
+    /// <summary>
+    /// Load the default config files, and say what was found. Reads only.
+    /// </summary>
+    /// <remarks>
+    /// It creates nothing: an editor saves the config file by swapping a temp
+    /// file in, so the file is absent for the length of the swap, and a
+    /// rebuild of a running app's config landing in that gap would otherwise
+    /// drop libghostty's starter template exactly where the save is about to
+    /// land, taking the user's configuration with it (issue #676). Writing
+    /// the starter file is <see cref="ConfigCreateDefaultFile"/>, for a first
+    /// run only.
+    ///
+    /// It distinguishes the three outcomes instead of silently handing back a
+    /// config of pure defaults for all of them, which is what lets
+    /// <c>ConfigService.Reload</c> keep the config it is already running on.
+    /// </remarks>
     [LibraryImport(Dll, EntryPoint = "ghostty_config_load_default_files")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial void ConfigLoadDefaultFiles(GhosttyConfig config);
+    internal static partial Ghostty.Core.Config.ConfigFilesFound ConfigLoadDefaultFiles(GhosttyConfig config);
+
+    /// <summary>
+    /// Write the starter config file. Returns true if it was written.
+    /// </summary>
+    /// <remarks>
+    /// For a first run only, which here means the constructor, and only when
+    /// the load above answered <c>Absent</c>. It refuses to overwrite, so a
+    /// config file that arrives between that answer and this call survives.
+    /// </remarks>
+    /// <remarks>
+    /// The native return is C99 <c>_Bool</c>, one byte. Taken as a byte and
+    /// widened here because this assembly sets DisableRuntimeMarshalling, so
+    /// every interop signature has to be blittable and <c>bool</c> is not.
+    /// Same shape as the other predicate imports in this file.
+    /// </remarks>
+    internal static bool ConfigCreateDefaultFile() => ConfigCreateDefaultFileNative() != 0;
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_create_default_file")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte ConfigCreateDefaultFileNative();
 
     /// <summary>
     /// Layer this process's command line over the config, as

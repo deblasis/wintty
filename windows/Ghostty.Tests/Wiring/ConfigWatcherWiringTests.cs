@@ -90,4 +90,71 @@ public class ConfigWatcherWiringTests
 
         Assert.NotEmpty(shutdown.Calls("StopWatcher"));
     }
+
+    /// <summary>
+    /// The half of issue #676 the watcher cannot close. Its delivery checks
+    /// the file is present and then loads, and those are two steps: the file
+    /// can go between them, because that is exactly the moment an editor's
+    /// atomic save is passing through. libghostty answered "no config file
+    /// anywhere" by writing its starter template at the config path, so the
+    /// loser of that race had the template dropped on top of the save.
+    ///
+    /// Only the loader can close it, which it does by not creating anything:
+    /// ghostty_config_load_default_files reads, and writing the starter file
+    /// is its own call. The behaviour is tested in zig, against the real
+    /// entry point, in Config.zig. This pins the one thing that is a call
+    /// site rather than behaviour: creating belongs to startup alone.
+    /// </summary>
+    [Fact]
+    public void Only_the_constructor_may_create_a_config_file()
+    {
+        var source = ConfigService();
+
+        var creating = source.Root.Calls("NativeMethods.ConfigCreateDefaultFile");
+        Assert.Single(creating);
+        Assert.NotNull(creating[0].Ancestors()
+            .OfType<ConstructorDeclarationSyntax>()
+            .FirstOrDefault(c => c.Identifier.ValueText == "ConfigService"));
+    }
+
+    /// <summary>
+    /// The reload decision is behaviour, and it is tested as behaviour in
+    /// <c>Config.ConfigReloadGateTests</c>. What a wiring test can add is
+    /// that Reload asks the gate rather than growing a second copy of the
+    /// rule, and that a decline frees what it built and reports false:
+    /// callers read true as "expect the ConfigChanged echo".
+    /// </summary>
+    [Fact]
+    public void A_reload_defers_to_the_gate_and_a_decline_costs_nothing()
+    {
+        var reload = ConfigService().Method("Reload");
+
+        var decide = Assert.Single(reload.Calls("ConfigReloadGate.Decide"));
+        var guard = decide.Ancestors().OfType<IfStatementSyntax>().First();
+
+        Assert.NotEmpty(guard.Statement.Calls("NativeMethods.ConfigFree"));
+        Assert.Contains(
+            guard.Statement.DescendantNodes().OfType<ReturnStatementSyntax>(),
+            r => r.Expression?.ToString() == "false");
+        Assert.NotEmpty(guard.Statement.Calls("_watcher?.Resettle"));
+    }
+
+    /// <summary>
+    /// And the flag the gate reads moves only with an applied config, from
+    /// the gate's own answer. Deriving it a second way here is how the two
+    /// start disagreeing about what counts as a config file.
+    /// </summary>
+    [Fact]
+    public void The_session_config_file_flag_comes_from_the_gate()
+    {
+        var assignments = ConfigService().Method("Reload")
+            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_configFilePresent")
+            .ToList();
+
+        var assignment = Assert.Single(assignments);
+        Assert.Equal(
+            "ConfigReloadGate.HasConfigFileAfterApply",
+            Assert.IsType<InvocationExpressionSyntax>(assignment.Right).CalleeText());
+    }
 }

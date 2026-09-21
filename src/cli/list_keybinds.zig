@@ -62,7 +62,7 @@ pub fn run(alloc: Allocator) !u8 {
         try args.parse(Options, alloc, &opts, &iter);
     }
 
-    var config = if (opts.default) try Config.default(alloc) else try Config.load(alloc);
+    var config = if (opts.default) try Config.default(alloc) else try Config.loadOrCreateDefault(alloc);
     defer config.deinit();
 
     var buffer: [1024]u8 = undefined;

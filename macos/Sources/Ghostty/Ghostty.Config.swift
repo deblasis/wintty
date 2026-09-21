@@ -37,8 +37,8 @@ extension Ghostty {
             self.config = config
         }
 
-        convenience init(at path: String? = nil, finalize: Bool = true) {
-            self.init(config: Self.loadConfig(at: path, finalize: finalize))
+        convenience init(at path: String? = nil, finalize: Bool = true, createIfAbsent: Bool = false) {
+            self.init(config: Self.loadConfig(at: path, finalize: finalize, createIfAbsent: createIfAbsent))
         }
 
         convenience init(clone config: ghostty_config_t) {
@@ -57,7 +57,17 @@ extension Ghostty {
         /// - Parameters:
         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
         ///   - finalize: Whether to finalize the configuration to populate default values.
-        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
+        ///   - createIfAbsent: Write the starter config file when no configuration file exists.
+        ///
+        ///     Every macOS call site passes true, the two reloads included, which is what this
+        ///     app has always done and is kept deliberately. It carries a data-loss bug: a
+        ///     reload can run while an editor is part-way through saving the config file, and
+        ///     creating one in that gap lands the starter template on top of the save
+        ///     (deblasis/wintty#676). The Windows shell no longer does this. macOS was left
+        ///     alone because it cannot be built or run on the machine that change was written
+        ///     on, and the parameter exists so the fix is one word per call site for somebody
+        ///     who can.
+        static func loadConfig(at path: String?, finalize: Bool, createIfAbsent: Bool = false) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {
                 logger.critical("ghostty_config_new failed")
@@ -68,7 +78,10 @@ extension Ghostty {
             if let path {
                 ghostty_config_load_file(cfg, path)
             } else {
-                ghostty_config_load_default_files(cfg)
+                let found = ghostty_config_load_default_files(cfg)
+                if createIfAbsent && found == GHOSTTY_CONFIG_DEFAULT_FILES_ABSENT {
+                    _ = ghostty_config_create_default_file()
+                }
             }
 
             // We only load CLI args when not running in Xcode because in Xcode we

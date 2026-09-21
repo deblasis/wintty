@@ -266,8 +266,9 @@ pub const Application = extern struct {
         gtk_version.logVersion();
         adw_version.logVersion();
 
-        // Load our configuration.
-        var config = CoreConfig.load(alloc) catch |err| err: {
+        // Load our configuration. A first run gets the starter config file
+        // written for it.
+        var config = CoreConfig.loadOrCreateDefault(alloc) catch |err| err: {
             // If we fail to load the configuration, then we should log
             // the error in the diagnostics so it can be shown to the user.
             // We can still load a default which only fails for OOM, allowing
@@ -2972,8 +2973,16 @@ const Action = struct {
             }
 
             // Hard reload, load a new config completely.
+            //
+            // `loadOrCreateDefault` keeps this path exactly as it is today:
+            // it creates the starter config file when it finds none, on a
+            // reload. That carries the data-loss bug the Windows shell was
+            // just fixed for, because a reload landing in the gap of an
+            // editor's atomic save writes the template on top of the save.
+            // Left alone on purpose: changing it needs a GTK build to verify
+            // and this branch was written without one.
             const alloc = self.allocator();
-            var config = try CoreConfig.load(alloc);
+            var config = try CoreConfig.loadOrCreateDefault(alloc);
             defer config.deinit();
             break :config try .new(alloc, &config);
         };

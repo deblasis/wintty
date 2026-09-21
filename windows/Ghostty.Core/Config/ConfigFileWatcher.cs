@@ -21,23 +21,30 @@ namespace Ghostty.Core.Config;
 /// Two rules follow from that:
 ///
 /// Every event kind re-arms the debounce, Deleted included, so the whole
-/// burst collapses into a single settle and a reload never fires between
-/// the two halves of a swap.
+/// burst collapses into a single settle and nothing is reported between the
+/// two halves of a swap.
 ///
-/// A settle that finds the file missing reports nothing. A reload at that
-/// moment would load no user config at all, and libghostty's default-file
-/// loader answers "no config file" by writing its template. The missing
-/// file is not the end of the save: the rename that completes it raises
-/// its own event, which re-arms the debounce, and that settle finds the
-/// file and reports it. A file that is deleted and never comes back simply
-/// keeps the config that is already running.
+/// A settle that finds the file missing reports nothing. The missing file is
+/// not the end of the save: the rename that completes it raises its own
+/// event, which re-arms the debounce, and that settle finds the file and
+/// reports it. A reload in the gap would have loaded no user config at all,
+/// so this saves the host a rebuild it would only decline.
 ///
-/// The existence check runs where the config is loaded, not on the timer:
-/// a settle is handed to <c>post</c>, and the check runs inside the posted
-/// delivery, immediately before <c>onSettled</c>. That keeps the window
-/// between the check and the load to the caller's own work on that thread,
-/// rather than a thread hop plus a dispatcher turn. It narrows the window,
-/// it does not close it: only a loader that never writes the template can.
+/// It used to be load-bearing rather than an early-out, because libghostty's
+/// default-file loader answered "no config file" by writing its template, at
+/// the path the save was about to land on. The check and the load are two
+/// steps, so this could only narrow that window; closing it needed a loader
+/// that creates nothing, which is what
+/// <c>ghostty_config_load_default_files</c> now is (issue #676).
+///
+/// The existence check runs where the config is loaded, not on the timer: a
+/// settle is handed to <c>post</c>, and the check runs inside the posted
+/// delivery, immediately before <c>onSettled</c>.
+///
+/// The other way editors save, rewriting in place, leaves the file present
+/// and zero bytes for the length of the write, and nothing here guards that.
+/// See issue #1138: it is a separate defect with a separate mechanism, and
+/// two attempts at fixing it from this class made it measurably worse.
 ///
 /// The watcher is directory-scoped (the file name is only its filter), so
 /// the file being deleted and replaced does not stop it. Two kinds of
@@ -80,6 +87,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
     private TimeSpan _rebuildDelay;
     private bool _overflowLogged;
     private bool _disposed;
+
 
     /// <summary>The watcher <see cref="CreateWatcher"/> is enabling right
     /// now, so <see cref="HandleWatcherError"/> can recognize a synchronous
@@ -294,6 +302,19 @@ public sealed partial class ConfigFileWatcher : IDisposable
         if (rebuild) LogWatcherError(ex, _dir!, "rebuilding it");
         else LogWatcherErrorRepeat(ex.Message);
     }
+
+    /// <summary>
+    /// Schedule one more settled delivery, as if an event had just arrived.
+    /// </summary>
+    /// <remarks>
+    /// For a host that was handed a settle and could not act on it because
+    /// the config file existed but would not open: an editor or an indexer
+    /// holding it, a sync client hydrating a placeholder. That save has
+    /// already landed and already raised its events, so nothing further is
+    /// coming, and without this the user's edit waits for the next save.
+    /// This only schedules; the caller bounds how often it asks.
+    /// </remarks>
+    public void Resettle() => Rearm();
 
     private void Rearm()
     {

@@ -67,7 +67,7 @@ fn runInner(
         try cfg.loadFile(alloc, abs_path);
         try cfg.loadRecursiveFiles(alloc);
     } else {
-        cfg = try Config.load(alloc);
+        cfg = try Config.loadOrCreateDefault(alloc);
     }
 
     try cfg.finalize();

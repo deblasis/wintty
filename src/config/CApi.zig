@@ -62,9 +62,39 @@ export fn ghostty_config_load_cli_args(self: *Config) void {
 /// Load the configuration from the default file locations. This
 /// is usually done first. The default file locations are locations
 /// such as the home directory.
-export fn ghostty_config_load_default_files(self: *Config) void {
-    self.loadDefaultFiles(global.alloc()) catch |err| {
+///
+/// Reads only, and reports what it found. Sync with
+/// ghostty_config_default_files_e.
+///
+/// Creating the starter file on a first run is
+/// `ghostty_config_create_default_file`, and the split is the point:
+/// this runs again every time a running app rebuilds its config, an
+/// editor saves the config file by swapping a temp file in, and a rebuild
+/// landing in that gap used to leave a starter config exactly where the
+/// save was about to go (deblasis/wintty#676).
+///
+/// The answer distinguishes the three outcomes rather than handing back a
+/// config full of defaults for all of them, so a caller can tell a user
+/// who configured nothing from a configuration that was not readable at
+/// the moment it looked, and keep what it is already running on.
+export fn ghostty_config_load_default_files(self: *Config) Config.DefaultFiles {
+    return self.loadDefaultFiles(global.alloc()) catch |err| {
         log.err("error loading config err={}", .{err});
+        return .unreadable;
+    };
+}
+
+/// Create the starter configuration file at the preferred default
+/// location. Returns true if it was written.
+///
+/// For a first run only, which means a caller that has just been told
+/// GHOSTTY_CONFIG_DEFAULT_FILES_ABSENT by a load it did at startup. It
+/// refuses to overwrite, so a config file that arrives between that
+/// answer and this call survives.
+export fn ghostty_config_create_default_file() bool {
+    return Config.createDefaultFile(global.alloc()) catch |err| {
+        log.warn("error creating template config file err={}", .{err});
+        return false;
     };
 }
 
