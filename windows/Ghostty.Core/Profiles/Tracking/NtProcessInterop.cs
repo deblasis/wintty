@@ -84,8 +84,14 @@ internal static partial class NtProcessInterop
     /// <summary>
     /// Queries class 60 on an already-open handle. Two-call pattern: probe
     /// for required length, allocate, then read.
+    ///
+    /// Internal rather than private so a caller already holding a handle
+    /// opened with PROCESS_QUERY_LIMITED_INFORMATION can read through it
+    /// instead of opening a second one for the same pid. One handle held
+    /// across several reads also pins the pid against reuse, which a
+    /// caller reading two facts about one process wants.
     /// </summary>
-    private static unsafe string? GetCommandLine(HANDLE handle)
+    internal static unsafe string? GetCommandLine(HANDLE handle)
     {
         // HANDLE.Value is a void* with useSafeHandles=false; convert to
         // IntPtr for the hand-written p/invoke signature.

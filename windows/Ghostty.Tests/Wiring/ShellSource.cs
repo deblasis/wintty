@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -60,6 +61,31 @@ internal sealed class ShellSource
         new(preprocessorSymbols: new[] { "DEMO", "DEBUG", "TESTSEAM" });
 
     /// <summary>
+    /// One parse per file per test run, shared.
+    ///
+    /// A <see cref="ShellSource"/> wraps an immutable Roslyn tree and
+    /// nothing mutates it, so handing the same instance to every caller is
+    /// safe, including across the collections xunit runs in parallel --
+    /// which is why the dictionary is concurrent. What it buys is real:
+    /// the popular files here run to two thousand lines, every Load parses
+    /// with preprocessor symbols and then walks the whole trivia looking
+    /// for disabled regions, and a dozen guards asking for App.xaml.cs
+    /// paid that a dozen times. The cost landed on wall-clock-bound
+    /// neighbours in the same assembly (the config-watcher tests, which
+    /// sleep against a real FileSystemWatcher) rather than on these.
+    ///
+    /// The disabled-region assertion inside runs on the first load, and
+    /// its verdict is a property of the file, so a cache hit skipping it
+    /// cannot say anything a second run would not have said. What the
+    /// cache does move is its ATTRIBUTION: a future <c>#if</c> in a
+    /// popular file now reddens whichever guard won the race to load it,
+    /// rather than every guard that reads it. The message names the file,
+    /// so the diagnosis is unchanged; only the test carrying it is
+    /// arbitrary.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, ShellSource> Parsed = new();
+
+    /// <summary>
     /// Load an embedded shell source by its dotted path tail, e.g.
     /// "Controls.CommandPalette.CommandPaletteControl.xaml.cs".
     ///
@@ -67,8 +93,17 @@ internal sealed class ShellSource
     /// resource names keep the source's folders, and a bare file name
     /// would start matching two files the day a second MainWindow.xaml.cs
     /// or TerminalControl.xaml.cs appears somewhere else in the tree.
+    ///
+    /// Parsed once per tail and shared thereafter; see
+    /// <see cref="Parsed"/>.
     /// </summary>
-    public static ShellSource Load(string dottedTail)
+    public static ShellSource Load(string dottedTail) => Parsed.GetOrAdd(dottedTail, LoadUncached);
+
+    /// <summary>
+    /// The parse itself, on a cache miss. Everything <see cref="Load"/>
+    /// documents about uniqueness and about disabled regions happens here.
+    /// </summary>
+    private static ShellSource LoadUncached(string dottedTail)
     {
         var asm = Assembly.GetExecutingAssembly();
         var matches = asm.GetManifestResourceNames()

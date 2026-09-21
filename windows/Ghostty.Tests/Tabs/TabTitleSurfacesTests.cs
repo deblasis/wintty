@@ -19,6 +19,16 @@ namespace Ghostty.Tests.Tabs;
 /// A surface that composed its own string would keep passing every test
 /// written against the model, which is why this reads the sources: the guard
 /// is that nobody re-derives the name locally.
+///
+/// It guards READING, and only reading. Whether a surface is TOLD the value
+/// moved is a separate claim, and the window title is the surface that lives
+/// or dies by it: its caption is written once per <c>WindowTitleChanged</c>
+/// and never re-read. A tier composed correctly and notified nowhere passes
+/// every assertion in this file while the caption lags the strip -- which is
+/// what happened when the launch-name tier landed, with the sentence above
+/// about the window title reading true and meaning nothing.
+/// <c>TabWindowTitleNotificationTests</c> holds that half. Neither file is
+/// the whole invariant.
 /// </summary>
 public class TabTitleSurfacesTests
 {

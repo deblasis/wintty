@@ -166,6 +166,20 @@ internal static class TabLabel
     internal static string Word(string title) => IsHome(title) ? "Home" : title;
 
     /// <summary>
+    /// What a tab is called when nothing has named it: not its pane's
+    /// title, not a reported directory, not a profile, and not even the
+    /// process the pane was launched into. It is the word this file
+    /// already uses for a nameless shell (see <see cref="IconTooltip"/>),
+    /// and it says what the tab is.
+    ///
+    /// Deliberately NOT the application's name. A tab labelled with the
+    /// product tells the reader nothing the window around it does not
+    /// already say, and in a strip of them one tab is indistinguishable
+    /// from the next.
+    /// </summary>
+    internal const string UnnamedTab = "Terminal";
+
+    /// <summary>
     /// Characters of directory a tooltip line gets before the middle goes.
     /// </summary>
     internal const int TooltipPathBudget = 60;
@@ -233,7 +247,7 @@ internal static class TabLabel
     {
         var shell = ProcessDisplayName.Shell(snapshot.ResolvedCommand);
         var profile = snapshot.DisplayName;
-        if (shell is null) return string.IsNullOrWhiteSpace(profile) ? "Terminal" : profile;
+        if (shell is null) return string.IsNullOrWhiteSpace(profile) ? UnnamedTab : profile;
         if (string.IsNullOrWhiteSpace(profile)) return shell;
         if (profile.Contains(shell, StringComparison.OrdinalIgnoreCase)) return profile;
         if (shell.Contains(profile, StringComparison.OrdinalIgnoreCase)) return shell;

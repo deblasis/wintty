@@ -43,11 +43,14 @@ internal static class TabAccessibleText
 
     /// <summary>
     /// Accessible name for the tab whose title is
-    /// <paramref name="effectiveTitle"/>.
+    /// <paramref name="effectiveTitle"/>. A title that says nothing falls
+    /// on the same word the label does, because what a listener is told a
+    /// tab is called must be what a reader sees it called -- and neither is
+    /// the application's own name.
     /// </summary>
     internal static string Name(string? effectiveTitle)
         => string.IsNullOrWhiteSpace(effectiveTitle)
-            ? AppIdentity.ProductName
+            ? TabLabel.UnnamedTab
             : effectiveTitle;
 
     /// <summary>

@@ -52,7 +52,11 @@ public class TabAccessibleTextTests
     [InlineData("\t\n")]
     public void EmptyTitles_FallBackToAName(string? title)
     {
-        Assert.Equal(AppIdentity.ProductName, TabAccessibleText.Name(title));
+        // The same floor the label uses, because a listener and a reader
+        // have to be told the tab is the same thing; and it is not the
+        // application's own name.
+        Assert.Equal(TabLabel.UnnamedTab, TabAccessibleText.Name(title));
+        Assert.NotEqual(AppIdentity.ProductName, TabAccessibleText.Name(title));
     }
 
     /// <summary>
@@ -481,7 +485,7 @@ public class TabAccessibleTextTests
         var raised = new List<string?>();
         tab.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
 
-        Assert.Equal(AppIdentity.ProductName, TabAccessibleText.Name(tab));
+        Assert.Equal(TabLabel.UnnamedTab, TabAccessibleText.Name(tab));
 
         tab.ShellReportedCwd = @"C:\Users\alex\src";
 

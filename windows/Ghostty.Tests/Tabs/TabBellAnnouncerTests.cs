@@ -130,7 +130,8 @@ public class TabBellAnnouncerTests
     /// <summary>
     /// An untitled tab still has to name something a listener can hear:
     /// the announcement runs through the same fallback the tab's name
-    /// does, so the two agree.
+    /// does, so the two agree -- and neither says the application's name,
+    /// which would announce "Bell in Wintty" from a Wintty window.
     /// </summary>
     [Fact]
     public void Untitled_tab_is_announced_by_its_fallback_name()
@@ -140,6 +141,7 @@ public class TabBellAnnouncerTests
 
         mgr.Tabs[0].BellRinging = true;
 
-        Assert.Equal(new[] { $"Bell in {Ghostty.Core.AppIdentity.ProductName}" }, spoken);
+        Assert.Equal(new[] { $"Bell in {Ghostty.Core.Tabs.TabLabel.UnnamedTab}" }, spoken);
+        Assert.DoesNotContain(Ghostty.Core.AppIdentity.ProductName, spoken[0]);
     }
 }

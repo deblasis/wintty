@@ -69,6 +69,15 @@ internal sealed class TabModel : INotifyPropertyChanged
         // future-proofs the hot-apply path that lands when this guard
         // becomes a no-op.
         _tabIcon?.SetIcon(snapshot.Icon, TabLabel.IconTooltip(snapshot));
+
+        // The profile's display name is a tier of the label, so attaching
+        // one moves the label and everything read off it. Raising was
+        // missed here because the only caller attaches before the tab is
+        // added, let alone activated, so nothing was listening yet -- but
+        // "nobody is listening at the one call site we have" is not the
+        // same claim as "this does not change the label", and the window
+        // caption is written once per notification and never re-read.
+        RaiseTitleDerived();
     }
 
     private TabIconViewModel? _tabIcon;
@@ -92,7 +101,7 @@ internal sealed class TabModel : INotifyPropertyChanged
             {
                 _tabIcon = ProfileSnapshot is { } snap
                     ? new TabIconViewModel(snap.Icon, TabLabel.IconTooltip(snap))
-                    : new TabIconViewModel(new IconSpec.BundledKey("default"), "Terminal");
+                    : new TabIconViewModel(new IconSpec.BundledKey("default"), TabLabel.UnnamedTab);
                 _tabIcon.SetSettling(IsSettling);
             }
             return _tabIcon;
@@ -133,6 +142,124 @@ internal sealed class TabModel : INotifyPropertyChanged
         Raise(Args.WordTitle);
         Raise(Args.TooltipText);
         Raise(Args.HoverText);
+    }
+
+    /// <summary>
+    /// What a person calls the process this tab was launched into, or null
+    /// until the pane has said. The pane's own child: the shell (or
+    /// command) the surface spawned, not whatever is in the foreground now
+    /// -- that is <see cref="OnActiveProcessChanged"/>, which moves the
+    /// icon and leaves the label alone.
+    ///
+    /// It only names a tab that has nothing better: a tab opened from a
+    /// profile is named by the profile, and any tab whose shell has spoken
+    /// is named by what it said. This is the answer a tab with neither
+    /// used to lack.
+    ///
+    /// SCOPE, and it is narrower than the tiers above it. Those follow the
+    /// tab's ACTIVE pane; this one names the first pane to report a pid and
+    /// never follows focus.
+    ///
+    /// They can already disagree. A pane split from the profile menu
+    /// carries its own snapshot (<see cref="IPaneHost.Split"/> takes one,
+    /// and <c>MainWindow</c>'s new-pane target passes it), so a tab with
+    /// no profile can hold a pane running something else entirely, and
+    /// focusing it does not move this tier. What keeps the window narrow
+    /// is not that the case is unreachable but that it is short-lived:
+    /// the moment that pane reports a directory or a title, two tiers that
+    /// DO follow focus outrank this one. Closing it properly means a
+    /// per-pane launch fact rather than a per-tab one, which is a change
+    /// to the seam and not to this chain.
+    /// </summary>
+    public string? PaneLaunchName { get; private set; }
+
+    /// <summary>
+    /// Whether <see cref="PaneLaunchName"/> is the answer a complete read
+    /// of the launch process gives, rather than the lesser one half a read
+    /// gives. False while no name has been reported at all.
+    ///
+    /// The two facts behind the name are read from a live process and fail
+    /// independently: an image path still answers while the command line
+    /// is refused mid-exit. A name computed without the command line can
+    /// be strictly poorer than the same process would have given a moment
+    /// earlier -- "WSL" where "WSL: Ubuntu-24.04" was there to be had --
+    /// so a caller that can ask again is told whether it is worth it.
+    /// </summary>
+    public bool PaneLaunchNameIsComplete { get; private set; }
+
+    /// <summary>
+    /// Told what this tab's pane spawned: the executable's basename and
+    /// its raw command line, the same pair the active-process tracker
+    /// delivers. The naming happens here rather than at the call site so
+    /// the rule stays in the model and moves with it.
+    ///
+    /// SEAM, stated honestly because it is half portable and half not.
+    /// This method is portable: it takes two strings and applies the rule,
+    /// and a daemon that owns tab display names can call it unchanged.
+    /// What is NOT portable is the supply. The pane reports a pid, and the
+    /// shell layer asks the LOCAL OS about that pid, so a pid that crosses
+    /// a machine or user boundary answers nothing and every tab with no
+    /// profile quietly reads the generic word. Moving this seam means the
+    /// pane reporting the pair rather than the pid; until then, a remote
+    /// pane degrades silently and this comment is the only warning.
+    ///
+    /// The first COMPLETE report wins. What launched the pane happened
+    /// once, and a later resolution must not rename a tab the user has
+    /// been reading. A report that lost half its inputs still names the
+    /// tab, because a poorer name beats the generic one, but it does not
+    /// close the question: further reports may replace it until one is
+    /// complete. Unbounded in principle, bounded to one in practice,
+    /// because <see cref="ShellPid"/> is written once per tab and only its
+    /// writers call this. Nothing to report at all (an exited process, a
+    /// denied handle) leaves the tab as it was.
+    ///
+    /// The basename crosses from another process's image path, so it is
+    /// held to <see cref="TabLabel.IsPlain"/> like every other string the
+    /// tab renders from outside itself: a name carrying a line break or a
+    /// bidi override would write a second line into the tooltip.
+    ///
+    /// Deliberately does NOT settle the tab. Learning what was spawned is
+    /// not the pane speaking; the strips keep dimming the label until the
+    /// surface paints or the shell says something.
+    /// </summary>
+    /// <remarks>
+    /// UI thread only, like <see cref="OnActiveProcessChanged"/>: it
+    /// raises PropertyChanged that WinUI bindings consume, and the latch
+    /// is a plain read-then-write with no lock. Both callers reach it from
+    /// the thread that writes <see cref="ShellPid"/>, which is the UI
+    /// thread.
+    /// </remarks>
+    public void OnPaneLaunched(string? exeBasename, string? commandLine)
+    {
+        if (PaneLaunchNameIsComplete) return;
+        if (string.IsNullOrWhiteSpace(exeBasename) || !TabLabel.IsPlain(exeBasename)) return;
+
+        var name = ProcessDisplayName.For(exeBasename, commandLine);
+        if (string.IsNullOrWhiteSpace(name) || !TabLabel.IsPlain(name)) return;
+
+        // A command line that is present but says nothing is not an
+        // answer, and it must not close the question. Whitespace rather
+        // than null, like every other string test in this method: the
+        // resolver returns null for an unreadable command line today, but
+        // this is public, and a caller handing over "" would otherwise
+        // latch the poorer name for good -- "WSL" where the distro was
+        // there to be read. That mismatch between a null check and a
+        // whitespace check is the same one that stranded a blank-named
+        // profile on the generic word.
+        var complete = !string.IsNullOrWhiteSpace(commandLine);
+
+        // A repeat of the name already shown is not a change; raising for
+        // it would retitle the window and re-announce the tab for nothing.
+        if (name == PaneLaunchName)
+        {
+            PaneLaunchNameIsComplete = complete;
+            return;
+        }
+
+        PaneLaunchName = name;
+        PaneLaunchNameIsComplete = complete;
+        Raise(Args.PaneLaunchName);
+        RaiseTitleDerived();
     }
 
     /// <summary>
@@ -259,16 +386,37 @@ internal sealed class TabModel : INotifyPropertyChanged
         }
     }
 
-    // Title precedence: explicit user override beats anything; then
-    // the shell's OSC 0/2 reported title (which knows what the user
-    // is actually running, e.g. "vim file.txt"), minus the console's
-    // default exe-path title, which names the interpreter the icon
-    // already shows; then the folder the shell reported it is sitting
-    // in, which is what a tab at a prompt is actually about; then the
-    // profile's display name (so a tab opened from the new-tab split
-    // button reads its profile Name rather than the generic fallback
-    // before the shell sends a title); then the product name for the
-    // no-profile / pre-OSC-2 cold-start case.
+    // The rule: a tab is named by its active pane's title. Until the pane
+    // reports one, it is named by what launched the tab -- the profile's
+    // display name when there is one, otherwise the shell or command
+    // actually running. The application's own name is not the FALLBACK.
+    //
+    // "Not the fallback", precisely, and not "never appears": a pane that
+    // really runs this application names its tab after it, which is the
+    // honest answer and what ProcessDisplayName gives. What is banned is
+    // reaching for the product because nothing else was to hand.
+    //
+    // "The tab", not "the active pane", for the launch tier alone: the
+    // three tiers above it follow focus and that one does not. See
+    // PaneLaunchName for the scope and for what following focus would
+    // take.
+    //
+    // As precedence: explicit user override beats anything; then the
+    // shell's OSC 0/2 reported title (which knows what the user is
+    // actually running, e.g. "vim file.txt"), minus the console's default
+    // exe-path title, which names the interpreter the icon already shows;
+    // then the folder the shell reported it is sitting in, which is what a
+    // tab at a prompt is actually about; then the two tiers of "what
+    // launched this" -- the profile's display name, else the process the
+    // pane spawned (see PaneLaunchName), which is the only answer a tab
+    // opened with no profile has; then the generic, for the moment before
+    // any of them exists.
+    //
+    // The bottom tier used to be the product name. That was not a
+    // placeholder anyone chose, just the end of the chain, and a cold
+    // start with no resolvable default profile reached it: the window's
+    // first tab read "Wintty" while every tab from the new-tab button --
+    // which always carries a snapshot -- read its profile.
     //
     // Each level is coalesced on whitespace, not just on null. A shell
     // can report a title that is empty or all spaces (`printf
@@ -359,7 +507,8 @@ internal sealed class TabModel : INotifyPropertyChanged
         named
         ?? Titled(TabLabel.FolderName(displayCwd))
         ?? Titled(ProfileSnapshot?.DisplayName)
-        ?? AppIdentity.ProductName;
+        ?? Titled(PaneLaunchName)
+        ?? TabLabel.UnnamedTab;
 
     // The two tiers above the folder, as one: what the tab is called when
     // someone -- the user or the shell -- has actually named it.
@@ -446,11 +595,11 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// before the surface has spawned (or after teardown). Set by the
     /// WinUI layer once <c>ghostty_surface_foreground_pid</c> returns a
     /// non-zero value; raises <see cref="ShellPidChanged"/> so the
-    /// process tracker can register / unregister its descendant walk.
-    /// Today's Windows pty layer returns 0 for the foreground pid, so
-    /// this stays null on Windows until libghostty exposes the spawned
-    /// child pid; the lifecycle wiring here is the same shape we'll need
-    /// once that lands.
+    /// process tracker can register / unregister its descendant walk,
+    /// and so the shell layer can resolve what the pane was launched
+    /// into for <see cref="PaneLaunchName"/>. On Windows the value is
+    /// the child the surface spawned, which is what both readers want:
+    /// the tracker walks down from it, and the name is taken from it.
     /// </summary>
     public int? ShellPid
     {
@@ -488,6 +637,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         internal static readonly PropertyChangedEventArgs UserOverrideTitle = new(nameof(TabModel.UserOverrideTitle));
         internal static readonly PropertyChangedEventArgs ShellReportedTitle = new(nameof(TabModel.ShellReportedTitle));
         internal static readonly PropertyChangedEventArgs ShellReportedCwd = new(nameof(TabModel.ShellReportedCwd));
+        internal static readonly PropertyChangedEventArgs PaneLaunchName = new(nameof(TabModel.PaneLaunchName));
         internal static readonly PropertyChangedEventArgs HomeDirectory = new(nameof(TabModel.HomeDirectory));
         internal static readonly PropertyChangedEventArgs Progress = new(nameof(TabModel.Progress));
         internal static readonly PropertyChangedEventArgs Color = new(nameof(TabModel.Color));

@@ -817,9 +817,12 @@ public sealed partial class MainWindow : Window
         // public. Same constraint CommandPaletteControl documents.
         //
         // TitleBarCoordinator takes the caption over further down this
-        // constructor, from the active tab's EffectiveTitle, which falls
-        // back to this same constant. So this is the value only until
-        // then, and the two agree.
+        // constructor, from the active tab's EffectiveTitle. The two no
+        // longer agree, on purpose: a tab is named after what runs in it
+        // and never after the application, so the label's own floor is the
+        // generic word. This constant is the WINDOW's name for the moment
+        // before a tab exists to name it, which is a different question and
+        // still the right answer to it.
         Title = Ghostty.Core.AppIdentity.ProductName;
 
         // Apply window-theme from config. The manager resolves the
