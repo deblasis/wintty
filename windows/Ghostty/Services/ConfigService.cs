@@ -469,9 +469,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // which never creates, and NativeMethods says why.
         //
         // --no-config must not leave a file behind where none existed, and
-        // libghostty refuses the create under it too; both, because this one
-        // is the readable half and that one is the half that holds if a
-        // future flag spelling only reaches libghostty.
+        // libghostty refuses the create under it too. Both, and they are not
+        // the same test: CliAliases sets _noConfig from the literal
+        // `--no-config` and rewrites it to `--config-default-files=false`,
+        // which is the only spelling libghostty's own check looks for. So a
+        // launch passing the libghostty spelling directly has _noConfig
+        // false and is stopped by that half alone. Neither is redundant, and
+        // deleting either on the grounds that the other covers it opens the
+        // case the deleted one was holding.
         var created = !_noConfig
             && defaultFiles == ConfigFilesFound.Absent
             && NativeMethods.ConfigCreateDefaultFile();

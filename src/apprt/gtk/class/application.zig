@@ -2974,13 +2974,20 @@ const Action = struct {
 
             // Hard reload, load a new config completely.
             //
-            // `loadOrCreateDefault` keeps this path exactly as it is today:
-            // it creates the starter config file when it finds none, on a
-            // reload. That carries the data-loss bug the Windows shell was
-            // just fixed for, because a reload landing in the gap of an
-            // editor's atomic save writes the template on top of the save.
-            // Left alone on purpose: changing it needs a GTK build to verify
-            // and this branch was written without one.
+            // `loadOrCreateDefault` keeps this path creating: it still
+            // writes the starter config file when it finds none, on a
+            // reload. Not quite what it did before, and the difference is
+            // only ever in this path's favour: the write is now exclusive,
+            // so a config file that arrives between finding none and
+            // writing one survives instead of being truncated.
+            //
+            // What is left is the half the gate covers. A reload landing in
+            // the gap of an editor's atomic save still builds a config of
+            // pure defaults and pushes it at every live surface, and there
+            // is nothing here that asks whether the config it just built is
+            // the user's. Left alone on purpose: changing it needs a GTK
+            // build to verify and this branch was written without one. See
+            // issue #1137.
             const alloc = self.allocator();
             var config = try CoreConfig.loadOrCreateDefault(alloc);
             defer config.deinit();

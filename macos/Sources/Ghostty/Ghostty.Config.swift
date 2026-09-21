@@ -60,13 +60,17 @@ extension Ghostty {
         ///   - createIfAbsent: Write the starter config file when no configuration file exists.
         ///
         ///     Every macOS call site passes true, the two reloads included, which is what this
-        ///     app has always done and is kept deliberately. It carries a data-loss bug: a
-        ///     reload can run while an editor is part-way through saving the config file, and
-        ///     creating one in that gap lands the starter template on top of the save
-        ///     (deblasis/wintty#676). The Windows shell no longer does this. macOS was left
-        ///     alone because it cannot be built or run on the machine that change was written
-        ///     on, and the parameter exists so the fix is one word per call site for somebody
-        ///     who can.
+        ///     app has always done and is kept deliberately. Not byte for byte what it did:
+        ///     the write underneath refuses to overwrite now, so a config file that arrives
+        ///     between finding none and writing one survives instead of being truncated.
+        ///
+        ///     What is left is the reload itself. It can run while an editor is part-way
+        ///     through saving the config file, and it then builds a config of pure defaults
+        ///     and pushes it at every live surface, because nothing here asks whether the
+        ///     config it just built is the user's (deblasis/wintty#676). The Windows shell
+        ///     has a gate for that; macOS was left alone because it cannot be built or run on
+        ///     the machine that change was written on, and the parameter exists so the create
+        ///     half is one word per call site for somebody who can.
         static func loadConfig(at path: String?, finalize: Bool, createIfAbsent: Bool = false) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {

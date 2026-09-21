@@ -81,11 +81,23 @@ public static class ConfigReloadGate
     public static ConfigReloadDecision Decide(
         ConfigFilesFound found,
         int defaultFilesFound,
-        int sessionDefaultFilesFound) => found switch
+        int sessionDefaultFilesFound)
+    {
+        // "No default config file exists" and "the count of them is zero" are
+        // the same statement, and the loader is written so that they always
+        // are. They still cross the FFI as two separate values, so this
+        // checks that they agree rather than taking it on trust. It is worth
+        // the two comparisons: an Absent carrying a non-zero count walks
+        // straight through the shrink test below, and what it lets through is
+        // a config of pure defaults applied at every live surface, which is
+        // the whole thing this gate exists to refuse.
+        if ((found == ConfigFilesFound.Absent) != (defaultFilesFound == 0))
+            return ConfigReloadDecision.Decline;
+
+        return found switch
         {
-            // Absent and Loaded differ only in whether the count is zero, so
-            // the comparison below is the whole rule for both. Spelling them
-            // as one case rather than two keeps there being one rule.
+            // One rule for both, because with the two agreeing they differ
+            // only in whether the count is zero.
             ConfigFilesFound.Loaded or ConfigFilesFound.Absent =>
                 defaultFilesFound < sessionDefaultFilesFound
                     ? ConfigReloadDecision.Decline
@@ -96,6 +108,7 @@ public static class ConfigReloadGate
             // the config in hand cannot be trusted.
             _ => ConfigReloadDecision.Decline,
         };
+    }
 
     /// <summary>
     /// Whether a declined reload should ask to be tried again.

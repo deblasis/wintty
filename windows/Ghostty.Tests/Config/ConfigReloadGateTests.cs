@@ -32,9 +32,12 @@ public class ConfigReloadGateTests
     /// A config file that will not open is somebody else holding it. The
     /// config built from it carries defaults where the user's settings
     /// belong, so it never applies, whatever the session was running on.
+    ///
+    /// Every row has at least one file, because Unreadable says one is
+    /// there. A count of zero beside it is the two sides disagreeing, which
+    /// is its own case below.
     /// </summary>
     [Theory]
-    [InlineData(0, 0)]
     [InlineData(1, 0)]
     [InlineData(1, 1)]
     [InlineData(1, 2)]
@@ -101,6 +104,33 @@ public class ConfigReloadGateTests
         Assert.Equal(
             ConfigReloadDecision.Apply,
             ConfigReloadGate.Decide(ConfigFilesFound.Loaded, 2, 1));
+    }
+
+    /// <summary>
+    /// The verdict and the count say the same thing twice, and the gate
+    /// checks that rather than assuming it.
+    /// </summary>
+    /// <remarks>
+    /// They cross the FFI as two values, and the dangerous direction is the
+    /// second row: an Absent claiming a non-zero count walks straight
+    /// through the shrink comparison, and what it lets through is a config
+    /// of pure defaults applied at every live surface. The first row is the
+    /// same disagreement the other way. Both are impossible from a correct
+    /// loader, which is the point: the day one is possible, this refuses it
+    /// instead of applying it.
+    /// </remarks>
+    [Theory]
+    [InlineData(ConfigFilesFound.Loaded, 0)]
+    [InlineData(ConfigFilesFound.Absent, 1)]
+    [InlineData(ConfigFilesFound.Absent, 2)]
+    public void A_verdict_that_disagrees_with_the_count_is_refused(
+        ConfigFilesFound found, int filesFound)
+    {
+        // Session counts chosen so the shrink comparison on its own would
+        // say Apply: without the agreement check these all reload.
+        Assert.Equal(
+            ConfigReloadDecision.Decline,
+            ConfigReloadGate.Decide(found, filesFound, 0));
     }
 
     /// <summary>
