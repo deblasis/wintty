@@ -24,11 +24,18 @@ namespace Ghostty.Core.Config;
 /// burst collapses into a single settle and nothing is reported between the
 /// two halves of a swap.
 ///
-/// A settle that finds the file missing reports nothing. The missing file is
+/// A settle that finds the file missing reports no edit. The missing file is
 /// not the end of the save: the rename that completes it raises its own
 /// event, which re-arms the debounce, and that settle finds the file and
 /// reports it. A reload in the gap would have loaded no user config at all,
 /// so this saves the host a rebuild it would only decline.
+///
+/// It does report the absence, through <c>onVanished</c>. Getting that far
+/// means the file has been missing for a whole quiet period and nothing
+/// followed it, which a swap cannot produce: the rename is one event and it
+/// re-arms. So it is a deletion, and the host needs to know, because it is
+/// otherwise left refusing every later reload to protect a save that is
+/// never going to land (issue #676).
 ///
 /// It used to be load-bearing rather than an early-out, because libghostty's
 /// default-file loader answered "no config file" by writing its template, at
@@ -80,6 +87,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
     private readonly Func<bool> _ignoreEvents;
     private readonly Action<Action> _post;
     private readonly Action _onSettled;
+    private readonly Action? _onVanished;
     private readonly ILogger _logger;
     private readonly Lock _lock = new();
     private FileSystemWatcher? _watcher;
@@ -87,7 +95,6 @@ public sealed partial class ConfigFileWatcher : IDisposable
     private TimeSpan _rebuildDelay;
     private bool _overflowLogged;
     private bool _disposed;
-
 
     /// <summary>The watcher <see cref="CreateWatcher"/> is enabling right
     /// now, so <see cref="HandleWatcherError"/> can recognize a synchronous
@@ -122,6 +129,13 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// dispatcher); it does nothing else on the timer's thread.</param>
     /// <param name="onSettled">Called from inside the posted delivery, once
     /// per settled edit, only if the file exists at that moment.</param>
+    /// <param name="onVanished">Called instead of <paramref name="onSettled"/>
+    /// when the delivery finds the file gone. A swap re-arms the debounce
+    /// with the rename that completes it, so reaching here means the file
+    /// has been missing for a whole quiet period with nothing else
+    /// happening: a deletion, not a save in flight. Optional, and the
+    /// watcher does nothing else about it; it is the host that decides what
+    /// a deleted config file means.</param>
     public ConfigFileWatcher(
         string path,
         ISchedulerTimer timer,
@@ -129,7 +143,8 @@ public sealed partial class ConfigFileWatcher : IDisposable
         Func<bool> ignoreEvents,
         Action<Action> post,
         Action onSettled,
-        ILogger logger)
+        ILogger logger,
+        Action? onVanished = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         ArgumentNullException.ThrowIfNull(timer);
@@ -146,6 +161,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
         _ignoreEvents = ignoreEvents;
         _post = post;
         _onSettled = onSettled;
+        _onVanished = onVanished;
         _logger = logger;
         _timer.Callback = OnTimerFired;
     }
@@ -305,6 +321,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
 
     /// <summary>
     /// Schedule one more settled delivery, as if an event had just arrived.
+    /// Returns whether one was actually scheduled.
     /// </summary>
     /// <remarks>
     /// For a host that was handed a settle and could not act on it because
@@ -313,16 +330,23 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// already landed and already raised its events, so nothing further is
     /// coming, and without this the user's edit waits for the next save.
     /// This only schedules; the caller bounds how often it asks.
+    ///
+    /// The answer is load-bearing, not a courtesy. An ask is dropped while
+    /// the host is suppressing its own writes, and after disposal, and a
+    /// caller that counts those against its retry budget spends the budget
+    /// on deliveries that were never scheduled: it then stops asking
+    /// without anything having been tried.
     /// </remarks>
-    public void Resettle() => Rearm();
+    public bool Resettle() => Rearm();
 
-    private void Rearm()
+    private bool Rearm()
     {
-        if (_ignoreEvents()) return;
+        if (_ignoreEvents()) return false;
         lock (_lock)
         {
-            if (_disposed) return;
+            if (_disposed) return false;
             _timer.Schedule(_debounce);
+            return true;
         }
     }
 
@@ -409,6 +433,14 @@ public sealed partial class ConfigFileWatcher : IDisposable
         if (!File.Exists(_path))
         {
             LogSettledWithoutFile(_path);
+            // Not a save in flight. The rename that completes a swap raises
+            // its own event and re-arms the debounce, so a settle only gets
+            // here once the file has been gone for a whole quiet period with
+            // nothing following it. The host is told, because "the config
+            // file is gone for good" and "it is gone for the next few
+            // milliseconds" call for opposite answers and only this point
+            // can tell them apart.
+            _onVanished?.Invoke();
             return;
         }
 

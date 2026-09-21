@@ -1252,8 +1252,15 @@ GHOSTTY_API void ghostty_config_load_file(ghostty_config_t, const char*);
 // settings are not in this config, which is what lets a caller rebuilding a
 // running app's config keep the one it has instead of dropping every
 // setting to its default.
+//
+// The second argument, when not NULL, receives how many of the default
+// configuration files exist, readable or not. There is more than one default
+// location and they are layered, so LOADED on its own does not mean this
+// config is the user's: the file being saved can be the one that is missing
+// while another still reads. Comparing this count with the one from the load
+// a caller last applied is what sees that.
 GHOSTTY_API ghostty_config_default_files_e
-ghostty_config_load_default_files(ghostty_config_t);
+ghostty_config_load_default_files(ghostty_config_t, int*);
 // Write the starter config file, for a first run only: a caller that just
 // got ABSENT from a load at startup. Returns true if it was written. It
 // refuses to overwrite, because an editor's atomic save leaves the config

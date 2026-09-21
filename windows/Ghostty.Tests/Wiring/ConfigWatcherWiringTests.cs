@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.Linq;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -118,19 +120,83 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
+    /// And only on a first run, and never under --no-config.
+    /// </summary>
+    /// <remarks>
+    /// The flag has to mean nothing reads AND nothing writes the config
+    /// file, and the starter template is a write: it is how such a run still
+    /// left a config file behind on a fresh root. libghostty refuses it too;
+    /// both halves are kept, because this is the readable one and that is
+    /// the one that holds if a future flag spelling only reaches libghostty.
+    ///
+    /// Neither half has a test that fails without it otherwise: no C# test
+    /// drives this constructor, and the libghostty half is behind a flag
+    /// that is always empty under a zig test.
+    /// </remarks>
+    [Fact]
+    public void The_created_config_file_is_gated_on_a_first_run_and_on_the_flag()
+    {
+        static IEnumerable<string> AndOperands(ExpressionSyntax expression) =>
+            expression is BinaryExpressionSyntax b
+                && b.Kind() == SyntaxKind.LogicalAndExpression
+                    ? AndOperands(b.Left).Concat(AndOperands(b.Right))
+                    : new[] { expression.ToString().Trim() };
+
+        var create = Assert.Single(ConfigService().Root.Calls("NativeMethods.ConfigCreateDefaultFile"));
+        var chain = create.Ancestors().OfType<BinaryExpressionSyntax>()
+            .Last(b => b.Kind() == SyntaxKind.LogicalAndExpression);
+
+        var operands = AndOperands(chain).ToList();
+        Assert.Contains("!_noConfig", operands);
+        Assert.Contains("defaultFiles == ConfigFilesFound.Absent", operands);
+    }
+
+    /// <summary>
+    /// The one call to the gate in <c>Reload</c>, and the <c>if</c> built
+    /// around it.
+    /// </summary>
+    private static (InvocationExpressionSyntax Decide, IfStatementSyntax Guard) ReloadGuard()
+    {
+        var decide = Assert.Single(ConfigService().Method("Reload").Calls("ConfigReloadGate.Decide"));
+        return (decide, decide.Ancestors().OfType<IfStatementSyntax>().First());
+    }
+
+    /// <summary>
+    /// Assert that <paramref name="guard"/> refuses on
+    /// <paramref name="decision"/> and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// The assertion the rest of this file cannot make. <c>Calls()</c>
+    /// resolves the callee and stops there, so every other claim about this
+    /// guard is just as true of <c>== ConfigReloadDecision.Apply</c>: the
+    /// then-block would still free what it built, still return false, still
+    /// resettle, and the app would be one where no reload ever applies.
+    /// Nothing else in the suite sees it either, because
+    /// <c>ConfigReloadGateTests</c> tests the rule and not its call site and
+    /// no test drives <c>Reload</c> end to end.
+    /// </remarks>
+    private static void AssertRefusesOn(IfStatementSyntax guard, string decision)
+    {
+        var condition = Assert.IsType<BinaryExpressionSyntax>(guard.Condition);
+        Assert.Equal(SyntaxKind.EqualsExpression, condition.Kind());
+        Assert.Equal(decision, condition.Right.ToString());
+    }
+
+    /// <summary>
     /// The reload decision is behaviour, and it is tested as behaviour in
     /// <c>Config.ConfigReloadGateTests</c>. What a wiring test can add is
     /// that Reload asks the gate rather than growing a second copy of the
-    /// rule, and that a decline frees what it built and reports false:
-    /// callers read true as "expect the ConfigChanged echo".
+    /// rule, that it asks with the right operands, and that a decline frees
+    /// what it built and reports false: callers read true as "expect the
+    /// ConfigChanged echo".
     /// </summary>
     [Fact]
     public void A_reload_defers_to_the_gate_and_a_decline_costs_nothing()
     {
-        var reload = ConfigService().Method("Reload");
+        var (decide, guard) = ReloadGuard();
 
-        var decide = Assert.Single(reload.Calls("ConfigReloadGate.Decide"));
-        var guard = decide.Ancestors().OfType<IfStatementSyntax>().First();
+        AssertRefusesOn(guard, "ConfigReloadDecision.Decline");
+        Assert.Equal(decide.Span, ((BinaryExpressionSyntax)guard.Condition).Left.Span);
 
         Assert.NotEmpty(guard.Statement.Calls("NativeMethods.ConfigFree"));
         Assert.Contains(
@@ -140,21 +206,129 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// And the flag the gate reads moves only with an applied config, from
-    /// the gate's own answer. Deriving it a second way here is how the two
-    /// start disagreeing about what counts as a config file.
+    /// And with the counts the right way round: the load that just happened,
+    /// then the one the session is running on. Swapped, the guard refuses
+    /// every reload that finds MORE config files than before and waves
+    /// through the one case it exists for, a file going away mid save.
     /// </summary>
     [Fact]
-    public void The_session_config_file_flag_comes_from_the_gate()
+    public void The_gate_is_asked_about_this_load_against_the_session()
     {
-        var assignments = ConfigService().Method("Reload")
-            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "_configFilePresent")
-            .ToList();
+        var (decide, _) = ReloadGuard();
 
-        var assignment = Assert.Single(assignments);
+        Assert.Equal("defaultFiles", decide.Arg(0));
+        Assert.Equal("defaultFilesFound", decide.Arg(1));
+        Assert.Equal("_defaultFilesFound", decide.Arg(2));
+    }
+
+    /// <summary>
+    /// The count the gate reads has exactly one writer, so the session and
+    /// the gate cannot start disagreeing about what the session is running
+    /// on. Deriving it a second way is how that begins.
+    /// </summary>
+    [Fact]
+    public void The_session_default_file_count_has_one_writer()
+    {
+        var assignment = Assert.Single(ConfigService().Root
+            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_defaultFilesFound"));
+
         Assert.Equal(
-            "ConfigReloadGate.HasConfigFileAfterApply",
-            Assert.IsType<InvocationExpressionSyntax>(assignment.Right).CalleeText());
+            "RecordDefaultFiles",
+            assignment.Ancestors().OfType<MethodDeclarationSyntax>().First()
+                .Identifier.ValueText);
+    }
+
+    /// <summary>
+    /// And an applied reload records what that load found, not a fresh
+    /// reading of the disk: the two would be taken at different instants,
+    /// which is the whole hazard this is about.
+    /// </summary>
+    [Fact]
+    public void An_applied_reload_records_the_count_it_applied()
+    {
+        var record = Assert.Single(ConfigService().Method("Reload").Calls("RecordDefaultFiles"));
+
+        Assert.Equal("defaultFilesFound", record.Arg(0));
+    }
+
+    /// <summary>
+    /// The budget is spent on asks the watcher took, not on declines. It
+    /// drops an ask while this service suppresses its own writes, and there
+    /// is no watcher at all under --no-config, so counting a dropped one
+    /// stops the retrying with nothing having been tried.
+    /// </summary>
+    [Fact]
+    public void The_retry_budget_only_counts_an_ask_the_watcher_took()
+    {
+        var reload = ConfigService().Method("Reload");
+
+        var retry = Assert.Single(reload.DescendantNodes()
+            .OfType<PostfixUnaryExpressionSyntax>()
+            .Where(p => p.Operand.ToString() == "_declinedReloadRetries")
+            .Where(p => p.Ancestors().OfType<IfStatementSyntax>().First()
+                .Condition.Calls("_watcher?.Resettle").Count > 0));
+
+        var condition = Assert.IsType<BinaryExpressionSyntax>(
+            retry.Ancestors().OfType<IfStatementSyntax>().First().Condition);
+        Assert.Equal(SyntaxKind.EqualsExpression, condition.Kind());
+        Assert.Equal("true", condition.Right.ToString());
+    }
+
+    /// <summary>
+    /// A config file that stays gone is reported by the watcher, and the
+    /// session stops claiming to be running on one.
+    /// </summary>
+    /// <remarks>
+    /// Without this the refusal is permanent: the count only ever rose, so a
+    /// session whose config file is deleted declines every later reload for
+    /// the life of the process, and High Contrast reaches the terminal only
+    /// through the config a reload builds.
+    /// </remarks>
+    [Fact]
+    public void A_vanished_config_file_is_reported_and_clears_the_session_count()
+    {
+        var source = ConfigService();
+
+        var onVanished = Creations(source.Method("StartWatcher"))
+            .Single(o => o.Type.ToString() == "ConfigFileWatcher")
+            .ArgumentList!.Arguments
+            .Single(a => a.NameColon?.Name.Identifier.ValueText == "onVanished");
+        Assert.Equal("OnConfigFileVanished", onVanished.Expression.ToString());
+
+        var vanished = source.Method("OnConfigFileVanished");
+        Assert.Equal("0", Assert.Single(vanished.Calls("RecordDefaultFiles")).Arg(0));
+
+        // Nothing is rebuilt and nothing is pushed: a deletion keeps the
+        // running config, it does not replace it with pure defaults.
+        Assert.Empty(vanished.Calls("Reload"));
+        Assert.Empty(vanished.Calls("NativeMethods.AppUpdateConfig"));
+    }
+
+    /// <summary>
+    /// A palette preview takes the same gate, with the same polarity, and a
+    /// refusal takes back the overlay file it had already written. Nothing
+    /// later removes it: RevertThemePreview only runs for a preview that was
+    /// shown.
+    /// </summary>
+    [Fact]
+    public void A_refused_preview_cleans_up_after_itself()
+    {
+        var preview = ConfigService().Method("PreviewTheme");
+
+        var decide = Assert.Single(preview.Calls("ConfigReloadGate.Decide"));
+        var guard = decide.Ancestors().OfType<IfStatementSyntax>().First();
+
+        AssertRefusesOn(guard, "ConfigReloadDecision.Decline");
+        Assert.NotEmpty(guard.Statement.Calls("NativeMethods.ConfigFree"));
+        Assert.NotEmpty(guard.Statement.Calls("DeleteThemePreviewOverlay"));
+
+        // Its own line, not the reload's. Sharing one made a palette browse
+        // report "Keeping the running config" for something that never asked
+        // to change it, which reads in a log as a reload that happened.
+        Assert.NotEmpty(guard.Statement.Calls(
+            "StaticLoggers.ConfigService.LogThemePreviewKeptRunningConfig"));
+        Assert.Empty(guard.Statement.Calls(
+            "StaticLoggers.ConfigService.LogReloadKeptRunningConfig"));
     }
 }

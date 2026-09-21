@@ -39,60 +39,72 @@ public enum ConfigReloadDecision
 public static class ConfigReloadGate
 {
     /// <param name="found">What the load reported.</param>
-    /// <param name="sessionHasConfigFile">Whether the config currently in
-    /// force was built from a config file that exists.</param>
+    /// <param name="defaultFilesFound">How many default config files exist,
+    /// readable or not, as the same load counted them.</param>
+    /// <param name="sessionDefaultFilesFound">How many existed when the
+    /// config currently in force was built.</param>
     /// <remarks>
-    /// <para><c>Loaded</c> always applies, and that includes an empty config
-    /// file: emptying it is a configuration that asks for nothing, so the
-    /// defaults come back, which is what it says.</para>
+    /// <para>There are several default config files and they are layered,
+    /// not alternatives: the pre-rename <c>ghostty/config.ghostty</c> is
+    /// still read, and a user migrated from Ghostty has it alongside
+    /// <c>wintty/config.wintty</c>. So "a config file was read" is not
+    /// enough to say the config is the user's. The one being saved can be
+    /// the one that is missing while the other still reads, and that load
+    /// reports <c>Loaded</c> with one file fewer. Comparing the counts is
+    /// what sees it; the verdict on its own cannot.</para>
     ///
-    /// <para><c>Unreadable</c> never applies. A config file that is there and
-    /// will not open is an editor, an indexer or a sync client holding it,
-    /// and the config built from it carries defaults where the user's
-    /// settings belong. Applying it resets a terminal they are looking at for
-    /// the length of somebody else's file handle.</para>
+    /// <para><c>Unreadable</c> never applies. A config file that is there
+    /// and will not open is an editor, an indexer or a sync client holding
+    /// it, and the config built from it carries defaults where the user's
+    /// settings belong. Applying it resets a terminal they are looking at
+    /// for the length of somebody else's file handle.</para>
     ///
-    /// <para><c>Absent</c> applies only for a session that never had a config
-    /// file. For one that has, no file is what the gap of an atomic save
-    /// looks like, and the rename that completes the save is moments away.
-    /// For one that never had, refusing would be wrong in the other
-    /// direction: it is the path a High Contrast change takes on a machine
-    /// with no config file at all, and that override has to reach the
-    /// terminal.</para>
+    /// <para>Otherwise it applies unless a default config file the session
+    /// was running on is not there now. That is what the gap of an atomic
+    /// save looks like from outside, and the rename that completes the save
+    /// is moments away.</para>
     ///
-    /// <para>A config file deleted on purpose reads as the save gap and is
-    /// treated the same way: the session keeps its settings until it is
-    /// restarted. That is deliberate. The alternative, reading a deletion as
-    /// "put everything back to its default", tears down what is on screen for
-    /// an act that did not ask for it.</para>
+    /// <para>Losing the last one is the same rule with the count at zero,
+    /// and the other direction matters as much: a session that never had a
+    /// config file still applies, because that is the path a High Contrast
+    /// change takes on a machine with no config file at all, and that
+    /// override has to reach the terminal.</para>
+    ///
+    /// <para>A config file deleted on purpose looks exactly like the save
+    /// gap here, and is refused the same way, so the session keeps its
+    /// settings rather than having them torn down by an act that did not
+    /// ask for it. It does not stay refused: a settle that finds the file
+    /// still gone a full debounce period later is a deletion and not a
+    /// save, and the host lowers its count on that, which is
+    /// <c>ConfigFileWatcher</c>'s vanished callback.</para>
     /// </remarks>
     public static ConfigReloadDecision Decide(
         ConfigFilesFound found,
-        bool sessionHasConfigFile) => found switch
+        int defaultFilesFound,
+        int sessionDefaultFilesFound) => found switch
         {
-            ConfigFilesFound.Loaded => ConfigReloadDecision.Apply,
-            ConfigFilesFound.Unreadable => ConfigReloadDecision.Decline,
-            ConfigFilesFound.Absent => sessionHasConfigFile
-                ? ConfigReloadDecision.Decline
-                : ConfigReloadDecision.Apply,
+            // Absent and Loaded differ only in whether the count is zero, so
+            // the comparison below is the whole rule for both. Spelling them
+            // as one case rather than two keeps there being one rule.
+            ConfigFilesFound.Loaded or ConfigFilesFound.Absent =>
+                defaultFilesFound < sessionDefaultFilesFound
+                    ? ConfigReloadDecision.Decline
+                    : ConfigReloadDecision.Apply,
+
+            // Unreadable, and anything that is none of the three: a value
+            // outside the enum means the two sides of the FFI disagree and
+            // the config in hand cannot be trusted.
             _ => ConfigReloadDecision.Decline,
         };
-
-    /// <summary>
-    /// Whether the session is running on a config file once
-    /// <paramref name="found"/> has been applied. Only a load that read one
-    /// is applied with a file behind it, so this can only go false for a
-    /// session that never had one.
-    /// </summary>
-    public static bool HasConfigFileAfterApply(ConfigFilesFound found) =>
-        found == ConfigFilesFound.Loaded;
 
     /// <summary>
     /// Whether a declined reload should ask to be tried again.
     ///
     /// Only for <c>Unreadable</c>: that save has landed and its filesystem
-    /// events are spent, so nothing else will ask. <c>Absent</c> needs no
-    /// retry, because the rename that completes the save raises its own.
+    /// events are spent, so nothing else will ask. A count that shrank needs
+    /// no retry, because the rename that completes the save raises its own
+    /// event, and a file that never comes back is reported as vanished
+    /// instead.
     /// </summary>
     public static bool ShouldRetry(ConfigFilesFound found, int attemptsSoFar, int maxAttempts) =>
         found == ConfigFilesFound.Unreadable && attemptsSoFar < maxAttempts;

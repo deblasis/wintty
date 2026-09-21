@@ -78,7 +78,11 @@ extension Ghostty {
             if let path {
                 ghostty_config_load_file(cfg, path)
             } else {
-                let found = ghostty_config_load_default_files(cfg)
+                // nil for the count: it exists so a host holding a running
+                // config can tell one layered file going away mid save from
+                // a user who never had it, and only the Windows shell keeps
+                // a previous count to compare against. See ghostty.h.
+                let found = ghostty_config_load_default_files(cfg, nil)
                 if createIfAbsent && found == GHOSTTY_CONFIG_DEFAULT_FILES_ABSENT {
                     _ = ghostty_config_create_default_file()
                 }

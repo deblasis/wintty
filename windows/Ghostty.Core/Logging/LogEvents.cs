@@ -29,6 +29,8 @@ internal static class LogEvents
         public const int ThemePreviewFailed    = 1015;
         public const int ReloadFoundNoFile     = 1016;
         public const int ReloadGaveUp          = 1017;
+        public const int ThemePreviewKeptConfig = 1018;
+        public const int ConfigFileVanished    = 1019;
     }
 
     // 1100-1199: Frecency / command history

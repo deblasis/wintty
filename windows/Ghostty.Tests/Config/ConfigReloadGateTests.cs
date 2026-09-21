@@ -4,7 +4,7 @@ using Xunit;
 namespace Ghostty.Tests.Config;
 
 /// <summary>
-/// The whole truth table for issue #676's reload rule, both inputs crossed.
+/// The whole truth table for issue #676's reload rule, every input crossed.
 ///
 /// These are the assertions the wiring tests cannot make. A wiring test reads
 /// the call site and can only say the guard is shaped the way it was left;
@@ -19,13 +19,13 @@ public class ConfigReloadGateTests
     /// nothing, and the defaults coming back is what it says.
     /// </summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void A_config_file_that_was_read_always_applies(bool sessionHasConfigFile)
+    [InlineData(0)]
+    [InlineData(1)]
+    public void A_config_file_that_was_read_always_applies(int sessionFilesFound)
     {
         Assert.Equal(
             ConfigReloadDecision.Apply,
-            ConfigReloadGate.Decide(ConfigFilesFound.Loaded, sessionHasConfigFile));
+            ConfigReloadGate.Decide(ConfigFilesFound.Loaded, 1, sessionFilesFound));
     }
 
     /// <summary>
@@ -34,13 +34,17 @@ public class ConfigReloadGateTests
     /// belong, so it never applies, whatever the session was running on.
     /// </summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void A_config_file_that_would_not_open_never_applies(bool sessionHasConfigFile)
+    [InlineData(0, 0)]
+    [InlineData(1, 0)]
+    [InlineData(1, 1)]
+    [InlineData(1, 2)]
+    [InlineData(2, 1)]
+    public void A_config_file_that_would_not_open_never_applies(
+        int filesFound, int sessionFilesFound)
     {
         Assert.Equal(
             ConfigReloadDecision.Decline,
-            ConfigReloadGate.Decide(ConfigFilesFound.Unreadable, sessionHasConfigFile));
+            ConfigReloadGate.Decide(ConfigFilesFound.Unreadable, filesFound, sessionFilesFound));
     }
 
     /// <summary>
@@ -53,7 +57,7 @@ public class ConfigReloadGateTests
     {
         Assert.Equal(
             ConfigReloadDecision.Decline,
-            ConfigReloadGate.Decide(ConfigFilesFound.Absent, sessionHasConfigFile: true));
+            ConfigReloadGate.Decide(ConfigFilesFound.Absent, 0, 1));
     }
 
     /// <summary>
@@ -66,7 +70,37 @@ public class ConfigReloadGateTests
     {
         Assert.Equal(
             ConfigReloadDecision.Apply,
-            ConfigReloadGate.Decide(ConfigFilesFound.Absent, sessionHasConfigFile: false));
+            ConfigReloadGate.Decide(ConfigFilesFound.Absent, 0, 0));
+    }
+
+    /// <summary>
+    /// The case the verdict on its own cannot see, and the reason the count
+    /// is there. There are three default config files and they layer: a user
+    /// migrated from Ghostty has ghostty/config.ghostty beside
+    /// wintty/config.wintty, which this fork still reads. While an editor
+    /// swaps the newer one in, the older one still reads, so the load
+    /// reports a perfectly good <c>Loaded</c> with one file fewer, and every
+    /// setting from the file being saved is missing from it.
+    /// </summary>
+    [Fact]
+    public void A_config_file_the_session_had_going_missing_is_refused()
+    {
+        Assert.Equal(
+            ConfigReloadDecision.Decline,
+            ConfigReloadGate.Decide(ConfigFilesFound.Loaded, 1, 2));
+    }
+
+    /// <summary>
+    /// And a config file appearing is not a reason to refuse: writing the
+    /// second one is an ordinary edit, and the config built from it is the
+    /// user's.
+    /// </summary>
+    [Fact]
+    public void A_config_file_appearing_applies()
+    {
+        Assert.Equal(
+            ConfigReloadDecision.Apply,
+            ConfigReloadGate.Decide(ConfigFilesFound.Loaded, 2, 1));
     }
 
     /// <summary>
@@ -75,34 +109,20 @@ public class ConfigReloadGateTests
     /// sides disagree, and the config in hand cannot be trusted.
     /// </summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void An_unknown_answer_is_refused(bool sessionHasConfigFile)
+    [InlineData(0)]
+    [InlineData(1)]
+    public void An_unknown_answer_is_refused(int sessionFilesFound)
     {
         Assert.Equal(
             ConfigReloadDecision.Decline,
-            ConfigReloadGate.Decide((ConfigFilesFound)7, sessionHasConfigFile));
-    }
-
-    /// <summary>
-    /// Only a load that read a config file leaves the session running on one,
-    /// so a session that had one can never lose that flag to a reload: every
-    /// other answer is declined before this is consulted.
-    /// </summary>
-    [Theory]
-    [InlineData(ConfigFilesFound.Loaded, true)]
-    [InlineData(ConfigFilesFound.Absent, false)]
-    [InlineData(ConfigFilesFound.Unreadable, false)]
-    public void The_session_runs_on_a_config_file_only_after_one_was_read(
-        ConfigFilesFound found, bool expected)
-    {
-        Assert.Equal(expected, ConfigReloadGate.HasConfigFileAfterApply(found));
+            ConfigReloadGate.Decide((ConfigFilesFound)7, 1, sessionFilesFound));
     }
 
     /// <summary>
     /// A locked file is the only decline worth asking about again: its save
-    /// has landed and its events are spent. A missing file is mid swap, and
-    /// the rename that completes it raises its own.
+    /// has landed and its events are spent. A count that shrank is mid swap,
+    /// and the rename that completes it raises its own event; a file that
+    /// never comes back is reported as vanished instead.
     /// </summary>
     [Fact]
     public void Only_an_unreadable_config_file_is_retried()

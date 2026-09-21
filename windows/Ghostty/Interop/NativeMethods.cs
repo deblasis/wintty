@@ -400,9 +400,16 @@ internal static partial class NativeMethods
     /// config of pure defaults for all of them, which is what lets
     /// <c>ConfigService.Reload</c> keep the config it is already running on.
     /// </remarks>
+    /// <param name="found">Receives how many default config files exist,
+    /// readable or not. There is more than one default location and they
+    /// layer, so the verdict on its own cannot tell a user who has only
+    /// wintty/config.wintty from one migrated from Ghostty whose
+    /// ghostty/config.ghostty still reads while the other is mid save: both
+    /// report <c>Loaded</c>. The count is what tells them apart.</param>
     [LibraryImport(Dll, EntryPoint = "ghostty_config_load_default_files")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial Ghostty.Core.Config.ConfigFilesFound ConfigLoadDefaultFiles(GhosttyConfig config);
+    internal static partial Ghostty.Core.Config.ConfigFilesFound ConfigLoadDefaultFiles(
+        GhosttyConfig config, out int found);
 
     /// <summary>
     /// Write the starter config file. Returns true if it was written.
