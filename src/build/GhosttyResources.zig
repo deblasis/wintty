@@ -485,15 +485,26 @@ fn addLinuxAppResources(
     ).step);
 }
 
-/// The install paths a Windows build has to produce, relative to the install
-/// prefix. `share/terminfo/ghostty.terminfo` is the sentinel
-/// `os/resourcesdir.zig` finds the tree by, and `ghostty/shell-integration`
-/// under `share` is what `termio/shell_integration.zig` opens per shell. The
-/// themes are deliberately not required: `-Demit-themes=false` is a supported
-/// build and costs only the bundled colour schemes.
+/// The install paths a Windows build has to produce, each one the whole path
+/// under the install prefix and not the tail of one.
+///
+/// `share/terminfo/ghostty.terminfo` is the sentinel `os/resourcesdir.zig`
+/// finds the tree by, and `share/ghostty/shell-integration` is what
+/// `termio/shell_integration.zig` opens per shell. The themes are deliberately
+/// not required: `-Demit-themes=false` is a supported build and costs only the
+/// bundled colour schemes.
+///
+/// Writing the whole path is the correction to a guard that could not see the
+/// half it mattered most for. A step's own idea of where it goes is split in
+/// two (`install_dir` plus a path relative to it), and the shell-integration
+/// step carries `share` in the first half. Checking only the second half meant
+/// moving the scripts out of `share` left this list matching, so the build
+/// stayed green while shipping an app with a findable tree and no scripts in
+/// it. `installPath` now composes both halves, and these are composed the same
+/// way before comparison, so the two sides cannot drift apart again.
 const windows_required = [_][]const u8{
     "share/terminfo/ghostty.terminfo",
-    "ghostty/shell-integration",
+    "share/ghostty/shell-integration",
 };
 
 /// Fail the configure step unless every resource a Windows build has to ship
@@ -510,10 +521,15 @@ pub fn assertWindowsInstall(self: *const GhosttyResources, b: *std.Build) !void 
     const install_step = b.getInstallStep();
 
     for (windows_required) |required| {
+        // Composed the same way the steps are, so the comparison is between
+        // two absolute locations rather than between two path fragments whose
+        // bases might differ.
+        const want = b.getInstallPath(.prefix, required);
+
         var wired = false;
         for (self.windows) |step| {
-            const path = installPath(step) orelse continue;
-            if (!samePath(path, required)) continue;
+            const path = installPath(b, step) orelse continue;
+            if (!samePath(path, want)) continue;
 
             // Present in the set is not enough: it has to be depended on, or
             // the step is built and never run.
@@ -539,11 +555,21 @@ pub fn assertWindowsInstall(self: *const GhosttyResources, b: *std.Build) !void 
     }
 }
 
-/// Where a step installs to, relative to the install prefix, for the two step
-/// kinds the Windows set is made of. Null for anything else.
-fn installPath(step: *std.Build.Step) ?[]const u8 {
-    if (step.cast(std.Build.Step.InstallFile)) |s| return s.dest_rel_path;
-    if (step.cast(std.Build.Step.InstallDir)) |s| return s.options.install_subdir;
+/// Where a step installs to, as the absolute path it will write, for the two
+/// step kinds the Windows set is made of. Null for anything else.
+///
+/// Both kinds hold their destination in two parts: an `InstallDir` naming a
+/// base (`.prefix`, `.lib`, `.bin`, `.header` or a `.custom` subdirectory of
+/// the prefix) and a path relative to that base. Reading only the second part
+/// is what made the guard blind: the shell-integration step keeps `share` in
+/// its base, so `ghostty/shell-integration` matched no matter which base it
+/// was under. `b.getInstallPath` is the same call the steps themselves make in
+/// `make`, so this is the location that will actually be written.
+fn installPath(b: *std.Build, step: *std.Build.Step) ?[]const u8 {
+    if (step.cast(std.Build.Step.InstallFile)) |s|
+        return b.getInstallPath(s.dir, s.dest_rel_path);
+    if (step.cast(std.Build.Step.InstallDir)) |s|
+        return b.getInstallPath(s.options.install_dir, s.options.install_subdir);
     return null;
 }
 

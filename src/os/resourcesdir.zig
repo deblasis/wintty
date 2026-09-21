@@ -100,8 +100,17 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
         if (global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
             if (validResourcesDir(dir)) return .{ .app_path = dir };
 
+            // Naming the sentinel matters on Windows, where a value that IS
+            // an existing absolute directory is still refused. Told only that
+            // it is not one, whoever set it has nothing to act on and every
+            // reason to believe the message is wrong.
             log.warn(
-                "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
+                if (comptime builtin.target.os.tag == .windows)
+                    "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, " ++
+                        "or its parent directory holds no " ++ sentinels[0] ++
+                        " file, ignoring dir={s}"
+                else
+                    "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
                 .{dir},
             );
             alloc.free(dir);
@@ -225,14 +234,25 @@ fn validResourcesDir(path: []const u8) bool {
 /// `<parent>/ghostty`. This is the same evidence `resourcesDirFromExe`
 /// requires; it is applied to the environment value so that both routes to a
 /// resources directory demand the same thing.
+///
+/// It has to be a FILE, and the kind is what says so. An `access` on the path
+/// is satisfied by a directory of that name, which is the cheapest thing for
+/// someone planting a tree to create, and so, measured here, is opening it:
+/// on Windows `openFileAbsolute` returns a handle for a directory rather than
+/// an error, so swapping one for the other fixed nothing. This is the check
+/// that decides whether a directory gets to supply `ENV`, `ZDOTDIR`,
+/// `CLINK_PATH` and `TERMINFO_DIRS` for every shell in the session. The C#
+/// mirror in `ThemeSearchPath.HasTerminfoSentinel` asks `File.Exists`, which a
+/// directory does not satisfy, so this was the looser of two checks that
+/// document themselves as the same rule.
 fn hasSentinelBeside(path: []const u8) bool {
     const parent = std.fs.path.dirname(path) orelse return false;
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     inline for (sentinels) |sentinel| {
         if (std.fmt.bufPrint(&buf, "{s}/{s}", .{ parent, sentinel })) |p| {
-            if (std.Io.Dir.accessAbsolute(global.io(), p, .{})) {
-                return true;
+            if (std.Io.Dir.cwd().statFile(global.io(), p, .{})) |stat| {
+                if (stat.kind == .file) return true;
             } else |_| {}
         } else |_| {}
     }
@@ -464,6 +484,42 @@ test "validResourcesDir windows: rejects a directory carrying no sentinel" {
 
     const planted = try std.fmt.allocPrint(alloc, "{s}/planted/ghostty", .{root});
     try testing.expect(!validResourcesDir(planted));
+}
+
+test "validResourcesDir windows: a directory named like the sentinel is not one" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The same planted tree with the cheapest possible forgery of the
+    // evidence: a DIRECTORY at the sentinel's path. An `access` is satisfied
+    // by it, which is what this check used to be, and the C# mirror of this
+    // rule was never fooled by it because it asks File.Exists.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "as-dir/ghostty");
+    try tmp.dir.createDirPath(testing.io, "as-dir/" ++ sentinels[0]);
+    try tmp.dir.createDirPath(testing.io, "as-file/ghostty");
+    if (std.fs.path.dirname("as-file/" ++ sentinels[0])) |parent| {
+        try tmp.dir.createDirPath(testing.io, parent);
+    }
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "as-file/" ++ sentinels[0],
+        .data = "",
+    });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!validResourcesDir(
+        try std.fmt.allocPrint(alloc, "{s}/as-dir/ghostty", .{root}),
+    ));
+
+    // The same layout with the sentinel as a file is accepted, so the
+    // assertion above is not passing because the shape is wrong.
+    try testing.expect(validResourcesDir(
+        try std.fmt.allocPrint(alloc, "{s}/as-file/ghostty", .{root}),
+    ));
 }
 
 test "validResourcesDir non-windows: takes an existing absolute directory" {

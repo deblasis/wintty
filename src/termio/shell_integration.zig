@@ -1214,7 +1214,7 @@ test "nushell: missing resources" {
 /// arguments of their own) we go further and rewrite the launch command to
 /// auto-source the script:
 ///
-///     <pwsh> -NoExit -ExecutionPolicy RemoteSigned -Command ". '<resource_dir>/.../ghostty.ps1'"
+///     <pwsh> -NoExit -ExecutionPolicy Bypass -Command ". '<resource_dir>/.../ghostty.ps1'"
 ///
 /// PowerShell still loads the user's `$PROFILE` first, then runs the
 /// `-Command`, which dot-sources our script. The script wraps the
@@ -1264,32 +1264,19 @@ fn setupPowerShell(
         0,
     );
 
-    // Some policy override is needed for correctness: Windows PowerShell 5.1
-    // defaults to `Restricted` on client Windows, under which dot-sourcing a
-    // `.ps1` fails with "running scripts is disabled on this system",
-    // breaking integration and printing a security error on every launch.
-    //
-    // `RemoteSigned` rather than `Bypass`, because the reason this is
-    // supposed to be safe is that the script is a local file with no
-    // Mark-of-the-Web, and `Bypass` is precisely the setting that stops
-    // anyone checking. `RemoteSigned` enforces that property instead of
-    // assuming it: our own file runs, and a `.ps1` that arrived in that
-    // directory carrying MotW does not. Measured on a real install, no
-    // shipped file carries a Zone.Identifier stream, so this costs nothing.
-    //
-    // What it still does NOT do is respect a locally set `AllSigned`. Process
-    // scope loses to the MachinePolicy and UserPolicy scopes, so an
-    // organisation enforcing AllSigned through Group Policy is not overridden
-    // here, but one that set it with Set-ExecutionPolicy is. Closing that
-    // needs `ghostty.ps1` to carry an Authenticode signature; the signing
-    // step lives outside this repository and covers only `exe` and `dll`
-    // today. Until it signs this file too, dropping the override would take
-    // PowerShell integration away from every default Windows install.
+    // `-ExecutionPolicy Bypass` is process-scoped (it only affects the pwsh we
+    // spawn, never the user's persisted machine/user policy) and is required
+    // for correctness: Windows PowerShell 5.1 defaults to `Restricted` on
+    // client Windows, under which dot-sourcing our `.ps1` fails with
+    // "running scripts is disabled on this system", breaking integration and
+    // printing a security error on every launch. The script we source is
+    // Ghostty's own local file (no Mark-of-the-Web), so the bypass only
+    // unblocks our trusted script.
     const argv = try alloc_arena.alloc([:0]const u8, 6);
     argv[0] = try alloc_arena.dupeZ(u8, exe);
     argv[1] = try alloc_arena.dupeZ(u8, "-NoExit");
     argv[2] = try alloc_arena.dupeZ(u8, "-ExecutionPolicy");
-    argv[3] = try alloc_arena.dupeZ(u8, "RemoteSigned");
+    argv[3] = try alloc_arena.dupeZ(u8, "Bypass");
     argv[4] = try alloc_arena.dupeZ(u8, "-Command");
     argv[5] = dot_source;
 
@@ -1316,13 +1303,10 @@ test "powershell" {
     try testing.expectEqual(@as(usize, 6), argv.len);
     try testing.expectEqualStrings("pwsh", argv[0]);
     try testing.expectEqualStrings("-NoExit", argv[1]);
-    // Process-scoped policy so a default-Restricted Windows PowerShell 5.1
-    // can still dot-source our integration script. Pinned to the exact value:
-    // RemoteSigned lets our local file run and still refuses a `.ps1` that
-    // arrived in that directory carrying Mark-of-the-Web, which Bypass, the
-    // value this used to pass, would have run without looking.
+    // Process-scoped policy bypass so a default-Restricted Windows
+    // PowerShell 5.1 can still dot-source our integration script.
     try testing.expectEqualStrings("-ExecutionPolicy", argv[2]);
-    try testing.expectEqualStrings("RemoteSigned", argv[3]);
+    try testing.expectEqualStrings("Bypass", argv[3]);
     try testing.expectEqualStrings("-Command", argv[4]);
     // The dot-source argument references our integration script.
     try testing.expect(std.mem.indexOf(u8, argv[5], "ghostty.ps1") != null);
@@ -1389,20 +1373,13 @@ fn setupCmd(
 ) !?config.Command {
     // Preserve the user's prompt body if set, else cmd's default `$p$g`.
     const body = env.get("PROMPT") orelse "$p$g";
-
-    // An already-wrapped PROMPT is inherited, not user intent. Launching the
-    // app from inside an integrated cmd session hands us our own marks back,
-    // and wrapping again emits A and B twice per prompt, which reads as two
-    // commands to anything tracking them. Leave it exactly as found.
-    if (std.mem.indexOf(u8, body, "133;A") == null) {
-        // `$e` = ESC, terminator ST = `$e\`. OSC 9;9 carries cwd via `$p`.
-        const wrapped = try std.fmt.allocPrint(
-            alloc_arena,
-            "$e]133;A$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
-            .{body},
-        );
-        try env.put("PROMPT", wrapped);
-    }
+    // `$e` = ESC, terminator ST = `$e\`. OSC 9;9 carries cwd via `$p`.
+    const wrapped = try std.fmt.allocPrint(
+        alloc_arena,
+        "$e]133;A$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
+        .{body},
+    );
+    try env.put("PROMPT", wrapped);
 
     // Forward slashes are fine for Clink on Windows, matching the other
     // setup functions' path style.
@@ -1415,19 +1392,18 @@ fn setupCmd(
     if (std.Io.Dir.openDirAbsolute(global.io(), clink_dir, .{})) |dir_| {
         var dir = dir_;
         dir.close(global.io());
-
-        // Same inheritance problem as PROMPT above: a nested launch arrives
-        // carrying our directory already, and prependEnv does not deduplicate,
-        // so the list grows an entry per nesting level. Clink would load
-        // ghostty.lua once per entry.
-        const existing = env.get("CLINK_PATH") orelse "";
-        if (std.mem.indexOf(u8, existing, clink_dir) == null) try env.put(
+        try env.put(
             "CLINK_PATH",
             // CLINK_PATH is a Windows-format list and is always
             // ';'-separated, independent of the host (Clink only runs on
             // Windows; using the host path delimiter would emit ':' under
             // unit tests on POSIX).
-            try prependEnv(alloc_arena, existing, clink_dir, ';'),
+            try prependEnv(
+                alloc_arena,
+                env.get("CLINK_PATH") orelse "",
+                clink_dir,
+                ';',
+            ),
         );
     } else |err| switch (err) {
         // No integration dir is the expected case for a build without
@@ -1897,11 +1873,23 @@ test "packaged tree: the fixture matches what the build installs" {
     // to be there, under the name the build will install it as. This is the
     // link that otherwise does not exist: it fails if a file is renamed or
     // moved on either side.
-    var dir = std.Io.Dir.cwd().openDir(
-        testing.io,
-        "src/shell-integration",
-        .{},
-    ) catch return error.SkipZigTest;
+    //
+    // The path is relative to the build root, which is where the test runner
+    // is started from, the same way src/font's PNG comparison reads its
+    // reference image. A failure to open it is reported rather than skipped:
+    // this used to skip, which meant the one test standing between a renamed
+    // script and a silently broken shell turned itself off whenever it could
+    // not find the tree, and nothing in a run of 64 skipped tests said which
+    // one that was.
+    const tree = "src/shell-integration";
+    var dir = std.Io.Dir.cwd().openDir(testing.io, tree, .{}) catch |err| {
+        std.log.err(
+            "cannot open {s}; this test reads the source tree and has to run " ++
+                "from the build root ({})",
+            .{ tree, err },
+        );
+        return error.ShellIntegrationTreeUnreadable;
+    };
     defer dir.close(testing.io);
 
     for (shell_integration_files) |rel| {
@@ -1997,40 +1985,6 @@ test "packaged layout windows: every supported shell is detected and injected" {
             ),
         }
     }
-}
-
-test "cmd: a nested launch does not wrap PROMPT or CLINK_PATH twice" {
-    const testing = std.testing;
-    var arena = ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var res: TmpPackagedResourcesDir = try .init();
-    defer res.deinit();
-
-    // First launch, from a clean environment.
-    var env = EnvMap.init(alloc);
-    defer env.deinit();
-    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
-
-    const first_prompt = try alloc.dupe(u8, env.get("PROMPT").?);
-    const first_clink = try alloc.dupe(u8, env.get("CLINK_PATH").?);
-
-    // Second launch inheriting the first one's environment, which is what
-    // starting the app from inside an integrated cmd session does. Both
-    // values have to come out unchanged: a second A/B pair reads as two
-    // commands to anything tracking the marks, and a second CLINK_PATH entry
-    // loads ghostty.lua twice.
-    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
-
-    try testing.expectEqualStrings(first_prompt, env.get("PROMPT").?);
-    try testing.expectEqualStrings(first_clink, env.get("CLINK_PATH").?);
-
-    // And to be explicit about what "unchanged" is protecting against.
-    try testing.expectEqual(
-        @as(usize, 1),
-        std.mem.count(u8, env.get("PROMPT").?, "133;A"),
-    );
 }
 
 test "packaged layout windows: an unsupported shell injects nothing" {

@@ -109,6 +109,28 @@ public class ThemeSearchPathTests
     }
 
     [Fact]
+    public void Bundled_themes_are_found_one_directory_above_a_helper_in_bin()
+    {
+        // theme.zig's bundledThemesDir climbs one level for exactly this: an
+        // executable shipped in bin would otherwise find no bundled themes,
+        // and this method documents itself as following that rule.
+        var bin = Path.Combine(AppDir, "bin");
+        Assert.Equal(Beside, ThemeSearchPath.BundledDirectory(null, bin, d => d == Beside));
+    }
+
+    [Fact]
+    public void The_bundled_climb_does_not_reach_outside_the_install()
+    {
+        // Two above the executable is not part of the install, and a theme
+        // file is a config file, so a tree there must be out of reach rather
+        // than merely later in a list. Raise BundledThemesMaxAncestors and
+        // this returns the outside tree.
+        var deep = Path.Combine(AppDir, "bin", "sub");
+        var outside = Path.Combine(AppDir, "share", "ghostty", "themes");
+        Assert.Null(ThemeSearchPath.BundledDirectory(null, deep, d => d == outside));
+    }
+
+    [Fact]
     public void A_valid_resources_directory_replaces_the_one_beside_the_executable()
     {
         // libghostty takes the environment's directory as the resources

@@ -541,10 +541,15 @@
     differently enough to be written differently.
 
     share\ghostty\shell-integration is the scripts, resolved at spawn time as
-    <resources dir>\shell-integration\... . A wildcard, like the themes above,
-    so a library built without them ships none rather than failing the build.
-    RecursiveDir preserves the per-shell subdirectories, which the lookups
-    name directly.
+    <resources dir>\shell-integration\... . A wildcard, because the tree is
+    whole per-shell subdirectories and RecursiveDir is what preserves them,
+    which the lookups name directly.
+
+    A wildcard that matches nothing is silent, which is the same silent drop
+    the sentinel is guarded against below, so ErrorIfNoShellIntegration names
+    one script literally. It has to name a file rather than the directory: the
+    directory outlives a build that stopped filling it, and MSBuild does not
+    evaluate Exists() against a wildcard at all.
 
     share\terminfo\ghostty.terminfo is a literal path, NOT a wildcard, and the
     difference is load-bearing: MSBuild only globs an Include containing a
@@ -582,6 +587,26 @@
   <Target Name="ErrorIfNoTerminfoSentinel" BeforeTargets="Build"
           Condition="Exists('..\..\zig-out\lib\ghostty.dll') and !Exists('..\..\zig-out\share\terminfo\ghostty.terminfo')">
     <Error Text="ghostty.terminfo missing at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\share\terminfo\ghostty.terminfo')). It is how libghostty finds the resources directory on Windows; without it the shell-integration scripts and themes are copied but never loaded. Run 'zig build -Dapp-runtime=none' (without -Demit-terminfo=false) before 'dotnet build'." />
+  </Target>
+
+  <!--
+    The sentinel target above is about a tree nothing can find. This one is
+    about a tree that is found and empty, which looks identical from the app:
+    every shell falls back to no integration, so no prompt marks, no cwd
+    reporting and no command tracking, with nothing in the build output to say
+    so because a wildcard matching nothing is not a warning.
+
+    ghostty.ps1 is the file named, because PowerShell is the default shell
+    here and its script is the one the launch command dot-sources by name, so
+    a build missing it breaks the common case outright. Any one file of the
+    tree would serve as evidence; this is the one whose absence costs most.
+
+    Gated on the dll for the same reason as above: a tree with no zig-out at
+    all is ErrorIfNoLibghostty's to report.
+  -->
+  <Target Name="ErrorIfNoShellIntegration" BeforeTargets="Build"
+          Condition="Exists('..\..\zig-out\lib\ghostty.dll') and !Exists('..\..\zig-out\share\ghostty\shell-integration\powershell\ghostty.ps1')">
+    <Error Text="Shell integration missing at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\share\ghostty\shell-integration\powershell\ghostty.ps1')). The scripts are what every shell sources for prompt marks, cwd reporting and command tracking; without them the app starts and silently integrates with nothing. Run 'zig build -Dapp-runtime=none' before 'dotnet build'." />
   </Target>
 
   <!--

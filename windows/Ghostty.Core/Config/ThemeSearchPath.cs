@@ -105,8 +105,9 @@ public static class ThemeSearchPath
     /// </param>
     /// <param name="appDirectory">
     /// The directory holding the executable. Without a resources directory,
-    /// theme.zig looks for <c>share\ghostty\themes</c> beside the executable,
-    /// which is where the build copies the bundled themes.
+    /// theme.zig looks for <c>share\ghostty\themes</c> beside the executable
+    /// and in one directory above it, which is where the build copies the
+    /// bundled themes.
     /// </param>
     /// <remarks>
     /// The resources directory is also found by climbing from the executable
@@ -136,11 +137,12 @@ public static class ThemeSearchPath
         // sentinel detection requires. A value failing any of those is ignored
         // with a warning.
         //
-        // The sentinel half matters less here than it does there, because this
-        // resolves a list of colours and not the scripts every shell sources.
-        // It is mirrored anyway: this method documents itself as following
-        // that rule, and a mirror that quietly stopped matching would be worse
-        // than either behaviour on its own.
+        // The sentinel is mirrored rather than skipped as a lesser concern: a
+        // theme file is parsed by the same code as a config file, underneath
+        // the user's own config, so it carries every key the user has not set
+        // and is not a list of colours. This method also documents itself as
+        // following that rule, and a mirror that quietly stopped matching
+        // would be worse than either behaviour on its own.
         if (!string.IsNullOrEmpty(resourcesDirectory)
             && IsAbsolute(resourcesDirectory)
             && directoryExists(resourcesDirectory)
@@ -150,9 +152,35 @@ public static class ThemeSearchPath
         }
 
         if (string.IsNullOrEmpty(appDirectory)) return null;
-        var beside = Path.Combine(Path.TrimEndingDirectorySeparator(appDirectory), "share", "ghostty", "themes");
-        return directoryExists(beside) ? beside : null;
+
+        // theme.zig's bundledThemesDir looks in the executable's own directory
+        // and one above it, and stops there. One above is for the CLI, which
+        // ships in bin and would otherwise find no bundled themes at all; the
+        // stop is because nothing further up is any part of the install.
+        var start = Path.TrimEndingDirectorySeparator(appDirectory);
+        for (var climbed = 0; climbed < BundledThemesMaxAncestors; climbed++)
+        {
+            // A path with no parent is a drive root, which grants Authenticated
+            // Users the right to create folders. resourcesdir.zig refuses to
+            // probe one and so does the fallback this mirrors.
+            var parent = Path.GetDirectoryName(start);
+            if (string.IsNullOrEmpty(parent)) break;
+
+            var candidate = Path.Combine(start, "share", "ghostty", "themes");
+            if (directoryExists(candidate)) return candidate;
+
+            start = parent;
+        }
+
+        return null;
     }
+
+    /// <summary>
+    /// How many directories <see cref="BundledDirectory(string?, string?)"/>
+    /// looks in, counting the executable's own. Mirrors
+    /// <c>bundled_themes_max_ancestors</c> in src/config/theme.zig.
+    /// </summary>
+    private const int BundledThemesMaxAncestors = 2;
 
     /// <summary>
     /// True when the terminfo sentinel sits beside <paramref name="resourcesDirectory"/>

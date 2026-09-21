@@ -8,8 +8,13 @@
 
 const std = @import("std");
 
-/// Whether two install paths, both relative to the install prefix, name the
-/// same place.
+/// Whether two install paths name the same place.
+///
+/// Both sides are whole locations rather than fragments: the caller composes
+/// the required path and the step's own destination through the same
+/// `getInstallPath` before comparing, because a step keeps part of where it
+/// goes in an install-base it does not spell out. Comparing the tails alone
+/// let a step move out from under `share` with the guard still matching.
 ///
 /// The build writes these with the host separator, so on a Windows host they
 /// come back with backslashes while the paths they are checked against are
@@ -37,12 +42,23 @@ test "samePath ignores which separator the host wrote" {
         "ghostty\\shell-integration",
     ));
     try testing.expect(samePath("ghostty/themes", "ghostty/themes"));
+
+    // The shape the guard actually compares: whole locations under a prefix.
+    try testing.expect(samePath(
+        "C:\\src\\zig-out\\share\\ghostty\\shell-integration",
+        "C:\\src\\zig-out/share/ghostty/shell-integration",
+    ));
 }
 
 test "samePath does not treat different paths as equal" {
     const testing = std.testing;
 
     try testing.expect(!samePath("ghostty/themes", "ghostty/shell-integration"));
+    // The case the guard was blind to: same tail, different install base.
+    try testing.expect(!samePath(
+        "C:\\src\\zig-out\\share\\ghostty\\shell-integration",
+        "C:\\src\\zig-out\\ghostty\\shell-integration",
+    ));
     // Length is part of it: a trailing separator is a different string, and
     // the guard compares against an exact install path.
     try testing.expect(!samePath("ghostty/shell-integration", "ghostty/shell-integration/"));
