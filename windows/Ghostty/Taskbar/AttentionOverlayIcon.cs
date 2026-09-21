@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core.Taskbar;
 using Windows.Win32;
 using Windows.Win32.Graphics.Gdi;
 using Windows.Win32.UI.WindowsAndMessaging;
@@ -25,6 +26,24 @@ internal static class AttentionOverlayIcon
         int h = PInvoke.GetSystemMetrics(SYSTEM_METRICS_INDEX.SM_CYSMICON);
         if (w <= 0) w = 16;
         if (h <= 0) h = 16;
+
+        // CreateIconIndirect needs a mask bitmap even for a 32-bpp alpha
+        // color plane. The alpha carries the shape, and an all-zero mask
+        // (zero meaning opaque) leaves it in charge.
+        //
+        // The bits have to be handed over rather than left to CreateBitmap:
+        // given a null lpvBits it allocates the plane and leaves the contents
+        // undefined, so "all-zero" would be an assumption about uninitialized
+        // memory rather than something this code established. A new byte[] is
+        // zeroed, and w and h are clamped positive above, so the buffer is
+        // never empty: pinning an empty array yields a null pointer, which
+        // would quietly put this back the way it was.
+        //
+        // Allocated before the GDI handles exist, because it is the only
+        // statement in this method that can throw and there is nothing to
+        // leak yet. The mask's geometry does not depend on the color plane.
+        int maskStride = MaskGeometry.WordAlignedStride(w);
+        var maskBits = new byte[maskStride * h];
 
         var header = new BITMAPV5HEADER
         {
@@ -65,25 +84,14 @@ internal static class AttentionOverlayIcon
 
         RasterizeDot((byte*)bits, w, h);
 
-        // CreateIconIndirect needs a mask bitmap even for a 32-bpp alpha
-        // color plane. The alpha channel carries the shape, and an all-zero
-        // mask (zero meaning opaque) leaves it in charge.
-        //
-        // The bits have to be handed over rather than left to CreateBitmap:
-        // given a null lpvBits it allocates the plane and leaves the contents
-        // undefined, so "all-zero" would be an assumption about uninitialized
-        // memory rather than something this code established. Measured on
-        // Windows 11, nothing that composites this icon reads the mask at all
-        // -- the alpha decides -- but the icon keeps the plane it was built
-        // with and DI_MASK hands it straight back out.
-        //
-        // 1-bpp GDI scanlines are WORD aligned, and a new byte[] is zeroed.
-        // w and h are clamped positive above, so the buffer is never empty:
-        // pinning an empty array yields a null pointer, which would quietly
-        // put this back the way it was. CreateBitmap copies the bits into the
-        // bitmap object, so nothing needs the pin past the call.
-        int maskStride = ((w + 15) / 16) * 2;
-        var maskBits = new byte[maskStride * h];
+        // Measured on Windows 11, nothing in this product reads the mask
+        // back: the alpha decides the shape, and no DrawIconEx reaches this
+        // icon. Defining the plane still matters, because the icon keeps
+        // whatever mask it was built with, and because the documented
+        // fallback engages the moment the color plane carries no alpha at
+        // all -- which is what RasterizeDot produces if the disc ever comes
+        // out empty. CreateBitmap copies the bits into the bitmap object, so
+        // nothing needs the pin past the call.
         HBITMAP mask;
         fixed (byte* maskPtr = maskBits)
         {
