@@ -4664,6 +4664,33 @@ fn testProcessArgs(comptime argv: []const [:0]const u8) std.process.Args {
     return .{ .vector = &ptrs };
 }
 
+test "testProcessArgs round-trips what a DefaultFiles test passes it" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Windows hands over one command line and the iterator splits it again,
+    // so what a test thinks it passed and what the code under test reads are
+    // two different things there, and the same thing everywhere else. Every
+    // default-file test below that passes a flag rests on those agreeing,
+    // and this is the only place that can say so rather than assume it.
+    const argv = [_][:0]const u8{
+        "wintty",
+        "--title=x",
+        "--config-default-files=false",
+        "--font-size=20",
+    };
+
+    var iter = try cli.args.argsIterator(alloc, testProcessArgs(&argv));
+    defer iter.deinit();
+
+    // argsIterator has already skipped argv0.
+    for (argv[1..]) |expected| {
+        const actual = iter.next() orelse return error.TooFewArguments;
+        try testing.expectEqualStrings(expected, actual);
+    }
+    try testing.expect(iter.next() == null);
+}
+
 test "cliDisablesDefaultFiles sees the flag that turns the default files off" {
     const testing = std.testing;
     const alloc = testing.allocator;
