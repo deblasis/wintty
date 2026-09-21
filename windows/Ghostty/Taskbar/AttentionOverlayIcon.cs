@@ -66,9 +66,30 @@ internal static class AttentionOverlayIcon
         RasterizeDot((byte*)bits, w, h);
 
         // CreateIconIndirect needs a mask bitmap even for a 32-bpp alpha
-        // color plane; an all-zero monochrome mask leaves the alpha in
-        // charge of the shape.
-        HBITMAP mask = PInvoke.CreateBitmap(w, h, 1, 1, null);
+        // color plane. The alpha channel carries the shape, and an all-zero
+        // mask (zero meaning opaque) leaves it in charge.
+        //
+        // The bits have to be handed over rather than left to CreateBitmap:
+        // given a null lpvBits it allocates the plane and leaves the contents
+        // undefined, so "all-zero" would be an assumption about uninitialized
+        // memory rather than something this code established. Measured on
+        // Windows 11, nothing that composites this icon reads the mask at all
+        // -- the alpha decides -- but the icon keeps the plane it was built
+        // with and DI_MASK hands it straight back out.
+        //
+        // 1-bpp GDI scanlines are WORD aligned, and a new byte[] is zeroed.
+        // w and h are clamped positive above, so the buffer is never empty:
+        // pinning an empty array yields a null pointer, which would quietly
+        // put this back the way it was. CreateBitmap copies the bits into the
+        // bitmap object, so nothing needs the pin past the call.
+        int maskStride = ((w + 15) / 16) * 2;
+        var maskBits = new byte[maskStride * h];
+        HBITMAP mask;
+        fixed (byte* maskPtr = maskBits)
+        {
+            mask = PInvoke.CreateBitmap(w, h, 1, 1, maskPtr);
+        }
+
         var info = new ICONINFO
         {
             fIcon = true,
