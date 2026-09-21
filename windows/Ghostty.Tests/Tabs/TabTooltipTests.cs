@@ -70,7 +70,16 @@ public class TabTooltipTests
     public void TheTooltip_IsTheLabel_WhenNoDirectoryIsKnown()
     {
         var tab = new TabModel(new FakePaneHost());
-        Assert.Equal(AppIdentity.ProductName, tab.TooltipText);
+        // Whatever the label is, the tooltip is the same thing -- and
+        // neither is the application's own name.
+        Assert.Equal(tab.EffectiveTitle, tab.TooltipText);
+        Assert.Equal(TabLabel.UnnamedTab, tab.TooltipText);
+        Assert.NotEqual(AppIdentity.ProductName, tab.TooltipText);
+
+        // Still no directory, but the pane has now said what it was
+        // launched into: the tooltip follows the label onto that.
+        tab.OnPaneLaunched("pwsh.exe", null);
+        Assert.Equal("PowerShell", tab.TooltipText);
 
         tab.UserOverrideTitle = "deploy";
         Assert.Equal("deploy", tab.TooltipText);

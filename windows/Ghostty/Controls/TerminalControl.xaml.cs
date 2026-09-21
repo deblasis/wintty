@@ -384,12 +384,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// <summary>
     /// Returns the pid of the shell process attached to this surface, or
     /// null when libghostty cannot report one (surface not yet created,
-    /// already disposed, or the platform's pty layer is a stub). The
-    /// active-process tracker uses this to root its descendant walk.
-    /// On Windows today this currently returns null because
-    /// <c>WindowsPty.getProcessInfo</c> upstream still returns 0; the
-    /// wiring is in place so the tracker picks up the pid automatically
-    /// once libghostty exposes it.
+    /// already disposed, or the pty has not finished spawning). The
+    /// active-process tracker roots its descendant walk here, and the tab
+    /// reads it once to name itself after what the pane was launched into.
+    ///
+    /// On Windows the pty layer tracks no foreground process group, so
+    /// <c>Subprocess.getProcessInfo</c> answers <c>.foreground_pid</c>
+    /// from the spawned child's own HANDLE (<c>WindowsPty</c> itself still
+    /// returns null, and is bypassed for this). The pid here is therefore
+    /// the shell this surface started, not whatever is in front of it now.
     /// </summary>
     internal int? TryGetShellPid()
     {

@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core;
 using Ghostty.Core.Profiles;
 using Ghostty.Core.Tabs;
 using Xunit;
@@ -96,12 +97,33 @@ public class TabModelProfileSnapshotTests
         Assert.Equal("renamed", tab.EffectiveTitle);
     }
 
+    /// <summary>
+    /// No snapshot, no titles: the bottom of the chain. It used to be the
+    /// product name, which is what a cold start with no resolvable default
+    /// profile put on the window's first tab.
+    /// </summary>
     [Fact]
-    public void EffectiveTitle_NoSnapshotAndNoTitles_FallsBackToHardcoded()
+    public void EffectiveTitle_NoSnapshotAndNoTitles_IsNotTheApplicationsName()
     {
         var tab = new TabModel(new FakePaneHost());
 
-        Assert.Equal("Wintty", tab.EffectiveTitle);
+        Assert.NotEqual(AppIdentity.ProductName, tab.EffectiveTitle);
+        Assert.Equal(TabLabel.UnnamedTab, tab.EffectiveTitle);
+    }
+
+    /// <summary>
+    /// A snapshot is one way to know what launched a tab; the pane's own
+    /// child is the other, and it is the one a no-profile tab has. Either
+    /// way the tab is named for the thing it runs.
+    /// </summary>
+    [Fact]
+    public void EffectiveTitle_NoSnapshot_NamesWhatThePaneWasLaunchedInto()
+    {
+        var tab = new TabModel(new FakePaneHost());
+
+        tab.OnPaneLaunched("cmd.exe", null);
+
+        Assert.Equal("Command Prompt", tab.EffectiveTitle);
     }
 
     /// <summary>
@@ -125,12 +147,13 @@ public class TabModelProfileSnapshotTests
     }
 
     [Fact]
-    public void EffectiveTitle_BlankShellTitleAndNoProfile_FallsBackToProductName()
+    public void EffectiveTitle_BlankShellTitleAndNoProfile_FallsBackToTheGenericName()
     {
         var tab = new TabModel(new FakePaneHost());
         tab.ShellReportedTitle = "   ";
 
-        Assert.Equal("Wintty", tab.EffectiveTitle);
+        Assert.Equal(TabLabel.UnnamedTab, tab.EffectiveTitle);
+        Assert.NotEqual(AppIdentity.ProductName, tab.EffectiveTitle);
     }
 
     [Fact]

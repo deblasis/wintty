@@ -27,6 +27,12 @@ public class TabLabelCwdTests
     [InlineData(@"\\server\share", "share")]
     [InlineData(@"\\wsl.localhost\Ubuntu\home\alex", "alex")]
     [InlineData(@"C:\", "C:")]
+    // An executable's image path is the same shape of string and takes the
+    // same rule: PaneLaunchImage names a launch process through this rather
+    // than carrying a second copy of it, and two copies of a rule that must
+    // agree would drift.
+    [InlineData(@"C:\Program Files\PowerShell\7\pwsh.exe", "pwsh.exe")]
+    [InlineData(@"\\?\C:\tools\btop.exe", "btop.exe")]
     public void FolderName_IsTheLastSegment(string cwd, string expected)
         => Assert.Equal(expected, TabLabel.FolderName(cwd));
 
@@ -85,14 +91,27 @@ public class TabLabelCwdTests
         Assert.Equal("notes", tab.EffectiveTitle);
     }
 
+    /// <summary>
+    /// No directory, and nothing else either: the label still says
+    /// something, and what it says is what the tab is rather than what the
+    /// application is. A blank cwd is the same as no cwd, which is the
+    /// case an all-spaces OSC 7 produces.
+    /// </summary>
     [Fact]
-    public void EffectiveTitle_NeverRendersEmpty_WhenNoCwdIsKnown()
+    public void EffectiveTitle_NamesTheTab_NotTheApplication_WhenNoCwdIsKnown()
     {
         var tab = new TabModel(new FakePaneHost());
-        Assert.Equal(AppIdentity.ProductName, tab.EffectiveTitle);
+        Assert.Equal(TabLabel.UnnamedTab, tab.EffectiveTitle);
+        Assert.NotEqual(AppIdentity.ProductName, tab.EffectiveTitle);
 
         tab.ShellReportedCwd = "   ";
-        Assert.Equal(AppIdentity.ProductName, tab.EffectiveTitle);
+        Assert.Equal(TabLabel.UnnamedTab, tab.EffectiveTitle);
+        Assert.NotEqual(AppIdentity.ProductName, tab.EffectiveTitle);
+
+        // And once the pane says what it was launched into, that is the
+        // name -- still with no directory to go on.
+        tab.OnPaneLaunched("pwsh.exe", null);
+        Assert.Equal("PowerShell", tab.EffectiveTitle);
     }
 
     [Fact]

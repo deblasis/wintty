@@ -21,8 +21,8 @@ namespace Ghostty.Core.Tabs;
 /// Title routing: <see cref="TabManager"/> raises
 /// <see cref="WindowTitleChanged"/> on:
 ///   - active tab change
-///   - the active tab's <see cref="TabModel.ShellReportedTitle"/> or
-///     <see cref="TabModel.UserOverrideTitle"/> changes
+///   - the active tab's <see cref="TabModel.EffectiveTitle"/> changes,
+///     whichever tier moved it
 ///   - the active tab's <see cref="IPaneHost.LeafFocused"/> fires
 /// The actual leaf-title-changed hook lives in MainWindow because
 /// the leaf's <c>Terminal</c> is WinUI-only.
@@ -842,12 +842,34 @@ internal sealed class TabManager
         }
     }
 
+    /// <summary>
+    /// The window caption follows the active tab's label.
+    ///
+    /// It listens for <see cref="TabModel.EffectiveTitle"/> itself, not for
+    /// the inputs that feed it. Naming the inputs is how the caption came
+    /// to lag the strip: the list had to be extended by hand for every new
+    /// tier, and a tier added without it left the strip, the tooltip and
+    /// the accessible name moving while the caption stayed on the value it
+    /// had. The label raises exactly once per change (see
+    /// <c>TabModel.RaiseTitleDerived</c>, whose callers are all
+    /// equality-guarded or early-returning, and are a superset of
+    /// <c>Compose</c>'s inputs), so this is the same number of
+    /// invocations the input list produced and it cannot fall behind a
+    /// tier again.
+    ///
+    /// Three tiers were behind it, not one. The launch name is the tier
+    /// that made it visible; the profile's display name raised nothing at
+    /// all, and <see cref="TabModel.HomeDirectory"/> -- which moves the
+    /// caption between "Home" and a path leaf -- was simply missing from
+    /// the list. Both were unreachable only because the creation paths
+    /// write them before anything subscribes, which is an accident of call
+    /// order rather than a property of the tiers, and is exactly why this
+    /// routes on the label instead of on a list somebody has to remember.
+    /// </summary>
     private void OnTabPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (sender is TabModel t && ReferenceEquals(t, _activeTab) &&
-            (e.PropertyName == nameof(TabModel.ShellReportedTitle) ||
-             e.PropertyName == nameof(TabModel.ShellReportedCwd) ||
-             e.PropertyName == nameof(TabModel.UserOverrideTitle)))
+            e.PropertyName == nameof(TabModel.EffectiveTitle))
         {
             WindowTitleChanged?.Invoke(this, EventArgs.Empty);
         }

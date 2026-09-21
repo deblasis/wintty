@@ -62,3 +62,11 @@ CloseHandle
 // (ProcessTreeWalker + NtProcessInterop)
 OpenProcess
 PROCESS_ACCESS_RIGHTS
+
+// kernel32 for reading ONE known process's own image path
+// (PaneLaunchImage). The pid a pane just spawned, resolved once, so the
+// machine-wide Toolhelp32 snapshot ProcessTreeWalker takes is the wrong
+// instrument for it: this is O(1) and needs the same
+// PROCESS_QUERY_LIMITED_INFORMATION right NtProcessInterop already takes.
+QueryFullProcessImageName
+PROCESS_NAME_FORMAT

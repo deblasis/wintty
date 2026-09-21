@@ -188,16 +188,24 @@ internal sealed class TitleBarCoordinator
         UpdateVerticalTitleText();
     }
 
+    // The label itself, not the inputs that feed it. The two extra names
+    // were redundant (each raises EffectiveTitle with it) and were the
+    // beginnings of the hand-maintained input list that left the window
+    // caption a tier behind the strip; see TabManager.OnTabPropertyChanged,
+    // which routes the same way so the two layouts cannot disagree.
     private void OnBoundTabPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(TabModel.EffectiveTitle) ||
-            e.PropertyName == nameof(TabModel.ShellReportedTitle) ||
-            e.PropertyName == nameof(TabModel.UserOverrideTitle))
+        if (e.PropertyName == nameof(TabModel.EffectiveTitle))
         {
             UpdateVerticalTitleText();
         }
     }
 
+    // The coalesce covers NO TAB BOUND, not a tab with nothing to say:
+    // WordTitle is never null or empty, and its own floor is the generic
+    // word rather than the product, because a tab is named after what runs
+    // in it. With no tab at all this strip is naming the window, and the
+    // product name is still the right answer to that.
     private void UpdateVerticalTitleText()
         => _verticalTitleText.Text = _boundTab?.WordTitle ?? AppIdentity.ProductName;
 

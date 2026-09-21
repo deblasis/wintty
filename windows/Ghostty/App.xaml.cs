@@ -2095,24 +2095,40 @@ public partial class App : Application
 
     /// <summary>
     /// Enrol <paramref name="tab"/> with the process tracker. Idempotent:
-    /// re-registering the same tab is a no-op for the tracker and only
-    /// re-installs the <see cref="Ghostty.Core.Tabs.TabModel.ShellPidChanged"/>
-    /// subscription once via the underlying event's reentrancy semantics.
+    /// re-registering the same tab is a no-op for the tracker, and the
+    /// <see cref="Ghostty.Core.Tabs.TabModel.ShellPidChanged"/>
+    /// subscription is removed before it is added so a second enrolment
+    /// leaves one handler rather than two.
     /// Called from <see cref="MainWindow"/> on <c>TabManager.TabAdded</c>;
     /// the shell pid may be null at this point (the libghostty surface
     /// has not loaded yet) so we hook ShellPidChanged for the late path.
     /// </summary>
     internal void RegisterTabForProcessTracking(Ghostty.Core.Tabs.TabModel tab)
     {
-        if (_activeProcessTracker is null) return;
+        // The -= is what makes the += idempotent. A C# event does NOT
+        // dedupe delegates: subscribing the same method twice runs it
+        // twice, and removing a delegate that was never added is a no-op,
+        // so this pair is the whole mechanism. The doc used to claim the
+        // event did this itself, which was never true and is now
+        // load-bearing: the handler below gained a second consumer this
+        // round (it names the tab as well as tracking it), so a double
+        // enrolment would cost two resolves and two OpenProcess calls on
+        // the UI thread per pid change.
+        tab.ShellPidChanged -= OnTabShellPidChanged;
+        // Subscribed whatever state the tracker is in, and unsubscribed
+        // the same way (see UnregisterTabForProcessTracking, which never
+        // asked). Naming a tab after what runs in it is not a function of
+        // foreground-process tracking.
         tab.ShellPidChanged += OnTabShellPidChanged;
         // Pick up a pid already set before we subscribed (e.g. a future
         // path that resolves the pid synchronously at TabManager.NewTab).
-        if (tab.ShellPid is int pid)
-        {
-            _tabsByPid[pid] = tab;
-            _activeProcessTracker.Register(pid);
-        }
+        if (tab.ShellPid is not int pid) return;
+
+        NameTabAfterItsLaunchProcess(tab, pid);
+
+        if (_activeProcessTracker is null) return;
+        _tabsByPid[pid] = tab;
+        _activeProcessTracker.Register(pid);
     }
 
     /// <summary>
@@ -2133,6 +2149,12 @@ public partial class App : Application
 
     private void OnTabShellPidChanged(Ghostty.Core.Tabs.TabModel tab, int? newPid)
     {
+        // The name first, and above the tracker's null check on purpose. A
+        // tab is named after what runs in it whether or not
+        // foreground-process tracking is up; the two readers of the pid are
+        // independent and the naming one must not be gated on the other.
+        if (newPid is int spawned) NameTabAfterItsLaunchProcess(tab, spawned);
+
         if (_activeProcessTracker is null) return;
         // Old pid may still be registered if the shell respawned without
         // an explicit unregister; drop it before adopting the new one.
@@ -2151,6 +2173,36 @@ public partial class App : Application
             _tabsByPid[pid] = tab;
             _activeProcessTracker.Register(pid);
         }
+    }
+
+    /// <summary>
+    /// Tell <paramref name="tab"/> what it was launched into, so a tab
+    /// that nothing else names can say what it is actually running.
+    ///
+    /// Skipped for a tab a profile already NAMES, which is not the same as
+    /// a tab that HAS a profile. The model coalesces the profile's display
+    /// name on whitespace, so a profile with a blank name falls through to
+    /// the launch name on purpose; guarding on the snapshot's existence
+    /// would strand exactly that tab on the generic word. Also skipped
+    /// once the model says the name it holds is the complete one, since a
+    /// repeat would buy nothing for a handle open and two queries. Neither
+    /// guard keeps the value honest -- the model's own latch does that.
+    ///
+    /// Runs on the UI thread, which is where
+    /// <see cref="Ghostty.Core.Tabs.TabModel.ShellPid"/> is written from:
+    /// the report raises PropertyChanged that WinUI bindings consume. The
+    /// cost is one handle open and two queries against one known pid --
+    /// not the machine-wide snapshot the active-process tracker pays for
+    /// on its own thread.
+    /// </summary>
+    private static void NameTabAfterItsLaunchProcess(Ghostty.Core.Tabs.TabModel tab, int pid)
+    {
+        if (!string.IsNullOrWhiteSpace(tab.ProfileSnapshot?.DisplayName)) return;
+        if (tab.PaneLaunchNameIsComplete) return;
+        if (pid <= 0) return;
+
+        var (exe, commandLine) = Ghostty.Core.Profiles.Tracking.PaneLaunchImage.TryResolve((uint)pid);
+        tab.OnPaneLaunched(exe, commandLine);
     }
 
     private void OnActiveProcessChanged(
