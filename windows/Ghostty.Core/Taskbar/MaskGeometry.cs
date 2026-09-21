@@ -1,3 +1,5 @@
+using System;
+
 namespace Ghostty.Core.Taskbar;
 
 /// <summary>
@@ -23,5 +25,19 @@ internal static class MaskGeometry
     /// words: never shorter than ceil(width / 8), always even, and never
     /// more than one byte past the minimum.
     /// </summary>
-    public static int WordAlignedStride(int width) => ((width + 15) / 16) * 2;
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="width"/> is zero or negative.
+    /// </exception>
+    public static int WordAlignedStride(int width)
+    {
+        // A non-positive width has no stride, and returning 0 would be the
+        // quiet form of the very defect this type was extracted to close:
+        // a zero-length buffer pins to a null pointer, which is precisely
+        // what handing CreateBitmap a null lpvBits does, undefined mask and
+        // all. Callers clamp their metrics, so this is unreachable. It
+        // throws rather than returning 0 so that losing a clamp fails
+        // loudly instead of silently reintroducing undefined bits.
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
+        return ((width + 15) / 16) * 2;
+    }
 }

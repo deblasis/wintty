@@ -1,3 +1,4 @@
+using System;
 using Ghostty.Core.Taskbar;
 using Xunit;
 
@@ -31,6 +32,25 @@ public class MaskGeometryTests
     [InlineData(64, 8)]
     public void KnownWidthsGetTheirDocumentedStride(int width, int expected)
         => Assert.Equal(expected, MaskGeometry.WordAlignedStride(width));
+
+    /// <summary>
+    /// A non-positive width is refused rather than answered with 0.
+    ///
+    /// This is the precondition the caller's `if (w &lt;= 0) w = 16;` clamp
+    /// satisfies, and it is checked here rather than described in prose,
+    /// because a 0 stride makes a zero-length buffer, a zero-length buffer
+    /// pins to a null pointer, and a null pointer is exactly the undefined
+    /// mask this whole change exists to remove. Losing the clamp has to
+    /// fail loudly, not quietly come back round to the original defect.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-16)]
+    [InlineData(int.MinValue)]
+    public void ANonPositiveWidthIsRefused(int width)
+        => Assert.Throws<ArgumentOutOfRangeException>(
+            () => MaskGeometry.WordAlignedStride(width));
 
     /// <summary>
     /// The invariant itself, derived a different way from the expression

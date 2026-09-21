@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -153,7 +154,65 @@ public sealed class AttentionOverlayIconWiringTests
             $"'{strideName}' is not a local with an initializer in Create(), so the mask "
                 + "buffer length is not the tested stride.");
 
+        // Coupling this to the helper is deliberate, in the same way the
+        // `fixed` rule above is: a correct stride written out inline here
+        // reddens this test, because inline arithmetic is arithmetic that
+        // no test executes. The answer is to call the helper, or to move
+        // the new expression into MaskGeometry and test it there.
         var strideCall = strideDecl!.Initializer!.Value.AssertCallTo("MaskGeometry.WordAlignedStride");
         Assert.Equal("w", strideCall.Arg(0));
+
+        // Nothing may move the goalposts after the stride is computed.
+        // Naming the operands does not pin their values: a `w` rescaled for
+        // a new monitor, or a `maskStride` reassigned, between here and the
+        // CreateBitmap call leaves the buffer describing one bitmap while
+        // GDI is told to build another, and GDI reads past the end of it.
+        // Not a hypothetical edit: rescaling `w` for the current DPI is the
+        // subject of the overlay icon caching follow-up.
+        int computedAt = strideDecl.Span.End;
+        foreach (var symbol in new[] { "w", "h", strideName })
+        {
+            var late = create.AssignsTo(symbol)
+                .Where(a => a.SpanStart > computedAt)
+                .ToList();
+            Assert.True(
+                late.Count == 0,
+                $"'{symbol}' is assigned {late.Count} time(s) after the mask stride is "
+                    + "computed, so the buffer may no longer describe the bitmap that "
+                    + "CreateBitmap is asked to build. Compute the stride after the last "
+                    + "change to the metrics instead.");
+        }
+    }
+
+    /// <summary>
+    /// Nothing in the product reads an icon's mask plane back.
+    ///
+    /// AttentionOverlayIcon leans on this: it documents the mask as inert
+    /// for this icon because the alpha carries the shape and no DrawIconEx
+    /// reaches it. That is a claim about the whole corpus, and a corpus
+    /// claim in a comment is true on the day it is written. A census keeps
+    /// it true, and turns adding the first mask-reading call site into a
+    /// decision someone makes rather than one that quietly invalidates the
+    /// reasoning behind choosing an all-zero plane.
+    ///
+    /// Scoped to the CsWin32 projections, so the private GDI+ DrawIcon
+    /// helper in SplashWindow is not mistaken for the Win32 one.
+    /// </summary>
+    [Fact]
+    public void NothingReadsAnIconMaskPlaneBack()
+    {
+        var readers = ShellSource.AllFiles()
+            .Where(f => f.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Any(i => i.CalleeText().StartsWith("PInvoke.", StringComparison.Ordinal)
+                          && i.CalleeText().Contains("DrawIcon", StringComparison.Ordinal)))
+            .Select(f => f.Name)
+            .ToList();
+
+        Assert.True(
+            readers.Count == 0,
+            "the attention overlay's mask is documented as inert because nothing draws "
+                + "these icons through DrawIconEx, which reads the AND mask. That is now "
+                + "false in: " + string.Join(", ", readers)
+                + ". Recheck whether an all-zero mask is still the right plane.");
     }
 }
