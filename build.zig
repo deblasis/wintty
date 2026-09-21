@@ -261,6 +261,12 @@ pub fn build(b: *std.Build) !void {
                 // executable build depends on, so the shippable steps are
                 // depended on individually (see GhosttyResources.windows).
                 for (resources.windows) |step| b.getInstallStep().dependOn(step);
+
+                // And then prove it. Deleting the line above used to be
+                // invisible: the whole suite stayed green while the shipped
+                // app went back to finding no resources directory at all.
+                try resources.assertWindowsInstall(b);
+
                 lib_shared.install("ghostty.dll");
                 if (lib_shared.implib) |implib| {
                     b.getInstallStep().dependOn(&b.addInstallLibFile(

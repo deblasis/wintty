@@ -118,22 +118,36 @@ function Invoke-SeamCommandQuiet($s, [hashtable]$Command) {
     return Receive-SeamResponse $s $Command['op']
 }
 
-# A shell cannot report its directory without the integration scripts, and
-# the Debug layout ships no share/ghostty tree for resourcesDir() to find
-# (`zig build -Dapp-runtime=none` installs the dll, not the resources). In a
-# Debug build resourcesDir() falls back to GHOSTTY_RESOURCES_DIR, so stage
-# the repo's own src/shell-integration under one and point at it. This is a
-# harness compensation for the build layout, NOT part of what is under test:
-# the scripts staged here are the ones an installed build ships.
+# A shell cannot report its directory without the integration scripts, so
+# stage the repo's own src/shell-integration and point GHOSTTY_RESOURCES_DIR
+# at it. This is a harness compensation for the build layout, NOT part of what
+# is under test: the scripts staged here are the ones an installed build
+# ships.
+#
+# The stage has to be a whole tree, not just the scripts. On Windows the
+# environment value is only accepted when the terminfo sentinel sits beside it
+# the way an install puts it (validResourcesDir in src/os/resourcesdir.zig),
+# so that a folder a standard user can create is not enough to redirect ENV,
+# ZDOTDIR, CLINK_PATH and TERMINFO for every session. The stage therefore
+# mirrors the shipped shape:
+#
+#     <stage>\share\terminfo\ghostty.terminfo
+#     <stage>\share\ghostty\shell-integration\...
+#
+# and the variable names <stage>\share\ghostty.
 function Enter-StagedResources {
     $repo = Resolve-Path (Join-Path $PSScriptRoot '..\..')
     $src = Join-Path $repo 'src\shell-integration'
     if (-not (Test-Path $src)) { throw "HARNESS: no shell-integration tree at $src" }
     $stage = Join-Path $env:TEMP "wintty-cwd-res-$([guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    Copy-Item $src -Destination (Join-Path $stage 'shell-integration') -Recurse -Force
+    $resources = Join-Path $stage 'share\ghostty'
+    $terminfo = Join-Path $stage 'share\terminfo'
+    New-Item -ItemType Directory -Force -Path $resources, $terminfo | Out-Null
+    Copy-Item $src -Destination (Join-Path $resources 'shell-integration') -Recurse -Force
+    # Contents are irrelevant: this file is a sentinel, never parsed.
+    Set-Content -Path (Join-Path $terminfo 'ghostty.terminfo') -Value '' -Encoding ascii
     $prior = if (Test-Path Env:GHOSTTY_RESOURCES_DIR) { $env:GHOSTTY_RESOURCES_DIR } else { $null }
-    $env:GHOSTTY_RESOURCES_DIR = $stage
+    $env:GHOSTTY_RESOURCES_DIR = $resources
     return @{ Stage = $stage; Prior = $prior }
 }
 

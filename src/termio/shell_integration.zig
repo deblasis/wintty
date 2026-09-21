@@ -1214,7 +1214,7 @@ test "nushell: missing resources" {
 /// arguments of their own) we go further and rewrite the launch command to
 /// auto-source the script:
 ///
-///     <pwsh> -NoExit -ExecutionPolicy Bypass -Command ". '<resource_dir>/.../ghostty.ps1'"
+///     <pwsh> -NoExit -ExecutionPolicy RemoteSigned -Command ". '<resource_dir>/.../ghostty.ps1'"
 ///
 /// PowerShell still loads the user's `$PROFILE` first, then runs the
 /// `-Command`, which dot-sources our script. The script wraps the
@@ -1264,19 +1264,32 @@ fn setupPowerShell(
         0,
     );
 
-    // `-ExecutionPolicy Bypass` is process-scoped (it only affects the pwsh we
-    // spawn, never the user's persisted machine/user policy) and is required
-    // for correctness: Windows PowerShell 5.1 defaults to `Restricted` on
-    // client Windows, under which dot-sourcing our `.ps1` fails with
-    // "running scripts is disabled on this system", breaking integration and
-    // printing a security error on every launch. The script we source is
-    // Ghostty's own local file (no Mark-of-the-Web), so the bypass only
-    // unblocks our trusted script.
+    // Some policy override is needed for correctness: Windows PowerShell 5.1
+    // defaults to `Restricted` on client Windows, under which dot-sourcing a
+    // `.ps1` fails with "running scripts is disabled on this system",
+    // breaking integration and printing a security error on every launch.
+    //
+    // `RemoteSigned` rather than `Bypass`, because the reason this is
+    // supposed to be safe is that the script is a local file with no
+    // Mark-of-the-Web, and `Bypass` is precisely the setting that stops
+    // anyone checking. `RemoteSigned` enforces that property instead of
+    // assuming it: our own file runs, and a `.ps1` that arrived in that
+    // directory carrying MotW does not. Measured on a real install, no
+    // shipped file carries a Zone.Identifier stream, so this costs nothing.
+    //
+    // What it still does NOT do is respect a locally set `AllSigned`. Process
+    // scope loses to the MachinePolicy and UserPolicy scopes, so an
+    // organisation enforcing AllSigned through Group Policy is not overridden
+    // here, but one that set it with Set-ExecutionPolicy is. Closing that
+    // needs `ghostty.ps1` to carry an Authenticode signature; the signing
+    // step lives outside this repository and covers only `exe` and `dll`
+    // today. Until it signs this file too, dropping the override would take
+    // PowerShell integration away from every default Windows install.
     const argv = try alloc_arena.alloc([:0]const u8, 6);
     argv[0] = try alloc_arena.dupeZ(u8, exe);
     argv[1] = try alloc_arena.dupeZ(u8, "-NoExit");
     argv[2] = try alloc_arena.dupeZ(u8, "-ExecutionPolicy");
-    argv[3] = try alloc_arena.dupeZ(u8, "Bypass");
+    argv[3] = try alloc_arena.dupeZ(u8, "RemoteSigned");
     argv[4] = try alloc_arena.dupeZ(u8, "-Command");
     argv[5] = dot_source;
 
@@ -1303,10 +1316,13 @@ test "powershell" {
     try testing.expectEqual(@as(usize, 6), argv.len);
     try testing.expectEqualStrings("pwsh", argv[0]);
     try testing.expectEqualStrings("-NoExit", argv[1]);
-    // Process-scoped policy bypass so a default-Restricted Windows
-    // PowerShell 5.1 can still dot-source our integration script.
+    // Process-scoped policy so a default-Restricted Windows PowerShell 5.1
+    // can still dot-source our integration script. Pinned to the exact value:
+    // RemoteSigned lets our local file run and still refuses a `.ps1` that
+    // arrived in that directory carrying Mark-of-the-Web, which Bypass, the
+    // value this used to pass, would have run without looking.
     try testing.expectEqualStrings("-ExecutionPolicy", argv[2]);
-    try testing.expectEqualStrings("Bypass", argv[3]);
+    try testing.expectEqualStrings("RemoteSigned", argv[3]);
     try testing.expectEqualStrings("-Command", argv[4]);
     // The dot-source argument references our integration script.
     try testing.expect(std.mem.indexOf(u8, argv[5], "ghostty.ps1") != null);
@@ -1373,13 +1389,20 @@ fn setupCmd(
 ) !?config.Command {
     // Preserve the user's prompt body if set, else cmd's default `$p$g`.
     const body = env.get("PROMPT") orelse "$p$g";
-    // `$e` = ESC, terminator ST = `$e\`. OSC 9;9 carries cwd via `$p`.
-    const wrapped = try std.fmt.allocPrint(
-        alloc_arena,
-        "$e]133;A$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
-        .{body},
-    );
-    try env.put("PROMPT", wrapped);
+
+    // An already-wrapped PROMPT is inherited, not user intent. Launching the
+    // app from inside an integrated cmd session hands us our own marks back,
+    // and wrapping again emits A and B twice per prompt, which reads as two
+    // commands to anything tracking them. Leave it exactly as found.
+    if (std.mem.indexOf(u8, body, "133;A") == null) {
+        // `$e` = ESC, terminator ST = `$e\`. OSC 9;9 carries cwd via `$p`.
+        const wrapped = try std.fmt.allocPrint(
+            alloc_arena,
+            "$e]133;A$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
+            .{body},
+        );
+        try env.put("PROMPT", wrapped);
+    }
 
     // Forward slashes are fine for Clink on Windows, matching the other
     // setup functions' path style.
@@ -1392,18 +1415,19 @@ fn setupCmd(
     if (std.Io.Dir.openDirAbsolute(global.io(), clink_dir, .{})) |dir_| {
         var dir = dir_;
         dir.close(global.io());
-        try env.put(
+
+        // Same inheritance problem as PROMPT above: a nested launch arrives
+        // carrying our directory already, and prependEnv does not deduplicate,
+        // so the list grows an entry per nesting level. Clink would load
+        // ghostty.lua once per entry.
+        const existing = env.get("CLINK_PATH") orelse "";
+        if (std.mem.indexOf(u8, existing, clink_dir) == null) try env.put(
             "CLINK_PATH",
             // CLINK_PATH is a Windows-format list and is always
             // ';'-separated, independent of the host (Clink only runs on
             // Windows; using the host path delimiter would emit ':' under
             // unit tests on POSIX).
-            try prependEnv(
-                alloc_arena,
-                env.get("CLINK_PATH") orelse "",
-                clink_dir,
-                ';',
-            ),
+            try prependEnv(alloc_arena, existing, clink_dir, ';'),
         );
     } else |err| switch (err) {
         // No integration dir is the expected case for a build without
@@ -1791,17 +1815,41 @@ const TmpResourcesDir = struct {
     }
 };
 
-/// A resources directory laid out the way an install lays one out: every
-/// shell's subdirectory present at once, with the files the lookups open by
-/// name rather than merely probe for.
+/// Every file the shipped tree has to contain for a shell to integrate, as
+/// the path it lives at under `shell-integration/`.
+///
+/// This list is the contract between what `build/GhosttyResources.zig`
+/// installs (the whole of `src/shell-integration/`, minus `.md`) and what the
+/// setup functions above open. Nothing links those two automatically, which
+/// for a change whose entire premise is "the tree now ships" is the thing
+/// most worth pinning: a build that stopped installing a subdirectory, or a
+/// rename on either side, would otherwise be caught by nobody.
+///
+/// Keep it in step with `src/shell-integration/`. A shell whose entry is
+/// wrong fails `packaged tree: the fixture matches what the build installs`.
+const shell_integration_files = [_][]const u8{
+    "bash/ghostty.bash",
+    "bash/bash-preexec.sh",
+    "cmd/ghostty.lua",
+    "elvish/lib/ghostty-integration.elv",
+    "fish/vendor_conf.d/ghostty-shell-integration.fish",
+    "nushell/vendor/autoload/ghostty.nu",
+    "powershell/ghostty.ps1",
+    "zsh/.zshenv",
+    "zsh/ghostty-integration",
+};
+
+/// A resources directory laid out the way an install lays one out: the real
+/// files, at the paths the build installs them to.
 ///
 /// Distinct from `TmpResourcesDir`, which fabricates exactly the one
-/// directory the shell under test asks for. That is the right shape for
-/// testing a single setup function and the wrong shape for asking whether a
-/// shipped tree serves every shell, because it cannot fail: it builds
-/// whatever the lookup is about to want. This one is built from the shell
-/// enum instead, so a shell whose directory the build does not install shows
-/// up as a failure here.
+/// directory the shell under test is about to ask for. That is the right
+/// shape for testing a single setup function and the wrong shape for asking
+/// whether a shipped tree serves every shell, because it cannot fail: it
+/// builds whatever the lookup wants. Note that building this one from the
+/// `Shell` enum instead would have the same flaw, since the enum names and
+/// the directory names are equal by construction; only naming the files
+/// makes the fixture able to disagree with the tree.
 const TmpPackagedResourcesDir = struct {
     tmp_dir: std.testing.TmpDir,
     path: [:0]const u8,
@@ -1810,21 +1858,21 @@ const TmpPackagedResourcesDir = struct {
         var tmp_dir = std.testing.tmpDir(.{});
         errdefer tmp_dir.cleanup();
 
-        inline for (@typeInfo(Shell).@"enum".fields) |field| {
-            try tmp_dir.dir.createDirPath(
-                std.testing.io,
-                "shell-integration/" ++ field.name,
+        for (shell_integration_files) |rel| {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const sub_path = try std.fmt.bufPrint(
+                &buf,
+                "shell-integration/{s}",
+                .{rel},
             );
+            if (std.fs.path.dirname(sub_path)) |parent| {
+                try tmp_dir.dir.createDirPath(std.testing.io, parent);
+            }
+            try tmp_dir.dir.writeFile(std.testing.io, .{
+                .sub_path = sub_path,
+                .data = "",
+            });
         }
-
-        try tmp_dir.dir.writeFile(std.testing.io, .{
-            .sub_path = "shell-integration/bash/ghostty.bash",
-            .data = "",
-        });
-        try tmp_dir.dir.writeFile(std.testing.io, .{
-            .sub_path = "shell-integration/powershell/ghostty.ps1",
-            .data = "",
-        });
 
         const path = try tmp_dir.dir.realPathFileAlloc(
             std.testing.io,
@@ -1840,6 +1888,39 @@ const TmpPackagedResourcesDir = struct {
         self.tmp_dir.cleanup();
     }
 };
+
+test "packaged tree: the fixture matches what the build installs" {
+    const testing = std.testing;
+
+    // The fixture is only evidence if it is the real tree. Read
+    // src/shell-integration/ and require every file the setup paths depend on
+    // to be there, under the name the build will install it as. This is the
+    // link that otherwise does not exist: it fails if a file is renamed or
+    // moved on either side.
+    var dir = std.Io.Dir.cwd().openDir(
+        testing.io,
+        "src/shell-integration",
+        .{},
+    ) catch return error.SkipZigTest;
+    defer dir.close(testing.io);
+
+    for (shell_integration_files) |rel| {
+        dir.access(testing.io, rel, .{}) catch |err| {
+            std.log.err("shell-integration file missing from the source tree: {s} ({})", .{ rel, err });
+            return error.ShellIntegrationFileMissing;
+        };
+    }
+
+    // Every shell in the enum must own at least one of those files, so a new
+    // shell cannot be added with a directory nothing ever installs into.
+    inline for (@typeInfo(Shell).@"enum".fields) |field| {
+        var found = false;
+        for (shell_integration_files) |rel| {
+            if (std.mem.startsWith(u8, rel, field.name ++ "/")) found = true;
+        }
+        try testing.expect(found);
+    }
+}
 
 test "packaged layout windows: every supported shell is detected and injected" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -1866,6 +1947,8 @@ test "packaged layout windows: every supported shell is detected and injected" {
         .{ "C:\\Program Files\\Git\\bin\\bash.exe", Shell.bash },
         .{ "C:\\msys64\\usr\\bin\\zsh.exe", Shell.zsh },
         .{ "C:\\msys64\\usr\\bin\\fish.exe", Shell.fish },
+        .{ "C:\\msys64\\usr\\bin\\elvish.exe", Shell.elvish },
+        .{ "C:\\msys64\\usr\\bin\\nu.exe", Shell.nushell },
     };
 
     inline for (cases) |case| {
@@ -1879,21 +1962,75 @@ test "packaged layout windows: every supported shell is detected and injected" {
         const integration = result orelse return error.NoShellIntegration;
         try testing.expectEqual(case[1], integration.shell);
 
-        // Detecting the shell is not the claim; injecting is. Assert the
-        // one variable each shell's integration cannot work without.
+        // Detecting the shell is not the claim; injecting is, and injecting
+        // the right path at that. Each arm names the variable that shell's
+        // integration cannot work without AND the part of the shipped tree it
+        // has to point into, so a value that is merely present does not pass.
+        const expect = struct {
+            fn contains(env_map: *const EnvMap, key: []const u8, needle: []const u8) !void {
+                const value = env_map.get(key) orelse {
+                    std.log.err("expected {s} to be set", .{key});
+                    return error.EnvVarMissing;
+                };
+                if (std.mem.indexOf(u8, value, needle) == null) {
+                    std.log.err("{s} is {s}, expected it to contain {s}", .{ key, value, needle });
+                    return error.EnvVarWrong;
+                }
+            }
+        };
+
         switch (case[1]) {
-            .cmd => try testing.expect(env.get("CLINK_PATH") != null),
-            .powershell => try testing.expect(
-                env.get("GHOSTTY_SHELL_INTEGRATION_PS1") != null,
+            .cmd => try expect.contains(&env, "CLINK_PATH", "shell-integration/cmd"),
+            .powershell => try expect.contains(
+                &env,
+                "GHOSTTY_SHELL_INTEGRATION_PS1",
+                "shell-integration/powershell/ghostty.ps1",
             ),
-            .bash => try testing.expect(env.get("ENV") != null),
-            .zsh => try testing.expect(env.get("ZDOTDIR") != null),
-            .fish => try testing.expect(env.get("XDG_DATA_DIRS") != null),
-            // Exhaustive on purpose: a new shell should fail to compile here
-            // and make someone decide whether it belongs in `cases` above.
-            .elvish, .nushell => unreachable,
+            .bash => try expect.contains(&env, "ENV", "ghostty.bash"),
+            .zsh => try expect.contains(&env, "ZDOTDIR", "shell-integration/zsh"),
+            // These three ride XDG_DATA_DIRS, which the shells then resolve
+            // their own subdirectory under.
+            .fish, .elvish, .nushell => try expect.contains(
+                &env,
+                "XDG_DATA_DIRS",
+                "shell-integration",
+            ),
         }
     }
+}
+
+test "cmd: a nested launch does not wrap PROMPT or CLINK_PATH twice" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpPackagedResourcesDir = try .init();
+    defer res.deinit();
+
+    // First launch, from a clean environment.
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
+
+    const first_prompt = try alloc.dupe(u8, env.get("PROMPT").?);
+    const first_clink = try alloc.dupe(u8, env.get("CLINK_PATH").?);
+
+    // Second launch inheriting the first one's environment, which is what
+    // starting the app from inside an integrated cmd session does. Both
+    // values have to come out unchanged: a second A/B pair reads as two
+    // commands to anything tracking the marks, and a second CLINK_PATH entry
+    // loads ghostty.lua twice.
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
+
+    try testing.expectEqualStrings(first_prompt, env.get("PROMPT").?);
+    try testing.expectEqualStrings(first_clink, env.get("CLINK_PATH").?);
+
+    // And to be explicit about what "unchanged" is protecting against.
+    try testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, env.get("PROMPT").?, "133;A"),
+    );
 }
 
 test "packaged layout windows: an unsupported shell injects nothing" {

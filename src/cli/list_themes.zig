@@ -177,13 +177,11 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
         }
     }
 
-    if (count == 0) {
-        // Only now do we know whether a missing resources directory is worth
-        // reporting. Themes are searched for in the user's config directory
-        // too, so a missing resources directory explains nothing as long as
-        // something was found; saying otherwise told users their install was
-        // broken while the list printed fine underneath.
-        try stderr.print("{s}\n", .{emptyThemesMessage(global.resourcesDir().app() != null)});
+    // The one place a diagnostic is decided, and it is decided from the
+    // outcome rather than from the inputs. Keep it that way: printing
+    // anything before this point is what produced the bug being fixed here.
+    if (themesDiagnostic(count, global.resourcesDir().app() != null)) |message| {
+        try stderr.print("{s}\n", .{message});
         try stderr.flush();
         return 1;
     }
@@ -213,12 +211,22 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     return 0;
 }
 
-/// What to tell a user whose theme list came back empty.
+/// What to tell the user about a theme listing, or null when there is nothing
+/// worth saying.
 ///
-/// The two cases have different fixes, so they get different sentences: with
-/// no resources directory the install is missing the tree the bundled themes
-/// live in, and with one the tree is there but empty.
-fn emptyThemesMessage(has_resources_dir: bool) []const u8 {
+/// Taking `count` is the point of this function rather than an inconvenience.
+/// The bug it replaces was a diagnostic chosen from the inputs, printed before
+/// anything had been searched, so it announced a broken install above a
+/// perfectly good list of themes. Deciding from the result makes that shape
+/// unrepresentable: there is no answer here that both names a problem and
+/// leaves a listing on screen.
+///
+/// The two empty cases have different fixes, so they get different sentences.
+/// With no resources directory the install is missing the tree the bundled
+/// themes live in; with one, the tree is there and empty.
+fn themesDiagnostic(count: usize, has_resources_dir: bool) ?[]const u8 {
+    if (count > 0) return null;
+
     return if (has_resources_dir)
         "No themes found, check to make sure that the themes were installed correctly."
     else
@@ -1885,26 +1893,35 @@ fn shouldIncludeTheme(theme_filter: ColorScheme, theme_config: Config) bool {
     return (theme_filter == .all) or (theme_filter == .dark and is_dark) or (theme_filter == .light and !is_dark);
 }
 
-test "emptyThemesMessage blames the resources directory only when there is none" {
+test "themesDiagnostic says nothing when themes were found" {
     const testing = std.testing;
 
-    // The regression this pins: the resources-directory sentence used to be
+    // The regression this pins. The resources-directory sentence used to be
     // printed from the absence of the directory alone, before anything had
     // been searched, so it appeared above a perfectly good list of themes.
+    // Having found themes, there is nothing to say, with or without a
+    // resources directory: the user's own config directory is a legitimate
+    // place for all of them to come from.
+    try testing.expect(themesDiagnostic(1, false) == null);
+    try testing.expect(themesDiagnostic(607, false) == null);
+    try testing.expect(themesDiagnostic(486, true) == null);
+}
+
+test "themesDiagnostic blames the resources directory only when there is none" {
+    const testing = std.testing;
+
+    const without = themesDiagnostic(0, false) orelse return error.NoDiagnostic;
     try testing.expect(std.mem.indexOf(
         u8,
-        emptyThemesMessage(false),
+        without,
         "Could not find the Ghostty resources directory",
     ) != null);
 
+    const with = themesDiagnostic(0, true) orelse return error.NoDiagnostic;
     try testing.expect(std.mem.indexOf(
         u8,
-        emptyThemesMessage(true),
+        with,
         "Could not find the Ghostty resources directory",
     ) == null);
-    try testing.expect(std.mem.indexOf(
-        u8,
-        emptyThemesMessage(true),
-        "No themes found",
-    ) != null);
+    try testing.expect(std.mem.indexOf(u8, with, "No themes found") != null);
 }

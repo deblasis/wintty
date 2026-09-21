@@ -3956,12 +3956,23 @@ else
 /// Available since Ghostty 1.2.0.
 @"faint-opacity": f64 = 0.5,
 
-/// This will be used to set the `TERM` environment variable.
+/// This will be used to set the `TERM` environment variable, except on
+/// Windows, where it is used only if the terminfo for it can be resolved (see
+/// below).
 /// HACK: We set this with an `xterm` prefix because vim uses that to enable key
 /// protocols (specifically this will enable `modifyOtherKeys`), among other
 /// features. An option exists in vim to modify this: `:set
 /// keyprotocol=ghostty:kitty`, however a bug in the implementation prevents it
 /// from working properly. https://github.com/vim/vim/pull/13211 fixes this.
+///
+/// On Windows this value is used only when a compiled terminfo entry for it
+/// can be found in the terminfo directory shipped beside the app. Windows
+/// builds currently ship the terminfo source and no compiled database, so in
+/// practice the value is not used and `TERM` is `xterm-256color`. The reason
+/// is that a `TERM` the child cannot resolve does not degrade: ncurses fails
+/// outright, taking `clear`, `tput` and every curses program in that session
+/// with it. To set `TERM` on Windows regardless of that check, use
+/// `env-override = TERM=...`, which is applied afterwards and wins.
 term: []const u8 = "xterm-ghostty",
 
 /// String to send when we receive `ENQ` (`0x05`) from the command that we are

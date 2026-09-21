@@ -43,26 +43,45 @@ pub const Location = enum {
     ///
     /// A Windows build installs the whole resources tree, so the branch above
     /// normally finds these same files and this one never runs. It stays as
-    /// the floor for an install whose tree is incomplete: the tree is
-    /// detected by its terminfo, so an install that lost only that file would
-    /// otherwise lose its themes with it, and a list of colours needs none of
-    /// what the terminfo is evidence for.
+    /// the floor for an install whose tree is incomplete: the tree is detected
+    /// by its terminfo, so an install that lost only that file would otherwise
+    /// lose its themes with it, and a list of colours needs none of what the
+    /// terminfo is evidence for.
+    ///
+    /// It climbs for the same reason the resources lookup does. The CLI ships
+    /// one level down in `bin`, so a lookup anchored on the executable's own
+    /// directory finds the themes for the app and not for the CLI. That is not
+    /// hypothetical: it is measurable as `+list-themes` printing the user's
+    /// themes and none of the bundled ones, in exactly the incomplete install
+    /// this floor exists to cover.
     fn bundledThemesDir(arena_alloc: Allocator) error{OutOfMemory}!?[]const u8 {
         if (comptime builtin.os.tag != .windows) return null;
 
         var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const exe = exe_buf[0 .. std.process.executablePath(
+        var exe: []const u8 = exe_buf[0 .. std.process.executablePath(
             global.io(),
             &exe_buf,
         ) catch return null];
-        const exe_dir = std.fs.path.dirname(exe) orelse return null;
 
-        const themes_dir = try std.fs.path.join(
-            arena_alloc,
-            &.{ exe_dir, "share", "ghostty", "themes" },
-        );
-        std.Io.Dir.accessAbsolute(global.io(), themes_dir, .{}) catch return null;
-        return themes_dir;
+        // `dir` is this enum's own method name, so the capture cannot borrow
+        // it without shadowing the declaration.
+        while (std.fs.path.dirname(exe)) |ancestor| {
+            exe = ancestor;
+
+            // Stop before a drive root; see resourcesDirFromExe for why a
+            // tree there is not ours to trust.
+            if (std.fs.path.dirname(ancestor) == null) return null;
+
+            const themes_dir = try std.fs.path.join(
+                arena_alloc,
+                &.{ ancestor, "share", "ghostty", "themes" },
+            );
+            if (std.Io.Dir.accessAbsolute(global.io(), themes_dir, .{})) {
+                return themes_dir;
+            } else |_| {}
+        }
+
+        return null;
     }
 
     /// The `themes` subdirectory of an XDG config directory, for the given

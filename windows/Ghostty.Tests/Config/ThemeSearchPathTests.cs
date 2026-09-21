@@ -115,8 +115,23 @@ public class ThemeSearchPathTests
         // directory and then looks for themes in it and nowhere else, whether
         // or not a themes subdirectory exists there.
         const string res = @"D:\ghostty\share\ghostty";
-        var dir = ThemeSearchPath.BundledDirectory(res, AppDir, d => d == res || d == Beside);
+        const string sentinel = @"D:\ghostty\share\terminfo\ghostty.terminfo";
+        var dir = ThemeSearchPath.BundledDirectory(
+            res, AppDir, d => d == res || d == Beside, f => f == sentinel);
         Assert.Equal(Path.Combine(res, "themes"), dir);
+    }
+
+    [Fact]
+    public void A_resources_directory_without_the_terminfo_sentinel_is_ignored()
+    {
+        // validResourcesDir on Windows requires the same sentinel detection
+        // does, so that a folder a standard user can create is not enough to
+        // redirect where the app reads from. A directory that merely exists
+        // falls back to the themes beside the executable.
+        const string res = @"D:\planted\share\ghostty";
+        var dir = ThemeSearchPath.BundledDirectory(
+            res, AppDir, d => d == res || d == Beside, _ => false);
+        Assert.Equal(Beside, dir);
     }
 
     [Theory]
@@ -126,7 +141,7 @@ public class ThemeSearchPathTests
     public void An_unusable_resources_directory_is_ignored(string res)
     {
         // validResourcesDir: relative or missing values fall back to detection.
-        var dir = ThemeSearchPath.BundledDirectory(res, AppDir, d => d == Beside);
+        var dir = ThemeSearchPath.BundledDirectory(res, AppDir, d => d == Beside, _ => true);
         Assert.Equal(Beside, dir);
     }
 
