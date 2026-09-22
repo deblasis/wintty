@@ -78,8 +78,18 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
 
         if (validResourcesDir(dir)) return .{ .app_path = dir };
 
+        // The same message the debug route below gives, for the same reason:
+        // naming the sentinel matters on Windows, where a value that IS an
+        // existing absolute directory is still refused. This is the route
+        // every real user hits, so it is the one that must not say only
+        // "not an existing absolute directory" about a directory that exists.
         log.warn(
-            "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
+            if (comptime builtin.target.os.tag == .windows)
+                "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, " ++
+                    "or its parent directory holds no " ++ sentinels[0] ++
+                    " file, ignoring dir={s}"
+            else
+                "GHOSTTY_RESOURCES_DIR is not an existing absolute directory, ignoring dir={s}",
             .{dir},
         );
         alloc.free(dir);
@@ -123,6 +133,12 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     return .{};
 }
 
+/// How many ancestors of the executable the Windows climb consults: its own
+/// directory, and one above it for the `bin` case. The theme fallback carries
+/// the same bound (`config.theme.bundled_themes_max_ancestors`) for the same
+/// reason; see `resourcesDirFromExe`.
+const resources_climb_max_ancestors = 2;
+
 /// Climb from `exe_path` towards the filesystem root looking for the bundled
 /// resources tree the way an install lays it out, and return it if found.
 ///
@@ -130,20 +146,37 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
 /// layout on disk. The climb is what makes one layout serve executables at
 /// different depths: an app at `<root>/app.exe` and a helper at
 /// `<root>/bin/helper.exe` both arrive at `<root>/share/ghostty`.
+///
+/// On Windows the climb is also bounded: it stops after the executable's own
+/// directory and its parent, the two levels every layout this fork ships
+/// actually uses, and never reaches a drive root. Detection is the route that
+/// arms shell integration, so a tree adopted here supplies `ENV`, `ZDOTDIR`,
+/// `CLINK_PATH` and the scripts every shell in the session sources, and an
+/// ancestor that is no part of any install must not be allowed to supply one:
+/// a standard user can create folders in `C:\ProgramData` and in `C:\` itself,
+/// and an install whose own tree is missing or damaged (a portable zip, a
+/// partial copy, a rollout skew) would otherwise climb straight into a tree
+/// planted there.
 fn resourcesDirFromExe(alloc: Allocator, exe_path: []const u8) !?ResourcesDir {
     var exe = exe_path;
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var climbed: usize = 0;
     while (std.fs.path.dirname(exe)) |dir| {
         exe = dir;
 
-        // Windows: never probe a drive root. `C:\` grants Authenticated Users
-        // the right to create folders, so a standard user can plant
+        // Windows: stop before a drive root, and stop before the climb leaves
+        // the install behind. `C:\` grants Authenticated Users the right to
+        // create folders, so a standard user can plant
         // `C:\share\terminfo\ghostty.terminfo` and have an installed app adopt
-        // a tree they own. The climb is nearest-first, so this is only
+        // a tree they own; the same measurement found `C:\ProgramData` open
+        // to BUILTIN\Users. The climb is nearest-first, so these are only
         // reachable where the install's own tree is missing, which is exactly
         // the partial, portable or damaged install that would take it. Nothing
-        // legitimate puts a resources tree at a drive root.
+        // legitimate puts a resources tree at a drive root or above an
+        // install.
         if (comptime builtin.target.os.tag == .windows) {
+            climbed += 1;
+            if (climbed > resources_climb_max_ancestors) break;
             if (std.fs.path.dirname(dir) == null) break;
         }
 
@@ -262,7 +295,13 @@ fn hasSentinelBeside(path: []const u8) bool {
 
 /// Little helper to check if the "base/sub/suffix" directory exists and
 /// if so return true. The "suffix" is just used as a way to verify a directory
-/// seems roughly right.
+/// seems roughly right, and it has to be a FILE: the kind is what says so,
+/// because an `access` on the path is satisfied by a directory of that name,
+/// which is the cheapest thing for someone planting a tree to create.
+///
+/// This is the same rule `hasSentinelBeside` applies to the environment route
+/// and `ThemeSearchPath.HasTerminfoSentinel` applies on the C# side, and this
+/// is the copy whose adopted tree arms shell integration.
 ///
 /// "buf" must be large enough to fit base + sub + suffix. This is generally
 /// max_path_bytes so its not a big deal.
@@ -274,15 +313,15 @@ pub fn maybeDir(
 ) !?[]const u8 {
     const path = try std.fmt.bufPrint(buf, "{s}/{s}/{s}", .{ base, sub, suffix });
 
-    if (std.Io.Dir.accessAbsolute(global.io(), path, .{})) {
-        const len = path.len - suffix.len - 1;
-        return buf[0..len];
-    } else |_| {
+    const stat = std.Io.Dir.cwd().statFile(global.io(), path, .{}) catch {
         // Folder doesn't exist. If a different error happens its okay
         // we just ignore it and move on.
-    }
+        return null;
+    };
+    if (stat.kind != .file) return null;
 
-    return null;
+    const len = path.len - suffix.len - 1;
+    return buf[0..len];
 }
 
 /// Lay out a packaged install under `dir`: the app executable at the root, a
@@ -420,6 +459,74 @@ test "resourcesDirFromExe windows: never adopts a tree at a drive root" {
     // An executable sitting directly at a drive root therefore finds nothing,
     // even though the loop would otherwise have probed that root.
     const found = try resourcesDirFromExe(alloc, "C:\\Wintty.exe");
+    try testing.expect(found == null);
+}
+
+test "resourcesDirFromExe windows: a tree planted above the install is not adopted" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The review's planting scenario: an install whose own tree is missing or
+    // damaged (a portable zip, a partial copy, a rollout skew) nested under a
+    // directory a standard user can create folders in, with a complete tree
+    // planted further up. Nothing above the executable's own directory and
+    // its parent is any part of an install of ours, so the climb must stop
+    // before it reaches this tree, whatever is in it.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "writable/vendor/install");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "writable/vendor/install/Wintty.exe", .data = "" });
+
+    // The planted tree at the third ancestor (the `C:\ProgramData` of the
+    // scenario): sentinel first, then the payload a planted tree exists to
+    // deliver.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const planted_sentinel = try std.fmt.bufPrint(
+        &buf,
+        share_dir ++ "/{s}",
+        .{sentinels[0]},
+    );
+    if (std.fs.path.dirname(planted_sentinel)) |parent| try tmp.dir.createDirPath(testing.io, parent);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = planted_sentinel, .data = "" });
+    try tmp.dir.createDirPath(testing.io, share_dir ++ "/ghostty/shell-integration/bash");
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    const exe = try std.fmt.allocPrint(alloc, "{s}/writable/vendor/install/Wintty.exe", .{root});
+    const found = try resourcesDirFromExe(alloc, exe);
+
+    // Nothing is found: the executable's own directory and its parent hold
+    // no tree, and the climb goes no further. The planted tree is what an
+    // unbounded climb returns here, which is what makes this test red before
+    // the bound and green after it.
+    try testing.expect(found == null);
+}
+
+test "resourcesDirFromExe windows: a directory named like the sentinel is not one" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The cheapest forgery of the evidence detection asks for: a DIRECTORY at
+    // the sentinel's path, inside a tree an ancestor-climber would reach.
+    // `maybeDir` used to be satisfied by it, because it asked `access` and
+    // not the kind. The other two copies of this rule (`hasSentinelBeside`
+    // here, `ThemeSearchPath.HasTerminfoSentinel` on the C# side) were never
+    // satisfied by it, so this brings the third copy in line.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "install");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "install/Wintty.exe", .data = "" });
+    try tmp.dir.createDirPath(testing.io, "install/" ++ share_dir ++ "/terminfo/ghostty.terminfo");
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    const exe = try std.fmt.allocPrint(alloc, "{s}/install/Wintty.exe", .{root});
+    const found = try resourcesDirFromExe(alloc, exe);
+
     try testing.expect(found == null);
 }
 

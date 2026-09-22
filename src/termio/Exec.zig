@@ -2863,6 +2863,19 @@ fn setupTermEnv(
 ///   TERMINFO_DIRS=/c/dir   cwd on Z:  256
 ///   TERMINFO_DIRS=\\host\share\dir    256, from either cwd
 ///
+/// The UNC row holds for every separator spelling, including the mixed
+/// `\\host\share\dir/sub` form this code composes for a UNC install, and for
+/// both ways the value can reach the child: set by the Win32 parent in its
+/// environment block before the spawn (how this app sets it), and exported
+/// inside an already-running MSYS shell. Re-measured twice over against a
+/// local administrative share and a real SMB share, from cwd on two drives,
+/// through `bash -c`, `bash -lc` and both Git Bash entry points. A value that
+/// arrives byte-exact always resolves; the one way to make these rows read
+/// "unknown terminal" is a quoting layer between experimenter and child that
+/// eats one backslash level (double quotes, a nested `-Command`, an agent
+/// shell transport), which produces exactly the dropped-element signature and
+/// is worth knowing before re-measuring.
+///
 /// So the backslash form that looks like it works is the drive letter being
 /// eaten and the remainder resolved against whatever drive the CHILD started
 /// on. There is no drive-lettered spelling that survives, and the POSIX form
