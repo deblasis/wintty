@@ -74,11 +74,12 @@ public static class ConfigReloadGate
     /// gap here, and is refused the same way, so the session keeps its
     /// settings rather than having them torn down by an act that did not
     /// ask for it. It does not stay refused: a delivery that finds the
-    /// watched file gone reports it, and a report that outlives its whole
-    /// ask budget is a deletion, on which the host lowers its count. One
-    /// report is not, because an ordinary save produces one: see
-    /// <see cref="ShouldConfirmVanish"/>. A layered file the watcher does
-    /// not watch raises no event at all, and a shrink still a shrink after
+    /// watched file gone reports it, and a stretch of absence outlasting the
+    /// widest measured save gap by a wide margin is a deletion, on which the
+    /// host lowers its count. One report is not, because an ordinary save
+    /// produces one: see <c>ConfigVanishConfirmer</c>, which holds that
+    /// question and the measurements it is pinned against. A layered file
+    /// the watcher does not watch raises no event at all, and a shrink after
     /// its own budget is a deletion the same way: see
     /// <see cref="IsPersistentShrink"/>.</para>
     /// </remarks>
@@ -193,57 +194,4 @@ public static class ConfigReloadGate
         int maxAttempts) =>
         IsCountShrink(found, defaultFilesFound, sessionDefaultFilesFound)
             && attemptsSoFar >= maxAttempts;
-
-    /// <summary>
-    /// Whether a delivery that found the watched config file gone should
-    /// spend one ask on looking again, rather than believing it at once.
-    /// </summary>
-    /// <remarks>
-    /// <para>The vanish proves deletion from one observation while the
-    /// shrink proves it from a spent budget, and the one-observation
-    /// standard is what mid-save firing exploits.</para>
-    ///
-    /// <para>It fires during an ordinary atomic save. Measured, not
-    /// reasoned: the watcher posts the delivery and the existence check
-    /// runs inside it a dispatcher turn later, so the quiet period the
-    /// debounce buys applies to the settle and not to the check, and the
-    /// file need only be away for that turn.
-    /// <c>ConfigFileWatcherTests</c> builds exactly that. Believing it
-    /// lowered the session count mid save, which disarmed both the shrink
-    /// guard and the absent guard for the next reload, and a reload landing
-    /// in a second gap then applied pure defaults at every live surface
-    /// (issue #1146).</para>
-    ///
-    /// <para>Asking again is what separates the two: the rename completing
-    /// the save lands during the asks, settles, reloads and restores the
-    /// count. A file still gone after the whole budget has outlived every
-    /// save that could explain it in ordinary disk conditions. The budget
-    /// is a heuristic bound, about a second of continuous absence, not a
-    /// proof: a swap wedged longer than that, by a frozen editor or a
-    /// stalled network rename, is beyond what the asks can tell apart and
-    /// is confirmed wrongly, transiently, until its settle heals.</para>
-    ///
-    /// <para>A session claiming no config file has nothing to confirm, so
-    /// it neither asks nor lowers.</para>
-    /// </remarks>
-    public static bool ShouldConfirmVanish(
-        int sessionDefaultFilesFound,
-        int attemptsSoFar,
-        int maxAttempts) =>
-        sessionDefaultFilesFound > 0 && attemptsSoFar < maxAttempts;
-
-    /// <summary>
-    /// Whether a vanished watched file has outlived its whole confirmation
-    /// budget, which no ordinary save in flight can do, so it is a
-    /// deletion and the session should stop claiming to be running on it.
-    /// "Ordinary" is doing work in that sentence: the budget is a
-    /// heuristic bound of continuous absence, about a second, and a swap
-    /// wedged past it is confirmed wrongly, transiently, until its settle
-    /// heals.
-    /// </summary>
-    public static bool IsPersistentVanish(
-        int sessionDefaultFilesFound,
-        int attemptsSoFar,
-        int maxAttempts) =>
-        sessionDefaultFilesFound > 0 && attemptsSoFar >= maxAttempts;
 }

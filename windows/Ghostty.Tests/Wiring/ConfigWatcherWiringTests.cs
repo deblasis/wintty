@@ -309,10 +309,20 @@ public class ConfigWatcherWiringTests
         Assert.Equal("_shrinkConfirms", heal.Arg(3));
         Assert.Equal("MaxShrinkConfirms", heal.Arg(4));
 
-        // The decline's cost only runs when the shrink is NOT confirmed
-        // as a deletion; the heal is the fall-through past that branch.
+        // The decline's cost only runs when neither proof landed: not a
+        // confirmed vanish of the watched file, and not a shrink that
+        // outlived its asks. Both operands are decomposed rather than
+        // matched as text, because a condition that merely CONTAINS the
+        // heal is also satisfied by one that inverts it.
         var inner = heal.Ancestors().OfType<IfStatementSyntax>().First();
-        var not = Assert.IsType<PrefixUnaryExpressionSyntax>(inner.Condition);
+        var both = Assert.IsType<BinaryExpressionSyntax>(inner.Condition);
+        Assert.Equal(SyntaxKind.LogicalAndExpression, both.Kind());
+
+        var vanish = Assert.IsType<PrefixUnaryExpressionSyntax>(both.Left);
+        Assert.Equal(SyntaxKind.ExclamationToken, vanish.OperatorToken.Kind());
+        Assert.Equal("vanishConfirmed", vanish.Operand.ToString());
+
+        var not = Assert.IsType<PrefixUnaryExpressionSyntax>(both.Right);
         Assert.Equal(SyntaxKind.ExclamationToken, not.OperatorToken.Kind());
         Assert.Equal(heal.Span, not.Operand.Span);
         Assert.NotEmpty(inner.Statement.Calls("NativeMethods.ConfigFree"));
@@ -486,16 +496,22 @@ public class ConfigWatcherWiringTests
             .Single(a => a.NameColon?.Name.Identifier.ValueText == "onVanished");
         Assert.Equal("OnConfigFileVanished", onVanished.Expression.ToString());
 
-        // The count moves inside the accept the protocol reports, wired at
-        // construction and only there.
-        var onAccept = ProtocolArgument("onAccept");
-        Assert.Equal("0", Assert.Single(onAccept.Calls("RecordDefaultFiles")).Arg(0));
-
-        // Nothing is rebuilt and nothing is pushed: a deletion keeps the
-        // running config, it does not replace it with pure defaults.
+        // The report is not the evidence, so the handler goes and gets some:
+        // it reloads, and the load's verdict is what the protocol runs on.
+        // Concluding here instead is what left a session with no watcher
+        // unable to conclude at all (wintty#1155).
         var vanished = source.Method("OnConfigFileVanished");
-        Assert.Empty(vanished.Calls("Reload"));
+        Assert.Single(vanished.Calls("Reload"));
+
+        // And the handler keeps nothing of its own: no count, no push. The
+        // count falls on the applied path, through its one writer.
+        Assert.Empty(vanished.Calls("RecordDefaultFiles"));
         Assert.Empty(vanished.Calls("NativeMethods.AppUpdateConfig"));
+
+        // The accept writes no count either. Lowering it there would write
+        // it from a second place AND write it before the gate reads it, so
+        // the decision would turn on call order that nothing pins.
+        Assert.Empty(ProtocolArgument("onAccept").Calls("RecordDefaultFiles"));
     }
 
     /// <summary>
@@ -523,18 +539,25 @@ public class ConfigWatcherWiringTests
     {
         var source = ConfigService();
 
-        // The decision is asked for rather than reimplemented here, and the
-        // handler keeps nothing of its own: the count, the log and every
-        // other effect live in the accept wired at construction.
-        var vanished = source.Method("OnConfigFileVanished");
-        Assert.Single(vanished.Calls("_vanishProtocol.Vanished"));
-        Assert.Empty(vanished.Calls("RecordDefaultFiles"));
+        // The decision is asked for rather than reimplemented here, and it
+        // is asked with a LOAD's verdict rather than with the watcher's
+        // existence check, which is a proxy a dangling symlink defeats.
+        var reload = source.Method("Reload");
+        var observed = Assert.Single(reload.Calls("_vanishProtocol.Observed"));
+        Assert.Equal("defaultFiles", observed.Arg(0));
 
+        // Nowhere else. A second caller feeding it something other than a
+        // verdict is the shape this is against.
+        Assert.Empty(source.Method("OnConfigFileVanished")
+            .Calls("_vanishProtocol.Observed"));
+
+        // The accept's only effect is the account of it. The count moves on
+        // the applied path, which a proven vanish reaches by being carried
+        // past the gate, not by the accept reaching over and writing it.
         var onAccept = ProtocolArgument("onAccept");
-        Assert.Equal(
-            "0", Assert.Single(onAccept.Calls("RecordDefaultFiles")).Arg(0));
         Assert.NotEmpty(onAccept.Calls(
             "StaticLoggers.ConfigService.LogConfigFileVanished"));
+        Assert.Empty(onAccept.Calls("RecordDefaultFiles"));
     }
 
     /// <summary>
@@ -556,63 +579,59 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// A reload that finds no config file carries the vanish question
-    /// forward, so a dropped ask is not the end of it.
+    /// Every load's verdict reaches the question, and it reaches it before
+    /// the gate decides anything.
     /// </summary>
     /// <remarks>
-    /// On the watcher's path a dropped ask is terminal: a deleted file
-    /// raises no further filesystem events, so the only thing that could
-    /// revisit the question is the ask that was just dropped. A shrink
-    /// cannot heal it either, because <c>IsCountShrink</c> takes only
-    /// <c>Loaded</c> and an Absent load is deliberately the vanish's case.
-    /// Without this branch the session declines every reload for the life of
-    /// the process, which is issue #676's lockout reintroduced by the fix
-    /// for it. Shape only, like everything else over this file.
+    /// Unconditional is the point. An earlier shape asked only on an Absent
+    /// branch, which tells the protocol nothing the argument does not
+    /// already carry and, worse, never delivers the verdict that ENDS a
+    /// stretch: a file coming back was then invisible to the question, and
+    /// a stretch opened by one save could be concluded by another an hour
+    /// later. Shape only, like everything else over this file; the
+    /// behaviour is driven in <c>Config.ConfigVanishProtocolTests</c>.
     /// </remarks>
     [Fact]
-    public void A_reload_that_finds_no_config_file_carries_the_vanish_forward()
+    public void Every_load_verdict_reaches_the_question_before_the_gate()
     {
-        var (_, guard) = ReloadGuard();
+        var reload = ConfigService().Method("Reload");
 
-        var carried = Assert.Single(guard.Statement.Calls("OnConfigFileVanished"));
-        var branch = carried.Ancestors().OfType<IfStatementSyntax>().First();
+        var observed = Assert.Single(reload.Calls("_vanishProtocol.Observed"));
+        Assert.Equal("defaultFiles", observed.Arg(0));
+        Assert.Empty(observed.Ancestors().OfType<IfStatementSyntax>());
 
-        // The whole condition, not a substring of it. Contains() is happy
-        // with `!= ConfigFilesFound.Absent`, which carries the vanish
-        // forward on every decline EXCEPT the one it is for: a locked file
-        // that is still there would then be confirmed as gone and the count
-        // lowered under it. That is the trap SyntaxQueries.ArgExpression
-        // documents, and it survived a first attempt at this test.
-        Assert.Equal(
-            "defaultFiles == ConfigFilesFound.Absent",
-            branch.Condition.ToString());
+        // Before the gate, whose decision a proven vanish has to be able to
+        // overrule. These are statements of one block, which is the one
+        // place source order in this file IS execution order.
+        var decide = Assert.Single(reload.Calls("ConfigReloadGate.Decide"));
+        Assert.Same(
+            observed.Ancestors().OfType<BlockSyntax>().First(),
+            decide.Ancestors().OfType<BlockSyntax>().First());
+        Assert.True(
+            observed.Span.End < decide.Span.Start,
+            "the gate decides before the verdict has reached the question");
     }
 
     /// <summary>
-    /// The budget is restored where the file is seen present, which is the
-    /// delivery that settles, not the reload that may follow it.
+    /// The settle answers nothing itself: it reloads, and the load's verdict
+    /// is the answer.
     /// </summary>
     /// <remarks>
-    /// Those are not the same moment: a file that comes back and will not
-    /// open reaches the settle and never reaches an applied reload, and a
-    /// budget left spent there has the next ordinary save believed on one
-    /// observation, which is issue #1146 through a stale budget.
-    ///
-    /// The restore itself is ConfigVanishProtocol's and is driven, against
-    /// a real watcher, in <c>Config.ConfigVanishProtocolTests</c>: what a
-    /// source-shape test still has to add is that the shell delegates it
-    /// here and not somewhere the settle cannot reach.
+    /// A settle knows only that the path existed when it looked. A dangling
+    /// symlink satisfies that and fails to open, so ending the question here
+    /// cleared the stretch that the same settle's reload then reopened, and
+    /// it oscillated without ever concluding. The verdict distinguishes
+    /// present from readable and is the same evidence wherever the reload
+    /// came from, which is what lets a host with no watcher conclude at all
+    /// (wintty#1155).
     /// </remarks>
     [Fact]
-    public void The_vanish_budget_is_restored_where_the_file_is_seen_present()
+    public void The_settle_reloads_rather_than_answering_the_question_itself()
     {
-        var source = ConfigService();
+        var settled = ConfigService().Method("OnConfigFileSettled");
 
-        Assert.Single(source.Method("OnConfigFileSettled").Calls("_vanishProtocol.Settled"));
-
-        // And not moved back onto the applied reload, which is the position
-        // that leaves the gap above.
-        Assert.Empty(source.Method("Reload").Calls("_vanishProtocol.Settled"));
+        Assert.Single(settled.Calls("Reload"));
+        Assert.Empty(settled.Calls("_vanishProtocol.Observed"));
     }
 
     /// <summary>
