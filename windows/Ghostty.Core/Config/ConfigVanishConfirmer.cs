@@ -41,9 +41,13 @@ public sealed class ConfigVanishConfirmer
 {
     /// <summary>
     /// Asks before a vanish is believed. Three debounce periods is about a
-    /// second, which outlasts every save that could explain the file being
-    /// away and still settles a real deletion quickly enough that the next
-    /// High Contrast toggle is not left waiting on it.
+    /// second, which outlasts every save in ordinary disk conditions and
+    /// still settles a real deletion quickly enough that the next High
+    /// Contrast toggle is not left waiting on it. It is a heuristic bound,
+    /// not a proof: a swap held wedged longer than the budget, by a frozen
+    /// editor or a network rename that lost its race, is confirmed
+    /// wrongly. That is #1146 narrowed by the budget rather than closed,
+    /// and it heals on the completing settle.
     /// </summary>
     public const int DefaultAttempts = 3;
 
@@ -69,6 +73,15 @@ public sealed class ConfigVanishConfirmer
     /// <remarks>
     /// An ask the watcher dropped was never put, so it does not count:
     /// spending the budget on it would confirm a deletion out of silence.
+    ///
+    /// The conclusion restores the budget. A stretch that reached Accept
+    /// is over, and a spent budget carried past its own answer accepts
+    /// the next single report at once: the file can come back through
+    /// paths that settle no delivery, because the app's own writes
+    /// suppress the watcher, and the count those restores raise is what
+    /// makes the next mid-save report dangerous to believe. While the
+    /// count the Accept zeroed still stands, reports are Ignored below,
+    /// so the restored budget is inert until it is needed.
     /// </remarks>
     public ConfigVanishAction Observe(int sessionDefaultFilesFound, Func<bool> ask)
     {
@@ -77,10 +90,10 @@ public sealed class ConfigVanishConfirmer
         if (!ConfigReloadGate.ShouldConfirmVanish(
                 sessionDefaultFilesFound, _attempts, _maxAttempts))
         {
-            return ConfigReloadGate.IsPersistentVanish(
-                sessionDefaultFilesFound, _attempts, _maxAttempts)
-                ? ConfigVanishAction.Accept
-                : ConfigVanishAction.Ignore;
+            var accept = ConfigReloadGate.IsPersistentVanish(
+                sessionDefaultFilesFound, _attempts, _maxAttempts);
+            if (accept) _attempts = 0;
+            return accept ? ConfigVanishAction.Accept : ConfigVanishAction.Ignore;
         }
 
         if (ask()) _attempts++;
@@ -99,6 +112,11 @@ public sealed class ConfigVanishConfirmer
     /// next ordinary save that straddles the delivery hop is then believed
     /// on one observation, which is issue #1146 re-entered through a stale
     /// budget. Call this wherever the file is seen present.
+    ///
+    /// The conclusion guards the same invariant from its own side: an
+    /// Accept restores the budget too, because the file can return without
+    /// any delivery ever seeing it (the app's own suppressed writes). See
+    /// <see cref="Observe"/>.
     /// </remarks>
     public void Reset() => _attempts = 0;
 }
