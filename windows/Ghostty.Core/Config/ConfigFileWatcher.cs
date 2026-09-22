@@ -340,6 +340,17 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// caller that counts those against its retry budget spends the budget
     /// on deliveries that were never scheduled: it then stops asking
     /// without anything having been tried.
+    ///
+    /// Read the answer precisely: true means the timer was armed, NOT that
+    /// a delivery will run. <see cref="OnTimerFired"/> consumes the tick
+    /// for a watcher rebuild whenever one is pending, and returns without
+    /// posting a delivery if the rebuild fails, which is the ordinary state
+    /// while the watched DIRECTORY is missing. Deleting a config directory
+    /// does exactly that. A caller counting armed asks therefore spends its
+    /// budget on ticks that were accepted and then swallowed, and stalls
+    /// part way with every later reload declining, until the directory
+    /// comes back and the rebuild succeeds, which heals it. Bounding that
+    /// properly needs a delivery-side signal this does not have.
     /// </remarks>
     public bool Resettle() => Rearm();
 
