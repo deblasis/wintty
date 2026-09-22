@@ -3956,12 +3956,33 @@ else
 /// Available since Ghostty 1.2.0.
 @"faint-opacity": f64 = 0.5,
 
-/// This will be used to set the `TERM` environment variable.
+/// This will be used to set the `TERM` environment variable, except on
+/// Windows, where it is used only if the terminfo for it can be resolved (see
+/// below).
 /// HACK: We set this with an `xterm` prefix because vim uses that to enable key
 /// protocols (specifically this will enable `modifyOtherKeys`), among other
 /// features. An option exists in vim to modify this: `:set
 /// keyprotocol=ghostty:kitty`, however a bug in the implementation prevents it
 /// from working properly. https://github.com/vim/vim/pull/13211 fixes this.
+///
+/// On Windows this value is used only when the child can be shown a compiled
+/// terminfo entry for it, and on an ordinary install it cannot, so `TERM`
+/// there is `xterm-256color`. The reason for the check is that a `TERM` the
+/// child cannot resolve does not degrade: ncurses fails outright, taking
+/// `clear`, `tput` and every curses program in that session with it.
+///
+/// What stops it is the path and not the entry. Every terminfo reader
+/// available on Windows is the MSYS2 or Cygwin ncurses, and neither `TERMINFO`
+/// nor `TERMINFO_DIRS` accepts a directory named with a drive letter from
+/// those libraries, so a database shipped beside the app cannot be pointed at
+/// from an install on a drive. Making `xterm-ghostty` work for a shell on
+/// Windows means compiling the entry into the database that shell already
+/// reads, such as the MSYS2 `/usr/share/terminfo` or `~/.terminfo`. The
+/// terminfo source to compile is shipped at `share/terminfo/ghostty.terminfo`
+/// beside the app.
+///
+/// To set `TERM` on Windows regardless of that check, use
+/// `env-override = TERM=...`, which is applied afterwards and wins.
 term: []const u8 = "xterm-ghostty",
 
 /// String to send when we receive `ENQ` (`0x05`) from the command that we are

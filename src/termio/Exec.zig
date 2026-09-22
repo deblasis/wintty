@@ -40,6 +40,18 @@ const log_validate = std.log.scoped(.validate_transport);
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 
+/// The TERM handed to a child when `term` has no terminfo it could read.
+///
+/// Not a guess: this is the entry every terminfo database carries, so it is
+/// the floor a session can always be driven from. What we lose by naming it,
+/// we lose in capabilities the child negotiates anyway, not in a session that
+/// fails to start. See `terminfoHasEntry` for when it is chosen.
+const fallback_term = "xterm-256color";
+
+/// Whether the "no compiled terminfo entry" warning has already been emitted
+/// in this process. See the use site for why it is once per process.
+var terminfo_warned: std.atomic.Value(bool) = .init(false);
+
 /// If we build with flatpak support then we have to keep track of
 /// a potential execution on the host.
 const FlatpakHostCommand = if (!build_config.flatpak) struct {
@@ -887,30 +899,7 @@ const Subprocess = struct {
             try env.put("GHOSTTY_RESOURCES_DIR", dir);
         }
 
-        // Set our TERM var. This is a bit complicated because we want to use
-        // the ghostty TERM value but we want to only do that if we have
-        // ghostty in the TERMINFO database.
-        //
-        // For now, we just look up a bundled dir but in the future we should
-        // also load the terminfo database and look for it.
-        var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (terminfoDir(&terminfo_buf, cfg.resources_dir)) |dir| {
-            try env.put("TERM", cfg.term);
-            try env.put("COLORTERM", "truecolor");
-            try env.put("TERMINFO", dir);
-        } else {
-            if (cfg.resources_dir) |base| {
-                log.warn("no terminfo dir beside the resources dir base={s}", .{base});
-                log.warn("using xterm-256color, check GHOSTTY_RESOURCES_DIR", .{});
-            } else if (comptime builtin.target.os.tag.isDarwin()) {
-                log.warn("ghostty terminfo not found, using xterm-256color", .{});
-                log.warn("the terminfo SHOULD exist on macos, please ensure", .{});
-                log.warn("you're using a valid app bundle.", .{});
-            }
-
-            try env.put("TERM", "xterm-256color");
-            try env.put("COLORTERM", "truecolor");
-        }
+        try setupTermEnv(&env, cfg.resources_dir, cfg.term);
 
         // Add our binary to the path if we can find it.
         ghostty_path: {
@@ -2711,10 +2700,318 @@ fn execCommand(
 /// parent directory to look beside. The latter happens when
 /// GHOSTTY_RESOURCES_DIR is a bare name, so the caller falls back to a
 /// TERM that needs none of our terminfo.
+///
+/// Note this walks OUT of the resources directory, into a sibling. On Windows
+/// that sibling is the one place the tree is evidenced from: both routes to a
+/// resources directory require the sentinel to be exactly here (detection
+/// climbs to it, and validResourcesDir demands it of the environment value),
+/// so the directory handed to the child is not a fresh unchecked path. It is
+/// still a directory whose contents we do not own the way we own the scripts:
+/// whoever can write there can put a compiled entry in it, which both opens
+/// `terminfoHasEntry` and hands ncurses a file to parse. That is the same
+/// principal who can already rewrite the scripts beside it.
 fn terminfoDir(buf: []u8, resources_dir: ?[]const u8) ?[]const u8 {
     const base = resources_dir orelse return null;
     const parent = std.fs.path.dirname(base) orelse return null;
     return std.fmt.bufPrint(buf, "{s}/terminfo", .{parent}) catch null;
+}
+
+/// Compose the terminal-identification environment a child is spawned with:
+/// TERM, COLORTERM and TERMINFO.
+///
+/// Split out of `Subprocess.init` so the decision itself is testable. It was
+/// inline, and a test suite that covered `terminfoHasEntry` thoroughly still
+/// went green with the whole gate reverted to `TERM = term`, because nothing
+/// joined the predicate to the choice.
+///
+/// Windows is the only place the gate applies. A resources directory there is
+/// NOT evidence that the child can resolve `term`: the tree is detected by the
+/// uncompiled `terminfo/ghostty.terminfo` source, which no terminfo reader can
+/// use, and no compiled database ships beside it. Handing a child a TERM it
+/// cannot resolve is worse than the generic one we ship today, because ncurses
+/// does not degrade, it fails (`tput: unknown terminal "xterm-ghostty"`) and
+/// takes `clear`, `tput` and every curses program in that session with it.
+///
+/// The check runs only on Windows because it can see our directory and never
+/// the child's own database. On a POSIX system the name usually resolves out
+/// of /usr/share/terminfo, so running it there would downgrade working
+/// sessions. (Note that is not the same as saying detection proves the entry
+/// exists elsewhere: a release build takes GHOSTTY_RESOURCES_DIR before any
+/// detection runs.)
+///
+/// On Windows the gate is shut and shipping a compiled database beside the app
+/// would not open it, which is the correction to what this comment used to
+/// claim. Two conditions have to hold and the second one cannot: the child has
+/// to be able to OPEN the directory we name, and every terminfo reader that
+/// exists on Windows is the MSYS2/Cygwin ncurses, which cannot open a path
+/// carrying a drive letter. See `terminfoPathIsChildReadable` for the
+/// measurements. An install on a UNC path is the one shape that satisfies it,
+/// so the two halves are asked separately rather than folded into a constant.
+///
+/// What that leaves for a drive-lettered install, which is every ordinary one,
+/// is that `xterm-ghostty` can only be made to work by putting a compiled
+/// entry in the database the child already reads without being told to, such
+/// as the MSYS2 `/usr/share/terminfo` or the `~/.terminfo` ncurses checks by
+/// itself. Nothing this function composes can substitute for that.
+///
+/// This is also not the only place TERM is decided for a Windows child;
+/// `cli/ssh.zig` sets it for a remote host it has provisioned. And
+/// `env-override` is applied after this, so a user can force any value.
+fn setupTermEnv(
+    env: *EnvMap,
+    resources_dir: ?[]const u8,
+    term: []const u8,
+) !void {
+    var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = terminfoDir(&terminfo_buf, resources_dir) orelse {
+        if (resources_dir) |base| {
+            log.warn("no terminfo dir beside the resources dir base={s}", .{base});
+            log.warn("using {s}, check GHOSTTY_RESOURCES_DIR", .{fallback_term});
+        } else if (comptime builtin.target.os.tag.isDarwin()) {
+            log.warn("ghostty terminfo not found, using {s}", .{fallback_term});
+            log.warn("the terminfo SHOULD exist on macos, please ensure", .{});
+            log.warn("you're using a valid app bundle.", .{});
+        }
+
+        try env.put("TERM", fallback_term);
+        try env.put("COLORTERM", "truecolor");
+        return;
+    };
+
+    // Two separate questions on Windows, asked separately because a user
+    // reading the log needs to know which one said no. Elsewhere neither is
+    // asked: the name usually resolves from a database this code cannot see.
+    const readable = if (comptime builtin.os.tag == .windows)
+        terminfoPathIsChildReadable(dir)
+    else
+        true;
+    const refusal: ?[]const u8 = if (comptime builtin.os.tag != .windows)
+        null
+    else if (!readable)
+        "no terminfo reader on Windows can open a path under a drive letter"
+    else if (!terminfoHasEntry(dir, term))
+        "there is no compiled entry for it there"
+    else
+        null;
+
+    if (refusal) |why| {
+        // Once per process, not once per spawn. The resources directory
+        // cannot change within a session, so this answer is the same for
+        // every pane, tab and split, and warning per spawn would bury the log
+        // in a line that never changes. Silent too when the configured term
+        // already is the fallback, where there is nothing to report.
+        if (!std.mem.eql(u8, term, fallback_term) and
+            !terminfo_warned.swap(true, .monotonic))
+        {
+            log.warn(
+                "not using TERM={s} with terminfo dir {s}: {s}; using {s}",
+                .{ term, dir, why, fallback_term },
+            );
+        }
+        try env.put("TERM", fallback_term);
+    } else {
+        try env.put("TERM", term);
+    }
+
+    try env.put("COLORTERM", "truecolor");
+
+    // Point the child at our directory, where it is a directory the child
+    // could open. A directory with no database in it is harmless to read:
+    // ncurses falls through to its own, measured, and `xterm-256color` still
+    // resolves. One it cannot open is worse than harmless, because the value
+    // then looks like configuration that works and is not, which is what the
+    // drive-lettered form was doing here: it resolved or not according to
+    // which drive the child happened to start on.
+    //
+    // Which variable carries it differs on Windows, and not for style.
+    // $TERMINFO is also where ncurses `tic` WRITES when given no `-o`.
+    // Measured in Git Bash: with TERMINFO naming the install's terminfo
+    // directory, `tic -x ghostty.terminfo` created `78/xterm-ghostty` inside
+    // the install. That is the wrong place for it on every count. An update
+    // erases it, a machine-wide install refuses the write outright, and it
+    // would silently change what we hand every child from then on, including
+    // `wsl.exe` and `ssh`, where the entry does not exist on the other side.
+    //
+    // TERMINFO_DIRS reads the same and is not a write target. Elsewhere
+    // TERMINFO stays as it was, since that is the established behaviour on
+    // those platforms and their resources directory is not one an update
+    // rewrites.
+    if (comptime builtin.os.tag == .windows) {
+        if (readable) try env.put("TERMINFO_DIRS", dir);
+    } else {
+        try env.put("TERMINFO", dir);
+    }
+}
+
+/// Whether a terminfo directory spelled like `dir` is one the terminfo library
+/// inside a child process could open at all, before asking what is in it.
+///
+/// This is a Windows question and the answer is almost always no. Every
+/// terminfo reader that can run on Windows is the MSYS2/Cygwin ncurses, which
+/// is a POSIX program: it splits `TERMINFO_DIRS` on ':' with no idea that a
+/// drive designator exists, and it does not translate one in `TERMINFO`
+/// either. Measured on this machine against a real `tic` entry at
+/// `78/xterm-ghostty`, with `tput -T xterm-ghostty colors`:
+///
+///   TERMINFO_DIRS=C:/dir   cwd on C:  unknown terminal   (`infocmp -D` lists
+///                                                         only the system
+///                                                         database: the whole
+///                                                         value is dropped)
+///   TERMINFO_DIRS=C:\dir   cwd on C:  256
+///   TERMINFO_DIRS=C:\dir   cwd on Z:  unknown terminal
+///   TERMINFO=C:\dir        cwd on Z:  unknown terminal
+///   TERMINFO_DIRS=/c/dir   cwd on Z:  256
+///   TERMINFO_DIRS=\\host\share\dir    256, from either cwd
+///
+/// The UNC row holds for every separator spelling, including the mixed
+/// `\\host\share\dir/sub` form this code composes for a UNC install, and for
+/// both ways the value can reach the child: set by the Win32 parent in its
+/// environment block before the spawn (how this app sets it), and exported
+/// inside an already-running MSYS shell. Re-measured twice over against a
+/// local administrative share and a real SMB share, from cwd on two drives,
+/// through `bash -c`, `bash -lc` and both Git Bash entry points. A value that
+/// arrives byte-exact always resolves; the one way to make these rows read
+/// "unknown terminal" is a quoting layer between experimenter and child that
+/// eats one backslash level (double quotes, a nested `-Command`, an agent
+/// shell transport), which produces exactly the dropped-element signature and
+/// is worth knowing before re-measuring.
+///
+/// So the backslash form that looks like it works is the drive letter being
+/// eaten and the remainder resolved against whatever drive the CHILD started
+/// on. There is no drive-lettered spelling that survives, and the POSIX form
+/// that does is not ours to compose: Git Bash and MSYS2 mount `C:` at `/c`
+/// while Cygwin mounts it at `/cygdrive/c`, and `/cygdrive/c/...` is measured
+/// above to fail under Git Bash. A UNC path carries no drive designator and no
+/// ':' to split on, so it is the one install shape whose terminfo directory a
+/// child can be pointed at.
+///
+/// Absence of ':' is the test rather than the shape of a drive designator,
+/// because ':' is also what turns one path into two list elements.
+fn terminfoPathIsChildReadable(dir: []const u8) bool {
+    if (dir.len == 0) return false;
+    return std.mem.indexOfScalar(u8, dir, ':') == null;
+}
+
+/// The two compiled-terminfo formats, by the magic number a file starts with
+/// and the width of one entry in its numeric section: 0432 octal with 16-bit
+/// numbers, and 01036 with 32-bit ones, both little endian on disk.
+///
+/// Which one `tic` writes is decided by the values and not by its flags. An
+/// earlier note here said `-x` emits the 32-bit format; measured, it does not.
+/// `tic -x` on an entry with `colors#256` wrote 0432, and the same entry with
+/// `colors#65536` wrote 01036, so the 16-bit format is the common case and the
+/// other appears only when a numeric capability does not fit in a short.
+/// Believing otherwise would have made the ordinary file look like the
+/// suspicious one.
+const terminfo_formats = [_]struct {
+    magic: [2]u8,
+    number_bytes: usize,
+}{
+    .{ .magic = .{ 0x1a, 0x01 }, .number_bytes = 2 },
+    .{ .magic = .{ 0x1e, 0x02 }, .number_bytes = 4 },
+};
+
+/// Six little-endian 16-bit fields: the magic, the size of the names section,
+/// and the counts of booleans, numbers and strings plus the size of the string
+/// table. ncurses reads all of it before it can use an entry.
+const terminfo_header_len = 12;
+
+/// Whether `term` resolves to a compiled terminfo entry under `dir`, for a
+/// child running on Windows.
+///
+/// Only the hex layout counts. ncurses keeps a compiled entry at
+/// `<dir>/<subdir>/<name>`, where `subdir` is the first byte of the name: its
+/// literal character where the library was built with MIXED_CASE_FILENAMES,
+/// and its two-digit lowercase hex where it was not. Every terminfo reader
+/// that can exist on Windows is the MSYS2/Cygwin ncurses, which is built
+/// without it, so a letter directory holds a database no child here can read.
+/// Measured on Git Bash with the same bytes in both places:
+/// `78/xterm-hexcase` gives 256 colours, `x/xterm-lettercase` gives
+/// `tput: unknown terminal`. Accepting the letter layout could therefore only
+/// ever open this gate onto a database that does not work, which is the exact
+/// failure the gate exists to prevent. That is not hypothetical: the obvious
+/// way to produce the entry later is a `tic` run on a Linux host, and the
+/// letter layout is what that writes.
+///
+/// The name existing is not enough either. What this build installs into that
+/// tree is uncompiled terminfo source, so copying it to the entry path is a
+/// plausible first attempt at shipping one, and a directory of that name is
+/// just as easy to create. Both are readable paths that ncurses refuses, so
+/// the header decides rather than the path.
+///
+/// The magic number alone is not enough in turn. It is two bytes, so a file
+/// truncated anywhere after them passed while ncurses refused it, which is the
+/// wrong way round for a gate whose whole job is to be more conservative than
+/// the reader it speaks for. The header is therefore read whole and its
+/// section sizes are required to add up to bytes that are actually in the
+/// file, which is what ncurses does before it trusts one.
+///
+/// This says nothing about the child's own database, which is why the caller
+/// consults it only on Windows. Elsewhere a child that would have resolved
+/// the name from /usr/share/terminfo would be downgraded here for no reason.
+fn terminfoHasEntry(dir: []const u8, term: []const u8) bool {
+    if (term.len == 0) return false;
+
+    // openFileAbsolute asserts that its argument is absolute, and that assert
+    // is a panic rather than an error. Everything that reaches here is
+    // absolute (the resources directory is either climbed from the executable
+    // path or passed through validResourcesDir), so this guard should never
+    // fire; it is here so a future caller cannot turn a relative path into a
+    // crash. Same reason maybeWrapGitBashWithWinpty checks before its own
+    // accessAbsolute.
+    if (!std.fs.path.isAbsolute(dir)) return false;
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(
+        &buf,
+        "{s}/{x:0>2}/{s}",
+        .{ dir, term[0], term },
+    ) catch return false;
+
+    var file = std.Io.Dir.openFileAbsolute(
+        global.io(),
+        path,
+        .{ .mode = .read_only },
+    ) catch return false;
+    defer file.close(global.io());
+
+    var header: [terminfo_header_len]u8 = undefined;
+    const n = file.readPositionalAll(global.io(), &header, 0) catch return false;
+    if (n < header.len) return false;
+
+    const number_bytes = for (terminfo_formats) |format| {
+        if (std.mem.eql(u8, header[0..2], format.magic[0..])) break format.number_bytes;
+    } else return false;
+
+    const names_size = std.mem.readInt(u16, header[2..4], .little);
+    const bool_count = std.mem.readInt(u16, header[4..6], .little);
+    const num_count = std.mem.readInt(u16, header[6..8], .little);
+    const str_count = std.mem.readInt(u16, header[8..10], .little);
+    const str_size = std.mem.readInt(u16, header[10..12], .little);
+
+    // The fields are signed shorts, and ncurses refuses an entry with a
+    // negative in any of them rather than treating it as a large positive.
+    for ([_]u16{ names_size, bool_count, num_count, str_count, str_size }) |v| {
+        if (v > std.math.maxInt(i16)) return false;
+    }
+
+    // The names section is what the entry is looked up by, so it is never
+    // empty in a file `tic` wrote.
+    if (names_size == 0) return false;
+
+    var end: usize = header.len + names_size + bool_count;
+    // The numeric section starts on an even boundary; a padding byte is
+    // written when the booleans do not leave it there.
+    if (end % 2 != 0) end += 1;
+    end += num_count * number_bytes;
+    end += str_count * 2;
+    end += str_size;
+
+    // Declared is not the same as present. Reading the last byte the header
+    // accounts for says the sections are really there, and needs no stat.
+    var last: [1]u8 = undefined;
+    const got = file.readPositionalAll(global.io(), &last, end - 1) catch return false;
+    return got == last.len;
 }
 
 /// Append a value to an environment variable such as PATH.
@@ -4818,6 +5115,439 @@ test "terminfoDir has nothing to derive from a bare resources dir" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expect(terminfoDir(&buf, null) == null);
     try testing.expect(terminfoDir(&buf, "ghostty") == null);
+}
+
+/// A whole compiled terminfo entry, byte for byte as `tic -x` wrote it on this
+/// machine from a small `xterm-ghostty` source, and verified readable there
+/// with `tput -T xterm-ghostty colors` reporting 256.
+///
+/// Whole rather than a prefix, because the check is no longer only the magic:
+/// a header claims section sizes and they have to be backed by bytes that
+/// exist. The eight-byte stub that used to stand in here passed the old check
+/// and is exactly the shape ncurses refuses.
+///
+/// 0432 magic, i.e. the 16-bit numeric format. `-x` does not select the other
+/// one; see `terminfo_formats`.
+const compiled_entry_bytes =
+    "\x1a\x01\x1a\x00\x00\x00\x0e\x00\x0b\x00\x25\x00\x78\x74\x65\x72\x6d\x2d\x67\x68" ++
+    "\x6f\x73\x74\x74\x79\x7c\x70\x72\x6f\x62\x65\x20\x65\x6e\x74\x72\x79\x00\x50\x00" ++
+    "\x08\x00\x18\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" ++
+    "\xff\xff\xff\xff\x00\x01\xff\xff\x00\x00\x02\x00\xff\xff\xff\xff\x04\x00\x0c\x00" ++
+    "\x10\x00\xff\xff\xff\xff\x14\x00\x07\x00\x0d\x00\x1b\x5b\x48\x1b\x5b\x32\x4a\x00" ++
+    "\x1b\x5b\x4b\x00\x1b\x5b\x4a\x00\x1b\x5b\x25\x69\x25\x70\x31\x25\x64\x3b\x25\x70" ++
+    "\x32\x25\x64\x48\x00";
+
+/// The same source with `colors#65536`, which is what makes `tic` switch to
+/// the 01036 magic and 32-bit numbers. Kept so both formats are exercised by
+/// a file a reader actually accepts rather than by a handcrafted header.
+const compiled_entry_bytes_32 =
+    "\x1e\x02\x14\x00\x00\x00\x0e\x00\x06\x00\x0c\x00\x78\x74\x65\x72\x6d\x2d\x62\x69" ++
+    "\x67\x7c\x70\x72\x6f\x62\x65\x20\x62\x69\x67\x00\x50\x00\x00\x00\xff\xff\xff\xff" ++
+    "\x18\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" ++
+    "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" ++
+    "\xff\xff\xff\xff\x00\x00\x01\x00\xff\xff\x00\x00\x02\x00\xff\xff\xff\xff\x04\x00" ++
+    "\x07\x00\x0d\x00\x1b\x5b\x48\x1b\x5b\x32\x4a\x00";
+
+test "terminfoHasEntry finds a compiled entry in a hex subdirectory" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The only layout that counts on Windows: MSYS2/Cygwin ncurses is built
+    // without MIXED_CASE_FILENAMES and reads the two-digit hex of the name's
+    // first byte ('x' == 0x78).
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "78/xterm-ghostty",
+        .data = compiled_entry_bytes,
+    });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry accepts the 32-bit numeric format as well as the 16-bit one" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Both are real `tic` output. The section arithmetic differs between them
+    // (numbers are four bytes wide rather than two), so accepting one is no
+    // evidence about the other.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "78/xterm-ghostty",
+        .data = compiled_entry_bytes_32,
+    });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects an entry truncated anywhere after the magic" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The magic alone said yes to every one of these while ncurses said no.
+    // 2 and 6 bytes do not even carry a whole header; the rest carry one that
+    // promises sections the file does not contain.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78");
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    for ([_]usize{ 2, 6, 12, 13, 64, compiled_entry_bytes.len - 1 }) |len| {
+        errdefer std.log.err("truncation to {d} bytes was accepted", .{len});
+        try tmp.dir.writeFile(testing.io, .{
+            .sub_path = "78/xterm-ghostty",
+            .data = compiled_entry_bytes[0..len],
+        });
+        try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+    }
+
+    // And the whole file is still accepted, so the test above is not passing
+    // because the check now refuses everything.
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "78/xterm-ghostty",
+        .data = compiled_entry_bytes,
+    });
+    try testing.expect(terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a header with a negative section size" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The sizes are signed shorts. Read as unsigned, a negative one becomes a
+    // huge section that the file happens to be too small for, so the length
+    // check would refuse it anyway; ncurses refuses it on sign alone and so
+    // does this, because a file large enough to satisfy the arithmetic must
+    // not be the thing that decides.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78");
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    var bytes: [compiled_entry_bytes.len]u8 = undefined;
+    @memcpy(bytes[0..], compiled_entry_bytes[0..bytes.len]);
+    std.mem.writeInt(u16, bytes[2..4], 0xffff, .little); // names_size = -1
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "78/xterm-ghostty",
+        .data = &bytes,
+    });
+
+    try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a letter subdirectory no reader here can use" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A real compiled entry, in the layout `tic` writes on a Linux host.
+    // MSYS2/Cygwin ncurses cannot read it, so it must not open the gate.
+    // Measured on Git Bash with identical bytes in both layouts:
+    //
+    //   78/xterm-hexcase    -> tput -T xterm-hexcase colors    -> 256
+    //   x/xterm-lettercase  -> tput -T xterm-lettercase colors
+    //                          -> tput: unknown terminal "xterm-lettercase"
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "x");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "x/xterm-ghostty",
+        .data = compiled_entry_bytes,
+    });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects uncompiled source sitting at the entry path" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The file this build installs into that tree is uncompiled source, so
+    // copying it to the entry path is the plausible first attempt at shipping
+    // a compiled one. ncurses refuses it, and so must we: the path is
+    // readable, only the magic number tells them apart.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "78/xterm-ghostty",
+        .data = "#\tReconstructed via infocmp\nxterm-ghostty|stub,\n\tcolors#256,\n",
+    });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a directory at the entry path" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A name existing is not an entry. A directory is the cheapest way to
+    // make the path resolve while holding nothing ncurses can read.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78/xterm-ghostty");
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a directory holding only the shipped source" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Exactly what a Windows build ships: the uncompiled source under its own
+    // name, which is also the sentinel resourcesDir detects the tree by.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "ghostty.terminfo",
+        .data = "xterm-ghostty|stub,\n\tcolors#256,\n",
+    });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "terminfoHasEntry rejects a missing directory, an empty term and a short file" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "78");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "78/xterm-short", .data = "\x1e" });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try testing.expect(!terminfoHasEntry(dir, ""));
+    try testing.expect(!terminfoHasEntry(dir, "xterm-short"));
+
+    const missing = try std.fmt.allocPrint(alloc, "{s}/nope", .{dir});
+    try testing.expect(!terminfoHasEntry(missing, "xterm-ghostty"));
+}
+
+/// Build a shipped-shape resources tree under `tmp` and return its resources
+/// directory, i.e. `<root>/share/ghostty`, with the terminfo directory beside
+/// it at `<root>/share/terminfo`. When `entry` is given it is written as the
+/// compiled entry for that terminal name, in the hex layout.
+fn testResourcesTree(
+    alloc: Allocator,
+    tmp: *std.testing.TmpDir,
+    entry: ?[]const u8,
+) ![]const u8 {
+    const io = std.testing.io;
+
+    try tmp.dir.createDirPath(io, "share/ghostty");
+    try tmp.dir.createDirPath(io, "share/terminfo");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "share/terminfo/ghostty.terminfo",
+        .data = "xterm-ghostty|stub,\n\tcolors#256,\n",
+    });
+
+    if (entry) |name| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const sub_dir = try std.fmt.bufPrint(
+            &buf,
+            "share/terminfo/{x:0>2}",
+            .{name[0]},
+        );
+        try tmp.dir.createDirPath(io, sub_dir);
+
+        var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const sub_path = try std.fmt.bufPrint(
+            &file_buf,
+            "share/terminfo/{x:0>2}/{s}",
+            .{ name[0], name },
+        );
+        try tmp.dir.writeFile(io, .{
+            .sub_path = sub_path,
+            .data = compiled_entry_bytes,
+        });
+    }
+
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    return try std.fmt.allocPrint(alloc, "{s}/share/ghostty", .{root});
+}
+
+test "setupTermEnv windows: a source-only tree keeps the conservative TERM" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Exactly what this build ships: the terminfo SOURCE and no compiled
+    // database. This is the decision the whole change is named for, so it is
+    // asserted on the composed environment and not only on the predicate.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const resources = try testResourcesTree(alloc, &tmp, null);
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try setupTermEnv(&env, resources, "xterm-ghostty");
+
+    try testing.expectEqualStrings(fallback_term, env.get("TERM").?);
+    try testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
+    // No pointer either. A temp directory is drive-lettered, like every
+    // ordinary install, and a drive-lettered terminfo path is one no reader
+    // on Windows can open; see terminfoPathIsChildReadable. Setting it anyway
+    // is how this looked like it worked.
+    try testing.expect(env.get("TERMINFO_DIRS") == null);
+    try testing.expect(env.get("TERMINFO") == null);
+}
+
+test "setupTermEnv windows: a compiled entry does not open the gate under a drive letter" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The same tree WITH a compiled entry in the hex layout beside it, which
+    // is the state the gate was said to clear itself in. It does not, and
+    // this is the assertion that says so: the entry is real and readable by
+    // us, and the child still cannot be told where it is, because the only
+    // spelling we have for the path carries a drive letter.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const resources = try testResourcesTree(alloc, &tmp, "xterm-ghostty");
+
+    // Our own reader agrees the entry is there, so what follows is about the
+    // path and not about the file.
+    var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = terminfoDir(&terminfo_buf, resources).?;
+    try testing.expect(terminfoHasEntry(dir, "xterm-ghostty"));
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try setupTermEnv(&env, resources, "xterm-ghostty");
+
+    try testing.expectEqualStrings(fallback_term, env.get("TERM").?);
+}
+
+test "terminfoPathIsChildReadable refuses every drive-lettered spelling" {
+    const testing = std.testing;
+
+    // Measured against a real `tic` entry on this machine, with
+    // `tput -T xterm-ghostty colors` in Git Bash. None of these resolve
+    // except by accident of which drive the child started on, and the value
+    // the lookup composes is the third: maybeDir writes its half with '/' and
+    // std.fs.path.join appends with the host separator.
+    for ([_][]const u8{
+        "C:/Program Files/Wintty/share/terminfo",
+        "C:\\Program Files\\Wintty\\share\\terminfo",
+        "C:\\Program Files\\Wintty/share/terminfo",
+        "Z:\\Wintty\\share\\terminfo",
+        "",
+    }) |dir| {
+        errdefer std.log.err("accepted an unreadable terminfo path: {s}", .{dir});
+        try testing.expect(!terminfoPathIsChildReadable(dir));
+    }
+
+    // And the shapes that do resolve, so this is a predicate and not a
+    // constant. A UNC install has no drive designator and nothing to split
+    // on; the POSIX form is what the same library uses for its own database.
+    for ([_][]const u8{
+        "\\\\fileserver\\apps\\Wintty\\share\\terminfo",
+        "//fileserver/apps/Wintty/share/terminfo",
+        "/usr/share/terminfo",
+    }) |dir| {
+        errdefer std.log.err("refused a readable terminfo path: {s}", .{dir});
+        try testing.expect(terminfoPathIsChildReadable(dir));
+    }
+}
+
+test "terminfoHasEntry is per name, not per database" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Asserted on the predicate rather than through setupTermEnv, because on
+    // Windows that would now answer the fallback for the path's sake and pass
+    // whatever this returned.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const resources = try testResourcesTree(alloc, &tmp, "xterm-kitty");
+
+    var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = terminfoDir(&terminfo_buf, resources).?;
+
+    try testing.expect(terminfoHasEntry(dir, "xterm-kitty"));
+    try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+}
+
+test "setupTermEnv: no resources directory means no terminfo pointer at all" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try setupTermEnv(&env, null, "xterm-ghostty");
+
+    try testing.expectEqualStrings(fallback_term, env.get("TERM").?);
+    try testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
+    try testing.expect(env.get("TERMINFO") == null);
+    try testing.expect(env.get("TERMINFO_DIRS") == null);
+}
+
+test "setupTermEnv non-windows: the configured term is used as given" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The gate is Windows-only on purpose: elsewhere the name usually
+    // resolves from the system database, which this code cannot see, so
+    // applying it would downgrade working sessions.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const resources = try testResourcesTree(alloc, &tmp, null);
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try setupTermEnv(&env, resources, "xterm-ghostty");
+
+    try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
+    try testing.expect(env.get("TERMINFO") != null);
+}
+
+test "terminfoHasEntry rejects a relative dir without reaching openFileAbsolute" {
+    const testing = std.testing;
+
+    // openFileAbsolute asserts an absolute path, so a relative one has to be
+    // turned away before it gets there rather than panic.
+    for ([_][]const u8{ "share/terminfo", "terminfo", ".", "" }) |dir| {
+        try testing.expect(!terminfoHasEntry(dir, "xterm-ghostty"));
+    }
 }
 
 test "ReadThread windows: a quit request during output processing stops the loop" {

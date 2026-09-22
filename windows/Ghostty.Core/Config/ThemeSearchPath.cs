@@ -105,40 +105,96 @@ public static class ThemeSearchPath
     /// </param>
     /// <param name="appDirectory">
     /// The directory holding the executable. Without a resources directory,
-    /// theme.zig looks for <c>share\ghostty\themes</c> beside the executable,
-    /// which is where the build copies the bundled themes.
+    /// theme.zig looks for <c>share\ghostty\themes</c> beside the executable
+    /// and in one directory above it, which is where the build copies the
+    /// bundled themes.
     /// </param>
     /// <remarks>
     /// The resources directory is also found by climbing from the executable
-    /// to a <c>share\terminfo\ghostty.terminfo</c>. The Windows app ships no
-    /// terminfo, so that detection never succeeds and is not mirrored here;
-    /// shipping the full resources tree would put the themes at the same
-    /// <c>share\ghostty\themes</c> path anyway.
+    /// to a <c>share\terminfo\ghostty.terminfo</c>. The app now ships that
+    /// file, so that detection does succeed; it is not mirrored here because
+    /// it resolves to the same <c>share\ghostty\themes</c> beside the
+    /// executable that the fallback below already returns.
     /// </remarks>
     public static string? BundledDirectory(string? resourcesDirectory, string? appDirectory)
-        => BundledDirectory(resourcesDirectory, appDirectory, Directory.Exists);
+        => BundledDirectory(resourcesDirectory, appDirectory, Directory.Exists, File.Exists);
 
     /// <summary>
-    /// <see cref="BundledDirectory(string?, string?)"/> over an injected
-    /// existence check, so the rule is testable without a disk.
+    /// <see cref="BundledDirectory(string?, string?)"/> over injected
+    /// existence checks, so the rule is testable without a disk.
     /// </summary>
     public static string? BundledDirectory(
-        string? resourcesDirectory, string? appDirectory, Func<string, bool> directoryExists)
+        string? resourcesDirectory,
+        string? appDirectory,
+        Func<string, bool> directoryExists,
+        Func<string, bool>? fileExists = null)
     {
         ArgumentNullException.ThrowIfNull(directoryExists);
+        fileExists ??= File.Exists;
 
-        // theme.zig's validResourcesDir: non-empty, absolute, and a directory
-        // that opens. A relative or missing value is ignored with a warning.
+        // resourcesdir.zig's validResourcesDir: non-empty, absolute, a
+        // directory that opens, and on Windows carrying the same terminfo
+        // sentinel detection requires. A value failing any of those is ignored
+        // with a warning.
+        //
+        // The sentinel is mirrored rather than skipped as a lesser concern: a
+        // theme file is parsed by the same code as a config file, underneath
+        // the user's own config, so it carries every key the user has not set
+        // and is not a list of colours. This method also documents itself as
+        // following that rule, and a mirror that quietly stopped matching
+        // would be worse than either behaviour on its own.
         if (!string.IsNullOrEmpty(resourcesDirectory)
             && IsAbsolute(resourcesDirectory)
-            && directoryExists(resourcesDirectory))
+            && directoryExists(resourcesDirectory)
+            && HasTerminfoSentinel(resourcesDirectory, fileExists))
         {
             return Path.Combine(resourcesDirectory, "themes");
         }
 
         if (string.IsNullOrEmpty(appDirectory)) return null;
-        var beside = Path.Combine(Path.TrimEndingDirectorySeparator(appDirectory), "share", "ghostty", "themes");
-        return directoryExists(beside) ? beside : null;
+
+        // theme.zig's bundledThemesDir looks in the executable's own directory
+        // and one above it, and stops there. One above is for the CLI, which
+        // ships in bin and would otherwise find no bundled themes at all; the
+        // stop is because nothing further up is any part of the install.
+        var start = Path.TrimEndingDirectorySeparator(appDirectory);
+        for (var climbed = 0; climbed < BundledThemesMaxAncestors; climbed++)
+        {
+            // A path with no parent is a drive root, which grants Authenticated
+            // Users the right to create folders. resourcesdir.zig refuses to
+            // probe one and so does the fallback this mirrors.
+            var parent = Path.GetDirectoryName(start);
+            if (string.IsNullOrEmpty(parent)) break;
+
+            var candidate = Path.Combine(start, "share", "ghostty", "themes");
+            if (directoryExists(candidate)) return candidate;
+
+            start = parent;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// How many directories <see cref="BundledDirectory(string?, string?)"/>
+    /// looks in, counting the executable's own. Mirrors
+    /// <c>bundled_themes_max_ancestors</c> in src/config/theme.zig.
+    /// </summary>
+    private const int BundledThemesMaxAncestors = 2;
+
+    /// <summary>
+    /// True when the terminfo sentinel sits beside <paramref name="resourcesDirectory"/>
+    /// the way an install lays it out, i.e. <c>&lt;parent&gt;\terminfo\ghostty.terminfo</c>
+    /// for a directory of <c>&lt;parent&gt;\ghostty</c>.
+    /// </summary>
+    private static bool HasTerminfoSentinel(
+        string resourcesDirectory, Func<string, bool> fileExists)
+    {
+        var parent = Path.GetDirectoryName(
+            Path.TrimEndingDirectorySeparator(resourcesDirectory));
+        if (string.IsNullOrEmpty(parent)) return false;
+
+        return fileExists(Path.Combine(parent, "terminfo", "ghostty.terminfo"));
     }
 
     /// <summary>

@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const args = @import("args.zig");
 const Action = @import("ghostty.zig").Action;
 const Config = @import("../config/Config.zig");
@@ -137,16 +136,6 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     var stderr_writer = std.Io.File.stderr().writer(global.io(), &stderr_buf);
     const stderr = &stderr_writer.interface;
 
-    // A Windows build ships its themes beside the executable rather than in
-    // a resources directory (see theme.Location.bundledThemesDir), so a
-    // missing resources directory there is expected rather than a broken
-    // install. If nothing can be found at all, the "no themes found"
-    // message below says so.
-    const resources_dir = global.resourcesDir().app();
-    if (resources_dir == null and builtin.os.tag != .windows)
-        try stderr.print("Could not find the Ghostty resources directory. Please ensure " ++
-            "that Ghostty is installed correctly.\n", .{});
-
     var count: usize = 0;
 
     var themes: std.ArrayList(ThemeListElement) = .empty;
@@ -188,8 +177,12 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
         }
     }
 
-    if (count == 0) {
-        try stderr.print("No themes found, check to make sure that the themes were installed correctly.", .{});
+    // The one place a diagnostic is decided, and it is decided from the
+    // outcome rather than from the inputs. Keep it that way: printing
+    // anything before this point is what produced the bug being fixed here.
+    if (themesDiagnostic(count, global.resourcesDir().app() != null)) |message| {
+        try stderr.print("{s}\n", .{message});
+        try stderr.flush();
         return 1;
     }
 
@@ -216,6 +209,29 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     // Don't forget to flush!
     try stdout.flush();
     return 0;
+}
+
+/// What to tell the user about a theme listing, or null when there is nothing
+/// worth saying.
+///
+/// Taking `count` is the point of this function rather than an inconvenience.
+/// The bug it replaces was a diagnostic chosen from the inputs, printed before
+/// anything had been searched, so it announced a broken install above a
+/// perfectly good list of themes. Deciding from the result makes that shape
+/// unrepresentable: there is no answer here that both names a problem and
+/// leaves a listing on screen.
+///
+/// The two empty cases have different fixes, so they get different sentences.
+/// With no resources directory the install is missing the tree the bundled
+/// themes live in; with one, the tree is there and empty.
+fn themesDiagnostic(count: usize, has_resources_dir: bool) ?[]const u8 {
+    if (count > 0) return null;
+
+    return if (has_resources_dir)
+        "No themes found, check to make sure that the themes were installed correctly."
+    else
+        "Could not find the Ghostty resources directory. Please ensure " ++
+            "that Ghostty is installed correctly.";
 }
 
 fn resolveAutoThemePath(alloc: std.mem.Allocator) ![]u8 {
@@ -1875,4 +1891,37 @@ fn shouldIncludeTheme(theme_filter: ColorScheme, theme_config: Config) bool {
     const luminance = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
     const is_dark = luminance < 0.5;
     return (theme_filter == .all) or (theme_filter == .dark and is_dark) or (theme_filter == .light and !is_dark);
+}
+
+test "themesDiagnostic says nothing when themes were found" {
+    const testing = std.testing;
+
+    // The regression this pins. The resources-directory sentence used to be
+    // printed from the absence of the directory alone, before anything had
+    // been searched, so it appeared above a perfectly good list of themes.
+    // Having found themes, there is nothing to say, with or without a
+    // resources directory: the user's own config directory is a legitimate
+    // place for all of them to come from.
+    try testing.expect(themesDiagnostic(1, false) == null);
+    try testing.expect(themesDiagnostic(607, false) == null);
+    try testing.expect(themesDiagnostic(486, true) == null);
+}
+
+test "themesDiagnostic blames the resources directory only when there is none" {
+    const testing = std.testing;
+
+    const without = themesDiagnostic(0, false) orelse return error.NoDiagnostic;
+    try testing.expect(std.mem.indexOf(
+        u8,
+        without,
+        "Could not find the Ghostty resources directory",
+    ) != null);
+
+    const with = themesDiagnostic(0, true) orelse return error.NoDiagnostic;
+    try testing.expect(std.mem.indexOf(
+        u8,
+        with,
+        "Could not find the Ghostty resources directory",
+    ) == null);
+    try testing.expect(std.mem.indexOf(u8, with, "No themes found") != null);
 }

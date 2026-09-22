@@ -1790,3 +1790,226 @@ const TmpResourcesDir = struct {
         self.tmp_dir.cleanup();
     }
 };
+
+/// Every file the shipped tree has to contain for a shell to integrate, as
+/// the path it lives at under `shell-integration/`.
+///
+/// This list is the contract between what `build/GhosttyResources.zig`
+/// installs (the whole of `src/shell-integration/`, minus `.md`) and what the
+/// setup functions above open. Nothing links those two automatically, which
+/// for a change whose entire premise is "the tree now ships" is the thing
+/// most worth pinning: a build that stopped installing a subdirectory, or a
+/// rename on either side, would otherwise be caught by nobody.
+///
+/// Keep it in step with `src/shell-integration/`. A shell whose entry is
+/// wrong fails `packaged tree: the fixture matches what the build installs`.
+const shell_integration_files = [_][]const u8{
+    "bash/ghostty.bash",
+    "bash/bash-preexec.sh",
+    "cmd/ghostty.lua",
+    "elvish/lib/ghostty-integration.elv",
+    "fish/vendor_conf.d/ghostty-shell-integration.fish",
+    "nushell/vendor/autoload/ghostty.nu",
+    "powershell/ghostty.ps1",
+    "zsh/.zshenv",
+    "zsh/ghostty-integration",
+};
+
+/// A resources directory laid out the way an install lays one out: the real
+/// files, at the paths the build installs them to.
+///
+/// Distinct from `TmpResourcesDir`, which fabricates exactly the one
+/// directory the shell under test is about to ask for. That is the right
+/// shape for testing a single setup function and the wrong shape for asking
+/// whether a shipped tree serves every shell, because it cannot fail: it
+/// builds whatever the lookup wants. Note that building this one from the
+/// `Shell` enum instead would have the same flaw, since the enum names and
+/// the directory names are equal by construction; only naming the files
+/// makes the fixture able to disagree with the tree.
+const TmpPackagedResourcesDir = struct {
+    tmp_dir: std.testing.TmpDir,
+    path: [:0]const u8,
+
+    fn init() !TmpPackagedResourcesDir {
+        var tmp_dir = std.testing.tmpDir(.{});
+        errdefer tmp_dir.cleanup();
+
+        for (shell_integration_files) |rel| {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const sub_path = try std.fmt.bufPrint(
+                &buf,
+                "shell-integration/{s}",
+                .{rel},
+            );
+            if (std.fs.path.dirname(sub_path)) |parent| {
+                try tmp_dir.dir.createDirPath(std.testing.io, parent);
+            }
+            try tmp_dir.dir.writeFile(std.testing.io, .{
+                .sub_path = sub_path,
+                .data = "",
+            });
+        }
+
+        const path = try tmp_dir.dir.realPathFileAlloc(
+            std.testing.io,
+            ".",
+            std.testing.allocator,
+        );
+
+        return .{ .tmp_dir = tmp_dir, .path = path };
+    }
+
+    fn deinit(self: *TmpPackagedResourcesDir) void {
+        std.testing.allocator.free(self.path);
+        self.tmp_dir.cleanup();
+    }
+};
+
+test "packaged tree: the fixture matches what the build installs" {
+    const testing = std.testing;
+
+    // The fixture is only evidence if it is the real tree. Read
+    // src/shell-integration/ and require every file the setup paths depend on
+    // to be there, under the name the build will install it as. This is the
+    // link that otherwise does not exist: it fails if a file is renamed or
+    // moved on either side.
+    //
+    // The path is relative to the build root, which is where the test runner
+    // is started from, the same way src/font's PNG comparison reads its
+    // reference image. A failure to open it is reported rather than skipped:
+    // this used to skip, which meant the one test standing between a renamed
+    // script and a silently broken shell turned itself off whenever it could
+    // not find the tree, and nothing in a run of 64 skipped tests said which
+    // one that was.
+    const tree = "src/shell-integration";
+    var dir = std.Io.Dir.cwd().openDir(testing.io, tree, .{}) catch |err| {
+        std.log.err(
+            "cannot open {s}; this test reads the source tree and has to run " ++
+                "from the build root ({})",
+            .{ tree, err },
+        );
+        return error.ShellIntegrationTreeUnreadable;
+    };
+    defer dir.close(testing.io);
+
+    for (shell_integration_files) |rel| {
+        dir.access(testing.io, rel, .{}) catch |err| {
+            std.log.err("shell-integration file missing from the source tree: {s} ({})", .{ rel, err });
+            return error.ShellIntegrationFileMissing;
+        };
+    }
+
+    // Every shell in the enum must own at least one of those files, so a new
+    // shell cannot be added with a directory nothing ever installs into.
+    inline for (@typeInfo(Shell).@"enum".fields) |field| {
+        var found = false;
+        for (shell_integration_files) |rel| {
+            if (std.mem.startsWith(u8, rel, field.name ++ "/")) found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "packaged layout windows: every supported shell is detected and injected" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpPackagedResourcesDir = try .init();
+    defer res.deinit();
+
+    // Spelled as Windows actually spells them, so detection is exercised on
+    // the paths a real spawn carries rather than on bare POSIX names. They go
+    // in as `.direct`, which is the form a resolved path takes: a `.shell`
+    // command is shell-expanded, and "C:\Program Files\..." would tokenize on
+    // the space into something no shell detection should ever have to see.
+    const cases = .{
+        .{ "C:\\Windows\\System32\\cmd.exe", Shell.cmd },
+        .{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", Shell.powershell },
+        .{
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            Shell.powershell,
+        },
+        .{ "C:\\Program Files\\Git\\bin\\bash.exe", Shell.bash },
+        .{ "C:\\msys64\\usr\\bin\\zsh.exe", Shell.zsh },
+        .{ "C:\\msys64\\usr\\bin\\fish.exe", Shell.fish },
+        .{ "C:\\msys64\\usr\\bin\\elvish.exe", Shell.elvish },
+        .{ "C:\\msys64\\usr\\bin\\nu.exe", Shell.nushell },
+    };
+
+    inline for (cases) |case| {
+        errdefer std.log.err("shell integration case failed: {s}", .{case[0]});
+
+        var env = EnvMap.init(alloc);
+        defer env.deinit();
+
+        const argv: []const [:0]const u8 = &.{case[0]};
+        const result = try setup(alloc, res.path, .{ .direct = argv }, &env, null);
+        const integration = result orelse return error.NoShellIntegration;
+        try testing.expectEqual(case[1], integration.shell);
+
+        // Detecting the shell is not the claim; injecting is, and injecting
+        // the right path at that. Each arm names the variable that shell's
+        // integration cannot work without AND the part of the shipped tree it
+        // has to point into, so a value that is merely present does not pass.
+        const expect = struct {
+            fn contains(env_map: *const EnvMap, key: []const u8, needle: []const u8) !void {
+                const value = env_map.get(key) orelse {
+                    std.log.err("expected {s} to be set", .{key});
+                    return error.EnvVarMissing;
+                };
+                if (std.mem.indexOf(u8, value, needle) == null) {
+                    std.log.err("{s} is {s}, expected it to contain {s}", .{ key, value, needle });
+                    return error.EnvVarWrong;
+                }
+            }
+        };
+
+        switch (case[1]) {
+            .cmd => try expect.contains(&env, "CLINK_PATH", "shell-integration/cmd"),
+            .powershell => try expect.contains(
+                &env,
+                "GHOSTTY_SHELL_INTEGRATION_PS1",
+                "shell-integration/powershell/ghostty.ps1",
+            ),
+            .bash => try expect.contains(&env, "ENV", "ghostty.bash"),
+            .zsh => try expect.contains(&env, "ZDOTDIR", "shell-integration/zsh"),
+            // These three ride XDG_DATA_DIRS, which the shells then resolve
+            // their own subdirectory under.
+            .fish, .elvish, .nushell => try expect.contains(
+                &env,
+                "XDG_DATA_DIRS",
+                "shell-integration",
+            ),
+        }
+    }
+}
+
+test "packaged layout windows: an unsupported shell injects nothing" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A full tree present and a shell we have no integration for. The tree
+    // being there must not tempt us into touching the environment: the
+    // session has to come out exactly as it would with no tree at all.
+    var res: TmpPackagedResourcesDir = try .init();
+    defer res.deinit();
+
+    for ([_][:0]const u8{
+        "C:\\Windows\\System32\\wsl.exe",
+        "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+        "C:\\tools\\xonsh.exe",
+    }) |exe| {
+        var env = EnvMap.init(alloc);
+        defer env.deinit();
+
+        const argv: []const [:0]const u8 = &.{exe};
+        try testing.expect(try setup(alloc, res.path, .{ .direct = argv }, &env, null) == null);
+        try testing.expectEqual(0, env.count());
+    }
+}

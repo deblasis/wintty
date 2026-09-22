@@ -41,30 +41,77 @@ pub const Location = enum {
     /// The bundled themes a Windows build ships beside its executable, at
     /// `share/ghostty/themes`, when no resources directory was found.
     ///
-    /// The Windows app ships the themes without the rest of the resources
-    /// tree. A resources directory is detected by its terminfo, and finding
-    /// one changes far more than themes: every child gets TERM=xterm-ghostty
-    /// and the shell integration scripts. The themes alone are only a list
-    /// of colours, so they get a lookup of their own that turns on nothing
-    /// else. The path is the one a full resources tree would put them at,
-    /// so shipping that tree later finds the same files through the branch
-    /// above instead.
+    /// A Windows build installs the whole resources tree, so the branch above
+    /// normally finds these same files and this one never runs. It stays as
+    /// the floor for an install whose tree is incomplete: the tree is detected
+    /// by its terminfo, so an install that lost only that file would otherwise
+    /// lose its themes with it.
+    ///
+    /// That floor is unavoidably weaker than detection and the reason it used
+    /// to give was wrong. It said a list of colours needs none of what the
+    /// terminfo is evidence for. A theme file is not a list of colours: it is
+    /// parsed by the same code as a config file, underneath the user's own
+    /// config, so every key the user has not set comes from it, `command`
+    /// included. A themes directory is therefore code execution, and the
+    /// sentinel cannot be demanded here to make it safe, because the whole
+    /// reason this branch runs is that the sentinel is missing.
+    ///
+    /// What can be done is to look no further than the install. The climb is
+    /// only for the CLI, which ships one level down in `bin` and would
+    /// otherwise find the themes for itself and not for the app (measurable as
+    /// `+list-themes` printing the user's themes and none of the bundled
+    /// ones), so one ancestor beyond the executable's own directory is all it
+    /// ever needed. Bounded at that, the directories consulted are the install
+    /// root and the directory the executable sits in, which on a per-user
+    /// install belong to the same user who owns the executable, and on a
+    /// machine-wide install are administrator-only. An unbounded climb reached
+    /// the user's profile and `C:\Users` from a Program Files install, where
+    /// the executable is protected and the ancestor is not.
     fn bundledThemesDir(arena_alloc: Allocator) error{OutOfMemory}!?[]const u8 {
         if (comptime builtin.os.tag != .windows) return null;
 
         var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const exe = exe_buf[0 .. std.process.executablePath(
+        const exe: []const u8 = exe_buf[0 .. std.process.executablePath(
             global.io(),
             &exe_buf,
         ) catch return null];
-        const exe_dir = std.fs.path.dirname(exe) orelse return null;
 
-        const themes_dir = try std.fs.path.join(
-            arena_alloc,
-            &.{ exe_dir, "share", "ghostty", "themes" },
-        );
-        std.Io.Dir.accessAbsolute(global.io(), themes_dir, .{}) catch return null;
-        return themes_dir;
+        return bundledThemesDirFromExe(arena_alloc, exe);
+    }
+
+    /// How many ancestors of the executable are consulted: its own directory,
+    /// and one above it for the `bin` case. See `bundledThemesDir`.
+    const bundled_themes_max_ancestors = 2;
+
+    /// `bundledThemesDir` over a given executable path, so the bound above is
+    /// testable without being the machine's own layout.
+    fn bundledThemesDirFromExe(
+        arena_alloc: Allocator,
+        exe_path: []const u8,
+    ) error{OutOfMemory}!?[]const u8 {
+        var exe = exe_path;
+        var climbed: usize = 0;
+
+        // `dir` is this enum's own method name, so the capture cannot borrow
+        // it without shadowing the declaration.
+        while (std.fs.path.dirname(exe)) |ancestor| : (climbed += 1) {
+            if (climbed == bundled_themes_max_ancestors) return null;
+            exe = ancestor;
+
+            // Stop before a drive root; see resourcesDirFromExe for why a
+            // tree there is not ours to trust.
+            if (std.fs.path.dirname(ancestor) == null) return null;
+
+            const themes_dir = try std.fs.path.join(
+                arena_alloc,
+                &.{ ancestor, "share", "ghostty", "themes" },
+            );
+            if (std.Io.Dir.accessAbsolute(global.io(), themes_dir, .{})) {
+                return themes_dir;
+            } else |_| {}
+        }
+
+        return null;
     }
 
     /// The `themes` subdirectory of an XDG config directory, for the given
@@ -336,4 +383,53 @@ test "theme: search order prefers the current config dir over the pre-rename one
     // have.
     try testing.expect(@intFromEnum(Location.user) < @intFromEnum(Location.user_ghostty));
     try testing.expect(@intFromEnum(Location.user_ghostty) < @intFromEnum(Location.resources));
+}
+
+test "theme: the bundled floor reaches the install root and stops there" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Two trees: one inside the install, one above it. The floor has no
+    // sentinel to tell them apart, and a theme file is a config file, so the
+    // one above must be out of reach rather than merely further down a list.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "outside/share/ghostty/themes");
+    try tmp.dir.createDirPath(testing.io, "outside/install/share/ghostty/themes");
+    try tmp.dir.createDirPath(testing.io, "outside/install/bin");
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    const install = try std.fs.path.join(alloc, &.{ root, "outside", "install" });
+    const want = try std.fs.path.join(alloc, &.{ install, "share", "ghostty", "themes" });
+
+    // The app, at the install root.
+    const app = try std.fs.path.join(alloc, &.{ install, "Wintty.exe" });
+    try testing.expectEqualStrings(
+        want,
+        (try Location.bundledThemesDirFromExe(alloc, app)) orelse
+            return error.ThemesNotFound,
+    );
+
+    // The CLI, one level down in bin, which is the only reason this climbs.
+    const cli_exe = try std.fs.path.join(alloc, &.{ install, "bin", "wintty.exe" });
+    try testing.expectEqualStrings(
+        want,
+        (try Location.bundledThemesDirFromExe(alloc, cli_exe)) orelse
+            return error.ThemesNotFound,
+    );
+
+    // An install with no tree of its own, one directory below a tree that is
+    // not ours. Two ancestors are consulted and neither holds one, so the
+    // answer is nothing. Raise bundled_themes_max_ancestors by one and this
+    // returns the tree outside the install instead, which is the whole point
+    // of the bound.
+    try tmp.dir.createDirPath(testing.io, "plantable/share/ghostty/themes");
+    try tmp.dir.createDirPath(testing.io, "plantable/install/bin");
+    const outsider = try std.fs.path.join(
+        alloc,
+        &.{ root, "plantable", "install", "bin", "wintty.exe" },
+    );
+    try testing.expect(try Location.bundledThemesDirFromExe(alloc, outsider) == null);
 }

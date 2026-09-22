@@ -3,20 +3,39 @@ const GhosttyResources = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const Config = @import("Config.zig");
+const samePath = @import("install_paths.zig").samePath;
 const RunStep = std.Build.Step.Run;
 const SharedDeps = @import("SharedDeps.zig");
 
 steps: []*std.Build.Step,
 
-/// The bundled themes' install step on its own, when themes are emitted.
-/// The Windows library build installs just this (see build.zig): the app
-/// ships the themes without the rest of the resources tree.
-themes: ?*std.Build.Step = null,
+/// The resources a Windows build installs, as individual steps.
+///
+/// Windows builds a library rather than an executable, so `install()` (which
+/// only the executable build depends on) never runs there and build.zig has
+/// to depend on the shippable steps one by one. What belongs here is every
+/// resource that is just files: the terminfo source, the shell-integration
+/// scripts and the themes. What does not is everything produced by shelling
+/// out to `tic`, `infotocap`, `mkdir -p` or `cp -R`, none of which a Windows
+/// build host has.
+///
+/// The three are not independent. The terminfo source is what
+/// `os/resourcesdir.zig` detects the tree by, so it gates the other two:
+/// without it the scripts and the themes are installed into a tree nothing
+/// ever looks in. `init` refuses a Windows target that would drop it rather
+/// than leave that to be noticed at runtime.
+///
+/// Only ever populated for a Windows target. The same steps exist for other
+/// targets and install elsewhere (FreeBSD puts terminfo under
+/// `site-terminfo`), so collecting them under this name would be a trap for
+/// whoever reads it next.
+windows: []*std.Build.Step,
 
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !GhosttyResources {
     var steps: std.ArrayList(*std.Build.Step) = .empty;
     errdefer steps.deinit(b.allocator);
-    var themes_step: ?*std.Build.Step = null;
+    var windows_steps: std.ArrayList(*std.Build.Step) = .empty;
+    errdefer windows_steps.deinit(b.allocator);
 
     // This is the exe used to generate some build data.
     const build_data_exe = b.addExecutable(.{
@@ -33,9 +52,10 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
 
     deps.help_strings.addImport(build_data_exe);
 
+    const os_tag = cfg.target.result.os.tag;
+
     // Terminfo
     terminfo: {
-        const os_tag = cfg.target.result.os.tag;
         const terminfo_share_dir = if (os_tag == .freebsd)
             "site-terminfo"
         else
@@ -47,6 +67,24 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const wf = b.addWriteFiles();
         const source = wf.addCopyFile(run.captureStdOut(.{}), "ghostty.terminfo");
 
+        // On Windows this file is not just one more resource: it is the only
+        // thing `os/resourcesdir.zig` detects the tree by, so without it the
+        // shell-integration scripts and the themes install into a tree
+        // libghostty never finds. That is the exact bug this tree was shipped
+        // to fix, and it would come back with no signal but a per-spawn log
+        // line. `-Demit-terminfo=false` is user settable and only defaults
+        // true here, so refuse it rather than let it re-land the bug quietly.
+        if (os_tag == .windows and !cfg.emit_terminfo) {
+            std.log.err(
+                "-Demit-terminfo=false cannot be used for a Windows target: " ++
+                    "share/terminfo/ghostty.terminfo is how the resources " ++
+                    "directory is found, and without it the shell-integration " ++
+                    "scripts and themes are installed but never loaded.",
+                .{},
+            );
+            return error.WindowsRequiresTerminfo;
+        }
+
         if (cfg.emit_terminfo) {
             const source_install = b.addInstallFile(
                 source,
@@ -57,6 +95,12 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             );
 
             try steps.append(b.allocator, &source_install.step);
+            // Only the Windows target's copy of this step belongs in the
+            // Windows set; on other targets the same step installs elsewhere
+            // (FreeBSD puts it under site-terminfo) and nothing would read it.
+            if (os_tag == .windows) {
+                try windows_steps.append(b.allocator, &source_install.step);
+            }
         }
 
         // Windows doesn't have the binaries below.
@@ -129,6 +173,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             .exclude_extensions = &.{".md"},
         });
         try steps.append(b.allocator, &install_step.step);
+        if (os_tag == .windows) {
+            try windows_steps.append(b.allocator, &install_step.step);
+        }
     }
 
     // Themes
@@ -141,7 +188,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
                 .exclude_extensions = &.{".md"},
             });
             try steps.append(b.allocator, &install_step.step);
-            themes_step = &install_step.step;
+            if (os_tag == .windows) {
+                try windows_steps.append(b.allocator, &install_step.step);
+            }
         }
     }
 
@@ -257,7 +306,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         &steps,
     );
 
-    return .{ .steps = steps.items, .themes = themes_step };
+    return .{ .steps = steps.items, .windows = windows_steps.items };
 }
 
 /// Add the resource files needed to make Ghostty a proper
@@ -434,6 +483,94 @@ fn addLinuxAppResources(
         b.path("images/gnome/512.png"),
         "share/icons/hicolor/256x256@2/apps/com.mitchellh.ghostty.png",
     ).step);
+}
+
+/// The install paths a Windows build has to produce, each one the whole path
+/// under the install prefix and not the tail of one.
+///
+/// `share/terminfo/ghostty.terminfo` is the sentinel `os/resourcesdir.zig`
+/// finds the tree by, and `share/ghostty/shell-integration` is what
+/// `termio/shell_integration.zig` opens per shell. The themes are deliberately
+/// not required: `-Demit-themes=false` is a supported build and costs only the
+/// bundled colour schemes.
+///
+/// Writing the whole path is the correction to a guard that could not see the
+/// half it mattered most for. A step's own idea of where it goes is split in
+/// two (`install_dir` plus a path relative to it), and the shell-integration
+/// step carries `share` in the first half. Checking only the second half meant
+/// moving the scripts out of `share` left this list matching, so the build
+/// stayed green while shipping an app with a findable tree and no scripts in
+/// it. `installPath` now composes both halves, and these are composed the same
+/// way before comparison, so the two sides cannot drift apart again.
+const windows_required = [_][]const u8{
+    "share/terminfo/ghostty.terminfo",
+    "share/ghostty/shell-integration",
+};
+
+/// Fail the configure step unless every resource a Windows build has to ship
+/// is both produced and attached to the install step.
+///
+/// This exists because neither half was covered by anything. The install
+/// wiring could be deleted from build.zig, or a member dropped from
+/// `windows`, and the whole suite stayed green while the shipped app went
+/// back to having no resources directory: shell integration off, TERM
+/// generic, and nothing but a per-spawn log line to say so. A unit test
+/// cannot reach this, since it needs a real `std.Build`, so the check runs at
+/// configure time on every Windows build instead, where it cannot be skipped.
+pub fn assertWindowsInstall(self: *const GhosttyResources, b: *std.Build) !void {
+    const install_step = b.getInstallStep();
+
+    for (windows_required) |required| {
+        // Composed the same way the steps are, so the comparison is between
+        // two absolute locations rather than between two path fragments whose
+        // bases might differ.
+        const want = b.getInstallPath(.prefix, required);
+
+        var wired = false;
+        for (self.windows) |step| {
+            const path = installPath(b, step) orelse continue;
+            if (!samePath(path, want)) continue;
+
+            // Present in the set is not enough: it has to be depended on, or
+            // the step is built and never run.
+            for (install_step.dependencies.items) |dep| {
+                if (dep == step) {
+                    wired = true;
+                    break;
+                }
+            }
+            break;
+        }
+
+        if (!wired) {
+            std.log.err(
+                "a Windows build must install {s}, and it is either not " ++
+                    "produced (see GhosttyResources.init) or not attached to " ++
+                    "the install step (see the Windows branch of build.zig). " ++
+                    "Without it the app ships a resources tree it cannot find.",
+                .{required},
+            );
+            return error.WindowsResourcesNotInstalled;
+        }
+    }
+}
+
+/// Where a step installs to, as the absolute path it will write, for the two
+/// step kinds the Windows set is made of. Null for anything else.
+///
+/// Both kinds hold their destination in two parts: an `InstallDir` naming a
+/// base (`.prefix`, `.lib`, `.bin`, `.header` or a `.custom` subdirectory of
+/// the prefix) and a path relative to that base. Reading only the second part
+/// is what made the guard blind: the shell-integration step keeps `share` in
+/// its base, so `ghostty/shell-integration` matched no matter which base it
+/// was under. `b.getInstallPath` is the same call the steps themselves make in
+/// `make`, so this is the location that will actually be written.
+fn installPath(b: *std.Build, step: *std.Build.Step) ?[]const u8 {
+    if (step.cast(std.Build.Step.InstallFile)) |s|
+        return b.getInstallPath(s.dir, s.dest_rel_path);
+    if (step.cast(std.Build.Step.InstallDir)) |s|
+        return b.getInstallPath(s.options.install_dir, s.options.install_subdir);
+    return null;
 }
 
 pub fn install(self: *const GhosttyResources) void {

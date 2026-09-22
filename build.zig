@@ -256,11 +256,17 @@ pub fn build(b: *std.Build) !void {
         if (!config.target.result.os.tag.isDarwin()) {
             lib_shared.installHeader(); // Only need one header
             if (config.target.result.os.tag == .windows) {
-                // The Windows app ships the bundled themes beside its
-                // executable, and only the themes: a full resources tree
-                // would also turn on terminfo and shell integration for
-                // every child (see bundledThemesDir in config/theme.zig).
-                if (resources.themes) |themes| b.getInstallStep().dependOn(themes);
+                // The Windows app ships its resources beside its executable.
+                // The library build never runs `install()`, which only the
+                // executable build depends on, so the shippable steps are
+                // depended on individually (see GhosttyResources.windows).
+                for (resources.windows) |step| b.getInstallStep().dependOn(step);
+
+                // And then prove it. Deleting the line above used to be
+                // invisible: the whole suite stayed green while the shipped
+                // app went back to finding no resources directory at all.
+                try resources.assertWindowsInstall(b);
+
                 lib_shared.install("ghostty.dll");
                 if (lib_shared.implib) |implib| {
                     b.getInstallStep().dependOn(&b.addInstallLibFile(

@@ -18,5 +18,6 @@
 
 test {
     _ = @import("GitVersion.zig");
+    _ = @import("install_paths.zig");
     _ = @import("wasm_patch_growable_table.zig");
 }
