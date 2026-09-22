@@ -561,21 +561,45 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// The protocol's ask goes through the watcher's own Resettle, which is
-    /// what keeps a real deletion moving: every report schedules the next
-    /// delivery through it. A constant ask, the shape a careless refactor
-    /// leaves behind, spends nothing and concludes nothing, so the deletion
-    /// is never confirmed, the count never lowers and every later reload
-    /// declines for the life of the process: the issue #676 lockout,
-    /// restored by a mutation only this assertion sees. The behaviour is
-    /// driven in <c>Config.ConfigVanishProtocolTests</c>; this pins the
-    /// shell to the wiring those tests drive.
+    /// The ask goes through the watcher's own Resettle, which is what keeps
+    /// a real deletion moving: a deleted file raises no further filesystem
+    /// events, so without this nothing schedules the next look.
     /// </summary>
+    /// <remarks>
+    /// This is a LIVENESS pin and not a correctness one, and the difference
+    /// matters enough to say. A constant ask still concludes, because the
+    /// answer is deliberately not consulted: gating on it is what made a
+    /// deletion unprovable with no watcher, which is the default
+    /// (wintty#1155). What a constant loses is the sooner look, so the
+    /// question waits for whatever reload happens to come next. No
+    /// behavioural test can see that difference, which is the reason to
+    /// assert the shape here.
+    /// </remarks>
     [Fact]
     public void The_vanish_ask_goes_through_the_watchers_own_resettle()
     {
         Assert.NotEmpty(ProtocolArgument("ask")
             .Expression.Calls("_watcher?.Resettle"));
+    }
+
+    /// <summary>
+    /// The question is asked about THIS session's count, read at report time
+    /// through the field its one writer owns.
+    /// </summary>
+    /// <remarks>
+    /// A constant here has a session that never had a config file confirming
+    /// the deletion of one. Reading it eagerly is the other half: the service
+    /// is constructed before the first config is ever loaded, so a value
+    /// captured then is zero for the life of the process and no deletion is
+    /// ever confirmed.
+    /// </remarks>
+    [Fact]
+    public void The_question_is_asked_about_the_sessions_own_count()
+    {
+        var lambda = Assert.IsType<ParenthesizedLambdaExpressionSyntax>(
+            ProtocolArgument("sessionDefaultFilesFound").Expression);
+
+        Assert.Equal("_defaultFilesFound", lambda.Body!.ToString());
     }
 
     /// <summary>
