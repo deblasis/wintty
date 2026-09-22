@@ -551,6 +551,11 @@
     directory outlives a build that stopped filling it, and MSBuild does not
     evaluate Exists() against a wildcard at all.
 
+    Deleting any of the copy items above or below (dll, pdb, themes, these
+    two) is guarded separately, by ErrorIfResourcesNotInOutput and
+    ErrorIfResourcesNotInPublish, because no check against zig-out can see
+    an item that stopped existing.
+
     share\terminfo\ghostty.terminfo is a literal path, NOT a wildcard, and the
     difference is load-bearing: MSBuild only globs an Include containing a
     wildcard character, so this item exists whether or not the file does, and
@@ -607,6 +612,110 @@
   <Target Name="ErrorIfNoShellIntegration" BeforeTargets="Build"
           Condition="Exists('..\..\zig-out\lib\ghostty.dll') and !Exists('..\..\zig-out\share\ghostty\shell-integration\powershell\ghostty.ps1')">
     <Error Text="Shell integration missing at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\share\ghostty\shell-integration\powershell\ghostty.ps1')). The scripts are what every shell sources for prompt marks, cwd reporting and command tracking; without them the app starts and silently integrates with nothing. Run 'zig build -Dapp-runtime=none' before 'dotnet build'." />
+  </Target>
+
+  <!--
+    Every check above reads the INPUT, either the zig build graph or zig-out.
+    These two read what the app build actually ships, and they matter most,
+    because the copy items in this file are the only thing that ships the
+    resources tree into the app: nothing else under windows\ references
+    share\ghostty. Delete an item with a complete zig-out staged and every
+    other gate reports clean, including the zig-side configure guard, which
+    only knows what the zig build installs. Not a hypothetical edit: this
+    file is carried by patches across four editions, so a replay dropping
+    one line is the realistic path to it.
+
+    The expected set is globbed from the staged tree at guard time, never
+    from the copy items: the items are the suspect, so they cannot also be
+    the witness. Every staged file must have a copy item that ships it at
+    its installed destination, and no item may ship a destination the
+    staged tree does not hold. Presence alone could not say that: leftover
+    files from an earlier build satisfy an Exists check forever, on every
+    warm output, and IncrementalClean, the only thing that empties them,
+    knows nothing once obj/ is wiped.
+
+    The dll and the themes ride in the same check because deleting their
+    items is the same one-line replay: the app then throws
+    DllNotFoundException at startup or ships a Colors page with no bundled
+    themes, with every gate green.
+
+    Fail-closed on an unstaged tree: with no zig-out there is nothing to
+    compare, and a green exit would mean unchecked. In a full build that
+    line is unreachable, because ErrorIfNoLibghostty (BeforeTargets="Build")
+    fires first; it is there for direct -t: invocation, where no Condition
+    and a skip-shaped Condition differ by exactly this honesty.
+  -->
+  <Target Name="_StageResourcesGuardFacts">
+    <ItemGroup>
+      <!-- One item type per surface, globbed from the staged tree. Separate
+           types because the destination spelling differs per surface, and
+           transforms, not metadata placeholders, are how a destination gets
+           built: %() in an item's metadata cross-batches in-target items,
+           measured, while a transform is per source item by definition.
+           Literal Includes carry an Exists gate because a literal creates
+           the item even when the file is absent; the dll is the exception,
+           its absence owned by the fail-closed precheck in the guards. -->
+      <_ZigOutShellScript Include="..\..\zig-out\share\ghostty\shell-integration\**\*" />
+      <_ZigOutTerminfo Include="..\..\zig-out\share\terminfo\ghostty.terminfo"
+                       Condition="Exists('..\..\zig-out\share\terminfo\ghostty.terminfo')" />
+      <_ZigOutTheme Include="..\..\zig-out\share\ghostty\themes\*" />
+      <_ZigOutDll Include="..\..\zig-out\lib\ghostty.dll" />
+      <_ZigOutPdb Include="..\..\zig-out\lib\ghostty.pdb"
+                  Condition="Exists('..\..\zig-out\lib\ghostty.pdb')" />
+    </ItemGroup>
+    <ItemGroup>
+      <!-- The destinations those files must ship at, spelled exactly the
+           way the copy items' Link metadata spells them. -->
+      <_ExpectedResourceDest Include="@(_ZigOutShellScript->'share\ghostty\shell-integration\%(RecursiveDir)%(Filename)%(Extension)')" />
+      <_ExpectedResourceDest Include="@(_ZigOutTerminfo->'share\terminfo\ghostty.terminfo')" />
+      <_ExpectedResourceDest Include="@(_ZigOutTheme->'share\ghostty\themes\%(Filename)%(Extension)')" />
+      <_ExpectedResourceDest Include="@(_ZigOutDll->'native\ghostty.dll')" />
+      <_ExpectedResourceDest Include="@(_ZigOutPdb->'native\ghostty.pdb')" />
+    </ItemGroup>
+    <ItemGroup>
+      <!-- The None items that copy out of zig-out, reduced to their
+           destinations. Straight from evaluation: an item deleted, narrowed,
+           or with its Link or copy metadata dropped is absent from this
+           list. -->
+      <_ZigOutCopyItem Include="@(None)"
+                       Condition="'%(None.CopyToOutputDirectory)' != '' and $([System.String]::Copy('%(None.Identity)').StartsWith('..\..\zig-out'))" />
+      <_ResourceCopyDest Include="@(_ZigOutCopyItem->'%(Link)')" />
+    </ItemGroup>
+    <ItemGroup>
+      <_StagedWithoutCopyItem Include="@(_ExpectedResourceDest)" />
+      <_StagedWithoutCopyItem Remove="@(_ResourceCopyDest)" />
+      <_CopyItemWithoutStage Include="@(_ResourceCopyDest)" />
+      <_CopyItemWithoutStage Remove="@(_ExpectedResourceDest)" />
+    </ItemGroup>
+  </Target>
+  <Target Name="ErrorIfResourcesNotInOutput" AfterTargets="Build"
+          DependsOnTargets="_StageResourcesGuardFacts">
+    <Error Condition="!Exists('..\..\zig-out\lib\ghostty.dll')"
+           Text="no staged zig-out at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\lib\ghostty.dll')), so this guard compared nothing and refuses to pass unchecked. Run 'zig build -Dapp-runtime=none' before 'dotnet build'." />
+    <Error Condition="'%(_StagedWithoutCopyItem.Identity)' != ''"
+           Text="%(_StagedWithoutCopyItem.Identity) is staged under zig-out but no copy item in Ghostty.csproj would ship it there: the item, its Link or its Exists condition is missing." />
+    <Error Condition="'%(_CopyItemWithoutStage.Identity)' != ''"
+           Text="a copy item would ship %(_CopyItemWithoutStage.Identity), a destination nothing under zig-out holds: its Include or Link is wrong." />
+    <Error Condition="!Exists('$(OutDir)%(_ExpectedResourceDest.Identity)')"
+           Text="%(_ExpectedResourceDest.Identity) did not reach the build output at $([System.IO.Path]::GetFullPath('$(OutDir)%(_ExpectedResourceDest.Identity)')). It is staged and an item ships it, so the copy itself did not run." />
+  </Target>
+  <!--
+    The publish folder is the one that ships, and a no-build publish
+    (`dotnet publish` with the no-build switch) never runs the Build hook
+    above, so the same comparison has to happen on $(PublishDir) too. The
+    staging facts are recomputed rather than shared, because a no-build
+    publish starts from items alone.
+  -->
+  <Target Name="ErrorIfResourcesNotInPublish" AfterTargets="Publish"
+          DependsOnTargets="_StageResourcesGuardFacts">
+    <Error Condition="!Exists('..\..\zig-out\lib\ghostty.dll')"
+           Text="no staged zig-out at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\lib\ghostty.dll')), so this guard compared nothing and refuses to pass unchecked. Run 'zig build -Dapp-runtime=none' before 'dotnet publish'." />
+    <Error Condition="'%(_StagedWithoutCopyItem.Identity)' != ''"
+           Text="%(_StagedWithoutCopyItem.Identity) is staged under zig-out but no copy item in Ghostty.csproj would ship it there: the item, its Link or its Exists condition is missing." />
+    <Error Condition="'%(_CopyItemWithoutStage.Identity)' != ''"
+           Text="a copy item would ship %(_CopyItemWithoutStage.Identity), a destination nothing under zig-out holds: its Include or Link is wrong." />
+    <Error Condition="!Exists('$(PublishDir)%(_ExpectedResourceDest.Identity)')"
+           Text="%(_ExpectedResourceDest.Identity) did not reach the publish folder at $([System.IO.Path]::GetFullPath('$(PublishDir)%(_ExpectedResourceDest.Identity)')). It is staged and an item ships it, so the publish copy did not run." />
   </Target>
 
   <!--
