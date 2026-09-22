@@ -171,9 +171,11 @@ public static class ConfigReloadGate
 
     /// <summary>
     /// Whether a count shrink has outlived the whole shrink confirmation
-    /// budget, which no save in flight can do: each ask waits out a full
-    /// quiet period, and a rename that slow has lost its race with its own
-    /// editor.
+    /// budget, which no ordinary save in flight can do: each ask waits out
+    /// a full quiet period, and a rename that slow has lost its race with
+    /// its own editor. A wedged swap can outstay the budget all the same,
+    /// and is then applied wrongly, transiently, until its settle
+    /// restores the count.
     /// </summary>
     /// <remarks>
     /// So it is a deletion, of a layered file the watcher does not watch,
@@ -215,7 +217,11 @@ public static class ConfigReloadGate
     /// <para>Asking again is what separates the two: the rename completing
     /// the save lands during the asks, settles, reloads and restores the
     /// count. A file still gone after the whole budget has outlived every
-    /// save that could explain it.</para>
+    /// save that could explain it in ordinary disk conditions. The budget
+    /// is a heuristic bound, about a second of continuous absence, not a
+    /// proof: a swap wedged longer than that, by a frozen editor or a
+    /// stalled network rename, is beyond what the asks can tell apart and
+    /// is confirmed wrongly, transiently, until its settle heals.</para>
     ///
     /// <para>A session claiming no config file has nothing to confirm, so
     /// it neither asks nor lowers.</para>
@@ -228,8 +234,12 @@ public static class ConfigReloadGate
 
     /// <summary>
     /// Whether a vanished watched file has outlived its whole confirmation
-    /// budget, which no save in flight can do, so it is a deletion and the
-    /// session should stop claiming to be running on it.
+    /// budget, which no ordinary save in flight can do, so it is a
+    /// deletion and the session should stop claiming to be running on it.
+    /// "Ordinary" is doing work in that sentence: the budget is a
+    /// heuristic bound of continuous absence, about a second, and a swap
+    /// wedged past it is confirmed wrongly, transiently, until its settle
+    /// heals.
     /// </summary>
     public static bool IsPersistentVanish(
         int sessionDefaultFilesFound,
