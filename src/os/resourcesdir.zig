@@ -158,6 +158,21 @@ const resources_climb_max_ancestors = 2;
 /// partial copy, a rollout skew) would otherwise climb straight into a tree
 /// planted there.
 fn resourcesDirFromExe(alloc: Allocator, exe_path: []const u8) !?ResourcesDir {
+    return resourcesDirFromExeBy(alloc, exe_path, ancestorIsProbeable);
+}
+
+/// Same climb with the ancestor probe injected. The probe is the one input no
+/// filesystem fixture can supply honestly: a predicate that refuses a real
+/// directory is what proves the loop consults it, and planting that on the
+/// machine would mean planting directories the real predicate must not
+/// refuse. Deletion of the `probeable` call in the loop leaves every other
+/// test green on a machine without a planted `C:\share`, which is a fact
+/// about the machine; the seam turns that into a fact about the loop.
+fn resourcesDirFromExeBy(
+    alloc: Allocator,
+    exe_path: []const u8,
+    comptime probeable: fn ([]const u8) bool,
+) !?ResourcesDir {
     var exe = exe_path;
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     var climbed: usize = 0;
@@ -177,8 +192,12 @@ fn resourcesDirFromExe(alloc: Allocator, exe_path: []const u8) !?ResourcesDir {
         if (comptime builtin.target.os.tag == .windows) {
             climbed += 1;
             if (climbed > resources_climb_max_ancestors) break;
-            if (std.fs.path.dirname(dir) == null) break;
         }
+
+        // Consulted on every platform, not only Windows: the default predicate
+        // answers true elsewhere, so the call is behaviour-preserving there
+        // and the injected parameter stays live everywhere.
+        if (!probeable(dir)) break;
 
         // On MacOS, we look for the app bundle path.
         if (comptime builtin.target.os.tag.isDarwin()) {
@@ -210,6 +229,28 @@ fn resourcesDirFromExe(alloc: Allocator, exe_path: []const u8) !?ResourcesDir {
     }
 
     return null;
+}
+
+/// Whether the climb is allowed to look for a resources tree under `dir`.
+///
+/// A root is not, on Windows. `C:\` grants Authenticated Users the right to
+/// create folders, so a standard user can plant
+/// `C:\share\terminfo\ghostty.terminfo` and have an installed app adopt a tree
+/// they own. A UNC share root is refused for the same reason: nothing
+/// legitimate puts our tree directly under `\\server\share` either.
+///
+/// A named predicate rather than a line inside the loop, because the test on
+/// that line could not fail when it was removed. It asserted that
+/// `resourcesDirFromExe` finds nothing for `C:\Wintty.exe`, which is true with
+/// the guard deleted too on any machine where `C:\share` does not happen to
+/// exist, so it was a test about the machine. The question is about path
+/// shapes and can be asked directly, so it is.
+fn ancestorIsProbeable(dir: []const u8) bool {
+    if (comptime builtin.target.os.tag != .windows) return true;
+
+    // A path with no parent is a root: `C:\` for a drive, `\\server\share`
+    // for a UNC share.
+    return std.fs.path.dirname(dir) != null;
 }
 
 /// Returns true if a GHOSTTY_RESOURCES_DIR value is usable as the resources
@@ -448,18 +489,72 @@ test "resourcesDirFromExe windows: never adopts a tree at a drive root" {
     const alloc = arena.allocator();
 
     // `C:\` grants Authenticated Users the right to create folders, so
-    // `C:\share` is plantable by a standard user. The climb must stop before
-    // it, whatever is there. Asserting on the real drive root would depend on
-    // what happens to be on this machine, so the claim is made against the
-    // path shape instead: a drive root has no parent, and that is what the
-    // loop now refuses to probe.
-    try testing.expect(std.fs.path.dirname("C:\\") == null);
-    try testing.expect(std.fs.path.dirname("C:\\Program Files") != null);
+    // `C:\share` is plantable by a standard user. The claim is made against
+    // the predicate the loop consults, because the behavioural assertion at
+    // the end of this test passes with the guard deleted too: it depends on
+    // `C:\share` not existing on the machine running the test, which is a
+    // fact about the machine and not about the guard. Delete
+    // `ancestorIsProbeable`'s root check and these three die.
+    try testing.expect(!ancestorIsProbeable("C:\\"));
+    try testing.expect(!ancestorIsProbeable("Z:\\"));
+    try testing.expect(!ancestorIsProbeable("\\\\fileserver\\apps"));
 
-    // An executable sitting directly at a drive root therefore finds nothing,
-    // even though the loop would otherwise have probed that root.
+    try testing.expect(ancestorIsProbeable("C:\\Program Files"));
+    try testing.expect(ancestorIsProbeable("C:\\Program Files\\Wintty"));
+    try testing.expect(ancestorIsProbeable("\\\\fileserver\\apps\\Wintty"));
+
+    // And the behaviour that follows: an executable sitting directly at a
+    // drive root finds nothing, because the one ancestor it has is refused.
     const found = try resourcesDirFromExe(alloc, "C:\\Wintty.exe");
     try testing.expect(found == null);
+}
+
+/// Refuses exactly the directory the seam test plants its tree under. A test
+/// fixture, not policy: it stands in for `C:\ProgramData` or any other
+/// directory a real predicate might refuse.
+fn probeRefusesInstall(dir: []const u8) bool {
+    return !std.mem.endsWith(u8, dir, "install");
+}
+
+fn probeAllowsEverything(dir: []const u8) bool {
+    _ = dir;
+    return true;
+}
+
+test "resourcesDirFromExe windows: the climb consults the probe predicate" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The tree sits at the second ancestor, inside a directory one probe
+    // refuses and the other allows. With the `probeable` call deleted from
+    // the loop the refused run finds this tree; with the call present it
+    // never looks. No fact about the machine running the test can flip
+    // either outcome.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "install/bin");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "install/bin/Wintty.exe", .data = "" });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sentinel_sub = try std.fmt.bufPrint(
+        &buf,
+        "install/" ++ share_dir ++ "/{s}",
+        .{sentinels[0]},
+    );
+    if (std.fs.path.dirname(sentinel_sub)) |parent| try tmp.dir.createDirPath(testing.io, parent);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = sentinel_sub, .data = "" });
+
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    const exe = try std.fmt.allocPrint(alloc, "{s}/install/bin/Wintty.exe", .{root});
+
+    const refused = try resourcesDirFromExeBy(alloc, exe, probeRefusesInstall);
+    try testing.expect(refused == null);
+
+    const allowed = try resourcesDirFromExeBy(alloc, exe, probeAllowsEverything);
+    try testing.expect(allowed != null);
 }
 
 test "resourcesDirFromExe windows: a tree planted above the install is not adopted" {
