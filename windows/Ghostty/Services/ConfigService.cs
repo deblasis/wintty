@@ -56,6 +56,18 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private int _declinedReloadRetries;
     private const int MaxDeclinedReloadRetries = 3;
 
+    // The shrink confirmations' own budget, with the same shape and the
+    // same reset. It is a separate counter because the two ask about
+    // different stretches: this one counts asks about a file that went
+    // away, while _declinedReloadRetries counts asks about a file that
+    // would not open. Sharing one counter let a gave-up unreadable
+    // stretch arrive spent at the first shrink decline, and IsPersistentShrink
+    // read that as the confirmation budget being exhausted, so the shrink
+    // applied as a deletion with no confirming asks at all. UI thread only,
+    // like everything Reload touches. See the decline in Reload.
+    private int _shrinkConfirms;
+    private const int MaxShrinkConfirms = 3;
+
     // How many default config files existed when the config in force was
     // built. Seeded at construction and moved only by a reload that is
     // applied, so a reload can tell "this user configures nothing" from
@@ -577,6 +589,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// exclusively and re-checks the length under that hold (issue
     /// #1138 is the wider version of that window). A save holding the
     /// file refuses the open and the seed waits for the next launch.
+    /// A writer whose handle was already open with a permissive share
+    /// mode can still land content beside the hold; the seed truncates
+    /// first, so what it leaves is itself rather than a hybrid of
+    /// itself and that write's tail.
     /// </summary>
     private void SeedConfigIfEmpty()
     {
@@ -616,6 +632,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 ConfigFilePath, FileMode.Open, FileAccess.Write, FileShare.None))
             {
                 if (stream.Length != 0) return;
+
+                // Truncate, because the write below is at offset 0 and a
+                // writer whose handle was already open with a permissive
+                // share mode can still land content beside this hold: seed
+                // bytes plus that write's tail would be a file neither of
+                // us wrote. Truncating makes the seed's write total; that
+                // racing save's content is lost either way, this way it is
+                // not corrupted.
+                stream.SetLength(0);
 
                 var bytes = System.Text.Encoding.UTF8.GetBytes(seed);
                 stream.Write(bytes, 0, bytes.Length);
@@ -689,7 +714,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         if (ConfigReloadGate.Decide(defaultFiles, defaultFilesFound, _defaultFilesFound)
             == ConfigReloadDecision.Decline)
         {
-            // A shrink that is still a shrink after the whole ask budget is
+            // A shrink that is still a shrink after its whole ask budget is
             // a deletion of a layered file the watcher does not watch, not a
             // save in flight: no rename is coming for it. The config in hand
             // was built from every file that does exist, so applying it is
@@ -699,7 +724,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // removed: the count cannot fall from anywhere else.
             if (!ConfigReloadGate.IsPersistentShrink(
                     defaultFiles, defaultFilesFound, _defaultFilesFound,
-                    _declinedReloadRetries, MaxDeclinedReloadRetries))
+                    _shrinkConfirms, MaxShrinkConfirms))
             {
                 NativeMethods.ConfigFree(newConfig);
                 StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
@@ -713,10 +738,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                             : "it was not there");
 
                 if (ConfigReloadGate.ShouldRetry(
-                        defaultFiles, _declinedReloadRetries, MaxDeclinedReloadRetries)
-                    || ConfigReloadGate.ShouldConfirmShrink(
-                        defaultFiles, defaultFilesFound, _defaultFilesFound,
-                        _declinedReloadRetries, MaxDeclinedReloadRetries))
+                        defaultFiles, _declinedReloadRetries, MaxDeclinedReloadRetries))
                 {
                     // Counted only when the watcher actually scheduled the
                     // delivery. It drops the ask while this service is
@@ -724,6 +746,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                     // under --no-config; counting those would spend the budget
                     // on deliveries that never happened.
                     if (_watcher?.Resettle() == true) _declinedReloadRetries++;
+                }
+                else if (ConfigReloadGate.ShouldConfirmShrink(
+                        defaultFiles, defaultFilesFound, _defaultFilesFound,
+                        _shrinkConfirms, MaxShrinkConfirms))
+                {
+                    // The same scheduled-only count, on the shrink budget:
+                    // asks about a file that went away are not asks about a
+                    // file that would not open, and one counter holding both
+                    // is what let a spent unreadable budget skip these asks.
+                    if (_watcher?.Resettle() == true) _shrinkConfirms++;
                 }
                 else if (defaultFiles == ConfigFilesFound.Unreadable &&
                          _declinedReloadRetries == MaxDeclinedReloadRetries)
@@ -742,8 +774,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 _defaultFilesFound, defaultFilesFound, ConfigFilePath);
         }
 
-        // Any applied reload ends the run: the next lock is a new one.
+        // Any applied reload ends the run: the next lock is a new one and
+        // the next shrink is a fresh question.
         _declinedReloadRetries = 0;
+        _shrinkConfirms = 0;
 
         var oldConfig = _config;
 

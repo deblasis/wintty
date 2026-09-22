@@ -229,10 +229,10 @@ public class ConfigWatcherWiringTests
     /// and an ask for one more look is what tells them apart: the save's
     /// completing rename answers it, a deletion answers nothing. Locked
     /// files ask through ShouldRetry on their own; the shrink asks here,
-    /// beside it, on the same budget.
+    /// beside it, on its own budget.
     /// </summary>
     [Fact]
-    public void A_shrunk_count_decline_asks_for_one_more_look_on_the_same_budget()
+    public void A_shrunk_count_decline_asks_for_one_more_look_on_its_own_budget()
     {
         var (_, guard) = ReloadGuard();
 
@@ -240,19 +240,53 @@ public class ConfigWatcherWiringTests
         Assert.Equal("defaultFiles", ask.Arg(0));
         Assert.Equal("defaultFilesFound", ask.Arg(1));
         Assert.Equal("_defaultFilesFound", ask.Arg(2));
-        Assert.Equal("_declinedReloadRetries", ask.Arg(3));
-        Assert.Equal("MaxDeclinedReloadRetries", ask.Arg(4));
+        Assert.Equal("_shrinkConfirms", ask.Arg(3));
+        Assert.Equal("MaxShrinkConfirms", ask.Arg(4));
 
-        // Beside ShouldRetry, not instead of it: each covers a different
-        // decline, and replacing one with the other would stop asking
-        // about locked files or about deletions outright.
+        // An else-if on the chain ShouldRetry heads, not a condition of its
+        // own and not folded into one: each covers a different decline, and
+        // replacing one with the other would stop asking about locked files
+        // or about deletions outright.
         var askIf = ask.Ancestors().OfType<IfStatementSyntax>().First();
-        var or = Assert.IsType<BinaryExpressionSyntax>(askIf.Condition);
-        Assert.Equal(SyntaxKind.LogicalOrExpression, or.Kind());
+        Assert.Equal(ask.Span, askIf.Condition.Span);
+        var elseClause = Assert.IsType<ElseClauseSyntax>(askIf.Parent);
+        var head = Assert.IsType<IfStatementSyntax>(elseClause.Parent);
         Assert.Equal(
             "ConfigReloadGate.ShouldRetry",
-            Assert.IsType<InvocationExpressionSyntax>(or.Left).Expression.ToString());
-        Assert.Equal(ask.Span, or.Right.Span);
+            Assert.IsType<InvocationExpressionSyntax>(head.Condition).Expression.ToString());
+
+        // The ask spends the shrink budget, not the locked-file one: one
+        // counter carrying both meanings is what let a gave-up unreadable
+        // stretch skip these asks.
+        var spend = Assert.Single(askIf.Statement.DescendantNodes()
+            .OfType<PostfixUnaryExpressionSyntax>()
+            .Where(p => p.OperatorToken.Kind() == SyntaxKind.PlusPlusToken)
+            .Where(p => p.Operand.ToString() == "_shrinkConfirms"));
+        Assert.Empty(askIf.Statement.DescendantNodes()
+            .OfType<PostfixUnaryExpressionSyntax>()
+            .Where(p => p.Operand.ToString() == "_declinedReloadRetries"));
+    }
+
+    /// <summary>
+    /// The shrink confirmations and the locked-file retries are separate
+    /// budgets, because they count different stretches: asks about a file
+    /// that would not open, and asks about a file that went away. The
+    /// deletion guard reads the shrink budget alone, so a spent unreadable
+    /// budget cannot make the first shrink decline apply as a deletion
+    /// with zero confirming asks.
+    /// </summary>
+    [Fact]
+    public void Shrink_confirmations_spend_their_own_budget()
+    {
+        var (_, guard) = ReloadGuard();
+
+        var retry = Assert.Single(guard.Statement.Calls("ConfigReloadGate.ShouldRetry"));
+        Assert.Equal("_declinedReloadRetries", retry.Arg(1));
+        Assert.Equal("MaxDeclinedReloadRetries", retry.Arg(2));
+
+        var heal = Assert.Single(guard.Statement.Calls("ConfigReloadGate.IsPersistentShrink"));
+        Assert.Equal("_shrinkConfirms", heal.Arg(3));
+        Assert.Equal("MaxShrinkConfirms", heal.Arg(4));
     }
 
     /// <summary>
@@ -272,8 +306,8 @@ public class ConfigWatcherWiringTests
         Assert.Equal("defaultFiles", heal.Arg(0));
         Assert.Equal("defaultFilesFound", heal.Arg(1));
         Assert.Equal("_defaultFilesFound", heal.Arg(2));
-        Assert.Equal("_declinedReloadRetries", heal.Arg(3));
-        Assert.Equal("MaxDeclinedReloadRetries", heal.Arg(4));
+        Assert.Equal("_shrinkConfirms", heal.Arg(3));
+        Assert.Equal("MaxShrinkConfirms", heal.Arg(4));
 
         // The decline's cost only runs when the shrink is NOT confirmed
         // as a deletion; the heal is the fall-through past that branch.
@@ -349,19 +383,24 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// The budget ends when a reload applies, not when a decline stretch
+    /// Both budgets end when a reload applies, not when a decline stretch
     /// does. Without the reset, one exhausted budget suppresses the
     /// resettles and the one-per-stretch gave-up warning for every later
     /// stretch of the session.
     /// </summary>
     [Fact]
-    public void An_applied_reload_resets_the_retry_budget()
+    public void An_applied_reload_resets_both_budgets()
     {
-        var reset = Assert.Single(ConfigService().Method("Reload")
-            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "_declinedReloadRetries"));
+        var resets = ConfigService().Method("Reload")
+            .DescendantNodes().OfType<AssignmentExpressionSyntax>();
 
-        Assert.Equal("0", reset.Right.ToString());
+        var retry = Assert.Single(resets
+            .Where(a => a.Left.ToString() == "_declinedReloadRetries"));
+        Assert.Equal("0", retry.Right.ToString());
+
+        var confirms = Assert.Single(resets
+            .Where(a => a.Left.ToString() == "_shrinkConfirms"));
+        Assert.Equal("0", confirms.Right.ToString());
     }
 
     /// <summary>

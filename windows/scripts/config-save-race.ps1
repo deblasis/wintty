@@ -60,6 +60,22 @@
     deletion and fails, whatever the first N iterations landed; a build that
     recovers keeps applying within a few settles.
 
+    -GaveUpFirst (needs -Migrated, not with -DeleteMigratedAt) spends the
+    unreadable budget to its give-up line first: an ordinary write arms the
+    watcher and the config file is immediately held exclusively, so every
+    settle for the hold reads the file as there and unopenable, the
+    indexer-and-antivirus shape. The phase waits for a probe reload to land
+    before it starts, because the watcher only delivers once the app is
+    fully up and a probe that lands before that is lost, and the hold has
+    to outlast the native open's sharing-violation retry ladder (about
+    four seconds a delivery; thirteen attempts with doubling sleeps) before
+    the load reports the file as unreadable at all. Each iteration then takes the ghostty file
+    away for half a second and brings it back: a save gap of the unwatched
+    layer, well under the whole ask budget, and never a deletion. The mode
+    fails if the give-up line never appeared (the setup did not reach the
+    state) or if any reload logs the layered file gone for good, which only
+    a build that skips the confirming asks can do from a pre-spent budget.
+
     Exit code 1 if either bad count is non-zero or too few reloads landed, so
     this can gate a change.
 
@@ -99,6 +115,18 @@ param(
     # 0 (the default) never deletes it.
     [int]$DeleteMigratedAt = 0,
 
+    # Spend the unreadable budget to give-up before the iterations, then
+    # swap the ghostty file away and back each iteration. Needs -Migrated;
+    # not compatible with -DeleteMigratedAt.
+    [switch]$GaveUpFirst,
+
+    # How long the config file is held exclusively in that opening phase.
+    # The native open retries a sharing violation thirteen times with
+    # doubling sleeps (about four seconds) before it fails as unreadable,
+    # and the ask chain needs four such deliveries to reach give-up, so
+    # anything under ~20s cannot spend the budget.
+    [int]$GaveUpHoldMs = 30000,
+
     # How many reloads have to land for the run to count. Every iteration
     # ends with the config file back in place and a wait past the debounce,
     # so one reload per iteration is the shape; half of that is the floor,
@@ -137,6 +165,12 @@ if ($DeleteMigratedAt -gt 0 -and -not $Migrated) {
 }
 if ($DeleteMigratedAt -lt 0 -or $DeleteMigratedAt -ge $Iterations) {
     throw '-DeleteMigratedAt has to sit inside the run: 1..(Iterations-1).'
+}
+if ($GaveUpFirst -and -not $Migrated) {
+    throw '-GaveUpFirst needs -Migrated: the shrink it presents is the older file going away.'
+}
+if ($GaveUpFirst -and $DeleteMigratedAt -gt 0) {
+    throw '-GaveUpFirst and -DeleteMigratedAt are separate modes: one spends then saves, the other deletes.'
 }
 
 if ($MinApplied -lt 0) { $MinApplied = [Math]::Max(2, [int]($Iterations / 2)) }
@@ -196,6 +230,90 @@ try {
     $exited = $null
     $deletedAtUtc = [datetimeoffset]::MinValue
 
+    if ($GaveUpFirst) {
+        # Spend the unreadable budget to its give-up line. The watcher only
+        # delivers once the app is fully up, and a probe that lands before
+        # that is lost. Startup itself applies the staged config, so "a font
+        # line appeared" alone is not proof: wait for the font lines to go
+        # quiet first, then probe, and take a font line strictly newer than
+        # the probe as the only proof of a live watcher.
+        $logsEarly = Join-Path $stateBase 'Wintty\logs'
+        $newestFontStamp = {
+            param($dir)
+            $newest = [datetimeoffset]::MinValue
+            if (-not (Test-Path -LiteralPath $dir)) { return $newest }
+            $lines = Get-ChildItem -LiteralPath $dir -Filter *.log | ForEach-Object {
+                Select-String -LiteralPath $_.FullName -Pattern 'set font size size=(\d+)' -AllMatches
+            }
+            foreach ($line in @($lines)) {
+                if ($null -eq $line) { continue }
+                $stamp = [datetimeoffset]::Parse(
+                    ($line.Line -split ' ')[0],
+                    [System.Globalization.CultureInfo]::InvariantCulture)
+                if ($stamp -gt $newest) { $newest = $stamp }
+            }
+            return $newest
+        }
+        $live = $false
+        $probeNo = 0
+        $quietAt = [datetimeoffset]::MinValue
+        $deadline = [datetimeoffset]::UtcNow.AddSeconds(150)
+        while (-not $live -and [datetimeoffset]::UtcNow -lt $deadline) {
+            $newest = & $newestFontStamp $logsEarly
+            if ($newest -ne $quietAt) {
+                # Still applying something (startup or an earlier probe):
+                # let it finish, then confirm the log stays quiet.
+                $quietAt = $newest
+                Start-Sleep -Milliseconds 6000
+                continue
+            }
+            $probeNo++
+            $wroteAt = [datetimeoffset]::UtcNow
+            [System.IO.File]::WriteAllText($cfg, $body + "# liveness $probeNo`n")
+            Write-Host "  liveness probe $probeNo written at $wroteAt"
+            Start-Sleep -Milliseconds 1200
+            $newest = & $newestFontStamp $logsEarly
+            if ($newest -ge $wroteAt.AddMilliseconds(-300)) { $live = $true; continue }
+            # The probe did not come back. Re-establish quiet before the
+            # next one, in case it lands late.
+            $quietAt = [datetimeoffset]::MinValue
+        }
+        if (-not $live) {
+            Write-Host 'THE WATCHER NEVER DELIVERED A RELOAD: the unreadable state cannot be reached'
+            exit 1
+        }
+        Write-Host "  watcher live after $probeNo probe(s)"
+
+        # Let the probe's apply finish before arming: an apply suppresses
+        # the watcher for its own writes, and the arming write's event would
+        # be dropped if it landed inside that window, leaving nothing to
+        # deliver into the hold.
+        Start-Sleep -Milliseconds 3000
+
+        $armAt = [datetimeoffset]::UtcNow
+        Write-Host "  arming at $armAt"
+
+        # Now arm the debounce with an ordinary write and hold the config
+        # exclusively, so every settle for the length of the hold finds the
+        # file there and unopenable. The asks land one per debounce period
+        # until the budget is spent and the app says so in its log; the run
+        # is judged on that line appearing. The arming write has to close
+        # its handle before the hold opens: a write through the hold raises
+        # no watcher event until the handle is gone, which lands the one
+        # delivery after the hold and reads it fine.
+        [System.IO.File]::WriteAllText($cfg, $body + "# gaveup arm`n")
+        $hold = [System.IO.File]::Open(
+            $cfg, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $holdUntil = [datetimeoffset]::UtcNow.AddMilliseconds($GaveUpHoldMs)
+        Write-Host "  hold open at $([datetimeoffset]::UtcNow) until $holdUntil"
+        try {
+            Start-Sleep -Milliseconds $GaveUpHoldMs
+        }
+        finally { $hold.Dispose() }
+        Write-Host "  hold released at $([datetimeoffset]::UtcNow)"
+    }
+
     for ($i = 1; $i -le $Iterations; $i++) {
         if ($DeleteMigratedAt -gt 0 -and $i -eq $DeleteMigratedAt + 1) {
             # Migration cleanup, mid-run: the watcher watches the wintty
@@ -213,6 +331,27 @@ try {
             # build through the vanished path. A healthy run applies every
             # one of these; a wedged one applies none.
             [System.IO.File]::WriteAllText($cfg, $body + "# probe $i`n")
+            Start-Sleep -Milliseconds 1200
+            $proc.Refresh()
+            if ($proc.HasExited) { $exited = $proc.ExitCode; break }
+            continue
+        }
+
+        if ($GaveUpFirst) {
+            # A save gap of the unwatched layer, not a deletion: the watched
+            # file is written normally, then the ghostty file is taken away
+            # for half a second and put back. The settle inside the gap sees
+            # the count shrink and has to ask; the gap closes well before
+            # the whole ask budget is spent, so a build that asks applies
+            # the full config and never logs the file gone for good.
+            $gcfg = Join-Path $session.Dir 'ghostty\config.ghostty'
+            $gaway = "$gcfg~"
+            [System.IO.File]::WriteAllText($cfg, $body + "# probe $i`n")
+            Start-Sleep -Milliseconds 250
+            if (Test-Path -LiteralPath $gaway) { Remove-Item -LiteralPath $gaway -Force }
+            [System.IO.File]::Move($gcfg, $gaway)
+            Start-Sleep -Milliseconds 500
+            [System.IO.File]::Move($gaway, $gcfg)
             Start-Sleep -Milliseconds 1200
             $proc.Refresh()
             if ($proc.HasExited) { $exited = $proc.ExitCode; break }
@@ -288,9 +427,22 @@ try {
     $wrong = 0
     $migratedHits = 0
     $appliedAfterDeletion = 0
+    $gaveUpSeen = $false
+    $falseDeletions = 0
     $logDir = Join-Path $stateBase 'Wintty\logs'
     if (Test-Path -LiteralPath $logDir) {
         Get-ChildItem -LiteralPath $logDir -Filter *.log | ForEach-Object {
+            if ($GaveUpFirst) {
+                # The two lines the mode turns on: the app admitting the
+                # unreadable budget is spent, and a shrink settled as a
+                # deletion. The log root is this run's alone, so plain
+                # counts need no baseline marker.
+                if (Select-String -LiteralPath $_.FullName -Pattern 'still unreadable after' -Quiet) {
+                    $gaveUpSeen = $true
+                }
+                $falseDeletions += (Select-String -LiteralPath $_.FullName -Pattern 'gone for good' -AllMatches |
+                    Measure-Object).Count
+            }
             Select-String -LiteralPath $_.FullName -Pattern 'set font size size=(\d+)' -AllMatches |
                 ForEach-Object {
                     $stamp = [datetimeoffset]::Parse(
@@ -324,6 +476,10 @@ try {
         $expectedAfter = $Iterations - $DeleteMigratedAt - 8
         Write-Host "applied after the deletion           : $appliedAfterDeletion (need at least $expectedAfter)"
     }
+    if ($GaveUpFirst) {
+        Write-Host "give-up line seen in the log         : $gaveUpSeen"
+        Write-Host "shrinks settled as deletions         : $falseDeletions (need 0)"
+    }
     if ($null -ne $exited) { Write-Host "the app EXITED, code=$exited" }
     Write-Host "root=$($session.Dir)"
 
@@ -335,6 +491,19 @@ try {
         # file the watcher does not watch is deleted. A session wedged on
         # the count shrink applies nothing from the deletion on.
         Write-Host "RELOADS STOPPED AFTER THE DELETION: the session never believed the file was gone"
+        $failed = $true
+    }
+    if ($GaveUpFirst -and -not $gaveUpSeen) {
+        # The discriminating state was never reached, so whatever else the
+        # run counted, it proved nothing about the pre-spent budget.
+        Write-Host "THE UNREADABLE BUDGET WAS NEVER SPENT: the setup did not reach give-up"
+        $failed = $true
+    }
+    if ($GaveUpFirst -and $falseDeletions -gt 0) {
+        # Every ghostty absence in this mode is a save gap under the ask
+        # budget. Settling one as a deletion can only happen when a stale
+        # budget from the unreadable episode is read as spent shrink asks.
+        Write-Host "A SHRINK SETTLED AS A DELETION WITHOUT ITS ASKS: the pre-spent budget skipped the confirmation"
         $failed = $true
     }
     if ($applied -lt $MinApplied) {

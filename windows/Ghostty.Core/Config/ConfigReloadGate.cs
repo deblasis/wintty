@@ -145,9 +145,12 @@ public static class ConfigReloadGate
             && defaultFilesFound < sessionDefaultFilesFound;
 
     /// <summary>
-    /// Whether a count-shrink decline should spend one ask of the retry
-    /// budget on looking again, the same budget <see cref="ShouldRetry"/>
-    /// spends on a locked file.
+    /// Whether a count-shrink decline should spend one ask of the shrink
+    /// confirmation budget on looking again. A budget of its own, not the
+    /// one <see cref="ShouldRetry"/> spends on a locked file: asks about a
+    /// file that went away are not asks about a file that would not open,
+    /// and one counter holding both let a gave-up locked-file stretch
+    /// arrive spent here.
     /// </summary>
     /// <remarks>
     /// The ask is the confirmation protocol for deletions the watcher
@@ -167,9 +170,10 @@ public static class ConfigReloadGate
             && attemptsSoFar < maxAttempts;
 
     /// <summary>
-    /// Whether a count shrink has outlived the whole ask budget, which no
-    /// save in flight can do: each ask waits out a full quiet period, and
-    /// a rename that slow has lost its race with its own editor.
+    /// Whether a count shrink has outlived the whole shrink confirmation
+    /// budget, which no save in flight can do: each ask waits out a full
+    /// quiet period, and a rename that slow has lost its race with its own
+    /// editor.
     /// </summary>
     /// <remarks>
     /// So it is a deletion, of a layered file the watcher does not watch,
