@@ -73,13 +73,13 @@ public static class ConfigReloadGate
     /// <para>A config file deleted on purpose looks exactly like the save
     /// gap here, and is refused the same way, so the session keeps its
     /// settings rather than having them torn down by an act that did not
-    /// ask for it. It does not stay refused: a settle that finds the
-    /// watched file still gone a full debounce period later is a deletion
-    /// and not a save, and the host lowers its count on that, which is
-    /// <c>ConfigFileWatcher</c>'s vanished callback. A layered file the
-    /// watcher does not watch raises no event at all, so the host asks to
-    /// look again instead, and a shrink that is still a shrink after the
-    /// whole ask budget is spent is a deletion the same way: see
+    /// ask for it. It does not stay refused: a delivery that finds the
+    /// watched file gone reports it, and a report that outlives its whole
+    /// ask budget is a deletion, on which the host lowers its count. One
+    /// report is not, because an ordinary save produces one: see
+    /// <see cref="ShouldConfirmVanish"/>. A layered file the watcher does
+    /// not watch raises no event at all, and a shrink still a shrink after
+    /// its own budget is a deletion the same way: see
     /// <see cref="IsPersistentShrink"/>.</para>
     /// </remarks>
     public static ConfigReloadDecision Decide(
@@ -134,8 +134,8 @@ public static class ConfigReloadGate
     /// Either a save is mid swap, or a file is gone for good, and the load
     /// cannot tell those apart; only what happens next can. <c>Absent</c> is
     /// deliberately not one: the watched file going missing is the vanished
-    /// callback's case, decided on a whole quiet period of the file being
-    /// gone rather than on a count.
+    /// callback's case, decided on its own budget of asks rather than on a
+    /// count.
     /// </remarks>
     public static bool IsCountShrink(
         ConfigFilesFound found,

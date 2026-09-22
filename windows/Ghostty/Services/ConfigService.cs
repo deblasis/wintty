@@ -75,10 +75,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     // never sees. A deletion can present as both, and sharing a counter
     // would let one stretch arrive spent at the other's first observation
     // and confirm it with no asks of its own, which is exactly what sharing
-    // cost between the other two. UI thread only, like everything the
-    // watcher's delivery reaches. See OnConfigFileVanished.
-    private int _vanishConfirms;
-    private const int MaxVanishConfirms = 3;
+    // cost between the other two.
+    //
+    // It is an object from Ghostty.Core rather than an int and a const here
+    // because nothing executes this file: Ghostty.Tests holds no reference
+    // to the shell project, so every test about this class reads the source
+    // with Roslyn and asserts on its shape. A budget of zero restores the
+    // #1146 defect exactly, and no source-shape test can see that. Over
+    // there a test drives it. UI thread only, like everything the watcher's
+    // delivery reaches. See OnConfigFileVanished.
+    private readonly ConfigVanishConfirmer _vanishConfirmer = new();
 
     // How many default config files existed when the config in force was
     // built. Seeded at construction and moved only by a reload that is
@@ -787,13 +793,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         }
 
         // Any applied reload ends the run: the next lock is a new one and
-        // the next shrink is a fresh question. The vanish budget resets here
-        // too, and this is what ends a confirmation that a save answered:
-        // the rename completing it settles, the delivery finds the file,
-        // this reload applies, and the asks stop with nothing lowered.
+        // the next shrink is a fresh question. The vanish budget is not
+        // reset here but in OnConfigFileSettled, because the evidence that
+        // answers a vanish is the file being present, and that is seen a
+        // step earlier than this.
         _declinedReloadRetries = 0;
         _shrinkConfirms = 0;
-        _vanishConfirms = 0;
 
         var oldConfig = _config;
 
@@ -2304,13 +2309,25 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private void OnConfigFileSettled()
     {
         if (_shuttingDown) return;
+
+        // The file is there, which is the evidence that answers an open
+        // vanish question, so the asks stop here rather than on the applied
+        // reload below. Those are not the same moment: a file that comes
+        // back and will not open reaches this line and never reaches an
+        // applied reload, and leaving the budget spent would have the next
+        // ordinary save believed on one observation, which is #1146 through
+        // a stale budget.
+        _vanishConfirmer.Reset();
+
         Reload();
     }
 
     /// <summary>
-    /// The config file has been gone for a whole quiet period, which is a
-    /// deletion and not a save in flight. Nothing is rebuilt and nothing is
-    /// pushed: the running config stays in force, which is what a deletion
+    /// A delivery found the config file gone. That is a report, not a
+    /// verdict: an ordinary atomic save produces one. It is confirmed by
+    /// asking again, and only a report that outlives the whole budget is
+    /// taken as a deletion. Nothing is rebuilt and nothing is pushed even
+    /// then: the running config stays in force, which is what a deletion
     /// deserves. All that changes is what the next reload compares against.
     /// </summary>
     /// <remarks>
@@ -2344,24 +2361,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         if (_shuttingDown) return;
 
-        if (ConfigReloadGate.ShouldConfirmVanish(
-                _defaultFilesFound, _vanishConfirms, MaxVanishConfirms))
-        {
-            // Scheduled-only, as everywhere else this budget is spent: an
-            // ask the watcher dropped was never put, and counting it would
-            // confirm a deletion out of silence.
-            if (_watcher?.Resettle() == true) _vanishConfirms++;
-            return;
-        }
+        var action = _vanishConfirmer.Observe(
+            _defaultFilesFound,
+            () => _watcher?.Resettle() == true);
 
-        if (!ConfigReloadGate.IsPersistentVanish(
-                _defaultFilesFound, _vanishConfirms, MaxVanishConfirms))
+        if (action == ConfigVanishAction.Accept)
         {
-            return;
+            StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
+            RecordDefaultFiles(0);
         }
-
-        StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
-        RecordDefaultFiles(0);
     }
 
     /// <summary>

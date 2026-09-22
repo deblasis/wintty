@@ -4650,6 +4650,20 @@ fn cliDisablesDefaultFiles(
 
     var disabled = false;
     while (iter.next()) |arg| {
+        // `-e` hands the rest of the line to the child command, and
+        // `loadCliArgs` stops there too: `parseManuallyHook` consumes
+        // everything after it as the command to run. Reading past it makes
+        // this disagree with the load it exists to describe, in both
+        // directions. A `=false` after `-e` is the child's argument and
+        // configures nothing here, so continuing would suppress the starter
+        // file for a run that never disabled anything; and taking a later
+        // value as the answer would let one after `-e` overturn a real
+        // `=false` before it, which writes the template into a run whose
+        // configuration libghostty has already discarded. That second one
+        // is issue #676 again, and it is the reason to break rather than
+        // merely to skip.
+        if (std.mem.eql(u8, arg, "-e")) break;
+
         // A bare `--config-default-files` carries no `=` and means true,
         // so it is not a disable and startsWith skips it here.
         if (!std.mem.startsWith(u8, arg, key)) continue;
@@ -4807,6 +4821,42 @@ test "cliDisablesDefaultFiles ignores what parseBool refuses, and the last one d
     try testing.expect(cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
         "wintty",
         "--config-default-files=true",
+        "--config-default-files=0",
+    })));
+}
+
+test "cliDisablesDefaultFiles stops at -e, where loadCliArgs stops" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Everything after `-e` is the child command's, and `loadCliArgs` never
+    // reads it: `parseManuallyHook` takes the rest of the line. Reading past
+    // it makes this disagree with the load it describes.
+
+    // The one that writes the template into a run whose configuration was
+    // discarded, which is issue #676 again. Before the `-e` break, the
+    // `=true` meant for the child overturned the real `=false`, this
+    // answered "not disabled", and the starter file was written.
+    try testing.expect(cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=false",
+        "-e",
+        "mytool",
+        "--config-default-files=true",
+    })));
+
+    // And the other direction: a child's flag is not this launch's, so it
+    // must not suppress a starter file the run is entitled to.
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "-e",
+        "mytool",
+        "--config-default-files=false",
+    })));
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "-e",
+        "mytool",
         "--config-default-files=0",
     })));
 }

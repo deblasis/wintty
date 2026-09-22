@@ -168,8 +168,8 @@ public class ConfigReloadGateTests
     /// completing rename answers it, so a shrink worth asking about stops
     /// being asked about the moment the budget is spent. Only a Loaded
     /// count takes it; an Unreadable one asks through ShouldRetry, and an
-    /// Absent one is the vanished callback's case, decided on a whole
-    /// quiet period of the watched file being gone.
+    /// Absent one is the vanished callback's case, decided on its own
+    /// budget of asks.
     /// </summary>
     [Theory]
     [InlineData(ConfigFilesFound.Loaded, 1, 2, 0, 3, true)]

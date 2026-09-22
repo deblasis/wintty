@@ -487,30 +487,64 @@ public class ConfigWatcherWiringTests
     /// side of a confirmation, never on the report itself.
     /// </summary>
     /// <remarks>
-    /// The rule is <c>ConfigReloadGateTests</c>' and the proof that the
-    /// report fires mid save is
-    /// <c>ConfigFileWatcherTests.The_file_check_runs_in_the_delivery_not_on_the_timer</c>.
-    /// What a wiring test adds is that this handler consults the gate
-    /// rather than keeping a rule of its own, spends the budget only on an
-    /// ask the watcher took, and reaches the one call that lowers the count
-    /// only past the conclusion (issue #1146).
+    /// <para>Read what this can and cannot say. Nothing executes this file:
+    /// Ghostty.Tests holds no reference to the shell project, so every
+    /// assertion here is over source read with Roslyn, and source ORDER is
+    /// not control flow. The budget and the counting live behind
+    /// <c>ConfigVanishConfirmer</c> exactly because a test of this kind
+    /// could not see them set wrong: a budget of zero restores the defect
+    /// and passes everything here. <c>ConfigVanishConfirmerTests</c> drives
+    /// the decision. This only says the handler delegates to it and acts on
+    /// nothing but its answer.</para>
+    ///
+    /// <para>The proof that the report fires mid save is
+    /// <c>ConfigFileWatcherTests.The_file_check_runs_in_the_delivery_not_on_the_timer</c>
+    /// (issue #1146).</para>
     /// </remarks>
     [Fact]
     public void A_vanished_config_file_is_confirmed_before_the_count_moves()
     {
         var vanished = ConfigService().Method("OnConfigFileVanished");
 
-        var ask = Assert.Single(vanished.Calls("ConfigReloadGate.ShouldConfirmVanish"));
-        var askGuard = ask.Ancestors().OfType<IfStatementSyntax>().First();
-        Assert.NotEmpty(askGuard.Statement.Calls("_watcher?.Resettle"));
+        // The decision is asked for rather than reimplemented here.
+        Assert.Single(vanished.Calls("_vanishConfirmer.Observe"));
 
-        var conclude = Assert.Single(vanished.Calls("ConfigReloadGate.IsPersistentVanish"));
+        // And the count moves only on Accept. Any other reading of that
+        // answer is a handler that lowers the count on a bare report.
         var record = Assert.Single(vanished.Calls("RecordDefaultFiles"));
-
-        // Both stand between the report and the count moving.
+        var guard = record.Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
         Assert.True(
-            ask.SpanStart < record.SpanStart && conclude.SpanStart < record.SpanStart,
-            "the count is lowered before the vanish is confirmed");
+            guard is not null && guard.Condition.ToString().Contains(
+                "ConfigVanishAction.Accept", System.StringComparison.Ordinal),
+            "the count must move only when the confirmer accepts the deletion");
+    }
+
+    /// <summary>
+    /// The budget is restored where the file is seen present, which is the
+    /// delivery that settles, not the reload that may follow it.
+    /// </summary>
+    /// <remarks>
+    /// Those are not the same moment: a file that comes back and will not
+    /// open reaches the settle and never reaches an applied reload, and a
+    /// budget left spent there has the next ordinary save believed on one
+    /// observation, which is issue #1146 through a stale budget.
+    ///
+    /// Shape only, and weaker than it looks. Deleting the call this asserts
+    /// for is caught by nothing else: <c>ConfigVanishConfirmerTests</c>
+    /// proves Reset works, and no test executes the caller, so this
+    /// assertion is the whole guard on the call happening at all. Measured:
+    /// commenting the call out leaves the rest of the suite green.
+    /// </remarks>
+    [Fact]
+    public void The_vanish_budget_is_restored_where_the_file_is_seen_present()
+    {
+        var source = ConfigService();
+
+        Assert.Single(source.Method("OnConfigFileSettled").Calls("_vanishConfirmer.Reset"));
+
+        // And not moved back onto the applied reload, which is the position
+        // that leaves the gap above.
+        Assert.Empty(source.Method("Reload").Calls("_vanishConfirmer.Reset"));
     }
 
     /// <summary>
