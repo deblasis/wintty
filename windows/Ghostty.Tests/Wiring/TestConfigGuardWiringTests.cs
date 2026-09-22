@@ -220,6 +220,21 @@ public class TestConfigGuardWiringTests
             "the guard must run before the write it guards");
     }
 
+    // This test and Seed_Rechecks_The_Length_Under_The_Hold below pin the
+    // SHAPE of the seed write, not its behaviour. They kill the two obvious
+    // reversions, measured, but they would also pass over a rewrite that
+    // kept the shape and lost the guarantee, and they break against a
+    // rewrite that keeps the guarantee and changes the shape. Behavioural
+    // versions would be better and want the decision extracted into
+    // Ghostty.Core, where a test can drive it against a real file.
+    //
+    // If you go to write those, the obvious test fails for a reason that has
+    // nothing to do with the code: File.ReadAllText opens with
+    // FileShare.Read, which does not permit the ReadWrite access a competing
+    // handle you opened in the test already holds, so the sharing rule trips
+    // on YOUR READ rather than on the seed. Read back through a FileStream
+    // opened with FileShare.ReadWrite instead. A test that fails for the
+    // wrong reason is worse than no test, because it looks like evidence.
     [Fact]
     public void Seed_Takes_The_File_Exclusively()
     {
@@ -262,6 +277,15 @@ public class TestConfigGuardWiringTests
                 && i.Statement.DescendantNodesAndSelf()
                     .OfType<ReturnStatementSyntax>().Any());
         Assert.NotNull(recheck);
+
+        // And it bails on NON-empty, which is the whole direction of it.
+        // Reading the stream and returning is not the property; returning on
+        // the wrong side of zero is a one-character edit that leaves every
+        // other assertion here true and makes the seed skip genuinely empty
+        // files and TRUNCATE a config that has the user's settings in it, to
+        // write the starter header over them. That is #676's corruption
+        // shape reached from startup, and nothing else in the suite sees it.
+        Assert.Equal("stream.Length != 0", recheck!.Condition.ToString());
 
         var bytes = hold.Statement.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()

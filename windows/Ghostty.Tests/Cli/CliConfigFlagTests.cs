@@ -85,6 +85,47 @@ public class CliConfigFlagTests
         Assert.False(result.NoConfig);
     }
 
+    // Every value libghostty reads as false, not just the documented one.
+    // cli.args.parseBool takes all four, so all four discard the default
+    // files on that side. Matching only `false` here left the other three
+    // with libghostty ignoring the config file while this shell went on
+    // resolving, creating, seeding and watching it (issue #1147).
+    [Theory]
+    [InlineData(@"wintty.exe --config-default-files=false")]
+    [InlineData(@"wintty.exe --config-default-files=0")]
+    [InlineData(@"wintty.exe --config-default-files=f")]
+    [InlineData(@"wintty.exe --config-default-files=F")]
+    public void RecognizesEveryValueLibghosttyReadsAsFalse(string commandLine)
+    {
+        var result = CliAliases.RewriteConfigFlags(commandLine);
+        Assert.Equal(commandLine, result.CommandLine);
+        Assert.True(result.NoConfig);
+    }
+
+    // And the four it reads as true are launches that asked for their
+    // default files, so they are not the flag.
+    [Theory]
+    [InlineData(@"wintty.exe --config-default-files=true")]
+    [InlineData(@"wintty.exe --config-default-files=1")]
+    [InlineData(@"wintty.exe --config-default-files=t")]
+    [InlineData(@"wintty.exe --config-default-files=T")]
+    public void DoesNotSeeNoConfigInAValueLibghosttyReadsAsTrue(string commandLine)
+    {
+        var result = CliAliases.RewriteConfigFlags(commandLine);
+        Assert.False(result.NoConfig);
+    }
+
+    // The last occurrence decides, matching how a repeated scalar key
+    // resolves on the libghostty side.
+    [Theory]
+    [InlineData(@"wintty.exe --config-default-files=false --config-default-files=true", false)]
+    [InlineData(@"wintty.exe --config-default-files=true --config-default-files=0", true)]
+    public void TheLastSpellingOfTheKeyDecides(string commandLine, bool expected)
+    {
+        var result = CliAliases.RewriteConfigFlags(commandLine);
+        Assert.Equal(expected, result.NoConfig);
+    }
+
     [Theory]
     // The documented form.
     [InlineData(@"wintty.exe --config-file=C:\cfg\a.wintty")]

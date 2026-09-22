@@ -4621,6 +4621,19 @@ fn createDefaultFileFrom(
 /// default files must not create one where none existed: the template
 /// write was how a `--no-config` run still left a config file behind on
 /// a fresh root.
+///
+/// The VALUE is parsed rather than compared, because the question this
+/// answers is "did `loadCliArgs` throw the default files away", and that
+/// one goes through `cli.args.parseBool`, which reads `0`, `f` and `F` as
+/// false as readily as `false`. Comparing the documented spelling alone
+/// left the other three discarding the user's configuration while this
+/// still called the run a first run and wrote it a starter file.
+///
+/// The last occurrence decides, the way a repeated scalar key does
+/// everywhere else, and a value `parseBool` refuses is not a disable at
+/// all: `loadCliArgs` reports that as a diagnostic and the default files
+/// stay on.
+///
 /// `process_args` rather than `global.args()` read in here: under
 /// `builtin.is_test` that one is always empty, so a test could not tell
 /// this function working from this function deleted.
@@ -4628,14 +4641,36 @@ fn cliDisablesDefaultFiles(
     alloc_gpa: Allocator,
     process_args: std.process.Args,
 ) bool {
+    const key = "--config-default-files=";
+
     // The process argv is wide on Windows; the shared iterator decodes it,
     // the same way loadCliArgs reads the flags that end up here.
     var iter = cli.args.argsIterator(alloc_gpa, process_args) catch return false;
     defer iter.deinit();
+
+    var disabled = false;
     while (iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config-default-files=false")) return true;
+        // `-e` hands the rest of the line to the child command, and
+        // `loadCliArgs` stops there too: `parseManuallyHook` consumes
+        // everything after it as the command to run. Reading past it makes
+        // this disagree with the load it exists to describe, in both
+        // directions. A `=false` after `-e` is the child's argument and
+        // configures nothing here, so continuing would suppress the starter
+        // file for a run that never disabled anything; and taking a later
+        // value as the answer would let one after `-e` overturn a real
+        // `=false` before it, which writes the template into a run whose
+        // configuration libghostty has already discarded. That second one
+        // is issue #676 again, and it is the reason to break rather than
+        // merely to skip.
+        if (std.mem.eql(u8, arg, "-e")) break;
+
+        // A bare `--config-default-files` carries no `=` and means true,
+        // so it is not a disable and startsWith skips it here.
+        if (!std.mem.startsWith(u8, arg, key)) continue;
+        const on = cli.args.parseBool(arg[key.len..]) catch continue;
+        disabled = !on;
     }
-    return false;
+    return disabled;
 }
 
 /// A `std.process.Args` carrying `argv`, for a test that needs a command
@@ -4713,13 +4748,145 @@ test "cliDisablesDefaultFiles sees the flag that turns the default files off" {
         "--config-default-files=true",
     })));
 
-    // Only the exact spelling. CliAliases rewrites `--no-config` into the
-    // line above before this is reached, so seeing the user's spelling here
-    // would mean the rewrite never ran.
+    // The Wintty spelling is not this function's business. CliAliases
+    // rewrites `--no-config` into the key above before this is reached, so
+    // seeing the user's spelling here would mean the rewrite never ran.
     try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
         "wintty",
         "--no-config",
     })));
+}
+
+test "cliDisablesDefaultFiles reads every value loadCliArgs reads as false" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // `cli.args.parseBool` takes all four of these, so all four discard the
+    // user's configuration. Matching only the documented spelling left the
+    // other three being handed a starter config file on a fresh root by a
+    // run that had just thrown its configuration away.
+    for ([_][:0]const u8{ "false", "0", "f", "F" }) |value| {
+        const arg = try std.fmt.allocPrintSentinel(
+            alloc,
+            "--config-default-files={s}",
+            .{value},
+            0,
+        );
+        defer alloc.free(arg);
+        try testing.expect(cliDisablesDefaultFilesArgv(alloc, &.{ "wintty", arg }));
+    }
+
+    // And the four it reads as true are not disables.
+    for ([_][:0]const u8{ "true", "1", "t", "T" }) |value| {
+        const arg = try std.fmt.allocPrintSentinel(
+            alloc,
+            "--config-default-files={s}",
+            .{value},
+            0,
+        );
+        defer alloc.free(arg);
+        try testing.expect(!cliDisablesDefaultFilesArgv(alloc, &.{ "wintty", arg }));
+    }
+}
+
+test "cliDisablesDefaultFiles ignores what parseBool refuses, and the last one decides" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A value parseBool refuses is not a disable: loadCliArgs reports it as
+    // a diagnostic and the default files stay on, so a first run here still
+    // gets its starter file.
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=false-thing",
+    })));
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=",
+    })));
+
+    // Bare, with no value, means true and so is not a disable.
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files",
+    })));
+
+    // Repeated, the last occurrence decides, the way a repeated scalar key
+    // does everywhere else.
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=false",
+        "--config-default-files=true",
+    })));
+    try testing.expect(cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=true",
+        "--config-default-files=0",
+    })));
+}
+
+test "cliDisablesDefaultFiles stops at -e, where loadCliArgs stops" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Everything after `-e` is the child command's, and `loadCliArgs` never
+    // reads it: `parseManuallyHook` takes the rest of the line. Reading past
+    // it makes this disagree with the load it describes.
+
+    // The one that writes the template into a run whose configuration was
+    // discarded, which is issue #676 again. Before the `-e` break, the
+    // `=true` meant for the child overturned the real `=false`, this
+    // answered "not disabled", and the starter file was written.
+    try testing.expect(cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=false",
+        "-e",
+        "mytool",
+        "--config-default-files=true",
+    })));
+
+    // And the other direction: a child's flag is not this launch's, so it
+    // must not suppress a starter file the run is entitled to.
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "-e",
+        "mytool",
+        "--config-default-files=false",
+    })));
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "-e",
+        "mytool",
+        "--config-default-files=0",
+    })));
+}
+
+/// `cliDisablesDefaultFiles` over an argv built at runtime.
+///
+/// `testProcessArgs` needs its argv comptime, because the Windows half has
+/// to fold it into a string literal for the WTF-16 conversion. A test
+/// looping over values cannot supply that, so this builds the same thing
+/// the long way: it is the one caller that pays an allocation for it.
+fn cliDisablesDefaultFilesArgv(
+    alloc: Allocator,
+    argv: []const [:0]const u8,
+) bool {
+    if (comptime builtin.os.tag == .windows) {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(alloc);
+        for (argv, 0..) |arg, i| {
+            if (i > 0) line.append(alloc, ' ') catch return false;
+            line.appendSlice(alloc, arg) catch return false;
+        }
+        const wide = std.unicode.wtf8ToWtf16LeAllocZ(alloc, line.items) catch return false;
+        defer alloc.free(wide);
+        return cliDisablesDefaultFiles(alloc, .{ .vector = wide });
+    }
+
+    const ptrs = alloc.alloc([*:0]const u8, argv.len) catch return false;
+    defer alloc.free(ptrs);
+    for (argv, 0..) |arg, i| ptrs[i] = arg.ptr;
+    return cliDisablesDefaultFiles(alloc, .{ .vector = ptrs });
 }
 
 /// Absolute path of `tmp` itself.
@@ -4882,6 +5049,62 @@ test "loadDefaultFiles creates nothing when no config file exists" {
     const created = try testTmpPath(alloc, &tmp, "wintty" ++ std.fs.path.sep_str ++ "config.wintty");
     defer alloc.free(created);
     try testExpectNoFile(created);
+}
+
+test "loadOrCreateDefault writes the starter file on a first run and not on a second" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // macOS writes into Application Support, which this root does not move.
+    if (comptime builtin.os.tag == .macos) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try testTmpRoot(alloc, &tmp);
+    defer alloc.free(root);
+
+    const env = try TestXdgConfigHome.set(alloc, root);
+    defer env.restore(alloc);
+
+    const sub_path = "wintty" ++ std.fs.path.sep_str ++ "config.wintty";
+
+    // The join nothing else covers. `loadDefaultFiles` is tested to create
+    // nothing and `createDefaultFile` is tested on its own, and deleting
+    // the create from between them leaves both of those green while GTK and
+    // every CLI action that builds a config stop giving a first run a
+    // config file at all. This is the only test that fails for that.
+    {
+        var cfg = try Config.loadOrCreateDefault(alloc);
+        defer cfg.deinit();
+    }
+
+    const first = try tmp.dir.readFileAlloc(testing.io, sub_path, alloc, .limited(64 * 1024));
+    defer alloc.free(first);
+    try testing.expect(std.mem.indexOf(u8, first, "This is the configuration file") != null);
+
+    // And the other half of the same call: a run that finds a config file
+    // reads it and leaves it byte for byte alone.
+    //
+    // What holds that is `writeConfigTemplate`'s exclusive open, not the
+    // `.absent` check above it. Making this create unconditionally leaves
+    // this test green, measured, so the check is a short-circuit and the
+    // exclusivity is the guarantee. Worth pinning here anyway: the
+    // exclusivity is covered on `createDefaultFile` directly, and this is
+    // the only place it is covered on the path GTK and the CLI actions
+    // actually take.
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = sub_path,
+        .data = "font-size = 20\n",
+    });
+    {
+        var cfg = try Config.loadOrCreateDefault(alloc);
+        defer cfg.deinit();
+        try testing.expectEqual(20, cfg.@"font-size");
+    }
+
+    const after = try tmp.dir.readFileAlloc(testing.io, sub_path, alloc, .limited(64 * 1024));
+    defer alloc.free(after);
+    try testing.expectEqualStrings("font-size = 20\n", after);
 }
 
 test "loadDefaultFiles reads the config file that is there" {

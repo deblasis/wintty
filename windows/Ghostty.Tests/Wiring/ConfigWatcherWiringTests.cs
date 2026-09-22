@@ -452,6 +452,20 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
+    /// The one <c>ConfigVanishProtocol</c> construction in the service: the
+    /// wiring whose behaviour is driven, against a real watcher, in
+    /// <c>Config.ConfigVanishProtocolTests</c>.
+    /// </summary>
+    private static ObjectCreationExpressionSyntax ProtocolCreation() =>
+        Assert.Single(Creations(ConfigService().Root)
+            .Where(o => o.Type.ToString() == "ConfigVanishProtocol"));
+
+    /// <summary>One named argument of that construction.</summary>
+    private static ArgumentSyntax ProtocolArgument(string name) =>
+        ProtocolCreation().ArgumentList!.Arguments
+            .Single(a => a.NameColon?.Name.Identifier.ValueText == name);
+
+    /// <summary>
     /// A config file that stays gone is reported by the watcher, and the
     /// session stops claiming to be running on one.
     /// </summary>
@@ -472,13 +486,133 @@ public class ConfigWatcherWiringTests
             .Single(a => a.NameColon?.Name.Identifier.ValueText == "onVanished");
         Assert.Equal("OnConfigFileVanished", onVanished.Expression.ToString());
 
-        var vanished = source.Method("OnConfigFileVanished");
-        Assert.Equal("0", Assert.Single(vanished.Calls("RecordDefaultFiles")).Arg(0));
+        // The count moves inside the accept the protocol reports, wired at
+        // construction and only there.
+        var onAccept = ProtocolArgument("onAccept");
+        Assert.Equal("0", Assert.Single(onAccept.Calls("RecordDefaultFiles")).Arg(0));
 
         // Nothing is rebuilt and nothing is pushed: a deletion keeps the
         // running config, it does not replace it with pure defaults.
+        var vanished = source.Method("OnConfigFileVanished");
         Assert.Empty(vanished.Calls("Reload"));
         Assert.Empty(vanished.Calls("NativeMethods.AppUpdateConfig"));
+    }
+
+    /// <summary>
+    /// And it asks before it believes. One vanished report is what an
+    /// ordinary atomic save produces, so the count moves only on the far
+    /// side of a confirmation, never on the report itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>Read what this can and cannot say. Nothing executes this file:
+    /// Ghostty.Tests holds no reference to the shell project, so every
+    /// assertion here is over source read with Roslyn, and source ORDER is
+    /// not control flow. The decision, the asks and the accept live behind
+    /// <c>ConfigVanishProtocol</c> exactly because a test of this kind
+    /// could not see them set wrong: a budget of zero restores the defect
+    /// and passes everything here. <c>ConfigVanishProtocolTests</c> drives
+    /// the wiring against a real watcher. This only says the handler
+    /// delegates to it and that nothing beside the delegation acts.</para>
+    ///
+    /// <para>The proof that the report fires mid save is
+    /// <c>ConfigFileWatcherTests.The_file_check_runs_in_the_delivery_not_on_the_timer</c>
+    /// (issue #1146).</para>
+    /// </remarks>
+    [Fact]
+    public void A_vanished_config_file_is_confirmed_before_the_count_moves()
+    {
+        var source = ConfigService();
+
+        // The decision is asked for rather than reimplemented here, and the
+        // handler keeps nothing of its own: the count, the log and every
+        // other effect live in the accept wired at construction.
+        var vanished = source.Method("OnConfigFileVanished");
+        Assert.Single(vanished.Calls("_vanishProtocol.Vanished"));
+        Assert.Empty(vanished.Calls("RecordDefaultFiles"));
+
+        var onAccept = ProtocolArgument("onAccept");
+        Assert.Equal(
+            "0", Assert.Single(onAccept.Calls("RecordDefaultFiles")).Arg(0));
+        Assert.NotEmpty(onAccept.Calls(
+            "StaticLoggers.ConfigService.LogConfigFileVanished"));
+    }
+
+    /// <summary>
+    /// The protocol's ask goes through the watcher's own Resettle, which is
+    /// what keeps a real deletion moving: every report schedules the next
+    /// delivery through it. A constant ask, the shape a careless refactor
+    /// leaves behind, spends nothing and concludes nothing, so the deletion
+    /// is never confirmed, the count never lowers and every later reload
+    /// declines for the life of the process: the issue #676 lockout,
+    /// restored by a mutation only this assertion sees. The behaviour is
+    /// driven in <c>Config.ConfigVanishProtocolTests</c>; this pins the
+    /// shell to the wiring those tests drive.
+    /// </summary>
+    [Fact]
+    public void The_vanish_ask_goes_through_the_watchers_own_resettle()
+    {
+        Assert.NotEmpty(ProtocolArgument("ask")
+            .Expression.Calls("_watcher?.Resettle"));
+    }
+
+    /// <summary>
+    /// A reload that finds no config file carries the vanish question
+    /// forward, so a dropped ask is not the end of it.
+    /// </summary>
+    /// <remarks>
+    /// On the watcher's path a dropped ask is terminal: a deleted file
+    /// raises no further filesystem events, so the only thing that could
+    /// revisit the question is the ask that was just dropped. A shrink
+    /// cannot heal it either, because <c>IsCountShrink</c> takes only
+    /// <c>Loaded</c> and an Absent load is deliberately the vanish's case.
+    /// Without this branch the session declines every reload for the life of
+    /// the process, which is issue #676's lockout reintroduced by the fix
+    /// for it. Shape only, like everything else over this file.
+    /// </remarks>
+    [Fact]
+    public void A_reload_that_finds_no_config_file_carries_the_vanish_forward()
+    {
+        var (_, guard) = ReloadGuard();
+
+        var carried = Assert.Single(guard.Statement.Calls("OnConfigFileVanished"));
+        var branch = carried.Ancestors().OfType<IfStatementSyntax>().First();
+
+        // The whole condition, not a substring of it. Contains() is happy
+        // with `!= ConfigFilesFound.Absent`, which carries the vanish
+        // forward on every decline EXCEPT the one it is for: a locked file
+        // that is still there would then be confirmed as gone and the count
+        // lowered under it. That is the trap SyntaxQueries.ArgExpression
+        // documents, and it survived a first attempt at this test.
+        Assert.Equal(
+            "defaultFiles == ConfigFilesFound.Absent",
+            branch.Condition.ToString());
+    }
+
+    /// <summary>
+    /// The budget is restored where the file is seen present, which is the
+    /// delivery that settles, not the reload that may follow it.
+    /// </summary>
+    /// <remarks>
+    /// Those are not the same moment: a file that comes back and will not
+    /// open reaches the settle and never reaches an applied reload, and a
+    /// budget left spent there has the next ordinary save believed on one
+    /// observation, which is issue #1146 through a stale budget.
+    ///
+    /// The restore itself is ConfigVanishProtocol's and is driven, against
+    /// a real watcher, in <c>Config.ConfigVanishProtocolTests</c>: what a
+    /// source-shape test still has to add is that the shell delegates it
+    /// here and not somewhere the settle cannot reach.
+    /// </remarks>
+    [Fact]
+    public void The_vanish_budget_is_restored_where_the_file_is_seen_present()
+    {
+        var source = ConfigService();
+
+        Assert.Single(source.Method("OnConfigFileSettled").Calls("_vanishProtocol.Settled"));
+
+        // And not moved back onto the applied reload, which is the position
+        // that leaves the gap above.
+        Assert.Empty(source.Method("Reload").Calls("_vanishProtocol.Settled"));
     }
 
     /// <summary>

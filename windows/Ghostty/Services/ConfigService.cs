@@ -68,6 +68,26 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private int _shrinkConfirms;
     private const int MaxShrinkConfirms = 3;
 
+    // The vanish confirmations' budget, and a third counter for the reason
+    // the second one exists. This counts asks about the WATCHED file being
+    // gone, which the watcher raises; _shrinkConfirms counts asks about a
+    // count that dropped, which a reload raises about files the watcher
+    // never sees. A deletion can present as both, and sharing a counter
+    // would let one stretch arrive spent at the other's first observation
+    // and confirm it with no asks of its own, which is exactly what sharing
+    // cost between the other two.
+    //
+    // The whole wiring is an object from Ghostty.Core rather than a counter
+    // and two calls here because nothing executes this file: Ghostty.Tests
+    // holds no reference to the shell project, so every test about this
+    // class reads the source with Roslyn and asserts on its shape. A budget
+    // of zero restores the #1146 defect exactly, and no source-shape test
+    // can see that; neither could one see the budget-restore call deleted,
+    // which was measured passing. Over there a test drives the real wiring
+    // against a real watcher. UI thread only, like everything the watcher's
+    // delivery reaches. See OnConfigFileVanished.
+    private readonly ConfigVanishProtocol _vanishProtocol;
+
     // How many default config files existed when the config in force was
     // built. Seeded at construction and moved only by a reload that is
     // applied, so a reload can tell "this user configures nothing" from
@@ -444,6 +464,19 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         _dispatcher = dispatcher;
 
+        // The vanish wiring, built here because the watcher it asks is
+        // created later: the ask reads the field lazily, at report time.
+        // The count is read the same way, so a report always sees what
+        // the last applied reload recorded.
+        _vanishProtocol = new ConfigVanishProtocol(
+            sessionDefaultFilesFound: () => _defaultFilesFound,
+            ask: () => _watcher?.Resettle() == true,
+            onAccept: () =>
+            {
+                StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
+                RecordDefaultFiles(0);
+            });
+
         // ConfigNew allocates from libghostty's global allocator. A failed
         // ghostty_init leaves the global state in place but torn down, so the
         // allocator reached here would be a deinitialized one: no trap, in any
@@ -767,6 +800,32 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                     StaticLoggers.ConfigService.LogReloadGaveUp(
                         MaxDeclinedReloadRetries, ConfigFilePath);
                 }
+                else if (defaultFiles == ConfigFilesFound.Absent)
+                {
+                    // This reload just looked at the disk and found no config
+                    // file, which is the same observation the watcher's
+                    // vanished report carries, so it counts toward the same
+                    // confirmation.
+                    //
+                    // It is here because on the vanish path a dropped ask is
+                    // otherwise TERMINAL. A deleted file raises no further
+                    // filesystem events, so the only thing that can revisit
+                    // the question is the Resettle that was just dropped, and
+                    // if it was, nothing ever does: the session declines every
+                    // reload for the life of the process, which is the #676
+                    // lockout made permanent by the fix for it.
+                    //
+                    // A shrink cannot heal it either, because IsCountShrink
+                    // takes only Loaded: an Absent load is deliberately the
+                    // vanish's case, so this branch is the whole of the
+                    // second route. Reloads that are not about the config
+                    // file at all, a High Contrast toggle or an OS scheme
+                    // flip, now carry the question forward.
+                    //
+                    // Nothing is believed here that would not be believed on
+                    // the watcher's path: the same budget, the same asks.
+                    OnConfigFileVanished();
+                }
                 return false;
             }
 
@@ -775,7 +834,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         }
 
         // Any applied reload ends the run: the next lock is a new one and
-        // the next shrink is a fresh question.
+        // the next shrink is a fresh question. The vanish budget is not
+        // reset here but in OnConfigFileSettled, because the evidence that
+        // answers a vanish is the file being present, and that is seen a
+        // step earlier than this.
         _declinedReloadRetries = 0;
         _shrinkConfirms = 0;
 
@@ -2233,10 +2295,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // read; the watcher's check is an early-out in front of it, not the
         // guarantee (issue #676).
         //
-        // It does report the file being gone, separately: reaching that
-        // needs a whole quiet period with the file missing and nothing
-        // following it, which a swap cannot produce, so it is a deletion.
-        // OnConfigFileVanished is what the session does about one.
+        // It does report the file being gone, separately, and that report
+        // says only "gone as of this delivery": an ordinary swap reaches it
+        // whenever it straddles the hop from the timer to the delivery.
+        // OnConfigFileVanished is what the session does about one, and what
+        // it does first is ask again (issue #1146).
         //
         // Suppression is decided when each event arrives, not when the
         // debounce fires, so a write bracketed by SuppressWatcher stays
@@ -2287,13 +2350,26 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private void OnConfigFileSettled()
     {
         if (_shuttingDown) return;
+
+        // The file is there, which is the evidence that answers an open
+        // vanish question, so the asks stop here rather than on the applied
+        // reload below. Those are not the same moment: a file that comes
+        // back and will not open reaches this line and never reaches an
+        // applied reload, and leaving the budget spent would have the next
+        // ordinary save believed on one observation, which is #1146 through
+        // a stale budget. The restore itself is ConfigVanishProtocol's,
+        // driven against a real watcher in Ghostty.Tests.
+        _vanishProtocol.Settled();
+
         Reload();
     }
 
     /// <summary>
-    /// The config file has been gone for a whole quiet period, which is a
-    /// deletion and not a save in flight. Nothing is rebuilt and nothing is
-    /// pushed: the running config stays in force, which is what a deletion
+    /// A delivery found the config file gone. That is a report, not a
+    /// verdict: an ordinary atomic save produces one. It is confirmed by
+    /// asking again, and only a report that outlives the whole budget is
+    /// taken as a deletion. Nothing is rebuilt and nothing is pushed even
+    /// then: the running config stays in force, which is what a deletion
     /// deserves. All that changes is what the next reload compares against.
     /// </summary>
     /// <remarks>
@@ -2301,25 +2377,38 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// session is running on more config files than exist, the count only
     /// ever rose, and nothing else lowers it, so a session whose config file
     /// is deleted declines every later reload for the life of the process.
-    /// High Contrast and the OS colour scheme reach the terminal only
-    /// through the config a reload builds, so that is an accessibility
-    /// override that can never be turned on again (issue #676).
+    /// High Contrast reaches the terminal only through the config a reload
+    /// builds, so that is an accessibility override that can never be turned
+    /// on again (issue #676). Not the OS colour scheme, which
+    /// <see cref="RefreshForOsColorScheme"/> serves by calling ReadFlags
+    /// directly, never reaching Reload at all.
     ///
-    /// Zeroed rather than decremented: the watcher watches one path and the
-    /// default files are three, so this says "stop claiming to be running on
-    /// files I can no longer vouch for" and lets the next reload re-establish
-    /// the count from what is actually on disk. The two paths it does not
-    /// watch raise no event at all; those deletions are healed from the
-    /// reload side instead, by the persistent-shrink confirmation in
-    /// <c>Reload</c>.
+    /// The vanish proves deletion from one observation while the shrink
+    /// proves it from a spent budget, and the one-observation standard is
+    /// what mid-save firing exploits. So this asks again before believing
+    /// it, on the protocol <c>Reload</c> already uses for a shrink, and only
+    /// a vanish that outlives the whole budget lowers anything. Believing
+    /// one observation lowered the count in the middle of an ordinary save
+    /// and disarmed both guards for the next reload (issue #1146).
+    ///
+    /// Zeroed rather than decremented once confirmed: the watcher watches
+    /// one path and the default files are three, so this says "stop claiming
+    /// to be running on files I can no longer vouch for" and lets the next
+    /// reload re-establish the count from what is actually on disk. The two
+    /// paths it does not watch raise no event at all; those deletions are
+    /// healed from the reload side instead, by the persistent-shrink
+    /// confirmation in <c>Reload</c>.
     /// </remarks>
     private void OnConfigFileVanished()
     {
         if (_shuttingDown) return;
-        if (_defaultFilesFound == 0) return;
 
-        StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
-        RecordDefaultFiles(0);
+        // The count moves only on the accept the protocol reports, and
+        // the accept fires only on the far side of the whole ask budget:
+        // both halves of that are ConfigVanishProtocol's, driven rather
+        // than read in Ghostty.Tests. This handler adds only the teardown
+        // fence.
+        _vanishProtocol.Vanished();
     }
 
     /// <summary>
