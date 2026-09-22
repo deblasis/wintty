@@ -414,6 +414,40 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
+    /// Lifting the write suppression frees both ask budgets, not only an
+    /// applied reload. Our own write ends whatever stretch the budgets were
+    /// counting, but its events were swallowed, so no delivery reloads on
+    /// it and the reload a caller makes afterwards can still decline. A
+    /// budget left spent makes the next stretch of unreadability arrive at
+    /// the cap and log gave-up with no ask having been tried in it.
+    /// </summary>
+    /// <remarks>
+    /// Only the LIFT frees them. Resetting on the bracket's opening half
+    /// would spend the budgets' meaning while a decline inside the bracket
+    /// is still trying to spend the budgets themselves.
+    /// </remarks>
+    [Fact]
+    public void Lifting_the_write_suppression_frees_both_ask_budgets()
+    {
+        var guard = Assert.Single(ConfigService().Method("SuppressWatcher")
+            .DescendantNodes().OfType<IfStatementSyntax>());
+
+        Assert.Equal("!suppress", guard.Condition.ToString());
+
+        var resets = guard.Statement.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() is "_declinedReloadRetries" or "_shrinkConfirms")
+            .ToArray();
+
+        Assert.Equal(2, resets.Length);
+        Assert.All(resets, a => Assert.Equal("0", a.Right.ToString()));
+
+        // The vanish question is not theirs to close: its stretches open and
+        // close on load verdicts, and a write is not one.
+        Assert.Empty(guard.Statement.Calls("_vanishProtocol.Observed"));
+    }
+
+    /// <summary>
     /// The session count is pinned at zero under --no-config, and this
     /// half is the pin. Deleting it lets a save gap refuse the High
     /// Contrast and OS-scheme reloads such a launch lives on, with no
@@ -612,8 +646,10 @@ public class ConfigWatcherWiringTests
     /// already carry and, worse, never delivers the verdict that ENDS a
     /// stretch: a file coming back was then invisible to the question, and
     /// a stretch opened by one save could be concluded by another an hour
-    /// later. Shape only, like everything else over this file; the
-    /// behaviour is driven in <c>Config.ConfigVanishProtocolTests</c>.
+    /// later. The one exception is the test below this: a verdict that
+    /// disagrees with its own count is not a verdict about presence at all.
+    /// Shape only, like everything else over this file; the behaviour is
+    /// driven in <c>Config.ConfigVanishProtocolTests</c>.
     /// </remarks>
     [Fact]
     public void Every_load_verdict_reaches_the_question_before_the_gate()
@@ -634,6 +670,33 @@ public class ConfigWatcherWiringTests
         Assert.True(
             observed.Span.End < decide.Span.Start,
             "the gate decides before the verdict has reached the question");
+    }
+
+    /// <summary>
+    /// A verdict its own count contradicts never reaches the vanish
+    /// question: the gate refuses the reload on it, and a confirmation built
+    /// on it would apply a defaults config straight past that refusal. The
+    /// stretch is left as it was rather than answered, which is the safe
+    /// direction for evidence that cannot be read.
+    /// </summary>
+    [Fact]
+    public void A_verdict_that_disagrees_with_its_count_is_not_vanish_evidence()
+    {
+        var observed = Assert.Single(ConfigService().Method("Reload")
+            .Calls("_vanishProtocol.Observed"));
+
+        // The gate's own agreement check, short-circuited in front of the
+        // call, with this load's verdict and count. Decomposed rather than
+        // matched as text, because a substring assertion here would accept
+        // the check sitting beside the call instead of guarding it.
+        var and = Assert.IsType<BinaryExpressionSyntax>(observed.Parent);
+        Assert.Equal(SyntaxKind.LogicalAndExpression, and.Kind());
+        Assert.Equal(observed.Span, and.Right.Span);
+
+        var agree = Assert.IsType<InvocationExpressionSyntax>(and.Left);
+        Assert.Equal("ConfigReloadGate.VerdictAndCountAgree", agree.Expression.ToString());
+        Assert.Equal("defaultFiles", agree.ArgumentList.Arguments[0].ToString());
+        Assert.Equal("defaultFilesFound", agree.ArgumentList.Arguments[1].ToString());
     }
 
     /// <summary>

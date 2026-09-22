@@ -88,15 +88,7 @@ public static class ConfigReloadGate
         int defaultFilesFound,
         int sessionDefaultFilesFound)
     {
-        // "No default config file exists" and "the count of them is zero" are
-        // the same statement, and the loader is written so that they always
-        // are. They still cross the FFI as two separate values, so this
-        // checks that they agree rather than taking it on trust. It is worth
-        // the two comparisons: an Absent carrying a non-zero count walks
-        // straight through the shrink test below, and what it lets through is
-        // a config of pure defaults applied at every live surface, which is
-        // the whole thing this gate exists to refuse.
-        if ((found == ConfigFilesFound.Absent) != (defaultFilesFound == 0))
+        if (!VerdictAndCountAgree(found, defaultFilesFound))
             return ConfigReloadDecision.Decline;
 
         return found switch
@@ -114,6 +106,31 @@ public static class ConfigReloadGate
             _ => ConfigReloadDecision.Decline,
         };
     }
+
+    /// <summary>
+    /// Whether the load's verdict and its own file count say the same thing,
+    /// which is the precondition for trusting either.
+    /// </summary>
+    /// <remarks>
+    /// <para>"No default config file exists" and "the count of them is zero"
+    /// are the same statement, and the loader is written so that they always
+    /// are. They still cross the FFI as two separate values, so this checks
+    /// that they agree rather than taking it on trust. It is worth the two
+    /// comparisons: an Absent carrying a non-zero count walks straight
+    /// through the shrink comparison in <see cref="Decide"/>, and what it
+    /// lets through is a config of pure defaults applied at every live
+    /// surface, which is the whole thing this gate exists to refuse.</para>
+    ///
+    /// <para>Public because the vanish wiring asks the same question about
+    /// the same pair: a verdict its own count contradicts is not evidence of
+    /// an absence, it is evidence of a disagreement, and must not confirm a
+    /// deletion the gate refuses. One definition, so the two cannot drift
+    /// into checking different things.</para>
+    /// </remarks>
+    public static bool VerdictAndCountAgree(
+        ConfigFilesFound found,
+        int defaultFilesFound) =>
+        (found == ConfigFilesFound.Absent) == (defaultFilesFound == 0);
 
     /// <summary>
     /// Whether a declined reload should ask to be tried again.

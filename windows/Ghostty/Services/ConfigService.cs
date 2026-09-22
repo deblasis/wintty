@@ -749,7 +749,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // so it is fed in here rather than from the watcher's existence
         // check. Absence is an observation; anything else answers it. The
         // protocol holds both halves and says why (wintty#1155).
-        var vanishConfirmed = _vanishProtocol.Observed(defaultFiles);
+        //
+        // A verdict its own count contradicts is neither. The gate refuses
+        // it below for exactly that reason, and feeding it here would let a
+        // disagreeing load confirm a deletion the gate exists to refuse, so
+        // the question is left exactly as it was. That is the safe direction
+        // twice over: the stretch neither advances on an untrusted absence
+        // nor resets on an untrusted read.
+        var vanishConfirmed = ConfigReloadGate.VerdictAndCountAgree(
+            defaultFiles, defaultFilesFound)
+            && _vanishProtocol.Observed(defaultFiles);
 
         // A reload only applies a config it could actually read. The rule and
         // its reasons are ConfigReloadGate's, in Ghostty.Core so they can be
@@ -780,13 +789,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 NativeMethods.ConfigFree(newConfig);
                 StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
                     ConfigFilePath,
-                    defaultFiles == ConfigFilesFound.Unreadable
-                        ? "it could not be read"
-                        : ConfigReloadGate.IsCountShrink(
-                              defaultFiles, defaultFilesFound, _defaultFilesFound)
-                            ? $"only {defaultFilesFound} of the " +
-                              $"{_defaultFilesFound} layered config files were there"
-                            : "it was not there");
+                    !ConfigReloadGate.VerdictAndCountAgree(defaultFiles, defaultFilesFound)
+                        ? "its verdict and its file count disagreed"
+                        : defaultFiles == ConfigFilesFound.Unreadable
+                            ? "it could not be read"
+                            : ConfigReloadGate.IsCountShrink(
+                                  defaultFiles, defaultFilesFound, _defaultFilesFound)
+                                ? $"only {defaultFilesFound} of the " +
+                                  $"{_defaultFilesFound} layered config files were there"
+                                : "it was not there");
 
                 if (ConfigReloadGate.ShouldRetry(
                         defaultFiles, _declinedReloadRetries, MaxDeclinedReloadRetries))
@@ -1047,7 +1058,28 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// Used by <see cref="ConfigFileEditor"/> during writes so our
     /// own save does not trigger a redundant reload.
     /// </summary>
-    public void SuppressWatcher(bool suppress) => _suppressWatcher = suppress;
+    public void SuppressWatcher(bool suppress)
+    {
+        _suppressWatcher = suppress;
+
+        // Lifting the suppression is the end of this service's own write,
+        // and that write ends any stretch the two ask budgets were
+        // counting. Its events were swallowed, so no delivery reloads on
+        // it, and the reload a caller makes afterwards can still decline
+        // (the write landing unreadable, the AppUpdateConfig fence), which
+        // is the one road to a reset it had. A budget left spent here hands
+        // the next stretch of unreadability a gave-up warning with no ask
+        // ever having been tried in it.
+        //
+        // The vanish question is deliberately NOT touched: its stretches
+        // open and close on load verdicts alone, and a write is not a
+        // verdict.
+        if (!suppress)
+        {
+            _declinedReloadRetries = 0;
+            _shrinkConfirms = 0;
+        }
+    }
 
     /// <summary>
     /// Set (or clear, with null) the High Contrast override palette and

@@ -134,6 +134,31 @@ public class ConfigReloadGateTests
     }
 
     /// <summary>
+    /// The agreement behind that refusal is asked as its own question, so
+    /// the vanish wiring can consult the same rule rather than grow a second
+    /// copy of the comparison with its polarity to get wrong.
+    /// </summary>
+    /// <remarks>
+    /// Unreadable agrees with any non-zero count: a file that will not open
+    /// is a file. The two disagreement rows are the ones the theory above
+    /// refuses the reload on.
+    /// </remarks>
+    [Theory]
+    [InlineData(ConfigFilesFound.Absent, 0, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, true)]
+    [InlineData(ConfigFilesFound.Unreadable, 1, true)]
+    [InlineData(ConfigFilesFound.Loaded, 0, false)]
+    [InlineData(ConfigFilesFound.Absent, 1, false)]
+    [InlineData(ConfigFilesFound.Unreadable, 0, false)]
+    public void Agreement_between_verdict_and_count_is_one_rule(
+        ConfigFilesFound found, int filesFound, bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ConfigReloadGate.VerdictAndCountAgree(found, filesFound));
+    }
+
+    /// <summary>
     /// An unknown value from the native side is refused rather than applied.
     /// The enum crosses an FFI boundary, so a value outside it means the two
     /// sides disagree, and the config in hand cannot be trusted.
