@@ -141,7 +141,7 @@ fn runArgs(
         return 1;
     }
 
-    var config = Config.load(alloc) catch |err| {
+    var config = Config.loadOrCreateDefault(alloc) catch |err| {
         try stderr.print("Unable to load config: {}", .{err});
         return 1;
     };

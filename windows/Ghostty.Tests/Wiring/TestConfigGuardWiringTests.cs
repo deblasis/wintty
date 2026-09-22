@@ -201,7 +201,12 @@ public class TestConfigGuardWiringTests
         var source = ShellSource.Load("Services.ConfigService.cs");
         var seed = source.Method("SeedConfigIfEmpty");
 
-        var write = seed.Calls("File.WriteAllText").Single();
+        // The write is the exclusive open of the file, not a WriteAllText:
+        // the stream is the decision point, and everything after it
+        // (length re-check, bytes) is under the same guard.
+        var write = seed.Body!.Statements
+            .SelectMany(s => s.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+            .Single(o => o.Type.ToString() == "FileStream");
         var assert = GuardCalls(seed).Single();
         var swallowingTry = write.Ancestors().OfType<TryStatementSyntax>()
             .SingleOrDefault(t => t.Catches.Count > 0);
@@ -213,6 +218,58 @@ public class TestConfigGuardWiringTests
         Assert.DoesNotContain(assert.Ancestors(), a => a == swallowingTry);
         Assert.True(assert.Span.Start < write.Span.Start,
             "the guard must run before the write it guards");
+    }
+
+    [Fact]
+    public void Seed_Takes_The_File_Exclusively()
+    {
+        var source = ShellSource.Load("Services.ConfigService.cs");
+        var seed = source.Method("SeedConfigIfEmpty");
+
+        var write = seed.Body!.Statements
+            .SelectMany(s => s.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+            .Single(o => o.Type.ToString() == "FileStream");
+
+        // FileShare.None is the whole point of the hold: a save in flight
+        // holds the file, and any looser share mode lets the seed's open
+        // succeed beside it and land the starter header on top of a save
+        // (issue #676's shape at startup time). A permissive mode here
+        // also reopens the seed/Save interleave the hold exists to close.
+        Assert.Equal(
+            "FileShare.None",
+            write.ArgumentList!.Arguments[3].Expression.ToString());
+    }
+
+    [Fact]
+    public void Seed_Rechecks_The_Length_Under_The_Hold()
+    {
+        var source = ShellSource.Load("Services.ConfigService.cs");
+        var seed = source.Method("SeedConfigIfEmpty");
+
+        var write = seed.Body!.Statements
+            .SelectMany(s => s.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+            .Single(o => o.Type.ToString() == "FileStream");
+        var hold = write.Ancestors().OfType<UsingStatementSyntax>().Single();
+
+        // The hold is the decision, not the cheap checks above it: a save
+        // can land its whole content in the gap between the unheld length
+        // check and this open, and without a re-check under the hold the
+        // seed overwrites that save with the starter header. The re-check
+        // must read the stream (the held truth) and bail before writing.
+        var recheck = hold.Statement.DescendantNodes()
+            .OfType<IfStatementSyntax>()
+            .SingleOrDefault(i => i.Condition.ToString().Contains("stream.Length")
+                && i.Statement.DescendantNodesAndSelf()
+                    .OfType<ReturnStatementSyntax>().Any());
+        Assert.NotNull(recheck);
+
+        var bytes = hold.Statement.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().Contains("Write"))
+            .ToList();
+        Assert.NotEmpty(bytes);
+        Assert.True(recheck!.Span.Start < bytes.Min(b => b.Span.Start),
+            "the re-check must precede the write it licenses");
     }
 
     [Fact]

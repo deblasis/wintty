@@ -46,8 +46,9 @@ extension Ghostty {
 
         init(configPath: String? = nil) {
             self.configPath = configPath
-            // Initialize the global configuration.
-            self.config = Config(at: configPath)
+            // Initialize the global configuration. A first run gets the
+            // starter config file written for it.
+            self.config = Config(at: configPath, createIfAbsent: true)
             if self.config.config == nil {
                 readiness = .error
                 return
@@ -151,7 +152,14 @@ extension Ghostty {
             }
 
             // Hard or full updates have to reload the full configuration
-            let newConfig = Config(at: configPath)
+            //
+            // createIfAbsent keeps this reload creating: one that finds no
+            // config file still writes the starter one, though the write
+            // refuses to overwrite now. Deliberately unchanged otherwise;
+            // see Ghostty.Config.loadConfig for what the Windows shell does
+            // beyond this and why that is a question to measure here rather
+            // than a change to make blind.
+            let newConfig = Config(at: configPath, createIfAbsent: true)
             guard newConfig.loaded else {
                 Ghostty.logger.warning("failed to reload configuration")
                 return
@@ -171,7 +179,9 @@ extension Ghostty {
             // Hard or full updates have to reload the full configuration.
             // NOTE: We never set this on self.config because this is a surface-only
             // config. We free it after the call.
-            let newConfig = Config(at: configPath)
+            //
+            // createIfAbsent as above, and for the same reason.
+            let newConfig = Config(at: configPath, createIfAbsent: true)
             guard newConfig.loaded else {
                 Ghostty.logger.warning("failed to reload configuration")
                 return

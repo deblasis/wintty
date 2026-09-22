@@ -53,6 +53,38 @@ public class CliConfigFlagTests
         Assert.False(result.NoConfig);
     }
 
+    // The libghostty spelling is already the key --no-config would be
+    // rewritten to, so the line is handed back untouched. It still has to
+    // set NoConfig: the shell's own config writers and readers branch on
+    // it, and a flag only libghostty sees leaves an empty config file
+    // behind on a fresh root (issue #676).
+    [Theory]
+    [InlineData(@"wintty.exe --config-default-files=false")]
+    [InlineData(@"wintty.exe --font-size=12 --config-default-files=false")]
+    public void RecognizesTheLibghosttySpellingItself(string commandLine)
+    {
+        var result = CliAliases.RewriteConfigFlags(commandLine);
+        Assert.Equal(commandLine, result.CommandLine);
+        Assert.True(result.NoConfig);
+        Assert.True(result.Any);
+    }
+
+    // Only the disabling value counts: the key with any other value is an
+    // ordinary config setting, and treating it as the flag would ignore
+    // the default files of a launch that asked for them. Same rules as
+    // the Wintty spelling: nothing after -e, no prefix matches.
+    [Theory]
+    [InlineData(@"wintty.exe --config-default-files=true")]
+    [InlineData(@"wintty.exe --config-default-files")]
+    [InlineData(@"wintty.exe -e mytool --config-default-files=false")]
+    [InlineData(@"wintty.exe --config-default-files=false-thing")]
+    public void DoesNotSeeNoConfigWhereThereIsNone(string commandLine)
+    {
+        var result = CliAliases.RewriteConfigFlags(commandLine);
+        Assert.Equal(commandLine, result.CommandLine);
+        Assert.False(result.NoConfig);
+    }
+
     [Theory]
     // The documented form.
     [InlineData(@"wintty.exe --config-file=C:\cfg\a.wintty")]

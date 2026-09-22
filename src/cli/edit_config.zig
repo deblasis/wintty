@@ -76,7 +76,7 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
 
     // We load the configuration once because that will write our
     // default configuration files to disk. We don't use the config.
-    var config = try Config.load(alloc);
+    var config = try Config.loadOrCreateDefault(alloc);
     defer config.deinit();
 
     // Find the preferred path.

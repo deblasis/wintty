@@ -37,8 +37,8 @@ extension Ghostty {
             self.config = config
         }
 
-        convenience init(at path: String? = nil, finalize: Bool = true) {
-            self.init(config: Self.loadConfig(at: path, finalize: finalize))
+        convenience init(at path: String? = nil, finalize: Bool = true, createIfAbsent: Bool = false) {
+            self.init(config: Self.loadConfig(at: path, finalize: finalize, createIfAbsent: createIfAbsent))
         }
 
         convenience init(clone config: ghostty_config_t) {
@@ -57,7 +57,22 @@ extension Ghostty {
         /// - Parameters:
         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
         ///   - finalize: Whether to finalize the configuration to populate default values.
-        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
+        ///   - createIfAbsent: Write the starter config file when no configuration file exists.
+        ///
+        ///     Every macOS call site passes true, the two reloads included, which is what this
+        ///     app has always done and is kept deliberately. Not byte for byte what it did:
+        ///     the write underneath refuses to overwrite now, so a config file that arrives
+        ///     between finding none and writing one survives instead of being truncated.
+        ///
+        ///     Deliberately unchanged otherwise. The Windows shell also refuses to APPLY a
+        ///     rebuilt config it could not read, which is the other half of
+        ///     deblasis/wintty#676 there. Whether macOS wants the same is not a question the
+        ///     branch that added that could answer: it could neither build nor run this app,
+        ///     and the config path, the shapes editors save in and what triggers a reload all
+        ///     differ from Windows. deblasis/wintty#1137 carries it as something to measure
+        ///     here. The parameter is still worth having: it makes the create side one word
+        ///     per call site for somebody who can measure it.
+        static func loadConfig(at path: String?, finalize: Bool, createIfAbsent: Bool = false) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {
                 logger.critical("ghostty_config_new failed")
@@ -68,7 +83,14 @@ extension Ghostty {
             if let path {
                 ghostty_config_load_file(cfg, path)
             } else {
-                ghostty_config_load_default_files(cfg)
+                // nil for the count: it exists so a host holding a running
+                // config can tell one layered file going away mid save from
+                // a user who never had it, and only the Windows shell keeps
+                // a previous count to compare against. See ghostty.h.
+                let found = ghostty_config_load_default_files(cfg, nil)
+                if createIfAbsent && found == GHOSTTY_CONFIG_DEFAULT_FILES_ABSENT {
+                    _ = ghostty_config_create_default_file()
+                }
             }
 
             // We only load CLI args when not running in Xcode because in Xcode we

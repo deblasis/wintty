@@ -4129,17 +4129,43 @@ pub fn keybindsCList(self: *Config) []const inputpkg.Binding.Set.CEntry {
 ///   4. CLI flags
 ///   5. Recursively defined configuration files
 ///
+/// Reads only. Use `loadOrCreateDefault` where a first run should be given
+/// a starter config file; the split is what keeps a reload from writing
+/// one, and `createDefaultFile` says why that matters.
 pub fn load(alloc_gpa: Allocator) !Config {
     var result = try default(alloc_gpa);
     errdefer result.deinit();
 
     // If we have a configuration file in our home directory, parse that first.
-    try result.loadDefaultFiles(alloc_gpa);
+    _ = try result.loadDefaultFiles(alloc_gpa);
 
     // Parse the config from the CLI args.
     try result.loadCliArgs(alloc_gpa);
 
     // Parse the config files that were added from our file and CLI args.
+    try result.loadRecursiveFiles(alloc_gpa);
+    try result.finalize();
+
+    return result;
+}
+
+/// `load`, and on a run that finds no configuration file anywhere, the
+/// starter file a first run is given.
+///
+/// Startup only. A reload of a running app calls `load`; `createDefaultFile`
+/// says why.
+pub fn loadOrCreateDefault(alloc_gpa: Allocator) !Config {
+    var result = try default(alloc_gpa);
+    errdefer result.deinit();
+
+    const default_files = try result.loadDefaultFiles(alloc_gpa);
+    if (default_files.result == .absent) {
+        _ = createDefaultFile(alloc_gpa) catch |err| {
+            log.warn("error creating template config file err={}", .{err});
+        };
+    }
+
+    try result.loadCliArgs(alloc_gpa);
     try result.loadRecursiveFiles(alloc_gpa);
     try result.finalize();
 
@@ -4185,17 +4211,13 @@ pub fn loadIter(
 /// `path` must be resolved and absolute.
 pub fn loadFile(self: *Config, alloc: Allocator, path: []const u8) !void {
     assert(std.fs.path.isAbsolute(path));
-    var file = file_load.open(global.io(), path) catch |err| switch (err) {
-        error.NotAFile => {
-            log.warn(
-                "config-file {s}: not reading because it is not a file",
-                .{path},
-            );
-            return;
-        },
-
-        else => return err,
-    };
+    // NotAFile is reported rather than swallowed. A directory at the config
+    // path is not an empty configuration, and returning success here told
+    // every caller it had read one: a reload then pushed a config of pure
+    // defaults at every live surface and recorded it as the user's
+    // (deblasis/wintty#676). The caller decides what to do about it; both
+    // of them log.
+    var file = try file_load.open(global.io(), path);
     defer file.close(global.io());
 
     try self.loadFsFile(alloc, &file, path);
@@ -4296,7 +4318,17 @@ test "config file with an over-long line keeps reading" {
     );
 }
 
-pub const OptionalFileAction = enum { loaded, not_found, @"error" };
+pub const OptionalFileAction = enum {
+    loaded,
+    not_found,
+
+    /// The file is there and is zero bytes, so there was nothing in it to
+    /// apply. Not an error, and not logged as one; see
+    /// `DefaultFiles.fromFileAction`.
+    empty,
+
+    @"error",
+};
 
 /// Load optional configuration file from `path`. All errors are ignored.
 ///
@@ -4310,6 +4342,7 @@ pub fn loadOptionalFile(
         return .loaded;
     } else |err| switch (err) {
         error.FileNotFound => return .not_found,
+        error.FileIsEmpty => return .empty,
         else => {
             std.log.warn(
                 "error reading optional config file, not loading err={} path={s}",
@@ -4321,12 +4354,32 @@ pub fn loadOptionalFile(
     }
 }
 
-fn writeConfigTemplate(path: []const u8) !void {
+/// Write the starter template at `path`, unless something is already
+/// there. Returns whether it was written.
+///
+/// `.exclusive` because deciding there is no config file and writing one
+/// are not the same instant, and an editor's save can land the user's
+/// config in between. Without it the create truncates what arrived. Same
+/// spelling as `edit.ensureConfigFile`, for the same reason.
+fn writeConfigTemplate(path: []const u8) !bool {
     log.info("creating template config file: path={s}", .{path});
     if (std.fs.path.dirname(path)) |dir_path| {
         try std.Io.Dir.cwd().createDirPath(global.io(), dir_path);
     }
-    const file = try std.Io.Dir.createFileAbsolute(global.io(), path, .{});
+    const file = std.Io.Dir.createFileAbsolute(
+        global.io(),
+        path,
+        .{ .exclusive = true },
+    ) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            log.info(
+                "config file appeared while creating the template, leaving it alone path={s}",
+                .{path},
+            );
+            return false;
+        },
+        else => return err,
+    };
     defer file.close(global.io());
     var buf: [4096]u8 = undefined;
     var file_writer = file.writer(global.io(), &buf);
@@ -4336,7 +4389,96 @@ fn writeConfigTemplate(path: []const u8) !void {
         .{ .path = path },
     );
     try writer.flush();
+    return true;
 }
+
+/// What a default-file load found. A caller uses it to decide whether the
+/// config it just built is the user's.
+pub const DefaultFiles = enum(c_int) {
+    /// A default configuration file is there and could not be read: it is
+    /// locked, or the open failed. This config has defaults where the
+    /// user's settings belong. A caller that can wait should keep what it
+    /// already has, since the next attempt is usually the one that works.
+    unreadable = -1,
+
+    /// No default configuration file exists at any of the paths searched,
+    /// so this config carries nothing but its defaults.
+    ///
+    /// Only a first run may act on this, by creating the starter file; see
+    /// `createDefaultFile`.
+    absent = 0,
+
+    /// A default configuration file was read and what it said is in this
+    /// config. An empty file reads as this; see `fromFileAction`.
+    loaded = 1,
+
+    /// What one candidate's outcome says about the config as a whole.
+    ///
+    /// An empty file reads as `loaded`: a zero-byte config file is a
+    /// configuration that asks for nothing, so emptying one gets you the
+    /// defaults, which is what it says. Calling it `unreadable` instead
+    /// would make emptying the file a silent no-op until the next restart.
+    pub fn fromFileAction(action: OptionalFileAction) DefaultFiles {
+        return switch (action) {
+            .loaded, .empty => .loaded,
+            .@"error" => .unreadable,
+            .not_found => .absent,
+        };
+    }
+
+    /// The answer for two groups of candidates that are LAYERED on one
+    /// another, which is what the default configuration files are: every
+    /// one that exists is read, oldest first, and a newer one overrides an
+    /// older one key by key.
+    ///
+    /// So `unreadable` dominates, which is the opposite of what a lattice
+    /// over alternatives would say. These are not alternatives: a layer
+    /// that is there and will not open is a layer whose settings are
+    /// missing from the config, and another layer having read does not put
+    /// them back. Answering `loaded` there tells a caller the config is the
+    /// user's when part of it is not in it.
+    ///
+    /// `absent` is the identity, because most users have one of these files
+    /// and not the other two. Absence is therefore NOT enough on its own to
+    /// notice a file going away mid save: that is what the count beside
+    /// this answer is for. See `Result`.
+    pub fn mergeLayered(self: DefaultFiles, other: DefaultFiles) DefaultFiles {
+        return switch (self) {
+            .unreadable => .unreadable,
+            .loaded => switch (other) {
+                .unreadable => .unreadable,
+                .loaded, .absent => .loaded,
+            },
+            .absent => other,
+        };
+    }
+
+    /// What a default-file load found: the verdict, and how many of the
+    /// candidate files are there at all.
+    pub const Result = struct {
+        result: DefaultFiles,
+
+        /// How many of the candidate paths have something at them,
+        /// readable or not.
+        ///
+        /// The verdict on its own cannot see one layered file disappear
+        /// while another still reads, and that is exactly an atomic save of
+        /// the newer file for a user migrated from Ghostty, who has
+        /// `ghostty/config.ghostty` beside `wintty/config.wintty`: the load
+        /// reports a perfectly good `loaded` with one file fewer. A caller
+        /// rebuilding a running app's config compares this with the count
+        /// it last applied, and fewer means a file it was running on is not
+        /// there now (deblasis/wintty#676).
+        found: u32,
+
+        pub fn mergeLayered(self: Result, other: Result) Result {
+            return .{
+                .result = self.result.mergeLayered(other.result),
+                .found = self.found + other.found,
+            };
+        }
+    };
+};
 
 /// Load configurations from the default configuration files. The default
 /// configuration file is at `$XDG_CONFIG_HOME/wintty/config.wintty`.
@@ -4348,7 +4490,10 @@ fn writeConfigTemplate(path: []const u8) !void {
 /// the Ghostty <1.3.0 `config` file (without extension), then
 /// `ghostty/config.ghostty` from before the Wintty rename, then
 /// `wintty/config.wintty`.
-pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
+///
+/// This reads and nothing else. Creating the starter file when none of
+/// these exists is `createDefaultFile`'s job.
+pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !DefaultFiles.Result {
     // Load XDG first
     const legacy_xdg_path = try file_load.legacyDefaultXdgPath(alloc);
     defer alloc.free(legacy_xdg_path);
@@ -4356,32 +4501,11 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
     defer alloc.free(ghostty_xdg_path);
     const xdg_path = try file_load.defaultXdgPath(alloc);
     defer alloc.free(xdg_path);
-    const xdg_loaded: bool = xdg_loaded: {
-        // Oldest first, so a newer file overrides an older one.
-        const legacy_xdg_action = self.loadOptionalFile(alloc, legacy_xdg_path);
-        const ghostty_xdg_action = self.loadOptionalFile(alloc, ghostty_xdg_path);
-        const xdg_action = self.loadOptionalFile(alloc, xdg_path);
-
-        var found: usize = 0;
-        for ([_]OptionalFileAction{
-            legacy_xdg_action,
-            ghostty_xdg_action,
-            xdg_action,
-        }) |action| {
-            if (action != .not_found) found += 1;
-        }
-
-        if (found > 1) {
-            log.warn("multiple config files exist: `{s}`, `{s}`, `{s}`", .{
-                legacy_xdg_path,
-                ghostty_xdg_path,
-                xdg_path,
-            });
-            log.warn("loading the ones that exist, oldest first", .{});
-        }
-
-        break :xdg_loaded found > 0;
-    };
+    var result: DefaultFiles.Result = self.loadDefaultFilesFrom(alloc, &.{
+        legacy_xdg_path,
+        ghostty_xdg_path,
+        xdg_path,
+    });
 
     // On macOS load the app support directory as well
     if (comptime builtin.os.tag == .macos) {
@@ -4391,57 +4515,104 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
         defer alloc.free(ghostty_app_support_path);
         const app_support_path = try file_load.defaultAppSupportPath(alloc);
         defer alloc.free(app_support_path);
-        const app_support_loaded: bool = loaded: {
-            // All three names differ, so unlike the previous two-path version
-            // there is no way to double-load the same file.
-            const legacy_app_support_action = self.loadOptionalFile(
-                alloc,
-                legacy_app_support_path,
-            );
-            const ghostty_app_support_action = self.loadOptionalFile(
-                alloc,
-                ghostty_app_support_path,
-            );
-            const app_support_action = self.loadOptionalFile(
-                alloc,
-                app_support_path,
-            );
 
-            var found: usize = 0;
-            for ([_]OptionalFileAction{
-                legacy_app_support_action,
-                ghostty_app_support_action,
-                app_support_action,
-            }) |action| {
-                if (action != .not_found) found += 1;
-            }
+        // All three names differ, so unlike the previous two-path version
+        // there is no way to double-load the same file.
+        const app_support = self.loadDefaultFilesFrom(alloc, &.{
+            legacy_app_support_path,
+            ghostty_app_support_path,
+            app_support_path,
+        });
 
-            if (found > 1) {
-                log.warn("multiple config files exist: `{s}`, `{s}`, `{s}`", .{
-                    legacy_app_support_path,
-                    ghostty_app_support_path,
-                    app_support_path,
-                });
-                log.warn("loading the ones that exist, oldest first", .{});
-            }
+        result = result.mergeLayered(app_support);
+    }
 
-            break :loaded found > 0;
-        };
+    return result;
+}
 
-        // If both files are not found, then we create a template file.
-        // For macOS, we only create the template file in the app support
-        if (!app_support_loaded and !xdg_loaded and !cliDisablesDefaultFiles(alloc)) {
-            writeConfigTemplate(app_support_path) catch |err| {
-                log.warn("error creating template config file err={}", .{err});
-            };
-        }
-    } else {
-        if (!xdg_loaded and !cliDisablesDefaultFiles(alloc)) {
-            writeConfigTemplate(xdg_path) catch |err| {
-                log.warn("error creating template config file err={}", .{err});
-            };
+/// Load `candidates` in order, oldest first so a newer file overrides an
+/// older one, and report what they amounted to.
+///
+/// Reads only, and nothing here creates a file. See `createDefaultFile`.
+fn loadDefaultFilesFrom(
+    self: *Config,
+    alloc: Allocator,
+    candidates: []const []const u8,
+) DefaultFiles.Result {
+    var found: u32 = 0;
+    var result: DefaultFiles = .absent;
+    for (candidates) |path| {
+        const action = self.loadOptionalFile(alloc, path);
+        result = result.mergeLayered(.fromFileAction(action));
+        if (action != .not_found) found += 1;
+    }
+
+    // Which file won is surprising when there is more than one, so the
+    // message names every candidate and says how they were ordered. A
+    // slice has no fixed arity, so the list is formatted rather than
+    // spelled out as three `{s}`.
+    if (found > 1) {
+        log.warn(
+            "multiple config files exist: {f}",
+            .{QuotedPaths{ .paths = candidates }},
+        );
+        log.warn("loading the ones that exist, oldest first", .{});
+    }
+
+    return .{ .result = result, .found = found };
+}
+
+/// The candidate paths as `` `a`, `b`, `c` ``, for the one message that
+/// has to name all of them.
+const QuotedPaths = struct {
+    paths: []const []const u8,
+
+    pub fn format(self: QuotedPaths, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (self.paths, 0..) |path, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.print("`{s}`", .{path});
         }
     }
+};
+
+/// Create the starter configuration file at the preferred default path,
+/// unless something is already there. Returns whether it was written.
+///
+/// Separate from loading, because loading runs again on every config
+/// reload of a running app and an editor saves the config by writing a
+/// temp file and swapping it in. Between those two halves the config file
+/// does not exist, so a load that created a file on the "nothing is here"
+/// answer dropped this template on top of a save in progress and took the
+/// user's configuration with it (deblasis/wintty#676). Only a caller that
+/// knows this is a first run should call it, and `writeConfigTemplate`
+/// refuses to overwrite so that "should" is not the only thing holding.
+pub fn createDefaultFile(alloc: Allocator) !bool {
+    return createDefaultFileFrom(alloc, global.args());
+}
+
+/// `createDefaultFile`, reading `process_args` for the flag that turns the
+/// default files off instead of the process's own. Split out only so a test
+/// can pass a command line: `global.args()` is always empty under
+/// `builtin.is_test`, so a test going through the entry point above could
+/// not tell the flag being honoured from the check being deleted.
+fn createDefaultFileFrom(
+    alloc: Allocator,
+    process_args: std.process.Args,
+) !bool {
+    // A flag that ignores the default files must not create one where none
+    // existed: the template write was how a `--no-config` run still left a
+    // config file behind on a fresh root.
+    if (cliDisablesDefaultFiles(alloc, process_args)) return false;
+
+    // macOS prefers the Application Support directory, matching where
+    // `loadDefaultFiles` looks last.
+    const path = if (comptime builtin.os.tag == .macos)
+        try file_load.defaultAppSupportPath(alloc)
+    else
+        try file_load.defaultXdgPath(alloc);
+    defer alloc.free(path);
+
+    return try writeConfigTemplate(path);
 }
 
 /// Whether the command line asked for the default files to be ignored.
@@ -4450,15 +4621,635 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
 /// default files must not create one where none existed: the template
 /// write was how a `--no-config` run still left a config file behind on
 /// a fresh root.
-fn cliDisablesDefaultFiles(alloc_gpa: Allocator) bool {
+/// `process_args` rather than `global.args()` read in here: under
+/// `builtin.is_test` that one is always empty, so a test could not tell
+/// this function working from this function deleted.
+fn cliDisablesDefaultFiles(
+    alloc_gpa: Allocator,
+    process_args: std.process.Args,
+) bool {
     // The process argv is wide on Windows; the shared iterator decodes it,
     // the same way loadCliArgs reads the flags that end up here.
-    var iter = cli.args.argsIterator(alloc_gpa, global.args()) catch return false;
+    var iter = cli.args.argsIterator(alloc_gpa, process_args) catch return false;
     defer iter.deinit();
     while (iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config-default-files=false")) return true;
     }
     return false;
+}
+
+/// A `std.process.Args` carrying `argv`, for a test that needs a command
+/// line. The shape is per platform and a test cannot just build one: Windows
+/// hands over a single WTF-16 command line for the iterator to split, every
+/// other target hands over the vector.
+///
+/// None of the arguments any caller passes carries a space or a quote, so
+/// the joined Windows line splits back into exactly `argv`.
+fn testProcessArgs(comptime argv: []const [:0]const u8) std.process.Args {
+    if (comptime builtin.os.tag == .windows) {
+        const line = comptime line: {
+            var joined: []const u8 = argv[0];
+            for (argv[1..]) |arg| joined = joined ++ " " ++ arg;
+            break :line joined;
+        };
+        return .{ .vector = std.unicode.wtf8ToWtf16LeStringLiteral(line) };
+    }
+
+    const ptrs = comptime ptrs: {
+        var built: [argv.len][*:0]const u8 = undefined;
+        for (argv, 0..) |arg, i| built[i] = arg.ptr;
+        const frozen = built;
+        break :ptrs frozen;
+    };
+    return .{ .vector = &ptrs };
+}
+
+test "testProcessArgs round-trips what a DefaultFiles test passes it" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Windows hands over one command line and the iterator splits it again,
+    // so what a test thinks it passed and what the code under test reads are
+    // two different things there, and the same thing everywhere else. Every
+    // default-file test below that passes a flag rests on those agreeing,
+    // and this is the only place that can say so rather than assume it.
+    const argv = [_][:0]const u8{
+        "wintty",
+        "--title=x",
+        "--config-default-files=false",
+        "--font-size=20",
+    };
+
+    var iter = try cli.args.argsIterator(alloc, testProcessArgs(&argv));
+    defer iter.deinit();
+
+    // argsIterator has already skipped argv0.
+    for (argv[1..]) |expected| {
+        const actual = iter.next() orelse return error.TooFewArguments;
+        try testing.expectEqualStrings(expected, actual);
+    }
+    try testing.expect(iter.next() == null);
+}
+
+test "cliDisablesDefaultFiles sees the flag that turns the default files off" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // argv0 is skipped by the iterator, so every case carries one.
+    try testing.expect(cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=false",
+    })));
+    try testing.expect(cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--title=x",
+        "--config-default-files=false",
+        "--font-size=20",
+    })));
+
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{"wintty"})));
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=true",
+    })));
+
+    // Only the exact spelling. CliAliases rewrites `--no-config` into the
+    // line above before this is reached, so seeing the user's spelling here
+    // would mean the rewrite never ran.
+    try testing.expect(!cliDisablesDefaultFiles(alloc, testProcessArgs(&.{
+        "wintty",
+        "--no-config",
+    })));
+}
+
+/// Absolute path of `tmp` itself.
+fn testTmpRoot(alloc: Allocator, tmp: *std.testing.TmpDir) ![]const u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(std.testing.io, &buf);
+    return try alloc.dupe(u8, buf[0..n]);
+}
+
+/// Absolute path to `name` inside `tmp`, whether or not it exists.
+fn testTmpPath(
+    alloc: Allocator,
+    tmp: *std.testing.TmpDir,
+    name: []const u8,
+) ![]const u8 {
+    const root = try testTmpRoot(alloc, tmp);
+    defer alloc.free(root);
+    return try std.fs.path.join(alloc, &.{ root, name });
+}
+
+/// Fails unless nothing exists at `path`.
+fn testExpectNoFile(path: []const u8) !void {
+    const io = std.testing.io;
+    if (std.Io.Dir.openFileAbsolute(io, path, .{})) |file| {
+        file.close(io);
+        return error.FileWasCreated;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+}
+
+/// `XDG_CONFIG_HOME` pointed at a config root of our own, so a test can
+/// drive the real `loadDefaultFiles` and `createDefaultFile` rather than
+/// the helper underneath them. Both resolve their paths through
+/// `global.environMap`, which under `builtin.is_test` reads
+/// `std.testing.environ`.
+///
+/// Worth the scaffolding: the write this change removes lived in
+/// `loadDefaultFiles`, and a test that only reaches the helper it now
+/// delegates to cannot see that write put back.
+///
+/// Two mechanisms, because only one is available per platform.
+/// `std.process.Environ` on Windows is `GlobalBlock`, which can only say
+/// "read the process block", so the process block is what has to change and
+/// kernel32 owns it. Everywhere else a synthetic block goes straight into
+/// `std.testing.environ` and nothing process-wide moves.
+///
+/// The Windows half therefore mutates process state for the length of one
+/// test. Zig's test runner is sequential, and the previous value goes back
+/// in `restore`, but a test added here that runs concurrently with another
+/// reader of this variable would race it.
+/// Test-only scaffolding. `pub` because `config/CApi.zig`'s tests drive the
+/// C exports over the same temporary config root, and there should be one
+/// spelling of this rather than a second copy over there.
+pub const TestXdgConfigHome = struct {
+    const name = "XDG_CONFIG_HOME";
+
+    previous: Previous,
+
+    const Previous = switch (builtin.os.tag) {
+        // The value to put back, or null when it was unset.
+        .windows => ?[:0]u16,
+        else => struct {
+            environ: std.process.Environ,
+            entry: [:0]u8,
+            slice: [:null]?[*:0]const u8,
+        },
+    };
+
+    const kernel32 = struct {
+        // Declared as c_int rather than std.os.windows.BOOL so the result
+        // compares against 0 without a conversion; nothing here needs the
+        // wrapper type.
+        extern "kernel32" fn SetEnvironmentVariableW(
+            lpName: [*:0]const u16,
+            lpValue: ?[*:0]const u16,
+        ) callconv(.winapi) c_int;
+    };
+
+    pub fn set(alloc: Allocator, dir: []const u8) !TestXdgConfigHome {
+        if (comptime builtin.os.tag == .windows) {
+            const previous: ?[:0]u16 = previous: {
+                var map = try global.environMap();
+                defer map.deinit();
+                const value = map.get(name) orelse break :previous null;
+                break :previous try std.unicode.wtf8ToWtf16LeAllocZ(alloc, value);
+            };
+            errdefer if (previous) |p| alloc.free(p);
+
+            const wide_name = std.unicode.wtf8ToWtf16LeStringLiteral(name);
+            const wide_dir = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, dir);
+            defer alloc.free(wide_dir);
+            if (kernel32.SetEnvironmentVariableW(wide_name, wide_dir) == 0) {
+                return error.SetEnvironmentVariableFailed;
+            }
+
+            return .{ .previous = previous };
+        }
+
+        const entry = try std.fmt.allocPrintSentinel(
+            alloc,
+            name ++ "={s}",
+            .{dir},
+            0,
+        );
+        errdefer alloc.free(entry);
+        const slice = try alloc.allocSentinel(?[*:0]const u8, 1, null);
+        slice[0] = entry.ptr;
+
+        const previous = std.testing.environ;
+        std.testing.environ = .{ .block = .{ .slice = slice } };
+        return .{ .previous = .{
+            .environ = previous,
+            .entry = entry,
+            .slice = slice,
+        } };
+    }
+
+    pub fn restore(self: TestXdgConfigHome, alloc: Allocator) void {
+        if (comptime builtin.os.tag == .windows) {
+            const wide_name = std.unicode.wtf8ToWtf16LeStringLiteral(name);
+            if (self.previous) |p| {
+                defer alloc.free(p);
+                _ = kernel32.SetEnvironmentVariableW(wide_name, p.ptr);
+            } else {
+                _ = kernel32.SetEnvironmentVariableW(wide_name, null);
+            }
+            return;
+        }
+
+        std.testing.environ = self.previous.environ;
+        alloc.free(self.previous.entry);
+        alloc.free(self.previous.slice);
+    }
+};
+
+test "loadDefaultFiles creates nothing when no config file exists" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try testTmpRoot(alloc, &tmp);
+    defer alloc.free(root);
+
+    const env = try TestXdgConfigHome.set(alloc, root);
+    defer env.restore(alloc);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // The real entry point, resolving the real candidate paths. This is the
+    // function the write used to live in: put it back and this test fails.
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .absent, .found = 0 },
+        try cfg.loadDefaultFiles(alloc),
+    );
+
+    const created = try testTmpPath(alloc, &tmp, "wintty" ++ std.fs.path.sep_str ++ "config.wintty");
+    defer alloc.free(created);
+    try testExpectNoFile(created);
+}
+
+test "loadDefaultFiles reads the config file that is there" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "wintty");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "wintty" ++ std.fs.path.sep_str ++ "config.wintty",
+        .data = "font-size = 20\n",
+    });
+
+    const root = try testTmpRoot(alloc, &tmp);
+    defer alloc.free(root);
+    const env = try TestXdgConfigHome.set(alloc, root);
+    defer env.restore(alloc);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 1 },
+        try cfg.loadDefaultFiles(alloc),
+    );
+    try testing.expectEqual(20, cfg.@"font-size");
+}
+
+test "createDefaultFile writes the starter file, and never over one that arrived" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try testTmpRoot(alloc, &tmp);
+    defer alloc.free(root);
+
+    const env = try TestXdgConfigHome.set(alloc, root);
+    defer env.restore(alloc);
+
+    // macOS writes into Application Support, which this root does not move.
+    if (comptime builtin.os.tag == .macos) return error.SkipZigTest;
+
+    try testing.expect(try Config.createDefaultFile(alloc));
+
+    const sub_path = "wintty" ++ std.fs.path.sep_str ++ "config.wintty";
+    const first = try tmp.dir.readFileAlloc(testing.io, sub_path, alloc, .limited(64 * 1024));
+    defer alloc.free(first);
+    try testing.expect(std.mem.indexOf(u8, first, "This is the configuration file") != null);
+
+    // The second call is the race: the decision to create was taken while
+    // there was no config file, and the user's save landed between that and
+    // the write. The create must lose, not the config (deblasis/wintty#676).
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = sub_path,
+        .data = "font-size = 20\n",
+    });
+    try testing.expect(!try Config.createDefaultFile(alloc));
+
+    const after = try tmp.dir.readFileAlloc(testing.io, sub_path, alloc, .limited(64 * 1024));
+    defer alloc.free(after);
+    try testing.expectEqualStrings("font-size = 20\n", after);
+}
+
+test "DefaultFiles values are the ones ghostty.h publishes" {
+    const testing = std.testing;
+
+    // Literals, and they are not the guard on their own: moving the header
+    // and this test together would pass while zig disagreed with the ABI.
+    // What closes that is DefaultFilesZigHeaderParityTests on the Windows
+    // side, which reads THIS declaration out of Config.zig and checks it
+    // against include/ghostty.h. @embedFile cannot reach the header from
+    // here (it is outside the source package), so the three-way check lives
+    // where the header is already in hand.
+    try testing.expectEqual(@as(c_int, -1), @intFromEnum(DefaultFiles.unreadable));
+    try testing.expectEqual(@as(c_int, 0), @intFromEnum(DefaultFiles.absent));
+    try testing.expectEqual(@as(c_int, 1), @intFromEnum(DefaultFiles.loaded));
+}
+
+test "createDefaultFile writes nothing when the command line turns the default files off" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try testTmpRoot(alloc, &tmp);
+    defer alloc.free(root);
+
+    const env = try TestXdgConfigHome.set(alloc, root);
+    defer env.restore(alloc);
+
+    // macOS writes into Application Support, which this root does not move.
+    if (comptime builtin.os.tag == .macos) return error.SkipZigTest;
+
+    // The flag says the default files are not read, so one must not be
+    // created either: writing the template was how such a run still left a
+    // config file behind on a fresh root.
+    try testing.expect(!try createDefaultFileFrom(alloc, testProcessArgs(&.{
+        "wintty",
+        "--config-default-files=false",
+    })));
+
+    const path = try testTmpPath(alloc, &tmp, "wintty" ++ std.fs.path.sep_str ++ "config.wintty");
+    defer alloc.free(path);
+    try testExpectNoFile(path);
+
+    // And the same call without the flag does write, so the test above is
+    // about the flag and not about the root being unwritable.
+    try testing.expect(try createDefaultFileFrom(alloc, testProcessArgs(&.{"wintty"})));
+}
+
+test "loadDefaultFilesFrom refuses a directory at the config path" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "config.wintty");
+
+    const path = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // Nothing was read, so this is not "the user configured nothing". It
+    // used to report a successful load of an empty configuration, which a
+    // reload then pushed at every live surface.
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .unreadable, .found = 1 },
+        cfg.loadDefaultFilesFrom(alloc, &.{path}),
+    );
+}
+
+test "loadDefaultFilesFrom creates nothing when no config file exists" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .absent, .found = 0 },
+        cfg.loadDefaultFilesFrom(alloc, &.{path}),
+    );
+
+    // The regression: loading used to answer "no config file here" by
+    // writing the starter template at this path. See `createDefaultFile`.
+    try testExpectNoFile(path);
+}
+
+test "loadDefaultFilesFrom reports and applies a config file that exists" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.wintty",
+        .data = "font-size = 20\n",
+    });
+    const path = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 1 },
+        cfg.loadDefaultFilesFrom(alloc, &.{path}),
+    );
+    try testing.expectEqual(20, cfg.@"font-size");
+}
+
+test "DefaultFiles.fromFileAction reads an empty file and refuses an unopenable one" {
+    const testing = std.testing;
+
+    // All four in one place, because only three of them have a portable
+    // way to be produced on disk: a file the OS refuses to open needs a
+    // platform-specific lock.
+    try testing.expectEqual(DefaultFiles.loaded, DefaultFiles.fromFileAction(.loaded));
+    try testing.expectEqual(DefaultFiles.loaded, DefaultFiles.fromFileAction(.empty));
+    try testing.expectEqual(DefaultFiles.unreadable, DefaultFiles.fromFileAction(.@"error"));
+    try testing.expectEqual(DefaultFiles.absent, DefaultFiles.fromFileAction(.not_found));
+}
+
+test "DefaultFiles.mergeLayered lets a layer that would not open spoil the answer" {
+    const testing = std.testing;
+    const loaded: DefaultFiles = .loaded;
+    const unreadable: DefaultFiles = .unreadable;
+    const absent: DefaultFiles = .absent;
+
+    // The rows that would differ under a lattice over alternatives, where a
+    // group that read settles it. These files are layered: a layer that is
+    // there and will not open is a layer whose settings are missing from
+    // the config, and another layer having read does not put them back.
+    try testing.expectEqual(DefaultFiles.unreadable, loaded.mergeLayered(.unreadable));
+    try testing.expectEqual(DefaultFiles.unreadable, unreadable.mergeLayered(.loaded));
+
+    try testing.expectEqual(DefaultFiles.loaded, loaded.mergeLayered(.absent));
+    try testing.expectEqual(DefaultFiles.loaded, absent.mergeLayered(.loaded));
+    try testing.expectEqual(DefaultFiles.loaded, loaded.mergeLayered(.loaded));
+
+    // A file that is there and unreadable says a configuration exists,
+    // which no file at all does not.
+    try testing.expectEqual(DefaultFiles.unreadable, unreadable.mergeLayered(.absent));
+    try testing.expectEqual(DefaultFiles.unreadable, absent.mergeLayered(.unreadable));
+
+    try testing.expectEqual(DefaultFiles.absent, absent.mergeLayered(.absent));
+}
+
+test "DefaultFiles.Result.mergeLayered adds the counts" {
+    const testing = std.testing;
+    const xdg: DefaultFiles.Result = .{ .result = .loaded, .found = 2 };
+    const app_support: DefaultFiles.Result = .{ .result = .absent, .found = 0 };
+
+    // The macOS shape: two groups of three candidates, layered on each
+    // other. The counts are what a caller compares across reloads, so they
+    // have to describe every candidate and not just the group that won.
+    try testing.expectEqual(
+        DefaultFiles.Result{ .result = .loaded, .found = 2 },
+        xdg.mergeLayered(app_support),
+    );
+    try testing.expectEqual(
+        DefaultFiles.Result{ .result = .unreadable, .found = 3 },
+        xdg.mergeLayered(.{ .result = .unreadable, .found = 1 }),
+    );
+}
+
+test "loadDefaultFilesFrom counts an empty config file as read" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.wintty",
+        .data = "",
+    });
+    const path = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // On disk, not just through fromFileAction: this is the path an
+    // emptied config file actually takes.
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 1 },
+        cfg.loadDefaultFilesFrom(alloc, &.{path}),
+    );
+}
+
+test "loadDefaultFilesFrom loads oldest first so a newer file wins" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config",
+        .data = "font-size = 10\n",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.wintty",
+        .data = "font-size = 20\n",
+    });
+    const old_path = try testTmpPath(alloc, &tmp, "config");
+    defer alloc.free(old_path);
+    const new_path = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(new_path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 2 },
+        cfg.loadDefaultFilesFrom(alloc, &.{ old_path, new_path }),
+    );
+    try testing.expectEqual(20, cfg.@"font-size");
+}
+
+test "loadDefaultFilesFrom counts the newer file going away mid save" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A user migrated from Ghostty: the pre-rename file is still read, and
+    // the newer one is the one an editor is saving. The fork keeps both
+    // paths, so this is an ordinary configuration, not a corner case.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.ghostty",
+        .data = "font-size = 10\n",
+    });
+    const older = try testTmpPath(alloc, &tmp, "config.ghostty");
+    defer alloc.free(older);
+    const newer = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(newer);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // The verdict is `loaded` and it is not wrong: a file was read. It is
+    // also not enough, and this is the whole reason the count is returned
+    // beside it. The newer file is gone for the length of the swap, the
+    // settings in it are not in this config, and a caller that looked only
+    // at the verdict would apply it (deblasis/wintty#676).
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 1 },
+        cfg.loadDefaultFilesFrom(alloc, &.{ older, newer }),
+    );
+
+    // The same two paths once the save lands: same verdict, one more file.
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.wintty",
+        .data = "font-size = 20\n",
+    });
+    var after = try Config.default(alloc);
+    defer after.deinit();
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 2 },
+        after.loadDefaultFilesFrom(alloc, &.{ older, newer }),
+    );
+}
+
+test "loadDefaultFilesFrom refuses a layer it could not read even when another read" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.ghostty",
+        .data = "font-size = 10\n",
+    });
+    // A directory at the newer path is the portable way to make a candidate
+    // exist and refuse to be read.
+    try tmp.dir.createDirPath(testing.io, "config.wintty");
+
+    const older = try testTmpPath(alloc, &tmp, "config.ghostty");
+    defer alloc.free(older);
+    const newer = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(newer);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // These files are layered, not alternatives: the older one reading does
+    // not put back the settings the newer one holds. Answering `loaded`
+    // here would tell a caller this config is the user's when part of it is
+    // missing from it.
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .unreadable, .found = 2 },
+        cfg.loadDefaultFilesFrom(alloc, &.{ older, newer }),
+    );
 }
 
 /// Load and parse the CLI args.

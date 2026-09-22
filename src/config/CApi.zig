@@ -62,9 +62,52 @@ export fn ghostty_config_load_cli_args(self: *Config) void {
 /// Load the configuration from the default file locations. This
 /// is usually done first. The default file locations are locations
 /// such as the home directory.
-export fn ghostty_config_load_default_files(self: *Config) void {
-    self.loadDefaultFiles(global.alloc()) catch |err| {
+///
+/// Reads only, and reports what it found. Sync with
+/// ghostty_config_default_files_e.
+///
+/// Creating the starter file on a first run is
+/// `ghostty_config_create_default_file`, and the split is the point:
+/// this runs again every time a running app rebuilds its config, an
+/// editor saves the config file by swapping a temp file in, and a rebuild
+/// landing in that gap used to leave a starter config exactly where the
+/// save was about to go (deblasis/wintty#676).
+///
+/// The answer distinguishes the three outcomes rather than handing back a
+/// config full of defaults for all of them, so a caller can tell a user
+/// who configured nothing from a configuration that was not readable at
+/// the moment it looked, and keep what it is already running on.
+///
+/// `found_out`, when given, receives how many of the default configuration
+/// files exist, readable or not. There is more than one default location
+/// and they are layered, so the verdict on its own cannot see the file
+/// being saved disappear while another one still reads: that load reports
+/// a perfectly good LOADED with one file fewer, and only the count says so.
+/// Zero on an error.
+export fn ghostty_config_load_default_files(
+    self: *Config,
+    found_out: ?*c_int,
+) Config.DefaultFiles {
+    const answer = self.loadDefaultFiles(global.alloc()) catch |err| {
         log.err("error loading config err={}", .{err});
+        if (found_out) |out| out.* = 0;
+        return .unreadable;
+    };
+    if (found_out) |out| out.* = @intCast(answer.found);
+    return answer.result;
+}
+
+/// Create the starter configuration file at the preferred default
+/// location. Returns true if it was written.
+///
+/// For a first run only, which means a caller that has just been told
+/// GHOSTTY_CONFIG_DEFAULT_FILES_ABSENT by a load it did at startup. It
+/// refuses to overwrite, so a config file that arrives between that
+/// answer and this call survives.
+export fn ghostty_config_create_default_file() bool {
+    return Config.createDefaultFile(global.alloc()) catch |err| {
+        log.warn("error creating template config file err={}", .{err});
+        return false;
     };
 }
 
@@ -238,6 +281,109 @@ export fn ghostty_config_open_path_no_create() String {
 const Diagnostic = extern struct {
     message: [*:0]const u8 = "",
 };
+
+// The two exports issue #676 turns on, driven as C callers drive them, over
+// a config root of this test's own. Without these the whole pair is
+// unreferenced by any test and can be hard-coded to a constant answer while
+// everything stays green, which is precisely the failure the fix is about:
+// an app where no reload ever applies looks identical from the zig side.
+
+test "ghostty_config_load_default_files reports and counts, and creates nothing" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // macOS also searches Application Support, which this root does not
+    // move, so the counts below would not be the whole picture there.
+    if (comptime builtin.os.tag == .macos) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
+    const env = try Config.TestXdgConfigHome.set(alloc, root);
+    defer env.restore(alloc);
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+
+        var found: c_int = -7;
+        try testing.expectEqual(
+            Config.DefaultFiles.absent,
+            ghostty_config_load_default_files(&cfg, &found),
+        );
+        try testing.expectEqual(@as(c_int, 0), found);
+    }
+
+    // Reading answered "nothing here" and wrote nothing: that write is the
+    // bug, and it landed on top of an editor's save in progress.
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(testing.io, "wintty" ++ std.fs.path.sep_str ++ "config.wintty", .{}),
+    );
+
+    try tmp.dir.createDirPath(testing.io, "wintty");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "wintty" ++ std.fs.path.sep_str ++ "config.wintty",
+        .data = "font-size = 20\n",
+    });
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+
+        var found: c_int = -7;
+        try testing.expectEqual(
+            Config.DefaultFiles.loaded,
+            ghostty_config_load_default_files(&cfg, &found),
+        );
+        try testing.expectEqual(@as(c_int, 1), found);
+        // Not just the verdict: the settings really are in the config.
+        try testing.expectEqual(20, cfg.@"font-size");
+    }
+
+    // The out parameter is optional, for callers that do not want it.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try testing.expectEqual(
+            Config.DefaultFiles.loaded,
+            ghostty_config_load_default_files(&cfg, null),
+        );
+    }
+}
+
+test "ghostty_config_create_default_file writes one, and never over one that arrived" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    if (comptime builtin.os.tag == .macos) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
+    const env = try Config.TestXdgConfigHome.set(alloc, root);
+    defer env.restore(alloc);
+
+    const sub_path = "wintty" ++ std.fs.path.sep_str ++ "config.wintty";
+    try testing.expect(ghostty_config_create_default_file());
+
+    const first = try tmp.dir.readFileAlloc(testing.io, sub_path, alloc, .limited(64 * 1024));
+    defer alloc.free(first);
+    try testing.expect(std.mem.indexOf(u8, first, "This is the configuration file") != null);
+
+    // The race: the decision to create was taken while there was no config
+    // file, and the user's save landed between that and this call.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = "font-size = 20\n" });
+    try testing.expect(!ghostty_config_create_default_file());
+
+    const after = try tmp.dir.readFileAlloc(testing.io, sub_path, alloc, .limited(64 * 1024));
+    defer alloc.free(after);
+    try testing.expectEqualStrings("font-size = 20\n", after);
+}
 
 test "ghostty_config_get: bool" {
     const testing = std.testing;

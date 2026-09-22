@@ -36,6 +36,7 @@ public sealed class ConfigFileWatcherTests : IDisposable
     private readonly ListLogger _log = new();
     private bool _ignore;
     private int _settled;
+    private int _vanished;
     private string? _contentAtSettle;
 
     public ConfigFileWatcherTests()
@@ -67,7 +68,8 @@ public sealed class ConfigFileWatcherTests : IDisposable
                 Interlocked.Increment(ref _settled);
                 _contentAtSettle = File.ReadAllText(_path);
             },
-            _log);
+            _log,
+            onVanished: () => Interlocked.Increment(ref _vanished));
         Assert.True(w.Start());
         return w;
     }
@@ -189,6 +191,81 @@ public sealed class ConfigFileWatcherTests : IDisposable
         Assert.True(_timer.Armed);
         _timer.Fire();
         Assert.Equal(0, _settled);
+    }
+
+    /// <summary>
+    /// A settle that finds the file gone reports that, separately from an
+    /// edit. The host needs it: the config file being gone is what it
+    /// refuses reloads over, and without being told it is gone for good it
+    /// refuses them for the life of the process (issue #676).
+    /// </summary>
+    [Fact]
+    public void A_settle_with_the_file_gone_reports_it_vanished_and_not_settled()
+    {
+        using var watcher = NewWatcher();
+
+        _timer.WaitForBurst(() => File.Delete(_path));
+        _timer.Fire();
+
+        Assert.Equal(0, _settled);
+        Assert.Equal(1, _vanished);
+
+        // And the file coming back is an edit, not another vanishing: the
+        // two are told apart at the same point.
+        _timer.WaitForBurst(() => File.WriteAllText(_path, "font-size = 17\n"));
+        _timer.Fire();
+
+        Assert.Equal(1, _settled);
+        Assert.Equal(1, _vanished);
+        Assert.Equal("font-size = 17\n", _contentAtSettle);
+    }
+
+    /// <summary>
+    /// Resettle schedules one more delivery, and says so. The answer is what
+    /// a host bounding its retries counts, so an ask that was dropped must
+    /// not come back as one that was taken.
+    /// </summary>
+    [Fact]
+    public void Resettle_schedules_a_delivery_and_reports_that_it_did()
+    {
+        using var watcher = NewWatcher();
+        Assert.False(_timer.Armed);
+
+        Assert.True(watcher.Resettle());
+        Assert.True(_timer.Armed);
+
+        _timer.Fire();
+        Assert.Equal(1, _settled);
+    }
+
+    /// <summary>
+    /// The half the retry budget was being spent on. While the host is
+    /// suppressing its own writes the ask is dropped, and a caller that
+    /// counted it would stop retrying with nothing having been tried.
+    /// </summary>
+    [Fact]
+    public void Resettle_is_dropped_while_events_are_ignored()
+    {
+        using var watcher = NewWatcher();
+        _ignore = true;
+
+        Assert.False(watcher.Resettle());
+        Assert.False(_timer.Armed);
+
+        // And it works again once the host stops ignoring.
+        _ignore = false;
+        Assert.True(watcher.Resettle());
+        Assert.True(_timer.Armed);
+    }
+
+    [Fact]
+    public void Resettle_after_dispose_schedules_nothing()
+    {
+        var watcher = NewWatcher();
+        watcher.Dispose();
+
+        Assert.False(watcher.Resettle());
+        Assert.False(_timer.Armed);
     }
 
     [Fact]

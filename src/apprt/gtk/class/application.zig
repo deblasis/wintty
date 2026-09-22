@@ -266,8 +266,9 @@ pub const Application = extern struct {
         gtk_version.logVersion();
         adw_version.logVersion();
 
-        // Load our configuration.
-        var config = CoreConfig.load(alloc) catch |err| err: {
+        // Load our configuration. A first run gets the starter config file
+        // written for it.
+        var config = CoreConfig.loadOrCreateDefault(alloc) catch |err| err: {
             // If we fail to load the configuration, then we should log
             // the error in the diagnostics so it can be shown to the user.
             // We can still load a default which only fails for OOM, allowing
@@ -2972,8 +2973,24 @@ const Action = struct {
             }
 
             // Hard reload, load a new config completely.
+            //
+            // `loadOrCreateDefault` keeps this path creating: it still
+            // writes the starter config file when it finds none, on a
+            // reload. Not quite what it did before, and the difference is
+            // only ever in this path's favour: the write is now exclusive,
+            // so a config file that arrives between finding none and
+            // writing one survives instead of being truncated.
+            //
+            // Deliberately unchanged otherwise. The Windows shell also
+            // refuses to APPLY a rebuilt config it could not read, and
+            // whether this path wants the same is not a question the branch
+            // that added that could answer: it was written without a GTK
+            // build, and the config path, the shapes editors save in and
+            // what triggers a reload all differ from Windows. Issue #1137
+            // carries it as something to measure here, not as a patch
+            // waiting to be applied.
             const alloc = self.allocator();
-            var config = try CoreConfig.load(alloc);
+            var config = try CoreConfig.loadOrCreateDefault(alloc);
             defer config.deinit();
             break :config try .new(alloc, &config);
         };

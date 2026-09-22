@@ -170,6 +170,18 @@ typedef enum {
   GHOSTTY_COLOR_SCHEME_DARK = 1,
 } ghostty_color_scheme_e;
 
+// What a default-file config load found. See
+// ghostty_config_load_default_files.
+typedef enum {
+  // A config file is there and could not be read, or the load failed. The
+  // config has defaults where the user's settings belong.
+  GHOSTTY_CONFIG_DEFAULT_FILES_UNREADABLE = -1,
+  // No config file exists at any of the default locations.
+  GHOSTTY_CONFIG_DEFAULT_FILES_ABSENT = 0,
+  // A config file was read. An empty one counts: it configures nothing.
+  GHOSTTY_CONFIG_DEFAULT_FILES_LOADED = 1,
+} ghostty_config_default_files_e;
+
 // This is a packed struct (see src/input/mouse.zig) but the C standard
 // afaik doesn't let us reliably define packed structs so we build it up
 // from scratch.
@@ -1236,7 +1248,25 @@ GHOSTTY_API void ghostty_config_free(ghostty_config_t);
 GHOSTTY_API ghostty_config_t ghostty_config_clone(ghostty_config_t);
 GHOSTTY_API void ghostty_config_load_cli_args(ghostty_config_t);
 GHOSTTY_API void ghostty_config_load_file(ghostty_config_t, const char*);
-GHOSTTY_API void ghostty_config_load_default_files(ghostty_config_t);
+// Reads only, and says what it found. Anything but LOADED means the user's
+// settings are not in this config, which is what lets a caller rebuilding a
+// running app's config keep the one it has instead of dropping every
+// setting to its default.
+//
+// The second argument, when not NULL, receives how many of the default
+// configuration files exist, readable or not. There is more than one default
+// location and they are layered, so LOADED on its own does not mean this
+// config is the user's: the file being saved can be the one that is missing
+// while another still reads. Comparing this count with the one from the load
+// a caller last applied is what sees that.
+GHOSTTY_API ghostty_config_default_files_e
+ghostty_config_load_default_files(ghostty_config_t, int*);
+// Write the starter config file, for a first run only: a caller that just
+// got ABSENT from a load at startup. Returns true if it was written. It
+// refuses to overwrite, because an editor's atomic save leaves the config
+// file absent for the length of the swap and a create in that gap would
+// otherwise land on top of the save.
+GHOSTTY_API bool ghostty_config_create_default_file(void);
 GHOSTTY_API void ghostty_config_load_recursive_files(ghostty_config_t);
 // Must be called before ghostty_config_finalize. Returns false if it was
 // not, or if the scheme is out of range, in which case nothing changed.

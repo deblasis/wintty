@@ -7,6 +7,7 @@ using System.Threading;
 using Ghostty.Core.Accessibility;
 using Ghostty.Core.Config;
 using Ghostty.Core.Env;
+using Ghostty.Core.Interop;
 using Ghostty.Core.Shell;
 using Ghostty.Core.Themes;
 using Ghostty.Interop;
@@ -38,6 +39,50 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private ConfigFileWatcher? _watcher;
     private readonly DispatcherQueue _dispatcher;
     private volatile bool _suppressWatcher;
+
+    // How many deliveries a declined reload has asked the watcher for in a
+    // row, and the cap. Reset by any applied reload, so the budget is per
+    // stretch of unreadability rather than per session. Three debounce
+    // periods is about a second, which covers an editor or an indexer
+    // holding the file and stops short of retrying forever at one config
+    // rebuild per 300ms.
+    //
+    // Counted on the ask being SCHEDULED, not on the decline: Resettle does
+    // nothing while this service is suppressing its own writes, and there is
+    // no watcher at all under --no-config. Counting those would spend the
+    // budget on deliveries that never happened and then stop asking with
+    // nothing having been tried. UI thread only, like everything Reload
+    // touches. See the decline in Reload.
+    private int _declinedReloadRetries;
+    private const int MaxDeclinedReloadRetries = 3;
+
+    // The shrink confirmations' own budget, with the same shape and the
+    // same reset. It is a separate counter because the two ask about
+    // different stretches: this one counts asks about a file that went
+    // away, while _declinedReloadRetries counts asks about a file that
+    // would not open. Sharing one counter let a gave-up unreadable
+    // stretch arrive spent at the first shrink decline, and IsPersistentShrink
+    // read that as the confirmation budget being exhausted, so the shrink
+    // applied as a deletion with no confirming asks at all. UI thread only,
+    // like everything Reload touches. See the decline in Reload.
+    private int _shrinkConfirms;
+    private const int MaxShrinkConfirms = 3;
+
+    // How many default config files existed when the config in force was
+    // built. Seeded at construction and moved only by a reload that is
+    // applied, so a reload can tell "this user configures nothing" from
+    // "a config file this session was running on was not there for the
+    // instant I looked at it", which is what an editor's atomic save looks
+    // like from outside.
+    //
+    // A count rather than a flag because the default files are layered and
+    // there are three of them: a user migrated from Ghostty has
+    // ghostty/config.ghostty as well, so the one being saved can be missing
+    // while another still reads, and the load reports a perfectly good
+    // "loaded" with one file fewer. UI thread only, same as _config, which
+    // it describes. Written only by RecordDefaultFiles. See the guard in
+    // Reload.
+    private int _defaultFilesFound;
 
     // Set by BeginShutdown when the app is tearing down so a queued or
     // debounced reload can't call into a libghostty app that is about to
@@ -427,7 +472,26 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         var isOsDark = OsTheme.IsDark();
 
         _config = NativeMethods.ConfigNew();
-        NativeMethods.ConfigLoadDefaultFiles(_config);
+        var defaultFiles = NativeMethods.ConfigLoadDefaultFiles(
+            _config, out var defaultFilesFound);
+
+        // Startup is the one place that may create a config file: this is a
+        // first run exactly when the load above found none. Everything that
+        // rebuilds the config of a running app goes through BuildLiveConfig,
+        // which never creates, and NativeMethods says why.
+        //
+        // The flag must mean nothing reads AND nothing writes the config
+        // file, in either spelling. CliAliases sets _noConfig for
+        // `--no-config` and for `--config-default-files=false` alike, which
+        // is what gates this create, the path resolution below, and the seed
+        // write after it. libghostty refuses its own create under the flag
+        // as well, and that half is not redundant either: the export has
+        // callers that never see this shell's command line, and the flag
+        // has to mean the same thing at the ABI.
+        var created = !_noConfig
+            && defaultFiles == ConfigFilesFound.Absent
+            && NativeMethods.ConfigCreateDefaultFile();
+
         NativeMethods.ConfigLoadCliArgs(_config);
         NativeMethods.ConfigLoadRecursiveFiles(_config);
         // Before finalize: that is where the theme is applied, and the
@@ -438,10 +502,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         NativeMethods.ConfigSetColorScheme(_config, ToScheme(isOsDark));
         NativeMethods.ConfigFinalize(_config);
 
-        // --no-config resolves without the create: the flag ignores the
-        // file, so it must not even leave an empty one behind (the native
-        // openPath creates dir + file when missing; the no-create variant
-        // performs the same resolution without that side effect).
+        // --no-config resolves without the create, either spelling: the
+        // flag ignores the file, so it must not even leave an empty one
+        // behind (the native openPath creates dir + file when missing; the
+        // no-create variant performs the same resolution without that side
+        // effect).
         var pathStr = _noConfig
             ? NativeMethods.ConfigOpenPathNoCreate()
             : NativeMethods.ConfigOpenPath();
@@ -461,6 +526,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             ConfigFilePath, "resolved config path");
 
         SeedConfigIfEmpty();
+
+        // What Reload's guard compares against. Taken from the count the same
+        // load returned, plus the starter file if one was just written,
+        // rather than from File.Exists, so the two cannot disagree about what
+        // counts as a config file (an empty one does, and preferredXdgPath's
+        // resolution of ConfigFilePath does not think so).
+        RecordDefaultFiles(created ? defaultFilesFound + 1 : defaultFilesFound);
+
         CacheDiagnostics();
 
         try
@@ -510,6 +583,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// take effect on the next reload. That's fine -- every seeded
     /// line is a comment, so the loaded config is functionally
     /// identical to "no file" anyway.
+    ///
+    /// A zero-byte file is also what an in-place save looks like from
+    /// outside while it holds its breath, so the write takes the file
+    /// exclusively and re-checks the length under that hold (issue
+    /// #1138 is the wider version of that window). A save holding the
+    /// file refuses the open and the seed waits for the next launch.
+    /// A writer whose handle was already open with a permissive share
+    /// mode can still land content beside the hold; the seed truncates
+    /// first, so what it leaves is itself rather than a hybrid of
+    /// itself and that write's tail.
     /// </summary>
     private void SeedConfigIfEmpty()
     {
@@ -541,7 +624,27 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 "# Config docs:  https://ghostty.org/docs/config\n" +
                 "# Config path:  " + ConfigFilePath + "\n";
 
-            File.WriteAllText(ConfigFilePath, seed);
+            // Exclusive, and re-checked under the hold: the checks above are
+            // the cheap way past the common case, and this open is the
+            // decision. A save in flight holds the file, so the open throws
+            // and the seed skips rather than landing on top of it.
+            using (var stream = new FileStream(
+                ConfigFilePath, FileMode.Open, FileAccess.Write, FileShare.None))
+            {
+                if (stream.Length != 0) return;
+
+                // Truncate, because the write below is at offset 0 and a
+                // writer whose handle was already open with a permissive
+                // share mode can still land content beside this hold: seed
+                // bytes plus that write's tail would be a file neither of
+                // us wrote. Truncating makes the seed's write total; that
+                // racing save's content is lost either way, this way it is
+                // not corrupted.
+                stream.SetLength(0);
+
+                var bytes = System.Text.Encoding.UTF8.GetBytes(seed);
+                stream.Write(bytes, 0, bytes.Length);
+            }
         }
         catch (Exception ex)
         {
@@ -590,17 +693,91 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         var isOsDark = OsTheme.IsDark();
 
         GhosttyConfig newConfig;
+        ConfigFilesFound defaultFiles;
+        int defaultFilesFound;
         try
         {
             // The same build a palette theme preview uses, without the
             // preview's overlay: see BuildLiveConfig for the layering.
-            newConfig = BuildLiveConfig(overlayPath: null, isOsDark);
+            newConfig = BuildLiveConfig(
+                overlayPath: null, isOsDark, out defaultFiles, out defaultFilesFound);
         }
         catch (Exception ex)
         {
             StaticLoggers.ConfigService.LogReloadFailed(ex);
             return false;
         }
+
+        // A reload only applies a config it could actually read. The rule and
+        // its reasons are ConfigReloadGate's, in Ghostty.Core so they can be
+        // tested without a libghostty or a window.
+        if (ConfigReloadGate.Decide(defaultFiles, defaultFilesFound, _defaultFilesFound)
+            == ConfigReloadDecision.Decline)
+        {
+            // A shrink that is still a shrink after its whole ask budget is
+            // a deletion of a layered file the watcher does not watch, not a
+            // save in flight: no rename is coming for it. The config in hand
+            // was built from every file that does exist, so applying it is
+            // the user's configuration as it now stands, and the applied
+            // path below records the lower count. Refusing instead would be
+            // permanent, which is the lockout of issue #676 one layer
+            // removed: the count cannot fall from anywhere else.
+            if (!ConfigReloadGate.IsPersistentShrink(
+                    defaultFiles, defaultFilesFound, _defaultFilesFound,
+                    _shrinkConfirms, MaxShrinkConfirms))
+            {
+                NativeMethods.ConfigFree(newConfig);
+                StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
+                    ConfigFilePath,
+                    defaultFiles == ConfigFilesFound.Unreadable
+                        ? "it could not be read"
+                        : ConfigReloadGate.IsCountShrink(
+                              defaultFiles, defaultFilesFound, _defaultFilesFound)
+                            ? $"only {defaultFilesFound} of the " +
+                              $"{_defaultFilesFound} layered config files were there"
+                            : "it was not there");
+
+                if (ConfigReloadGate.ShouldRetry(
+                        defaultFiles, _declinedReloadRetries, MaxDeclinedReloadRetries))
+                {
+                    // Counted only when the watcher actually scheduled the
+                    // delivery. It drops the ask while this service is
+                    // suppressing its own writes, and there is no watcher at all
+                    // under --no-config; counting those would spend the budget
+                    // on deliveries that never happened.
+                    if (_watcher?.Resettle() == true) _declinedReloadRetries++;
+                }
+                else if (ConfigReloadGate.ShouldConfirmShrink(
+                        defaultFiles, defaultFilesFound, _defaultFilesFound,
+                        _shrinkConfirms, MaxShrinkConfirms))
+                {
+                    // The same scheduled-only count, on the shrink budget:
+                    // asks about a file that went away are not asks about a
+                    // file that would not open, and one counter holding both
+                    // is what let a spent unreadable budget skip these asks.
+                    if (_watcher?.Resettle() == true) _shrinkConfirms++;
+                }
+                else if (defaultFiles == ConfigFilesFound.Unreadable &&
+                         _declinedReloadRetries == MaxDeclinedReloadRetries)
+                {
+                    // Exactly on the attempt that spends the budget, so the
+                    // warning is one per stretch of unreadability rather than one
+                    // per settle. The counter carries past the cap for that.
+                    _declinedReloadRetries++;
+                    StaticLoggers.ConfigService.LogReloadGaveUp(
+                        MaxDeclinedReloadRetries, ConfigFilePath);
+                }
+                return false;
+            }
+
+            StaticLoggers.ConfigService.LogReloadDefaultFilesShrunk(
+                _defaultFilesFound, defaultFilesFound, ConfigFilePath);
+        }
+
+        // Any applied reload ends the run: the next lock is a new one and
+        // the next shrink is a fresh question.
+        _declinedReloadRetries = 0;
+        _shrinkConfirms = 0;
 
         var oldConfig = _config;
 
@@ -629,6 +806,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         ReleaseThemePreviewConfig();
 
         _config = newConfig;
+        // Moved with the config, not with the answer: a reload that bailed at
+        // either fence above did not apply anything, so it must not change
+        // what the next one compares against.
+        RecordDefaultFiles(defaultFilesFound);
         try
         {
             CacheDiagnostics();
@@ -816,8 +997,19 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public void SetHighContrastOverride(HighContrastColors? colors)
     {
         if (_highContrastOverrideColors == colors) return;
+
+        var previous = _highContrastOverrideColors;
         _highContrastOverrideColors = colors;
-        Reload();
+
+        // Put the latch back when the reload did not happen. Reload can
+        // decline (a config file that will not open, teardown, no app yet),
+        // and the override only reaches the terminal through the config it
+        // builds. Leaving the field moved on a decline makes the guard above
+        // answer "already on this palette" to every later call, so one
+        // refused reload turns High Contrast off for the life of the process.
+        // The same shape RefreshForOsColorScheme's scheme guard has, and it
+        // has bitten there before.
+        if (!Reload()) _highContrastOverrideColors = previous;
     }
 
     /// <summary>
@@ -1263,7 +1455,32 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             themeCache = LoadIniFile(themePath);
             var overlay = WriteThemePreviewOverlay(themeName);
             if (overlay is null) return false;
-            preview = BuildLiveConfig(overlay, isOsDark);
+            preview = BuildLiveConfig(
+                overlay, isOsDark, out var previewFiles, out var previewFilesFound);
+
+            // The same gate a reload takes, for a sharper reason: a preview
+            // that could not read the user's config shows the theme over pure
+            // defaults, so they judge it against a configuration that is not
+            // theirs and then confirm it. Showing the palette unchanged is
+            // the documented fallback for a preview that cannot be built.
+            if (ConfigReloadGate.Decide(previewFiles, previewFilesFound, _defaultFilesFound) ==
+                ConfigReloadDecision.Decline)
+            {
+                NativeMethods.ConfigFree(preview);
+                // The overlay was already written, and nothing later is going
+                // to take it away: RevertThemePreview only runs for a preview
+                // that was shown. Left behind it is a stale `theme = ` sitting
+                // in the live config's include chain until the next preview
+                // overwrites it.
+                DeleteThemePreviewOverlay();
+                StaticLoggers.ConfigService.LogThemePreviewKeptRunningConfig(
+                    themeName,
+                    ConfigFilePath,
+                    previewFiles == ConfigFilesFound.Unreadable
+                        ? "it could not be read"
+                        : "it was not there");
+                return false;
+            }
         }
         catch (Exception ex)
         {
@@ -1375,12 +1592,28 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// then the High Contrast override, resolved against
     /// <paramref name="isOsDark"/>. Freed here if any step throws.
     /// </summary>
-    private GhosttyConfig BuildLiveConfig(string? overlayPath, bool isOsDark)
+    /// <param name="defaultFiles">What the default config files amounted to.
+    /// Anything but <c>Loaded</c> means the user's settings are not in the
+    /// returned config. <see cref="Reload"/> is what acts on it.</param>
+    /// <param name="defaultFilesFound">How many default config files exist,
+    /// readable or not. The verdict alone cannot see one layered file
+    /// disappearing while another still reads, which is what an atomic save
+    /// of the newer one looks like; the count can.</param>
+    private GhosttyConfig BuildLiveConfig(
+        string? overlayPath,
+        bool isOsDark,
+        out ConfigFilesFound defaultFiles,
+        out int defaultFilesFound)
     {
         var config = NativeMethods.ConfigNew();
         try
         {
-            NativeMethods.ConfigLoadDefaultFiles(config);
+            // The answer is passed through rather than flattened to a bool:
+            // "no config file exists" and "a config file is there and I could
+            // not read it" are different situations and Reload treats them
+            // differently. libghostty logs the read failure itself.
+            defaultFiles = NativeMethods.ConfigLoadDefaultFiles(
+                config, out defaultFilesFound);
             NativeMethods.ConfigLoadCliArgs(config);
             NativeMethods.ConfigLoadRecursiveFiles(config);
             // A palette preview's theme sits above the user's files, which is
@@ -1994,11 +2227,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
         // Editors save by swapping a temp file in, so the file is briefly
         // absent and one save arrives as a burst of events. ConfigFileWatcher
-        // collapses the burst into one settle and never reloads while the
-        // file is missing: a reload in that gap would load no user config,
-        // and libghostty's default-file loader writes its template when it
-        // finds no config file at all. The existence check runs on the UI
-        // thread, inside the posted delivery, right before Reload.
+        // collapses the burst into one settle and reports no edit while the
+        // file is missing, which saves a rebuild Reload would only decline.
+        // Reload is what actually refuses to apply a config it could not
+        // read; the watcher's check is an early-out in front of it, not the
+        // guarantee (issue #676).
+        //
+        // It does report the file being gone, separately: reaching that
+        // needs a whole quiet period with the file missing and nothing
+        // following it, which a swap cannot produce, so it is a deletion.
+        // OnConfigFileVanished is what the session does about one.
         //
         // Suppression is decided when each event arrives, not when the
         // debounce fires, so a write bracketed by SuppressWatcher stays
@@ -2016,7 +2254,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             ignoreEvents: () => _suppressWatcher || _shuttingDown,
             post: deliver => _dispatcher.TryEnqueue(() => deliver()),
             onSettled: OnConfigFileSettled,
-            StaticLoggers.ConfigService);
+            StaticLoggers.ConfigService,
+            onVanished: OnConfigFileVanished);
         var started = false;
         try
         {
@@ -2050,6 +2289,52 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         if (_shuttingDown) return;
         Reload();
     }
+
+    /// <summary>
+    /// The config file has been gone for a whole quiet period, which is a
+    /// deletion and not a save in flight. Nothing is rebuilt and nothing is
+    /// pushed: the running config stays in force, which is what a deletion
+    /// deserves. All that changes is what the next reload compares against.
+    /// </summary>
+    /// <remarks>
+    /// Without this the refusal is permanent. Reload declines while the
+    /// session is running on more config files than exist, the count only
+    /// ever rose, and nothing else lowers it, so a session whose config file
+    /// is deleted declines every later reload for the life of the process.
+    /// High Contrast and the OS colour scheme reach the terminal only
+    /// through the config a reload builds, so that is an accessibility
+    /// override that can never be turned on again (issue #676).
+    ///
+    /// Zeroed rather than decremented: the watcher watches one path and the
+    /// default files are three, so this says "stop claiming to be running on
+    /// files I can no longer vouch for" and lets the next reload re-establish
+    /// the count from what is actually on disk. The two paths it does not
+    /// watch raise no event at all; those deletions are healed from the
+    /// reload side instead, by the persistent-shrink confirmation in
+    /// <c>Reload</c>.
+    /// </remarks>
+    private void OnConfigFileVanished()
+    {
+        if (_shuttingDown) return;
+        if (_defaultFilesFound == 0) return;
+
+        StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
+        RecordDefaultFiles(0);
+    }
+
+    /// <summary>
+    /// The one writer of <c>_defaultFilesFound</c>: how many default config
+    /// files the config now in force was built from.
+    /// </summary>
+    /// <remarks>
+    /// Pinned at zero under <c>--no-config</c>, where the config file is
+    /// ignored by policy. Gating on a file this launch does not read would
+    /// let its absence refuse the High Contrast and OS-theme reloads, which
+    /// are the only reloads such a launch has: there is no watcher either,
+    /// so nothing would ever ask again.
+    /// </remarks>
+    private void RecordDefaultFiles(int found) =>
+        _defaultFilesFound = _noConfig ? 0 : found;
 
     /// <summary>
     /// Stop applying config reloads ahead of app teardown. After this,
@@ -2091,6 +2376,63 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
 internal static partial class ConfigServiceLogExtensions
 {
+    // Information, not Warning: nothing is broken and nothing is lost. The
+    // running config stays in force and the save that is in flight raises its
+    // own event when it lands, so the usual outcome is one of these followed
+    // immediately by a reload that works. It is logged at all because the
+    // alternative reading of a config file that stays away is that the user
+    // deleted it, and then this line is the only account of why the app is
+    // still running on settings that are no longer on disk.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ReloadFoundNoFile,
+                   Level = LogLevel.Information,
+                   Message = "[ConfigService] Keeping the running config: {Path} was not applied because {Reason}")]
+    internal static partial void LogReloadKeptRunningConfig(
+        this ILogger<ConfigService> logger, string path, string reason);
+
+    // Warning, unlike the line above, and logged once per stretch: the retry
+    // budget is spent, so nothing is going to ask again, and the edit the
+    // user saved is not in force until they save once more or restart. That
+    // is a functional degradation, and this line is the only account of it.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ReloadGaveUp,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigService] Config file still unreadable after {Attempts} attempts, keeping the running config until the next save: {Path}")]
+    internal static partial void LogReloadGaveUp(
+        this ILogger<ConfigService> logger, int attempts, string path);
+
+    // A preview, not a reload, so it says so: the running config is being
+    // kept because the preview could not be built over it, and nothing was
+    // reloaded. Sharing the reload's line made a palette browse report
+    // "Keeping the running config" for something that never asked to change
+    // it, which reads in a log as a reload that happened.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ThemePreviewKeptConfig,
+                   Level = LogLevel.Information,
+                   Message = "[ConfigService] Not previewing {Theme}: {Path} was not read because {Reason}")]
+    internal static partial void LogThemePreviewKeptRunningConfig(
+        this ILogger<ConfigService> logger, string theme, string path, string reason);
+
+    // Information: the running config is untouched and nothing is lost. What
+    // it records is that the session stopped treating the config file as
+    // present, which is what lets later reloads apply again. A save in
+    // flight never reaches here, so a line like this means the file really
+    // is gone.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ConfigFileVanished,
+                   Level = LogLevel.Information,
+                   Message = "[ConfigService] Config file is gone, keeping the running config: {Path}")]
+    internal static partial void LogConfigFileVanished(
+        this ILogger<ConfigService> logger, string path);
+
+    // Information, and the account of a deletion the watcher cannot see:
+    // the missing file is one of the layered candidates it does not watch,
+    // so no event ever names it. Logged on the reload that stops refusing
+    // and applies what is left, which is also what lowers the session
+    // count; without that line a log would show a run of declines ending
+    // in an unexplained apply.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ReloadDefaultFilesShrunk,
+                   Level = LogLevel.Information,
+                   Message = "[ConfigService] A layered config file is gone for good; the session ran on {Before} default files and {Now} remain, so this reload applies the configuration that is left: {Path}")]
+    internal static partial void LogReloadDefaultFilesShrunk(
+        this ILogger<ConfigService> logger, int before, int now, string path);
+
     // Warning: the palette keeps showing whatever it showed before, and the
     // theme can still be chosen from Settings or the config file.
     [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ThemePreviewFailed,
