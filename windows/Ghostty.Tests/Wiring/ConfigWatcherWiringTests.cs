@@ -125,9 +125,12 @@ public class ConfigWatcherWiringTests
     /// <remarks>
     /// The flag has to mean nothing reads AND nothing writes the config
     /// file, and the starter template is a write: it is how such a run still
-    /// left a config file behind on a fresh root. libghostty refuses it too;
-    /// both halves are kept, because this is the readable one and that is
-    /// the one that holds if a future flag spelling only reaches libghostty.
+    /// left a config file behind on a fresh root. CliAliases sets NoConfig
+    /// for either spelling, so this half covers them both, and the path
+    /// resolution and the seed write in the same constructor branch on the
+    /// same flag. libghostty refuses its create under the flag as well:
+    /// that half holds for callers of the export that never see this
+    /// shell's command line.
     ///
     /// Neither half has a test that fails without it otherwise: no C# test
     /// drives this constructor, and the libghostty half is behind a flag
@@ -222,6 +225,76 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
+    /// A count shrink is either a save mid swap or a file gone for good,
+    /// and an ask for one more look is what tells them apart: the save's
+    /// completing rename answers it, a deletion answers nothing. Locked
+    /// files ask through ShouldRetry on their own; the shrink asks here,
+    /// beside it, on the same budget.
+    /// </summary>
+    [Fact]
+    public void A_shrunk_count_decline_asks_for_one_more_look_on_the_same_budget()
+    {
+        var (_, guard) = ReloadGuard();
+
+        var ask = Assert.Single(guard.Statement.Calls("ConfigReloadGate.ShouldConfirmShrink"));
+        Assert.Equal("defaultFiles", ask.Arg(0));
+        Assert.Equal("defaultFilesFound", ask.Arg(1));
+        Assert.Equal("_defaultFilesFound", ask.Arg(2));
+        Assert.Equal("_declinedReloadRetries", ask.Arg(3));
+        Assert.Equal("MaxDeclinedReloadRetries", ask.Arg(4));
+
+        // Beside ShouldRetry, not instead of it: each covers a different
+        // decline, and replacing one with the other would stop asking
+        // about locked files or about deletions outright.
+        var askIf = ask.Ancestors().OfType<IfStatementSyntax>().First();
+        var or = Assert.IsType<BinaryExpressionSyntax>(askIf.Condition);
+        Assert.Equal(SyntaxKind.LogicalOrExpression, or.Kind());
+        Assert.Equal(
+            "ConfigReloadGate.ShouldRetry",
+            Assert.IsType<InvocationExpressionSyntax>(or.Left).Expression.ToString());
+        Assert.Equal(ask.Span, or.Right.Span);
+    }
+
+    /// <summary>
+    /// A shrink that survives the whole ask budget is a deletion of a
+    /// layered file the watcher does not watch, and believing the disk is
+    /// the only way the session recovers: no event is coming for that
+    /// file, so a refusal here is permanent. The config in hand was built
+    /// from every file that does exist, so applying it is the user's
+    /// configuration as it now stands.
+    /// </summary>
+    [Fact]
+    public void A_shrink_that_outlives_the_asks_is_applied_as_a_deletion()
+    {
+        var (_, guard) = ReloadGuard();
+
+        var heal = Assert.Single(guard.Statement.Calls("ConfigReloadGate.IsPersistentShrink"));
+        Assert.Equal("defaultFiles", heal.Arg(0));
+        Assert.Equal("defaultFilesFound", heal.Arg(1));
+        Assert.Equal("_defaultFilesFound", heal.Arg(2));
+        Assert.Equal("_declinedReloadRetries", heal.Arg(3));
+        Assert.Equal("MaxDeclinedReloadRetries", heal.Arg(4));
+
+        // The decline's cost only runs when the shrink is NOT confirmed
+        // as a deletion; the heal is the fall-through past that branch.
+        var inner = heal.Ancestors().OfType<IfStatementSyntax>().First();
+        var not = Assert.IsType<PrefixUnaryExpressionSyntax>(inner.Condition);
+        Assert.Equal(SyntaxKind.ExclamationToken, not.OperatorToken.Kind());
+        Assert.Equal(heal.Span, not.Operand.Span);
+        Assert.NotEmpty(inner.Statement.Calls("NativeMethods.ConfigFree"));
+        Assert.Contains(
+            inner.Statement.DescendantNodes().OfType<ReturnStatementSyntax>(),
+            r => r.Expression?.ToString() == "false");
+
+        // The heal writes the count nowhere: the applied path below
+        // records the lower count, so the fall-through stays inside the
+        // one-writer rule. All it adds is the account of what happened.
+        Assert.NotEmpty(guard.Statement.Calls(
+            "StaticLoggers.ConfigService.LogReloadDefaultFilesShrunk"));
+        Assert.Empty(guard.Statement.Calls("RecordDefaultFiles"));
+    }
+
+    /// <summary>
     /// The count the gate reads has exactly one writer, so the session and
     /// the gate cannot start disagreeing about what the session is running
     /// on. Deriving it a second way is how that begins.
@@ -273,6 +346,70 @@ public class ConfigWatcherWiringTests
             retry.Ancestors().OfType<IfStatementSyntax>().First().Condition);
         Assert.Equal(SyntaxKind.EqualsExpression, condition.Kind());
         Assert.Equal("true", condition.Right.ToString());
+    }
+
+    /// <summary>
+    /// The budget ends when a reload applies, not when a decline stretch
+    /// does. Without the reset, one exhausted budget suppresses the
+    /// resettles and the one-per-stretch gave-up warning for every later
+    /// stretch of the session.
+    /// </summary>
+    [Fact]
+    public void An_applied_reload_resets_the_retry_budget()
+    {
+        var reset = Assert.Single(ConfigService().Method("Reload")
+            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_declinedReloadRetries"));
+
+        Assert.Equal("0", reset.Right.ToString());
+    }
+
+    /// <summary>
+    /// The session count is pinned at zero under --no-config, and this
+    /// half is the pin. Deleting it lets a save gap refuse the High
+    /// Contrast and OS-scheme reloads such a launch lives on, with no
+    /// watcher to ever ask again.
+    /// </summary>
+    [Fact]
+    public void The_session_count_is_pinned_at_zero_under_no_config()
+    {
+        var assignment = Assert.Single(ConfigService().Method("RecordDefaultFiles")
+            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_defaultFilesFound"));
+
+        var conditional = Assert.IsType<ConditionalExpressionSyntax>(assignment.Right);
+        Assert.Equal("_noConfig", conditional.Condition.ToString());
+        Assert.Equal("0", conditional.WhenTrue.ToString());
+        Assert.Equal("found", conditional.WhenFalse.ToString());
+    }
+
+    /// <summary>
+    /// The gave-up warning is the only account of a stretch of
+    /// unreadability that outlived its asks, so the call is pinned, not
+    /// just the branch it sits in.
+    /// </summary>
+    [Fact]
+    public void A_stretch_that_outlives_its_asks_is_reported()
+    {
+        Assert.NotEmpty(ConfigService().Method("Reload")
+            .Calls("StaticLoggers.ConfigService.LogReloadGaveUp"));
+    }
+
+    /// <summary>
+    /// The preview gate is asked with the counts the same way round as
+    /// the reload's: the load that just happened, then the session.
+    /// Swapped, the first preview after a config file appeared is
+    /// refused, which reads as a palette browse that does nothing.
+    /// </summary>
+    [Fact]
+    public void The_preview_gate_is_asked_about_this_load_against_the_session()
+    {
+        var decide = Assert.Single(
+            ConfigService().Method("PreviewTheme").Calls("ConfigReloadGate.Decide"));
+
+        Assert.Equal("previewFiles", decide.Arg(0));
+        Assert.Equal("previewFilesFound", decide.Arg(1));
+        Assert.Equal("_defaultFilesFound", decide.Arg(2));
     }
 
     /// <summary>

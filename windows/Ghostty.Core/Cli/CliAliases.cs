@@ -216,6 +216,11 @@ internal static class CliAliases
     /// reimplementation would have to reproduce that, and would still
     /// leave `no-config` on the command line for libghostty to report as
     /// an unknown key.
+    ///
+    /// The key is also recognized where a launch writes it directly:
+    /// <c>RewriteConfigFlags</c> sets the flag for that spelling too,
+    /// without splicing anything, because the shell's own config handling
+    /// branches on it.
     /// </remarks>
     private const string NoConfigFlag = "--no-config";
 
@@ -263,6 +268,17 @@ internal static class CliAliases
             {
                 noConfig = true;
                 (splices ??= new List<(int, int)>()).Add((start, length));
+                continue;
+            }
+
+            // The libghostty spelling needs no splice - libghostty parses
+            // it where it stands - but it sets the flag here too. The
+            // shell's own config writers and readers branch on NoConfig,
+            // and a flag only libghostty sees leaves an empty config file
+            // behind on a fresh root (issue #676).
+            if (span.SequenceEqual(NoConfigKey))
+            {
+                noConfig = true;
                 continue;
             }
 

@@ -10,10 +10,11 @@ namespace Ghostty.Core.Cli;
 /// the common launch allocates nothing.
 /// </param>
 /// <param name="NoConfig">
-/// Whether the invocation asked for no configuration at all. Wintty
-/// reads several Windows-only keys off the config file itself, without
-/// libghostty, so this has to travel past the rewrite: rewriting alone
-/// would leave those keys in force and make the flag a half-truth.
+/// Whether the invocation asked for no configuration at all, in either
+/// spelling. Wintty reads several Windows-only keys off the config file
+/// itself, without libghostty, so this has to travel past the rewrite:
+/// rewriting alone would leave those keys in force and make the flag a
+/// half-truth.
 /// </param>
 /// <param name="ConfigFile">
 /// Whether the invocation named a config file of its own.

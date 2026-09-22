@@ -31,6 +31,7 @@ internal static class LogEvents
         public const int ReloadGaveUp          = 1017;
         public const int ThemePreviewKeptConfig = 1018;
         public const int ConfigFileVanished    = 1019;
+        public const int ReloadDefaultFilesShrunk = 1020;
     }
 
     // 1100-1199: Frecency / command history

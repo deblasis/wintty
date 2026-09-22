@@ -201,7 +201,12 @@ public class TestConfigGuardWiringTests
         var source = ShellSource.Load("Services.ConfigService.cs");
         var seed = source.Method("SeedConfigIfEmpty");
 
-        var write = seed.Calls("File.WriteAllText").Single();
+        // The write is the exclusive open of the file, not a WriteAllText:
+        // the stream is the decision point, and everything after it
+        // (length re-check, bytes) is under the same guard.
+        var write = seed.Body!.Statements
+            .SelectMany(s => s.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+            .Single(o => o.Type.ToString() == "FileStream");
         var assert = GuardCalls(seed).Single();
         var swallowingTry = write.Ancestors().OfType<TryStatementSyntax>()
             .SingleOrDefault(t => t.Catches.Count > 0);

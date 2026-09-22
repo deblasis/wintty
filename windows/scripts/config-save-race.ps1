@@ -50,6 +50,16 @@
     missing from it. The older file carries its own distinctive size, so a
     reload that applied it lands in `wrong`.
 
+    -DeleteMigratedAt N (needs -Migrated) runs N ordinary iterations, then
+    deletes the staged ghostty/config.ghostty for good and finishes the run
+    with plain writes and long settles. That is migration cleanup, the
+    ordinary user action: the watcher watches the wintty directory only, so
+    the deletion is never announced, and the session is left running on one
+    more config file than exists. The mode is judged on its own window: a
+    build that refuses the count shrink forever applies nothing after the
+    deletion and fails, whatever the first N iterations landed; a build that
+    recovers keeps applying within a few settles.
+
     Exit code 1 if either bad count is non-zero or too few reloads landed, so
     this can gate a change.
 
@@ -58,6 +68,9 @@
 
 .EXAMPLE
     pwsh -NoProfile -File windows/scripts/config-save-race.ps1 -Migrated -Iterations 200
+
+.EXAMPLE
+    pwsh -NoProfile -File windows/scripts/config-save-race.ps1 -Migrated -DeleteMigratedAt 30 -Iterations 90
 #>
 [CmdletBinding()]
 param(
@@ -81,12 +94,19 @@ param(
     # Ghostty has it. The file being saved is still wintty/config.wintty.
     [switch]$Migrated,
 
+    # With -Migrated: after this many iterations, delete the staged
+    # ghostty/config.ghostty for good and finish the run with plain writes.
+    # 0 (the default) never deletes it.
+    [int]$DeleteMigratedAt = 0,
+
     # How many reloads have to land for the run to count. Every iteration
     # ends with the config file back in place and a wait past the debounce,
     # so one reload per iteration is the shape; half of that is the floor,
     # because a strike landing either side of the debounce can fold two
     # iterations into one settle. Zero would make this script pass a build
-    # where no reload ever applies, which is what it is here to catch.
+    # where no reload ever applies, which is what it is here to catch. The
+    # floor is 2, not 1: startup applies the staged config once by itself,
+    # and a one- or two-iteration run must not pass on that alone.
     [int]$MinApplied = -1,
 
     # Leave the staged config root and its app log behind, for working out
@@ -112,7 +132,14 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
 # launch that lost the root refuses instead of writing to the real config.
 . (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 
-if ($MinApplied -lt 0) { $MinApplied = [Math]::Max(1, [int]($Iterations / 2)) }
+if ($DeleteMigratedAt -gt 0 -and -not $Migrated) {
+    throw '-DeleteMigratedAt needs -Migrated: there is no legacy file to delete.'
+}
+if ($DeleteMigratedAt -lt 0 -or $DeleteMigratedAt -ge $Iterations) {
+    throw '-DeleteMigratedAt has to sit inside the run: 1..(Iterations-1).'
+}
+
+if ($MinApplied -lt 0) { $MinApplied = [Math]::Max(2, [int]($Iterations / 2)) }
 
 # font-size is the oracle. Every applied config change calls the core's
 # setFontSize, which logs the size it was given, so the app log holds one
@@ -152,7 +179,7 @@ try {
     New-Item -ItemType Directory -Force -Path $stateBase | Out-Null
     $env:WINTTY_STATE_BASE = $stateBase
 
-    Write-Host "root=$($session.Dir) shape=$Shape iterations=$Iterations migrated=$([bool]$Migrated)"
+    Write-Host "root=$($session.Dir) shape=$Shape iterations=$Iterations migrated=$([bool]$Migrated) deleteMigratedAt=$DeleteMigratedAt"
     $proc = Start-Process $ExePath -PassThru
     Start-Sleep -Milliseconds $SettleMs
     $proc.Refresh()
@@ -167,8 +194,31 @@ try {
     $rng = [System.Random]::new()
     $clobbers = 0
     $exited = $null
+    $deletedAtUtc = [datetimeoffset]::MinValue
 
     for ($i = 1; $i -le $Iterations; $i++) {
+        if ($DeleteMigratedAt -gt 0 -and $i -eq $DeleteMigratedAt + 1) {
+            # Migration cleanup, mid-run: the watcher watches the wintty
+            # directory only, so this raises no event anywhere and nothing
+            # announces it. What the app does on the next edit is the whole
+            # point of the mode.
+            $deletedAtUtc = [datetimeoffset]::UtcNow
+            Remove-Item -LiteralPath (Join-Path $session.Dir 'ghostty\config.ghostty') -Force
+            Write-Host "  deleted the migrated ghostty config after iteration $DeleteMigratedAt"
+        }
+
+        if ($DeleteMigratedAt -gt 0 -and $i -gt $DeleteMigratedAt) {
+            # Plain writes and long settles: no swap games past the deletion,
+            # so no settle can catch the saved file away and rescue a wedged
+            # build through the vanished path. A healthy run applies every
+            # one of these; a wedged one applies none.
+            [System.IO.File]::WriteAllText($cfg, $body + "# probe $i`n")
+            Start-Sleep -Milliseconds 1200
+            $proc.Refresh()
+            if ($proc.HasExited) { $exited = $proc.ExitCode; break }
+            continue
+        }
+
         # Arm the debounce with a real edit.
         [System.IO.File]::WriteAllText($cfg, $body + "# probe $i`n")
 
@@ -179,17 +229,28 @@ try {
         while ($sw.Elapsed.TotalMilliseconds -lt $strike) { }
 
         if ($Shape -eq 'swap') {
-            if (Test-Path -LiteralPath $away) { Remove-Item -LiteralPath $away -Force }
-            [System.IO.File]::Move($cfg, $away)
-            Start-Sleep -Milliseconds $HoldMs
+            try {
+                if (Test-Path -LiteralPath $away) { Remove-Item -LiteralPath $away -Force }
+                [System.IO.File]::Move($cfg, $away)
+                Start-Sleep -Milliseconds $HoldMs
 
-            # Anything at the config path now is libghostty's doing: this
-            # process moved the only file that was there.
-            if (Test-Path -LiteralPath $cfg) {
-                $clobbers++
-                Remove-Item -LiteralPath $cfg -Force
+                # Anything at the config path now is libghostty's doing: this
+                # process moved the only file that was there.
+                if (Test-Path -LiteralPath $cfg) {
+                    $clobbers++
+                    Remove-Item -LiteralPath $cfg -Force
+                }
+                [System.IO.File]::Move($away, $cfg)
             }
-            [System.IO.File]::Move($away, $cfg)
+            catch [System.IO.IOException] {
+                # The app opens the config for the length of a load, and a
+                # move under that throws. Put the file back if it can be put
+                # back and let the run carry on: one dropped strike is not a
+                # measurement, a dead harness is no measurement at all.
+                if ((Test-Path -LiteralPath $away) -and -not (Test-Path -LiteralPath $cfg)) {
+                    try { [System.IO.File]::Move($away, $cfg) } catch { }
+                }
+            }
         }
         else {
             # Truncate in place and hold it empty, then write the content
@@ -220,20 +281,33 @@ try {
     # Every size the app was set to, split into the ones that came from the
     # staged config and the ones that did not. Both halves are needed: the
     # bad count alone is zero in a build where no reload ever applies.
+    # The count is lines, not reloads: every applied reload logs one line
+    # per surface, so it overcounts reloads, and the deletion mode judges
+    # its own window rather than this total.
     $applied = 0
     $wrong = 0
     $migratedHits = 0
+    $appliedAfterDeletion = 0
     $logDir = Join-Path $stateBase 'Wintty\logs'
     if (Test-Path -LiteralPath $logDir) {
         Get-ChildItem -LiteralPath $logDir -Filter *.log | ForEach-Object {
             Select-String -LiteralPath $_.FullName -Pattern 'set font size size=(\d+)' -AllMatches |
-                ForEach-Object { $_.Matches } |
                 ForEach-Object {
-                    $size = [int]$_.Groups[1].Value
-                    if ($size -eq $FontSize) { $applied++ }
-                    else {
-                        $wrong++
-                        if ($Migrated -and $size -eq $MigratedSize) { $migratedHits++ }
+                    $stamp = [datetimeoffset]::Parse(
+                        ($_.Line -split ' ')[0],
+                        [System.Globalization.CultureInfo]::InvariantCulture)
+                    foreach ($match in $_.Matches) {
+                        $size = [int]$match.Groups[1].Value
+                        if ($size -eq $FontSize) {
+                            $applied++
+                            if ($DeleteMigratedAt -gt 0 -and $stamp -ge $deletedAtUtc) {
+                                $appliedAfterDeletion++
+                            }
+                        }
+                        else {
+                            $wrong++
+                            if ($Migrated -and $size -eq $MigratedSize) { $migratedHits++ }
+                        }
                     }
                 }
         }
@@ -246,11 +320,23 @@ try {
     if ($Migrated) {
         Write-Host "  of those, the older config file    : $migratedHits"
     }
+    if ($DeleteMigratedAt -gt 0) {
+        $expectedAfter = $Iterations - $DeleteMigratedAt - 8
+        Write-Host "applied after the deletion           : $appliedAfterDeletion (need at least $expectedAfter)"
+    }
     if ($null -ne $exited) { Write-Host "the app EXITED, code=$exited" }
     Write-Host "root=$($session.Dir)"
 
     $failed = $false
     if ($clobbers -gt 0 -or $wrong -gt 0 -or $null -ne $exited) { $failed = $true }
+    if ($DeleteMigratedAt -gt 0 -and
+        $appliedAfterDeletion -lt ($Iterations - $DeleteMigratedAt - 8)) {
+        # The whole point of the mode: reloads that keep landing after a
+        # file the watcher does not watch is deleted. A session wedged on
+        # the count shrink applies nothing from the deletion on.
+        Write-Host "RELOADS STOPPED AFTER THE DELETION: the session never believed the file was gone"
+        $failed = $true
+    }
     if ($applied -lt $MinApplied) {
         # Not a pass with nothing wrong: it is a run that proved nothing.
         # An app whose reload guard refuses everything reaches here with

@@ -73,10 +73,14 @@ public static class ConfigReloadGate
     /// <para>A config file deleted on purpose looks exactly like the save
     /// gap here, and is refused the same way, so the session keeps its
     /// settings rather than having them torn down by an act that did not
-    /// ask for it. It does not stay refused: a settle that finds the file
-    /// still gone a full debounce period later is a deletion and not a
-    /// save, and the host lowers its count on that, which is
-    /// <c>ConfigFileWatcher</c>'s vanished callback.</para>
+    /// ask for it. It does not stay refused: a settle that finds the
+    /// watched file still gone a full debounce period later is a deletion
+    /// and not a save, and the host lowers its count on that, which is
+    /// <c>ConfigFileWatcher</c>'s vanished callback. A layered file the
+    /// watcher does not watch raises no event at all, so the host asks to
+    /// look again instead, and a shrink that is still a shrink after the
+    /// whole ask budget is spent is a deletion the same way: see
+    /// <see cref="IsPersistentShrink"/>.</para>
     /// </remarks>
     public static ConfigReloadDecision Decide(
         ConfigFilesFound found,
@@ -114,11 +118,73 @@ public static class ConfigReloadGate
     /// Whether a declined reload should ask to be tried again.
     ///
     /// Only for <c>Unreadable</c>: that save has landed and its filesystem
-    /// events are spent, so nothing else will ask. A count that shrank needs
-    /// no retry, because the rename that completes the save raises its own
-    /// event, and a file that never comes back is reported as vanished
-    /// instead.
+    /// events are spent, so nothing else will ask. A count that shrank does
+    /// not take this path, because the rename that completes the save raises
+    /// its own event, and a file that never comes back is reported as
+    /// vanished or confirmed as a deletion instead.
     /// </summary>
     public static bool ShouldRetry(ConfigFilesFound found, int attemptsSoFar, int maxAttempts) =>
         found == ConfigFilesFound.Unreadable && attemptsSoFar < maxAttempts;
+
+    /// <summary>
+    /// Whether the load found fewer default config files than the session
+    /// is running on: <c>Loaded</c> with a count that dropped.
+    /// </summary>
+    /// <remarks>
+    /// Either a save is mid swap, or a file is gone for good, and the load
+    /// cannot tell those apart; only what happens next can. <c>Absent</c> is
+    /// deliberately not one: the watched file going missing is the vanished
+    /// callback's case, decided on a whole quiet period of the file being
+    /// gone rather than on a count.
+    /// </remarks>
+    public static bool IsCountShrink(
+        ConfigFilesFound found,
+        int defaultFilesFound,
+        int sessionDefaultFilesFound) =>
+        found == ConfigFilesFound.Loaded
+            && defaultFilesFound < sessionDefaultFilesFound;
+
+    /// <summary>
+    /// Whether a count-shrink decline should spend one ask of the retry
+    /// budget on looking again, the same budget <see cref="ShouldRetry"/>
+    /// spends on a locked file.
+    /// </summary>
+    /// <remarks>
+    /// The ask is the confirmation protocol for deletions the watcher
+    /// cannot see: it watches one path, and the default files are layered
+    /// candidates, so a deleted file it does not watch raises no event at
+    /// all. While the budget lasts, a save mid swap is still the expected
+    /// answer, and its completing rename settles and reloads with the count
+    /// restored, ending the asks.
+    /// </remarks>
+    public static bool ShouldConfirmShrink(
+        ConfigFilesFound found,
+        int defaultFilesFound,
+        int sessionDefaultFilesFound,
+        int attemptsSoFar,
+        int maxAttempts) =>
+        IsCountShrink(found, defaultFilesFound, sessionDefaultFilesFound)
+            && attemptsSoFar < maxAttempts;
+
+    /// <summary>
+    /// Whether a count shrink has outlived the whole ask budget, which no
+    /// save in flight can do: each ask waits out a full quiet period, and
+    /// a rename that slow has lost its race with its own editor.
+    /// </summary>
+    /// <remarks>
+    /// So it is a deletion, of a layered file the watcher does not watch,
+    /// and the host should believe the disk: apply what the load built and
+    /// let the applied reload record the lower count. Refusing instead is
+    /// permanent, because nothing else lowers the session count; that is
+    /// the accessibility lockout of issue #676 all over again, one layer
+    /// removed.
+    /// </remarks>
+    public static bool IsPersistentShrink(
+        ConfigFilesFound found,
+        int defaultFilesFound,
+        int sessionDefaultFilesFound,
+        int attemptsSoFar,
+        int maxAttempts) =>
+        IsCountShrink(found, defaultFilesFound, sessionDefaultFilesFound)
+            && attemptsSoFar >= maxAttempts;
 }

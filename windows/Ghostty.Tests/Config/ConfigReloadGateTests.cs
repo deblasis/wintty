@@ -149,10 +149,10 @@ public class ConfigReloadGateTests
     }
 
     /// <summary>
-    /// A locked file is the only decline worth asking about again: its save
-    /// has landed and its events are spent. A count that shrank is mid swap,
-    /// and the rename that completes it raises its own event; a file that
-    /// never comes back is reported as vanished instead.
+    /// A locked file is the only decline worth asking about again on its
+    /// own: its save has landed and its events are spent. A count that
+    /// shrank takes the separate confirm ask below, and a watched file
+    /// that never comes back is reported as vanished instead.
     /// </summary>
     [Fact]
     public void Only_an_unreadable_config_file_is_retried()
@@ -160,6 +160,65 @@ public class ConfigReloadGateTests
         Assert.True(ConfigReloadGate.ShouldRetry(ConfigFilesFound.Unreadable, 0, 3));
         Assert.False(ConfigReloadGate.ShouldRetry(ConfigFilesFound.Absent, 0, 3));
         Assert.False(ConfigReloadGate.ShouldRetry(ConfigFilesFound.Loaded, 0, 3));
+    }
+
+    /// <summary>
+    /// A shrunk count is either a save mid swap or a file gone for good,
+    /// and the confirm ask is how the two are told apart: the save's
+    /// completing rename answers it, so a shrink worth asking about stops
+    /// being asked about the moment the budget is spent. Only a Loaded
+    /// count takes it; an Unreadable one asks through ShouldRetry, and an
+    /// Absent one is the vanished callback's case, decided on a whole
+    /// quiet period of the watched file being gone.
+    /// </summary>
+    [Theory]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 0, 3, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 2, 3, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 3, 3, false)]
+    [InlineData(ConfigFilesFound.Loaded, 2, 1, 0, 3, false)]
+    [InlineData(ConfigFilesFound.Absent, 0, 1, 0, 3, false)]
+    [InlineData(ConfigFilesFound.Unreadable, 1, 2, 0, 3, false)]
+    public void A_shrunk_count_gets_one_more_look_while_the_budget_lasts(
+        ConfigFilesFound found,
+        int filesFound,
+        int sessionFilesFound,
+        int attemptsSoFar,
+        int maxAttempts,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ConfigReloadGate.ShouldConfirmShrink(
+                found, filesFound, sessionFilesFound, attemptsSoFar, maxAttempts));
+    }
+
+    /// <summary>
+    /// A shrink that is still a shrink after the whole budget was spent on
+    /// looking again is a deletion, not a save: every ask waited out a full
+    /// quiet period, and a rename that slow lost its race with its own
+    /// editor. The deleted file is one the watcher does not watch - the
+    /// layered candidates it never sees - so nothing else would ever lower
+    /// the session count, and refusing here is the permanent lockout of
+    /// issue #676 again.
+    /// </summary>
+    [Theory]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 3, 3, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 4, 3, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 2, 3, false)]
+    [InlineData(ConfigFilesFound.Loaded, 2, 1, 3, 3, false)]
+    [InlineData(ConfigFilesFound.Absent, 0, 1, 3, 3, false)]
+    public void A_shrink_that_outlives_the_whole_budget_is_a_deletion(
+        ConfigFilesFound found,
+        int filesFound,
+        int sessionFilesFound,
+        int attemptsSoFar,
+        int maxAttempts,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ConfigReloadGate.IsPersistentShrink(
+                found, filesFound, sessionFilesFound, attemptsSoFar, maxAttempts));
     }
 
     /// <summary>
