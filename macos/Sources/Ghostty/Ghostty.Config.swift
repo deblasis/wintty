@@ -64,13 +64,14 @@ extension Ghostty {
         ///     the write underneath refuses to overwrite now, so a config file that arrives
         ///     between finding none and writing one survives instead of being truncated.
         ///
-        ///     What is left is the reload itself. It can run while an editor is part-way
-        ///     through saving the config file, and it then builds a config of pure defaults
-        ///     and pushes it at every live surface, because nothing here asks whether the
-        ///     config it just built is the user's (deblasis/wintty#676). The Windows shell
-        ///     has a gate for that; macOS was left alone because it cannot be built or run on
-        ///     the machine that change was written on, and the parameter exists so the create
-        ///     half is one word per call site for somebody who can.
+        ///     Deliberately unchanged otherwise. The Windows shell also refuses to APPLY a
+        ///     rebuilt config it could not read, which is the other half of
+        ///     deblasis/wintty#676 there. Whether macOS wants the same is not a question the
+        ///     branch that added that could answer: it could neither build nor run this app,
+        ///     and the config path, the shapes editors save in and what triggers a reload all
+        ///     differ from Windows. deblasis/wintty#1137 carries it as something to measure
+        ///     here. The parameter is still worth having: it makes the create side one word
+        ///     per call site for somebody who can measure it.
         static func loadConfig(at path: String?, finalize: Bool, createIfAbsent: Bool = false) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {

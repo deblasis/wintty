@@ -155,10 +155,10 @@ extension Ghostty {
             //
             // createIfAbsent keeps this reload creating: one that finds no
             // config file still writes the starter one, though the write
-            // refuses to overwrite now. What is left is the reload itself,
-            // which applies a config of pure defaults when it lands in the
-            // gap of a save. Left alone on purpose; see
-            // Ghostty.Config.loadConfig.
+            // refuses to overwrite now. Deliberately unchanged otherwise;
+            // see Ghostty.Config.loadConfig for what the Windows shell does
+            // beyond this and why that is a question to measure here rather
+            // than a change to make blind.
             let newConfig = Config(at: configPath, createIfAbsent: true)
             guard newConfig.loaded else {
                 Ghostty.logger.warning("failed to reload configuration")

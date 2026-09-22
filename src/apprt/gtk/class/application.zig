@@ -2981,13 +2981,14 @@ const Action = struct {
             // so a config file that arrives between finding none and
             // writing one survives instead of being truncated.
             //
-            // What is left is the half the gate covers. A reload landing in
-            // the gap of an editor's atomic save still builds a config of
-            // pure defaults and pushes it at every live surface, and there
-            // is nothing here that asks whether the config it just built is
-            // the user's. Left alone on purpose: changing it needs a GTK
-            // build to verify and this branch was written without one. See
-            // issue #1137.
+            // Deliberately unchanged otherwise. The Windows shell also
+            // refuses to APPLY a rebuilt config it could not read, and
+            // whether this path wants the same is not a question the branch
+            // that added that could answer: it was written without a GTK
+            // build, and the config path, the shapes editors save in and
+            // what triggers a reload all differ from Windows. Issue #1137
+            // carries it as something to measure here, not as a patch
+            // waiting to be applied.
             const alloc = self.allocator();
             var config = try CoreConfig.loadOrCreateDefault(alloc);
             defer config.deinit();
