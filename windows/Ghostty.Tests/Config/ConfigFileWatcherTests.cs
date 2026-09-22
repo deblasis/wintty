@@ -221,6 +221,34 @@ public sealed class ConfigFileWatcherTests : IDisposable
     }
 
     /// <summary>
+    /// A tick that a pending rebuild consumes still delivers. While the
+    /// watched directory is missing, that tick is the only thing still
+    /// running on the watcher's schedule, and swallowing it leaves a
+    /// deleted directory unconfirmable: no delivery, no vanish report,
+    /// no asks, and every later reload declined for the life of the
+    /// process, which is the #676 lockout down the directory path.
+    /// </summary>
+    [Fact]
+    public void A_tick_consumed_by_a_failed_rebuild_still_delivers()
+    {
+        using var watcher = NewWatcher();
+
+        DeleteDirectory(_dir);
+        WaitUntil(() => _log.Count(WatcherError) == 1,
+            "the watcher reported no error for its deleted directory");
+        Assert.True(_timer.Armed);
+
+        // The rebuild fails because the directory is still missing, and
+        // the tick delivers anyway: the file is gone, and the host can
+        // only ask again if it is told.
+        _timer.Fire();
+        Assert.Equal(1, _vanished);
+
+        // The retry chain survives the delivery.
+        Assert.True(_timer.Armed);
+    }
+
+    /// <summary>
     /// Resettle schedules one more delivery, and says so. The answer is what
     /// a host bounding its retries counts, so an ask that was dropped must
     /// not come back as one that was taken.
