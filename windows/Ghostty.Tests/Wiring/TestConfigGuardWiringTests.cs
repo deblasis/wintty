@@ -278,6 +278,15 @@ public class TestConfigGuardWiringTests
                     .OfType<ReturnStatementSyntax>().Any());
         Assert.NotNull(recheck);
 
+        // And it bails on NON-empty, which is the whole direction of it.
+        // Reading the stream and returning is not the property; returning on
+        // the wrong side of zero is a one-character edit that leaves every
+        // other assertion here true and makes the seed skip genuinely empty
+        // files and TRUNCATE a config that has the user's settings in it, to
+        // write the starter header over them. That is #676's corruption
+        // shape reached from startup, and nothing else in the suite sees it.
+        Assert.Equal("stream.Length != 0", recheck!.Condition.ToString());
+
         var bytes = hold.Statement.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
             .Where(i => i.CalleeText().Contains("Write"))

@@ -785,6 +785,32 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                     StaticLoggers.ConfigService.LogReloadGaveUp(
                         MaxDeclinedReloadRetries, ConfigFilePath);
                 }
+                else if (defaultFiles == ConfigFilesFound.Absent)
+                {
+                    // This reload just looked at the disk and found no config
+                    // file, which is the same observation the watcher's
+                    // vanished report carries, so it counts toward the same
+                    // confirmation.
+                    //
+                    // It is here because on the vanish path a dropped ask is
+                    // otherwise TERMINAL. A deleted file raises no further
+                    // filesystem events, so the only thing that can revisit
+                    // the question is the Resettle that was just dropped, and
+                    // if it was, nothing ever does: the session declines every
+                    // reload for the life of the process, which is the #676
+                    // lockout made permanent by the fix for it.
+                    //
+                    // A shrink cannot heal it either, because IsCountShrink
+                    // takes only Loaded: an Absent load is deliberately the
+                    // vanish's case, so this branch is the whole of the
+                    // second route. Reloads that are not about the config
+                    // file at all, a High Contrast toggle or an OS scheme
+                    // flip, now carry the question forward.
+                    //
+                    // Nothing is believed here that would not be believed on
+                    // the watcher's path: the same budget, the same asks.
+                    OnConfigFileVanished();
+                }
                 return false;
             }
 

@@ -520,6 +520,39 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
+    /// A reload that finds no config file carries the vanish question
+    /// forward, so a dropped ask is not the end of it.
+    /// </summary>
+    /// <remarks>
+    /// On the watcher's path a dropped ask is terminal: a deleted file
+    /// raises no further filesystem events, so the only thing that could
+    /// revisit the question is the ask that was just dropped. A shrink
+    /// cannot heal it either, because <c>IsCountShrink</c> takes only
+    /// <c>Loaded</c> and an Absent load is deliberately the vanish's case.
+    /// Without this branch the session declines every reload for the life of
+    /// the process, which is issue #676's lockout reintroduced by the fix
+    /// for it. Shape only, like everything else over this file.
+    /// </remarks>
+    [Fact]
+    public void A_reload_that_finds_no_config_file_carries_the_vanish_forward()
+    {
+        var (_, guard) = ReloadGuard();
+
+        var carried = Assert.Single(guard.Statement.Calls("OnConfigFileVanished"));
+        var branch = carried.Ancestors().OfType<IfStatementSyntax>().First();
+
+        // The whole condition, not a substring of it. Contains() is happy
+        // with `!= ConfigFilesFound.Absent`, which carries the vanish
+        // forward on every decline EXCEPT the one it is for: a locked file
+        // that is still there would then be confirmed as gone and the count
+        // lowered under it. That is the trap SyntaxQueries.ArgExpression
+        // documents, and it survived a first attempt at this test.
+        Assert.Equal(
+            "defaultFiles == ConfigFilesFound.Absent",
+            branch.Condition.ToString());
+    }
+
+    /// <summary>
     /// The budget is restored where the file is seen present, which is the
     /// delivery that settles, not the reload that may follow it.
     /// </summary>
