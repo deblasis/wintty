@@ -77,14 +77,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     // and confirm it with no asks of its own, which is exactly what sharing
     // cost between the other two.
     //
-    // It is an object from Ghostty.Core rather than an int and a const here
-    // because nothing executes this file: Ghostty.Tests holds no reference
-    // to the shell project, so every test about this class reads the source
-    // with Roslyn and asserts on its shape. A budget of zero restores the
-    // #1146 defect exactly, and no source-shape test can see that. Over
-    // there a test drives it. UI thread only, like everything the watcher's
+    // The whole wiring is an object from Ghostty.Core rather than a counter
+    // and two calls here because nothing executes this file: Ghostty.Tests
+    // holds no reference to the shell project, so every test about this
+    // class reads the source with Roslyn and asserts on its shape. A budget
+    // of zero restores the #1146 defect exactly, and no source-shape test
+    // can see that; neither could one see the budget-restore call deleted,
+    // which was measured passing. Over there a test drives the real wiring
+    // against a real watcher. UI thread only, like everything the watcher's
     // delivery reaches. See OnConfigFileVanished.
-    private readonly ConfigVanishConfirmer _vanishConfirmer = new();
+    private readonly ConfigVanishProtocol _vanishProtocol;
 
     // How many default config files existed when the config in force was
     // built. Seeded at construction and moved only by a reload that is
@@ -461,6 +463,19 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public ConfigService(DispatcherQueue dispatcher)
     {
         _dispatcher = dispatcher;
+
+        // The vanish wiring, built here because the watcher it asks is
+        // created later: the ask reads the field lazily, at report time.
+        // The count is read the same way, so a report always sees what
+        // the last applied reload recorded.
+        _vanishProtocol = new ConfigVanishProtocol(
+            sessionDefaultFilesFound: () => _defaultFilesFound,
+            ask: () => _watcher?.Resettle() == true,
+            onAccept: () =>
+            {
+                StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
+                RecordDefaultFiles(0);
+            });
 
         // ConfigNew allocates from libghostty's global allocator. A failed
         // ghostty_init leaves the global state in place but torn down, so the
@@ -2342,8 +2357,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // back and will not open reaches this line and never reaches an
         // applied reload, and leaving the budget spent would have the next
         // ordinary save believed on one observation, which is #1146 through
-        // a stale budget.
-        _vanishConfirmer.Reset();
+        // a stale budget. The restore itself is ConfigVanishProtocol's,
+        // driven against a real watcher in Ghostty.Tests.
+        _vanishProtocol.Settled();
 
         Reload();
     }
@@ -2387,15 +2403,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         if (_shuttingDown) return;
 
-        var action = _vanishConfirmer.Observe(
-            _defaultFilesFound,
-            () => _watcher?.Resettle() == true);
-
-        if (action == ConfigVanishAction.Accept)
-        {
-            StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
-            RecordDefaultFiles(0);
-        }
+        // The count moves only on the accept the protocol reports, and
+        // the accept fires only on the far side of the whole ask budget:
+        // both halves of that are ConfigVanishProtocol's, driven rather
+        // than read in Ghostty.Tests. This handler adds only the teardown
+        // fence.
+        _vanishProtocol.Vanished();
     }
 
     /// <summary>
