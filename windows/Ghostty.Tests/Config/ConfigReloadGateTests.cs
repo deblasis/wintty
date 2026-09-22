@@ -235,6 +235,56 @@ public class ConfigReloadGateTests
     }
 
     /// <summary>
+    /// A vanished watched file is asked about until the budget is spent,
+    /// because one observation of it is what an ordinary atomic save
+    /// produces.
+    /// </summary>
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(3, false)]
+    [InlineData(4, false)]
+    public void A_vanished_config_file_is_asked_about_until_the_budget_is_spent(
+        int attemptsSoFar, bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ConfigReloadGate.ShouldConfirmVanish(1, attemptsSoFar, 3));
+    }
+
+    /// <summary>
+    /// And only once the budget is spent is it a deletion. The two are
+    /// complements over a session that has files, so there is no attempt
+    /// count at which the host neither asks nor concludes: such a gap would
+    /// leave it refusing reloads with nothing left that could resolve them.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void Asking_and_concluding_cover_every_attempt_count(int attemptsSoFar)
+    {
+        var asks = ConfigReloadGate.ShouldConfirmVanish(1, attemptsSoFar, 3);
+        var concludes = ConfigReloadGate.IsPersistentVanish(1, attemptsSoFar, 3);
+
+        Assert.NotEqual(asks, concludes);
+    }
+
+    /// <summary>
+    /// A session claiming no config file has nothing to confirm and nothing
+    /// to lower, so a vanish neither asks nor concludes.
+    /// </summary>
+    [Fact]
+    public void A_session_running_on_no_config_file_does_neither()
+    {
+        Assert.False(ConfigReloadGate.ShouldConfirmVanish(0, 0, 3));
+        Assert.False(ConfigReloadGate.IsPersistentVanish(0, 3, 3));
+    }
+
+    /// <summary>
     /// The managed enum is the C one. A renumber here and a load that read
     /// the user's config arrives as one that found nothing.
     /// </summary>

@@ -30,12 +30,15 @@ namespace Ghostty.Core.Config;
 /// reports it. A reload in the gap would have loaded no user config at all,
 /// so this saves the host a rebuild it would only decline.
 ///
-/// It does report the absence, through <c>onVanished</c>. Getting that far
-/// means the file has been missing for a whole quiet period and nothing
-/// followed it, which a swap cannot produce: the rename is one event and it
-/// re-arms. So it is a deletion, and the host needs to know, because it is
-/// otherwise left refusing every later reload to protect a save that is
-/// never going to land (issue #676).
+/// It does report the absence, through <c>onVanished</c>, and that report is
+/// NOT evidence of a deletion on its own. The quiet period the debounce buys
+/// belongs to the settle, while the existence check runs later still, inside
+/// the posted delivery, so an ordinary atomic save reaches it whenever the
+/// swap straddles that hop. <c>onVanished</c> means "gone as of this
+/// delivery" and nothing more, and a host acting on one observation of it
+/// lowers what it knows in the middle of a save (issue #1146). It is
+/// reported at all because the host is otherwise left refusing every later
+/// reload to protect a save that is never going to land (issue #676).
 ///
 /// It used to be load-bearing rather than an early-out, because libghostty's
 /// default-file loader answered "no config file" by writing its template, at
@@ -130,12 +133,13 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// <param name="onSettled">Called from inside the posted delivery, once
     /// per settled edit, only if the file exists at that moment.</param>
     /// <param name="onVanished">Called instead of <paramref name="onSettled"/>
-    /// when the delivery finds the file gone. A swap re-arms the debounce
-    /// with the rename that completes it, so reaching here means the file
-    /// has been missing for a whole quiet period with nothing else
-    /// happening: a deletion, not a save in flight. Optional, and the
-    /// watcher does nothing else about it; it is the host that decides what
-    /// a deleted config file means.</param>
+    /// when the delivery finds the file gone. It says "gone as of this
+    /// delivery" and no more than that: an ordinary atomic save reaches it
+    /// whenever the swap straddles the hop between the timer and the posted
+    /// delivery, which is measured rather than theoretical. Optional, and
+    /// the watcher does nothing else about it; the host decides what a
+    /// missing config file means and is expected to ask again before
+    /// treating one report as a deletion.</param>
     public ConfigFileWatcher(
         string path,
         ISchedulerTimer timer,
@@ -433,13 +437,13 @@ public sealed partial class ConfigFileWatcher : IDisposable
         if (!File.Exists(_path))
         {
             LogSettledWithoutFile(_path);
-            // Not a save in flight. The rename that completes a swap raises
-            // its own event and re-arms the debounce, so a settle only gets
-            // here once the file has been gone for a whole quiet period with
-            // nothing following it. The host is told, because "the config
-            // file is gone for good" and "it is gone for the next few
-            // milliseconds" call for opposite answers and only this point
-            // can tell them apart.
+            // Gone as of now, which is all this can say. The debounce has
+            // already fired by the time this runs, so the quiet period it
+            // bought is behind us and an ordinary swap reaches here whenever
+            // it straddles the hop from the timer to this delivery. "Gone
+            // for good" and "gone for the next few milliseconds" look
+            // identical from this line; the host tells them apart by asking
+            // again, which is what OnConfigFileVanished does.
             _onVanished?.Invoke();
             return;
         }

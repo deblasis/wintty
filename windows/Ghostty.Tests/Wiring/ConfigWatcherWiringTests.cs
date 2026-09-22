@@ -482,6 +482,38 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
+    /// And it asks before it believes. One vanished report is what an
+    /// ordinary atomic save produces, so the count moves only on the far
+    /// side of a confirmation, never on the report itself.
+    /// </summary>
+    /// <remarks>
+    /// The rule is <c>ConfigReloadGateTests</c>' and the proof that the
+    /// report fires mid save is
+    /// <c>ConfigFileWatcherTests.The_file_check_runs_in_the_delivery_not_on_the_timer</c>.
+    /// What a wiring test adds is that this handler consults the gate
+    /// rather than keeping a rule of its own, spends the budget only on an
+    /// ask the watcher took, and reaches the one call that lowers the count
+    /// only past the conclusion (issue #1146).
+    /// </remarks>
+    [Fact]
+    public void A_vanished_config_file_is_confirmed_before_the_count_moves()
+    {
+        var vanished = ConfigService().Method("OnConfigFileVanished");
+
+        var ask = Assert.Single(vanished.Calls("ConfigReloadGate.ShouldConfirmVanish"));
+        var askGuard = ask.Ancestors().OfType<IfStatementSyntax>().First();
+        Assert.NotEmpty(askGuard.Statement.Calls("_watcher?.Resettle"));
+
+        var conclude = Assert.Single(vanished.Calls("ConfigReloadGate.IsPersistentVanish"));
+        var record = Assert.Single(vanished.Calls("RecordDefaultFiles"));
+
+        // Both stand between the report and the count moving.
+        Assert.True(
+            ask.SpanStart < record.SpanStart && conclude.SpanStart < record.SpanStart,
+            "the count is lowered before the vanish is confirmed");
+    }
+
+    /// <summary>
     /// A palette preview takes the same gate, with the same polarity, and a
     /// refusal takes back the overlay file it had already written. Nothing
     /// later removes it: RevertThemePreview only runs for a preview that was

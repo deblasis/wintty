@@ -220,6 +220,21 @@ public class TestConfigGuardWiringTests
             "the guard must run before the write it guards");
     }
 
+    // This test and Seed_Rechecks_The_Length_Under_The_Hold below pin the
+    // SHAPE of the seed write, not its behaviour. They kill the two obvious
+    // reversions, measured, but they would also pass over a rewrite that
+    // kept the shape and lost the guarantee, and they break against a
+    // rewrite that keeps the guarantee and changes the shape. Behavioural
+    // versions would be better and want the decision extracted into
+    // Ghostty.Core, where a test can drive it against a real file.
+    //
+    // If you go to write those, the obvious test fails for a reason that has
+    // nothing to do with the code: File.ReadAllText opens with
+    // FileShare.Read, which does not permit the ReadWrite access a competing
+    // handle you opened in the test already holds, so the sharing rule trips
+    // on YOUR READ rather than on the seed. Read back through a FileStream
+    // opened with FileShare.ReadWrite instead. A test that fails for the
+    // wrong reason is worse than no test, because it looks like evidence.
     [Fact]
     public void Seed_Takes_The_File_Exclusively()
     {

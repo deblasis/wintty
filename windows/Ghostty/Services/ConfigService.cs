@@ -68,6 +68,18 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private int _shrinkConfirms;
     private const int MaxShrinkConfirms = 3;
 
+    // The vanish confirmations' budget, and a third counter for the reason
+    // the second one exists. This counts asks about the WATCHED file being
+    // gone, which the watcher raises; _shrinkConfirms counts asks about a
+    // count that dropped, which a reload raises about files the watcher
+    // never sees. A deletion can present as both, and sharing a counter
+    // would let one stretch arrive spent at the other's first observation
+    // and confirm it with no asks of its own, which is exactly what sharing
+    // cost between the other two. UI thread only, like everything the
+    // watcher's delivery reaches. See OnConfigFileVanished.
+    private int _vanishConfirms;
+    private const int MaxVanishConfirms = 3;
+
     // How many default config files existed when the config in force was
     // built. Seeded at construction and moved only by a reload that is
     // applied, so a reload can tell "this user configures nothing" from
@@ -775,9 +787,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         }
 
         // Any applied reload ends the run: the next lock is a new one and
-        // the next shrink is a fresh question.
+        // the next shrink is a fresh question. The vanish budget resets here
+        // too, and this is what ends a confirmation that a save answered:
+        // the rename completing it settles, the delivery finds the file,
+        // this reload applies, and the asks stop with nothing lowered.
         _declinedReloadRetries = 0;
         _shrinkConfirms = 0;
+        _vanishConfirms = 0;
 
         var oldConfig = _config;
 
@@ -2233,10 +2249,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // read; the watcher's check is an early-out in front of it, not the
         // guarantee (issue #676).
         //
-        // It does report the file being gone, separately: reaching that
-        // needs a whole quiet period with the file missing and nothing
-        // following it, which a swap cannot produce, so it is a deletion.
-        // OnConfigFileVanished is what the session does about one.
+        // It does report the file being gone, separately, and that report
+        // says only "gone as of this delivery": an ordinary swap reaches it
+        // whenever it straddles the hop from the timer to the delivery.
+        // OnConfigFileVanished is what the session does about one, and what
+        // it does first is ask again (issue #1146).
         //
         // Suppression is decided when each event arrives, not when the
         // debounce fires, so a write bracketed by SuppressWatcher stays
@@ -2301,22 +2318,47 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// session is running on more config files than exist, the count only
     /// ever rose, and nothing else lowers it, so a session whose config file
     /// is deleted declines every later reload for the life of the process.
-    /// High Contrast and the OS colour scheme reach the terminal only
-    /// through the config a reload builds, so that is an accessibility
-    /// override that can never be turned on again (issue #676).
+    /// High Contrast reaches the terminal only through the config a reload
+    /// builds, so that is an accessibility override that can never be turned
+    /// on again (issue #676). Not the OS colour scheme, which
+    /// <see cref="RefreshForOsColorScheme"/> serves by calling ReadFlags
+    /// directly, never reaching Reload at all.
     ///
-    /// Zeroed rather than decremented: the watcher watches one path and the
-    /// default files are three, so this says "stop claiming to be running on
-    /// files I can no longer vouch for" and lets the next reload re-establish
-    /// the count from what is actually on disk. The two paths it does not
-    /// watch raise no event at all; those deletions are healed from the
-    /// reload side instead, by the persistent-shrink confirmation in
-    /// <c>Reload</c>.
+    /// The vanish proves deletion from one observation while the shrink
+    /// proves it from a spent budget, and the one-observation standard is
+    /// what mid-save firing exploits. So this asks again before believing
+    /// it, on the protocol <c>Reload</c> already uses for a shrink, and only
+    /// a vanish that outlives the whole budget lowers anything. Believing
+    /// one observation lowered the count in the middle of an ordinary save
+    /// and disarmed both guards for the next reload (issue #1146).
+    ///
+    /// Zeroed rather than decremented once confirmed: the watcher watches
+    /// one path and the default files are three, so this says "stop claiming
+    /// to be running on files I can no longer vouch for" and lets the next
+    /// reload re-establish the count from what is actually on disk. The two
+    /// paths it does not watch raise no event at all; those deletions are
+    /// healed from the reload side instead, by the persistent-shrink
+    /// confirmation in <c>Reload</c>.
     /// </remarks>
     private void OnConfigFileVanished()
     {
         if (_shuttingDown) return;
-        if (_defaultFilesFound == 0) return;
+
+        if (ConfigReloadGate.ShouldConfirmVanish(
+                _defaultFilesFound, _vanishConfirms, MaxVanishConfirms))
+        {
+            // Scheduled-only, as everywhere else this budget is spent: an
+            // ask the watcher dropped was never put, and counting it would
+            // confirm a deletion out of silence.
+            if (_watcher?.Resettle() == true) _vanishConfirms++;
+            return;
+        }
+
+        if (!ConfigReloadGate.IsPersistentVanish(
+                _defaultFilesFound, _vanishConfirms, MaxVanishConfirms))
+        {
+            return;
+        }
 
         StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
         RecordDefaultFiles(0);

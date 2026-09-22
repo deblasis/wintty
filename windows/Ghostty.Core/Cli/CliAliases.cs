@@ -227,6 +227,38 @@ internal static class CliAliases
     private const string NoConfigKey = "--config-default-files=false";
 
     /// <summary>
+    /// The libghostty key <c>--no-config</c> is rewritten to, without its
+    /// value, for reading whatever value a launch actually wrote.
+    /// </summary>
+    private const string NoConfigKeyPrefix = "--config-default-files=";
+
+    /// <summary>
+    /// <c>cli.args.parseBool</c>, which is what libghostty reads this key
+    /// with. Mirrored rather than approximated: the two halves disagreeing
+    /// about which spellings disable the default files is the whole of
+    /// issue #1147, and the zig side is pinned against this same set.
+    /// </summary>
+    private static bool TryParseCliBool(ReadOnlySpan<char> value, out bool result)
+    {
+        foreach (var t in (ReadOnlySpan<string>)["1", "t", "T", "true"])
+        {
+            if (!value.SequenceEqual(t)) continue;
+            result = true;
+            return true;
+        }
+
+        foreach (var f in (ReadOnlySpan<string>)["0", "f", "F", "false"])
+        {
+            if (!value.SequenceEqual(f)) continue;
+            result = false;
+            return true;
+        }
+
+        result = false;
+        return false;
+    }
+
+    /// <summary>
     /// <c>--config-file</c>, in the <c>--key=value</c> form libghostty
     /// documents, and bare for the case where the value is a separate
     /// argument.
@@ -276,9 +308,21 @@ internal static class CliAliases
             // shell's own config writers and readers branch on NoConfig,
             // and a flag only libghostty sees leaves an empty config file
             // behind on a fresh root (issue #676).
-            if (span.SequenceEqual(NoConfigKey))
+            //
+            // The VALUE is parsed rather than compared, because the question
+            // is whether libghostty will discard the default files, and it
+            // decides that with cli.args.parseBool, which reads 0, f and F
+            // as false exactly as it reads false. Comparing the documented
+            // spelling alone left the other three discarding the user's
+            // configuration on the libghostty side while this shell went on
+            // resolving, creating, seeding and watching the config file
+            // (issue #1147). The last occurrence decides, matching how a
+            // repeated scalar key resolves, and a value parseBool refuses is
+            // not a disable at all.
+            if (span.StartsWith(NoConfigKeyPrefix) &&
+                TryParseCliBool(span[NoConfigKeyPrefix.Length..], out var defaultFilesOn))
             {
-                noConfig = true;
+                noConfig = !defaultFilesOn;
                 continue;
             }
 

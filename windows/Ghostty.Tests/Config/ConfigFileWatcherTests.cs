@@ -287,6 +287,16 @@ public sealed class ConfigFileWatcherTests : IDisposable
 
         Assert.Equal(0, _settled);
         Assert.Equal(1, _log.Count(WatcherFileMissing));
+
+        // And the host is told the file is gone, in the middle of what is an
+        // ordinary atomic save. The debounce had already fired, so the quiet
+        // period it buys was spent before the move: this is the hop between
+        // the timer and the delivery, and a swap straddling it lands here.
+        //
+        // So one vanished report is not evidence of a deletion, and a host
+        // that treats it as one lowers what it knows mid save (issue #1146).
+        // The watcher cannot tell the two apart from here and does not try.
+        Assert.Equal(1, _vanished);
     }
 
     [Fact]
