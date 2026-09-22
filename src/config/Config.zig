@@ -4773,7 +4773,7 @@ test "cliDisablesDefaultFiles reads every value loadCliArgs reads as false" {
             0,
         );
         defer alloc.free(arg);
-        try testing.expect(cliDisablesDefaultFilesArgv(alloc, &.{ "wintty", arg }));
+        try testing.expect(try cliDisablesDefaultFilesArgv(alloc, &.{ "wintty", arg }));
     }
 
     // And the four it reads as true are not disables.
@@ -4785,7 +4785,7 @@ test "cliDisablesDefaultFiles reads every value loadCliArgs reads as false" {
             0,
         );
         defer alloc.free(arg);
-        try testing.expect(!cliDisablesDefaultFilesArgv(alloc, &.{ "wintty", arg }));
+        try testing.expect(!try cliDisablesDefaultFilesArgv(alloc, &.{ "wintty", arg }));
     }
 }
 
@@ -4867,23 +4867,34 @@ test "cliDisablesDefaultFiles stops at -e, where loadCliArgs stops" {
 /// to fold it into a string literal for the WTF-16 conversion. A test
 /// looping over values cannot supply that, so this builds the same thing
 /// the long way: it is the one caller that pays an allocation for it.
+///
+/// The Windows half joins with spaces, so an argument carrying a space or
+/// a quote does not split back into itself and the code under test would
+/// read a different command line than the test meant to pass. The assert
+/// refuses that rather than letting it pass silently; every caller passes
+/// `--key=value` fragments, none of which can contain either.
+///
+/// Allocation failures propagate rather than answering: a helper that ran
+/// out of memory and reported "not disabled" would hand the test a false
+/// green with extra steps.
 fn cliDisablesDefaultFilesArgv(
     alloc: Allocator,
     argv: []const [:0]const u8,
-) bool {
+) !bool {
     if (comptime builtin.os.tag == .windows) {
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(alloc);
         for (argv, 0..) |arg, i| {
-            if (i > 0) line.append(alloc, ' ') catch return false;
-            line.appendSlice(alloc, arg) catch return false;
+            std.debug.assert(std.mem.indexOfAny(u8, arg, " \"") == null);
+            if (i > 0) try line.append(alloc, ' ');
+            try line.appendSlice(alloc, arg);
         }
-        const wide = std.unicode.wtf8ToWtf16LeAllocZ(alloc, line.items) catch return false;
+        const wide = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, line.items);
         defer alloc.free(wide);
         return cliDisablesDefaultFiles(alloc, .{ .vector = wide });
     }
 
-    const ptrs = alloc.alloc([*:0]const u8, argv.len) catch return false;
+    const ptrs = try alloc.alloc([*:0]const u8, argv.len);
     defer alloc.free(ptrs);
     for (argv, 0..) |arg, i| ptrs[i] = arg.ptr;
     return cliDisablesDefaultFiles(alloc, .{ .vector = ptrs });
