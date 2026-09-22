@@ -1264,20 +1264,31 @@ fn setupPowerShell(
         0,
     );
 
-    // Some policy override is needed for correctness. It is process-scoped
-    // and never touches the user's persisted machine or user policy, and
-    // Windows PowerShell 5.1 defaults to `Restricted` on client Windows,
-    // under which dot-sourcing a `.ps1` fails with "running scripts is
-    // disabled on this system", breaking integration and printing a security
-    // error on every launch.
+    // Some policy override is needed for correctness. It never touches the
+    // user's persisted machine or user policy, and Windows PowerShell 5.1
+    // defaults to `Restricted` on client Windows, under which dot-sourcing a
+    // `.ps1` fails with "running scripts is disabled on this system",
+    // breaking integration and printing a security error on every launch.
+    //
+    // What the value applies to is wider than the one file we source, which
+    // is the reason this is worth getting right. `-ExecutionPolicy` sets the
+    // Process-scope policy for the whole `-NoExit` interactive session, and
+    // it sets `PSExecutionPolicyPreference` in the environment, which
+    // descendant PowerShell processes inherit and adopt. Measured: a child
+    // launched with no switch of its own from a `Bypass` parent reports
+    // `Bypass`, and the same for `RemoteSigned`. So the old value meant every
+    // script the user ran in that tab, and in every pwsh spawned from it, ran
+    // with no policy checking at all.
     //
     // `RemoteSigned` rather than `Bypass`, because the reason this is
-    // supposed to be safe is that the script is a local file with no
+    // supposed to be safe is that the script is a local file carrying no
     // Mark-of-the-Web, and `Bypass` is precisely the setting that stops
     // anyone checking. `RemoteSigned` enforces that property instead of
-    // assuming it: our own file runs, and a `.ps1` that arrived in that
-    // directory carrying MotW does not. Measured on a real install, no
-    // shipped file carries a Zone.Identifier stream, so this costs nothing.
+    // assuming it. Measured against `.ps1` files stamped with each ZoneId:
+    // 0, 1 and 2 (local, intranet, trusted) run unsigned, and 3 and 4
+    // (Internet, Untrusted) are refused. Browsers and Explorer's zip
+    // extractor stamp 3, so a script that arrived that way does not run while
+    // an installed one does.
     //
     // What it still does NOT do is respect a locally set `AllSigned`. Process
     // scope loses to the MachinePolicy and UserPolicy scopes, so an
@@ -1287,6 +1298,13 @@ fn setupPowerShell(
     // signing step outside this repository does not cover today. Until it
     // does, dropping the override would take PowerShell integration away from
     // every default Windows install.
+    //
+    // A signature would also be the thing that makes a portable zip work. An
+    // installer writes the tree itself, so nothing in it is stamped, but
+    // Explorer's extractor stamps ZoneId 3 on every file it extracts, which
+    // is the one zone measured above to be refused. That is a condition on
+    // shipping a portable build rather than a problem here, and it is filed
+    // as one.
     const argv = try alloc_arena.alloc([:0]const u8, 6);
     argv[0] = try alloc_arena.dupeZ(u8, exe);
     argv[1] = try alloc_arena.dupeZ(u8, "-NoExit");
@@ -1383,6 +1401,49 @@ test "powershell: user-supplied args are left untouched" {
 /// (`;`-separated), so no POSIX path conversion is involved, and it is a
 /// harmless no-op when Clink is not installed. We skip it when the
 /// integration directory is missing (e.g. a build without resources).
+/// Whether `list`, a `;`-separated CLINK_PATH, already holds `dir` as an
+/// entry of its own.
+///
+/// Entry by entry rather than a substring of the whole, and case-insensitively
+/// because Windows paths are. A substring test gets both halves wrong on a
+/// value we did not write: an inherited entry ending `...\cmd-extra` contains
+/// our path, so we would never add ours and Clink would load nothing of ours,
+/// while an inherited entry differing only in case does NOT contain it, so we
+/// would add a second copy and produce exactly the duplicate load this is
+/// here to prevent. Both only arise from an inherited value, which is the only
+/// kind this function ever sees.
+///
+/// Separators are compared loosely for the same reason: Clink takes a native
+/// Windows list, we compose ours with forward slashes, and an inherited copy
+/// of the same directory may spell them either way.
+fn clinkPathHasEntry(list: []const u8, dir: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ';');
+    while (it.next()) |raw| {
+        const entry = std.mem.trim(u8, raw, " \t\"");
+        if (entry.len != dir.len) continue;
+
+        var same = true;
+        for (entry, dir) |a, b| {
+            const na = if (a == '\\') '/' else std.ascii.toLower(a);
+            const nb = if (b == '\\') '/' else std.ascii.toLower(b);
+            if (na != nb) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return true;
+    }
+    return false;
+}
+
+/// What `setupCmd` looks for to decide a PROMPT is already ours.
+///
+/// The prompt-start mark in full. A fragment of it would be a weaker test
+/// that nothing notices: with `133` alone, a user PROMPT containing a path
+/// segment or a literal `133` is read as already integrated and cmd
+/// integration switches itself off silently.
+const prompt_mark_sentinel = "133;A";
+
 fn setupCmd(
     alloc_arena: Allocator,
     command: config.Command,
@@ -1396,7 +1457,18 @@ fn setupCmd(
     // app from inside an integrated cmd session hands us our own marks back,
     // and wrapping again emits A and B twice per prompt, which reads as two
     // commands to anything tracking them. Leave it exactly as found.
-    if (std.mem.indexOf(u8, body, "133;A") == null) {
+    //
+    // What that costs, when it fires, is more than the duplicate it avoids
+    // makes obvious: the value is left untouched, so this session emits
+    // neither our OSC 9;9 cwd report NOR our 133;B input-start mark. Only A
+    // survives, from the wrapping the outer session did. The alternative is
+    // stripping and rewrapping someone else's PROMPT, which is worse, so the
+    // trade is deliberate. A nested session reports no cwd.
+    //
+    // The sentinel is the whole mark and not a fragment of it. `133` alone
+    // appears in a path segment or a literal, and a user PROMPT carrying one
+    // would silently turn cmd integration off with nothing to say so.
+    if (std.mem.indexOf(u8, body, prompt_mark_sentinel) == null) {
         // `$e` = ESC, terminator ST = `$e\`. OSC 9;9 carries cwd via `$p`.
         const wrapped = try std.fmt.allocPrint(
             alloc_arena,
@@ -1423,7 +1495,7 @@ fn setupCmd(
         // so the list grows an entry per nesting level. Clink would load
         // ghostty.lua once per entry.
         const existing = env.get("CLINK_PATH") orelse "";
-        if (std.mem.indexOf(u8, existing, clink_dir) == null) try env.put(
+        if (!clinkPathHasEntry(existing, clink_dir)) try env.put(
             "CLINK_PATH",
             // CLINK_PATH is a Windows-format list and is always
             // ';'-separated, independent of the host (Clink only runs on
@@ -1490,6 +1562,69 @@ test "cmd: preserves existing PROMPT body" {
     try testing.expect(std.mem.indexOf(u8, prompt, "133;B") != null);
 }
 
+test "cmd: a PROMPT containing 133 but not our mark is still wrapped" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(.cmd);
+    defer res.deinit();
+
+    // The weakening this pins: with the sentinel cut to `133`, every one of
+    // these reads as already integrated and cmd integration switches itself
+    // off, silently, on a PROMPT the user chose. The nested-launch test below
+    // cannot see it, because its input contains the whole mark either way.
+    for ([_][:0]const u8{
+        "$p$g 133",
+        "C:\\build\\133\\bin$g",
+        "[133] $p$g",
+        "$e]133;Z$e\\$p$g",
+    }) |body| {
+        errdefer std.log.err("PROMPT not wrapped: {s}", .{body});
+
+        var env = EnvMap.init(alloc);
+        defer env.deinit();
+        try env.put("PROMPT", body);
+
+        _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
+
+        const prompt = env.get("PROMPT") orelse return error.NoPrompt;
+        try testing.expect(std.mem.indexOf(u8, prompt, "133;A") != null);
+        try testing.expect(std.mem.indexOf(u8, prompt, "133;B") != null);
+        // The user's own body survives inside ours.
+        try testing.expect(std.mem.indexOf(u8, prompt, body) != null);
+    }
+}
+
+test "clinkPathHasEntry compares entries, not substrings" {
+    const testing = std.testing;
+
+    const ours = "C:/Program Files/Wintty/share/ghostty/shell-integration/cmd";
+
+    // Ours already there, however an inherited copy spells it.
+    try testing.expect(clinkPathHasEntry(ours, ours));
+    try testing.expect(clinkPathHasEntry("D:/other;" ++ ours, ours));
+    try testing.expect(clinkPathHasEntry(ours ++ ";D:/other", ours));
+    try testing.expect(clinkPathHasEntry(
+        "C:\\Program Files\\Wintty\\share\\ghostty\\shell-integration\\cmd",
+        ours,
+    ));
+    try testing.expect(clinkPathHasEntry(
+        "c:/program files/wintty/share/ghostty/shell-integration/CMD",
+        ours,
+    ));
+
+    // A substring test says yes to this one and we would never add our entry
+    // at all, so Clink would load none of our integration.
+    try testing.expect(!clinkPathHasEntry(ours ++ "-extra", ours));
+    try testing.expect(!clinkPathHasEntry("D:/x;" ++ ours ++ "-extra", ours));
+
+    // And no to these, where it belongs.
+    try testing.expect(!clinkPathHasEntry("", ours));
+    try testing.expect(!clinkPathHasEntry("D:/other;E:/more", ours));
+}
+
 test "cmd: a nested launch does not wrap PROMPT or CLINK_PATH twice" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1522,6 +1657,20 @@ test "cmd: a nested launch does not wrap PROMPT or CLINK_PATH twice" {
         @as(usize, 1),
         std.mem.count(u8, env.get("PROMPT").?, "133;A"),
     );
+    try testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, env.get("CLINK_PATH").?, "shell-integration/cmd"),
+    );
+
+    // An inherited value that spells our directory differently is still our
+    // directory. A substring test in the other direction would add a second
+    // entry here, which is the duplicate load this whole guard is for.
+    var mixed = EnvMap.init(alloc);
+    defer mixed.deinit();
+    const native = try std.mem.replaceOwned(u8, alloc, first_clink, "/", "\\");
+    try mixed.put("CLINK_PATH", native);
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &mixed);
+    try testing.expectEqualStrings(native, mixed.get("CLINK_PATH").?);
 }
 
 test "cmd: CLINK_PATH includes the shell-integration cmd dir" {
