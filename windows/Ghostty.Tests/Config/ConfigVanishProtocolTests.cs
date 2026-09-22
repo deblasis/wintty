@@ -251,6 +251,33 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     }
 
     /// <summary>
+    /// A file that is there is never confirmed gone, however long the
+    /// session runs and however often it is loaded.
+    /// </summary>
+    /// <remarks>
+    /// This is the half of the verdict rule that no deletion sequence can
+    /// see. Every one of those starts from a real absence, so swapping which
+    /// verdict opens a stretch breaks them for a reason that almost any
+    /// other broken rule also produces, and the swap has no test of its own.
+    /// Here the file never goes away, so a conclusion can only come from
+    /// treating a load that FOUND it as evidence that it is gone.
+    /// </remarks>
+    [Fact]
+    public void A_file_that_is_there_is_never_confirmed_gone()
+    {
+        var protocol = Start();
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Loaded));
+        AdvancePastFloor();
+        Assert.False(protocol.Observed(ConfigFilesFound.Loaded));
+        AdvancePastFloor();
+        Assert.False(protocol.Observed(ConfigFilesFound.Loaded));
+
+        Assert.Equal(0, _accepted);
+        Assert.Equal(1, _count);
+    }
+
+    /// <summary>
     /// A deletion is provable with no watcher to ask. The ask buys a
     /// sooner look and nothing hangs on its answer: the observation has
     /// already happened, so whether another can be scheduled says nothing
