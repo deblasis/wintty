@@ -131,6 +131,35 @@ public sealed partial class MainWindow : Window
     /// <summary>The palette chord's own toggle.</summary>
     internal void TestSeamTogglePalette() => ToggleCommandPalette();
 
+    /// <summary>The tab overview control, whose key acts the seam drives.</summary>
+    internal Tabs.TabOverviewControl TestSeamOverviewUI => TabOverviewUI;
+
+    /// <summary>Whether the tab overview is up.</summary>
+    internal bool TestSeamOverviewOpen => TabOverviewHost.IsOpen;
+
+    /// <summary>The overview chord's own open.</summary>
+    internal void TestSeamShowOverview() => ShowTabOverview();
+
+    /// <summary>The notice dock, whose bar keys the seam drives.</summary>
+    internal Controls.Notifications.NotificationHost TestSeamNotificationHost => NotificationHost;
+
+    /// <summary>
+    /// The active pane's context menu, built and shown the way a right click
+    /// shows it, for the seam to dismiss.
+    /// </summary>
+    internal MenuFlyout TestSeamOpenPaneMenu()
+    {
+        var paneHost = (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
+        var control = paneHost.ActiveLeaf.Terminal();
+        var flyout = BuildPaneContextMenu(control, paneHost);
+        flyout.ShowAt(control);
+        return flyout;
+    }
+
+    /// <summary>The tab rename dialog, opened the way prompt_title opens it.</summary>
+    internal Task TestSeamPromptTabTitle() =>
+        ShowPromptTitleDialogAsync(isTab: true, _tabManager.ActiveTab.PaneHost.ActiveLeaf.Terminal());
+
     /// <summary>This window's palette theme browse, for the seam's settle wait.</summary>
     internal Ghostty.Core.Themes.PaletteThemeBrowse? TestSeamThemeBrowse => _paletteThemeBrowse;
 
@@ -789,6 +818,11 @@ public sealed partial class MainWindow : Window
         // window alive and points an OS callback at a freed libghostty app.
         _systemUiSettings.ColorValuesChanged += OnSystemColorValuesChanged;
 
+        // A key some surface consumed to close itself: arm this window's
+        // panes for its trailing character. The signal is static and
+        // outlives the window, so the close takes this back.
+        ConsumedCloseKey.Raised += OnConsumedCloseKey;
+
         // The other system motion preference, on the same lifetime terms.
         // High Contrast arrives through ColorValuesChanged above, but the
         // animation-effects toggle is its own event and nobody listened:
@@ -1415,6 +1449,8 @@ public sealed partial class MainWindow : Window
                 Placement = FlyoutPlacementMode.Bottom,
                 ShouldConstrainToRootBounds = true,
             };
+            // Escape, or Enter on a swatch, closes it back onto the pane.
+            ConsumedCloseKey.Watch(pickerFlyout);
             picker.ColorSelected += (_, color) =>
             {
                 pickerFlyout.Hide();
@@ -2371,6 +2407,9 @@ public sealed partial class MainWindow : Window
         // toggle during teardown puts AppSetColorScheme through the app
         // pointer _host.Dispose is about to free at the end of this method.
         _systemUiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
+        // Static: left attached, every consumed close key anywhere in the
+        // process would reach this closed window and keep it alive.
+        ConsumedCloseKey.Raised -= OnConsumedCloseKey;
         if (AnimationsFlipObservable)
             _systemUiSettings.AnimationsEnabledChanged -= OnSystemAnimationsEnabledChanged;
 
@@ -2488,6 +2527,15 @@ public sealed partial class MainWindow : Window
         PaneHostContainer.Children.Remove(paneHost);
     }
 
+    private MenuFlyout BuildPaneContextMenu(Controls.TerminalControl control, Panes.PaneHost paneHost) =>
+        PaneContextMenuBuilder.Build(
+            invokePaneAction: _router.Invoke,
+            invokeBindingAction: ExecuteBindingAction,
+            hasSelection: () => control.HasSelection,
+            isZoomed: () => paneHost.IsZoomed,
+            promptTabTitle: () => _ = ShowPromptTitleDialogAsync(isTab: true, control),
+            promptTerminalTitle: () => _ = ShowPromptTitleDialogAsync(isTab: false, control));
+
     private void OnPaneContextMenuRequested(object? sender, Panes.PaneContextMenuRequest request)
     {
         var control = request.Control;
@@ -2502,13 +2550,7 @@ public sealed partial class MainWindow : Window
         var paneHost = sender as Panes.PaneHost
             ?? (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
 
-        var flyout = PaneContextMenuBuilder.Build(
-            invokePaneAction: _router.Invoke,
-            invokeBindingAction: ExecuteBindingAction,
-            hasSelection: () => control.HasSelection,
-            isZoomed: () => paneHost.IsZoomed,
-            promptTabTitle: () => _ = ShowPromptTitleDialogAsync(isTab: true, control),
-            promptTerminalTitle: () => _ = ShowPromptTitleDialogAsync(isTab: false, control));
+        var flyout = BuildPaneContextMenu(control, paneHost);
 
         if (request.Position is { } pos)
             flyout.ShowAt(control, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions { Position = pos });
@@ -5320,6 +5362,26 @@ public sealed partial class MainWindow : Window
             var paneHost = (Panes.PaneHost)tab.PaneHost;
             foreach (var leaf in PaneTree.Leaves(paneHost.RootNode))
                 leaf.Terminal().CommandPaletteIsOpen = isOpen;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ConsumedCloseKey.Raised"/>'s handler: arms every terminal
+    /// this window holds for the trailing character of a key some surface
+    /// consumed to close itself. Every leaf, not just the active one: which
+    /// surface the character lands on is decided by where focus falls once
+    /// the surface is gone, and a popup closing around the focused element
+    /// can drop it on any pane. The palette-open flag cannot cover this: the
+    /// close clears it before the character is delivered.
+    /// </summary>
+    private void OnConsumedCloseKey(ConsumedCloseChars chars)
+    {
+        if (_isClosed) return;
+        foreach (var tab in _tabManager.Tabs)
+        {
+            var paneHost = (Panes.PaneHost)tab.PaneHost;
+            foreach (var leaf in PaneTree.Leaves(paneHost.RootNode))
+                leaf.Terminal().ArmConsumedClose(chars);
         }
     }
 

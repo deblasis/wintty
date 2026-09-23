@@ -22,6 +22,8 @@ internal static class StripContextMenuBuilder
         bool isSidebarCollapsed = false)
     {
         var flyout = new MenuFlyout();
+        // Escape or Enter here can hand focus back to a pane.
+        ConsumedCloseKey.Watch(flyout);
 
         var newTab = new MenuFlyoutItem
         {

@@ -24,6 +24,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:converters="using:Ghostty.Converters"
     AutomationProperties.Name="Command palette overlay"
+    TabNavigation="Cycle"
     Width="560"
     HorizontalAlignment="Center"
     VerticalAlignment="Top">

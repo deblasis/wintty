@@ -38,6 +38,12 @@ internal sealed partial class DialogTracker
     /// </summary>
     public System.IDisposable Track(ContentDialog dialog)
     {
+        // Every window dialog is shown through here, so this is where a
+        // dialog closed by Enter or Escape arms the panes for the key's
+        // trailing character: the dialog hands focus back to the pane it was
+        // opened over, and a rename dialog's Enter would otherwise submit
+        // that pane's prompt line.
+        Ghostty.Input.ConsumedCloseKey.Watch(dialog);
         var tcs = new TaskCompletionSource();
         lock (_lock) _pending.Add(tcs);
         return new Token(this, tcs, dialog);

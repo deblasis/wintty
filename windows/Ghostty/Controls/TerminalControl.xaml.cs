@@ -43,6 +43,33 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal bool CommandPaletteIsOpen { get; set; }
 
     /// <summary>
+    /// The one-shot guard for a key another surface consumed to close
+    /// itself (see <see cref="ConsumedCloseKey"/>). That surface's KeyDown
+    /// closes it and focus moves inside the same keystroke, but the key's
+    /// WM_CHAR was posted before the KeyDown ran, so it is delivered to
+    /// whatever holds focus next: this pane or any sibling. Without the arm
+    /// the pane forwards it, and Enter's '\r' runs the prompt line.
+    /// </summary>
+    private ConsumedCloseArm _consumedCloseArm;
+
+    /// <summary>
+    /// Arms this surface for the trailing character of a consumed close key.
+    /// The window calls it on every terminal it holds when
+    /// <see cref="ConsumedCloseKey.Raised"/> fires.
+    /// </summary>
+    internal void ArmConsumedClose(ConsumedCloseChars chars) => _consumedCloseArm.Arm(chars);
+
+    /// <summary>
+    /// The retire half of the arm: OnKeyDown's first statement, split out so
+    /// the test seam drives the same retire a real key press performs (a
+    /// KeyRoutedEventArgs cannot be constructed in process). Every real
+    /// character follows its own KeyDown on the element that receives it, so
+    /// an arm still standing when the keyboard touches this surface again is
+    /// stale. Returns whether one was standing.
+    /// </summary>
+    internal bool RetireStaleCharacterSuppress() => _consumedCloseArm.Retire();
+
+    /// <summary>
     /// Raised when the user requests the pane context menu over this surface.
     /// The argument is the pointer position in this control's coordinates, or
     /// null when the request came from the keyboard (Shift+F10 / Menu key).
@@ -1905,6 +1932,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // First, before any gate: this key's own character follows it, and
+        // an arm left over from a consumed close elsewhere must not be the
+        // thing that decides that character's fate.
+        RetireStaleCharacterSuppress();
+
         if (CommandPaletteIsOpen) return;
 
         // Suppress forwarding while the in-pane search bar owns keyboard
@@ -1987,6 +2019,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
+        // Mirror OnKeyDown's palette gate: between the popup opening and
+        // focus reaching its search box, releases still land here, and a
+        // release for a press the gate dropped hands libghostty half a pair.
+        if (CommandPaletteIsOpen) return;
+
         // Mirror OnKeyDown: while the search bar owns focus, swallow the
         // key-up too so libghostty never sees a release for a press it
         // never received.
@@ -2112,6 +2149,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (_surface.Handle == IntPtr.Zero) return;
 
+        // Characters keep arriving while the command palette is open: between
+        // the popup opening and focus reaching its search box this surface
+        // still holds focus, and CharacterReceived is raised independently of
+        // KeyDown, so OnKeyDown's palette gate alone leaves this path open.
+        // The trailing character of the key that CLOSES the palette is not
+        // this gate's job: the arm below is what drops it.
+        if (CommandPaletteIsOpen) return;
+
         // WM_CHAR from the focused search bar bubbles up here too. Drop it
         // so typed characters edit the needle only and never reach
         // libghostty as terminal text. See the matching guard in OnKeyDown.
@@ -2122,6 +2167,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // TextCompositionChanged; drop stray chars until commit.
         if (_imeComposing) return;
 
+        HandleCharacter(e.Character);
+    }
+
+    /// <summary>
+    /// The character half of <see cref="OnCharacterReceived"/> below its
+    /// routed guards: the consumed-close arm, the bound-chord suppress, then
+    /// the preview sink or the forward to the surface. Split out so the test
+    /// seam drives the same decision a real WM_CHAR takes past those guards
+    /// (a CharacterReceivedRoutedEventArgs cannot be constructed in process).
+    /// Returns true when the consumed-close arm dropped the character.
+    /// </summary>
+    private bool HandleCharacter(char ch)
+    {
+        // The trailing character of a key another surface consumed to close
+        // itself. Spent by any character; only the armed key's own character
+        // is dropped, so a stale arm never eats typing.
+        if (_consumedCloseArm.Consume(ch)) return true;
+
         // If the matching OnKeyDown short-circuited a bound chord, drop
         // the WM_CHAR that follows. WinUI 3 raises CharacterReceived
         // independently of KeyDown handling, so without this the C0
@@ -2130,7 +2193,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_suppressNextCharacter)
         {
             _suppressNextCharacter = false;
-            return;
+            return false;
         }
 
         // WM_CHAR goes to the fake session as typed text. Control units
@@ -2145,11 +2208,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_isPreviewSurface)
         {
             if (PreviewInputSink is { } sink &&
-                e.Character is >= (char)0x20 and not (char)0x7f)
+                ch is >= (char)0x20 and not (char)0x7f)
             {
-                sink.Character(e.Character);
+                sink.Character(ch);
             }
-            return;
+            return false;
         }
 
         // Forward WM_CHAR unchanged, but assemble surrogate pairs first.
@@ -2157,8 +2220,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // each unit with new Rune(ch) throws on D800–DFFF and kills the
         // UI thread. C0 filtering stays in libghostty (see above).
         Span<byte> buf = stackalloc byte[4];
-        if (!WmCharUtf8.TryEncode(e.Character, ref _pendingWmCharHigh, buf, out var len))
-            return;
+        if (!WmCharUtf8.TryEncode(ch, ref _pendingWmCharHigh, buf, out var len))
+            return false;
         unsafe
         {
             fixed (byte* p = buf)
@@ -2166,12 +2229,37 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)len);
             }
         }
+        return false;
     }
+
+    // ---- test seam accessors (compiled into every build, reachable only
+    // through the seam's pipe, which exists only in a TESTSEAM build) ------
+
+    /// <summary>
+    /// One character through the decision a real WM_CHAR takes once it is
+    /// past the routed guards. A character the arm does not drop reaches the
+    /// shell exactly as typing would, so the seam gates this op behind its
+    /// input opt-in. Returns true when the consumed-close arm dropped it.
+    /// </summary>
+    internal bool TestSeamCharacter(char ch) =>
+        _surface.Handle != IntPtr.Zero && HandleCharacter(ch);
+
+    /// <summary>The keys this surface is armed for right now.</summary>
+    internal ConsumedCloseChars TestSeamConsumedCloseArm => _consumedCloseArm.Armed;
+
+    /// <summary>This pane's search bar, whose close acts the seam drives.</summary>
+    internal Search.SearchBarControl TestSeamSearchBar => SearchBar;
 
     // IME composition (ImeSink TextBox, wired in XAML) -----------------
 
     private void OnImeCompositionStarted(object sender, TextCompositionStartedEventArgs e)
     {
+        // Retire before anything else, for the reason OnKeyDown does: a
+        // commit's characters arrive after TextCompositionEnded, and TSF
+        // swallows the confirming key's KeyDown, so OnKeyDown never runs to
+        // retire for them. Unconditional: an arm standing when any
+        // composition starts belongs to a keystroke that went elsewhere.
+        RetireStaleCharacterSuppress();
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
         _imeComposing = true;
     }

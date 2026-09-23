@@ -838,11 +838,16 @@ internal sealed partial class CommandPaletteControl : UserControl
         switch (key)
         {
             case VirtualKey.Escape:
+                // Before Close(): the close hands focus back to a pane inside
+                // this keystroke, and the Escape's 0x1B follows it there.
+                Ghostty.Input.ConsumedCloseKey.Raise(VirtualKey.Escape);
                 _vm.Close();
                 return true;
 
             case VirtualKey.Enter:
-                _vm.ExecuteSelectedCommand();
+                // Activate raises the signal itself; Enter's '\r' is a
+                // submitted line to whatever shell it lands in.
+                Activate(VirtualKey.Enter);
                 return true;
 
             case VirtualKey.Tab:
@@ -896,6 +901,13 @@ internal sealed partial class CommandPaletteControl : UserControl
 
     /// <summary>A key pressed in the search box, through the real handler.</summary>
     internal bool TestSeamKey(VirtualKey key) => HandleSearchKey(key, isCtrl: false);
+
+    /// <summary>
+    /// The activation act on the selected command, the call OnItemClick
+    /// makes: the seam's way to the list-row entrance, whose
+    /// ItemClickEventArgs this process cannot construct.
+    /// </summary>
+    internal void TestSeamActivate() => Activate(null);
 
     /// <summary>
     /// Text typed into the search box. The box's TextChanged reaches the view
@@ -997,8 +1009,24 @@ internal sealed partial class CommandPaletteControl : UserControl
         if (e.ClickedItem is CommandItem item)
         {
             _vm.SelectedCommand = item;
-            _vm.ExecuteSelectedCommand();
+            Activate(null);
         }
+    }
+
+    /// <summary>
+    /// Runs the selected command. Both entrances to a close go through here,
+    /// Enter in the search box and an invoked list item, so the act and the
+    /// consumed-close signal cannot drift apart. The signal comes first: a
+    /// command run from the keyboard closes the palette inside that
+    /// keystroke, and its character ('\r' for Enter, 0x20 for Space on a
+    /// focused row) follows focus to a pane. An ItemClick cannot say which
+    /// key raised it, if any, so it arms for whichever close key is down; a
+    /// mouse click arms nothing.
+    /// </summary>
+    private void Activate(VirtualKey? key)
+    {
+        Ghostty.Input.ConsumedCloseKey.RaiseFor(key);
+        _vm?.ExecuteSelectedCommand();
     }
 
     private void OnResultsSelectionChanged(object sender, SelectionChangedEventArgs e)

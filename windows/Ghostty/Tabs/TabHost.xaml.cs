@@ -2593,10 +2593,26 @@ internal sealed partial class TabHost : UserControl, ITabHost
             }
             foreach (var (model, vi) in _itemByModel)
             {
-                if (vi == item) { _manager.Activate(model); return; }
+                if (vi == item) { ActivateFromSelection(model); return; }
             }
         }
     }
+
+    /// <summary>
+    /// A tab item's selection, which TabView raises for a click, an arrow
+    /// key, and Enter or Space on a focused item. Activation hands focus to
+    /// the tab's pane; for Enter or Space the key's character was queued
+    /// before TabView ran, so the panes are armed for whichever close key is
+    /// down (an arrow or a click arms nothing).
+    /// </summary>
+    private void ActivateFromSelection(TabModel model)
+    {
+        ConsumedCloseKey.RaiseForHeldKeys();
+        _manager.Activate(model);
+    }
+
+    /// <summary>A tab item's selection through the strip's own activation.</summary>
+    internal void TestSeamSelect(TabModel model) => ActivateFromSelection(model);
 
     private void OnTabViewContextRequested(
         UIElement sender, ContextRequestedEventArgs e)
