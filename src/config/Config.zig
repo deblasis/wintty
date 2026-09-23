@@ -1323,6 +1323,27 @@ command: ?Command = null,
 /// Available since: 1.2.0
 env: RepeatableStringMap = .{},
 
+/// Windows only. When true, the default, every new terminal's environment
+/// is rebuilt at the moment it is created from the environment a fresh
+/// logon gives your user: the system and user variables as they are in the
+/// registry now, with both PATH scopes merged. A variable you add, change or
+/// remove in the system settings, or a PATH entry an installer writes, is
+/// seen by the next terminal you open without restarting Wintty. This is
+/// what Windows Terminal does with its `reloadEnvironmentVariables` setting.
+///
+/// On top of that environment Wintty sets only its own variables (such as
+/// `TERM` and `GHOSTTY_RESOURCES_DIR`) and the ones from `env`. Variables
+/// set by whatever launched Wintty, for example `FOO=1` in a shell that then
+/// ran it, do not reach the terminal. The one exception is `NO_COLOR`: when
+/// Wintty has removed it to turn color back on, it stays removed.
+///
+/// Set this to false to start every terminal from Wintty's own environment
+/// instead, including whatever its launcher set. Changes apply to terminals
+/// opened after the change.
+///
+/// Has no effect on other platforms.
+@"reload-env": bool = true,
+
 /// Data to send as input to the command on startup.
 ///
 /// The configured `command` will be launched using the typical rules,
