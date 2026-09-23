@@ -2780,8 +2780,19 @@ internal sealed partial class VerticalTabStrip : UserControl
         RefreshSelectionChrome();
     }
 
+#if TESTSEAM
     /// <summary>A body row's selection through the strip's own activation.</summary>
     internal void TestSeamNavSelect(TabModel tab) => ActivateFromNavSelection(tab);
+
+    /// <summary>A pinned row's Enter or Space through the row's own act.</summary>
+    internal bool TestSeamShelfKey(TabModel tab, Windows.System.VirtualKey key)
+    {
+        if (key is not (Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)) return false;
+        if (RowElementOf(tab) is null) return false;
+        ActivateShelfFromKey(tab, key);
+        return true;
+    }
+#endif
 
     /// <summary>
     /// The activation a shelf row gets, from a click (the drag machine's
@@ -2813,15 +2824,6 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         ConsumedCloseKey.Raise(key);
         ActivateFromShelf(tab);
-    }
-
-    /// <summary>A pinned row's Enter or Space through the row's own act.</summary>
-    internal bool TestSeamShelfKey(TabModel tab, Windows.System.VirtualKey key)
-    {
-        if (key is not (Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)) return false;
-        if (RowElementOf(tab) is null) return false;
-        ActivateShelfFromKey(tab, key);
-        return true;
     }
 
     private void OnPinnedRowKeyDown(object sender, KeyRoutedEventArgs e)

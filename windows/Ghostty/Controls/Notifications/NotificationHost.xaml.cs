@@ -288,6 +288,7 @@ public sealed partial class NotificationHost : UserControl
         _service?.Dismiss(notice);
     }
 
+#if TESTSEAM
     /// <summary>
     /// Enter or Space on the bar showing <paramref name="notice"/>, through
     /// the bar's own act. False when no bar shows it or it takes no keys.
@@ -299,6 +300,7 @@ public sealed partial class NotificationHost : UserControl
         DismissFromKey(notice, key);
         return true;
     }
+#endif
 
     /// <summary>
     /// Whether <paramref name="bar"/>, or something inside it, currently

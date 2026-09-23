@@ -244,6 +244,9 @@ public sealed partial class SearchBarControl : UserControl
     /// <summary>Whether the needle box itself holds keyboard focus, where those keys land.</summary>
     internal bool TestSeamNeedleFocused
         => XamlRoot is { } root && ReferenceEquals(FocusManager.GetFocusedElement(root), NeedleBox);
+
+    /// <summary>The close button's Click, which a key or a mouse can raise.</summary>
+    internal void TestSeamCloseClick() => CloseFromKey(null);
 #endif
 
     private void OnPrevClick(object sender, RoutedEventArgs e) =>
@@ -269,12 +272,6 @@ public sealed partial class SearchBarControl : UserControl
         ConsumedCloseKey.RaiseFor(key);
         RaiseClosed();
     }
-
-    /// <summary>The Escape the needle box and the bar handle, through the real path.</summary>
-    internal void TestSeamEscape() => CloseFromKey(VirtualKey.Escape);
-
-    /// <summary>The close button's Click, which a key or a mouse can raise.</summary>
-    internal void TestSeamCloseClick() => CloseFromKey(null);
 
     private void RaiseClosed()
     {

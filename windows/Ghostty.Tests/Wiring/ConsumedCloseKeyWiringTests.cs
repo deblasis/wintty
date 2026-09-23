@@ -201,7 +201,7 @@ public class ConsumedCloseKeyWiringTests
         Assert.Equal(Signal + ".RaiseFor", AssertRaisesFirst(bar, "CloseFromKey"));
 
         Assert.Single(CallsTo(bar.Method("OnControlKeyDown"), "CloseFromKey"));
-        Assert.Single(CallsTo(bar.Case("OnNeedleKeyDown", "VirtualKey.Escape"), "CloseFromKey"));
+        Assert.Single(CallsTo(bar.Case("HandleNeedleKey", "VirtualKey.Escape"), "CloseFromKey"));
         Assert.Single(CallsTo(bar.Method("OnCloseClick"), "CloseFromKey"));
 
         // RaiseClosed is what hands focus back to the pane. Reached only
@@ -219,8 +219,8 @@ public class ConsumedCloseKeyWiringTests
         Assert.Equal(Signal + ".RaiseFor", AssertRaisesFirst(overview, "Choose"));
         Assert.Equal(Signal + ".Raise", AssertRaisesFirst(overview, "Dismiss"));
 
-        Assert.Single(CallsTo(overview.Case("OnKeyDown", "VirtualKey.Escape"), "Dismiss"));
-        Assert.Single(CallsTo(overview.Case("OnKeyDown", "VirtualKey.Enter"), "Choose"));
+        Assert.Single(CallsTo(overview.Case("HandleKey", "VirtualKey.Escape"), "Dismiss"));
+        Assert.Single(CallsTo(overview.Case("HandleKey", "VirtualKey.Enter"), "Choose"));
         Assert.Single(CallsTo(overview.Method("OnTileClick"), "Choose"));
 
         // The events that close the overview, raised only from the two acts,

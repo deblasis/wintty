@@ -131,35 +131,6 @@ public sealed partial class MainWindow : Window
     /// <summary>The palette chord's own toggle.</summary>
     internal void TestSeamTogglePalette() => ToggleCommandPalette();
 
-    /// <summary>The tab overview control, whose key acts the seam drives.</summary>
-    internal Tabs.TabOverviewControl TestSeamOverviewUI => TabOverviewUI;
-
-    /// <summary>Whether the tab overview is up.</summary>
-    internal bool TestSeamOverviewOpen => TabOverviewHost.IsOpen;
-
-    /// <summary>The overview chord's own open.</summary>
-    internal void TestSeamShowOverview() => ShowTabOverview();
-
-    /// <summary>The notice dock, whose bar keys the seam drives.</summary>
-    internal Controls.Notifications.NotificationHost TestSeamNotificationHost => NotificationHost;
-
-    /// <summary>
-    /// The active pane's context menu, built and shown the way a right click
-    /// shows it, for the seam to dismiss.
-    /// </summary>
-    internal MenuFlyout TestSeamOpenPaneMenu()
-    {
-        var paneHost = (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
-        var control = paneHost.ActiveLeaf.Terminal();
-        var flyout = BuildPaneContextMenu(control, paneHost);
-        flyout.ShowAt(control);
-        return flyout;
-    }
-
-    /// <summary>The tab rename dialog, opened the way prompt_title opens it.</summary>
-    internal Task TestSeamPromptTabTitle() =>
-        ShowPromptTitleDialogAsync(isTab: true, _tabManager.ActiveTab.PaneHost.ActiveLeaf.Terminal());
-
     /// <summary>This window's palette theme browse, for the seam's settle wait.</summary>
     internal Ghostty.Core.Themes.PaletteThemeBrowse? TestSeamThemeBrowse => _paletteThemeBrowse;
 

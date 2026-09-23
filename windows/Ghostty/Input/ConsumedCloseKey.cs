@@ -68,7 +68,9 @@ internal static class ConsumedCloseKey
     /// <summary>The close keys that are down right now on this thread.</summary>
     internal static ConsumedCloseChars HeldKeys()
     {
+#if TESTSEAM
         if (TestSeamHeldKeys is { } forced) return forced;
+#endif
         var chars = ConsumedCloseChars.None;
         if (IsDown(VirtualKey.Enter)) chars |= ConsumedCloseChars.Return;
         if (IsDown(VirtualKey.Escape)) chars |= ConsumedCloseChars.Escape;
@@ -96,10 +98,12 @@ internal static class ConsumedCloseKey
     internal static void Watch(FlyoutBase flyout) =>
         flyout.Closing += (_, _) => RaiseForHeldKeys();
 
+#if TESTSEAM
     /// <summary>
     /// The test seam's stand-in for a held key. The seam drives a close in
     /// process with no key down, so it names the key the close would have
     /// been pressed with. Null outside a seam drive.
     /// </summary>
     internal static ConsumedCloseChars? TestSeamHeldKeys { get; set; }
+#endif
 }

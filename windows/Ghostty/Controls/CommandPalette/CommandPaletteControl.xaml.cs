@@ -902,12 +902,14 @@ internal sealed partial class CommandPaletteControl : UserControl
     /// <summary>A key pressed in the search box, through the real handler.</summary>
     internal bool TestSeamKey(VirtualKey key) => HandleSearchKey(key, isCtrl: false);
 
+#if TESTSEAM
     /// <summary>
     /// The activation act on the selected command, the call OnItemClick
     /// makes: the seam's way to the list-row entrance, whose
     /// ItemClickEventArgs this process cannot construct.
     /// </summary>
     internal void TestSeamActivate() => Activate(null);
+#endif
 
     /// <summary>
     /// Text typed into the search box. The box's TextChanged reaches the view

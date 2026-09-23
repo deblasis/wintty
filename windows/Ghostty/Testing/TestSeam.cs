@@ -2070,7 +2070,7 @@ internal static class TestSeam
                 if (terminal is null) return "no such tab or leaf";
                 terminal.OpenSearch();
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                if (key == Windows.System.VirtualKey.Escape) terminal.TestSeamSearchBar.TestSeamEscape();
+                if (key == Windows.System.VirtualKey.Escape) terminal.TestSeamSearchBar.TestSeamNeedleKey(Windows.System.VirtualKey.Escape, shift: false);
                 else if (key is null) terminal.TestSeamSearchBar.TestSeamCloseClick();
                 else return "search takes key=escape or no key (the close button)";
                 break;

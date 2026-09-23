@@ -214,6 +214,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         flyout.ShowAt(item);
         return true;
     }
+
+    /// <summary>A tab item's selection through the strip's own activation.</summary>
+    internal void TestSeamSelect(TabModel model) => ActivateFromSelection(model);
 #endif
 
     /// <summary>
@@ -2610,9 +2613,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
         ConsumedCloseKey.RaiseForHeldKeys();
         _manager.Activate(model);
     }
-
-    /// <summary>A tab item's selection through the strip's own activation.</summary>
-    internal void TestSeamSelect(TabModel model) => ActivateFromSelection(model);
 
     private void OnTabViewContextRequested(
         UIElement sender, ContextRequestedEventArgs e)

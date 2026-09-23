@@ -563,6 +563,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     /// <summary>This pane's search bar, whose key handler the seam drives.</summary>
     internal Search.SearchBarControl TestSeamSearchBar => SearchBar;
+
+    /// <summary>
+    /// One character through the decision a real WM_CHAR takes once it is
+    /// past the routed guards. A character the arm does not drop reaches the
+    /// shell exactly as typing would, so the seam gates this op behind its
+    /// input opt-in. Returns true when the consumed-close arm dropped it.
+    /// </summary>
+    internal bool TestSeamCharacter(char ch) =>
+        _surface.Handle != IntPtr.Zero && HandleCharacter(ch);
+
+    /// <summary>The keys this surface is armed for right now.</summary>
+    internal ConsumedCloseChars TestSeamConsumedCloseArm => _consumedCloseArm.Armed;
 #endif
 
     /// <summary>
@@ -2231,24 +2243,6 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         }
         return false;
     }
-
-    // ---- test seam accessors (compiled into every build, reachable only
-    // through the seam's pipe, which exists only in a TESTSEAM build) ------
-
-    /// <summary>
-    /// One character through the decision a real WM_CHAR takes once it is
-    /// past the routed guards. A character the arm does not drop reaches the
-    /// shell exactly as typing would, so the seam gates this op behind its
-    /// input opt-in. Returns true when the consumed-close arm dropped it.
-    /// </summary>
-    internal bool TestSeamCharacter(char ch) =>
-        _surface.Handle != IntPtr.Zero && HandleCharacter(ch);
-
-    /// <summary>The keys this surface is armed for right now.</summary>
-    internal ConsumedCloseChars TestSeamConsumedCloseArm => _consumedCloseArm.Armed;
-
-    /// <summary>This pane's search bar, whose close acts the seam drives.</summary>
-    internal Search.SearchBarControl TestSeamSearchBar => SearchBar;
 
     // IME composition (ImeSink TextBox, wired in XAML) -----------------
 
