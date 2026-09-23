@@ -28,14 +28,6 @@ public class TabCloseConfirmationWiringTests
         Assert.DoesNotContain("const bool confirmCloseMultiPane", helper);
     }
 
-    [Fact]
-    public void TitleBarCoordinator_GuardsLiveTitleAgainstClosedTab()
-    {
-        var src = ReadEmbedded("TitleBarCoordinator.cs");
-        Assert.Contains("LiveTitleGuard.Accepts", src);
-        Assert.Contains("_titleHookedTab", src);
-    }
-
     private static string ReadEmbedded(string suffix)
     {
         var asm = Assembly.GetExecutingAssembly();

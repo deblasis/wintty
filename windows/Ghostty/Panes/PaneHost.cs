@@ -231,6 +231,28 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // no resubscription -- only a re-emit of the newly active leaf's value.
     private void EmitActiveLeafCwd() => CwdChanged?.Invoke(this, _activeLeaf.LastCwd);
 
+    /// <summary>
+    /// Raised when the title the tab should show changes: the active leaf's
+    /// surface reported a new one, or a focus change handed the tab a
+    /// different leaf. Raised whether or not this host's tab is selected,
+    /// which is what lets a background tab follow its shell. Null means the
+    /// newly active leaf has not reported a title yet.
+    /// </summary>
+    public event EventHandler<string?>? TitleChanged;
+
+    // Every leaf's terminal is subscribed for its whole life (CreateTerminal
+    // to TeardownLeaf), so a focus change needs no resubscription: only a
+    // re-emit of the newly active leaf's title. A title from any other leaf,
+    // including one soft-closed and retained for undo, is dropped by the
+    // guard, so it cannot name the tab.
+    private void EmitActiveLeafTitle() => TitleChanged?.Invoke(this, _activeLeaf.Terminal().CurrentTitle);
+
+    private void OnTerminalTitleChanged(object? sender, string title)
+    {
+        if (!Ghostty.Core.Tabs.LiveTitleGuard.Accepts(sender, _activeLeaf.Terminal())) return;
+        EmitActiveLeafTitle();
+    }
+
     /// <summary>Raised when the active leaf's terminal rings the bell,
     /// carrying the decoded bell-features. Rewired across leaf-focus
     /// changes, mirroring <see cref="ProgressChanged"/>.</summary>
@@ -712,12 +734,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
                 System.Threading.Timeout.InfiniteTimeSpan);
         };
         // Rebind progress and bell whenever the active leaf changes later,
-        // and hand the tab the newly active leaf's directory.
+        // and hand the tab the newly active leaf's directory and title.
         LeafFocused += (_, _) =>
         {
             BindActiveLeafProgress();
             BindActiveLeafBell();
             EmitActiveLeafCwd();
+            EmitActiveLeafTitle();
         };
     }
 
@@ -1016,6 +1039,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         ProgressChanged = null;
         BellRang = null;
         BellAcknowledged = null;
+        TitleChanged = null;
         LastLeafClosed = null;
     }
 
@@ -1178,6 +1202,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested -= OnTerminalCloseRequested;
         t.ContextMenuRequested -= OnTerminalContextMenuRequested;
         t.PwdChanged -= OnTerminalPwdChanged;
+        t.TitleChanged -= OnTerminalTitleChanged;
         // Tear down the per-surface startup glow so its controller, renderer
         // and mount do not outlive the disposed terminal. Runs before
         // DisposeSurface so a glow timer that fires mid-teardown finds its
@@ -1794,6 +1819,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested += OnTerminalCloseRequested;
         t.ContextMenuRequested += OnTerminalContextMenuRequested;
         t.PwdChanged += OnTerminalPwdChanged;
+        t.TitleChanged += OnTerminalTitleChanged;
         // Startup glow: begin the orbit when this leaf's surface spawns.
         // first_render only arms a short grace, not the end -- on a
         // daemon-attached pane it is the attach resize repainting blank

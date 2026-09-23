@@ -63,6 +63,14 @@ internal sealed class FakePaneHost : IPaneHost
 
     public void RaiseCwdChanged(string? cwd) => CwdChanged?.Invoke(this, cwd);
 
+    public event EventHandler<string?>? TitleChanged;
+
+    public void RaiseTitleChanged(string? title) => TitleChanged?.Invoke(this, title);
+
+    /// <summary>How many handlers are on <see cref="TitleChanged"/>, so a
+    /// test can see a closed or detached tab's forwarder come off.</summary>
+    public int TitleChangedSubscribers => TitleChanged?.GetInvocationList().Length ?? 0;
+
     public event EventHandler? FirstRendered;
 
     public void RaiseFirstRendered() => FirstRendered?.Invoke(this, EventArgs.Empty);

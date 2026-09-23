@@ -54,8 +54,8 @@ namespace Ghostty;
 ///     Storyboard + strip-column tween + concurrent-tween guard).
 ///   - <see cref="TitleBarCoordinator"/> owns the title bar
 ///     drag-region selection, the caption-inset DPI sync, the
-///     active-leaf TitleChanged hook, and the vertical-mode title
-///     TextBlock binding.
+///     window caption, and the vertical-mode title TextBlock
+///     binding.
 ///   - <see cref="TaskbarHost"/> wires the Ghostty.Core taskbar
 ///     progress coordinator into ITaskbarList3.
 ///
