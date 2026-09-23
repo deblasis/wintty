@@ -241,10 +241,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal IntPtr SurfaceHandle => _surface.Handle;
 
     /// <summary>
-    /// The grid the surface had when SurfaceNew returned, which is the size
-    /// its pty is created at. Read by the test seam; (0, 0) before creation.
+    /// The grid and pixel size the surface had when SurfaceNew returned: the
+    /// size its pty is created at. Read by the test seam; zeros before
+    /// creation.
     /// </summary>
-    internal (ushort Cols, ushort Rows) SpawnGrid { get; private set; }
+    internal (ushort Cols, ushort Rows, uint WidthPx, uint HeightPx) SpawnSize { get; private set; }
 
     /// <summary>
     /// Schedule an immediate repaint of this surface. Used by the
@@ -581,6 +582,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     /// <summary>The keys this surface is armed for right now.</summary>
     internal ConsumedCloseChars TestSeamConsumedCloseArm => _consumedCloseArm.Armed;
+
+    /// <summary>The panel's composition scale, so a driver can say which display scale it measured at.</summary>
+    internal double TestSeamCompositionScale => Panel.CompositionScaleX;
 #endif
 
     /// <summary>
@@ -1070,7 +1074,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             throw;
         }
         var spawn = NativeMethods.SurfaceSize(_surface);
-        SpawnGrid = (spawn.Columns, spawn.Rows);
+        SpawnSize = (spawn.Columns, spawn.Rows, spawn.WidthPx, spawn.HeightPx);
 
         // Drop our ref: libghostty does not retain the panel pointer.
         SwapChainPanelInterop.Release(panelPtr);

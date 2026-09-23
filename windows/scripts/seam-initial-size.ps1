@@ -4,35 +4,50 @@
 
     The shell's first reported size is what it formats startup output at: a
     profile error printed at the wrong width is hard-wrapped with real CRLFs
-    and no later resize can reflow it. Windows Terminal measures the pane
-    first and creates the pseudoconsole at that size. This harness checks
-    that Wintty does the same for a local (non-daemon) pane.
+    and no later resize can reflow it. Windows Terminal does not start a
+    terminal's connection until the control has a measured, non-zero size,
+    and then creates the pseudoconsole at that size. This harness checks that
+    Wintty does the same for local (non-daemon) panes.
 
-    Two panes per launch:
+    Three kinds of pane per launch:
 
       launch  the window's first tab, created while the window lays out.
       newtab  a tab opened through the seam (open-profile) once the window
               has settled, the way Ctrl+T or the + button opens one.
+      hidden  tabs created in one dispatcher turn behind the active one
+              (seed-tabs), the shape a session restore has. They are laid
+              out only when first shown.
 
-    For each, the grid the surface was created at (the size its pty is
-    created with: surface-size's spawnCols/spawnRows) must equal the grid the
-    pane settles on (cols/rows). That check is deterministic.
+    The oracle, for every pane: the size the surface was created at, which
+    is the size its pty starts with (surface-size: spawnWidthPx/HeightPx and
+    spawnCols/Rows), equals the size the pane settles on (widthPx/heightPx,
+    cols/rows). Pixels are compared as well as cells, so a creation size a
+    few pixels off the laid-out one fails even when both round to the same
+    grid: which grid a few pixels land in depends on the window height, and
+    the verdict should not. A hidden pane may also have no surface yet
+    (live=false): no pty has started, which is correct. Once shown it must
+    be live and pass the same check.
 
-    The newtab pane also runs a shell that reports its own size: the
-    profile's command is `mode con` redirected to a file, run the moment the
-    shell starts, then a `ping` to keep the pane alive. Its first report must
-    equal the pane's grid too. That is what a user sees, and it depends on
-    whether the shell asks before the first resize lands, so on a build that
-    creates the pty at the wrong size it fails only some of the time.
+    What is recorded but not judged:
 
-    Only the newtab pane runs the reporting shell. The window's first tab
-    and the hidden quick-terminal window both run the default profile, and
-    two shells writing reports would leave no way to tell whose is whose.
+      shell   the newtab pane's shell reports its own size (`mode con` to a
+              file, run as the profile's command). Whether that report
+              comes before or after the first resize is a race the harness
+              cannot control, so on a build that starts the pty at the wrong
+              size it is red only sometimes. It is data, not the verdict.
+      scale   the panel's composition scale. At 1.0 the display-scale half
+              of the size calculation is not exercised, and the summary
+              says so; the unit tests cover it at 1.5 and 2.0.
+
+    The window's first tab and the hidden quick-terminal window run a silent
+    default profile; only the seam-opened tab runs the reporting shell, so
+    no report can be mistaken for another shell's.
 
     Nothing is typed and no OS input is synthesized: the probe runs as a
-    profile's command, and the seam only reads and opens a tab. The launch
-    is isolated (private config, private state, single-instance off) so it
-    can run beside a Wintty somebody else is using.
+    profile's command, and the seam only reads, opens, seeds and selects
+    tabs. The launch is isolated (private config, private state,
+    single-instance off) so it can run beside a Wintty somebody else is
+    using.
 
     Exits 0 on pass, 2 on a product finding, 1 when the harness could not
     run and nothing is known about the product.
@@ -40,9 +55,10 @@
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
-    # Launches to run. The shell's report is timing-shaped, so one launch is
-    # a sample and several are a measurement.
-    [int]$Runs = 3
+    [int]$Runs = 3,
+    # Tabs seed-tabs adds per launch. The last becomes the active one, so
+    # all but one of them are created hidden.
+    [int]$SeededTabs = 3
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -61,25 +77,46 @@ function Read-ModeCon([string]$Path) {
     return [pscustomobject]@{ Rows = $nums[0]; Cols = $nums[1] }
 }
 
-# The pane's settled grid: read until two reads a second apart agree, so a
+function Read-Size($s, [int]$Index) {
+    $r = Invoke-SeamCommand $s @{ op = 'surface-size'; index = $Index }
+    foreach ($field in 'live', 'scale') {
+        if ($null -eq $r.PSObject.Properties[$field]) { throw "HARNESS: the seam no longer reports '$field'" }
+    }
+    if ($r.live) {
+        foreach ($field in 'spawnCols', 'spawnRows', 'spawnWidthPx', 'spawnHeightPx', 'cols', 'rows', 'widthPx', 'heightPx') {
+            if ($null -eq $r.PSObject.Properties[$field]) { throw "HARNESS: the seam no longer reports '$field'" }
+        }
+        if ($r.spawnCols -eq 0 -or $r.cols -eq 0) { throw "HARNESS: the seam reported an empty grid for tab $Index" }
+    }
+    return $r
+}
+
+# The pane's settled size: read until two reads a second apart agree, so a
 # layout pass still in flight is not taken for the answer.
-function Get-SettledGrid($s, [int]$Index) {
+function Get-Settled($s, [int]$Index) {
     $prev = $null
-    $grid = $null
+    $r = $null
     $deadline = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
-        $grid = Invoke-SeamCommand $s @{ op = 'surface-size'; index = $Index }
-        if ($prev -and $prev.cols -eq $grid.cols -and $prev.rows -eq $grid.rows) { break }
-        $prev = $grid
+        $r = Read-Size $s $Index
+        if ($r.live -and $prev -and $prev.live -and $prev.widthPx -eq $r.widthPx -and $prev.heightPx -eq $r.heightPx) { break }
+        $prev = $r
         Start-Sleep -Milliseconds 1000
     }
-    foreach ($field in 'spawnCols', 'spawnRows', 'cols', 'rows') {
-        if ($null -eq $grid.PSObject.Properties[$field]) {
-            throw "HARNESS: the seam no longer reports '$field'"
-        }
+    if (-not $r.live) { throw "HARNESS: tab $Index never got a live surface" }
+    return $r
+}
+
+function Format-Pane($r) {
+    return "pty $($r.spawnCols)x$($r.spawnRows) ($($r.spawnWidthPx)x$($r.spawnHeightPx) px), pane $($r.cols)x$($r.rows) ($($r.widthPx)x$($r.heightPx) px)"
+}
+
+function Test-Pane([string]$What, $r) {
+    if ($r.spawnWidthPx -ne $r.widthPx -or $r.spawnHeightPx -ne $r.heightPx -or
+        $r.spawnCols -ne $r.cols -or $r.spawnRows -ne $r.rows) {
+        return "${What}: $(Format-Pane $r)"
     }
-    if ($grid.spawnCols -eq 0 -or $grid.cols -eq 0) { throw "HARNESS: the seam reported an empty grid for tab $Index" }
-    return $grid
+    return $null
 }
 
 function Invoke-Run([int]$N) {
@@ -97,8 +134,8 @@ profile.sizeprobe.name = SizeProbe
 profile.sizeprobe.command = cmd.exe /d /c mode con > $probe & ping -n 120 127.0.0.1 > nul
 "@
     $entry = [ordered]@{
-        run = $N; ok = $false; class = ''; error = ''
-        launchPty = ''; launchPane = ''; newtabPty = ''; newtabShell = ''; newtabPane = ''
+        run = $N; ok = $false; class = ''; error = ''; scale = $null
+        launch = ''; newtab = ''; shell = ''; hidden = @()
     }
     $s = $null
     try {
@@ -106,45 +143,55 @@ profile.sizeprobe.command = cmd.exe /d /c mode con > $probe & ping -n 120 127.0.
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -PrivateStateBase
         $fails = @()
 
-        $launch = Get-SettledGrid $s 0
-        $entry.launchPty = "$($launch.spawnCols)x$($launch.spawnRows)"
-        $entry.launchPane = "$($launch.cols)x$($launch.rows)"
-        if ($launch.spawnCols -ne $launch.cols -or $launch.spawnRows -ne $launch.rows) {
-            $fails += "launch tab: the pty was created at $($entry.launchPty), the pane's grid is $($entry.launchPane)"
-        }
+        # launch
+        $launch = Get-Settled $s 0
+        $entry.scale = [double]$launch.scale
+        $entry.launch = Format-Pane $launch
+        if ($f = Test-Pane 'launch tab' $launch) { $fails += $f }
 
+        # newtab
         $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'sizeprobe' }
-        $tabs = @($opened.state.tabs)
-        if ($tabs.Count -ne 2) { throw "HARNESS: open-profile left $($tabs.Count) tabs, wanted 2" }
+        if (@($opened.state.tabs).Count -ne 2) { throw "HARNESS: open-profile left $(@($opened.state.tabs).Count) tabs, wanted 2" }
         $index = [int]$opened.state.active
         if ($index -eq 0) { throw 'HARNESS: the opened tab is not the active one' }
+        $newtab = Get-Settled $s $index
+        $entry.newtab = Format-Pane $newtab
+        if ($f = Test-Pane 'new tab' $newtab) { $fails += $f }
 
+        # The shell's own report, as data.
         $deadline = (Get-Date).AddSeconds(30)
         $first = $null
-        while ((Get-Date) -lt $deadline -and -not ($first = Read-ModeCon $probe)) {
-            Start-Sleep -Milliseconds 200
-        }
-        if (-not $first) { throw "HARNESS: the probe shell never wrote its size to $probe" }
+        while ((Get-Date) -lt $deadline -and -not ($first = Read-ModeCon $probe)) { Start-Sleep -Milliseconds 200 }
+        $entry.shell = if ($first) { "$($first.Cols)x$($first.Rows)" } else { 'no report' }
 
-        $grid = Get-SettledGrid $s $index
-        $entry.newtabPty = "$($grid.spawnCols)x$($grid.spawnRows)"
-        $entry.newtabShell = "$($first.Cols)x$($first.Rows)"
-        $entry.newtabPane = "$($grid.cols)x$($grid.rows)"
-        if ($grid.spawnCols -ne $grid.cols -or $grid.spawnRows -ne $grid.rows) {
-            $fails += "new tab: the pty was created at $($entry.newtabPty), the pane's grid is $($entry.newtabPane)"
-        }
-        if ($first.Cols -ne $grid.cols -or $first.Rows -ne $grid.rows) {
-            $fails += "new tab: the shell's first size was $($entry.newtabShell), the pane's grid is $($entry.newtabPane)"
+        # hidden: seed-tabs closes down to one tab, then adds the rest in one
+        # turn; the last one added is the active one and the others are
+        # created behind it.
+        $seeded = Invoke-SeamCommand $s @{ op = 'seed-tabs'; count = $SeededTabs + 1 }
+        $tabs = @($seeded.state.tabs)
+        if ($tabs.Count -ne $SeededTabs + 1) { throw "HARNESS: seed-tabs left $($tabs.Count) tabs, wanted $($SeededTabs + 1)" }
+        $active = [int]$seeded.state.active
+        $hiddenIdx = @(1..$SeededTabs | Where-Object { $_ -ne $active })
+        if ($active -eq 0) { $hiddenIdx = @(1..$SeededTabs) }
+        if ($hiddenIdx.Count -eq 0) { throw 'HARNESS: seed-tabs left no tab behind the active one' }
+        # Let the seeded tabs load before reading what they started with.
+        Start-Sleep -Seconds 2
+        $before = @{}
+        foreach ($i in $hiddenIdx) { $before[$i] = Read-Size $s $i }
+        foreach ($i in $hiddenIdx) {
+            [void](Invoke-SeamCommand $s @{ op = 'select'; index = $i })
+            $shown = Get-Settled $s $i
+            $pre = $before[$i]
+            $preText = if ($pre.live) { "live before shown, pty $($pre.spawnCols)x$($pre.spawnRows)" } else { 'no pty before shown' }
+            $entry.hidden += "tab ${i}: $preText; shown: $(Format-Pane $shown)"
+            if ($f = Test-Pane "hidden tab $i once shown" $shown) { $fails += $f }
         }
 
         if ($s.Proc.HasExited) { throw "APP_EXIT: the app exited during run $N (code $($s.Proc.ExitCode))" }
-        if ($fails.Count -gt 0) {
-            throw ("PRODUCT_FAIL: " + ($fails -join '; ') +
-                " (cell $($grid.cellWidthPx)x$($grid.cellHeightPx) px)")
-        }
+        if ($fails.Count -gt 0) { throw ("PRODUCT_FAIL: " + ($fails -join '; ')) }
         $entry.ok = $true
-        Write-Host ("PASS run {0}: launch pty {1} pane {2}; new tab pty {3} shell {4} pane {5}" -f $N,
-            $entry.launchPty, $entry.launchPane, $entry.newtabPty, $entry.newtabShell, $entry.newtabPane) -ForegroundColor Green
+        Write-Host ("PASS run {0}: launch {1}; new tab {2}; shell {3}; {4}" -f $N, $entry.launch, $entry.newtab,
+            $entry.shell, ($entry.hidden -join '; ')) -ForegroundColor Green
     } catch {
         $msg = "$($_.Exception.Message)"
         $entry.error = $msg
@@ -173,13 +220,24 @@ profile.sizeprobe.command = cmd.exe /d /c mode con > $probe & ping -n 120 127.0.
 }
 
 $results = @(1..$Runs | ForEach-Object { Invoke-Run $_ })
-$results | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
+$scales = @($results | Where-Object { $null -ne $_.scale } | ForEach-Object { $_.scale } | Select-Object -Unique)
+$scaleCovered = @($scales | Where-Object { $_ -ne 1.0 }).Count -gt 0
+[ordered]@{
+    runs = $results
+    scales = $scales
+    scaleCovered = $scaleCovered
+} | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
 
 Write-Host ''
 foreach ($r in $results) {
-    Write-Host ("run {0}: launch pty {1,-8} pane {2,-8} | new tab pty {3,-8} shell {4,-8} pane {5,-8} {6}" -f $r.run,
-        $r.launchPty, $r.launchPane, $r.newtabPty, $r.newtabShell, $r.newtabPane,
-        $(if ($r.ok) { 'PASS' } else { "FAIL ($($r.class))" }))
+    Write-Host ("run {0}: {1}  launch [{2}]  new tab [{3}]  shell {4}  hidden [{5}]" -f $r.run,
+        $(if ($r.ok) { 'PASS' } else { "FAIL ($($r.class))" }), $r.launch, $r.newtab, $r.shell, ($r.hidden -join '; '))
+}
+if ($scaleCovered) {
+    Write-Host ("display scale: {0}" -f ($scales -join ', '))
+} else {
+    Write-Host ("display scale: {0}; the display-scale half of the size calculation was not exercised here" -f
+        $(if ($scales.Count) { $scales -join ', ' } else { 'unknown' }))
 }
 if (@($results | Where-Object { -not $_.ok -and $_.class -eq 'product' }).Count -gt 0) { exit 2 }
 if (@($results | Where-Object { -not $_.ok }).Count -gt 0) { exit 1 }
