@@ -136,6 +136,13 @@ function Invoke-Secondary([string]$Cli) {
     # variable and silently swallows the parameter (every secondary
     # then launches with no jumplist flags and becomes NewWindow).
     Write-Host "secondary $Cli"
+    # The secondary reads config before it forwards, so it must see the
+    # session's temp root: refuse if the session is not up, and re-arm the
+    # guard for the child explicitly rather than trust the inherited value.
+    if ($null -eq $session -or $env:XDG_CONFIG_HOME -ne $session.TempXdg) {
+        throw 'HARNESS: a secondary must launch inside the seam session''s config root'
+    }
+    $env:WINTTY_TEST_CONFIG = '1'
     $p = Start-Process -FilePath $session.ExePath -ArgumentList $Cli -PassThru `
         -WorkingDirectory (Split-Path $session.ExePath)
     $dl = (Get-Date).AddSeconds(12)
