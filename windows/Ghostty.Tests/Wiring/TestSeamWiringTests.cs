@@ -733,4 +733,69 @@ public class TestSeamWiringTests
         // And the op it reports under is the one the request named.
         Assert.Equal("opName", seam.Method("ExecuteAsync").Call("RunOnUiThreadAsync").Arg(1));
     }
+
+    /// <summary>
+    /// The menu and scroll ops stand in for a right-click and a wheel, so
+    /// what they must not do is grow a second implementation of either. The
+    /// pane menu goes out through the keyboard request's own raise (no
+    /// position, which is how OnContextRequested tells Shift+F10 from a
+    /// click) into the window's handler; the tab menu is the item's own
+    /// ContextFlyout shown at the item; dismiss closes flyouts and nothing
+    /// else; scroll is the wheel handler's discrete notch into the same
+    /// native call, unmodified; and overview-key runs the overview's own key
+    /// handler.
+    /// </summary>
+    [Fact]
+    public void TheMenuScrollAndOverviewOps_TakeTheProductsOwnPaths()
+    {
+        var seam = ShellSource.Load("Testing.TestSeam.cs");
+        var menu = seam.Case("ExecuteOnUiThreadAsync", "\"menu\"");
+        AssertInsideTheBuildGate(seam.Root, menu.Span, "the menu op");
+        Assert.Single(menu.Calls(
+            "manager.ActiveTab.PaneHost.ActiveLeaf.Terminal().TestSeamRequestContextMenu"));
+        Assert.Single(menu.Calls("host.TestSeamOpenTabMenu"));
+        Assert.Single(menu.Calls("OpenFlyoutPopups"));
+        // Dismiss reaches only popups whose presenter is a flyout's, so it
+        // cannot close the palette, the switcher or the overview.
+        var popups = seam.Method("OpenFlyoutPopups");
+        Assert.Single(popups.Calls("FlyoutPresenterOf"));
+        var presenter = seam.Method("FlyoutPresenterOf").ToString();
+        Assert.Contains("MenuFlyoutPresenter", presenter);
+        Assert.Contains("FlyoutPresenter", presenter);
+
+        var terminal = ShellSource.Load("Controls.TerminalControl.xaml.cs");
+        var request = terminal.Method("TestSeamRequestContextMenu")
+            .Call("ContextMenuRequested?.Invoke");
+        Assert.Equal("this", request.Arg(0));
+        Assert.Equal("null", request.Arg(1));
+        // The keyboard branch of the real handler makes the identical raise.
+        var keyboard = terminal.Method("OnContextRequested")
+            .Call("ContextMenuRequested?.Invoke");
+        Assert.Equal("null", keyboard.Arg(1));
+
+        var tabs = ShellSource.Load("Tabs.TabHost.xaml.cs");
+        var show = tabs.Method("TestSeamOpenTabMenu").Call("flyout.ShowAt");
+        Assert.Equal("item", Assert.Single(show.ArgumentList.Arguments).ToString());
+        Assert.Contains("item.ContextFlyout", tabs.Method("TestSeamOpenTabMenu").ToString());
+
+        var scroll = seam.Case("ExecuteOnUiThreadAsync", "\"scroll\"");
+        AssertInsideTheBuildGate(seam.Root, scroll.Span, "the scroll op");
+        Assert.Single(scroll.Calls("tab.PaneHost.ActiveLeaf.Terminal().TestSeamScroll"));
+        var wheel = terminal.Method("TestSeamScroll").Call("NativeMethods.SurfaceMouseScroll");
+        Assert.Equal("0.0", wheel.Arg(1));
+        Assert.Equal("notches", wheel.Arg(2));
+        Assert.Equal("0", wheel.Arg(3));
+        // Same native entry the pointer handler feeds.
+        Assert.Single(terminal.Method("OnPointerWheelChanged")
+            .Calls("NativeMethods.SurfaceMouseScroll"));
+
+        // The overview's keys go through the one handler its KeyDown uses,
+        // so the seam's Escape is the user's Escape and nothing parallel.
+        var overviewKey = seam.Case("ExecuteOnUiThreadAsync", "\"overview-key\"");
+        AssertInsideTheBuildGate(seam.Root, overviewKey.Span, "the overview-key op");
+        Assert.Single(overviewKey.Calls("window.TestSeamOverviewUI.TestSeamKey"));
+        var overview = ShellSource.Load("Tabs.TabOverviewControl.xaml.cs");
+        Assert.Equal("key", overview.Method("TestSeamKey").Call("HandleKey").Arg(0));
+        Assert.Equal("e.Key", overview.Method("OnKeyDown").Call("HandleKey").Arg(0));
+    }
 }

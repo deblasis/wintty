@@ -265,20 +265,29 @@ internal sealed partial class TabOverviewControl : UserControl
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        switch (e.Key)
+        if (HandleKey(e.Key)) e.Handled = true;
+    }
+
+    private bool HandleKey(Windows.System.VirtualKey key)
+    {
+        switch (key)
         {
             case Windows.System.VirtualKey.Escape:
                 Dismissed?.Invoke(this, EventArgs.Empty);
-                e.Handled = true;
-                break;
+                return true;
             case Windows.System.VirtualKey.Enter:
                 if (TilesView.SelectedItem is UIElement tile &&
                     _tabByTile.TryGetValue(tile, out var tab))
                 {
                     TabChosen?.Invoke(this, tab);
-                    e.Handled = true;
+                    return true;
                 }
-                break;
+                return false;
+            default:
+                return false;
         }
     }
+
+    /// <summary>A key pressed in the overview, through the real handler, for the test seam.</summary>
+    internal bool TestSeamKey(Windows.System.VirtualKey key) => HandleKey(key);
 }

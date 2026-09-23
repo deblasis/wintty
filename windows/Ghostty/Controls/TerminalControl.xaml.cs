@@ -495,6 +495,26 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
 
     /// <summary>
+    /// The context menu's keyboard request (Shift+F10 or the menu key), for
+    /// the test seam: the same no-position raise OnContextRequested makes, so
+    /// the menu opens through the window's own handler with nothing clicked.
+    /// </summary>
+    internal void TestSeamRequestContextMenu() => ContextMenuRequested?.Invoke(this, null);
+
+    /// <summary>
+    /// A discrete mouse wheel, for the test seam: the notches OnPointerWheelChanged
+    /// hands libghostty for a vertical wheel with no modifier held (positive
+    /// scrolls up). Returns false when the surface is gone.
+    /// </summary>
+    internal bool TestSeamScroll(double notches)
+    {
+        if (_surface.Handle == IntPtr.Zero) return false;
+        NoteActivity();
+        NativeMethods.SurfaceMouseScroll(_surface, 0.0, notches, 0);
+        return true;
+    }
+
+    /// <summary>
     /// Notify the UIA automation peer that the terminal selection changed so
     /// assistive tech re-queries it. No-op when no automation peer has been
     /// created (i.e. no AT client is attached), so non-AT users pay nothing.

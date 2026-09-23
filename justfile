@@ -376,8 +376,9 @@ _no-wintty-running:
 
 # Fuzz in-pane scrollback search against a real oracle: the harness reads the
 # terminal's own UIA text document, counts matches itself, and compares every
-# needle it types against that count. Drives real input, so it needs an
-# interactive desktop and takes the foreground for the duration.
+# needle it sets against that count. Drives the app over the test seam and
+# UIA, so it synthesizes no input and never takes the foreground; it still
+# needs an interactive desktop, because its highlight check reads pixels.
 #
 # Exit codes: 0 clean, 2 product findings (see the JSON and shots under
 # windows/scripts/search-fuzz/), 1 the harness could not run.

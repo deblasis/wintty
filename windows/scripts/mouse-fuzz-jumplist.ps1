@@ -1,246 +1,134 @@
 #requires -Version 7
-# Jump-list CLI under windows-single-instance. Isolated XDG.
-# No desktop-root walk. No modifier chords.
+<#
+    Jump-list CLI under windows-single-instance: the arguments a jump-list
+    entry launches Wintty with must reach the running primary and open what
+    they name.
+
+    What is tested is the command line, not the shell's jump list: each
+    secondary is started with the same --jumplist-* arguments an entry
+    carries, and must hand them to the primary and exit. Explorer and the
+    taskbar are never touched.
+
+    Seam-launched: the primary is a seam session, tab counts are the
+    manager's, and the harness synthesizes no OS input. The
+    confirm-close-surface=false check opens the pane menu and the tab menu
+    through the seam's menu op (the keyboard's context request) instead of
+    right-clicks, and invokes Split Right and Close by UIA as before.
+
+    Checks, all gated:
+      default profile   the primary's title names the default profile
+      new-tab           --jumplist-action=new-tab adds a tab, no window
+      confirm-skipped   closing a split tab raises no dialog and drops it
+      new-window        --jumplist-action=new-window adds a window
+      profile           --jumplist-profile=pwsh adds a window
+    and every secondary must exit rather than stay up as its own app.
+
+    Exits 0 clean, 2 findings, 1 could-not-run.
+#>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
-. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
-# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
-# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
-# not run" - which the suite retries and then reports as an area nothing is
-# known about. Every finally below still runs: exit from a trap unwinds
-# through them, and `break` rethrows anything that is not a product failure so
-# a genuine harness failure still leaves with 1.
-trap {
-    if ("$_" -like 'PRODUCT_FAIL*') {
-        Write-Host "$_" -ForegroundColor Red
-        exit 2
-    }
-    break
-}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
-
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-public static class MzD {
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    public static void Key(long hwnd, int vk) {
-        var h = P(hwnd);
-        PostMessage(h, 0x0100, (IntPtr)vk, IntPtr.Zero);
-        Thread.Sleep(40);
-        PostMessage(h, 0x0101, (IntPtr)vk, IntPtr.Zero);
-    }
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-    public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-    public class Hit { public bool Ok; public string Why; public int X,Y; public uint HitPid; public string HitClass; }
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd); RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L=r.L,T=r.T,R=r.R,B=r.B };
-        return (wr.W < 80 || wr.Hh < 80) ? null : wr;
-    }
-    public static string ClassOf(IntPtr h) {
-        var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString();
-    }
-    public static string TitleOf(IntPtr h) {
-        var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString();
-    }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    static Hit Miss(string why, int x, int y, uint pid, string cls) {
-        return new Hit { Ok=false, Why=why, X=x, Y=y, HitPid=pid, HitClass=cls };
-    }
-    public static Hit ClickScreen(uint pid, int x, int y, bool right) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        uint hitPid = PidOf(hit); string cls = ClassOf(hit);
-        if (cls == "WinttySplash") return Miss("splash", x, y, hitPid, cls);
-        if (hitPid != pid) return Miss("not Wintty", x, y, hitPid, cls);
-        if (!SetCursorPos(x, y)) return Miss("SetCursorPos", x, y, hitPid, cls);
-        Thread.Sleep(40);
-        hit = WindowFromPoint(new POINT { X=x, Y=y });
-        hitPid = PidOf(hit); cls = ClassOf(hit);
-        if (hitPid != pid) return Miss("not Wintty after move", x, y, hitPid, cls);
-        if (right) {
-            mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,UIntPtr.Zero);
-        } else {
-            mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,UIntPtr.Zero);
-        }
-        Thread.Sleep(250);
-        return new Hit { Ok=true, X=x, Y=y, HitPid=hitPid, HitClass=cls };
-    }
-}
-'@
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
-function Get-WinUiWindows([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [MzD+EnumProc]{
-        param($h,$lp)
-        [uint32]$o=0; [void][MzD]::GetWindowThreadProcessId($h,[ref]$o)
-        if ($o -ne $ProcId -or -not [MzD]::IsWindowVisible($h)) { return $true }
-        if ([MzD]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [MzD]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64=$hwnd64; Title=[MzD]::TitleOf($h); Area=($rc.W*$rc.Hh) })
-        return $true
-    }
-    [void][MzD]::EnumWindows($cb,[IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending
-}
-
-function Splash-Visible([int]$ProcId) {
-    $script:splashSeen = $false
-    $cb = [MzD+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner=0; [void][MzD]::GetWindowThreadProcessId($hwnd,[ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        if ([MzD]::ClassOf($hwnd) -eq 'WinttySplash' -and [MzD]::IsWindowVisible($hwnd)) { $script:splashSeen = $true }
-        return $true
-    }
-    [void][MzD]::EnumWindows($cb,[IntPtr]::Zero)
-    return $script:splashSeen
-}
-
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(40)
-    $got = $null
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL startup exit=$($proc.ExitCode)" }
-        $got = @(Get-WinUiWindows ([uint32]$proc.Id)) | Select-Object -First 1
-        if ($got) { break }
-    }
-    if (-not $got) { throw "HARVEST_MISS: no WinUI hwnd" }
-    $dl = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $dl) {
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL during splash" }
-        if (Splash-Visible $proc.Id) { Start-Sleep -Milliseconds 200; continue }
-        Start-Sleep -Milliseconds 900
-        if (-not (Splash-Visible $proc.Id)) { return $got }
-    }
-    throw "HARVEST_MISS: splash never dropped"
-}
-
-function Shot([int64]$Hwnd64, [string]$name) {
-    $rc = [MzD]::RectOf($Hwnd64)
-    if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
-    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rc.L,$rc.T,0,0,$bmp.Size)
-    $p = Join-Path $OutDir "shots\$name.png"
-    $bmp.Save($p); $g.Dispose(); $bmp.Dispose()
-    Write-Host "shot $name $($rc.W)x$($rc.Hh) title=$([MzD]::TitleOf([MzD]::P($Hwnd64)))"
-}
-
-function Shot-Pid([uint32]$ProcId, [string]$prefix) {
-    $i = 0
-    foreach ($w in @(Get-WinUiWindows $ProcId)) {
-        $safe = ($w.Title -replace '[^A-Za-z0-9]+','-').Trim('-')
-        if (-not $safe) { $safe = 'untitled' }
-        Shot $w.Hwnd64 ("{0}-{1}-{2}" -f $prefix, $i, $safe)
-        $i++
-    }
-    Write-Host "pid windows: $i"
-}
-
-function Find-Name($root, [string]$name) {
-    if ($null -eq $root) { return $null }
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-    return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-}
-
-function Invoke-El($el, [uint32]$ProcId, [string]$what, [int64]$MainHwnd = 0) {
-    if ($null -eq $el) { throw "HARVEST_MISS: no UIA element for $what" }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $pat.Invoke()
-        Write-Host "invoke $what"
-        Start-Sleep -Milliseconds 400
-        return
-    } catch { Write-Host "invoke $what unsupported, clicking bounds" }
-    $r = $el.Current.BoundingRectangle
-    $x = [int]($r.X + $r.Width/2); $y = [int]($r.Y + $r.Height/2)
-    $rc = if ($MainHwnd -ne 0) { [MzD]::RectOf($MainHwnd) } else { $null }
-    $inside = $rc -and $x -ge $rc.L -and $x -le $rc.R -and $y -ge $rc.T -and $y -le $rc.B
-    if (-not $inside) {
-        Write-Host "bounds outside hwnd for $what at $x,$y; Enter"
-        if ($MainHwnd -eq 0) { throw "HARVEST_MISS: empty/outside bounds for $what at $x,$y" }
-        [MzD]::Key($MainHwnd, 0x0D)
-        Start-Sleep -Milliseconds 400
-        return
-    }
-    $hit = [MzD]::ClickScreen($ProcId, $x, $y, $false)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
-    Write-Host "click $what $x,$y"
-    Start-Sleep -Milliseconds 400
-}
-
-function Count-TabItemsOn([int64]$Hwnd64) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($Hwnd64))
-    if ($null -eq $root) { return 0 }
-    $ct = [System.Windows.Automation.ControlType]::TabItem
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $ct)
-    return @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)).Count
-}
-
-function Count-TabItems([uint32]$ProcId) {
-    $n = 0
-    foreach ($w in @(Get-WinUiWindows $ProcId)) {
-        $n += Count-TabItemsOn $w.Hwnd64
-    }
-    return $n
-}
-
-function New-IsolatedConfig {
-    # The shared helper's randomly named root; the session is kept
-    # script-scoped so the finally below can pair the Exit.
-    $script:TestConfig = Enter-WinttyTestConfig
-    $tempXdg = $script:TestConfig.Dir
-    $winttyDir = Join-Path $tempXdg 'wintty'
-    New-Item -ItemType Directory -Force -Path $winttyDir | Out-Null
-    $dst = Join-Path $winttyDir 'config.wintty'
-    $body = @"
+$Config = @'
 windows-single-instance = true
 window-save-state = never
 windows-settings-ui = true
 confirm-close-surface = false
+vertical-tabs = false
 profile.pwsh.name = PowerShell
 profile.pwsh.command = pwsh.exe
 default-profile = pwsh
-"@
-    [IO.File]::WriteAllText($dst, $body)
-    Write-Host "XDG_CONFIG_HOME=$tempXdg"
-    return $tempXdg
+'@
+
+$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
+$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+
+$session = $null
+$harnessError = ''
+$script:Findings = [System.Collections.Generic.List[string]]::new()
+$secondaryAlive = $false
+$newWindowOk = $false
+$newTabOk = $false
+$profileOk = $false
+$defaultProfileOk = $false
+$confirmProbed = $false
+$confirmSkipped = $false
+$windowsBefore = 0
+$windowsAfterTab = 0
+$windowsAfterNew = 0
+$windowsAfterProfile = 0
+$tabsBefore = 0
+$tabsAfter = 0
+$tabsAfterClose = 0
+$tabsAfterProfile = 0
+
+function Shot([int64]$Hwnd64, [string]$Name) {
+    $rc = [SeamWin]::RectOf($Hwnd64)
+    if ($null -eq $rc) { return }
+    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
+    $bmp.Save((Join-Path $OutDir "shots\$Name.png"))
+    $g.Dispose(); $bmp.Dispose()
+}
+
+function Shot-Pid([uint32]$ProcId, [string]$Prefix) {
+    $i = 0
+    foreach ($w in @(Get-SeamWinUiWindows $ProcId)) {
+        $safe = ($w.Title -replace '[^A-Za-z0-9]+', '-').Trim('-')
+        if (-not $safe) { $safe = 'untitled' }
+        Shot $w.Hwnd64 ("{0}-{1}-{2}" -f $Prefix, $i, $safe)
+        $i++
+    }
+}
+
+# Tabs across every window, for the profile step's report only: the seam
+# serves the first window, and the entry under test opens another.
+function Count-TabItems([uint32]$ProcId) {
+    $n = 0
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::TabItem)
+    foreach ($w in @(Get-SeamWinUiWindows $ProcId)) {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($w.Hwnd64))
+        if ($null -ne $root) { $n += @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)).Count }
+    }
+    return $n
+}
+
+function Find-MenuItem([int64]$Hwnd64, [string]$Name) {
+    $cond = New-Object System.Windows.Automation.AndCondition(
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::MenuItem)),
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty, $Name)))
+    $deadline = (Get-Date).AddSeconds(3)
+    do {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Hwnd64))
+        $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($null -ne $el) { return $el }
+        Start-Sleep -Milliseconds 150
+    } while ((Get-Date) -lt $deadline)
+    return $null
+}
+
+function Invoke-MenuItem([int64]$Hwnd64, [string]$Name) {
+    $el = Find-MenuItem $Hwnd64 $Name
+    if ($null -eq $el) { throw "HARVEST_MISS: no '$Name' menu item under the window" }
+    $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Write-Host "invoke $Name"
+    Start-Sleep -Milliseconds 500
 }
 
 function Invoke-Secondary([string]$Cli) {
@@ -248,7 +136,8 @@ function Invoke-Secondary([string]$Cli) {
     # variable and silently swallows the parameter (every secondary
     # then launches with no jumplist flags and becomes NewWindow).
     Write-Host "secondary $Cli"
-    $p = Start-Process -FilePath $ExePath -ArgumentList $Cli -PassThru -WorkingDirectory (Split-Path $ExePath)
+    $p = Start-Process -FilePath $session.ExePath -ArgumentList $Cli -PassThru `
+        -WorkingDirectory (Split-Path $session.ExePath)
     $dl = (Get-Date).AddSeconds(12)
     while ((Get-Date) -lt $dl) {
         $p.Refresh()
@@ -258,140 +147,114 @@ function Invoke-Secondary([string]$Cli) {
         }
         Start-Sleep -Milliseconds 200
     }
-    Write-Host "HARVEST_MISS: secondary still alive pid=$($p.Id)"
+    Write-Host "secondary still alive pid=$($p.Id)"
     return $p
 }
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+function Wait-WindowCount([uint32]$ProcId, [int]$AtLeast) {
+    $deadline = (Get-Date).AddSeconds(8)
+    do {
+        $n = @(Get-SeamWinUiWindows $ProcId).Count
+        if ($n -ge $AtLeast) { return $n }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    return $n
+}
 
-# XDG_CONFIG_HOME and WINTTY_TEST_CONFIG are owned by the session that
-# New-IsolatedConfig enters; its Exit pairs in the finally below.
-$tempXdg = New-IsolatedConfig
-$proc = $null
-$secondaryAlive = $false
-$newWindowOk = $false
-$newTabOk = $false
-$profileOk = $false
-$windowsBefore = 0
-$windowsAfterTab = 0
-$windowsAfterNew = 0
-$tabsBefore = 0
-$tabsAfter = 0
-$tabsAfterProfile = 0
-$defaultProfileOk = $false
-$confirmSkipped = $false
-$confirmProbed = $false
-$tabsBefore = 0
-$tabsAfter = 0
-$tabsAfterProfile = 0
-
-Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
 try {
-    Start-Sleep -Milliseconds 500
-    $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
-    $pid32 = [uint32]$proc.Id
-    $main = Wait-Ready $proc
-    Start-Sleep -Seconds 2
-    $main = @(Get-WinUiWindows $pid32) | Select-Object -First 1
-    $hwnd64 = [int64]$main.Hwnd64
-    Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
+    Assert-NoWintty -Context 'The jump-list harness'
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    $pid32 = [uint32]$session.Proc.Id
+    $hwnd64 = [int64]$session.Hwnd64
+    $title = [SeamWin]::TitleOf([SeamWin]::P($hwnd64))
+    Write-Host "hwnd=$hwnd64 pid=$pid32 title=$title"
     Shot $hwnd64 '00-launch'
-    $defaultProfileOk = $main.Title -match 'pwsh'
-    Write-Host "defaultProfileOk=$defaultProfileOk"
+    $defaultProfileOk = $title -match 'pwsh'
 
-    $windowsBefore = @(Get-WinUiWindows $pid32).Count
-    $tabsBefore = Count-TabItemsOn $hwnd64
-    Write-Host "before windows=$windowsBefore tabsOnHwnd0=$tabsBefore"
+    $windowsBefore = @(Get-SeamWinUiWindows $pid32).Count
+    $tabsBefore = @((Invoke-SeamCommand $session @{ op = 'get-state' }).state.tabs).Count
 
     $sec2 = Invoke-Secondary '--jumplist-action=new-tab'
-    Start-Sleep -Seconds 2
-    $proc.Refresh()
     if (-not $sec2.HasExited) { $secondaryAlive = $true }
-    $windowsAfterTab = @(Get-WinUiWindows $pid32).Count
-    $tabsAfter = Count-TabItemsOn $hwnd64
+    $deadline = (Get-Date).AddSeconds(8)
+    do {
+        Start-Sleep -Milliseconds 250
+        $tabsAfter = @((Invoke-SeamCommand $session @{ op = 'get-state' }).state.tabs).Count
+    } while ($tabsAfter -le $tabsBefore -and (Get-Date) -lt $deadline)
+    $windowsAfterTab = @(Get-SeamWinUiWindows $pid32).Count
     $newTabOk = ($tabsAfter -gt $tabsBefore) -and ($windowsAfterTab -eq $windowsBefore)
-    Write-Host "after new-tab tabsOnHwnd0=$tabsAfter (was $tabsBefore) windows=$windowsAfterTab newTabOk=$newTabOk"
+    Write-Host "after new-tab tabs=$tabsAfter (was $tabsBefore) windows=$windowsAfterTab newTabOk=$newTabOk"
     Shot $hwnd64 '01-new-tab'
 
-    $confirmSkipped = $false
-    try {
-        $rc = [MzD]::RectOf($hwnd64)
-        $menuHit = [MzD]::ClickScreen($pid32, $rc.L + 400, $rc.T + 280, $true)
-        if (-not $menuHit.Ok) { throw "pane menu $($menuHit.Why)" }
-        Start-Sleep -Milliseconds 400
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-        $split = Find-Name $root 'Split Right'
-        if ($null -eq $split) { throw "no Split Right menu" }
-        Invoke-El $split $pid32 'Split Right' $hwnd64
-        Start-Sleep -Milliseconds 500
-        $rc = [MzD]::RectOf($hwnd64)
-        $tabHit = [MzD]::ClickScreen($pid32, $rc.L + 80, $rc.T + 16, $true)
-        if (-not $tabHit.Ok) { throw "tab menu $($tabHit.Why)" }
-        Start-Sleep -Milliseconds 400
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-        $closeTab = $null
-        $miCt = [System.Windows.Automation.ControlType]::MenuItem
-        $miCond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $miCt)
-        foreach ($mi in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $miCond)) {
-            if ($mi.Current.Name -eq 'Close') { $closeTab = $mi; break }
-        }
-        if ($null -eq $closeTab) { throw "no Close MenuItem on tab flyout" }
-        $confirmProbed = $true
-        Invoke-El $closeTab $pid32 'Close tab menu' $hwnd64
-        Start-Sleep -Milliseconds 500
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-        $dlg = Find-Name $root 'Close tab?'
-        $tabsAfterClose = Count-TabItemsOn $hwnd64
-        $confirmSkipped = ($null -eq $dlg) -and ($tabsAfterClose -lt $tabsAfter)
-        Write-Host "confirm-close-surface=false dialog=$($null -ne $dlg) tabs=$tabsAfterClose confirmSkipped=$confirmSkipped"
-        Shot $hwnd64 '01b-close-split-tab'
-    } catch {
-        Write-Host "confirm-close probe: $_"
-    }
+    # confirm-close-surface=false: a split tab closes without a dialog.
+    $menu = Invoke-SeamCommand $session @{ op = 'menu'; target = 'pane' }
+    if (@($menu.menus).Count -eq 0) { throw 'PRODUCT_FAIL: the pane context menu did not open' }
+    Invoke-MenuItem $hwnd64 'Split Right'
+    $state = Invoke-SeamCommand $session @{ op = 'get-state' }
+    $active = [int]$state.state.active
+    $leaves = [int]$state.state.tabs[$active].leaves
+    if ($leaves -lt 2) { throw "PRODUCT_FAIL: Split Right left the active tab with $leaves leaf" }
+    [void](Invoke-SeamCommand $session @{ op = 'menu'; target = 'tab'; index = $active })
+    $confirmProbed = $true
+    Invoke-MenuItem $hwnd64 'Close'
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($hwnd64))
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'Close tab?')
+    $dlg = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    $tabsAfterClose = @((Invoke-SeamCommand $session @{ op = 'get-state' }).state.tabs).Count
+    $confirmSkipped = ($null -eq $dlg) -and ($tabsAfterClose -lt $tabsAfter)
+    Write-Host "confirm-close-surface=false dialog=$($null -ne $dlg) tabs=$tabsAfterClose confirmSkipped=$confirmSkipped"
+    Shot $hwnd64 '01b-close-split-tab'
 
     $sec = Invoke-Secondary '--jumplist-action=new-window'
-    Start-Sleep -Seconds 2
-    $proc.Refresh()
     if (-not $sec.HasExited) { $secondaryAlive = $true }
-    $windowsAfterNew = @(Get-WinUiWindows $pid32).Count
+    $windowsAfterNew = Wait-WindowCount $pid32 ($windowsBefore + 1)
     $newWindowOk = (-not $secondaryAlive) -and ($windowsAfterNew -gt $windowsBefore)
     Write-Host "after new-window windows=$windowsAfterNew newWindowOk=$newWindowOk"
     Shot-Pid $pid32 '02-new-window'
 
     $sec3 = Invoke-Secondary '--jumplist-profile=pwsh'
-    Start-Sleep -Seconds 2
-    $proc.Refresh()
     if (-not $sec3.HasExited) { $secondaryAlive = $true }
-    $windowsAfterProfile = @(Get-WinUiWindows $pid32).Count
+    $windowsAfterProfile = Wait-WindowCount $pid32 ($windowsAfterNew + 1)
     $tabsAfterProfile = Count-TabItems $pid32
     $profileOk = $windowsAfterProfile -gt $windowsAfterNew
     Write-Host "after profile windows=$windowsAfterProfile tabs=$tabsAfterProfile profileOk=$profileOk"
     Shot-Pid $pid32 '03-profile'
+
+    if ($session.Proc.HasExited) {
+        throw "APP_EXIT: the app exited during the run (code $($session.Proc.ExitCode))"
+    }
+}
+catch {
+    $msg = "$($_.Exception.Message)"
+    if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { $script:Findings.Add($msg) }
+    else { $harnessError = $msg }
+    Write-Host "ERROR: $msg" -ForegroundColor Red
 }
 finally {
-    if ($null -ne $proc) {
-        $proc.Refresh()
-        if (-not $proc.HasExited) {
-            try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
-        }
-    }
-    # The sweep first (it takes the app down), then the session exit:
-    # restoring env and deleting the staged root while the app still
-    # holds it would pull the config out from under a live window.
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    Exit-WinttyTestConfig $script:TestConfig
+    # The sweep inside takes every secondary this run started, too.
+    if ($null -ne $session) { Stop-SeamSession $session }
 }
 
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
-$result = @{
+if (-not $harnessError) {
+    if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
+    if ($secondaryAlive) { $script:Findings.Add('a secondary stayed up instead of handing its arguments to the primary') }
+    if (-not $defaultProfileOk) { $script:Findings.Add('the primary title does not name the default profile') }
+    if (-not $newTabOk) { $script:Findings.Add('--jumplist-action=new-tab did not add a tab to the primary') }
+    if ($confirmProbed -and -not $confirmSkipped) { $script:Findings.Add('confirm-close-surface=false still asked, or kept the split tab') }
+    if (-not $newWindowOk) { $script:Findings.Add('--jumplist-action=new-window did not add a window') }
+    if (-not $profileOk) { $script:Findings.Add('--jumplist-profile=pwsh did not add a window') }
+}
+
+[ordered]@{
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); secondaries by command line, menus by the seam, items by UIA'
     crashGrew = $crashGrew
     secondaryAlive = $secondaryAlive
     windowsBefore = $windowsBefore
     windowsAfterTab = $windowsAfterTab
     windowsAfterNew = $windowsAfterNew
+    windowsAfterProfile = $windowsAfterProfile
     newWindowOk = $newWindowOk
     tabsBefore = $tabsBefore
     tabsAfter = $tabsAfter
@@ -399,10 +262,14 @@ $result = @{
     defaultProfileOk = $defaultProfileOk
     confirmProbed = $confirmProbed
     confirmSkipped = $confirmSkipped
+    tabsAfterClose = $tabsAfterClose
     tabsAfterProfile = $tabsAfterProfile
     profileOk = $profileOk
-}
-$result | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
+    findings = $script:Findings
+    harness = $harnessError
+} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-if ($crashGrew -or $secondaryAlive -or -not $newWindowOk -or -not $newTabOk -or -not $profileOk -or -not $defaultProfileOk -or ($confirmProbed -and -not $confirmSkipped)) { exit 2 }
+
+if ($script:Findings.Count -gt 0) { exit 2 }
+if ($harnessError) { exit 1 }
 exit 0

@@ -116,9 +116,9 @@ several harnesses check much less than their names suggest. `just fuzz-list`
 prints what each one actually rules out. Three worth knowing before trusting
 a green run:
 
-- `tab-colors` reads no pixel at all. It confirms the swatches were findable
-  and the layout switched; a build that painted every tab the same colour
-  would pass.
+- `tab-colors` reads no pixel at all. It checks the colour the manager holds
+  for every tab across selection, both layout switches and a recolour; a
+  build that painted every tab the same colour would pass.
 - `mica-dpi` never changes the DPI - it reads it once - and checks
   `PerMonitorV2` by grepping the manifest in the source tree rather than the
   binary under test.
@@ -349,7 +349,8 @@ sweep below, a refusal binds `$null` to a mandatory `[datetime]`, and that
 binding error *replaces* the refusal message and abandons the rest of the
 `finally` - including the `XDG_CONFIG_HOME` restore. `search-fuzz.ps1` keeps
 its gate inside the `try` on purpose, because its `catch` records the refusal
-as a harness finding; its sweep is guarded for exactly this reason.
+as a harness finding; its teardown runs only for a session that exists, for
+exactly this reason.
 
 ## Before you run search-fuzz
 
@@ -361,13 +362,17 @@ as a harness finding; its sweep is guarded for exactly this reason.
   `%LOCALAPPDATA%` per user rather than per exe path, `XDG_CONFIG_HOME` does
   not move it, and the harness reports everything the file gains during a
   run as a defect in the build under test.
-- By default it uses **your real config and state directory**, because a
-  throwaway `XDG_CONFIG_HOME` made the app crash at startup on the machine
-  it was written on. `-IsolatedConfig` opts into the throwaway dir. The
-  default means your session restore, pane layout and theme are in play, so
-  a run that starts with several panes open is not a clean run.
-- It moves the physical cursor, synthesizes global input, and resizes the
-  window without restoring the original geometry.
+- It runs on a random temp config root from `Start-SeamSession`, never your
+  real config, and there is no switch to change that.
+- It synthesizes no input and never takes the foreground: the bar opens
+  through the seam's chord op, the needle is set and the buttons pressed
+  over UIA, and the corpus reaches the shell through `send-text`. It does
+  place its own window topmost without activating it, because the highlight
+  check reads screen pixels, and it resizes that window without restoring
+  the original geometry.
+- Three checks only real key presses can make are not made: that typed keys
+  do not leak through the bar to the shell, and the needle box's own Enter,
+  Shift+Enter and Escape handlers.
 
 ### What its oracle does and does not judge
 
@@ -408,7 +413,8 @@ Two more things will stop a seam session that used to work:
   `WINTTY_TEST_SEAM_INPUT=1`) only in a harness that genuinely needs the shell
   to run something. The harnesses that arm it: `seam-cwd-tab-label.ps1` (the
   cwd round trip), `mouse-fuzz-inspector.ps1` (shell seeding so the inspector
-  has surface state) and `mouse-fuzz-undo-osc.ps1` (the OSC title command).
+  has surface state), `mouse-fuzz-undo-osc.ps1` (the OSC title command) and
+  `search-fuzz.ps1` (the scrollback corpus its oracle counts against).
   That list expanding is a policy change and belongs in the PR that does it.
 
 ## Driving input

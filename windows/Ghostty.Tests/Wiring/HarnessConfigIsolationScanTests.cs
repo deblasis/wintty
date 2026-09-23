@@ -1492,8 +1492,12 @@ public class HarnessConfigIsolationScanTests
         var lines = File.ReadAllLines(path);
         Assert.DoesNotContain(lines, l =>
             IsCode(l) && l.Contains("RealConfig", StringComparison.Ordinal));
+        // Either spelling of an isolated launch: the harness now drives the
+        // app over the seam, whose session stages the random root and arms
+        // WINTTY_TEST_CONFIG itself.
         Assert.Contains(lines, l =>
-            IsCode(l) && l.Contains("Enter-WinttyTestConfig", StringComparison.Ordinal));
+            IsCode(l) && (l.Contains("Enter-WinttyTestConfig", StringComparison.Ordinal)
+                          || l.Contains("Start-SeamSession", StringComparison.Ordinal)));
     }
 
     [Fact]

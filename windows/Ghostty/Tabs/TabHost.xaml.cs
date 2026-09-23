@@ -201,6 +201,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
             : null;
 
     /// <summary>
+    /// Open <paramref name="tab"/>'s context menu the way Shift+F10 on a
+    /// focused tab does: the framework shows the item's own ContextFlyout at
+    /// the item, with no pointer position. False when the strip has no item
+    /// for the tab yet.
+    /// </summary>
+    internal bool TestSeamOpenTabMenu(TabModel tab)
+    {
+        if (!_itemByModel.TryGetValue(tab, out var item) || item.ContextFlyout is not { } flyout)
+            return false;
+        flyout.ShowAt(item);
+        return true;
+    }
+
+    /// <summary>
     /// The foreground the ink pass hands a colour-tagged tab's header row,
     /// as 0x00RRGGBB, or null when the tab carries no tag. The expectation
     /// a pixel harness measures against -- and, on its own, worth nothing:

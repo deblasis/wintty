@@ -1,551 +1,295 @@
 #requires -Version 7
-# Remaining chrome: tab rename/color/snap, pane zoom/paste, quake.
-# UIA scoped to Wintty hwnds only. No desktop-root walk. No modifier chords.
+<#
+    Remaining chrome: the tab overview, the tab menu (rename, colour, snap
+    zone), the pane menu (zoom, paste) and the quake terminal.
+
+    Seam-actuated: the harness synthesizes no OS input and never takes the
+    foreground. The palette opens through focus{frame} + Ctrl+Shift+P, the
+    window's real chord routing; the tab and pane menus through the seam's
+    menu op, the keyboard's context request that reaches the same handler a
+    right-click does; a click outside a flyout is menu{dismiss}, and the
+    overview's Escape is overview-key, its own key handler. Everything inside
+    - palette rows, menu items, the rename dialog's Cancel - is UIA, with a
+    loud HARVEST_MISS where a bounds click used to be.
+
+    Gated, as before: the overview opens and closes, and the app survives
+    it all without crash.log growing. Rename, colour, snap, zoom, paste and
+    quake are driven and logged but not gated, so a build missing all six
+    still passes.
+
+    Exits 0 clean, 2 findings, 1 could-not-run.
+#>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
-. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
-# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
-# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
-# not run" - which the suite retries and then reports as an area nothing is
-# known about. Every finally below still runs: exit from a trap unwinds
-# through them, and `break` rethrows anything that is not a product failure so
-# a genuine harness failure still leaves with 1.
-trap {
-    if ("$_" -like 'PRODUCT_FAIL*') {
-        Write-Host "$_" -ForegroundColor Red
-        exit 2
-    }
-    break
-}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
-
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-public static class MzD {
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    public static void Key(long hwnd, int vk) {
-        var h = P(hwnd);
-        PostMessage(h, 0x0100, (IntPtr)vk, IntPtr.Zero);
-        Thread.Sleep(40);
-        PostMessage(h, 0x0101, (IntPtr)vk, IntPtr.Zero);
-    }
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-    public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-    public class Hit { public bool Ok; public string Why; public int X,Y; public uint HitPid; public string HitClass; }
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd); RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L=r.L,T=r.T,R=r.R,B=r.B };
-        return (wr.W < 80 || wr.Hh < 80) ? null : wr;
-    }
-    public static string ClassOf(IntPtr h) {
-        var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString();
-    }
-    public static string TitleOf(IntPtr h) {
-        var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString();
-    }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    static Hit Miss(string why, int x, int y, uint pid, string cls) {
-        return new Hit { Ok=false, Why=why, X=x, Y=y, HitPid=pid, HitClass=cls };
-    }
-    public static Hit ClickScreen(uint pid, int x, int y, bool right) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        uint hitPid = PidOf(hit); string cls = ClassOf(hit);
-        if (cls == "WinttySplash") return Miss("splash", x, y, hitPid, cls);
-        if (hitPid != pid) return Miss("not Wintty", x, y, hitPid, cls);
-        if (!SetCursorPos(x, y)) return Miss("SetCursorPos", x, y, hitPid, cls);
-        Thread.Sleep(40);
-        hit = WindowFromPoint(new POINT { X=x, Y=y });
-        hitPid = PidOf(hit); cls = ClassOf(hit);
-        if (hitPid != pid) return Miss("not Wintty after move", x, y, hitPid, cls);
-        if (right) {
-            mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,UIntPtr.Zero);
-        } else {
-            mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,UIntPtr.Zero);
-        }
-        Thread.Sleep(250);
-        return new Hit { Ok=true, X=x, Y=y, HitPid=hitPid, HitClass=cls };
-    }
-}
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
+
+# The tab menu is the horizontal strip's; the vertical one builds its own.
+$Config = @'
+window-save-state = never
+vertical-tabs = false
 '@
-
-function Get-WinUiWindows([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [MzD+EnumProc]{
-        param($h,$lp)
-        [uint32]$o=0; [void][MzD]::GetWindowThreadProcessId($h,[ref]$o)
-        if ($o -ne $ProcId -or -not [MzD]::IsWindowVisible($h)) { return $true }
-        if ([MzD]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [MzD]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64=$hwnd64; Title=[MzD]::TitleOf($h); Area=($rc.W*$rc.Hh) })
-        return $true
-    }
-    [void][MzD]::EnumWindows($cb,[IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending
-}
-
-function Splash-Visible([int]$ProcId) {
-    $script:splashSeen = $false
-    $cb = [MzD+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner=0; [void][MzD]::GetWindowThreadProcessId($hwnd,[ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        if ([MzD]::ClassOf($hwnd) -eq 'WinttySplash' -and [MzD]::IsWindowVisible($hwnd)) { $script:splashSeen = $true }
-        return $true
-    }
-    [void][MzD]::EnumWindows($cb,[IntPtr]::Zero)
-    return $script:splashSeen
-}
-
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(40)
-    $got = $null
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL startup exit=$($proc.ExitCode)" }
-        $got = @(Get-WinUiWindows ([uint32]$proc.Id)) | Select-Object -First 1
-        if ($got) { break }
-    }
-    if (-not $got) { throw "HARVEST_MISS: no WinUI hwnd" }
-    $dl = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $dl) {
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL during splash" }
-        if (Splash-Visible $proc.Id) { Start-Sleep -Milliseconds 200; continue }
-        Start-Sleep -Milliseconds 900
-        if (-not (Splash-Visible $proc.Id)) { return $got }
-    }
-    throw "HARVEST_MISS: splash never dropped"
-}
-
-function Shot([int64]$Hwnd64, [string]$name) {
-    $rc = [MzD]::RectOf($Hwnd64)
-    if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
-    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rc.L,$rc.T,0,0,$bmp.Size)
-    $p = Join-Path $OutDir "shots\$name.png"
-    $bmp.Save($p); $g.Dispose(); $bmp.Dispose()
-    Write-Host "shot $name $($rc.W)x$($rc.Hh) title=$([MzD]::TitleOf([MzD]::P($Hwnd64)))"
-}
-
-function Shot-Pid([uint32]$ProcId, [string]$prefix) {
-    $i = 0
-    foreach ($w in @(Get-WinUiWindows $ProcId)) {
-        $safe = ($w.Title -replace '[^A-Za-z0-9]+','-').Trim('-')
-        if (-not $safe) { $safe = 'untitled' }
-        Shot $w.Hwnd64 ("{0}-{1}-{2}" -f $prefix, $i, $safe)
-        $i++
-    }
-    Write-Host "pid windows: $i"
-}
-
-function Find-Name($root, [string]$name) {
-    if ($null -eq $root) { return $null }
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-    return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-}
-
-function Get-ListItemAncestor($el) {
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $cur = $el
-    while ($null -ne $cur) {
-        try {
-            if ($cur.Current.ControlType.ProgrammaticName -eq 'ControlType.ListItem') { return $cur }
-        } catch { return $el }
-        $cur = $walker.GetParent($cur)
-    }
-    return $el
-}
-
-# ModeLabel.Text is "Search". Find-Name('Search') hits that TextBlock, not
-# the command ListItem. Only accept a match that lives under a ListItem.
-function Find-NamedListItem($root, [string]$name) {
-    if ($null -eq $root) { return $null }
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    foreach ($el in $all) {
-        $item = Get-ListItemAncestor $el
-        try {
-            if ($item.Current.ControlType.ProgrammaticName -eq 'ControlType.ListItem') { return $item }
-        } catch { }
-    }
-    return $null
-}
-
-function Invoke-El($el, [uint32]$ProcId, [string]$what, [int64]$MainHwnd = 0) {
-    if ($null -eq $el) { throw "HARVEST_MISS: no UIA element for $what" }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $pat.Invoke()
-        Write-Host "invoke $what"
-        Start-Sleep -Milliseconds 400
-        return
-    } catch { Write-Host "invoke $what unsupported, clicking bounds" }
-    $r = $el.Current.BoundingRectangle
-    $x = [int]($r.X + $r.Width/2); $y = [int]($r.Y + $r.Height/2)
-    $rc = if ($MainHwnd -ne 0) { [MzD]::RectOf($MainHwnd) } else { $null }
-    $inside = $rc -and $x -ge $rc.L -and $x -le $rc.R -and $y -ge $rc.T -and $y -le $rc.B
-    if (-not $inside) {
-        Write-Host "bounds outside hwnd for $what at $x,$y; Enter"
-        if ($MainHwnd -eq 0) { throw "FOREGROUND_MISS: empty/outside bounds for $what at $x,$y" }
-        [MzD]::Key($MainHwnd, 0x0D)
-        Start-Sleep -Milliseconds 400
-        return
-    }
-    $hit = [MzD]::ClickScreen($ProcId, $x, $y, $false)
-    if (-not $hit.Ok) { throw "FOREGROUND_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
-    Write-Host "click $what $x,$y"
-    Start-Sleep -Milliseconds 400
-}
-
-function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-    $rc = [MzD]::RectOf($MainHwnd)
-    $hit = [MzD]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-    if (-not $hit.Ok) { throw "FOREGROUND_MISS: grid context $($hit.Why) class=$($hit.HitClass)" }
-    Start-Sleep -Milliseconds 300
-    $pal = $null
-    $dl = (Get-Date).AddMilliseconds(1200)
-    while ((Get-Date) -lt $dl -and $null -eq $pal) {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-        $pal = Find-Name $root 'Command Palette'
-        Start-Sleep -Milliseconds 80
-    }
-    if ($null -eq $pal) {
-        # Leftover MenuFlyout eats the next right-click. Left-click the
-        # grid to dismiss, then retry once.
-        $dismiss = [MzD]::ClickScreen($ProcId, $rc.L + 200, $rc.T + 200, $false)
-        Write-Host "palette miss, grid dismiss ok=$($dismiss.Ok)"
-        Start-Sleep -Milliseconds 300
-        $hit = [MzD]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-        if (-not $hit.Ok) { throw "FOREGROUND_MISS: grid context retry $($hit.Why) class=$($hit.HitClass)" }
-        Start-Sleep -Milliseconds 300
-        $dl = (Get-Date).AddMilliseconds(1200)
-        while ((Get-Date) -lt $dl -and $null -eq $pal) {
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-            $pal = Find-Name $root 'Command Palette'
-            Start-Sleep -Milliseconds 80
-        }
-    }
-    if ($null -eq $pal) { throw "HARVEST_MISS: Command Palette menu item not under hwnd" }
-    Invoke-El $pal $ProcId 'Command Palette' $MainHwnd
-    Start-Sleep -Milliseconds 400
-}
-
-function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-    # By AutomationId, not "the first Edit under the window". The terminal
-    # keeps a 1x1 IME sink TextBox focused whenever a pane has focus, and it
-    # sorts ahead of the palette in the tree - so FindFirst(Edit) returned the
-    # sink, SetValue typed into it, and the palette never filtered. The list
-    # then still held every command, so the lookup below failed on a command
-    # that was present the whole time.
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
-    $edit = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { throw "HARVEST_MISS: no SearchBox in palette" }
-    $vp = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-    $vp.SetValue($text)
-    Write-Host "filter '$text'"
-    Start-Sleep -Milliseconds 350
-}
-
-function Invoke-PaletteCommand([int64]$MainHwnd, [uint32]$ProcId, [string]$filter, [string]$title) {
-    Open-Palette $MainHwnd $ProcId
-    Set-PaletteFilter $MainHwnd $filter
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-    $el = $null
-    $dl = (Get-Date).AddMilliseconds(1200)
-    while ((Get-Date) -lt $dl -and $null -eq $el) {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-        $el = Find-NamedListItem $root $title
-        Start-Sleep -Milliseconds 80
-    }
-    if ($null -eq $el) { throw "HARVEST_MISS: palette ListItem '$title' not under hwnd after filter '$filter'" }
-    Invoke-El $el $ProcId $title $MainHwnd
-    Start-Sleep -Milliseconds 1200
-}
-
-function Close-Extras([int64]$MainHwnd, [uint32]$ProcId) {
-    foreach ($w in @(Get-WinUiWindows $ProcId)) {
-        if ($w.Hwnd64 -eq $MainHwnd) { continue }
-        Write-Host "closing extra '$($w.Title)' hwnd=$($w.Hwnd64)"
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($w.Hwnd64))
-        $close = Find-Name $root 'Close'
-        if ($null -ne $close) { Invoke-El $close $ProcId "Close $($w.Title)" $MainHwnd }
-        else { Write-Host "HARVEST_MISS: no Close on extra window" }
-        Start-Sleep -Milliseconds 300
-    }
-}
-
-function Dismiss-Flyout([int64]$MainHwnd, [uint32]$ProcId) {
-    $rc = [MzD]::RectOf($MainHwnd)
-    if ($null -eq $rc) { return }
-    $hit = [MzD]::ClickScreen($ProcId, $rc.L + 200, $rc.T + 200, $false)
-    Write-Host "dismiss flyout ok=$($hit.Ok)"
-    Start-Sleep -Milliseconds 300
-}
-
-function Open-TabMenu([int64]$MainHwnd, [uint32]$ProcId) {
-    $rc = [MzD]::RectOf($MainHwnd)
-    $x = $rc.L + 80; $y = $rc.T + 16
-    $hit = [MzD]::ClickScreen($ProcId, $x, $y, $true)
-    if (-not $hit.Ok) { throw "FOREGROUND_MISS: tab context $($hit.Why) class=$($hit.HitClass) at $x,$y" }
-    Start-Sleep -Milliseconds 400
-    return [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-}
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
-Start-Sleep -Milliseconds 400
-# A per-run random temp config root with the WINTTY_TEST_CONFIG guard armed
-# for the child. This harness used to launch against the user's real config
-# (reads and writes both). Enter without a paired Exit is deliberate: the
-# script process exits and takes the env with it, and the helper's sweep
-# reaps the staged root.
-$script:TestConfig = Enter-WinttyTestConfig
-$proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
-$pid32 = [uint32]$proc.Id
-$main = Wait-Ready $proc
-Start-Sleep -Seconds 2
-$main = @(Get-WinUiWindows $pid32) | Select-Object -First 1
-$hwnd64 = [int64]$main.Hwnd64
-Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
-Shot $hwnd64 '00-launch'
-
+$script:Findings = [System.Collections.Generic.List[string]]::new()
+$harnessError = ''
+$session = $null
 $overview = $false
-$script:OverviewMissed = $false
-$script:OverviewBroke = $false
-try {
-    Invoke-PaletteCommand $hwnd64 $pid32 'show all' 'Show all tabs'
-    Start-Sleep -Milliseconds 800
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-    $overview = $null -ne (Find-Name $root 'All tabs')
-    Shot $hwnd64 '00b-overview'
-    [MzD]::Key($hwnd64, 0x1B)
-    Start-Sleep -Milliseconds 400
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-    if ($null -ne (Find-Name $root 'All tabs')) {
-        $rc = [MzD]::RectOf($hwnd64)
-        [void][MzD]::ClickScreen($pid32, $rc.L + 200, $rc.T + 200, $false)
-        Start-Sleep -Milliseconds 400
-    }
-} catch {
-    Write-Host "overview: $_"
-    # Distinguish "the overview did not open" from "the click never landed".
-    # Only the latter is a run that judged nothing. A HARVEST_MISS here means a
-    # named control was absent - no Command Palette entry, no Edit in the
-    # palette, no 'Show all tabs' after filtering - and that is a defect, so it
-    # must keep falling through to the exit-2 path below.
-    if ("$_" -like '*FOREGROUND_MISS*') {
-        $script:OverviewMissed = $true
-    } else {
-        # Everything else thrown in here is evidence about the build: a named
-        # control that was not there, or a window rect that collapsed. It can
-        # be thrown AFTER $overview was already set true - the screenshot below
-        # the check is one such path - so a separate flag is needed; keying
-        # only off $overview would let it pass.
-        $script:OverviewBroke = $true
-    }
-}
-
+$overviewClosed = $false
+$newTab = $false
 $rename = $false
 $tabColor = $false
 $moveZone = $false
-$colorPicker = $false
 $renameDialog = $false
+$colorPicker = $false
 $zoomPane = $false
+$zoomed = $false
 $paste = $false
-$quake = $false
-$newTab = $false
-
-$root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-$plus = Find-Name $root 'New tab'
-if ($null -ne $plus) {
-    Invoke-El $plus $pid32 'New tab' $hwnd64
-    $newTab = $true
-    Start-Sleep -Milliseconds 600
-    Shot $hwnd64 '01-two-tabs'
-} else {
-    Write-Host "HARVEST_MISS: New tab button"
-}
-
-$root = Open-TabMenu $hwnd64 $pid32
-$rename = $null -ne (Find-Name $root 'Rename Tab')
-$tabColor = $null -ne (Find-Name $root 'Tab Color...')
-$moveZone = $null -ne (Find-Name $root 'Move Tab to Zone')
-Write-Host "tabMenu rename=$rename color=$tabColor zone=$moveZone"
-Shot $hwnd64 '02-tab-menu'
-
-$el = Find-Name $root 'Rename Tab'
-if ($null -ne $el) {
-    Invoke-El $el $pid32 'Rename Tab' $hwnd64
-    Start-Sleep -Milliseconds 500
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-    $renameDialog = ($null -ne (Find-Name $root 'Rename tab')) -or ($null -ne (Find-Name $root 'Cancel'))
-    Write-Host "renameDialog=$renameDialog"
-    Shot $hwnd64 '03-rename'
-    $cancel = Find-Name $root 'Cancel'
-    if ($null -ne $cancel) { Invoke-El $cancel $pid32 'Cancel rename' $hwnd64 }
-    else { [MzD]::Key($hwnd64, 0x1B) }
-    Start-Sleep -Milliseconds 400
-} else {
-    Dismiss-Flyout $hwnd64 $pid32
-}
-
-$root = Open-TabMenu $hwnd64 $pid32
-$el = Find-Name $root 'Tab Color...'
-if ($null -ne $el) {
-    Invoke-El $el $pid32 'Tab Color...' $hwnd64
-    Start-Sleep -Milliseconds 500
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-    $colorPicker = ($null -ne (Find-Name $root 'Blue')) -or ($null -ne (Find-Name $root 'None'))
-    Write-Host "colorPicker uia=$colorPicker"
-    Shot $hwnd64 '04-tab-color'
-    Dismiss-Flyout $hwnd64 $pid32
-} else {
-    Dismiss-Flyout $hwnd64 $pid32
-}
-
-$root = Open-TabMenu $hwnd64 $pid32
-$el = Find-Name $root 'Move Tab to Zone'
-if ($null -ne $el) {
-    Invoke-El $el $pid32 'Move Tab to Zone' $hwnd64
-    Start-Sleep -Milliseconds 500
-    Shot $hwnd64 '05-snap-zone'
-    Dismiss-Flyout $hwnd64 $pid32
-} else {
-    Write-Host "HARVEST_MISS: Move Tab to Zone (need 2 tabs? newTab=$newTab)"
-    Dismiss-Flyout $hwnd64 $pid32
-}
-
-$rc = [MzD]::RectOf($hwnd64)
-$menuHit = [MzD]::ClickScreen($pid32, $rc.L + 400, $rc.T + 280, $true)
-if (-not $menuHit.Ok) { throw "FOREGROUND_MISS: pane menu $($menuHit.Why) class=$($menuHit.HitClass)" }
-Start-Sleep -Milliseconds 500
-$root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-$zoomPane = $null -ne (Find-Name $root 'Zoom Pane')
-$paste = $null -ne (Find-Name $root 'Paste')
-Write-Host "paneMenu zoom=$zoomPane paste=$paste"
-$miCt = [System.Windows.Automation.ControlType]::MenuItem
-$miCond = New-Object System.Windows.Automation.PropertyCondition(
-    [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $miCt)
-foreach ($mi in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $miCond)) {
-    Write-Host ("  menu {0}" -f $mi.Current.Name)
-}
-Shot $hwnd64 '06-pane-menu'
-$el = Find-Name $root 'Zoom Pane'
-if ($null -ne $el) {
-    Invoke-El $el $pid32 'Zoom Pane' $hwnd64
-    Start-Sleep -Milliseconds 500
-    Shot $hwnd64 '07-zoomed'
-} else {
-    Dismiss-Flyout $hwnd64 $pid32
-}
-
 $quakeTried = $false
-try {
-    Invoke-PaletteCommand $hwnd64 $pid32 'quake' 'Toggle Quake Terminal'
-    $quakeTried = $true
-} catch {
-    Write-Host "palette quake: $_"
-    $rc = [MzD]::RectOf($hwnd64)
-    $menuHit = [MzD]::ClickScreen($pid32, $rc.L + 400, $rc.T + 280, $true)
-    if ($menuHit.Ok) {
-        Start-Sleep -Milliseconds 400
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
-        $pal = Find-Name $root 'Command Palette'
-        if ($null -ne $pal) {
-            Invoke-El $pal $pid32 'Command Palette' $hwnd64
-            Set-PaletteFilter $hwnd64 'quake'
-            $el = Find-NamedListItem ([System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))) 'Toggle Quake Terminal'
-            if ($null -ne $el) {
-                Invoke-El $el $pid32 'Toggle Quake Terminal' $hwnd64
-                $quakeTried = $true
-            }
-        }
+$quakeExtras = 0
+
+function Shot([int64]$Hwnd64, [string]$Name) {
+    $rc = [SeamWin]::RectOf($Hwnd64)
+    if ($null -eq $rc) { return }
+    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
+    $bmp.Save((Join-Path $OutDir "shots\$Name.png"))
+    $g.Dispose(); $bmp.Dispose()
+}
+
+function Shot-Pid([uint32]$ProcId, [string]$Prefix) {
+    $i = 0
+    foreach ($w in @(Get-SeamWinUiWindows $ProcId)) {
+        $safe = ($w.Title -replace '[^A-Za-z0-9]+', '-').Trim('-')
+        if (-not $safe) { $safe = 'untitled' }
+        Shot $w.Hwnd64 ("{0}-{1}-{2}" -f $Prefix, $i, $safe)
+        $i++
     }
 }
-Start-Sleep -Seconds 1
-Shot-Pid $pid32 '08-quake'
-$extras = @(Get-WinUiWindows $pid32 | Where-Object { $_.Hwnd64 -ne $hwnd64 })
-$quake = $extras.Count -gt 0
-Write-Host "quake extras=$($extras.Count)"
-$extras | ForEach-Object { Write-Host "  $($_.Title) $($_.Hwnd64)" }
 
-$proc.Refresh()
+function Get-Root([int64]$Hwnd64) {
+    return [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Hwnd64))
+}
+
+function Find-Name($Root, [string]$Name) {
+    if ($null -eq $Root) { return $null }
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, $Name)
+    return $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+}
+
+function Wait-Name([int64]$Hwnd64, [string]$Name, [int]$Ms = 3000) {
+    $deadline = (Get-Date).AddMilliseconds($Ms)
+    do {
+        $el = Find-Name (Get-Root $Hwnd64) $Name
+        if ($null -ne $el) { return $el }
+        Start-Sleep -Milliseconds 120
+    } while ((Get-Date) -lt $deadline)
+    return $null
+}
+
+function Get-ListItemAncestor($El) {
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $cur = $El
+    while ($null -ne $cur) {
+        try {
+            if ($cur.Current.ControlType.ProgrammaticName -eq 'ControlType.ListItem') { return $cur }
+        } catch { return $El }
+        $cur = $walker.GetParent($cur)
+    }
+    return $El
+}
+
+function Invoke-El($El, [string]$What) {
+    if ($null -eq $El) { throw "HARVEST_MISS: no UIA element for $What" }
+    # InvokePattern or a loud miss - never a bounds click.
+    $El.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Write-Host "invoke $What"
+    Start-Sleep -Milliseconds 400
+}
+
+function Invoke-PaletteCommand($Session, [int64]$Hwnd64, [string]$Filter, [string]$Title) {
+    [void](Invoke-SeamCommand $Session @{ op = 'focus'; target = 'frame' })
+    $r = Invoke-SeamCommand $Session @{ op = 'chord'; key = 0x50; ctrl = $true; shift = $true }
+    if (-not $r.dispatched) {
+        throw "HARVEST_MISS: the palette chord was not dispatched (focus was '$($r.focus)')"
+    }
+    Start-Sleep -Milliseconds 400
+    # By AutomationId: the terminal's 1x1 IME sink is also an Edit.
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
+    $edit = (Get-Root $Hwnd64).FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($null -eq $edit) { throw 'HARVEST_MISS: no SearchBox in the palette' }
+    $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($Filter)
+    Start-Sleep -Milliseconds 350
+    $el = Wait-Name $Hwnd64 $Title 1500
+    if ($null -eq $el) { throw "HARVEST_MISS: palette row '$Title' not found after filter '$Filter'" }
+    Invoke-El (Get-ListItemAncestor $el) $Title
+    Start-Sleep -Milliseconds 1200
+}
+
+function Get-MenuItems($Response) {
+    return @($Response.menus | ForEach-Object { $_.items } | ForEach-Object { $_.text })
+}
+
+function Dismiss-Menus($Session) {
+    $r = Invoke-SeamCommand $Session @{ op = 'menu'; target = 'dismiss' }
+    if (@($r.menus).Count -gt 0) { throw 'HARVEST_MISS: a flyout stayed open after menu{dismiss}' }
+}
+
+try {
+    Assert-NoWintty -Context 'The remain harness'
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    $pid32 = [uint32]$session.Proc.Id
+    $hwnd64 = [int64]$session.Hwnd64
+    [SeamWin]::PlaceOnTop($hwnd64)
+    Write-Host "hwnd=$hwnd64 pid=$pid32"
+    Shot $hwnd64 '00-launch'
+
+    # The overview: the one gated feature here.
+    Invoke-PaletteCommand $session $hwnd64 'show all' 'Show all tabs'
+    $overview = $null -ne (Wait-Name $hwnd64 'All tabs')
+    Shot $hwnd64 '00b-overview'
+    if ($overview) {
+        $r = Invoke-SeamCommand $session @{ op = 'overview-key'; key = 'escape' }
+        $overviewClosed = -not $r.open
+    }
+    Write-Host "overview=$overview closed=$overviewClosed"
+
+    # A second tab, so the snap-zone item has something to move.
+    $plus = Find-Name (Get-Root $hwnd64) 'New tab'
+    if ($null -ne $plus) {
+        Invoke-El $plus 'New tab'
+        $newTab = @((Invoke-SeamCommand $session @{ op = 'get-state' }).state.tabs).Count -ge 2
+        Shot $hwnd64 '01-two-tabs'
+    } else {
+        Write-Host 'HARVEST_MISS: New tab button'
+    }
+
+    $menu = Invoke-SeamCommand $session @{ op = 'menu'; target = 'tab'; index = 0 }
+    $items = Get-MenuItems $menu
+    $rename = $items -contains 'Rename Tab'
+    $tabColor = $items -contains 'Tab Color...'
+    $moveZone = $items -contains 'Move Tab to Zone'
+    Write-Host "tabMenu rename=$rename color=$tabColor zone=$moveZone"
+    Shot $hwnd64 '02-tab-menu'
+    if ($rename) {
+        Invoke-El (Wait-Name $hwnd64 'Rename Tab') 'Rename Tab'
+        $cancel = Wait-Name $hwnd64 'Cancel'
+        $renameDialog = ($null -ne (Find-Name (Get-Root $hwnd64) 'Rename tab')) -or ($null -ne $cancel)
+        Write-Host "renameDialog=$renameDialog"
+        Shot $hwnd64 '03-rename'
+        if ($null -ne $cancel) { Invoke-El $cancel 'Cancel rename' }
+    } else {
+        Dismiss-Menus $session
+    }
+
+    $menu = Invoke-SeamCommand $session @{ op = 'menu'; target = 'tab'; index = 0 }
+    if ((Get-MenuItems $menu) -contains 'Tab Color...') {
+        Invoke-El (Wait-Name $hwnd64 'Tab Color...') 'Tab Color...'
+        $colorPicker = ($null -ne (Wait-Name $hwnd64 'Blue' 1500)) -or ($null -ne (Find-Name (Get-Root $hwnd64) 'None'))
+        Write-Host "colorPicker=$colorPicker"
+        Shot $hwnd64 '04-tab-color'
+    }
+    Dismiss-Menus $session
+
+    $menu = Invoke-SeamCommand $session @{ op = 'menu'; target = 'tab'; index = 0 }
+    if ((Get-MenuItems $menu) -contains 'Move Tab to Zone') {
+        Invoke-El (Wait-Name $hwnd64 'Move Tab to Zone') 'Move Tab to Zone'
+        Start-Sleep -Milliseconds 500
+        Shot $hwnd64 '05-snap-zone'
+    } else {
+        Write-Host "HARVEST_MISS: Move Tab to Zone (need 2 tabs? newTab=$newTab)"
+    }
+    Dismiss-Menus $session
+
+    $menu = Invoke-SeamCommand $session @{ op = 'menu'; target = 'pane' }
+    $items = Get-MenuItems $menu
+    $zoomPane = $items -contains 'Zoom Pane'
+    $paste = $items -contains 'Paste'
+    Write-Host "paneMenu zoom=$zoomPane paste=$paste items=$($items -join '|')"
+    Shot $hwnd64 '06-pane-menu'
+    if ($zoomPane) {
+        Invoke-El (Wait-Name $hwnd64 'Zoom Pane') 'Zoom Pane'
+        Start-Sleep -Milliseconds 500
+        $zoomed = $true
+        Shot $hwnd64 '07-zoomed'
+    } else {
+        Dismiss-Menus $session
+    }
+
+    try {
+        Invoke-PaletteCommand $session $hwnd64 'quake' 'Toggle Quake Terminal'
+        $quakeTried = $true
+    } catch {
+        Write-Host "palette quake: $_"
+    }
+    Start-Sleep -Seconds 1
+    Shot-Pid $pid32 '08-quake'
+    $extras = @(Get-SeamWinUiWindows $pid32 | Where-Object { $_.Hwnd64 -ne $hwnd64 })
+    $quakeExtras = $extras.Count
+    Write-Host "quake extras=$quakeExtras"
+    $extras | ForEach-Object { Write-Host "  $($_.Title) $($_.Hwnd64)" }
+
+    if ($session.Proc.HasExited) {
+        throw "APP_EXIT: the app exited during the run (code $($session.Proc.ExitCode))"
+    }
+}
+catch {
+    $msg = "$($_.Exception.Message)"
+    if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { $script:Findings.Add($msg) }
+    else { $harnessError = $msg }
+    Write-Host "ERROR: $msg" -ForegroundColor Red
+}
+finally {
+    $alive = ($null -ne $session) -and ($null -ne $session.Proc) -and -not $session.Proc.HasExited
+    if ($null -ne $session) { Stop-SeamSession $session }
+}
+
+# A dead process or a grown crash.log is evidence about the build whatever
+# else happened, so it is filed even when the run could not finish.
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
-@{
-    alive = -not $proc.HasExited
+if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
+if (-not $harnessError) {
+    if (-not $overview) { $script:Findings.Add('Show all tabs did not open the overview') }
+    elseif (-not $overviewClosed) { $script:Findings.Add('Escape in the overview did not close it') }
+}
+
+[ordered]@{
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); palette, menus and overview by the seam, everything inside by UIA'
+    alive = $alive
     crashGrew = $crashGrew
-    newTab = [bool]$newTab
-    overview = [bool]$overview
-    renameMenu = [bool]$rename
-    tabColorMenu = [bool]$tabColor
-    moveZoneMenu = [bool]$moveZone
-    renameDialog = [bool]$renameDialog
-    colorPicker = [bool]$colorPicker
-    zoomPane = [bool]$zoomPane
-    paste = [bool]$paste
-    quakeTried = [bool]$quakeTried
-    quakeExtras = $extras.Count
-    quake = [bool]$quake
-} | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
+    newTab = $newTab
+    overview = $overview
+    overviewClosed = $overviewClosed
+    renameMenu = $rename
+    tabColorMenu = $tabColor
+    moveZoneMenu = $moveZone
+    renameDialog = $renameDialog
+    colorPicker = $colorPicker
+    zoomPane = $zoomPane
+    zoomed = $zoomed
+    paste = $paste
+    quakeTried = $quakeTried
+    quakeExtras = $quakeExtras
+    quake = $quakeExtras -gt 0
+    findings = $script:Findings
+    harness = $harnessError
+} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-# Order matters. A dead process or a grown crash.log is evidence about the
-# build no matter what else happened, so it is checked first; letting the
-# missed-click branch preempt it would report a crash as "could not run" and
-# hand it to the runner to retry, where a clean second attempt buries it.
-if ($proc.HasExited -or $crashGrew) {
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    exit 2
-}
-# Only now: a click that never landed says nothing about the overview.
-if ($script:OverviewMissed) {
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    Write-Host 'the tab overview could not be reached, so nothing is known about it'
-    exit 1
-}
-if (-not $overview -or $script:OverviewBroke) {
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    exit 2
-}
-Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
+
+if ($script:Findings.Count -gt 0) { exit 2 }
+if ($harnessError) { exit 1 }
 exit 0
