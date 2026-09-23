@@ -1289,6 +1289,9 @@ GHOSTTY_API bool ghostty_config_theme_is_builtin(ghostty_config_t);
 GHOSTTY_API ghostty_string_s ghostty_config_builtin_theme(ghostty_color_scheme_e);
 GHOSTTY_API void ghostty_config_finalize(ghostty_config_t);
 GHOSTTY_API bool ghostty_config_get(ghostty_config_t, void*, const char*, uintptr_t);
+// The `command` key as one string; empty when unset. Free with
+// ghostty_string_free.
+GHOSTTY_API ghostty_string_s ghostty_config_command(ghostty_config_t);
 GHOSTTY_API ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
                                                               const char*,
                                                               uintptr_t);

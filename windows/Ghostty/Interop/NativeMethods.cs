@@ -521,6 +521,20 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyString ConfigOpenPathNoCreate();
 
+    /// <summary>
+    /// The <c>command</c> key rendered as one string, empty when unset.
+    /// <c>ghostty_config_get</c> cannot answer for this key (a Command has no
+    /// C value), so it has an export of its own. The result is allocated and
+    /// must go back through <see cref="StringFree"/>.
+    /// </summary>
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_command")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyString ConfigCommand(GhosttyConfig config);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_string_free")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void StringFree(GhosttyString str);
+
     // ---- app -----------------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_app_new")]

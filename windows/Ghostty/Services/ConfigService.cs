@@ -129,6 +129,18 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public bool SettingsUiEnabled { get; private set; }
     public double BackgroundOpacity { get; private set; } = 1.0;
 
+    /// <summary>
+    /// The <c>command</c> key, or null when the configuration does not set
+    /// one. Read from libghostty rather than the file, so an included file
+    /// and <c>--command</c> on the command line count. A launch's first pane
+    /// runs it in place of the default profile's command
+    /// (<see cref="Ghostty.Core.Profiles.FirstPaneCommand"/>): every pane
+    /// that carries a profile hands the surface a command of its own, which
+    /// replaces this key, so without that the key did nothing at all
+    /// (deblasis/wintty#1136).
+    /// </summary>
+    public string? ConfiguredCommand { get; private set; }
+
     // Cached during ReadFlagsCore so typed getters do not have to consult
     // _configFileCache on every read; the backing-field pattern keeps the
     // hot path allocation-free and matches BackgroundStyle / BackgroundTint*
@@ -1300,6 +1312,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // CLI flags decide it the same way for the app's own terminals
         // (libghostty) and everything the app builds itself.
         ReloadEnvironment = GetBool("reload-env", whenNotFound: true);
+        ConfiguredCommand = ReadConfiguredCommand();
         // windows-settings-ui is a fork-added Zig field, so libghostty
         // parses it and there is no unknown-field diagnostic to suppress;
         // that is why it is deliberately absent from WindowsOnlyKeys. It
@@ -1893,6 +1906,21 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         return ParseHexColor(hex) is { } parsed
             ? ((uint)parsed.R << 16) | ((uint)parsed.G << 8) | parsed.B
             : null;
+    }
+
+    private string? ReadConfiguredCommand()
+    {
+        var str = NativeMethods.ConfigCommand(_config);
+        try
+        {
+            if (str.Ptr == IntPtr.Zero || str.Len == UIntPtr.Zero) return null;
+            var command = Marshal.PtrToStringUTF8(str.Ptr, (int)str.Len);
+            return string.IsNullOrWhiteSpace(command) ? null : command;
+        }
+        finally
+        {
+            NativeMethods.StringFree(str);
+        }
     }
 
     private bool GetBool(string key) => GetBool(key, whenNotFound: false);

@@ -214,6 +214,26 @@ export fn ghostty_config_get(
     return c_get.get(self, key, ptr);
 }
 
+/// The `command` key as one string, or an empty string when it is unset.
+/// Caller frees with ghostty_string_free.
+///
+/// ghostty_config_get cannot read this key: a Command is a union with no C
+/// value, so it answers false whether or not the key is set. The Windows
+/// host needs the value itself, because a pane that runs a profile hands
+/// its own command to the surface (and a persistent pane to a daemon), and
+/// that replaces this key. Asking here rather than reading the config file
+/// keeps `config-file` includes and `--command` on the command line in the
+/// answer. A `direct:` command comes back with its arguments joined by
+/// spaces, which is lossless because the parser split them on spaces.
+export fn ghostty_config_command(self: *Config) String {
+    const command = self.command orelse return .empty;
+    const str = command.string(global.alloc()) catch |err| {
+        log.err("error rendering command err={}", .{err});
+        return .empty;
+    };
+    return .fromSlice(str);
+}
+
 export fn ghostty_config_trigger(
     self: *Config,
     str: [*]const u8,
@@ -481,6 +501,47 @@ test "ghostty_config_get: struct cval conversion" {
     try testing.expectEqual(@as(u8, 12), out.r);
     try testing.expectEqual(@as(u8, 34), out.g);
     try testing.expectEqual(@as(u8, 56), out.b);
+}
+
+test "ghostty_config_command: unset, shell and direct" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+
+    // Unset is an empty answer, not a default shell.
+    cfg.command = null;
+    {
+        const s = ghostty_config_command(&cfg);
+        defer s.deinit();
+        try testing.expect(s.ptr == null);
+        try testing.expectEqual(@as(usize, 0), s.len);
+    }
+
+    // The shell form comes back as written.
+    var shell: @import("command.zig").Command = undefined;
+    try shell.parseCLI(arena, "pwsh -NoLogo -File C:\\x.ps1");
+    cfg.command = shell;
+    {
+        const s = ghostty_config_command(&cfg);
+        defer s.deinit();
+        try testing.expectEqualStrings(
+            "pwsh -NoLogo -File C:\\x.ps1",
+            s.ptr.?[0..s.len],
+        );
+    }
+
+    // The direct form loses its prefix and keeps its arguments.
+    var direct: @import("command.zig").Command = undefined;
+    try direct.parseCLI(arena, "direct:nvim a b");
+    cfg.command = direct;
+    {
+        const s = ghostty_config_command(&cfg);
+        defer s.deinit();
+        try testing.expectEqualStrings("nvim a b", s.ptr.?[0..s.len]);
+    }
 }
 
 test "ghostty_config_keybinds: count and get" {

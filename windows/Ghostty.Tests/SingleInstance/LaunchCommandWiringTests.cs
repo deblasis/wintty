@@ -38,8 +38,14 @@ public sealed class LaunchCommandWiringTests
         // The command wins over the profile's resolved command, exactly the
         // precedence a cold start gives -e, and is applied on the snapshot
         // the first pane reads (ResolvedCommand feeds surfaceConfig.Command).
+        // Both arms hand the command to FirstPaneCommand (#1136), which sets
+        // ResolvedCommand, and makes a snapshot to carry it when no profile
+        // resolved, so a forwarded -e is no longer dropped on an empty
+        // registry.
         Assert.Contains("command = null", source.Method("OpenJumpListWindow")
             .ParameterList.Parameters.ToString());
-        Assert.Contains("ResolvedCommand = command", builder);
+        var flat = System.Text.RegularExpressions.Regex.Replace(builder, @"\s+", " ");
+        Assert.Contains("FirstPaneSnapshot(snapshot, command, workingDirectory)", flat);
+        Assert.Contains("FirstPaneCommand.Apply( snapshot, command, workingDirectory)", flat);
     }
 }
