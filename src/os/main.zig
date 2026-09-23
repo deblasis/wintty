@@ -28,7 +28,6 @@ pub const passwd = @import("passwd.zig");
 pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
 pub const windows_shell = @import("windows_shell.zig");
-pub const windows_logon_env = @import("windows_logon_env.zig");
 pub const posix_path = @import("posix_path.zig");
 pub const macos = @import("macos.zig");
 pub const shell = @import("shell.zig");
@@ -38,6 +37,7 @@ pub const uri = @import("uri.zig");
 // Functions and types
 pub const CFReleaseThread = @import("cf_release_thread.zig");
 pub const TempDir = @import("TempDir.zig");
+pub const windows_logon_env = @import("windows_logon_env.zig");
 pub const launchedFromDesktop = desktop.launchedFromDesktop;
 pub const launchedByDbusActivation = dbus.launchedByDbusActivation;
 pub const launchedBySystemd = systemd.launchedBySystemd;
@@ -66,6 +66,7 @@ pub const getConfigEditCommand = edit.getConfigEditCommand;
 
 test {
     _ = file;
+    _ = windows_logon_env;
     _ = openpkg;
     _ = stderr;
     _ = edit;
@@ -75,7 +76,6 @@ test {
     _ = uri;
     _ = shell;
     _ = windows_shell;
-    _ = windows_logon_env;
     _ = posix_path;
 
     if (comptime builtin.os.tag == .linux) {
