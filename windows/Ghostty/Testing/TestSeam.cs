@@ -1170,18 +1170,22 @@ internal static class TestSeam
 
             case "menu":
             {
-                // A context menu opened the way the keyboard opens one
-                // (Shift+F10 or the menu key), so the menu a harness reads is
-                // the one a right-click shows, built by the same handler, and
-                // nothing is clicked. Its items are then invoked over UIA.
-                // "dismiss" is the click outside: every open flyout closes.
+                // A context menu opened with nothing clicked, so the menu a
+                // harness reads is the one the product builds, by the same
+                // handler. Its items are then invoked over UIA. "dismiss" is
+                // the click outside: every open flyout closes.
                 switch (ArgString(args, "target"))
                 {
                     case "pane":
                     {
-                        // The pane path's own raise: TerminalControl hands it
-                        // to PaneHost, which hands it to the window's handler.
-                        manager.ActiveTab.PaneHost.ActiveLeaf.Terminal().TestSeamRequestContextMenu();
+                        // The right-click's own two halves, press then
+                        // release at the pane's centre: the mouse-capture
+                        // gate and the armed flag both stand in the way, as
+                        // they do for a real click.
+                        var clicked = manager.ActiveTab.PaneHost.ActiveLeaf.Terminal().TestSeamRightClick();
+                        if (clicked is null) return Error(op, "the active pane has no size yet");
+                        if (clicked == false)
+                            return Error(op, "the right-click did not open a menu: the program has captured the mouse");
                         break;
                     }
                     case "tab":
@@ -1222,6 +1226,10 @@ internal static class TestSeam
                     _ => null,
                 };
                 if (key is not { } pressed) return Error(op, "key must be escape or enter");
+                // Read before the press: the handler only hears a real key
+                // while focus is inside the overview, so a driver gates on
+                // this to catch FocusGrid or the KeyDown wiring breaking.
+                var focused = window.TestSeamOverviewUI.TestSeamHoldsFocus;
                 var handled = window.TestSeamOverviewUI.TestSeamKey(pressed);
                 // Closing re-homes focus into the active leaf on the dispatcher.
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
@@ -1230,6 +1238,7 @@ internal static class TestSeam
                     json.WriteStartObject();
                     json.WriteBoolean("ok", true);
                     json.WriteString("op", op);
+                    json.WriteBoolean("focusInside", focused);
                     json.WriteBoolean("handled", handled);
                     json.WriteBoolean("open", window.TestSeamOverviewOpen);
                     WriteState(json, window, manager);
@@ -1248,10 +1257,69 @@ internal static class TestSeam
                 var index = ArgInt(args, "index", manager.IndexOf(manager.ActiveTab));
                 var tab = TabAt(manager, index);
                 if (tab is null) return Error(op, $"no tab at index {index}");
-                if (!tab.PaneHost.ActiveLeaf.Terminal().TestSeamScroll(notches))
+                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                var before = terminal.TestSeamViewport;
+                if (!terminal.TestSeamScroll(notches))
                     return Error(op, $"tab {index} has no live surface");
+                // libghostty reports the new viewport from its own thread, so
+                // the ack waits (briefly) for the offset to move. It may not:
+                // at the top or bottom there is nowhere to go, which the
+                // driver judges from the numbers.
+                var after = before;
+                var deadline = Environment.TickCount64 + 1_500;
+                while (Environment.TickCount64 < deadline)
+                {
+                    await Task.Delay(30);
+                    after = terminal.TestSeamViewport;
+                    if (after.Offset != before.Offset) break;
+                }
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteStartObject("viewport");
+                    json.WriteNumber("total", after.Total);
+                    json.WriteNumber("len", after.Len);
+                    json.WriteNumber("offsetBefore", before.Offset);
+                    json.WriteNumber("offsetAfter", after.Offset);
+                    json.WriteEndObject();
+                    WriteState(json, window, manager);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "search-key":
+            {
+                // A key pressed in the active pane's search needle box,
+                // through the box's own handler: Enter is next, Enter with
+                // shift is previous, Escape closes the bar. Shift is passed
+                // because no key is actually held.
+                var bar = manager.ActiveTab.PaneHost.ActiveLeaf.Terminal().TestSeamSearchBar;
+                if (bar.Visibility != Microsoft.UI.Xaml.Visibility.Visible)
+                    return Error(op, "the search bar is not open");
+                Windows.System.VirtualKey? key = ArgString(args, "key") switch
+                {
+                    "enter" => Windows.System.VirtualKey.Enter,
+                    "escape" => Windows.System.VirtualKey.Escape,
+                    _ => null,
+                };
+                if (key is not { } pressed) return Error(op, "key must be enter or escape");
+                // Read before the press: a real key reaches this handler only
+                // while the needle box has focus.
+                var focused = bar.TestSeamNeedleFocused;
+                var handled = bar.TestSeamNeedleKey(pressed, ArgBool(args, "shift", false));
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return OkWithState(window, manager, op);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("needleFocused", focused);
+                    json.WriteBoolean("handled", handled);
+                    WriteState(json, window, manager);
+                    json.WriteEndObject();
+                });
             }
 
             default:

@@ -19,19 +19,21 @@
       open the bar      focus{frame} + Ctrl+Shift+F through the frame router
       type a needle     UIA ValuePattern on the needle box (TextChanged, the
                         debounce, StartSearch: the same chain a keystroke runs)
-      next / previous   UIA Invoke on the bar's own buttons
-      close             UIA Invoke on "Close search"
+      next / previous   search-key, Enter and Shift+Enter through the needle
+                        box's own key handler; the seam also reports whether
+                        the box held focus, and losing it is a finding
+      close             search-key Escape, or UIA Invoke on "Close search"
       seed the shell    send-text (armed with -AllowInput: the corpus has to
                         be typed into a live shell)
-      wheel             scroll, the wheel handler's discrete notch
+      wheel             scroll, the wheel handler's discrete notch; the
+                        viewport libghostty reports must move unless it was
+                        already at that end
       focus             read from the seam's pane readout, not from the
                         system-wide UIA focus, which follows the foreground
 
-    Three checks the keyboard version made are gone, because only real key
-    presses reach them: that typed keys do not leak through the bar to the
-    shell, and the needle box's own Enter, Shift+Enter and Escape handlers.
-    The buttons call the same search host, and the Escape-reopen regression
-    below is still covered through the close button.
+    One check the keyboard version made is gone, because only real key
+    presses reach it: that typed keys do not leak through the bar to the
+    shell.
 
     The corpus the oracle reads is typed into a live shell, so every seeding
     send is read back off the input row before Enter commits it. A line that
@@ -303,20 +305,30 @@ function Open-SearchBar {
     Start-Sleep -Milliseconds 500
 }
 
-function Invoke-BarButton([string]$id) {
-    $btn = Find-ById (Get-Root) $id
-    if ($null -eq $btn) { return $false }
-    $btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-    return $true
+
+# A key in the needle box, through the box's own key handler (search-key).
+# The seam also says whether the box held focus, which is where a real key
+# would have landed; a box that lost it is the product's finding, filed here
+# so the key's effect is still judged.
+function Press-NeedleKey([string]$key, [bool]$shift, [string]$what) {
+    $r = Invoke-SeamCommand $script:Session @{ op = 'search-key'; key = $key; shift = $shift }
+    [void](Assert-That ([bool]$r.needleFocused) 'needle-focus-lost' `
+        "$what pressed while the needle box did not hold focus" @{ key = $key; shift = $shift })
+    [void](Assert-That ([bool]$r.handled) 'needle-key-ignored' `
+        "the needle box's handler did not take $what" @{ key = $key; shift = $shift })
 }
 
 function Press-Next {
-    if (-not (Invoke-BarButton 'NextButton')) { throw 'the search bar has no NextButton' }
+    Press-NeedleKey 'enter' $false 'Enter'
     Start-Sleep -Milliseconds 260
 }
 function Press-Prev {
-    if (-not (Invoke-BarButton 'PrevButton')) { throw 'the search bar has no PrevButton' }
+    Press-NeedleKey 'enter' $true 'Shift+Enter'
     Start-Sleep -Milliseconds 260
+}
+function Press-Escape {
+    Press-NeedleKey 'escape' $false 'Escape'
+    Start-Sleep -Milliseconds 300
 }
 function Close-SearchBar {
     $btn = Find-ByName (Get-Root) 'Close search'
@@ -664,8 +676,8 @@ try {
         "the selected match is not painted in its own color: $litSelected before next, $selAfter after" `
         @{ before = $litSelected; after = $selAfter })
 
-    Close-SearchBar
-    [void](Assert-That (-not (Test-SearchBarOpen (Get-Root))) 'esc-did-not-close' 'closing left the search bar open' @{})
+    Press-Escape
+    [void](Assert-That (-not (Test-SearchBarOpen (Get-Root))) 'esc-did-not-close' 'Escape left the search bar open' @{})
 
     # After closing, focus must be back in the terminal, or the next thing
     # the user types goes nowhere. The seam reads it off the app's own focus.
@@ -778,11 +790,9 @@ try {
                     "empty needle left the counter showing '$c'" @{ counter = $c })
             }
             'close' {
-                # The draw that used to pick Escape or the button stays, so a
-                # seed replays the same sequence; both now close by the button.
-                [void]($rng.Next(2))
-                Close-SearchBar
-                $detail = 'button'
+                $useEsc = $rng.Next(2) -eq 0
+                if ($useEsc) { Press-Escape } else { Close-SearchBar }
+                $detail = if ($useEsc) { 'esc' } else { 'button' }
                 [void](Assert-That (-not (Test-SearchBarOpen (Get-Root))) 'esc-did-not-close' `
                     "close via $detail left the bar open" @{ via = $detail })
 
@@ -799,7 +809,20 @@ try {
                 $notches = $rng.Next(-6, 7)
                 $detail = "wheel $notches"
                 if ($notches -ne 0) {
-                    [void](Invoke-SeamCommand $script:Session @{ op = 'scroll'; notches = $notches })
+                    $s = Invoke-SeamCommand $script:Session @{ op = 'scroll'; notches = $notches }
+                    $v = $s.viewport
+                    $detail += " offset $($v.offsetBefore)->$($v.offsetAfter) of $($v.total)/$($v.len)"
+                    # Positive notches scroll up (towards row 0), negative
+                    # down (towards total-len). Only a viewport already at
+                    # that end may stay put.
+                    $bottom = [Math]::Max(0, [double]$v.total - [double]$v.len)
+                    $canMove = if ($notches -gt 0) { $v.offsetBefore -gt 0 } else { $v.offsetBefore -lt $bottom }
+                    $moved = if ($notches -gt 0) { $v.offsetAfter -lt $v.offsetBefore } else { $v.offsetAfter -gt $v.offsetBefore }
+                    if ($canMove) {
+                        [void](Assert-That $moved 'scroll-did-not-move' `
+                            "a $notches-notch wheel left the viewport at row $($v.offsetAfter) of $bottom" `
+                            @{ notches = $notches; viewport = $v })
+                    }
                 }
                 Start-Sleep -Milliseconds 500
                 $after = Get-CounterParts (Get-Counter (Get-Root))

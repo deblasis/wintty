@@ -288,6 +288,27 @@ internal sealed partial class TabOverviewControl : UserControl
         }
     }
 
+#if TESTSEAM
     /// <summary>A key pressed in the overview, through the real handler, for the test seam.</summary>
     internal bool TestSeamKey(Windows.System.VirtualKey key) => HandleKey(key);
+
+    /// <summary>
+    /// Whether keyboard focus is inside the overview, which is where the
+    /// KeyDown handler above hears keys: FocusGrid has to have put it there.
+    /// </summary>
+    internal bool TestSeamHoldsFocus
+    {
+        get
+        {
+            if (XamlRoot is null) return false;
+            for (var node = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+                 node is not null;
+                 node = VisualTreeHelper.GetParent(node))
+            {
+                if (ReferenceEquals(node, this)) return true;
+            }
+            return false;
+        }
+    }
+#endif
 }

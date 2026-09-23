@@ -6,16 +6,18 @@
     Seam-actuated: the harness synthesizes no OS input and never takes the
     foreground. The palette opens through focus{frame} + Ctrl+Shift+P, the
     window's real chord routing; the tab and pane menus through the seam's
-    menu op, the keyboard's context request that reaches the same handler a
-    right-click does; a click outside a flyout is menu{dismiss}, and the
-    overview's Escape is overview-key, its own key handler. Everything inside
-    - palette rows, menu items, the rename dialog's Cancel - is UIA, with a
-    loud HARVEST_MISS where a bounds click used to be.
+    menu op, which reaches the same handler a right-click does (for the
+    pane, the right-click's own press and release halves); a click outside
+    a flyout is menu{dismiss}, and the overview's Escape is overview-key,
+    its own key handler. Everything inside - palette
+    rows, menu items, the rename dialog's Cancel, a colour swatch - is UIA,
+    with a loud HARVEST_MISS where a bounds click used to be.
 
-    Gated, as before: the overview opens and closes, and the app survives
-    it all without crash.log growing. Rename, colour, snap, zoom, paste and
-    quake are driven and logged but not gated, so a build missing all six
-    still passes.
+    Gated: the overview opens, holds keyboard focus and closes on Escape; the
+    tab menu offers Tab Color..., the picker opens, and picking Teal colours
+    the tab; and the app survives it all without crash.log growing. Rename,
+    snap, zoom, paste and quake are driven and logged but not gated, so a
+    build missing all five still passes.
 
     Exits 0 clean, 2 findings, 1 could-not-run.
 #>
@@ -47,6 +49,8 @@ $harnessError = ''
 $session = $null
 $overview = $false
 $overviewClosed = $false
+$overviewFocused = $false
+$swatchPicked = ''
 $newTab = $false
 $rename = $false
 $tabColor = $false
@@ -164,9 +168,12 @@ try {
     Shot $hwnd64 '00b-overview'
     if ($overview) {
         $r = Invoke-SeamCommand $session @{ op = 'overview-key'; key = 'escape' }
+        # A real Escape reaches the handler only while focus is inside the
+        # overview, which FocusGrid puts there when the popup opens.
+        $overviewFocused = [bool]$r.focusInside
         $overviewClosed = -not $r.open
     }
-    Write-Host "overview=$overview closed=$overviewClosed"
+    Write-Host "overview=$overview focused=$overviewFocused closed=$overviewClosed"
 
     # A second tab, so the snap-zone item has something to move.
     $plus = Find-Name (Get-Root $hwnd64) 'New tab'
@@ -199,9 +206,19 @@ try {
     $menu = Invoke-SeamCommand $session @{ op = 'menu'; target = 'tab'; index = 0 }
     if ((Get-MenuItems $menu) -contains 'Tab Color...') {
         Invoke-El (Wait-Name $hwnd64 'Tab Color...') 'Tab Color...'
-        $colorPicker = ($null -ne (Wait-Name $hwnd64 'Blue' 1500)) -or ($null -ne (Find-Name (Get-Root $hwnd64) 'None'))
+        $swatch = Wait-Name $hwnd64 'Teal' 1500
+        $colorPicker = $null -ne $swatch
         Write-Host "colorPicker=$colorPicker"
         Shot $hwnd64 '04-tab-color'
+        if ($colorPicker) {
+            # The swatch is a GridView item; its Invoke is the ItemClick every
+            # activation route (click, Space, Enter) goes through.
+            Invoke-El (Get-ListItemAncestor $swatch) 'Teal swatch'
+            $after = Invoke-SeamCommand $session @{ op = 'get-state' }
+            $swatchPicked = [string]$after.state.tabs[0].color
+            Write-Host "swatch picked: tab 0 wears '$swatchPicked'"
+            Shot $hwnd64 '04b-tab-color-picked'
+        }
     }
     Dismiss-Menus $session
 
@@ -264,7 +281,11 @@ $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc
 if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
 if (-not $harnessError) {
     if (-not $overview) { $script:Findings.Add('Show all tabs did not open the overview') }
+    elseif (-not $overviewFocused) { $script:Findings.Add('the open overview did not hold keyboard focus, so a real Escape would not reach it') }
     elseif (-not $overviewClosed) { $script:Findings.Add('Escape in the overview did not close it') }
+    if (-not $tabColor) { $script:Findings.Add('the tab menu has no Tab Color...') }
+    elseif (-not $colorPicker) { $script:Findings.Add('Tab Color... did not open the colour picker') }
+    elseif ($swatchPicked -ne 'Teal') { $script:Findings.Add("picking the Teal swatch left tab 0 wearing '$swatchPicked'") }
 }
 
 [ordered]@{
@@ -279,6 +300,8 @@ if (-not $harnessError) {
     moveZoneMenu = $moveZone
     renameDialog = $renameDialog
     colorPicker = $colorPicker
+    swatchPicked = $swatchPicked
+    overviewFocused = $overviewFocused
     zoomPane = $zoomPane
     zoomed = $zoomed
     paste = $paste

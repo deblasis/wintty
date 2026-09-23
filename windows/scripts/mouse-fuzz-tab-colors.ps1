@@ -8,14 +8,16 @@
     colour menu's own `tab.Color = color` assignment), selection from
     select, the layout from toggle-layout (the chord's router event) and the
     sidebar from toggle-sidebar. The right-click, the "Tab Color..." item
-    and the swatch click are gone; mouse-fuzz-remain.ps1 still opens the tab
-    menu and the picker through the seam's menu op.
+    and the swatch click are gone here; mouse-fuzz-remain.ps1 opens the tab
+    menu and the picker through the seam's menu op and picks a swatch.
 
-    The oracle is the manager's colour per tab, read after every phase: the
-    colour a tab was given must survive selection, both layout switches and
-    the recolour, and None must stay None. Strip crops are still written to
-    shots/ for a person to look at; no pixel is compared, so a build that
-    paints every tab alike still passes.
+    Three oracles. The manager's colour per tab at every stop: what a tab was
+    given survives selection, both layout switches and the recolour. The
+    strip's ink pass, read through header-rect in the horizontal layout: every
+    tagged tab gets ink and no None tab does. And the paint: in a capture of
+    the horizontal strip, inactive tabs wearing different presets must be
+    painted apart and tabs wearing the same one alike. In the vertical layout
+    the strip must list every tab over UIA. Strip crops still go to shots/.
 
     Exits 0 clean, 2 findings, 1 could-not-run.
 #>
@@ -29,6 +31,8 @@ $ErrorActionPreference = 'Stop'
 
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
@@ -88,6 +92,113 @@ function Assert-Colors($State, [string[]]$Want, [string]$Where) {
     }
 }
 
+# The strip's side of the claim, horizontal only (header-rect reads the
+# horizontal host). Two readings per tab, neither of them the model field the
+# tab-color op wrote:
+#   ink   - the foreground the strip's ink pass assigned the row: present on
+#           every tagged tab, absent on every None tab;
+#   paint - the row's dominant colour in a screen capture. Inactive tabs
+#           wearing different presets must be painted apart, inactive tabs
+#           wearing the same one alike, and None apart from every preset.
+function Get-DominantColor($Bitmap, $Rc, $Rect) {
+    $bins = @{}
+    $x0 = [Math]::Max(0, $Rect.x - $Rc.L); $y0 = [Math]::Max(0, $Rect.y - $Rc.T)
+    $x1 = [Math]::Min($Bitmap.Width, $x0 + $Rect.w); $y1 = [Math]::Min($Bitmap.Height, $y0 + $Rect.h)
+    for ($y = $y0; $y -lt $y1; $y += 2) {
+        for ($x = $x0; $x -lt $x1; $x += 2) {
+            $p = $Bitmap.GetPixel($x, $y)
+            $key = (($p.R -shr 3) -shl 10) -bor (($p.G -shr 3) -shl 5) -bor ($p.B -shr 3)
+            if (-not $bins.ContainsKey($key)) { $bins[$key] = [System.Collections.Generic.List[object]]::new() }
+            $bins[$key].Add($p)
+        }
+    }
+    if ($bins.Count -eq 0) { return $null }
+    $top = ($bins.GetEnumerator() | Sort-Object { $_.Value.Count } -Descending | Select-Object -First 1).Value
+    return @(
+        [int](($top | Measure-Object -Property R -Average).Average),
+        [int](($top | Measure-Object -Property G -Average).Average),
+        [int](($top | Measure-Object -Property B -Average).Average))
+}
+
+function Get-Distance($A, $B) {
+    return [Math]::Max([Math]::Abs($A[0] - $B[0]), [Math]::Max([Math]::Abs($A[1] - $B[1]), [Math]::Abs($A[2] - $B[2])))
+}
+
+function Assert-StripPaint($Session, [string[]]$Want, [string]$Where) {
+    $state = (Invoke-SeamCommand $Session @{ op = 'get-state' }).state
+    $active = [int]$state.active
+    $rects = @{}
+    for ($i = 0; $i -lt $Want.Count; $i++) {
+        $r = Invoke-SeamCommand $Session @{ op = 'header-rect'; index = $i; part = 'row' }
+        $hasInk = -not [string]::IsNullOrEmpty([string]$r.fg)
+        $tagged = -not [string]::IsNullOrEmpty($Want[$i])
+        if ($hasInk -ne $tagged) {
+            $script:Findings.Add("${Where}: the strip's ink pass gives tab $i $(if ($hasInk) { "ink $($r.fg)" } else { 'no ink' }) while it wears $(if ($tagged) { $Want[$i] } else { 'None' })")
+        }
+        $rects[$i] = $r
+    }
+
+    $rc = [SeamWin]::RectOf($Session.Hwnd64)
+    if ($null -eq $rc) { throw 'HARVEST_MISS: lost the window rect before the paint check' }
+    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
+    $g.Dispose()
+    try {
+        $paint = @{}
+        for ($i = 0; $i -lt $Want.Count; $i++) {
+            if ($i -eq $active) { continue }
+            $c = Get-DominantColor $bmp $rc $rects[$i]
+            if ($null -eq $c) { throw "HARVEST_MISS: tab $i's row has no pixels on screen" }
+            $paint[$i] = $c
+        }
+    } finally { $bmp.Dispose() }
+
+    $idx = @($paint.Keys | Sort-Object)
+    for ($a = 0; $a -lt $idx.Count; $a++) {
+        for ($b = $a + 1; $b -lt $idx.Count; $b++) {
+            $i = $idx[$a]; $j = $idx[$b]
+            $d = Get-Distance $paint[$i] $paint[$j]
+            $ni = if ($Want[$i]) { $Want[$i] } else { 'None' }
+            $nj = if ($Want[$j]) { $Want[$j] } else { 'None' }
+            if ($ni -eq $nj -and $d -gt 12) {
+                $script:Findings.Add("${Where}: tabs $i and $j both wear $ni but are painted $d apart")
+            }
+            elseif ($ni -ne $nj -and $d -lt 6) {
+                $script:Findings.Add("${Where}: tab $i ($ni) and tab $j ($nj) are painted alike (distance $d)")
+            }
+        }
+    }
+}
+
+# The vertical strip's own rows over UIA, as the original check read them.
+# MUXC can virtualize a few, so a small shortfall is a warning, not a finding.
+function Assert-VerticalItems([int64]$Hwnd64, [int]$Expected) {
+    $best = 0
+    $deadline = (Get-Date).AddSeconds(12)
+    do {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Hwnd64))
+        $navCond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NavView')
+        $nav = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $navCond)
+        $count = 0
+        if ($null -ne $nav) {
+            $itemCond = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::ListItem)
+            $count = @($nav.FindAll([System.Windows.Automation.TreeScope]::Descendants, $itemCond)).Count
+        }
+        if ($count -gt $best) { $best = $count }
+        if ($count -ge $Expected) { return }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+    if ($best -lt [Math]::Max(5, $Expected - 2)) {
+        $script:Findings.Add("the vertical strip shows $best tab items, expected $Expected")
+    } else {
+        Write-Host "WARN vertical UIA items=$best expected=$Expected (virtualized)" -ForegroundColor Yellow
+    }
+}
+
 function Assert-Layout($State, [bool]$Vertical, [string]$Where) {
     if ([bool]$State.vertical -ne $Vertical) {
         $want = if ($Vertical) { 'vertical' } else { 'horizontal' }
@@ -109,6 +220,8 @@ function Invoke-ActiveCycle($Session, [bool]$Vertical, [string]$Prefix, [string[
         $state = if ($Vertical) { 'v' } else { 'h' }
         Shot-StripCrop $Session "$Prefix-$state-a$i-$tag" $cropW $cropH
     }
+    if ($Vertical) { Assert-VerticalItems $Session.Hwnd64 $Want.Count }
+    else { Assert-StripPaint $Session $Want $Prefix }
 }
 
 function Switch-Layout($Session, [bool]$ToVertical) {
@@ -144,6 +257,7 @@ try {
         }
         Assert-Layout $r.state $false 'after seeding'
         Assert-Colors $r.state (@('') * $TabCount) 'fresh tabs'
+        Assert-StripPaint $session (@('') * $TabCount) 'fresh tabs'
         Shot-StripCrop $session 'h-initial-all-none' 620 40
     }
 
@@ -152,6 +266,7 @@ try {
             $r = Invoke-SeamCommand $session @{ op = 'tab-color'; index = $i; color = $AllPresets[$i - 1] }
         }
         Assert-Colors $r.state $Labels 'after assigning every preset'
+        Assert-StripPaint $session $Labels 'after assigning every preset'
     }
 
     Add-Phase 'horiz-active-inactive-cycle' {

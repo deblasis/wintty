@@ -134,10 +134,6 @@ public sealed partial class MainWindow : Window
     /// <summary>This window's palette theme browse, for the seam's settle wait.</summary>
     internal Ghostty.Core.Themes.PaletteThemeBrowse? TestSeamThemeBrowse => _paletteThemeBrowse;
 
-    /// <summary>Whether the tab overview is up, and the control whose key handler the seam drives.</summary>
-    internal bool TestSeamOverviewOpen => TabOverviewHost.IsOpen;
-    internal Tabs.TabOverviewControl TestSeamOverviewUI => TabOverviewUI;
-
     internal bool TestSeamVerticalTabs => _verticalTabsVisible;
     internal bool TestSeamLayoutSwitching => _layout.IsSwitching;
 

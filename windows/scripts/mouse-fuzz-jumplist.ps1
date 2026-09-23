@@ -11,9 +11,10 @@
 
     Seam-launched: the primary is a seam session, tab counts are the
     manager's, and the harness synthesizes no OS input. The
-    confirm-close-surface=false check opens the pane menu and the tab menu
-    through the seam's menu op (the keyboard's context request) instead of
-    right-clicks, and invokes Split Right and Close by UIA as before.
+    confirm-close-surface=false check opens the pane menu through the seam's
+    menu op (the right-click's own press and release halves) and the tab menu
+    through the item's own flyout, and invokes Split Right and Close by UIA
+    as before.
 
     Checks, all gated:
       default profile   the primary's title names the default profile
@@ -243,9 +244,12 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
+# A grown crash.log is evidence about the build even when the run could not
+# finish, so it is recorded whatever else happened; the checks below judge
+# only a run that reached them.
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
 if (-not $harnessError) {
-    if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
     if ($secondaryAlive) { $script:Findings.Add('a secondary stayed up instead of handing its arguments to the primary') }
     if (-not $defaultProfileOk) { $script:Findings.Add('the primary title does not name the default profile') }
     if (-not $newTabOk) { $script:Findings.Add('--jumplist-action=new-tab did not add a tab to the primary') }

@@ -116,9 +116,9 @@ several harnesses check much less than their names suggest. `just fuzz-list`
 prints what each one actually rules out. Three worth knowing before trusting
 a green run:
 
-- `tab-colors` reads no pixel at all. It checks the colour the manager holds
-  for every tab across selection, both layout switches and a recolour; a
-  build that painted every tab the same colour would pass.
+- `tab-colors` compares painted colours only against each other: tabs with
+  different presets must be painted apart and tabs with the same one alike.
+  It does not check that a tab is painted the right preset.
 - `mica-dpi` never changes the DPI - it reads it once - and checks
   `PerMonitorV2` by grepping the manifest in the source tree rather than the
   binary under test.
@@ -365,14 +365,14 @@ exactly this reason.
 - It runs on a random temp config root from `Start-SeamSession`, never your
   real config, and there is no switch to change that.
 - It synthesizes no input and never takes the foreground: the bar opens
-  through the seam's chord op, the needle is set and the buttons pressed
-  over UIA, and the corpus reaches the shell through `send-text`. It does
-  place its own window topmost without activating it, because the highlight
-  check reads screen pixels, and it resizes that window without restoring
-  the original geometry.
-- Three checks only real key presses can make are not made: that typed keys
-  do not leak through the bar to the shell, and the needle box's own Enter,
-  Shift+Enter and Escape handlers.
+  through the seam's chord op, the needle is set over UIA, its keys go
+  through the seam's search-key op, and the corpus reaches the shell
+  through `send-text`. It does place its own window topmost without
+  activating it, because the highlight check reads screen pixels, and it
+  resizes that window without restoring the original geometry.
+- One check only real key presses can make is not made: that typed keys do
+  not leak through the bar to the shell. The needle box's Enter, Shift+Enter
+  and Escape go through its own handler over the seam.
 
 ### What its oracle does and does not judge
 

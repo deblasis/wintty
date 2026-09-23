@@ -5,7 +5,7 @@
 
     Seam-actuated: the harness synthesizes no OS input and never takes the
     foreground. The pane menu opens through the seam's menu op (the
-    keyboard's context request, the same handler a right-click reaches), and
+    right-click's own press and release halves at the pane's centre), and
     the palette through focus{frame} + Ctrl+Shift+P, the window's real chord
     routing. Everything inside - menu items, palette rows, the search bar,
     the dialogs' buttons - is UIA, with a loud HARVEST_MISS where a bounds

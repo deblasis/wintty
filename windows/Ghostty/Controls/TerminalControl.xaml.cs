@@ -494,12 +494,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return true;
     }
 
+#if TESTSEAM
     /// <summary>
-    /// The context menu's keyboard request (Shift+F10 or the menu key), for
-    /// the test seam: the same no-position raise OnContextRequested makes, so
-    /// the menu opens through the window's own handler with nothing clicked.
+    /// A right-click at the centre of the pane, for the test seam: the press
+    /// and release halves the pointer handlers run, in order, so the capture
+    /// gate and the armed flag are both on the path. Null when the pane has
+    /// no size yet; false when the gate refused (the program has the mouse).
     /// </summary>
-    internal void TestSeamRequestContextMenu() => ContextMenuRequested?.Invoke(this, null);
+    internal bool? TestSeamRightClick()
+    {
+        if (ActualWidth <= 0 || ActualHeight <= 0) return null;
+        return BeginRightClickMenu()
+            && CompleteRightClickMenu(new Windows.Foundation.Point(ActualWidth / 2, ActualHeight / 2));
+    }
 
     /// <summary>
     /// A discrete mouse wheel, for the test seam: the notches OnPointerWheelChanged
@@ -513,6 +520,23 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         NativeMethods.SurfaceMouseScroll(_surface, 0.0, notches, 0);
         return true;
     }
+
+    /// <summary>
+    /// The viewport as libghostty last reported it (total rows, the first
+    /// visible row, visible rows), so a driver can see a scroll happen.
+    /// </summary>
+    internal (ulong Total, ulong Offset, ulong Len) TestSeamViewport
+    {
+        get
+        {
+            lock (_scrollbarLock)
+                return (_pendingScrollbarTotal, _pendingScrollbarOffset, _pendingScrollbarLen);
+        }
+    }
+
+    /// <summary>This pane's search bar, whose key handler the seam drives.</summary>
+    internal Search.SearchBarControl TestSeamSearchBar => SearchBar;
+#endif
 
     /// <summary>
     /// Notify the UIA automation peer that the terminal selection changed so
@@ -1588,15 +1612,39 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // tmux mouse mode), forward the button so the program handles it.
         // Otherwise suppress forwarding and open our context menu on release.
         if (props.PointerUpdateKind == PointerUpdateKind.RightButtonPressed
-            && _surface.Handle != IntPtr.Zero
-            && !NativeMethods.SurfaceMouseCaptured(_surface))
+            && BeginRightClickMenu())
         {
-            _rightButtonOpensMenu = true;
             e.Handled = true;
             return;
         }
 
         SendMouseButton(e, GhosttyMouseState.Press);
+    }
+
+    /// <summary>
+    /// The right-press half of the context-menu gesture: arm the menu unless
+    /// the running program has captured the mouse, in which case the button
+    /// belongs to it and false sends it on.
+    /// </summary>
+    private bool BeginRightClickMenu()
+    {
+        if (_surface.Handle == IntPtr.Zero || NativeMethods.SurfaceMouseCaptured(_surface))
+            return false;
+        _rightButtonOpensMenu = true;
+        return true;
+    }
+
+    /// <summary>
+    /// The right-release half: open the menu at <paramref name="position"/>
+    /// if the press armed it, consuming the flag. False when nothing was
+    /// armed, so the release goes to libghostty as usual.
+    /// </summary>
+    private bool CompleteRightClickMenu(Windows.Foundation.Point position)
+    {
+        if (!_rightButtonOpensMenu) return false;
+        _rightButtonOpensMenu = false;
+        ContextMenuRequested?.Invoke(this, position);
+        return true;
     }
 
     private static async Task TryLaunchHoveredLinkAsync(string url)
@@ -1627,14 +1675,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // a right-release that never arrives because the pointer left the
         // panel) must not clear it early and forward an orphan button to
         // libghostty. A stale flag self-heals on the next right-press.
-        if (_rightButtonOpensMenu
-            && e.GetCurrentPoint(Panel).Properties.PointerUpdateKind
-               == PointerUpdateKind.RightButtonReleased)
+        if (e.GetCurrentPoint(Panel).Properties.PointerUpdateKind
+               == PointerUpdateKind.RightButtonReleased
+            && CompleteRightClickMenu(e.GetCurrentPoint(this).Position))
         {
-            _rightButtonOpensMenu = false;
             e.Handled = true;
-            var pos = e.GetCurrentPoint(this).Position;
-            ContextMenuRequested?.Invoke(this, pos);
             return;
         }
 

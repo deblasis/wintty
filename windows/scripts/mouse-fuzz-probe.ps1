@@ -8,10 +8,11 @@
     the old click stream made goes through the seam op that drives the same
     handler:
 
-      plus (x2)         Ctrl+T through the frame router    (new tab)
+      plus (x2)         the New tab button, UIA Invoke
       sidebar chevron   toggle-sidebar                     (vertical only)
       tab click         select
-      grid right-click  menu{pane}, then menu{dismiss}
+      grid right-click  menu{pane} (the right-click's press and release
+                        halves), then menu{dismiss}
       tab right-click   menu{tab}, then menu{dismiss}      (horizontal only)
       wheel             scroll
       resize            MoveWindow on the app's own window (not input)
@@ -35,6 +36,8 @@ $ErrorActionPreference = 'Stop'
 
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
@@ -66,13 +69,21 @@ function Step($Session, [string]$Name, [hashtable]$Command) {
     return $r
 }
 
-function New-TabByChord($Session, [string]$Name) {
-    [void](Invoke-SeamCommand $Session @{ op = 'focus'; target = 'frame' })
-    $r = Step $Session $Name @{ op = 'chord'; key = 0x54; ctrl = $true }
-    if (-not $r.dispatched) {
-        throw "HARVEST_MISS: the new-tab chord was not dispatched (focus was '$($r.focus)')"
+# The strip's "+" button, the control the old click landed on, invoked over
+# UIA. Both hosts build one and the hidden host stays in the tree, so only an
+# on-screen button counts.
+function New-TabByButton($Session, [string]$Name) {
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'New tab')
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Session.Hwnd64))
+    $button = $null
+    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+        if (-not $el.Current.IsOffscreen) { $button = $el; break }
     }
-    return $r
+    if ($null -eq $button) { throw 'HARVEST_MISS: no on-screen New tab button' }
+    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 600
+    return Step $Session $Name @{ op = 'get-state' }
 }
 
 try {
@@ -85,11 +96,11 @@ try {
     $start = Invoke-SeamCommand $session @{ op = 'get-state' }
     $tabsBefore = @($start.state.tabs).Count
 
-    [void](New-TabByChord $session '01-new-tab')
-    $afterPlus = New-TabByChord $session '02-new-tab-2'
+    [void](New-TabByButton $session '01-new-tab')
+    $afterPlus = New-TabByButton $session '02-new-tab-2'
     $tabsAfterPlus = @($afterPlus.state.tabs).Count
     if ($tabsAfterPlus -ne $tabsBefore + 2) {
-        $script:Findings.Add("two new-tab chords took the tab count from $tabsBefore to $tabsAfterPlus")
+        $script:Findings.Add("two New tab clicks took the tab count from $tabsBefore to $tabsAfterPlus")
     }
 
     if ($afterPlus.state.vertical) {
