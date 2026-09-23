@@ -617,6 +617,95 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
+    /// When the watcher takes no ask, which with auto-reload-config off is
+    /// always, the protocol's look-again is what reloads at the floor. It is
+    /// the service's own one-shot timer, posted to the UI thread, and it
+    /// reloads.
+    /// </summary>
+    /// <remarks>
+    /// Liveness again, like the ask above: without it a deletion still
+    /// concludes, on the next reload somebody else causes, and the reload
+    /// that opened the question is declined and lost. That is the second
+    /// High Contrast toggle a deleted config file used to cost
+    /// (wintty#1155). The protocol's half is driven in
+    /// <c>Config.ConfigVanishProtocolTests</c>; this pins the service's.
+    /// </remarks>
+    [Fact]
+    public void The_vanish_look_again_is_a_reload_on_the_UI_thread_at_the_asked_delay()
+    {
+        var source = ConfigService();
+
+        Assert.Equal("ScheduleVanishRecheck",
+            ProtocolArgument("lookAgainAfter").Expression.ToString());
+
+        var schedule = Assert.Single(
+            source.Method("ScheduleVanishRecheck").Calls("_vanishRecheck.Schedule"));
+        Assert.Equal("delay", schedule.Arg(0));
+
+        var callback = Assert.Single(source.Root.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_vanishRecheck.Callback"));
+        var post = Assert.Single(callback.Right.Calls("_dispatcher.TryEnqueue"));
+        Assert.Equal("OnVanishRecheck", post.Arg(0));
+
+        Assert.Single(source.Method("OnVanishRecheck").Calls("Reload"));
+    }
+
+    /// <summary>
+    /// And teardown stops it, beside the watcher: a look that fired after
+    /// AppFree would push a config into a freed app, which is issue #208.
+    /// Reload's own fence would catch it, but the fence is the last line,
+    /// not the plan.
+    /// </summary>
+    [Fact]
+    public void BeginShutdown_cancels_the_vanish_look_again()
+    {
+        Assert.NotEmpty(ConfigService().Method("BeginShutdown")
+            .Calls("_vanishRecheck.Cancel"));
+    }
+
+    /// <summary>
+    /// A High Contrast request whose reload declined is not put back. It
+    /// stays wanted, so the reload the vanish question schedules carries it,
+    /// and the running config's palette moves only on an applied reload.
+    /// </summary>
+    /// <remarks>
+    /// Putting it back was the other half of the second toggle: the look
+    /// the question scheduled rebuilt without the palette the user had just
+    /// asked for. The rule itself is <c>HighContrastOverrideLatch</c>'s, and
+    /// <c>Accessibility.HighContrastOverrideLatchTests</c> drives it.
+    /// </remarks>
+    [Fact]
+    public void A_declined_high_contrast_request_stays_wanted()
+    {
+        var source = ConfigService();
+
+        var set = source.Method("SetHighContrastOverride");
+        Assert.Single(set.Calls("_highContrast.Request"));
+        Assert.Single(set.Calls("Reload"));
+        Assert.Empty(set.DescendantNodes().OfType<AssignmentExpressionSyntax>());
+
+        // Applied is marked with what THIS reload built, on the applied
+        // path, after the config was pushed.
+        var reload = source.Method("Reload");
+        var built = Assert.Single(reload.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Identifier.ValueText == "highContrastBuilt"));
+        Assert.Equal("_highContrast.Wanted", built.Initializer!.Value.ToString());
+
+        var mark = Assert.Single(reload.Calls("_highContrast.MarkApplied"));
+        Assert.Equal("highContrastBuilt", mark.Arg(0));
+        var push = Assert.Single(reload.Calls("NativeMethods.AppUpdateConfig"));
+        Assert.Same(
+            push.Ancestors().OfType<BlockSyntax>().First(),
+            mark.Ancestors().OfType<BlockSyntax>().First());
+        Assert.True(push.Span.End < mark.Span.Start,
+            "the palette is marked applied before the config carrying it was pushed");
+        Assert.True(built.Span.End < Assert.Single(reload.Calls("BuildLiveConfig")).Span.Start,
+            "the palette is read after the config was built");
+    }
+
+    /// <summary>
     /// The question is asked about THIS session's count, read at report time
     /// through the field its one writer owns.
     /// </summary>

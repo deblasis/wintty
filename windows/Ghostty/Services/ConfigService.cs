@@ -155,11 +155,20 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         = Ghostty.Core.Diagnostics.HangDumpMode.Triage;
 
     // The High Contrast palette to layer on top of the user's config, or
-    // null when HC is inactive/opted-out. Set by HighContrastMonitor;
-    // consumed in Reload and by HighContrastBackground. Only touched on the
-    // UI thread (the monitor marshals its events, and Reload runs on the UI
-    // thread).
-    private HighContrastColors? _highContrastOverrideColors;
+    // null when HC is inactive/opted-out: the one asked for, and the one the
+    // running config was built with. Requested by HighContrastMonitor;
+    // Wanted is consumed by every config build, Applied by
+    // HighContrastBackground. Only touched on the UI thread (the monitor
+    // marshals its events, and Reload runs on the UI thread).
+    private readonly HighContrastOverrideLatch _highContrast = new();
+
+    // One reload scheduled by the vanish question when the watcher could not
+    // take the ask, which is always the case with auto-reload-config off.
+    // Without it the reload that opened the stretch is declined and nothing
+    // looks again, so a High Contrast toggle made after deleting the config
+    // file had to be made twice (wintty#1155).
+    private readonly SystemSchedulerTimer _vanishRecheck =
+        new(StaticLoggers.ConfigWatcherTimer);
     public string LogLevel { get; private set; } = "info";
     public string LogFilter { get; private set; } = string.Empty;
 
@@ -475,11 +484,19 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // decision into a side effect of call order that nothing pins. The
         // count falls the ordinary way instead, on the applied path, which
         // is reached because Reload carries a proven vanish past the gate.
+        //
+        // The look-again is for when the watcher took no ask: with
+        // auto-reload-config off, the default, there is no watcher at all.
+        // It reloads once, at the floor, which is the first moment a
+        // deletion can be proven, so the reload that opened the question
+        // (a High Contrast toggle) lands on that one instead of being lost.
+        _vanishRecheck.Callback = () => _dispatcher.TryEnqueue(OnVanishRecheck);
         _vanishProtocol = new ConfigVanishProtocol(
             sessionDefaultFilesFound: () => _defaultFilesFound,
             ask: () => _watcher?.Resettle() == true,
             onAccept: () =>
-                StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath));
+                StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath),
+            lookAgainAfter: ScheduleVanishRecheck);
 
         // ConfigNew allocates from libghostty's global allocator. A failed
         // ghostty_init leaves the global state in place but torn down, so the
@@ -729,6 +746,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // first would never be corrected.
         var isOsDark = OsTheme.IsDark();
 
+        // The palette this build layers, so an applied reload records the one
+        // it actually carries rather than one asked for since.
+        var highContrastBuilt = _highContrast.Wanted;
+
         GhosttyConfig newConfig;
         ConfigFilesFound defaultFiles;
         int defaultFilesFound;
@@ -883,6 +904,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // either fence above did not apply anything, so it must not change
         // what the next one compares against.
         RecordDefaultFiles(defaultFilesFound);
+        _highContrast.MarkApplied(highContrastBuilt);
         try
         {
             CacheDiagnostics();
@@ -1090,20 +1112,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </summary>
     public void SetHighContrastOverride(HighContrastColors? colors)
     {
-        if (_highContrastOverrideColors == colors) return;
-
-        var previous = _highContrastOverrideColors;
-        _highContrastOverrideColors = colors;
-
-        // Put the latch back when the reload did not happen. Reload can
-        // decline (a config file that will not open, teardown, no app yet),
-        // and the override only reaches the terminal through the config it
-        // builds. Leaving the field moved on a decline makes the guard above
-        // answer "already on this palette" to every later call, so one
-        // refused reload turns High Contrast off for the life of the process.
-        // The same shape RefreshForOsColorScheme's scheme guard has, and it
-        // has bitten there before.
-        if (!Reload()) _highContrastOverrideColors = previous;
+        // Skipped only when the running config already carries this palette.
+        // A declined reload leaves the request wanted but not applied, so it
+        // rides the next reload that applies, including the one the vanish
+        // question schedules for itself, and a repeat of the request tries
+        // again rather than being answered "already on this palette". The
+        // latch says why one field could not do both.
+        if (!_highContrast.Request(colors)) return;
+        Reload();
     }
 
     /// <summary>
@@ -1119,8 +1135,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// colour the terminal will actually settle on is answerable, which is
     /// what the splash needs.
     /// </remarks>
+    ///
+    /// Read from what was APPLIED, not what was asked for: a request whose
+    /// reload declined is not on screen yet, and the splash must match what
+    /// is.
     public uint? HighContrastBackground =>
-        _highContrastOverrideColors is { } hc
+        _highContrast.Applied is { } hc
             ? Ghostty.Core.Accessibility.HighContrastConfigWriter.ColorRefToRgb(hc.Background)
             : null;
 
@@ -1722,7 +1742,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // above it: High Contrast is an accessibility override and has to
             // outrank anything the user asked for, a file named on the command
             // line included.
-            if (_highContrastOverrideColors is { } hcColors)
+            if (_highContrast.Wanted is { } hcColors)
             {
                 var hcBody = Ghostty.Core.Accessibility.HighContrastConfigWriter.Render(hcColors);
                 var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
@@ -2416,6 +2436,34 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     }
 
     /// <summary>
+    /// The vanish question's look-again, taken when the watcher could not
+    /// take its ask: arm one reload <paramref name="delay"/> from now.
+    /// </summary>
+    /// <remarks>
+    /// Re-arming replaces a pending fire, and every caller passes the time
+    /// left until the same floor, so repeated asks inside one stretch land
+    /// on one reload rather than a train of them. A fire that finds the
+    /// stretch over, because a load found the file in between, costs one
+    /// reload of an unchanged config and nothing else.
+    /// </remarks>
+    private bool ScheduleVanishRecheck(TimeSpan delay)
+    {
+        if (_shuttingDown) return false;
+        _vanishRecheck.Schedule(delay);
+        return true;
+    }
+
+    /// <summary>
+    /// The look-again fired, posted to the UI thread: reload, so its verdict
+    /// is the next observation. Past the floor, an absence is proof.
+    /// </summary>
+    private void OnVanishRecheck()
+    {
+        if (_shuttingDown) return;
+        Reload();
+    }
+
+    /// <summary>
     /// The one writer of <c>_defaultFilesFound</c>: how many default config
     /// files the config now in force was built from.
     /// </summary>
@@ -2441,6 +2489,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         _shuttingDown = true;
         StopWatcher();
+        _vanishRecheck.Cancel();
     }
 
     /// <summary>
@@ -2454,6 +2503,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public void Dispose()
     {
         BeginShutdown();
+        _vanishRecheck.Dispose();
         // A preview still up at teardown: the revert is fenced off once
         // shutdown starts, so whatever preview config is left is freed here,
         // after the app that cloned it.

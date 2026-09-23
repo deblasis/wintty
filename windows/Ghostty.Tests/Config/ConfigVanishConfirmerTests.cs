@@ -199,4 +199,37 @@ public class ConfigVanishConfirmerTests
         clock.Advance(ConfigVanishConfirmer.DefaultFloor * 10);
         Assert.Equal(ConfigVanishAction.Ignore, confirmer.Observe(0, Armed));
     }
+
+    /// <summary>
+    /// The time left until the floor is what a host with no watcher waits
+    /// before looking again, so it has to name the first moment an
+    /// observation can accept: measured from the stretch's first
+    /// observation, not from the latest one, and zero once passed.
+    /// </summary>
+    [Fact]
+    public void Until_floor_names_the_first_moment_an_observation_can_accept()
+    {
+        var clock = new Clock();
+        var confirmer = new ConfigVanishConfirmer(now: clock.Now);
+        var step = TimeSpan.FromMilliseconds(300);
+
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor, confirmer.UntilFloor);
+
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Dropped));
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor, confirmer.UntilFloor);
+
+        clock.Advance(step);
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Dropped));
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor - step, confirmer.UntilFloor);
+
+        // Waiting exactly that long is enough, and not a tick less.
+        clock.Advance(confirmer.UntilFloor - TimeSpan.FromTicks(1));
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Dropped));
+        clock.Advance(TimeSpan.FromTicks(1));
+        Assert.Equal(TimeSpan.Zero, confirmer.UntilFloor);
+        Assert.Equal(ConfigVanishAction.Accept, confirmer.Observe(1, Dropped));
+
+        clock.Advance(step);
+        Assert.Equal(TimeSpan.Zero, confirmer.UntilFloor);
+    }
 }

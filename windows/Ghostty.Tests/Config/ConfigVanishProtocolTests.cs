@@ -320,6 +320,109 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     }
 
     /// <summary>
+    /// The protocol as a host with no watcher wires it: the default, since
+    /// <c>auto-reload-config</c> is off. The ask never schedules anything,
+    /// and every look it takes instead is recorded with its delay.
+    /// </summary>
+    private ConfigVanishProtocol NoWatcher(System.Collections.Generic.List<TimeSpan> looks) =>
+        new(
+            sessionDefaultFilesFound: () => _count,
+            ask: () => false,
+            onAccept: () =>
+            {
+                Interlocked.Increment(ref _accepted);
+                _count = 0;
+            },
+            now: () => _now,
+            lookAgainAfter: delay =>
+            {
+                looks.Add(delay);
+                return true;
+            });
+
+    /// <summary>
+    /// With no watcher, the reload that finds the file gone is enough on its
+    /// own. It cannot conclude, because the floor is measured from it, so the
+    /// protocol schedules one look exactly as far out as the floor, and that
+    /// look concludes.
+    /// </summary>
+    /// <remarks>
+    /// Before this, nothing looked again. The question waited for the next
+    /// reload somebody happened to cause, and the reload that opened it, a
+    /// High Contrast toggle, was declined and lost: deleting the config file
+    /// cost the user a second toggle, at least 900ms after the first
+    /// (wintty#1155).
+    /// </remarks>
+    [Fact]
+    public void With_no_watcher_one_reload_is_enough_because_the_protocol_looks_again()
+    {
+        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var protocol = NoWatcher(looks);
+
+        // The toggle's reload finds no file: an observation, not a proof.
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(0, _accepted);
+        var look = Assert.Single(looks);
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor, look);
+
+        // The look fires when it was scheduled to, and its reload still
+        // finds nothing. That is proof, with nobody touching anything.
+        _now += look;
+        Assert.True(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(1, _accepted);
+        Assert.Equal(0, _count);
+        Assert.Single(looks);
+    }
+
+    /// <summary>
+    /// The look is scheduled only when the watcher took no ask. With a
+    /// watcher, its own deliveries already come every 300ms and a second
+    /// source of reloads would only double the rebuilds.
+    /// </summary>
+    [Fact]
+    public void The_look_again_is_not_taken_when_the_watcher_took_the_ask()
+    {
+        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var protocol = new ConfigVanishProtocol(
+            sessionDefaultFilesFound: () => _count,
+            ask: () => true,
+            onAccept: () => { },
+            now: () => _now,
+            lookAgainAfter: delay =>
+            {
+                looks.Add(delay);
+                return true;
+            });
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Empty(looks);
+    }
+
+    /// <summary>
+    /// A file coming back ends the stretch, and the next absence schedules
+    /// its look a whole floor from ITS first observation. A look timed from
+    /// the old stretch would land before the new floor and conclude nothing,
+    /// and with no watcher nothing would look after it.
+    /// </summary>
+    [Fact]
+    public void A_fresh_stretch_times_its_look_from_its_own_first_observation()
+    {
+        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var protocol = NoWatcher(looks);
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        _now += TimeSpan.FromMilliseconds(600);
+        Assert.False(protocol.Observed(ConfigFilesFound.Loaded));
+
+        _now += TimeSpan.FromMilliseconds(600);
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+
+        Assert.Equal(2, looks.Count);
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor, looks[1]);
+        Assert.Equal(0, _accepted);
+    }
+
+    /// <summary>
     /// The settle's reload proves a file is there, and that ends the
     /// stretch: a run of absence interrupted by the file coming back
     /// starts from nothing, not from where it left off. A stretch carried

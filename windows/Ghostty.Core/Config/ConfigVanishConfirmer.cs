@@ -57,8 +57,9 @@ public enum ConfigVanishAction
 /// whose delivery returns Loaded within about 300ms. So two counted
 /// observations 900ms apart need 900ms of continuous re-arming with no
 /// successful load, which produces ONE delivery rather than two. Where no
-/// watcher exists the observations are High Contrast toggles, so it needs a
-/// user toggling repeatedly while also saving their config repeatedly.
+/// watcher exists the observations are a reload the user caused (a High
+/// Contrast toggle) and the one look the host schedules a floor later, so it
+/// needs both to land inside two different saves' gaps, 900ms apart.
 /// Deleting the reset removes both of those, not merely some tidiness.</para>
 ///
 /// <para>WHAT SURVIVES, stated as the probability argument it is. A save
@@ -116,6 +117,21 @@ public sealed class ConfigVanishConfirmer
 
     /// <summary>Whether a stretch of absence is currently open.</summary>
     public bool Observing => _seen;
+
+    /// <summary>
+    /// How long until an observation would accept: the floor less what the
+    /// open stretch has already run, or the whole floor with none open.
+    /// A look scheduled this far out is the first one that can conclude.
+    /// </summary>
+    public TimeSpan UntilFloor
+    {
+        get
+        {
+            if (!_seen) return _floor;
+            var left = _floor - (_now() - _first);
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+    }
 
     /// <summary>A load reported no default config file.</summary>
     /// <param name="sessionDefaultFilesFound">How many the session believes

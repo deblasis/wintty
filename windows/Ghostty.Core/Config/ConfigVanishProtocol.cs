@@ -33,6 +33,7 @@ public sealed class ConfigVanishProtocol
     private readonly ConfigVanishConfirmer _confirmer;
     private readonly Func<int> _sessionDefaultFilesFound;
     private readonly Func<bool> _ask;
+    private readonly Func<TimeSpan, bool>? _lookAgainAfter;
     private readonly Action _onAccept;
 
     /// <param name="sessionDefaultFilesFound">How many default config
@@ -50,12 +51,21 @@ public sealed class ConfigVanishProtocol
     /// <param name="onAccept">A deletion was confirmed: the session stops
     /// claiming to run on files it can no longer vouch for. Runs only on
     /// the far side of the floor.</param>
+    /// <param name="lookAgainAfter">Schedules one reload after the given
+    /// delay and answers whether it did. Asked only when
+    /// <paramref name="ask"/> scheduled nothing, with the time left until
+    /// the floor, so the look it buys is the first one that can conclude.
+    /// Without it a host with no watcher concludes only when something else
+    /// happens to reload, and the reload that opened the stretch (a High
+    /// Contrast toggle, say) is declined and lost: the user has to do it
+    /// twice.</param>
     public ConfigVanishProtocol(
         Func<int> sessionDefaultFilesFound,
         Func<bool> ask,
         Action onAccept,
         TimeSpan? floor = null,
-        Func<DateTimeOffset>? now = null)
+        Func<DateTimeOffset>? now = null,
+        Func<TimeSpan, bool>? lookAgainAfter = null)
     {
         ArgumentNullException.ThrowIfNull(sessionDefaultFilesFound);
         ArgumentNullException.ThrowIfNull(ask);
@@ -64,8 +74,16 @@ public sealed class ConfigVanishProtocol
         _confirmer = new ConfigVanishConfirmer(floor, now);
         _sessionDefaultFilesFound = sessionDefaultFilesFound;
         _ask = ask;
+        _lookAgainAfter = lookAgainAfter;
         _onAccept = onAccept;
     }
+
+    /// <summary>
+    /// The watcher's sooner look first; failing that, one look at the floor.
+    /// Either is an accelerator: the confirmer never reads the answer.
+    /// </summary>
+    private bool AskOrLookAgain() =>
+        _ask() || _lookAgainAfter?.Invoke(_confirmer.UntilFloor) == true;
 
     /// <summary>
     /// A config load finished. Its verdict is the evidence: absence is an
@@ -94,7 +112,7 @@ public sealed class ConfigVanishProtocol
             return false;
         }
 
-        if (_confirmer.Observe(_sessionDefaultFilesFound(), _ask)
+        if (_confirmer.Observe(_sessionDefaultFilesFound(), AskOrLookAgain)
             != ConfigVanishAction.Accept)
         {
             return false;
