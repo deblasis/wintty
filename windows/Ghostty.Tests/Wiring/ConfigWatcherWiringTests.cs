@@ -811,6 +811,12 @@ public class ConfigWatcherWiringTests
 
         var layered = Assert.Single(assigns, a => a.Right.ToString() != "null");
         Assert.Equal("hcColors", layered.Right.ToString());
+
+        // Guarded by the override file having been written, not merely by a
+        // palette having been wanted: the nearest if around the report is
+        // the one on hcPath.
+        var guard = layered.Ancestors().OfType<IfStatementSyntax>().First();
+        Assert.Equal("hcPath is not null", guard.Condition.ToString());
         var load = Assert.Single(layered.Ancestors().OfType<BlockSyntax>().First()
             .Calls("NativeMethods.ConfigLoadFile"));
         Assert.Equal("hcPath", load.Arg(1));
