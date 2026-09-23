@@ -35,7 +35,7 @@ public class HighContrastOverrideLatchTests
 
         // A later reload, not caused by the monitor, builds with it.
         Assert.Equal(Black, latch.Wanted);
-        latch.MarkApplied(latch.Wanted);
+        latch.MarkApplied(latch.Wanted, latch.Wanted);
         Assert.Equal(Black, latch.Applied);
     }
 
@@ -67,32 +67,77 @@ public class HighContrastOverrideLatchTests
     {
         var latch = new HighContrastOverrideLatch();
         Assert.True(latch.Request(Black));
-        latch.MarkApplied(latch.Wanted);
+        latch.MarkApplied(latch.Wanted, latch.Wanted);
 
         Assert.True(latch.Request(null));   // declined
         latch.Request(Black);               // declined, or skipped
 
         Assert.Equal(Black, latch.Wanted);
-        latch.MarkApplied(latch.Wanted);
+        latch.MarkApplied(latch.Wanted, latch.Wanted);
         Assert.Equal(Black, latch.Applied);
     }
 
     /// <summary>
     /// A reload that applied without layering the palette (its override
-    /// file could not be written) records none, so the palette is still
-    /// wanted and a repeat of the request reloads rather than being answered
-    /// "already on this palette" over a screen that is not showing it.
+    /// file could not be written) records none as applied, so the splash is
+    /// not told a palette the screen does not show. The palette stays
+    /// wanted, so the next reload for any other reason builds with it and
+    /// writes the file again. A repeat of the SAME request does not reload
+    /// on its own: that repeat is the monitor answering the reload's own
+    /// ConfigChanged, and reloading on it never stops (see below). A
+    /// different palette does reload.
     /// </summary>
     [Fact]
-    public void A_reload_that_could_not_layer_the_palette_leaves_it_to_ask_again()
+    public void A_reload_that_could_not_layer_the_palette_retries_only_on_a_change()
     {
         var latch = new HighContrastOverrideLatch();
 
         Assert.True(latch.Request(Black));
-        latch.MarkApplied(null);
+        latch.MarkApplied(null, attempted: Black);
 
         Assert.Null(latch.Applied);
-        Assert.True(latch.Request(Black));
+        Assert.Equal(Black, latch.Wanted);
+        Assert.False(latch.Request(Black));
+        Assert.True(latch.Request(White));
+    }
+
+    /// <summary>
+    /// The loop, with the monitor in it. High Contrast is on and the
+    /// override file cannot be written (a full disk, a read-only
+    /// high-contrast.conf, an unwritable state directory). Every applied
+    /// reload skips the layer, raises ConfigChanged, and HighContrastMonitor
+    /// answers ConfigChanged by asking for the same palette again. Skipping
+    /// only on Applied let every one of those through, and the app reloaded
+    /// forever: a config build and a push to every surface per turn. The
+    /// request that started it reloads once, and the monitor's repeat is
+    /// skipped.
+    /// </summary>
+    [Fact]
+    public void A_palette_that_cannot_be_written_does_not_reload_forever()
+    {
+        var latch = new HighContrastOverrideLatch();
+        var dispatcher = new System.Collections.Generic.Queue<System.Action>();
+        var reloads = 0;
+
+        // ConfigService.SetHighContrastOverride, and the applied path of
+        // Reload with a write that always fails: the build takes one read of
+        // Wanted, lays nothing, and ConfigChanged posts the monitor's Apply.
+        void SetOverride(HighContrastColors? colors)
+        {
+            if (!latch.Request(colors)) return;
+            reloads++;
+            var wanted = latch.Wanted;
+            HighContrastColors? layered = null;
+            latch.MarkApplied(layered, attempted: wanted);
+            dispatcher.Enqueue(() => SetOverride(Black));
+        }
+
+        SetOverride(Black);
+        for (var turn = 0; turn < 100 && dispatcher.Count > 0; turn++)
+            dispatcher.Dequeue()();
+
+        Assert.Equal(1, reloads);
+        Assert.Empty(dispatcher);
     }
 
     /// <summary>
@@ -108,11 +153,11 @@ public class HighContrastOverrideLatchTests
         Assert.False(latch.Request(null));
 
         Assert.True(latch.Request(Black));
-        latch.MarkApplied(latch.Wanted);
+        latch.MarkApplied(latch.Wanted, latch.Wanted);
         Assert.False(latch.Request(Black));
 
         Assert.True(latch.Request(null));
-        latch.MarkApplied(latch.Wanted);
+        latch.MarkApplied(latch.Wanted, latch.Wanted);
         Assert.False(latch.Request(null));
         Assert.Null(latch.Applied);
     }
@@ -130,7 +175,7 @@ public class HighContrastOverrideLatchTests
         Assert.True(latch.Request(Black));
         var built = latch.Wanted;
         Assert.True(latch.Request(White));
-        latch.MarkApplied(built);
+        latch.MarkApplied(built, built);
 
         Assert.Equal(Black, latch.Applied);
         Assert.Equal(White, latch.Wanted);

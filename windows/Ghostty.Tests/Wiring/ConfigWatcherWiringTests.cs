@@ -769,6 +769,10 @@ public class ConfigWatcherWiringTests
             .Where(i => i.Identifier.ValueText == "_highContrast"));
 
         Assert.Equal("highContrastBuilt", mark.Arg(0));
+        // And what it TRIED to layer, the same one read the build was given,
+        // so a palette whose file cannot be written is not re-requested by
+        // the monitor on every ConfigChanged, forever.
+        Assert.Equal("attempted: highContrastWanted", mark.Arg(1));
         var push = Assert.Single(reload.Calls("NativeMethods.AppUpdateConfig"));
         Assert.Same(
             push.Ancestors().OfType<BlockSyntax>().First(),

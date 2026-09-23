@@ -925,7 +925,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // either fence above did not apply anything, so it must not change
         // what the next one compares against.
         RecordDefaultFiles(defaultFilesFound);
-        _highContrast.MarkApplied(highContrastBuilt);
+        _highContrast.MarkApplied(highContrastBuilt, attempted: highContrastWanted);
         try
         {
             CacheDiagnostics();

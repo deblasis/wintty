@@ -20,6 +20,18 @@ namespace Ghostty.Core.Accessibility;
 /// config holds, and a request is skipped only when both already match
 /// it.</para>
 ///
+/// <para>A third value keeps that from looping. <see cref="Attempted"/> is
+/// what the last APPLIED reload tried to layer, whether or not its override
+/// file could be written. When the write fails (a full disk, a read-only
+/// file, a state directory the user cannot write), the reload still applies
+/// without the layer, raises ConfigChanged, and HighContrastMonitor asks for
+/// the same palette again. Skipping only on Applied let that request through
+/// every time, and the app reloaded forever. A request for the palette the
+/// last applied reload already tried is skipped too: it is retried by the
+/// next reload that happens for any other reason, which builds with
+/// <see cref="Wanted"/> and so writes the file again, or by a real change of
+/// palette.</para>
+///
 /// <para>Not thread safe: the monitor marshals to the UI thread, and every
 /// reload runs there.</para>
 /// </remarks>
@@ -36,14 +48,27 @@ public sealed class HighContrastOverrideLatch
     /// </summary>
     public bool Request(HighContrastColors? colors)
     {
-        if (Wanted == colors && Applied == colors) return false;
+        if (Wanted == colors && (Applied == colors || Attempted == colors)) return false;
         Wanted = colors;
         return true;
     }
 
     /// <summary>
-    /// A reload applied a config built with <paramref name="built"/>, the
-    /// value of <see cref="Wanted"/> read when it was built.
+    /// What the last applied reload tried to layer: the value of
+    /// <see cref="Wanted"/> it was built with, layered or not.
     /// </summary>
-    public void MarkApplied(HighContrastColors? built) => Applied = built;
+    public HighContrastColors? Attempted { get; private set; }
+
+    /// <summary>
+    /// A reload applied a config that tried to layer
+    /// <paramref name="attempted"/> (the value of <see cref="Wanted"/> read
+    /// when it was built) and actually carries <paramref name="built"/>:
+    /// the same palette, or null when its override file could not be
+    /// written.
+    /// </summary>
+    public void MarkApplied(HighContrastColors? built, HighContrastColors? attempted)
+    {
+        Applied = built;
+        Attempted = attempted;
+    }
 }
