@@ -632,6 +632,36 @@ pub const Surface = struct {
         height: u32 = 0,
     };
 
+    // Options is declared three times: here, as ghostty_surface_config_s in
+    // include/ghostty.h, and for the Windows app as GhosttySurfaceConfig in
+    // windows/Ghostty.Core/Interop/GhosttySurfaceConfig.cs. Nothing links
+    // them, so a field added in a different place on one side compiles
+    // cleanly and reads the wrong bytes at run time. These are the header's
+    // offsets on 64-bit targets. GhosttyStructHeaderParityTests reads the
+    // numbers below back and holds them to the header, and holds the C#
+    // struct to the header too, so the three agree or a build or a test
+    // fails.
+    comptime {
+        if (@sizeOf(usize) == 8) {
+            if (@offsetOf(Options, "platform_tag") != 0) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "platform") != 8) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "userdata") != 40) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "scale_factor") != 48) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "font_size") != 56) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "working_directory") != 64) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "command") != 72) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "env_vars") != 80) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "env_var_count") != 88) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "initial_input") != 96) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "wait_after_command") != 104) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "context") != 108) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "custom_shader") != 112) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "width") != 120) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "height") != 124) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@sizeOf(Options) != 128) @compileError("Options layout drifted from ghostty_surface_config_s");
+        }
+    }
+
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
         self.* = .{
             .app = app,

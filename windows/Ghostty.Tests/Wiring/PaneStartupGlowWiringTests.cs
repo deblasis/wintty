@@ -33,20 +33,26 @@ public class PaneStartupGlowWiringTests
 
     /// <summary>
     /// SurfaceSpawned is the glow's start gun, and it is only correct at the
-    /// tail of OnLoaded: before that statement the surface either does not
-    /// exist or is not registered, and the handler would find no leaf to
-    /// mount the glow over. Raised a line earlier, the first pane opens
-    /// dark and nothing fails.
+    /// tail of surface creation: before that statement the surface either
+    /// does not exist or is not registered, and the handler would find no
+    /// leaf to mount the glow over. Raised a line earlier, the first pane
+    /// opens dark and nothing fails. Creation runs from the first layout pass
+    /// that gives the panel a size (TryCreateSurface), so the raise is the
+    /// last thing it does before reporting success, and Loaded raises nothing.
     /// </summary>
     [Fact]
-    public void SurfaceSpawned_IsRaised_AsTheLastStatementOfOnLoaded()
+    public void SurfaceSpawned_IsRaised_AsTheLastStepOfSurfaceCreation()
     {
-        var body = Terminal().Method("OnLoaded").Body!.Statements;
-        Assert.True(body.Count > 1, "OnLoaded should have more than one statement");
+        var body = Terminal().Method("TryCreateSurface").Body!.Statements;
+        Assert.True(body.Count > 2, "TryCreateSurface should have more than two statements");
 
         var raise = body.OfType<ExpressionStatementSyntax>()
             .Single(s => s.ToString().Contains("SurfaceSpawned"));
-        Assert.Equal(body.Last(), raise);
+        Assert.Equal(body[^2], raise);
+        Assert.Equal("return true;", body[^1].ToString());
+
+        Assert.DoesNotContain("SurfaceSpawned", Terminal().Method("OnLoaded").ToString());
+        Assert.Contains("TryCreateSurface()", Terminal().Method("OnFirstLayoutUpdated").ToString());
     }
 
     /// <summary>

@@ -589,6 +589,10 @@ typedef struct {
   // surface is created. When both are non-zero the pty starts at the grid
   // this size holds, so the shell's first view is the real size. Zero keeps
   // a placeholder size until the first ghostty_surface_set_size.
+  //
+  // Fields are only ever appended here, and an embedder must be rebuilt
+  // against this header: a library built with these fields reads them past
+  // the end of a struct from an older build.
   uint32_t width;
   uint32_t height;
 } ghostty_surface_config_s;
