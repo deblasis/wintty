@@ -1037,6 +1037,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         surfaceConfig.Command = _commandUtf8;
         surfaceConfig.InitialInput = _initialInputUtf8;
         surfaceConfig.CustomShader = _customShaderUtf8;
+        // Start the pty at the pane's measured size, the way Windows Terminal
+        // sizes its pseudoconsole before starting it. Without this libghostty
+        // starts from an 800x600 px placeholder and the shell spawns on that
+        // grid (about 80x28) until the first layout resizes it, which is late
+        // for anything the shell prints at startup. Loaded runs after layout,
+        // so the panel is normally measured here; if it is not, the
+        // placeholder and OnFirstLayoutUpdated still cover it.
+        if (MeasuredPanelPixels() is (uint initialWidth, uint initialHeight))
+        {
+            surfaceConfig.Width = initialWidth;
+            surfaceConfig.Height = initialHeight;
+        }
 
         // Pin a managed handle to `this` and pass it as per-surface userdata.
         // libghostty echoes this pointer back through close_surface_cb and the
@@ -1428,6 +1440,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             cfg.ResizeOverlayPosition,
             cfg.ResizeOverlayDurationMs,
             allowShow);
+    }
+
+    /// <summary>
+    /// The panel's size in device pixels, by the same formula
+    /// <see cref="PushSurfaceSize"/> uses, so the size a surface is created
+    /// at and the first size it is pushed agree to the pixel. Null while the
+    /// panel has not been measured.
+    /// </summary>
+    private (uint Width, uint Height)? MeasuredPanelPixels()
+    {
+        var w = Panel.ActualWidth;
+        var h = Panel.ActualHeight;
+        if (w <= 0 || h <= 0) return null;
+        var sx = Panel.CompositionScaleX > 0 ? Panel.CompositionScaleX : 1.0;
+        var sy = Panel.CompositionScaleY > 0 ? Panel.CompositionScaleY : 1.0;
+        return ((uint)Math.Max(1, w * sx), (uint)Math.Max(1, h * sy));
     }
 
     private void PushSurfaceSize()

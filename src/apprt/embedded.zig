@@ -621,6 +621,15 @@ pub const Surface = struct {
         /// preview UIs. The string is borrowed and must remain valid until
         /// the surface is freed (same rule as working_directory/command).
         custom_shader: ?[*:0]const u8 = null,
+
+        /// The surface's size in pixels, as the embedder measured it before
+        /// creating the surface. When both are non-zero the grid, and so the
+        /// pty the shell starts on, is derived from this size rather than a
+        /// placeholder, so the shell's first view is the pane's real size
+        /// (the way Windows Terminal sizes its pseudoconsole before starting
+        /// it). Zero keeps the placeholder until the first set_size.
+        width: u32 = 0,
+        height: u32 = 0,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -633,7 +642,10 @@ pub const Surface = struct {
                 .x = @floatCast(opts.scale_factor),
                 .y = @floatCast(opts.scale_factor),
             },
-            .size = .{ .width = 800, .height = 600 },
+            .size = if (opts.width > 0 and opts.height > 0)
+                .{ .width = opts.width, .height = opts.height }
+            else
+                .{ .width = 800, .height = 600 },
             .cursor_pos = .{ .x = -1, .y = -1 },
         };
 

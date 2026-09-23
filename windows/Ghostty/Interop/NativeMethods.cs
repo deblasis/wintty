@@ -84,6 +84,11 @@ internal struct GhosttySurfaceConfig
     // Per-surface custom shader override (const char*). Must stay allocated
     // until the surface is freed, like the other string fields above.
     public IntPtr CustomShader;
+    // Initial size in pixels (uint32_t width/height). Both non-zero: the pty
+    // starts at the grid this size holds. Zero: a placeholder until the
+    // first SurfaceSetSize.
+    public uint Width;
+    public uint Height;
 }
 
 [StructLayout(LayoutKind.Sequential)]

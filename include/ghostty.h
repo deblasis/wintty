@@ -584,6 +584,13 @@ typedef struct {
   // The string is borrowed: it must remain valid until the surface is freed
   // (same lifetime rule as working_directory / command / initial_input).
   const char* custom_shader;
+
+  // Optional initial size in pixels, measured by the embedder before the
+  // surface is created. When both are non-zero the pty starts at the grid
+  // this size holds, so the shell's first view is the real size. Zero keeps
+  // a placeholder size until the first ghostty_surface_set_size.
+  uint32_t width;
+  uint32_t height;
 } ghostty_surface_config_s;
 
 typedef struct {
