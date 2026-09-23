@@ -62,7 +62,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
 
     private string Tmp => Path.Combine(_dir, FileName + ".tmp");
 
-    private DateTimeOffset _now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private TimeSpan _now = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Move the test clock past the floor, which is what a real stretch of
@@ -419,6 +419,145 @@ public sealed class ConfigVanishProtocolTests : IDisposable
 
         Assert.Equal(2, looks.Count);
         Assert.Equal(ConfigVanishConfirmer.DefaultFloor, looks[1]);
+        Assert.Equal(0, _accepted);
+    }
+
+    /// <summary>
+    /// No look once there is nothing left to lose. After an accepted
+    /// deletion the session count is zero, and every later reload finds the
+    /// same absence; a look scheduled from there would find it too and
+    /// schedule another, a reload every floor for the life of the process.
+    /// The same holds from startup under --no-config, where the count is
+    /// pinned at zero.
+    /// </summary>
+    [Fact]
+    public void No_look_is_scheduled_once_the_session_has_no_config_file()
+    {
+        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var protocol = NoWatcher(looks);
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        _now += looks[0];
+        Assert.True(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(0, _count);
+
+        for (var i = 0; i < 3; i++)
+        {
+            _now += ConfigVanishConfirmer.DefaultFloor;
+            Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        }
+        Assert.Single(looks);
+
+        // And a session that never had one asks for nothing from the start.
+        var none = new System.Collections.Generic.List<TimeSpan>();
+        _count = 0;
+        var fresh = NoWatcher(none);
+        Assert.False(fresh.Observed(ConfigFilesFound.Absent));
+        Assert.Empty(none);
+    }
+
+    /// <summary>
+    /// A look that lands short of the floor, a timer tick early or an
+    /// observation mid stretch, asks for exactly what is left rather than a
+    /// whole floor again: the protocol hands the host the confirmer's
+    /// remaining time, not a constant.
+    /// </summary>
+    [Fact]
+    public void A_look_mid_stretch_asks_only_for_what_is_left()
+    {
+        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var protocol = NoWatcher(looks);
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        _now += TimeSpan.FromMilliseconds(300);
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(TimeSpan.FromMilliseconds(600), looks[1]);
+
+        // A look that fires a hair early concludes nothing and re-asks for
+        // the hair.
+        _now += looks[1] - TimeSpan.FromMilliseconds(1);
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(TimeSpan.FromMilliseconds(1), looks[2]);
+
+        _now += looks[2];
+        Assert.True(protocol.Observed(ConfigFilesFound.Absent));
+    }
+
+    /// <summary>
+    /// A clock stepped back inside a stretch cannot push the look past one
+    /// floor: the look the protocol asks for is at most a floor out, and it
+    /// concludes. On the wall clock, a 60 day step asked for a look 60 days
+    /// out, and a High Contrast toggle after deleting the config file waited
+    /// that long with no watcher.
+    /// </summary>
+    [Fact]
+    public void A_clock_stepped_back_asks_for_no_look_past_the_floor()
+    {
+        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var protocol = NoWatcher(looks);
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        _now += TimeSpan.FromMilliseconds(400);
+        _now -= TimeSpan.FromDays(60);
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+
+        Assert.Equal(2, looks.Count);
+        Assert.All(looks, look =>
+            Assert.InRange(look, TimeSpan.Zero, ConfigVanishConfirmer.DefaultFloor));
+
+        _now += looks[^1];
+        Assert.True(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(1, _accepted);
+    }
+
+    /// <summary>
+    /// With a watcher, a deletion concludes through deliveries a debounce
+    /// apart, and every one short of the floor has to ask for the next: one
+    /// that asked nothing would leave the watcher quiet and the question
+    /// waiting for an unrelated reload, the wintty#1155 symptom down the
+    /// watcher's path. The other watcher tests jump a whole floor in one
+    /// step, so they never see an intermediate delivery.
+    /// </summary>
+    [Fact]
+    public void With_a_watcher_every_delivery_short_of_the_floor_asks_for_the_next()
+    {
+        Start();
+        _timer.WaitForBurst(() => File.Delete(_path));
+        FireAndDeliver();
+
+        var step = TimeSpan.FromMilliseconds(300);
+        for (var i = 0; i < 2; i++)
+        {
+            _now += step;
+            FireAndDeliver();
+            Assert.Equal(0, _accepted);
+            Assert.True(_timer.Armed, "an intermediate delivery asked nothing");
+        }
+
+        _now += step;
+        FireAndDeliver();
+        Assert.Equal(1, _accepted);
+    }
+
+    /// <summary>
+    /// A file that is there but will not open ends the stretch like one that
+    /// reads. A lock, a sharing violation, an offline cloud placeholder or a
+    /// scanner's hold all come back Unreadable, not Absent. Keeping the
+    /// stretch open across one would let a later load in another save's gap
+    /// accept on that single observation, its first already a floor old,
+    /// and apply defaults mid save: #1146.
+    /// </summary>
+    [Fact]
+    public void An_unreadable_verdict_ends_the_stretch()
+    {
+        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var protocol = NoWatcher(looks);
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        _now += TimeSpan.FromMilliseconds(100);
+        Assert.False(protocol.Observed(ConfigFilesFound.Unreadable));
+        AdvancePastFloor();
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
         Assert.Equal(0, _accepted);
     }
 

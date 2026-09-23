@@ -26,8 +26,8 @@ public class ConfigVanishConfirmerTests
 
     private sealed class Clock
     {
-        private DateTimeOffset _now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-        public Func<DateTimeOffset> Now => () => _now;
+        private TimeSpan _now = TimeSpan.FromHours(1);
+        public Func<TimeSpan> Now => () => _now;
         public void Advance(TimeSpan by) => _now += by;
     }
 
@@ -201,6 +201,30 @@ public class ConfigVanishConfirmerTests
     }
 
     /// <summary>
+    /// And it asks for nothing. With no watcher an ask becomes a reload the
+    /// host schedules for itself, and that reload finds the same absence:
+    /// a session with nothing to lose, after an accepted deletion or under
+    /// --no-config, that asked here would reload every floor for the life
+    /// of the process.
+    /// </summary>
+    [Fact]
+    public void A_session_running_on_no_config_file_asks_for_nothing()
+    {
+        var clock = new Clock();
+        var confirmer = new ConfigVanishConfirmer(now: clock.Now);
+        var asks = 0;
+
+        for (var i = 0; i < 5; i++)
+        {
+            Assert.Equal(ConfigVanishAction.Ignore,
+                confirmer.Observe(0, () => { asks++; return true; }));
+            clock.Advance(ConfigVanishConfirmer.DefaultFloor);
+        }
+
+        Assert.Equal(0, asks);
+    }
+
+    /// <summary>
     /// The time left until the floor is what a host with no watcher waits
     /// before looking again, so it has to name the first moment an
     /// observation can accept: measured from the stretch's first
@@ -231,5 +255,57 @@ public class ConfigVanishConfirmerTests
 
         clock.Advance(step);
         Assert.Equal(TimeSpan.Zero, confirmer.UntilFloor);
+    }
+
+    /// <summary>
+    /// A clock that steps BACK inside a stretch can neither stretch the wait
+    /// nor accept early. The time left is never more than one floor, and the
+    /// stretch restarts from the stepped time, so the first observation a
+    /// floor after that concludes.
+    /// </summary>
+    /// <remarks>
+    /// On the wall clock this was a real defect: 60 days back made the time
+    /// left 60 days and 900ms, which a host with no watcher scheduled its
+    /// one look for, and past about 49.7 days the timer threw inside the
+    /// reload. The default clock is monotonic now, and cannot step; this
+    /// holds the confirmer to it for any clock it is handed.
+    /// </remarks>
+    [Fact]
+    public void A_clock_stepped_back_never_waits_past_one_floor_nor_accepts_early()
+    {
+        var clock = new Clock();
+        var confirmer = new ConfigVanishConfirmer(now: clock.Now);
+
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Dropped));
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+
+        clock.Advance(TimeSpan.FromDays(-60));
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor, confirmer.UntilFloor);
+
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Dropped));
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor, confirmer.UntilFloor);
+
+        clock.Advance(ConfigVanishConfirmer.DefaultFloor - TimeSpan.FromTicks(1));
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Dropped));
+        clock.Advance(TimeSpan.FromTicks(1));
+        Assert.Equal(ConfigVanishAction.Accept, confirmer.Observe(1, Dropped));
+    }
+
+    /// <summary>
+    /// The time left is never more than the floor, whatever the clock does
+    /// between two reads of it: it is a delay a host hands to a timer.
+    /// </summary>
+    [Fact]
+    public void Until_floor_is_never_more_than_the_floor()
+    {
+        var clock = new Clock();
+        var confirmer = new ConfigVanishConfirmer(now: clock.Now);
+
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Dropped));
+        foreach (var step in new[] { -1, -300, -86_400_000, 5, 200 })
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(step));
+            Assert.InRange(confirmer.UntilFloor, TimeSpan.Zero, ConfigVanishConfirmer.DefaultFloor);
+        }
     }
 }

@@ -18,10 +18,11 @@ namespace Ghostty.Core.Config;
 /// is the correction wintty#1155 and the symlink case forced. A delivery
 /// knows only whether the path existed at the instant it looked, and that
 /// is a proxy for the question rather than an answer to it: a dangling
-/// symlink exists and will not open, so restoring the budget on a settled
-/// delivery cleared what the same settle's reload then spent and the
-/// question oscillated without ever concluding. A load's verdict
-/// distinguishes present from readable, and it is the same evidence
+/// symlink exists while its open returns not-found, so the load reads it as
+/// absent: restoring the budget on a settled delivery cleared what the same
+/// settle's reload then spent, and the question oscillated without ever
+/// concluding. A load's verdict is what the loader actually saw, and it
+/// separates absent from present-but-unreadable, and it is the same evidence
 /// wherever the reload came from, so a host with no watcher at all still
 /// makes progress.</para>
 ///
@@ -64,7 +65,7 @@ public sealed class ConfigVanishProtocol
         Func<bool> ask,
         Action onAccept,
         TimeSpan? floor = null,
-        Func<DateTimeOffset>? now = null,
+        Func<TimeSpan>? now = null,
         Func<TimeSpan, bool>? lookAgainAfter = null)
     {
         ArgumentNullException.ThrowIfNull(sessionDefaultFilesFound);
@@ -101,8 +102,10 @@ public sealed class ConfigVanishProtocol
     /// has to hold instead, and why each part is there.
     ///
     /// Anything but absence restores the question, because both a read and
-    /// a failed-to-open prove a file is there. Restoring on a file merely
-    /// EXISTING is what a dangling symlink defeats.
+    /// an open refused for any reason but not-found (a lock, a sharing
+    /// violation, an offline cloud placeholder) prove a file is there.
+    /// Restoring on a file merely EXISTING is what a dangling symlink
+    /// defeats: File.Exists says yes, and the open returns not-found.
     /// </remarks>
     public bool Observed(ConfigFilesFound found)
     {

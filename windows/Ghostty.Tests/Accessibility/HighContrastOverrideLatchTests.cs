@@ -55,6 +55,47 @@ public class HighContrastOverrideLatchTests
     }
 
     /// <summary>
+    /// Off then on again while reloads decline ends ON. The request to go
+    /// back to the palette the running config carries is still recorded as
+    /// wanted, because the declined "off" moved what the next reload would
+    /// build. Skipping it on Applied alone left Wanted at off, and the next
+    /// reload that applied, the vanish question's own look, turned High
+    /// Contrast off while the OS had it on.
+    /// </summary>
+    [Fact]
+    public void Off_then_on_while_reloads_decline_ends_on()
+    {
+        var latch = new HighContrastOverrideLatch();
+        Assert.True(latch.Request(Black));
+        latch.MarkApplied(latch.Wanted);
+
+        Assert.True(latch.Request(null));   // declined
+        latch.Request(Black);               // declined, or skipped
+
+        Assert.Equal(Black, latch.Wanted);
+        latch.MarkApplied(latch.Wanted);
+        Assert.Equal(Black, latch.Applied);
+    }
+
+    /// <summary>
+    /// A reload that applied without layering the palette (its override
+    /// file could not be written) records none, so the palette is still
+    /// wanted and a repeat of the request reloads rather than being answered
+    /// "already on this palette" over a screen that is not showing it.
+    /// </summary>
+    [Fact]
+    public void A_reload_that_could_not_layer_the_palette_leaves_it_to_ask_again()
+    {
+        var latch = new HighContrastOverrideLatch();
+
+        Assert.True(latch.Request(Black));
+        latch.MarkApplied(null);
+
+        Assert.Null(latch.Applied);
+        Assert.True(latch.Request(Black));
+    }
+
+    /// <summary>
     /// A request the running config already carries costs nothing: the
     /// monitor calls on every palette event and on every ConfigChanged, and
     /// each applied reload raises one.

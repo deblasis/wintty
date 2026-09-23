@@ -205,7 +205,7 @@ public class ConfigWatcherWiringTests
         Assert.Contains(
             guard.Statement.DescendantNodes().OfType<ReturnStatementSyntax>(),
             r => r.Expression?.ToString() == "false");
-        Assert.NotEmpty(guard.Statement.Calls("_watcher?.Resettle"));
+        Assert.NotEmpty(guard.Statement.Calls("_lookAgain.Ask"));
     }
 
     /// <summary>
@@ -370,26 +370,25 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// The budget is spent on asks the watcher took, not on declines. It
-    /// drops an ask while this service suppresses its own writes, and there
-    /// is no watcher at all under --no-config, so counting a dropped one
-    /// stops the retrying with nothing having been tried.
+    /// The budget is spent on looks that were scheduled, not on declines.
+    /// An ask nobody took is not a look, so counting it stops the retrying
+    /// with nothing having been tried. What counts as taken, the watcher's
+    /// delivery or the service's own look, is <c>ConfigLookAgain.Ask</c>'s
+    /// answer, driven in <c>Config.ConfigLookAgainTests</c>.
     /// </summary>
     [Fact]
-    public void The_retry_budget_only_counts_an_ask_the_watcher_took()
+    public void The_retry_budget_only_counts_a_look_that_was_scheduled()
     {
         var reload = ConfigService().Method("Reload");
 
         var retry = Assert.Single(reload.DescendantNodes()
             .OfType<PostfixUnaryExpressionSyntax>()
             .Where(p => p.Operand.ToString() == "_declinedReloadRetries")
-            .Where(p => p.Ancestors().OfType<IfStatementSyntax>().First()
-                .Condition.Calls("_watcher?.Resettle").Count > 0));
+            .Where(p => p.Parent is ExpressionStatementSyntax { Parent: IfStatementSyntax }));
 
-        var condition = Assert.IsType<BinaryExpressionSyntax>(
+        var condition = Assert.IsType<InvocationExpressionSyntax>(
             retry.Ancestors().OfType<IfStatementSyntax>().First().Condition);
-        Assert.Equal(SyntaxKind.EqualsExpression, condition.Kind());
-        Assert.Equal("true", condition.Right.ToString());
+        Assert.Equal("_lookAgain.Ask", condition.Expression.ToString());
     }
 
     /// <summary>
@@ -616,39 +615,84 @@ public class ConfigWatcherWiringTests
             .Expression.Calls("_watcher?.Resettle"));
     }
 
+    /// <summary>The one <c>ConfigLookAgain</c> construction in the service.</summary>
+    private static ObjectCreationExpressionSyntax LookAgainCreation() =>
+        Assert.Single(Creations(ConfigService().Root)
+            .Where(o => o.Type.ToString() == "ConfigLookAgain"));
+
     /// <summary>
     /// When the watcher takes no ask, which with auto-reload-config off is
-    /// always, the protocol's look-again is what reloads at the floor. It is
-    /// the service's own one-shot timer, posted to the UI thread, and it
-    /// reloads.
+    /// always, the service's own look is what reloads. It is one timer,
+    /// posted to the UI thread, it reloads, and it is what the vanish
+    /// protocol schedules at the floor.
     /// </summary>
     /// <remarks>
     /// Liveness again, like the ask above: without it a deletion still
     /// concludes, on the next reload somebody else causes, and the reload
     /// that opened the question is declined and lost. That is the second
     /// High Contrast toggle a deleted config file used to cost
-    /// (wintty#1155). The protocol's half is driven in
-    /// <c>Config.ConfigVanishProtocolTests</c>; this pins the service's.
+    /// (wintty#1155). The behaviour is driven in
+    /// <c>Config.ConfigLookAgainTests</c> and
+    /// <c>Config.ConfigVanishProtocolTests</c>; this pins the service's use.
     /// </remarks>
     [Fact]
-    public void The_vanish_look_again_is_a_reload_on_the_UI_thread_at_the_asked_delay()
+    public void The_look_again_is_one_reload_on_the_UI_thread()
     {
         var source = ConfigService();
+        var create = LookAgainCreation();
+        var args = create.ArgumentList!.Arguments;
 
-        Assert.Equal("ScheduleVanishRecheck",
+        // The watcher's own ask first, read at ask time.
+        var watcherAsk = args.Single(a => a.NameColon?.Name.Identifier.ValueText == "watcherAsk");
+        Assert.NotEmpty(watcherAsk.Expression.Calls("_watcher?.Resettle"));
+
+        // Its timer is a real one, and it posts a reload to the UI thread.
+        Assert.Contains("SystemSchedulerTimer", CreatedTypes(create));
+        var onLook = args.Single(a => a.NameColon?.Name.Identifier.ValueText == "onLook");
+        var post = Assert.Single(onLook.Expression.Calls("_dispatcher.TryEnqueue"));
+        Assert.Equal("OnLookAgain", post.Arg(0));
+        Assert.Single(source.Method("OnLookAgain").Calls("Reload"));
+
+        // Clamped to the floor: no question a decline asks waits longer.
+        var max = args.Single(a => a.NameColon?.Name.Identifier.ValueText == "maxDelay");
+        Assert.Equal("ConfigVanishConfirmer.DefaultFloor", max.Expression.ToString());
+
+        // And the vanish protocol schedules through it.
+        Assert.Equal("_lookAgain.Schedule",
             ProtocolArgument("lookAgainAfter").Expression.ToString());
+    }
 
-        var schedule = Assert.Single(
-            source.Method("ScheduleVanishRecheck").Calls("_vanishRecheck.Schedule"));
-        Assert.Equal("delay", schedule.Arg(0));
+    /// <summary>
+    /// Both of a declined reload's ask budgets count the look-again's ask,
+    /// not the watcher's alone.
+    /// </summary>
+    /// <remarks>
+    /// The watcher's ask alone was the second lockout of wintty#1155: with no
+    /// watcher the shrink budget never moved, a shrink was never judged
+    /// persistent, and a user who deleted one of two layered config files had
+    /// every reload refused until restart. The retries had the same shape,
+    /// so a High Contrast request declined on a locked file waited for an
+    /// unrelated reload. <c>ConfigLookAgain.Ask</c> takes the watcher's ask
+    /// first and schedules its own look when that fails.
+    /// </remarks>
+    [Fact]
+    public void Both_ask_budgets_count_the_look_again_not_the_watcher_alone()
+    {
+        var (_, guard) = ReloadGuard();
 
-        var callback = Assert.Single(source.Root.DescendantNodes()
-            .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "_vanishRecheck.Callback"));
-        var post = Assert.Single(callback.Right.Calls("_dispatcher.TryEnqueue"));
-        Assert.Equal("OnVanishRecheck", post.Arg(0));
+        foreach (var budget in new[] { "_declinedReloadRetries", "_shrinkConfirms" })
+        {
+            var spend = Assert.Single(guard.Statement.DescendantNodes()
+                .OfType<PostfixUnaryExpressionSyntax>()
+                .Where(p => p.OperatorToken.Kind() == SyntaxKind.PlusPlusToken)
+                .Where(p => p.Operand.ToString() == budget)
+                .Where(p => p.Parent is ExpressionStatementSyntax { Parent: IfStatementSyntax }));
+            var ask = Assert.IsType<InvocationExpressionSyntax>(
+                spend.Ancestors().OfType<IfStatementSyntax>().First().Condition);
+            Assert.Equal("_lookAgain.Ask", ask.Expression.ToString());
+        }
 
-        Assert.Single(source.Method("OnVanishRecheck").Calls("Reload"));
+        Assert.Empty(guard.Statement.Calls("_watcher?.Resettle"));
     }
 
     /// <summary>
@@ -658,21 +702,30 @@ public class ConfigWatcherWiringTests
     /// not the plan.
     /// </summary>
     [Fact]
-    public void BeginShutdown_cancels_the_vanish_look_again()
+    public void BeginShutdown_stops_the_look_again()
     {
         Assert.NotEmpty(ConfigService().Method("BeginShutdown")
-            .Calls("_vanishRecheck.Cancel"));
+            .Calls("_lookAgain.Stop"));
+
+        // And Dispose frees its timer, which waits out a callback in flight.
+        Assert.NotEmpty(ConfigService().Method("Dispose")
+            .Calls("_lookAgain.Dispose"));
     }
 
     /// <summary>
     /// A High Contrast request whose reload declined is not put back. It
     /// stays wanted, so the reload the vanish question schedules carries it,
-    /// and the running config's palette moves only on an applied reload.
+    /// and the running config's palette moves only on an applied reload,
+    /// to the palette that build actually layered.
     /// </summary>
     /// <remarks>
     /// Putting it back was the other half of the second toggle: the look
     /// the question scheduled rebuilt without the palette the user had just
-    /// asked for. The rule itself is <c>HighContrastOverrideLatch</c>'s, and
+    /// asked for. Marking what was WANTED rather than what was layered was
+    /// the other lie the latch could tell: an override file that could not
+    /// be written skips the layer, and the latch then answered "already on
+    /// this palette" to every repeat. The rule itself is
+    /// <c>HighContrastOverrideLatch</c>'s, and
     /// <c>Accessibility.HighContrastOverrideLatchTests</c> drives it.
     /// </remarks>
     [Fact]
@@ -685,15 +738,36 @@ public class ConfigWatcherWiringTests
         Assert.Single(set.Calls("Reload"));
         Assert.Empty(set.DescendantNodes().OfType<AssignmentExpressionSyntax>());
 
-        // Applied is marked with what THIS reload built, on the applied
-        // path, after the config was pushed.
-        var reload = source.Method("Reload");
-        var built = Assert.Single(reload.DescendantNodes()
-            .OfType<VariableDeclaratorSyntax>()
-            .Where(v => v.Identifier.ValueText == "highContrastBuilt"));
-        Assert.Equal("_highContrast.Wanted", built.Initializer!.Value.ToString());
+        // Applied moves in exactly one place in the whole service: Reload's
+        // applied path. A mark anywhere else, one beside the request above
+        // say, records a palette no config carries, and every later request
+        // for it is skipped as "already on this palette": the lockout the
+        // latch exists to end.
+        var marks = source.Root.Calls("_highContrast.MarkApplied");
+        var mark = Assert.Single(marks);
+        Assert.Equal("Reload",
+            mark.Ancestors().OfType<MethodDeclarationSyntax>().First().Identifier.ValueText);
 
-        var mark = Assert.Single(reload.Calls("_highContrast.MarkApplied"));
+        // Applied is marked with what THIS reload's build layered, reported
+        // by the build itself, on the applied path, after the push. The build
+        // is handed the reload's one read of Wanted rather than reading the
+        // latch again itself.
+        var reload = source.Method("Reload");
+        var build = Assert.Single(reload.Calls("BuildLiveConfig"));
+        var args = build.ArgumentList.Arguments;
+        Assert.Equal("out highContrastBuilt", args.Last().ToString());
+        Assert.Equal("highContrastWanted", args[2].ToString());
+        var wanted = Assert.Single(reload.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Identifier.ValueText == "highContrastWanted"));
+        Assert.Equal("_highContrast.Wanted", wanted.Initializer!.Value.ToString());
+        Assert.True(wanted.Span.End < build.Span.Start,
+            "the palette is read after the config was built");
+
+        var buildBody = source.Method("BuildLiveConfig");
+        Assert.Empty(buildBody.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(i => i.Identifier.ValueText == "_highContrast"));
+
         Assert.Equal("highContrastBuilt", mark.Arg(0));
         var push = Assert.Single(reload.Calls("NativeMethods.AppUpdateConfig"));
         Assert.Same(
@@ -701,10 +775,48 @@ public class ConfigWatcherWiringTests
             mark.Ancestors().OfType<BlockSyntax>().First());
         Assert.True(push.Span.End < mark.Span.Start,
             "the palette is marked applied before the config carrying it was pushed");
-        Assert.True(built.Span.End < Assert.Single(reload.Calls("BuildLiveConfig")).Span.Start,
-            "the palette is read after the config was built");
     }
 
+    /// <summary>
+    /// The High Contrast background the splash is given is the one the
+    /// running config carries, not one merely asked for: a request declined
+    /// during an unreadable stretch would otherwise paint the splash in
+    /// COLOR_WINDOW over a terminal still showing the theme.
+    /// </summary>
+    [Fact]
+    public void HighContrastBackground_reads_what_was_applied()
+    {
+        var property = Assert.Single(ConfigService().Root.DescendantNodes()
+            .OfType<PropertyDeclarationSyntax>()
+            .Where(p => p.Identifier.ValueText == "HighContrastBackground"));
+        var pattern = Assert.Single(property.DescendantNodes().OfType<IsPatternExpressionSyntax>());
+
+        Assert.Equal("_highContrast.Applied", pattern.Expression.ToString());
+    }
+
+    /// <summary>
+    /// The build reports a palette as layered only when it loaded the
+    /// override file, never merely because one was wanted.
+    /// </summary>
+    [Fact]
+    public void The_build_reports_only_the_palette_it_layered()
+    {
+        var build = ConfigService().Method("BuildLiveConfig");
+
+        var assigns = build.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "highContrastLayered")
+            .ToArray();
+        Assert.Equal(2, assigns.Length);
+        Assert.Contains(assigns, a => a.Right.ToString() == "null");
+
+        var layered = Assert.Single(assigns, a => a.Right.ToString() != "null");
+        Assert.Equal("hcColors", layered.Right.ToString());
+        var load = Assert.Single(layered.Ancestors().OfType<BlockSyntax>().First()
+            .Calls("NativeMethods.ConfigLoadFile"));
+        Assert.Equal("hcPath", load.Arg(1));
+        Assert.True(load.Span.End < layered.Span.Start,
+            "the palette is reported layered before its file was loaded");
+    }
     /// <summary>
     /// The question is asked about THIS session's count, read at report time
     /// through the field its one writer owns.
@@ -794,11 +906,11 @@ public class ConfigWatcherWiringTests
     /// </summary>
     /// <remarks>
     /// A settle knows only that the path existed when it looked. A dangling
-    /// symlink satisfies that and fails to open, so ending the question here
-    /// cleared the stretch that the same settle's reload then reopened, and
-    /// it oscillated without ever concluding. The verdict distinguishes
-    /// present from readable and is the same evidence wherever the reload
-    /// came from, which is what lets a host with no watcher conclude at all
+    /// symlink satisfies that while its open returns not-found, so ending the
+    /// question here cleared the stretch that the same settle's reload then
+    /// reopened, and it oscillated without ever concluding. The verdict is
+    /// what the loader saw, absent or readable or neither, and it is the same
+    /// evidence wherever the reload came from, which is what lets a host with no watcher conclude at all
     /// (wintty#1155).
     /// </remarks>
     [Fact]
@@ -835,5 +947,33 @@ public class ConfigWatcherWiringTests
             "StaticLoggers.ConfigService.LogThemePreviewKeptRunningConfig"));
         Assert.Empty(guard.Statement.Calls(
             "StaticLoggers.ConfigService.LogReloadKeptRunningConfig"));
+    }
+
+    /// <summary>
+    /// The vanish floor is measured on a monotonic clock, never the wall
+    /// clock. A wall clock stepped forward between two observations
+    /// shortens the floor to nothing, which accepts a save gap as a deletion
+    /// (#1146); one stepped back stretches the look-again by the step. No
+    /// behavioural test can step the system clock, so the source is the
+    /// only place this is visible.
+    /// </summary>
+    [Fact]
+    public void The_vanish_floor_is_measured_on_a_monotonic_clock()
+    {
+        var confirmer = ShellSource.Load("Ghostty.Core.Config.ConfigVanishConfirmer.cs");
+
+        var wall = confirmer.Root.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(i => i.Identifier.ValueText is "DateTimeOffset" or "DateTime")
+            .Select(i => i.Parent!.ToString())
+            .ToArray();
+        Assert.Empty(wall);
+
+        var monotonic = confirmer.Method("MonotonicNow");
+        Assert.NotEmpty(monotonic.Calls("Stopwatch.GetElapsedTime"));
+
+        var ctor = Assert.Single(confirmer.Root.DescendantNodes()
+            .OfType<ConstructorDeclarationSyntax>());
+        Assert.Contains(ctor.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "_now" && a.Right.ToString() == "now ?? MonotonicNow");
     }
 }

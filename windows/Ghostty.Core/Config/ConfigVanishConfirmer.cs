@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 
 namespace Ghostty.Core.Config;
 
@@ -27,7 +28,7 @@ public enum ConfigVanishAction
 /// first two revisions of this class got wrong, in both directions: gating
 /// on scheduling a FUTURE look when the look had already happened, and
 /// resetting on <c>File.Exists</c>, which a dangling symlink satisfies while
-/// the open fails.</para>
+/// the open returns not-found, so the load reads it as absent.</para>
 ///
 /// <para>Two things have to hold, and they rule out different hazards. Each
 /// is pinned separately, and a mutation of either kills a different test.</para>
@@ -70,7 +71,17 @@ public enum ConfigVanishAction
 /// same gap; only a longer floor would. A network drive, a scanner or a sync
 /// client holding the file could in principle exceed 900ms. The defences are
 /// the 41x margin over the widest measured window and the reset, and neither
-/// is a proof.</para>
+/// is a proof. What it costs is the defaults config in force until the next
+/// reload: with a watcher that is the save's own settle, and with
+/// auto-reload-config off, the default, it is whatever reload comes next,
+/// which may be a while.</para>
+///
+/// <para>TIME is monotonic. The floor and the look-again are both measured on
+/// <see cref="Stopwatch"/>, never on the wall clock: a clock stepped forward
+/// between two observations would shorten the floor to nothing, which is
+/// #1146, and one stepped back would stretch the look-again by the size of
+/// the step. <see cref="UntilFloor"/> is also clamped to the floor, so no
+/// clock, injected or not, can hand the host a delay longer than it.</para>
 ///
 /// <para>Not thread safe, and not meant to be: every caller is the config
 /// watcher's delivery or a reload, both UI thread only.</para>
@@ -78,8 +89,8 @@ public enum ConfigVanishAction
 public sealed class ConfigVanishConfirmer
 {
     /// <summary>
-    /// Wall time that must separate the first observation from the one that
-    /// accepts. See the class remarks for the measurements behind it.
+    /// Elapsed time that must separate the first observation from the one
+    /// that accepts. See the class remarks for the measurements behind it.
     /// </summary>
     public static readonly TimeSpan DefaultFloor = TimeSpan.FromMilliseconds(900);
 
@@ -92,27 +103,28 @@ public sealed class ConfigVanishConfirmer
         TimeSpan.FromMilliseconds(22);
 
     private readonly TimeSpan _floor;
-    private readonly Func<DateTimeOffset> _now;
+    private readonly Func<TimeSpan> _now;
 
     private bool _seen;
-    private DateTimeOffset _first;
+    private TimeSpan _first;
 
-    /// <param name="floor">Wall time that must separate the first
+    /// <param name="floor">Elapsed time that must separate the first
     /// observation from the accepting one. Must be positive: a floor of zero
     /// accepts the first report, which is the defect this exists to prevent,
     /// so it is refused here rather than left for a reviewer to notice.
     /// Because it is measured from the first observation, a positive floor
     /// is also what makes a second observation necessary.</param>
-    /// <param name="now">Clock, for tests. Defaults to UTC now.</param>
+    /// <param name="now">A monotonic clock, as elapsed time from any fixed
+    /// origin, for tests. Defaults to <see cref="Stopwatch"/>.</param>
     public ConfigVanishConfirmer(
         TimeSpan? floor = null,
-        Func<DateTimeOffset>? now = null)
+        Func<TimeSpan>? now = null)
     {
         var resolved = floor ?? DefaultFloor;
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(resolved, TimeSpan.Zero);
 
         _floor = resolved;
-        _now = now ?? (() => DateTimeOffset.UtcNow);
+        _now = now ?? MonotonicNow;
     }
 
     /// <summary>Whether a stretch of absence is currently open.</summary>
@@ -128,7 +140,9 @@ public sealed class ConfigVanishConfirmer
         get
         {
             if (!_seen) return _floor;
-            var left = _floor - (_now() - _first);
+            var elapsed = _now() - _first;
+            if (elapsed < TimeSpan.Zero) return _floor;
+            var left = _floor - elapsed;
             return left > TimeSpan.Zero ? left : TimeSpan.Zero;
         }
     }
@@ -156,7 +170,12 @@ public sealed class ConfigVanishConfirmer
         if (sessionDefaultFilesFound <= 0) return ConfigVanishAction.Ignore;
 
         var now = _now();
-        if (!_seen)
+
+        // A clock that runs backwards cannot measure a floor. The default one
+        // cannot, but an injected one can, and restarting the stretch here is
+        // the direction that never accepts early and never waits past one
+        // more floor.
+        if (!_seen || now < _first)
         {
             _seen = true;
             _first = now;
@@ -178,13 +197,15 @@ public sealed class ConfigVanishConfirmer
     /// </summary>
     /// <remarks>
     /// Driven by the load's verdict, not by the file appearing to exist. A
-    /// dangling symlink satisfies <c>File.Exists</c> and fails to open, so
-    /// resetting on existence cleared the stretch that the same settle's
-    /// reload then started, and it oscillated without ever reaching a
-    /// conclusion.
+    /// dangling symlink satisfies <c>File.Exists</c> while its open returns
+    /// not-found, so resetting on existence cleared the stretch that the same
+    /// settle's reload then continued, and it oscillated without ever reaching
+    /// a conclusion.
     ///
     /// This is also the whole defence against correlated sampling; see the
     /// class remarks before removing it.
     /// </remarks>
     public void Reset() => _seen = false;
+
+    private static TimeSpan MonotonicNow() => Stopwatch.GetElapsedTime(0);
 }
