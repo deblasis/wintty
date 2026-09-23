@@ -241,6 +241,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal IntPtr SurfaceHandle => _surface.Handle;
 
     /// <summary>
+    /// The grid the surface had when SurfaceNew returned, which is the size
+    /// its pty is created at. Read by the test seam; (0, 0) before creation.
+    /// </summary>
+    internal (ushort Cols, ushort Rows) SpawnGrid { get; private set; }
+
+    /// <summary>
     /// Schedule an immediate repaint of this surface. Used by the
     /// <c>config_change</c> action handler so a live config/theme reload
     /// presents a fresh frame: libghostty re-resolves default-colored cells,
@@ -1051,6 +1057,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 $"{AppIdentity.LogTag} SurfaceNew failed: {ex.Message}\n{ex.StackTrace}");
             throw;
         }
+        var spawn = NativeMethods.SurfaceSize(_surface);
+        SpawnGrid = (spawn.Columns, spawn.Rows);
+
         // Drop our ref: libghostty does not retain the panel pointer.
         SwapChainPanelInterop.Release(panelPtr);
         Host.Register(_surface, this);

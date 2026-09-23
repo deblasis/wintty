@@ -1000,6 +1000,48 @@ internal static class TestSeam
                 });
             }
 
+            case "open-profile":
+            {
+                // A new tab on a named profile, through the window's own
+                // funnel: the same call the profile slot chords make.
+                var id = ArgString(args, "id");
+                if (string.IsNullOrEmpty(id)) return Error(op, "id is required");
+                window.OpenProfile(id, Ghostty.Core.Profiles.ProfileLaunchTarget.NewTab);
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return OkWithState(window, manager, op);
+            }
+
+            case "surface-size":
+            {
+                // The grid libghostty holds for a tab's active pane (the
+                // size its pty was last told) and the grid it was created
+                // at (the size its pty started with). Read-only.
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                var handle = terminal.SurfaceHandle;
+                if (handle == IntPtr.Zero)
+                    return Error(op, $"tab {index} has no live surface");
+                var sz = Interop.NativeMethods.SurfaceSize(
+                    new Interop.GhosttySurface(handle));
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("cols", sz.Columns);
+                    json.WriteNumber("rows", sz.Rows);
+                    json.WriteNumber("widthPx", sz.WidthPx);
+                    json.WriteNumber("heightPx", sz.HeightPx);
+                    json.WriteNumber("cellWidthPx", sz.CellWidthPx);
+                    json.WriteNumber("cellHeightPx", sz.CellHeightPx);
+                    json.WriteNumber("spawnCols", terminal.SpawnGrid.Cols);
+                    json.WriteNumber("spawnRows", terminal.SpawnGrid.Rows);
+                    json.WriteEndObject();
+                });
+            }
+
             case "surface-dormant":
             {
                 // Tier C dormancy driver: "go" asks the surface's
