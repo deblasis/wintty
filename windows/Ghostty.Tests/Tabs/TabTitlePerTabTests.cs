@@ -110,4 +110,78 @@ public class TabTitlePerTabTests
 
         Assert.Equal("cargo build", moving.ShellReportedTitle);
     }
+
+    /// <summary>
+    /// Torn off twice, A to B to C: the adopter's forwarder has to come off
+    /// too, or B's handler stays on the host and keeps B's manager (and its
+    /// window) reachable after B is gone.
+    /// </summary>
+    [Fact]
+    public void ATabMovedTwice_LeavesOneForwarder_AndNoneOnceClosed()
+    {
+        var a = TwoTabs(out var first, out _);
+        var moving = a.Tabs[0];
+        var b = new TabManager(_ => new FakePaneHost());
+        var c = new TabManager(_ => new FakePaneHost());
+
+        a.DetachTab(moving);
+        b.AdoptTab(moving);
+        b.DetachTab(moving);
+        Assert.Equal(0, first.TitleChangedSubscribers);
+        c.AdoptTab(moving);
+        Assert.Equal(1, first.TitleChangedSubscribers);
+
+        first.RaiseTitleChanged("third window");
+        Assert.Equal("third window", moving.ShellReportedTitle);
+
+        c.CloseTab(moving);
+        Assert.Equal(0, first.TitleChangedSubscribers);
+    }
+
+    /// <summary>
+    /// A background tab now hears its shell, which a rename has to survive:
+    /// the user's name stays on top while the shell's titles keep updating
+    /// underneath, and clearing the name brings back the live title.
+    /// </summary>
+    [Fact]
+    public void ARenamedBackgroundTab_StaysRenamed_WhileItsShellSetsTitles()
+    {
+        var mgr = TwoTabs(out var first, out _);
+        var renamed = mgr.Tabs[0];
+        renamed.UserOverrideTitle = "prod";
+        mgr.Activate(mgr.Tabs[1]);
+
+        first.RaiseTitleChanged("vim a.txt");
+        first.RaiseTitleChanged("bash");
+
+        Assert.Equal("prod", renamed.EffectiveTitle);
+        Assert.Equal("prod", renamed.WordTitle);
+        Assert.Equal("bash", renamed.ShellReportedTitle);
+
+        renamed.UserOverrideTitle = null;
+        Assert.Equal("bash", renamed.EffectiveTitle);
+    }
+
+    /// <summary>
+    /// The founder's ruling, as Windows Terminal does it: when focus moves to
+    /// a pane that has not reported a title, the host sends null and the tab
+    /// shows its fallback, not the previous pane's title.
+    /// </summary>
+    [Fact]
+    public void AFocusedUntitledPane_ShowsTheFallback_NotThePreviousTitle()
+    {
+        var mgr = TwoTabs(out var first, out _);
+        var tab = mgr.Tabs[0];
+        var fallback = tab.EffectiveTitle;
+        first.RaiseTitleChanged("ssh prod");
+        Assert.Equal("ssh prod", tab.EffectiveTitle);
+
+        // What PaneHost sends when focus lands on a fresh split.
+        first.RaiseCwdChanged(null);
+        first.RaiseTitleChanged(null);
+
+        Assert.Null(tab.ShellReportedTitle);
+        Assert.Equal(fallback, tab.EffectiveTitle);
+        Assert.NotEqual("ssh prod", fallback);
+    }
 }

@@ -46,7 +46,8 @@ public class TabTitleSurfacesTests
         "Tabs.VerticalTabNavRow.cs",        // vertical body row
         "Tabs.TabSwitcherPopup.xaml.cs",    // Ctrl+Tab tiles
         "Tabs.TabOverviewControl.xaml.cs",  // overview grid
-        "Shell.TitleBarCoordinator.cs",     // window title (taskbar, Alt+Tab)
+        "Shell.TitleBarCoordinator.cs",     // vertical-mode title bar text
+        "Tabs.WindowTitleFollower.cs",      // window title (taskbar, Alt+Tab)
         "Shell.TabMorphGhost.cs",           // the layout-switch ghost
         "Commands.JumpCommandSource.cs",    // command palette entries
     ];

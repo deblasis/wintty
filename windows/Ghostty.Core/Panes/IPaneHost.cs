@@ -55,7 +55,7 @@ internal interface IPaneHost
     /// every tab's host whether or not that tab is selected, so a
     /// background tab keeps following its shell. Null means the newly
     /// active leaf has not reported a title yet; the tab then falls back
-    /// to naming that pane by its directory, launch process or profile,
+    /// to its folder, then its profile name, then its launch process,
     /// rather than keep the title of a pane that is no longer focused.</summary>
     event EventHandler<string?>? TitleChanged;
 

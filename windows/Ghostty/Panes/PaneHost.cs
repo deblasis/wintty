@@ -240,18 +240,19 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public event EventHandler<string?>? TitleChanged;
 
-    // Every leaf's terminal is subscribed for its whole life (CreateTerminal
-    // to TeardownLeaf), so a focus change needs no resubscription: only a
-    // re-emit of the newly active leaf's title. A title from any other leaf,
-    // including one soft-closed and retained for undo, is dropped by the
-    // guard, so it cannot name the tab.
-    private void EmitActiveLeafTitle() => TitleChanged?.Invoke(this, _activeLeaf.Terminal().CurrentTitle);
+    // The rules (track every terminal for its life, forward only the active
+    // one, re-emit on focus, null included) live in Core, where the tests
+    // drive them with fakes. This host only feeds it: Track/Untrack beside
+    // the directory wiring, ActiveChanged on LeafFocused, Stop on teardown.
+    // Assigned in both constructors, before the first CreateTerminal.
+    private readonly Core.Panes.PaneTitleForwarder<TerminalControl> _titleForwarder;
 
-    private void OnTerminalTitleChanged(object? sender, string title)
-    {
-        if (!Ghostty.Core.Tabs.LiveTitleGuard.Accepts(sender, _activeLeaf.Terminal())) return;
-        EmitActiveLeafTitle();
-    }
+    private Core.Panes.PaneTitleForwarder<TerminalControl> NewTitleForwarder() => new(
+        activeTerminal: () => _activeLeaf.Terminal(),
+        currentTitle: t => t.CurrentTitle,
+        subscribe: (t, h) => t.TitleChanged += h,
+        unsubscribe: (t, h) => t.TitleChanged -= h,
+        emit: title => TitleChanged?.Invoke(this, title));
 
     /// <summary>Raised when the active leaf's terminal rings the bell,
     /// carrying the decoded bell-features. Rewired across leaf-focus
@@ -503,6 +504,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     {
         _host = host;
         _terminalFactory = terminalFactory;
+        _titleForwarder = NewTitleForwarder();
         var policy = undoPolicy ?? Core.Panes.UndoPolicy.Default;
         _undoEnabled = policy.Enabled;
         _history = new Core.Panes.PaneHistory(_time, policy.Window);
@@ -553,6 +555,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         _host = host;
         _terminalFactory = terminalFactory;
+        _titleForwarder = NewTitleForwarder();
         var policy = undoPolicy ?? Core.Panes.UndoPolicy.Default;
         _undoEnabled = policy.Enabled;
         _history = new Core.Panes.PaneHistory(_time, policy.Window);
@@ -740,7 +743,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             BindActiveLeafProgress();
             BindActiveLeafBell();
             EmitActiveLeafCwd();
-            EmitActiveLeafTitle();
+            _titleForwarder.ActiveChanged();
         };
     }
 
@@ -1039,6 +1042,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         ProgressChanged = null;
         BellRang = null;
         BellAcknowledged = null;
+        _titleForwarder.Stop();
         TitleChanged = null;
         LastLeafClosed = null;
     }
@@ -1202,7 +1206,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested -= OnTerminalCloseRequested;
         t.ContextMenuRequested -= OnTerminalContextMenuRequested;
         t.PwdChanged -= OnTerminalPwdChanged;
-        t.TitleChanged -= OnTerminalTitleChanged;
+        _titleForwarder.Untrack(t);
         // Tear down the per-surface startup glow so its controller, renderer
         // and mount do not outlive the disposed terminal. Runs before
         // DisposeSurface so a glow timer that fires mid-teardown finds its
@@ -1819,7 +1823,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested += OnTerminalCloseRequested;
         t.ContextMenuRequested += OnTerminalContextMenuRequested;
         t.PwdChanged += OnTerminalPwdChanged;
-        t.TitleChanged += OnTerminalTitleChanged;
+        _titleForwarder.Track(t);
         // Startup glow: begin the orbit when this leaf's surface spawns.
         // first_render only arms a short grace, not the end -- on a
         // daemon-attached pane it is the attach resize repainting blank

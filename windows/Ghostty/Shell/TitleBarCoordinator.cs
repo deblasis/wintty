@@ -84,14 +84,12 @@ internal sealed class TitleBarCoordinator
 
         // Tab/title plumbing.
         _tabs.ActiveTabChanged += (_, _) => RebindVerticalTitle();
-        // WordTitle, not EffectiveTitle: the window title is words only, so
-        // the home glyph the strips draw reads "Home" here. TabManager
-        // raises this on a tab switch and whenever the active tab's label
-        // moves, so a background tab's title changes never reach it.
-        _tabs.WindowTitleChanged += (_, _) => _window.Title = _tabs.ActiveTab.WordTitle;
-
         RebindVerticalTitle();
-        _window.Title = _tabs.ActiveTab.WordTitle;
+
+        // The window caption: set now, then on every WindowTitleChanged.
+        // Both writes go through WindowTitleFollower.Sync, the one place the
+        // caption is computed. Nothing else in this class writes Window.Title.
+        new WindowTitleFollower(_tabs, title => _window.Title = title);
     }
 
     /// <summary>
@@ -205,5 +203,5 @@ internal sealed class TitleBarCoordinator
     // in it. With no tab at all this strip is naming the window, and the
     // product name is still the right answer to that.
     private void UpdateVerticalTitleText()
-        => _verticalTitleText.Text = _boundTab?.WordTitle ?? AppIdentity.ProductName;
+        => _verticalTitleText.Text = _boundTab is { } tab ? tab.WordTitle : AppIdentity.ProductName;
 }
