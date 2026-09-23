@@ -1168,6 +1168,160 @@ internal static class TestSeam
                 // the chrome resolved and what the file says.
                 return PaletteThemeJson(window, op);
 
+            case "menu":
+            {
+                // A context menu opened with nothing clicked, so the menu a
+                // harness reads is the one the product builds, by the same
+                // handler. Its items are then invoked over UIA. "dismiss" is
+                // the click outside: every open flyout closes.
+                switch (ArgString(args, "target"))
+                {
+                    case "pane":
+                    {
+                        // The right-click's own two halves, press then
+                        // release at the pane's centre: the mouse-capture
+                        // gate and the armed flag both stand in the way, as
+                        // they do for a real click.
+                        var clicked = manager.ActiveTab.PaneHost.ActiveLeaf.Terminal().TestSeamRightClick();
+                        if (clicked is null) return Error(op, "the active pane has no size yet");
+                        if (clicked == false)
+                            return Error(op, "the right-click did not open a menu: the program has captured the mouse");
+                        break;
+                    }
+                    case "tab":
+                    {
+                        var index = ArgInt(args, "index", -1);
+                        var tab = TabAt(manager, index);
+                        if (tab is null) return Error(op, $"no tab at index {index}");
+                        var host = window.TestSeamTabHost;
+                        if (host is null)
+                            return Error(op, "the horizontal strip is not the active host");
+                        if (!host.TestSeamOpenTabMenu(tab))
+                            return Error(op, $"tab {index} has no menu to open");
+                        break;
+                    }
+                    case "dismiss":
+                        foreach (var popup in OpenFlyoutPopups(window)) popup.IsOpen = false;
+                        break;
+                    default:
+                        return Error(op, "target must be pane, tab or dismiss");
+                }
+                // ShowAt populates on Opening and lays out on a later turn,
+                // so the ack waits that turn out before reading the items.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return MenuJson(window, manager, op);
+            }
+
+            case "overview-key":
+            {
+                // A key pressed in the tab overview, through its own handler:
+                // Escape dismisses it, Enter opens the selected tile. The
+                // overview holds focus while it is up, so this is the key a
+                // user presses there, with nothing actually pressed.
+                if (!window.TestSeamOverviewOpen) return Error(op, "the tab overview is not open");
+                Windows.System.VirtualKey? key = ArgString(args, "key") switch
+                {
+                    "escape" => Windows.System.VirtualKey.Escape,
+                    "enter" => Windows.System.VirtualKey.Enter,
+                    _ => null,
+                };
+                if (key is not { } pressed) return Error(op, "key must be escape or enter");
+                // Read before the press: the handler only hears a real key
+                // while focus is inside the overview, so a driver gates on
+                // this to catch FocusGrid or the KeyDown wiring breaking.
+                var focused = window.TestSeamOverviewUI.TestSeamHoldsFocus;
+                var handled = window.TestSeamOverviewUI.TestSeamKey(pressed);
+                // Closing re-homes focus into the active leaf on the dispatcher.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("focusInside", focused);
+                    json.WriteBoolean("handled", handled);
+                    json.WriteBoolean("open", window.TestSeamOverviewOpen);
+                    WriteState(json, window, manager);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "scroll":
+            {
+                // The wheel, one call below the framework: the discrete
+                // notches OnPointerWheelChanged hands libghostty, with no
+                // pointer over anything and nothing focused.
+                var notches = ArgInt(args, "notches", 0);
+                if (notches is 0 or < -50 or > 50)
+                    return Error(op, "notches must be -50..50 and not 0");
+                var index = ArgInt(args, "index", manager.IndexOf(manager.ActiveTab));
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                var before = terminal.TestSeamViewport;
+                if (!terminal.TestSeamScroll(notches))
+                    return Error(op, $"tab {index} has no live surface");
+                // libghostty reports the new viewport from its own thread, so
+                // the ack waits (briefly) for the offset to move. It may not:
+                // at the top or bottom there is nowhere to go, which the
+                // driver judges from the numbers.
+                var after = before;
+                var deadline = Environment.TickCount64 + 1_500;
+                while (Environment.TickCount64 < deadline)
+                {
+                    await Task.Delay(30);
+                    after = terminal.TestSeamViewport;
+                    if (after.Offset != before.Offset) break;
+                }
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteStartObject("viewport");
+                    json.WriteNumber("total", after.Total);
+                    json.WriteNumber("len", after.Len);
+                    json.WriteNumber("offsetBefore", before.Offset);
+                    json.WriteNumber("offsetAfter", after.Offset);
+                    json.WriteEndObject();
+                    WriteState(json, window, manager);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "search-key":
+            {
+                // A key pressed in the active pane's search needle box,
+                // through the box's own handler: Enter is next, Enter with
+                // shift is previous, Escape closes the bar. Shift is passed
+                // because no key is actually held.
+                var bar = manager.ActiveTab.PaneHost.ActiveLeaf.Terminal().TestSeamSearchBar;
+                if (bar.Visibility != Microsoft.UI.Xaml.Visibility.Visible)
+                    return Error(op, "the search bar is not open");
+                Windows.System.VirtualKey? key = ArgString(args, "key") switch
+                {
+                    "enter" => Windows.System.VirtualKey.Enter,
+                    "escape" => Windows.System.VirtualKey.Escape,
+                    _ => null,
+                };
+                if (key is not { } pressed) return Error(op, "key must be enter or escape");
+                // Read before the press: a real key reaches this handler only
+                // while the needle box has focus.
+                var focused = bar.TestSeamNeedleFocused;
+                var handled = bar.TestSeamNeedleKey(pressed, ArgBool(args, "shift", false));
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("needleFocused", focused);
+                    json.WriteBoolean("handled", handled);
+                    WriteState(json, window, manager);
+                    json.WriteEndObject();
+                });
+            }
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
@@ -1604,6 +1758,88 @@ internal static class TestSeam
         json.WriteEndObject();
     }
 
+    /// <summary>
+    /// The open flyouts: a popup whose presenter is a menu's or a flyout's.
+    /// The palette, the switcher and the overview are popups too, and are
+    /// left alone, so "dismiss" cannot close an overlay a click outside a
+    /// menu would not.
+    /// </summary>
+    private static List<Microsoft.UI.Xaml.Controls.Primitives.Popup> OpenFlyoutPopups(MainWindow window)
+    {
+        var result = new List<Microsoft.UI.Xaml.Controls.Primitives.Popup>();
+        if (window.TestSeamRoot?.XamlRoot is not { } root) return result;
+        foreach (var popup in Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(root))
+        {
+            if (FlyoutPresenterOf(popup.Child) is not null) result.Add(popup);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// The presenter at the top of a popup's tree: the popup's child or a
+    /// hop or two under it, depending on the chrome WinUI wraps it in.
+    /// </summary>
+    private static Microsoft.UI.Xaml.Controls.Control? FlyoutPresenterOf(
+        Microsoft.UI.Xaml.DependencyObject? node)
+    {
+        for (var depth = 0; node is not null && depth < 3; depth++)
+        {
+            if (node is Microsoft.UI.Xaml.Controls.MenuFlyoutPresenter
+                or Microsoft.UI.Xaml.Controls.FlyoutPresenter)
+            {
+                return (Microsoft.UI.Xaml.Controls.Control)node;
+            }
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(node) > 0
+                ? Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, 0)
+                : null;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Every open flyout and what it lists: a menu's items in order, with
+    /// their enabled state, or a bare flyout (the colour picker) with none.
+    /// </summary>
+    private static string MenuJson(MainWindow window, TabManager manager, string op)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            json.WriteStartArray("menus");
+            foreach (var popup in OpenFlyoutPopups(window))
+            {
+                var presenter = FlyoutPresenterOf(popup.Child);
+                json.WriteStartObject();
+                json.WriteString("kind",
+                    presenter is Microsoft.UI.Xaml.Controls.MenuFlyoutPresenter ? "menu" : "flyout");
+                json.WriteStartArray("items");
+                if (presenter is Microsoft.UI.Xaml.Controls.MenuFlyoutPresenter menu)
+                {
+                    foreach (var item in menu.Items)
+                    {
+                        var (text, enabled) = item switch
+                        {
+                            Microsoft.UI.Xaml.Controls.MenuFlyoutItem mi => (mi.Text, mi.IsEnabled),
+                            Microsoft.UI.Xaml.Controls.MenuFlyoutSubItem sub => (sub.Text, sub.IsEnabled),
+                            _ => ((string?)null, false),
+                        };
+                        // Separators carry no text and no action.
+                        if (text is null) continue;
+                        json.WriteStartObject();
+                        json.WriteString("text", text);
+                        json.WriteBoolean("enabled", enabled);
+                        json.WriteEndObject();
+                    }
+                }
+                json.WriteEndArray();
+                json.WriteEndObject();
+            }
+            json.WriteEndArray();
+            WriteState(json, window, manager);
+            json.WriteEndObject();
+        });
+
     private static string OkWithState(MainWindow window, TabManager manager, string op)
         => Json(json =>
         {
@@ -1774,6 +2010,11 @@ internal static class TestSeam
         // window remembering one and focusing neither.
         json.WriteNumber("focusedLeaf", host.TestSeamFocusedLeafIndex(focused));
         json.WriteString("focusedElement", focused?.GetType().Name ?? "");
+        // Its accessible name, which is what tells the search bar's needle
+        // box from the IME sink: both are TextBoxes inside the pane.
+        json.WriteString("focusedName", focused is null
+            ? ""
+            : Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(focused));
         json.WriteNumber("scale", window.TestSeamRasterizationScale);
         json.WriteNumber("borderArgb", host.TestSeamActiveBorderArgb);
         WriteRect(json, "border", host.TestSeamActiveBorderRect);

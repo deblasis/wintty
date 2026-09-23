@@ -5,20 +5,41 @@
     The oracle is the terminal itself: TerminalControl's UIA text provider
     exposes the whole screen including scrollback as one document, so the
     harness can read the real corpus and count matches independently of
-    libghostty. Every needle it types is checked against that count rather
+    libghostty. Every needle it sets is checked against that count rather
     than against a hardcoded expectation, which is what lets the needles be
     randomly drawn from live terminal content.
 
     Search is ASCII case-insensitive (src/terminal/search/sliding_window.zig
     uses std.ascii.indexOfIgnoreCase), so the oracle folds case the same way.
 
+    Seam-actuated: the harness synthesizes no OS input and never takes the
+    foreground, so it can run beside someone using the machine. Each input
+    goes through the path that does not need a keyboard:
+
+      open the bar      focus{frame} + Ctrl+Shift+F through the frame router
+      type a needle     UIA ValuePattern on the needle box (TextChanged, the
+                        debounce, StartSearch: the same chain a keystroke runs)
+      next / previous   search-key, Enter and Shift+Enter through the needle
+                        box's own key handler; the seam also reports whether
+                        the box held focus, and losing it is a finding
+      close             search-key Escape, or UIA Invoke on "Close search"
+      seed the shell    send-text (armed with -AllowInput: the corpus has to
+                        be typed into a live shell)
+      wheel             scroll, the wheel handler's discrete notch; the
+                        viewport libghostty reports must move unless it was
+                        already at that end
+      focus             read from the seam's pane readout, not from the
+                        system-wide UIA focus, which follows the foreground
+
+    One check the keyboard version made is gone, because only real key
+    presses reach it: that typed keys do not leak through the bar to the
+    shell.
+
     The corpus the oracle reads is typed into a live shell, so every seeding
-    send is read back off the input row before Enter commits it. A dropped
-    character there is silent and moves the answer for every later count
-    rather than failing one check, so a line that cannot be read back ends
-    the run as a harness failure - the corpus was never established, and a
-    harness that could not build its own premise has nothing to say about
-    the product.
+    send is read back off the input row before Enter commits it. A line that
+    cannot be read back ends the run as a harness failure - the corpus was
+    never established, and a harness that could not build its own premise has
+    nothing to say about the product.
 
     Failures are recorded and the run continues: one broken invariant should
     not hide the rest.
@@ -30,9 +51,8 @@
       0  clean
       2  product findings - see run-<seed>.json and shots/ under -OutDir
       1  the harness could not run; the product was never exercised, so do
-         not file a bug. Retrying helps when the cause was transient (window
-         never appeared, foreground stolen); it will not help when the run
-         was refused because a Wintty is already open - close it first
+         not file a bug. It will not help to retry when the run was refused
+         because a Wintty is already open - close it first
 
     A seed replays the op sequence, but not the corpus-slice needles drawn
     from live terminal text: those depend on the shell prompt and the window
@@ -49,275 +69,32 @@ param(
     [int]$Seed = 1337,
     [int]$Iterations = 40,
     [switch]$KeepOpen
-    # Isolation is unconditional: a per-run random temp XDG root plus
-    # WINTTY_TEST_CONFIG=1, so the fuzz cannot read or write the real
-    # per-user config and a lost root is a loud startup refusal rather
-    # than a silent taint. There is deliberately no real-config escape: a
-    # harness must not be able to point the app at the real config. If the
+    # Isolation is unconditional: Start-SeamSession stages a per-run random
+    # temp XDG root and arms WINTTY_TEST_CONFIG=1, so the fuzz cannot read or
+    # write the real per-user config and a lost root is a loud startup refusal
+    # rather than a silent taint. There is deliberately no real-config escape:
+    # a harness must not be able to point the app at the real config. If the
     # historical 0xc000027b under an isolated root ever returns, that is a
-    # product bug (possibly the x:Load-overlay family, tracked on the
-    # release side): capture it with cdb on the window-owner PID (break on av and
+    # product bug (possibly the x:Load-overlay family, tracked on the release
+    # side): capture it with cdb on the window-owner PID (break on av and
     # 40080201 first-chance) and fix it, never route around it.
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
-. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-
-public static class SFz {
-    public const uint KEYEVENTF_KEYUP    = 0x0002;
-    public const uint KEYEVENTF_UNICODE  = 0x0004;
-    public const uint MOUSEEVENTF_WHEEL  = 0x0800;
-    public const ushort VK_CONTROL = 0x11;
-    public const ushort VK_SHIFT   = 0x10;
-    public const ushort VK_RETURN  = 0x0D;
-    public const ushort VK_ESCAPE  = 0x1B;
-    public const ushort VK_BACK    = 0x08;
-    public const ushort VK_F       = 0x46;
-    public const ushort VK_A       = 0x41;
-    public const ushort VK_C       = 0x43;
-    public const ushort VK_T       = 0x54;
-    public const ushort VK_TAB     = 0x09;
-
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
-        public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
-        public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct HARDWAREINPUT {
-        public uint uMsg; public ushort wParamL; public ushort wParamH;
-    }
-    [StructLayout(LayoutKind.Explicit)] public struct InputUnion {
-        [FieldOffset(0)] public MOUSEINPUT mi;
-        [FieldOffset(0)] public KEYBDINPUT ki;
-        [FieldOffset(0)] public HARDWAREINPUT hi;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public InputUnion U; }
-
-    [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint n, INPUT[] inputs, int cb);
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll", SetLastError=true)] static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hh, bool repaint);
-    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
-    [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr h);
-    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-    public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-    public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd); RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L=r.L,T=r.T,R=r.R,B=r.B };
-        return (wr.W < 80 || wr.Hh < 80) ? null : wr;
-    }
-
-    // Synthesized input goes to whatever owns the foreground, never to a
-    // handle. Under the foreground lock a bare SetForegroundWindow fails
-    // silently, so every send confirms the target actually holds it first --
-    // otherwise the keystrokes land in whatever app grabbed focus.
-    //
-    // Attaching to the current foreground thread's input queue lifts that
-    // lock for the duration of the call, which is what makes the steal
-    // reliable when another app (an editor, a chat client repainting) keeps
-    // pulling focus back mid-run.
-    public static bool Focus(IntPtr expected) {
-        if (expected == IntPtr.Zero) return false;
-        for (int i = 0; i < 40; i++) {
-            if (GetForegroundWindow() == expected) return true;
-            var fg = GetForegroundWindow();
-            uint fgThread = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId2(fg);
-            uint me = GetCurrentThreadId();
-            bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
-            try {
-                SetForegroundWindow(expected);
-                BringWindowToTop(expected);
-                SetFocus(expected);
-            } finally {
-                if (attached) AttachThreadInput(me, fgThread, false);
-            }
-            Thread.Sleep(60);
-        }
-        return GetForegroundWindow() == expected;
-    }
-
-    static uint GetWindowThreadProcessId2(IntPtr h) { uint pid; return GetWindowThreadProcessId(h, out pid); }
-
-    static void Send(INPUT[] inputs) {
-        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
-    }
-
-    static INPUT Key(ushort vk, bool up) {
-        var i = new INPUT { type = 1 };
-        i.U.ki = new KEYBDINPUT { wVk = vk, wScan = 0, dwFlags = up ? KEYEVENTF_KEYUP : 0, time = 0, dwExtraInfo = IntPtr.Zero };
-        return i;
-    }
-
-    static INPUT Unicode(char c, bool up) {
-        var i = new INPUT { type = 1 };
-        i.U.ki = new KEYBDINPUT { wVk = 0, wScan = c, dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0), time = 0, dwExtraInfo = IntPtr.Zero };
-        return i;
-    }
-
-    // Posted WM_CHAR / WM_KEYDOWN do not reach this app at all: measured
-    // zero characters landing across every delay, while the same text sent
-    // through SendInput lands in full. Everything here therefore goes
-    // through the global input queue behind the foreground guard above.
-
-    /// Type a literal string. KEYEVENTF_UNICODE bypasses the keyboard layout,
-    /// so a needle can carry any BMP character without a VK mapping.
-    public static bool TypeText(IntPtr expected, string text, int perCharMs) {
-        foreach (char c in text) {
-            if (!Focus(expected)) return false;
-            Send(new INPUT[] { Unicode(c, false), Unicode(c, true) });
-            Thread.Sleep(perCharMs);
-        }
-        return true;
-    }
-
-    /// Unmodified key press, still as real input.
-    public static bool KeyPress(IntPtr expected, ushort vk, int gapMs) {
-        if (!Focus(expected)) return false;
-        Send(new INPUT[] { Key(vk, false) });
-        Thread.Sleep(gapMs);
-        Send(new INPUT[] { Key(vk, true) });
-        return true;
-    }
-
-    public static bool Chord(IntPtr expected, ushort[] mods, ushort key) {
-        if (!Focus(expected)) return false;
-        var seq = new System.Collections.Generic.List<INPUT>();
-        foreach (var m in mods) seq.Add(Key(m, false));
-        seq.Add(Key(key, false));
-        seq.Add(Key(key, true));
-        for (int i = mods.Length - 1; i >= 0; i--) seq.Add(Key(mods[i], true));
-        Send(seq.ToArray());
-        return true;
-    }
-
-    /// A posted WM_CHAR only lands if XAML has a focused element, and the
-    /// island does not take focus from the window merely being foreground.
-    /// One real click on the app's own pixels is what arms it. The point is
-    /// probed before and after the move so a toast or flyout that arrives
-    /// mid-settle cannot take the click.
-    public static bool Click(uint pid, int x, int y) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        if (ClassOf(hit) == "WinttySplash" || PidOf(hit) != pid) return false;
-        if (!SetCursorPos(x, y)) return false;
-        Thread.Sleep(60);
-        hit = WindowFromPoint(new POINT { X=x, Y=y });
-        if (PidOf(hit) != pid) return false;
-        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-        Thread.Sleep(200);
-        return true;
-    }
-
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
-
-    public static bool Wheel(uint pid, int x, int y, int notches) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        if (PidOf(hit) != pid) return false;
-        if (!SetCursorPos(x, y)) return false;
-        Thread.Sleep(30);
-        mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)(notches * 120)), UIntPtr.Zero);
-        Thread.Sleep(80);
-        return true;
-    }
-
-    public static bool Resize(long hwnd, int w, int h) {
-        var rc = RectOf(hwnd);
-        if (rc == null) return false;
-        return MoveWindow(P(hwnd), rc.L, rc.T, w, h, true);
-    }
-}
-'@
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 # ---- window / UIA plumbing -------------------------------------------------
 
 $UIA = [System.Windows.Automation.AutomationElement]
 $TS  = [System.Windows.Automation.TreeScope]
 
-function Get-Main([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [SFz+EnumProc]{
-        param($h, $lp)
-        [uint32]$o = 0; [void][SFz]::GetWindowThreadProcessId($h, [ref]$o)
-        if ($o -ne $ProcId -or -not [SFz]::IsWindowVisible($h)) { return $true }
-        if ([SFz]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [SFz]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64 = $hwnd64; Area = ($rc.W * $rc.Hh) })
-        return $true
-    }
-    [void][SFz]::EnumWindows($cb, [IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending | Select-Object -First 1
-}
-
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(60)
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 300
-        $proc.Refresh()
-        if ($proc.HasExited) {
-            $grew = $false
-            try {
-                $cp = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-                if (Test-Path $cp) { $grew = (Get-Item $cp).Length -gt $script:CrashBaseline }
-            } catch { }
-            # Only a corroborated crash is the product's fault. Without a log
-            # entry this is far more likely an instance that started between
-            # the gate and the launch and absorbed it.
-            Add-Finding $(if ($grew) { 'crash' } else { 'harness' }) `
-                "app exited during startup, code $($proc.ExitCode)$(if (-not $grew) { ' (crash.log did not grow; another instance may have absorbed the launch)' })" @{}
-            throw 'app exited during startup'
-        }
-        $m = Get-Main ([uint32]$proc.Id)
-        if ($m) { Start-Sleep -Seconds 2; return $m }
-    }
-    throw 'no main window appeared'
-}
-
-# The captured hwnd can go stale: the launch splash hands off to another
-# window, and a killed instance leaves a handle that UIA rejects outright
-# ("Unrecognized error"). Re-resolve once from the process before giving up,
-# so a window swap does not abort a whole run.
-function Get-Root {
-    try { return $UIA::FromHandle([SFz]::P($script:Hwnd64)) } catch { }
-    $m = Get-Main ([uint32]$script:Proc.Id)
-    if ($null -eq $m) { throw 'the app has no main window' }
-    $script:Hwnd64 = [int64]$m.Hwnd64
-    return $UIA::FromHandle([SFz]::P($script:Hwnd64))
-}
+function Get-Root { return $UIA::FromHandle([SeamWin]::P($script:Hwnd64)) }
 
 function Find-ByType($root, $controlType) {
     if ($null -eq $root) { return @() }
@@ -329,6 +106,12 @@ function Find-ByType($root, $controlType) {
 function Find-ByName($root, [string]$name) {
     if ($null -eq $root) { return $null }
     $cond = New-Object System.Windows.Automation.PropertyCondition($UIA::NameProperty, $name)
+    return $root.FindFirst($TS::Descendants, $cond)
+}
+
+function Find-ById($root, [string]$id) {
+    if ($null -eq $root) { return $null }
+    $cond = New-Object System.Windows.Automation.PropertyCondition($UIA::AutomationIdProperty, $id)
     return $root.FindFirst($TS::Descendants, $cond)
 }
 
@@ -392,18 +175,6 @@ function Get-Counter($root) {
 
 function Get-NeedleBox($root) { return Find-ByName $root 'Search scrollback' }
 
-# Put focus back in the needle box if something moved it. Without this a
-# single stray navigation key turns every later "typed X, box holds Y"
-# assertion into a false finding.
-function Set-NeedleFocus {
-    if ((Get-FocusedName) -eq 'Search scrollback') { return $true }
-    $box = Get-NeedleBox (Get-Root)
-    if ($null -eq $box) { return $false }
-    try { $box.SetFocus() } catch { return $false }
-    Start-Sleep -Milliseconds 200
-    return (Get-FocusedName) -eq 'Search scrollback'
-}
-
 function Get-NeedleText($root) {
     $box = Get-NeedleBox $root
     if ($null -eq $box) { return $null }
@@ -415,8 +186,14 @@ function Get-NeedleText($root) {
 
 function Test-SearchBarOpen($root) { return $null -ne (Get-NeedleBox $root) }
 
+# What holds keyboard focus inside the app, by accessible name. The seam
+# reads it through the window's FocusManager, so the answer is the app's own
+# and does not depend on which window is in the foreground.
 function Get-FocusedName {
-    try { return $UIA::FocusedElement.Current.Name } catch { return '<none>' }
+    try {
+        $r = Invoke-SeamCommand $script:Session @{ op = 'get-state' }
+        return [string]$r.state.panes.focusedName
+    } catch { return '<none>' }
 }
 
 # ---- oracle ---------------------------------------------------------------
@@ -425,10 +202,6 @@ function Get-FocusedName {
 # self-test, which exercises them with no window. See lib/seed-readback.ps1.
 . (Join-Path $PSScriptRoot 'lib/seed-readback.ps1')
 
-
-# Measure-Occurrences and Test-SeedLanded live in lib/seed-readback.ps1, so
-# the read-back rules can be tested without a window. See the dot-source above.
-
 # Both haystacks unwrap soft wraps: the UIA document comes from
 # Screen.selectionString with unwrap = true, and the search window builds its
 # haystack with PageFormatter unwrap = true. So a match cannot straddle a
@@ -436,11 +209,6 @@ function Get-FocusedName {
 # The only remaining difference is trailing whitespace (the document keeps
 # it, the search haystack trims it), which is why needles containing
 # whitespace never reach a strict assertion.
-#
-# An earlier version widened this to a range using a newlines-stripped
-# ceiling. That admitted matches spanning a hard line break, which cannot
-# exist in the product's haystack: a two-character needle like "0Z" then
-# passed against any reported count up to ~18 in the seeded corpus.
 function Get-ExpectedCount([string]$doc, [string]$needle) {
     return Measure-Occurrences $doc $needle
 }
@@ -464,7 +232,7 @@ function Assert-That([bool]$ok, [string]$kind, [string]$detail, [hashtable]$data
 }
 
 function Shot([string]$name) {
-    $rc = [SFz]::RectOf($script:Hwnd64)
+    $rc = [SeamWin]::RectOf($script:Hwnd64)
     if ($null -eq $rc) { return }
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -476,9 +244,11 @@ function Shot([string]$name) {
 # Counting pixels close to the search highlight colors is the only way to
 # tell "libghostty found matches" apart from "the renderer painted them".
 # Defaults come from Config.zig: search-background #FFE082, and
-# search-selected-background #F2A57E.
+# search-selected-background #F2A57E. The window is placed topmost without
+# activation at launch, so the screen capture sees the app and not whatever
+# the person at the machine is working in.
 function Measure-HighlightPixels([int]$r, [int]$g, [int]$b, [int]$tol = 24) {
-    $rc = [SFz]::RectOf($script:Hwnd64)
+    $rc = [SeamWin]::RectOf($script:Hwnd64)
     if ($null -eq $rc) { return -1 }
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $gfx = [System.Drawing.Graphics]::FromImage($bmp)
@@ -512,158 +282,101 @@ function Assert-Alive([string]$where) {
 
 # ---- input wrappers -------------------------------------------------------
 
-# Name whoever stole the foreground: without it "FOREGROUND_LOST" says
-# nothing about whether the app died, a toast appeared, or the harness is
-# fighting its own console.
-function Get-ForegroundInfo {
-    $h = [SFz]::GetForegroundWindow()
-    if ($h -eq [IntPtr]::Zero) { return 'foreground=<none>' }
-    $cls = [SFz]::ClassOf($h)
-    $fpid = [SFz]::PidOf($h)
-    $name = try { (Get-Process -Id $fpid -ErrorAction Stop).ProcessName } catch { '?' }
-    $mine = if ($h.ToInt64() -eq $script:Hwnd64) { ' (target)' } else { '' }
-    return "foreground=$cls pid=$fpid proc=$name$mine"
+# Bytes to the shell, the way committed IME text arrives: no focus needed.
+function Send-Shell([string]$text) {
+    [void](Invoke-SeamCommand $script:Session @{ op = 'send-text'; text = $text })
 }
 
-function Send-Chord([ushort[]]$mods, [ushort]$key, [int]$settleMs = 250) {
-    $ok = if ($mods.Count -eq 0) {
-        [SFz]::KeyPress([SFz]::P($script:Hwnd64), $key, 40)
-    } else {
-        [SFz]::Chord([SFz]::P($script:Hwnd64), $mods, $key)
-    }
-    if (-not $ok) { throw "FOREGROUND_LOST on key: $(Get-ForegroundInfo)" }
-    Start-Sleep -Milliseconds $settleMs
-}
-
-function Send-Text([string]$text, [int]$perCharMs = 30) {
-    if (-not [SFz]::TypeText([SFz]::P($script:Hwnd64), $text, $perCharMs)) {
-        throw "FOREGROUND_LOST while typing '$text': $(Get-ForegroundInfo)"
-    }
-}
-
-# Escape drops the PSReadLine buffer; Ctrl+C aborts a continuation prompt.
-# Both are harmless on an already-empty line.
+# Ctrl+C aborts both a half-typed line and a continuation prompt, and is
+# harmless on an already-empty one.
 function Clear-CommandLine {
-    Send-Chord @() ([SFz]::VK_ESCAPE) 200
-    Send-Chord @([SFz]::VK_CONTROL) ([SFz]::VK_C) 300
-    Send-Chord @() ([SFz]::VK_RETURN) 500
+    Send-Shell ([string][char]3)
+    Start-Sleep -Milliseconds 300
+    Send-Shell "`r"
+    Start-Sleep -Milliseconds 500
 }
 
-function Open-SearchBar { Send-Chord @([SFz]::VK_CONTROL, [SFz]::VK_SHIFT) ([SFz]::VK_F) 500 }
-function Press-Enter     { Send-Chord @() ([SFz]::VK_RETURN) 260 }
-function Press-ShiftEnter{ Send-Chord @([SFz]::VK_SHIFT) ([SFz]::VK_RETURN) 260 }
-function Press-Escape    { Send-Chord @() ([SFz]::VK_ESCAPE) 300 }
-function Clear-Needle {
-    # Select-all then Backspace: shorter and less racy than N backspaces.
-    Send-Chord @([SFz]::VK_CONTROL) ([SFz]::VK_A) 120
-    Send-Chord @() ([SFz]::VK_BACK) 250
+function Open-SearchBar {
+    [void](Invoke-SeamCommand $script:Session @{ op = 'focus'; target = 'frame' })
+    $r = Invoke-SeamCommand $script:Session @{ op = 'chord'; key = 0x46; ctrl = $true; shift = $true }
+    if (-not $r.dispatched) {
+        throw "the search chord was not dispatched (focus was '$($r.focus)')"
+    }
+    Start-Sleep -Milliseconds 500
+}
+
+
+# A key in the needle box, through the box's own key handler (search-key).
+# The seam also says whether the box held focus, which is where a real key
+# would have landed; a box that lost it is the product's finding, filed here
+# so the key's effect is still judged.
+function Press-NeedleKey([string]$key, [bool]$shift, [string]$what) {
+    $r = Invoke-SeamCommand $script:Session @{ op = 'search-key'; key = $key; shift = $shift }
+    [void](Assert-That ([bool]$r.needleFocused) 'needle-focus-lost' `
+        "$what pressed while the needle box did not hold focus" @{ key = $key; shift = $shift })
+    [void](Assert-That ([bool]$r.handled) 'needle-key-ignored' `
+        "the needle box's handler did not take $what" @{ key = $key; shift = $shift })
+}
+
+function Press-Next {
+    Press-NeedleKey 'enter' $false 'Enter'
+    Start-Sleep -Milliseconds 260
+}
+function Press-Prev {
+    Press-NeedleKey 'enter' $true 'Shift+Enter'
+    Start-Sleep -Milliseconds 260
+}
+function Press-Escape {
+    Press-NeedleKey 'escape' $false 'Escape'
+    Start-Sleep -Milliseconds 300
+}
+function Close-SearchBar {
+    $btn = Find-ByName (Get-Root) 'Close search'
+    if ($null -eq $btn) { throw 'the search bar has no Close search button' }
+    $btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 350
+}
+
+# Set the needle box's text, the way typing lands it: TextChanged fires and
+# the debounce starts the search.
+function Set-Needle([string]$text) {
+    $box = Get-NeedleBox (Get-Root)
+    if ($null -eq $box) { throw 'the needle box is not in the tree' }
+    $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($text)
 }
 
 # ---- seeding --------------------------------------------------------------
 #
-# A seed line is typed into a live shell, and a character it loses on the way
+# A seed line is handed to a live shell, and a character it loses on the way
 # is invisible: nothing throws, the shell just runs something else. The corpus
 # is what every oracle count is measured against, so a lost character does not
 # fail one check, it moves the answer for the rest of the run - a false pass
 # and a false finding are equally reachable from there.
-#
-# The needle path already refuses to trust a send (see 'needle-box-drift': it
-# reads the box back and compares). These three helpers are the same
-# discipline where there is no box to read, only the terminal document.
 
-# How many times a seed line is retyped before the run gives up on it.
+# How many times a seed line is resent before the run gives up on it.
 $script:SeedAttempts = 3
 
-# The first character after the search bar closes gets eaten. Escape tears the
-# bar down and XAML hands focus back to the terminal asynchronously, so a
-# keystroke that arrives mid-handoff lands nowhere: a run that typed
-# "$a='ZQ'+'XW'; ..." straight after Escape reached the shell as
-# "a='ZQ'+'XW'; ...", one dropped '$', and the pipeline behind it then ran
-# against a variable nobody set.
-#
-# The needle box is the only element that can be named positively here, so the
-# gate is "the bar is gone and focus has left it" rather than "the terminal has
-# focus" - TerminalControl's UIA name is not stable enough to wait on.
-# Returns 'ok', 'bar-open' or 'timeout'. Which of the two failures it is
-# decides who owns it: a search bar that never closed is a product defect this
-# harness asserts on by name elsewhere, and reporting that as a harness problem
-# would suppress the very regression the run exists to find.
-#
-# The gate is negative - "the bar is gone and focus has left it" - because the
-# needle box is the only element that can be named positively here;
-# TerminalControl's UIA name is not stable enough to wait on. That makes it a
-# weak signal, not a strong one: FocusedElement is system-wide, so another app
-# satisfies it, and Get-FocusedName answers '<none>' on a UIA fault. The
-# read-back below is what actually decides whether a send worked.
-function Wait-ShellFocus([int]$timeoutMs = 3000) {
-    $dl = (Get-Date).AddMilliseconds($timeoutMs)
-    while ((Get-Date) -lt $dl) {
-        if (-not (Test-SearchBarOpen (Get-Root))) {
-            if ((Get-FocusedName) -ne 'Search scrollback') {
-                # UIA reports the handoff slightly before the island will take
-                # a keystroke, so the settle is on top of the wait.
-                Start-Sleep -Milliseconds 250
-                return 'ok'
-            }
-        }
-        Start-Sleep -Milliseconds 120
-    }
-    if (Test-SearchBarOpen (Get-Root)) { return 'bar-open' }
-    return 'timeout'
-}
-
-# Re-arm the XAML island the way startup does. A retry that only retypes
-# repeats whatever swallowed the first attempt: the island does not take focus
-# from the window merely being foreground (see SFz.Click), and Clear-CommandLine
-# goes through the same input path that just failed.
-function Restore-IslandFocus {
-    $rc = [SFz]::RectOf($script:Hwnd64)
-    if ($null -eq $rc) { return $false }
-    $ok = [SFz]::Click($script:Pid32, [int]($rc.L + $rc.W / 2), [int]($rc.T + $rc.Hh * 0.7))
-    Start-Sleep -Milliseconds 300
-    return $ok
-}
-
-# Type a line that becomes corpus and prove it landed, before Enter commits it.
+# Send a line that becomes corpus and prove it landed, before Enter commits it.
 # Reading back afterwards is too late: by then the shell has echoed, executed
 # and scrolled, and a mangled line has become output that cannot be told apart
 # from the output that was wanted.
 #
-# The leading space is a sacrificial first character, not decoration. PowerShell
-# ignores leading whitespace, so if the handoff above still eats one keystroke
-# the payload is untouched; the read-back is what decides the outcome either
-# way, and it never looks at the space.
-#
-# Returns $false when the line could not be established. That is a harness
-# problem, not a product one: the corpus the run needs was never built, so the
-# run has nothing to say about the search. Callers throw, which the outer catch
-# records as a 'harness' finding and the verdict below turns into exit 1.
 # Returns 'ok', 'bar-open' or 'unverified'. 'bar-open' is handed back rather
 # than retried: the caller files it as the product defect it is.
 function Send-SeedText([string]$text, [string]$dumpPath) {
     # A dump from a previous run reads as evidence about this one, and OutDir
     # is reused. Clear it so its presence means this attempt wrote it.
     if ($dumpPath -and (Test-Path $dumpPath)) { Remove-Item $dumpPath -Force }
+    if (Test-SearchBarOpen (Get-Root)) { return 'bar-open' }
 
     for ($try = 1; $try -le $script:SeedAttempts; $try++) {
-        $focus = Wait-ShellFocus
-        if ($focus -eq 'bar-open') { return 'bar-open' }
-        if ($focus -ne 'ok') {
-            Write-Host "  seed: focus never settled after the bar closed (attempt $try of $script:SeedAttempts)" -ForegroundColor Yellow
-            [void](Restore-IslandFocus)
-            continue
-        }
-        # Sampled after the focus wait, not before it: the wait can spend
-        # three seconds, and anything the shell printed in them belongs to
-        # the baseline rather than to this send.
         $before = Get-TerminalText (Get-Term)
-        Send-Text (' ' + $text) 30
+        Send-Shell (' ' + $text)
 
         # Polled rather than slept. The peer serves its document from a 500ms
         # cache (TerminalAutomationPeer.ScreenTextCacheMs), so any fixed settle
         # shorter than that can read a snapshot taken before the last
-        # characters were typed and call a good send a miss - which costs a
-        # retype every time, and three in a row abort a healthy run.
+        # characters landed and call a good send a miss.
         $verdict = 'unreadable'
         $doc = ''
         $deadline = (Get-Date).AddMilliseconds(2500)
@@ -676,13 +389,10 @@ function Send-SeedText([string]$text, [string]$dumpPath) {
         if ($dumpPath) { $doc | Set-Content $dumpPath -Encoding utf8 }
         if ($verdict -eq 'landed') { return 'ok' }
 
-        Write-Host "  seed: the input row does not hold the typed line ($verdict, attempt $try of $script:SeedAttempts), retyping" -ForegroundColor Yellow
+        Write-Host "  seed: the input row does not hold the line ($verdict, attempt $try of $script:SeedAttempts), resending" -ForegroundColor Yellow
         # Drop whatever did land, including the continuation prompt a dropped
-        # quote leaves behind, so the retry starts from a bare line instead of
-        # appending to a broken one, then re-arm the island: retyping through
-        # the input path that just failed is not a different attempt.
+        # quote leaves behind, so the retry starts from a bare line.
         Clear-CommandLine
-        [void](Restore-IslandFocus)
     }
     return 'unverified'
 }
@@ -718,19 +428,13 @@ window-height = 34
 scrollback-limit = 10000000
 window-theme = wintty
 '@
-$script:TestConfig = Enter-WinttyTestConfig -ConfigText $configText
-$tempXdg = $script:TestConfig.Dir
+$script:Session = $null
 $script:Proc = $null
 $script:Iter = 0
 $script:ExitCode = 0
-# Set before the try so a throw that precedes their real assignment cannot
-# leave the teardown sweep with a null filter, which matches every process
-# rather than none, or bind $null to Stop-WinttyStartedAfter's mandatory
-# -Since and replace the in-flight exception with a binding error.
-$script:ExeFull = $null
-$script:StartedAt = $null
 $result = [ordered]@{
     seed = $Seed; iterations = $Iterations; ops = @()
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>, send-text armed); bar by chord and UIA; no synthesized OS input'
 }
 
 $script:CrashBaseline = 0
@@ -739,7 +443,6 @@ if (Test-Path $crashPath) { $script:CrashBaseline = (Get-Item $crashPath).Length
 
 try {
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
-    Write-Host ("config: {0}" -f $tempXdg)
 
     # Never kill by name: developers keep builds from several worktrees open
     # at once, and force-killing every Wintty takes down work this run has
@@ -750,35 +453,20 @@ try {
     #
     # The gate sits inside the try, unlike the other harnesses, because the
     # catch below records the refusal as a harness finding and prints it in
-    # the harness's own voice. That is only safe because the sweep in the
-    # finally is guarded on $script:StartedAt: an unguarded call would bind
-    # $null to a mandatory [datetime] and replace this message with a
-    # parameter-binding error.
+    # the harness's own voice. The finally only tears down a session that
+    # exists, so a refusal cannot be replaced by a teardown error.
     Assert-NoWintty -Context 'The search fuzz'
-    $script:ExeFull = (Resolve-Path $ExePath).Path
 
-    $script:StartedAt = Get-WinttyLaunchStamp
-    $script:Proc = Start-Process -FilePath $script:ExeFull -PassThru -WorkingDirectory (Split-Path -Parent $script:ExeFull)
-    $pid32 = [uint32]$script:Proc.Id
-    $script:Pid32 = $pid32
-    $main = Wait-Ready $script:Proc
-    $script:Hwnd64 = [int64]$main.Hwnd64
-    [void][SFz]::Focus([SFz]::P($script:Hwnd64))
+    $script:Session = Start-SeamSession -ExePath $ExePath -ConfigText $configText -AllowInput
+    $script:Proc = $script:Session.Proc
+    $script:Hwnd64 = [int64]$script:Session.Hwnd64
+    Write-Host ("config: {0}" -f $script:Session.TempXdg)
+    [SeamWin]::PlaceOnTop($script:Hwnd64)
     Start-Sleep -Milliseconds 800
 
-    $root = Get-Root
-    $terms = Get-TerminalElements $root
+    $terms = Get-TerminalElements (Get-Root)
     if ($terms.Count -lt 1) { throw 'no TerminalControl exposed to UIA' }
     Write-Host "terminal panes: $($terms.Count)"
-
-    # Arm the XAML island (see SFz.Click). Without this every posted
-    # character is dropped and the terminal never sees a keystroke.
-    $rc0 = [SFz]::RectOf($script:Hwnd64)
-    if ($null -eq $rc0) { throw 'window rect is degenerate; cannot arm XAML focus' }
-    if (-not [SFz]::Click($pid32, [int]($rc0.L + $rc0.W / 2), [int]($rc0.T + $rc0.Hh * 0.7))) {
-        throw 'could not click into the terminal to arm XAML focus'
-    }
-    Start-Sleep -Milliseconds 400
 
     # ---- seed the scrollback ---------------------------------------------
     # Every token is assembled at runtime so the echoed command line never
@@ -795,10 +483,9 @@ try {
 
     Write-Host 'seeding scrollback...'
 
-    # Wait for the shell to actually draw something. Typing into a terminal
-    # that has not started yet loses the keystrokes, and every later oracle
-    # count is measured against the corpus that typing was supposed to
-    # create.
+    # Wait for the shell to actually draw something. Bytes sent before the
+    # shell reads its input can be lost, and every later oracle count is
+    # measured against the corpus that send was supposed to create.
     $dl = (Get-Date).AddSeconds(30)
     $preseed = ''
     while ((Get-Date) -lt $dl) {
@@ -813,10 +500,9 @@ try {
 
     # The payload is PowerShell. Sniffing the prompt is unreliable (a themed
     # prompt looks nothing like "PS >"), so ask the shell what it is and wait
-    # for the answer. This doubles as proof that typed keys are landing.
+    # for the answer. This doubles as proof that sent text is landing.
     function Test-Pwsh([int]$timeoutMs) {
-        Send-Text '"SHELL"+"OK-$($PSVersionTable.PSEdition)"' 30
-        Send-Chord @() ([SFz]::VK_RETURN) 400
+        Send-Shell ('"SHELL"+"OK-$($PSVersionTable.PSEdition)"' + "`r")
         $dl = (Get-Date).AddMilliseconds($timeoutMs)
         while ((Get-Date) -lt $dl) {
             if ((Get-TerminalText (Get-Term)) -match 'SHELLOK-Core') { return $true }
@@ -828,30 +514,25 @@ try {
     $inPwsh = Test-Pwsh 25000
     if (-not $inPwsh) {
         Clear-CommandLine
-        Send-Text 'pwsh -NoLogo -NoProfile' 30
-        Send-Chord @() ([SFz]::VK_RETURN) 400
+        Send-Shell "pwsh -NoLogo -NoProfile`r"
         Start-Sleep -Seconds 6
         $inPwsh = Test-Pwsh 25000
     }
     if (-not $inPwsh) {
         (Get-TerminalText (Get-Term)) | Set-Content (Join-Path $OutDir 'doc-noshell.txt') -Encoding utf8
-        throw 'no PowerShell in the terminal (typed keys may not be landing), see doc-noshell.txt'
+        throw 'no PowerShell in the terminal (sent text may not be landing), see doc-noshell.txt'
     }
 
     # A dropped character can leave PowerShell in continuation mode, where
-    # everything typed afterwards is swallowed as more of an unterminated
+    # everything sent afterwards is swallowed as more of an unterminated
     # string. Reset the line before committing to the payload.
     Clear-CommandLine
 
     # Inline prediction renders the rest of a matching history entry into the
     # grid as soon as the typed prefix matches it, and those are real cells the
-    # read-back counts. A run whose payload is already in history would then
-    # verify text it had not finished typing, while Enter commits only what was
-    # typed. Default is HistoryAndPlugin on 7.2+, and the default (non-isolated)
-    # run loads the user's profile, so it has to be turned off rather than
-    # assumed off.
-    Send-Text 'Set-PSReadLineOption -PredictionSource None' 30
-    Send-Chord @() ([SFz]::VK_RETURN) 400
+    # read-back counts. Default is HistoryAndPlugin on 7.2+, so it has to be
+    # turned off rather than assumed off.
+    Send-Shell "Set-PSReadLineOption -PredictionSource None`r"
     Start-Sleep -Milliseconds 800
     Clear-CommandLine
 
@@ -859,7 +540,7 @@ try {
     if ($seeded -ne 'ok') {
         throw "the seed payload never landed on the input row ($seeded) after $script:SeedAttempts attempts, see doc-typed.txt"
     }
-    Send-Chord @() ([SFz]::VK_RETURN) 400
+    Send-Shell "`r"
     Start-Sleep -Seconds 3
 
     $term = Get-Term
@@ -879,13 +560,23 @@ try {
     Write-Host "corpus: $($doc.Length) chars, $((($doc -split "`n").Count)) rows"
     $result.corpusChars = $doc.Length
 
+    # The scroll oracle below judges only a viewport that can move, and that
+    # is decided from the scrollbar libghostty reports. If it never reported
+    # one, total stays 0 and every scroll check would pass without judging
+    # anything. The seeded corpus overflows the window, so the report must
+    # show more rows than fit, and a wheel up from the bottom must move.
+    $probe = Invoke-SeamCommand $script:Session @{ op = 'scroll'; notches = 3 }
+    $pv = $probe.viewport
+    Write-Host "  viewport after seeding: $($pv.total) rows, $($pv.len) visible, offset $($pv.offsetBefore)->$($pv.offsetAfter)"
+    [void](Assert-That ([double]$pv.total -gt [double]$pv.len) 'no-scrollback-report' `
+        "after seeding, the scrollbar libghostty reports holds $($pv.total) rows for $($pv.len) visible" @{ viewport = $pv })
+    [void](Assert-That ([double]$pv.offsetAfter -lt [double]$pv.offsetBefore) 'scroll-did-not-move' `
+        "a wheel up from the bottom of the seeded corpus left the viewport at row $($pv.offsetAfter)" @{ viewport = $pv })
+    [void](Invoke-SeamCommand $script:Session @{ op = 'scroll'; notches = -3 })
+
     # Needle pool. Strict needles are checked against the oracle; the rest
     # only have to not break an invariant (no crash, counter well-formed).
     $strict = @('ZQXW', 'zqxw', 'ZqXw', 'PLMK', 'VRTN', 'ZQXWPLMK', 'NOTHERE9X', 'row 1', 'item 4')
-    # No Tab in this pool: it is a focus-navigation key rather than a
-    # character, so typing it moves focus off the needle box and every
-    # needle after it lands on a button. That measures XAML focus, not
-    # search.
     $weird  = @(':', 'a:b', ' ', '  ', 'row ', '"', '\', '%', '$a', '.*', '[', '(', '?', 'ZQXW ', ' ZQXW',
                 'ábç', 'こんにちは', '😀', ('Z' * 200), '-', '--', '0', 'e')
 
@@ -921,30 +612,21 @@ try {
 
     # ---- baseline invariants ---------------------------------------------
     Write-Host "`n== baseline ==" -ForegroundColor Cyan
-    $docBefore = $doc
 
     Open-SearchBar
     Assert-Alive 'open'
-    $root = Get-Root
-    [void](Assert-That (Test-SearchBarOpen $root) 'bar-missing' 'Ctrl+Shift+F did not surface the search bar' @{})
+    [void](Assert-That (Test-SearchBarOpen (Get-Root)) 'bar-missing' 'Ctrl+Shift+F did not surface the search bar' @{})
 
     # Focus must land in the needle box, or the user types into the shell.
     $focused = Get-FocusedName
     [void](Assert-That ($focused -eq 'Search scrollback') 'focus-not-in-needle' `
         "after Ctrl+Shift+F the focused element is '$focused', expected 'Search scrollback'" @{ focused = $focused })
 
-    Send-Text 'ZQXW'
+    Set-Needle 'ZQXW'
     Start-Sleep -Milliseconds 400
     $c = Wait-Counter
-    Write-Host "  counter after typing ZQXW: '$c'"
+    Write-Host "  counter after setting ZQXW: '$c'"
     Assert-CounterMatchesOracle 'ZQXW' $c
-
-    # A keystroke that reaches the shell changes the document. Compare after
-    # the same settle the counter got.
-    $docNow = Get-TerminalText (Get-Term)
-    [void](Assert-That ($docNow -ceq $docBefore) 'keystroke-leak' `
-        'typing the needle changed the terminal document, so keys reached the shell' `
-        @{ beforeLen = $docBefore.Length; afterLen = $docNow.Length })
 
     # Navigation must walk 1..N and wrap.
     $parts = Get-CounterParts $c
@@ -952,7 +634,7 @@ try {
         $total = $parts[1]
         $seen = @()
         for ($k = 0; $k -lt 4; $k++) {
-            Press-Enter
+            Press-Next
             $cc = Wait-Counter 4000 250
             $pp = Get-CounterParts $cc
             $seen += if ($null -eq $pp) { -1 } else { $pp[0] }
@@ -966,29 +648,29 @@ try {
             if ($prev -lt 0 -or $cur -lt 0) { continue }
             if ($cur -ne ($prev % $total) + 1) { $monotonic = $false }
         }
-        [void](Assert-That ($seen[0] -ge 1) 'nav-no-selection' "first Enter left the index at $($seen[0])" @{ seen = $seen })
+        [void](Assert-That ($seen[0] -ge 1) 'nav-no-selection' "first next left the index at $($seen[0])" @{ seen = $seen })
         [void](Assert-That $monotonic 'nav-not-sequential' `
-            "Enter did not step 1-by-1 with wrap: $($seen -join ',') of $total" @{ seen = $seen; total = $total })
+            "next did not step 1-by-1 with wrap: $($seen -join ',') of $total" @{ seen = $seen; total = $total })
 
-        Press-ShiftEnter
+        Press-Prev
         $cb = Wait-Counter 4000 250
         $pb = Get-CounterParts $cb
         $expectBack = if ($seen[-1] -le 1) { $total } else { $seen[-1] - 1 }
         [void](Assert-That ($null -ne $pb -and $pb[0] -eq $expectBack) 'nav-prev-wrong' `
-            "Shift+Enter from $($seen[-1]) gave $cb, expected index $expectBack" @{ from = $seen[-1]; got = $cb })
+            "previous from $($seen[-1]) gave $cb, expected index $expectBack" @{ from = $seen[-1]; got = $cb })
     }
 
     # A correct counter proves libghostty found the matches; it says nothing
     # about whether the renderer painted them. The PLMK rows are the ones
     # sitting in the viewport after seeding, so their highlights must show up
     # as pixels in the window.
-    Clear-Needle
+    Set-Needle ''
     Start-Sleep -Milliseconds 600
     # Measure the baseline with no search active. Taking it while the
     # previous needle was still highlighted compared one search against
     # another rather than against an unhighlighted screen.
     $baseHighlight = Measure-HighlightPixels 255 224 130
-    Send-Text 'PLMK'
+    Set-Needle 'PLMK'
     Start-Sleep -Milliseconds 400
     $cH = Wait-Counter
     Assert-CounterMatchesOracle 'PLMK' $cH
@@ -1000,36 +682,30 @@ try {
     [void](Assert-That ($litHighlight -gt ($baseHighlight + 200)) 'no-match-highlight' `
         "search matches are not painted: $baseHighlight highlight-colored pixels before, $litHighlight after" `
         @{ before = $baseHighlight; after = $litHighlight })
-    Press-Enter
+    Press-Next
     Start-Sleep -Milliseconds 700
     $selAfter = Measure-HighlightPixels 242 165 126
     Shot 'highlight-plmk-selected'
     [void](Assert-That ($selAfter -gt ($litSelected + 50)) 'no-selected-highlight' `
-        "the selected match is not painted in its own color: $litSelected before Enter, $selAfter after" `
+        "the selected match is not painted in its own color: $litSelected before next, $selAfter after" `
         @{ before = $litSelected; after = $selAfter })
 
     Press-Escape
-    $root = Get-Root
-    [void](Assert-That (-not (Test-SearchBarOpen $root)) 'esc-did-not-close' 'Escape left the search bar open' @{})
+    [void](Assert-That (-not (Test-SearchBarOpen (Get-Root))) 'esc-did-not-close' 'Escape left the search bar open' @{})
 
-    # After Escape the terminal must take input again.
-    $docPre = Get-TerminalText (Get-Term)
-    Send-Text 'echoX'
-    Start-Sleep -Milliseconds 600
-    $docPost = Get-TerminalText (Get-Term)
-    [void](Assert-That ($docPost -ne $docPre) 'focus-not-returned' `
-        'after Escape, typing did not reach the terminal' @{})
-    Clear-Needle  # harmless if focus is in the shell: Ctrl+A / Backspace
-    Send-Chord @() ([SFz]::VK_BACK) 80
-    for ($k = 0; $k -lt 8; $k++) { Send-Chord @() ([SFz]::VK_BACK) 30 }
+    # After closing, focus must be back in the terminal, or the next thing
+    # the user types goes nowhere. The seam reads it off the app's own focus.
+    Start-Sleep -Milliseconds 300
+    $afterClose = Invoke-SeamCommand $script:Session @{ op = 'probe' }
+    [void](Assert-That ($afterClose.focus -eq 'pane' -and $afterClose.state.panes.focusedName -ne 'Search scrollback') `
+        'focus-not-returned' "after closing the bar focus is '$($afterClose.focus)' on '$($afterClose.state.panes.focusedName)'" @{})
 
     # ---- randomized sweep ------------------------------------------------
     Write-Host "`n== fuzz ($Iterations iterations, seed $Seed) ==" -ForegroundColor Cyan
     $barOpen = $false
     for ($script:Iter = 1; $script:Iter -le $Iterations; $script:Iter++) {
         Assert-Alive "iteration $script:Iter"
-        $root = Get-Root
-        $barOpen = Test-SearchBarOpen $root
+        $barOpen = Test-SearchBarOpen (Get-Root)
 
         # Draw unconditionally, even when the op is forced: letting product
         # state decide whether the RNG advances makes the seed stop
@@ -1050,8 +726,7 @@ try {
         switch ($op) {
             'open' {
                 Open-SearchBar
-                $r2 = Get-Root
-                [void](Assert-That (Test-SearchBarOpen $r2) 'bar-missing' 'Ctrl+Shift+F did not open the bar' @{})
+                [void](Assert-That (Test-SearchBarOpen (Get-Root)) 'bar-missing' 'Ctrl+Shift+F did not open the bar' @{})
                 $f = Get-FocusedName
                 [void](Assert-That ($f -eq 'Search scrollback') 'focus-not-in-needle' `
                     "focus is '$f' after opening" @{ focused = $f })
@@ -1072,17 +747,7 @@ try {
             }
             'type' {
                 $needle = Get-RandomNeedle
-                if (-not (Set-NeedleFocus)) {
-                    # Typing with focus elsewhere sends the needle to the
-                    # shell, which corrupts the corpus every later oracle
-                    # count is computed against.
-                    Add-Finding 'needle-focus-lost' `
-                        "could not put focus in the needle box before typing '$needle'" `
-                        @{ needle = $needle; focused = (Get-FocusedName) }
-                    break
-                }
-                Clear-Needle
-                if ($needle.Length -gt 0) { Send-Text $needle }
+                Set-Needle $needle
                 Start-Sleep -Milliseconds 300
                 $c = Wait-Counter
                 $detail = "needle='$needle' counter='$c'"
@@ -1101,12 +766,12 @@ try {
                 $box = Get-NeedleText (Get-Root)
                 if ($null -ne $box -and $needle -match '^[\x20-\x7E]+$') {
                     [void](Assert-That ($box -ceq $needle) 'needle-box-drift' `
-                        "typed '$needle' but the box holds '$box'" @{ typed = $needle; box = $box })
+                        "set '$needle' but the box holds '$box'" @{ typed = $needle; box = $box })
                 }
             }
             'next' {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
-                Press-Enter
+                Press-Next
                 $c = Wait-Counter 4000 250
                 $after = Get-CounterParts $c
                 $detail = "next -> '$c'"
@@ -1119,7 +784,7 @@ try {
             }
             'prev' {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
-                Press-ShiftEnter
+                Press-Prev
                 $c = Wait-Counter 4000 250
                 $after = Get-CounterParts $c
                 $detail = "prev -> '$c'"
@@ -1131,8 +796,7 @@ try {
                 }
             }
             'clear' {
-                [void](Set-NeedleFocus)
-                Clear-Needle
+                Set-Needle ''
                 Start-Sleep -Milliseconds 500
                 $c = Get-Counter (Get-Root)
                 $detail = "cleared -> '$c'"
@@ -1141,13 +805,7 @@ try {
             }
             'close' {
                 $useEsc = $rng.Next(2) -eq 0
-                if ($useEsc) { Press-Escape } else {
-                    $btn = Find-ByName (Get-Root) 'Close search'
-                    if ($null -ne $btn) {
-                        try { $btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke() } catch { Press-Escape }
-                        Start-Sleep -Milliseconds 350
-                    } else { Press-Escape }
-                }
+                if ($useEsc) { Press-Escape } else { Close-SearchBar }
                 $detail = if ($useEsc) { 'esc' } else { 'button' }
                 [void](Assert-That (-not (Test-SearchBarOpen (Get-Root))) 'esc-did-not-close' `
                     "close via $detail left the bar open" @{ via = $detail })
@@ -1162,15 +820,26 @@ try {
             }
             'scroll' {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
-                $rc = [SFz]::RectOf($script:Hwnd64)
                 $notches = $rng.Next(-6, 7)
-                if ($null -eq $rc -or -not [SFz]::Wheel($pid32, [int]($rc.L + $rc.W / 2), [int]($rc.T + $rc.Hh / 2), $notches)) {
-                    Add-Finding 'harness' 'wheel did not reach the window' @{}
-                    break
+                $detail = "wheel $notches"
+                if ($notches -ne 0) {
+                    $s = Invoke-SeamCommand $script:Session @{ op = 'scroll'; notches = $notches }
+                    $v = $s.viewport
+                    $detail += " offset $($v.offsetBefore)->$($v.offsetAfter) of $($v.total)/$($v.len)"
+                    # Positive notches scroll up (towards row 0), negative
+                    # down (towards total-len). Only a viewport already at
+                    # that end may stay put.
+                    $bottom = [Math]::Max(0, [double]$v.total - [double]$v.len)
+                    $canMove = if ($notches -gt 0) { $v.offsetBefore -gt 0 } else { $v.offsetBefore -lt $bottom }
+                    $moved = if ($notches -gt 0) { $v.offsetAfter -lt $v.offsetBefore } else { $v.offsetAfter -gt $v.offsetBefore }
+                    if ($canMove) {
+                        [void](Assert-That $moved 'scroll-did-not-move' `
+                            "a $notches-notch wheel left the viewport at row $($v.offsetAfter) of $bottom" `
+                            @{ notches = $notches; viewport = $v })
+                    }
                 }
                 Start-Sleep -Milliseconds 500
                 $after = Get-CounterParts (Get-Counter (Get-Root))
-                $detail = "wheel $notches"
                 if ($null -ne $before -and $null -ne $after) {
                     [void](Assert-That ($after[1] -eq $before[1]) 'total-changed-on-scroll' `
                         "scrolling changed the total from $($before[1]) to $($after[1])" `
@@ -1180,7 +849,8 @@ try {
             'resize' {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
                 $w = $rng.Next(700, 1400); $h = $rng.Next(500, 900)
-                if (-not [SFz]::Resize($script:Hwnd64, $w, $h)) {
+                $rc = [SeamWin]::RectOf($script:Hwnd64)
+                if ($null -eq $rc -or -not [SeamWin]::MoveWindow([SeamWin]::P($script:Hwnd64), $rc.L, $rc.T, $w, $h, $true)) {
                     Add-Finding 'harness' "resize to ${w}x${h} failed" @{}
                     break
                 }
@@ -1195,11 +865,9 @@ try {
                 }
             }
             'emit' {
-                # Append matching content while a search is live; the total
-                # must pick it up without reopening the bar.
-                $before = Get-CounterParts (Get-Counter (Get-Root))
-                $needleBox = Get-NeedleText (Get-Root)
-                Press-Escape
+                # Append matching content, then reopen and search again: the
+                # total must count it.
+                Close-SearchBar
                 $emit = '$a=' + "'ZQ'+'XW'; 1..12 | % { `"`$a extra `$_`" }"
                 # The initial seed clears the row first and this has to as
                 # well: anything already sitting there is prefixed to the
@@ -1208,24 +876,21 @@ try {
                 Clear-CommandLine
                 $seeded = Send-SeedText $emit (Join-Path $OutDir 'doc-emit.txt')
                 if ($seeded -eq 'bar-open') {
-                    # Escape not closing the bar is a product defect this
-                    # harness names elsewhere. Record it BEFORE the throw: the
-                    # verdict is derived from every finding, so this is what
-                    # keeps a live regression at exit 2 instead of being
-                    # filed as a harness failure and retried until it is
-                    # reported as a broken harness.
+                    # The bar not closing is a product defect this harness
+                    # names elsewhere. Record it BEFORE the throw: the verdict
+                    # is derived from every finding, so this keeps a live
+                    # regression at exit 2 instead of a retried harness miss.
                     [void](Assert-That $false 'esc-did-not-close' `
-                        'Escape left the search bar open, so the emit payload could not be typed' @{})
+                        'the close button left the search bar open, so the emit payload could not be sent' @{})
                 }
                 if ($seeded -ne 'ok') {
                     throw "the emit payload never landed on the input row ($seeded), see doc-emit.txt"
                 }
-                Send-Chord @() ([SFz]::VK_RETURN) 400
+                Send-Shell "`r"
                 Start-Sleep -Seconds 3
                 $doc = Get-TerminalText (Get-Term)
                 Open-SearchBar
-                Clear-Needle
-                Send-Text 'ZQXW'
+                Set-Needle 'ZQXW'
                 Start-Sleep -Milliseconds 400
                 $c = Wait-Counter
                 $detail = "emit -> '$c'"
@@ -1250,11 +915,10 @@ finally {
     # baseline is a file length, and using it as a character index reads the
     # wrong text and throws outright once the log contains any non-ASCII.
     try {
-        $crashLog = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-        if (Test-Path $crashLog) {
-            $now = (Get-Item $crashLog).Length
+        if (Test-Path $crashPath) {
+            $now = (Get-Item $crashPath).Length
             if ($now -gt $script:CrashBaseline) {
-                $bytes = [System.IO.File]::ReadAllBytes($crashLog)
+                $bytes = [System.IO.File]::ReadAllBytes($crashPath)
                 $fresh = [System.Text.Encoding]::UTF8.GetString(
                     $bytes, $script:CrashBaseline, $bytes.Length - $script:CrashBaseline)
                 $fresh | Set-Content (Join-Path $OutDir "crash-$Seed.log") -Encoding utf8
@@ -1268,12 +932,8 @@ finally {
     $result.checks = $script:Checks
     $result.findings = @($script:Findings)
     $result.failed = $script:Findings.Count
-    # Decide the verdict before any cleanup runs. It used to be computed at
-    # the very bottom of this block, after the sweep and the env restores, so
-    # anything throwing on the way down left $script:ExitCode at its initial
-    # 0 - a clean PASS with findings already recorded. Nothing below this
-    # point can change what the run found, so nothing below it should be able
-    # to change what the run reports.
+    # Decide the verdict before any cleanup runs, so nothing thrown on the
+    # way down can change what the run reports.
     #
     # 2 means the product is broken, 1 means the run never got far enough to
     # judge it and should be retried rather than filed. Same numbering as the
@@ -1289,27 +949,13 @@ finally {
         $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir "run-$Seed.json") -Encoding utf8
     }
 
-    # Tear down only what this run started. The handle covers the launch
-    # itself; the sweep is the backstop for anything else that came up from
-    # the same exe during the run, and is a no-op when there is nothing.
-    #
-    # The stamp guard is what keeps a refusal readable. Reaching the finally
-    # with $script:StartedAt still $null means the run never launched, so
-    # there is nothing to sweep; calling anyway would bind $null to a
-    # mandatory [datetime] and replace whatever threw with a binding error.
-    if (-not $KeepOpen -and $script:Proc) {
-        try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill($true) } } catch { }
-        try { [void]$script:Proc.WaitForExit(3000) } catch { }
+    # Tear down only what this run started: the session's own process and
+    # anything else that came up from the same exe during the run. -KeepOpen
+    # leaves the app and its staged root up on purpose.
+    if (-not $KeepOpen -and $null -ne $script:Session) {
+        try { Stop-SeamSession $script:Session }
+        catch { Add-Finding 'harness' "teardown: $($_.Exception.Message)" @{} }
     }
-    # After the kill, not before: the sweep and the teardown below must not
-    # run while the app still holds the config root. -KeepOpen keeps the
-    # staged root on purpose (the app stays up with it); the helper's 24h
-    # sweep reaps it later.
-    if (-not $KeepOpen -and $script:StartedAt) {
-        Stop-WinttyStartedAfter -Since $script:StartedAt -ExePath $script:ExeFull
-    }
-    Start-Sleep -Milliseconds 500
-    if (-not $KeepOpen) { Exit-WinttyTestConfig $script:TestConfig }
 
     Write-Host ""
     if ($script:Findings.Count -eq 0) {

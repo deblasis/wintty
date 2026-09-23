@@ -204,28 +204,46 @@ public sealed partial class SearchBarControl : UserControl
 
     private void OnNeedleKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        switch (e.Key)
+        var shift = (Microsoft.UI.Input.InputKeyboardSource
+            .GetKeyStateForCurrentThread(VirtualKey.Shift)
+            & Windows.UI.Core.CoreVirtualKeyStates.Down)
+            == Windows.UI.Core.CoreVirtualKeyStates.Down;
+        if (HandleNeedleKey(e.Key, shift)) e.Handled = true;
+    }
+
+    /// <summary>
+    /// The needle box's keys: Enter steps to the next match, Shift+Enter to
+    /// the previous one, Escape closes the bar. True when the key was taken.
+    /// Shift is a parameter so the test seam can press it without holding it.
+    /// </summary>
+    private bool HandleNeedleKey(VirtualKey key, bool shift)
+    {
+        switch (key)
         {
             case VirtualKey.Enter:
-                {
-                    var shift = (Microsoft.UI.Input.InputKeyboardSource
-                        .GetKeyStateForCurrentThread(VirtualKey.Shift)
-                        & Windows.UI.Core.CoreVirtualKeyStates.Down)
-                        == Windows.UI.Core.CoreVirtualKeyStates.Down;
-                    if (shift)
-                        SearchHost?.NavigatePrevious();
-                    else
-                        SearchHost?.NavigateNext();
-                    e.Handled = true;
-                    break;
-                }
+                if (shift)
+                    SearchHost?.NavigatePrevious();
+                else
+                    SearchHost?.NavigateNext();
+                return true;
 
             case VirtualKey.Escape:
                 RaiseClosed();
-                e.Handled = true;
-                break;
+                return true;
+
+            default:
+                return false;
         }
     }
+
+#if TESTSEAM
+    /// <summary>A key pressed in the needle box, through its real handler, for the test seam.</summary>
+    internal bool TestSeamNeedleKey(VirtualKey key, bool shift) => HandleNeedleKey(key, shift);
+
+    /// <summary>Whether the needle box itself holds keyboard focus, where those keys land.</summary>
+    internal bool TestSeamNeedleFocused
+        => XamlRoot is { } root && ReferenceEquals(FocusManager.GetFocusedElement(root), NeedleBox);
+#endif
 
     private void OnPrevClick(object sender, RoutedEventArgs e) =>
         SearchHost?.NavigatePrevious();

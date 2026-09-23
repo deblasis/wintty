@@ -230,4 +230,15 @@ public sealed partial class MainWindow
 
     internal bool TestSeamFrameChord(int virtualKey, VirtualKeyModifiers mods)
         => TryDispatchFrameChord(virtualKey, mods);
+
+#if TESTSEAM
+    // Here rather than beside MainWindow.xaml.cs's other seam accessors:
+    // that file keeps exactly one TESTSEAM region, around TestSeam.Start.
+
+    /// <summary>Whether the tab overview is up.</summary>
+    internal bool TestSeamOverviewOpen => TabOverviewHost.IsOpen;
+
+    /// <summary>The overview control, whose key handler the seam drives.</summary>
+    internal Tabs.TabOverviewControl TestSeamOverviewUI => TabOverviewUI;
+#endif
 }

@@ -200,6 +200,22 @@ internal sealed partial class TabHost : UserControl, ITabHost
                    && row.Children.OfType<FontIcon>().Any(f => f.Glyph == HomeGlyph && f.Visibility == Visibility.Visible))
             : null;
 
+#if TESTSEAM
+    /// <summary>
+    /// Open <paramref name="tab"/>'s context menu the way Shift+F10 on a
+    /// focused tab does: the framework shows the item's own ContextFlyout at
+    /// the item, with no pointer position. False when the strip has no item
+    /// for the tab yet.
+    /// </summary>
+    internal bool TestSeamOpenTabMenu(TabModel tab)
+    {
+        if (!_itemByModel.TryGetValue(tab, out var item) || item.ContextFlyout is not { } flyout)
+            return false;
+        flyout.ShowAt(item);
+        return true;
+    }
+#endif
+
     /// <summary>
     /// The foreground the ink pass hands a colour-tagged tab's header row,
     /// as 0x00RRGGBB, or null when the tab carries no tag. The expectation

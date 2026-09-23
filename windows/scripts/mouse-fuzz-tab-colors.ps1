@@ -1,694 +1,345 @@
 #requires -Version 7
-# Tab preset colors: all swatches + None, active/inactive, recolor, layout round-trip.
+<#
+    Tab preset colours: every swatch plus None, active and inactive, a
+    recolour pass, and a layout round trip each way.
+
+    Seam-actuated: the harness synthesizes no OS input and never takes the
+    foreground. Tabs come from seed-tabs, a colour from tab-color (the
+    colour menu's own `tab.Color = color` assignment), selection from
+    select, the layout from toggle-layout (the chord's router event) and the
+    sidebar from toggle-sidebar. The right-click, the "Tab Color..." item
+    and the swatch click are gone here; mouse-fuzz-remain.ps1 opens the tab
+    menu and the picker through the seam's menu op and picks a swatch.
+
+    Three oracles. The manager's colour per tab at every stop: what a tab was
+    given survives selection, both layout switches and the recolour. The
+    strip's ink pass, read through header-rect in the horizontal layout: every
+    tagged tab gets ink and no None tab does. And the paint: in a capture of
+    the horizontal strip, inactive tabs wearing different presets must be
+    painted apart and tabs wearing the same one alike. In the vertical layout
+    the strip must list every tab over UIA. Strip crops still go to shots/.
+
+    Exits 0 clean, 2 findings, 1 could-not-run.
+#>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
-# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
-# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
-# not run" - which the suite retries and then reports as an area nothing is
-# known about. Every finally below still runs: exit from a trap unwinds
-# through them, and `break` rethrows anything that is not a product failure so
-# a genuine harness failure still leaves with 1.
-trap {
-    if ("$_" -like 'PRODUCT_FAIL*') {
-        Write-Host "$_" -ForegroundColor Red
-        exit 2
-    }
-    break
-}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
-
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type -TypeDefinition @'
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
+
+# Which process owns the top-level window at a screen point: a read of the
+# window stack, no input. A sample point another window covers is a miss.
+Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-public static class TcFz {
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-    public const uint KEYUP = 0x0002;
-    public const byte VK_CONTROL = 0x11;
-    public const byte VK_SHIFT = 0x10;
-    public const byte VK_OEM_COMMA = 0xBC;
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+public static class TcPoint {
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-    public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd); RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L=r.L,T=r.T,R=r.R,B=r.B };
-        return (wr.W < 80 || wr.Hh < 80) ? null : wr;
-    }
-    public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    // Synthesized keystrokes go to whatever owns the foreground, not to a
-    // handle. SetForegroundWindow fails silently under the foreground lock,
-    // so confirm the target actually has it before sending Ctrl+Shift+, --
-    // otherwise the chord lands in the developer's editor or browser.
-    public static bool ChordToggleLayout(IntPtr expected) {
-        if (expected == IntPtr.Zero) return false;
-        for (int i = 0; i < 20; i++) {
-            if (GetForegroundWindow() == expected) break;
-            SetForegroundWindow(expected);
-            Thread.Sleep(50);
-        }
-        if (GetForegroundWindow() != expected) return false;
-        keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
-        keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);
-        keybd_event(VK_OEM_COMMA, 0, 0, UIntPtr.Zero);
-        keybd_event(VK_OEM_COMMA, 0, KEYUP, UIntPtr.Zero);
-        keybd_event(VK_SHIFT, 0, KEYUP, UIntPtr.Zero);
-        keybd_event(VK_CONTROL, 0, KEYUP, UIntPtr.Zero);
-        return true;
-    }
-    static bool OwnedByTarget(uint pid, int x, int y) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        return ClassOf(hit) != "WinttySplash" && PidOf(hit) == pid;
-    }
-    public static bool Click(uint pid, int x, int y, bool right) {
-        if (!OwnedByTarget(pid, x, y)) return false;
-        if (!SetCursorPos(x, y)) return false;
-        Thread.Sleep(40);
-        // Re-probe after the settle: a toast, UAC prompt or flyout can
-        // take the point during the sleep, and the click would land on
-        // whatever arrived instead of the target window.
-        if (!OwnedByTarget(pid, x, y)) return false;
-        if (right) {
-            mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,UIntPtr.Zero);
-        } else {
-            mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,UIntPtr.Zero);
-        }
-        Thread.Sleep(250);
-        return true;
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    public static long RootAt(int x, int y) {
+        var h = WindowFromPoint(new POINT { X = x, Y = y });
+        return h == IntPtr.Zero ? 0 : GetAncestor(h, 2).ToInt64();
     }
 }
+"@
+
+$Config = @'
+window-save-state = never
+vertical-tabs = false
+window-theme = wintty
+theme = Catppuccin Mocha
+# Solid and opaque, so an untagged tab is painted over one flat colour and
+# not a Mica gradient that varies with the wallpaper: the paint oracle below
+# compares pixels and needs the same ground under every tab.
+background-opacity = 1
+background-style = solid
+frame-style = solid
 '@
-
-function Get-Main([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [TcFz+EnumProc]{
-        param($h,$lp)
-        [uint32]$o=0; [void][TcFz]::GetWindowThreadProcessId($h,[ref]$o)
-        if ($o -ne $ProcId -or -not [TcFz]::IsWindowVisible($h)) { return $true }
-        if ([TcFz]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [TcFz]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64=$hwnd64; Area=($rc.W*$rc.Hh) })
-        return $true
-    }
-    [void][TcFz]::EnumWindows($cb,[IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending | Select-Object -First 1
-}
-
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(45)
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 300
-        $proc.Refresh(); if ($proc.HasExited) { throw "exit $($proc.ExitCode)" }
-        $m = Get-Main ([uint32]$proc.Id)
-        if ($m) { Start-Sleep -Seconds 1; return $m }
-    }
-    throw 'no hwnd'
-}
-
-function Get-UiaRoot([int64]$Hwnd64) {
-    return [System.Windows.Automation.AutomationElement]::FromHandle([TcFz]::P($Hwnd64))
-}
-
-function Find-Name($root, [string]$name) {
-    if ($null -eq $root) { return $null }
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-    return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-}
-
-function Find-NameRetry($root, [string]$name, [int]$ms = 1200) {
-    $dl = (Get-Date).AddMilliseconds($ms)
-    while ((Get-Date) -lt $dl) {
-        $el = Find-Name $root $name
-        if ($null -ne $el) { return $el }
-        Start-Sleep -Milliseconds 80
-    }
-    return $null
-}
-
-function Invoke-El($el, [uint32]$ProcId, [string]$what) {
-    if ($null -eq $el) { throw "HARVEST_MISS: $what" }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $pat.Invoke(); Start-Sleep -Milliseconds 400; return
-    } catch { }
-    $r = $el.Current.BoundingRectangle
-    $x = [int]($r.X + $r.Width/2); $y = [int]($r.Y + $r.Height/2)
-    if (-not [TcFz]::Click($ProcId, $x, $y, $false)) { throw "HARVEST_MISS: click $what" }
-}
-
-function Shot([int64]$Hwnd64, [string]$name) {
-    $rc = [TcFz]::RectOf($Hwnd64)
-    if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
-    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rc.L,$rc.T,0,0,$bmp.Size)
-    $p = Join-Path $OutDir "shots\$name.png"
-    $bmp.Save($p); $g.Dispose(); $bmp.Dispose()
-    Write-Host "shot $name"
-}
-
-function Shot-StripCrop([int64]$Hwnd64, [string]$name, [int]$width, [int]$height) {
-    $rc = [TcFz]::RectOf($Hwnd64)
-    $w = [Math]::Min($width, $rc.W)
-    $h = [Math]::Min($height, $rc.Hh)
-    $bmp = New-Object System.Drawing.Bitmap $w, $h
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, [System.Drawing.Size]::new($w, $h))
-    $p = Join-Path $OutDir "shots\$name.png"
-    $bmp.Save($p); $g.Dispose(); $bmp.Dispose()
-    Write-Host "crop $name ${w}x${h}"
-}
-
-function Invoke-NewTab($root, [uint32]$ProcId) {
-    $el = Find-Name $root 'New tab'
-    if ($null -eq $el) { throw 'HARVEST_MISS: New tab' }
-    Invoke-El $el $ProcId 'New tab'
-}
-
-function Get-HorizTabItems($root) {
-    $list = $null
-    foreach ($listId in @('TabListView', 'TabList')) {
-        $listCond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $listId)
-        $dl = (Get-Date).AddSeconds(3)
-        while ((Get-Date) -lt $dl) {
-            $list = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $listCond)
-            if ($null -ne $list) { break }
-            Start-Sleep -Milliseconds 100
-            $root = Get-UiaRoot $script:MainHwnd64
-        }
-        if ($null -ne $list) { break }
-    }
-    if ($null -eq $list) { return @() }
-    foreach ($ctName in @('TabItem', 'ListItem')) {
-        $ct = [System.Windows.Automation.ControlType]::$ctName
-        $cond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $ct)
-        $found = $list.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
-        if ($found.Count -gt 0) {
-            $out = @(); foreach ($i in $found) { $out += $i }; return $out
-        }
-    }
-    return @()
-}
-
-function Get-HorizTabClickPoint($root, [int]$tabIndex, [double]$xBias = 0.5) {
-    $tabs = Get-HorizTabItems $root
-    if ($tabs.Count -gt $tabIndex) {
-        $r = $tabs[$tabIndex].Current.BoundingRectangle
-        if (-not [double]::IsNaN($r.X) -and -not [double]::IsNaN($r.Y) -and $r.Width -gt 2 -and $r.Height -gt 2) {
-            return @([int]($r.X + $r.Width * $xBias), [int]($r.Y + $r.Height / 2))
-        }
-    }
-    foreach ($listId in @('TabListView', 'TabList')) {
-        $listCond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $listId)
-        $list = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $listCond)
-        if ($null -eq $list) { continue }
-        $lr = $list.Current.BoundingRectangle
-        if ([double]::IsNaN($lr.X) -or $lr.Width -le 1) { continue }
-        $count = [Math]::Max($tabs.Count, $TabCount)
-        $slotW = $lr.Width / $count
-        $x = [int]($lr.X + $slotW * $tabIndex + $slotW * $xBias)
-        $y = [int]($lr.Y + $lr.Height / 2)
-        return @($x, $y)
-    }
-    throw "HARVEST_MISS: horiz tab point $tabIndex"
-}
-
-function Get-VertTabClickPoint($root, [int]$tabIndex) {
-    $items = Find-VertNavItems $root
-    if ($items.Count -gt $tabIndex) {
-        $r = $items[$tabIndex].Current.BoundingRectangle
-        if (-not [double]::IsNaN($r.X) -and $r.Width -gt 2 -and $r.Height -gt 2) {
-            return @([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2))
-        }
-    }
-    $navCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NavView')
-    $nav = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $navCond)
-    if ($null -ne $nav) {
-        $nr = $nav.Current.BoundingRectangle
-        $rowH = 36
-        $x = [int]($nr.X + $nr.Width / 2)
-        $y = [int]($nr.Y + 72 + $tabIndex * $rowH)
-        return @($x, $y)
-    }
-    throw "HARVEST_MISS: vert tab point $tabIndex"
-}
-
-function Select-HorizTab($root, [uint32]$ProcId, [int]$index) {
-    $tabs = Get-HorizTabItems $root
-    if ($tabs.Count -gt $index) {
-        $r = $tabs[$index].Current.BoundingRectangle
-        if (-not [double]::IsNaN($r.X) -and $r.Width -gt 2) {
-            Invoke-El $tabs[$index] $ProcId "horiz tab $index"
-            return
-        }
-    }
-    $pt = Get-HorizTabClickPoint $root $index
-    if (-not [TcFz]::Click($ProcId, $pt[0], $pt[1], $false)) {
-        throw "HARVEST_MISS: horiz tab click $index"
-    }
-}
-
-function Find-VertNavItems($root) {
-    $navCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NavView')
-    $nav = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $navCond)
-    if ($null -eq $nav) { return @() }
-    $itemCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::ListItem)
-    $found = $nav.FindAll([System.Windows.Automation.TreeScope]::Descendants, $itemCond)
-    $out = @(); foreach ($i in $found) { $out += $i }; return $out
-}
-
-function Select-VertTab($root, [uint32]$ProcId, [int]$index) {
-    $items = Find-VertNavItems $root
-    if ($items.Count -gt $index) {
-        $r = $items[$index].Current.BoundingRectangle
-        if (-not [double]::IsNaN($r.X) -and $r.Width -gt 2) {
-            Invoke-El $items[$index] $ProcId "vert tab $index"
-            return
-        }
-    }
-    $pt = Get-VertTabClickPoint $root $index
-    if (-not [TcFz]::Click($ProcId, $pt[0], $pt[1], $false)) {
-        throw "HARVEST_MISS: vert tab click $index"
-    }
-}
-
-function Set-TabColor($root, [uint32]$ProcId, [int64]$Hwnd64, [int]$tabIndex, [string]$colorName, [bool]$vertical) {
-    Select-Tab $root $ProcId $tabIndex $vertical
-    Start-Sleep -Milliseconds 250
-    $root = Get-UiaRoot $Hwnd64
-    if ($vertical) {
-        $pt = Get-VertTabClickPoint $root $tabIndex
-    } else {
-        $pt = Get-HorizTabClickPoint $root $tabIndex 0.28
-    }
-    $x = $pt[0]; $y = $pt[1]
-    if (-not [TcFz]::Click($ProcId, $x, $y, $true)) { throw "HARVEST_MISS: tab context $tabIndex" }
-    Start-Sleep -Milliseconds 350
-    $root = Get-UiaRoot $Hwnd64
-    $pick = Find-NameRetry $root 'Tab Color...' 2500
-    if ($null -eq $pick) { throw "HARVEST_MISS: Tab Color menu $tabIndex" }
-    Invoke-El $pick $ProcId 'Tab Color...'
-    Start-Sleep -Milliseconds 350
-    $root = Get-UiaRoot $Hwnd64
-    $sw = Find-NameRetry $root $colorName 1500
-    if ($null -eq $sw) { throw "HARVEST_MISS: swatch $colorName" }
-    Invoke-El $sw $ProcId "swatch $colorName"
-    Start-Sleep -Milliseconds 300
-}
-
-function Expand-VertSidebar($root, [uint32]$ProcId) {
-    $dl = (Get-Date).AddSeconds(4)
-    $el = $null
-    while ((Get-Date) -lt $dl) {
-        $idCond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PaneToggleButton')
-        $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $idCond)
-        if ($null -ne $el) { break }
-        foreach ($n in @('Toggle sidebar', 'Expand sidebar', 'Collapse sidebar')) {
-            $el = Find-Name $root $n
-            if ($null -ne $el) { break }
-        }
-        if ($null -ne $el) { break }
-        Start-Sleep -Milliseconds 150
-        $root = Get-UiaRoot $script:MainHwnd64
-    }
-    if ($null -eq $el) { throw 'HARVEST_MISS: PaneToggleButton' }
-    Invoke-El $el $ProcId 'Expand sidebar'
-    Start-Sleep -Milliseconds 600
-}
-
-function Find-ByAutomationIdPrefix($root, [string]$prefix) {
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $stack = [System.Collections.Generic.Stack[object]]::new()
-    $stack.Push($root)
-    while ($stack.Count -gt 0) {
-        $el = $stack.Pop()
-        try {
-            $id = $el.Current.AutomationId
-            if ($id -and $id.StartsWith($prefix)) { return $el }
-        } catch { }
-        try {
-            $ch = $walker.GetFirstChild($el)
-            while ($null -ne $ch) { $stack.Push($ch); $ch = $walker.GetNextSibling($ch) }
-        } catch { }
-    }
-    return $null
-}
-
-function Focus-TerminalForShortcuts([int64]$Hwnd64, [uint32]$ProcId) {
-    [void][TcFz]::SetForegroundWindow([TcFz]::P($Hwnd64))
-    Start-Sleep -Milliseconds 120
-    $root = Get-UiaRoot $Hwnd64
-    $grid = Find-ByAutomationIdPrefix $root 'TerminalGrid'
-    if ($null -ne $grid) {
-        $r = $grid.Current.BoundingRectangle
-        if (-not [double]::IsNaN($r.X) -and $r.Width -gt 10) {
-            $x = [int]($r.X + $r.Width / 2)
-            $y = [int]($r.Y + $r.Height / 2)
-            if ([TcFz]::Click($ProcId, $x, $y, $false)) { Start-Sleep -Milliseconds 120; return }
-        }
-    }
-    $rc = [TcFz]::RectOf($Hwnd64)
-    if ($null -ne $rc) {
-        [void][TcFz]::Click($ProcId, $rc.L + 400, $rc.T + 280, $false)
-        Start-Sleep -Milliseconds 120
-    }
-}
-
-function Toggle-Layout([int64]$Hwnd64, [uint32]$ProcId) {
-    Focus-TerminalForShortcuts $Hwnd64 $ProcId
-    if (-not [TcFz]::ChordToggleLayout([TcFz]::P($Hwnd64))) {
-        throw 'FOREGROUND_MISS: layout chord not sent'
-    }
-    Start-Sleep -Milliseconds 1200
-}
-
-function Find-NavPane($root) {
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NavView')
-    return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-}
-
-function Get-NavPaneWidth($root) {
-    $nav = Find-NavPane $root
-    if ($null -eq $nav) { return 0 }
-    $w = $nav.Current.BoundingRectangle.Width
-    if ([double]::IsNaN($w)) { return 0 }
-    return [int]$w
-}
-
-function Get-HorizStripWidth($root) {
-    foreach ($listId in @('TabListView', 'TabList')) {
-        $listCond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $listId)
-        $list = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $listCond)
-        if ($null -eq $list) { continue }
-        $w = $list.Current.BoundingRectangle.Width
-        if (-not [double]::IsNaN($w) -and $w -gt 0) { return [int]$w }
-    }
-    return 0
-}
-
-function Get-LayoutMode($root) {
-    $navW = Get-NavPaneWidth $root
-    $tabW = Get-HorizStripWidth $root
-    $toggleCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PaneToggleButton')
-    $toggle = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $toggleCond)
-
-    # Collapsed vertical host stays in the tree; use geometry, not mere presence.
-    if ($tabW -gt 120) { return 'horizontal' }
-    if ($navW -ge 40 -and $null -ne $toggle) { return 'vertical' }
-    return 'unknown'
-}
-
-function Assert-LayoutMode($root, [string]$want) {
-    $mode = Get-LayoutMode $root
-    if ($mode -ne $want) {
-        throw "PRODUCT_FAIL: layout is '$mode', expected '$want' (navW=$(Get-NavPaneWidth $root) tabW=$(Get-HorizStripWidth $root))"
-    }
-}
-
-function Wait-VertStripReady([int64]$Hwnd64, [int]$expected) {
-    $dl = (Get-Date).AddSeconds(12)
-    $best = 0
-    while ((Get-Date) -lt $dl) {
-        $count = (Find-VertNavItems (Get-UiaRoot $Hwnd64)).Count
-        if ($count -gt $best) { $best = $count }
-        if ($count -ge $expected) { return $count }
-        Start-Sleep -Milliseconds 200
-    }
-    # MUXC often virtualizes: coordinate fallback still drives every tab index.
-    if ($best -lt [Math]::Max(5, $expected - 2)) {
-        throw "PRODUCT_FAIL: vertical nav items $best, expected $expected"
-    }
-    Write-Host "WARN vertical UIA items=$best expected=$expected (continuing with coordinate fallback)" -ForegroundColor Yellow
-    return $best
-}
-
-function Wait-LayoutMode([int64]$Hwnd64, [string]$want, [int]$seconds = 8) {
-    $dl = (Get-Date).AddSeconds($seconds)
-    while ((Get-Date) -lt $dl) {
-        $mode = Get-LayoutMode (Get-UiaRoot $Hwnd64)
-        if ($mode -eq $want) { return }
-        Start-Sleep -Milliseconds 120
-    }
-    Assert-LayoutMode (Get-UiaRoot $Hwnd64) $want
-}
-
-function Ensure-HorizontalLayout([int64]$Hwnd64, [uint32]$ProcId) {
-    if ((Get-LayoutMode (Get-UiaRoot $Hwnd64)) -eq 'horizontal') { return }
-
-    Toggle-Layout $Hwnd64 $ProcId
-    Wait-LayoutMode $Hwnd64 'horizontal' 8
-
-    if ((Get-LayoutMode (Get-UiaRoot $Hwnd64)) -eq 'horizontal') { return }
-
-    $root = Get-UiaRoot $Hwnd64
-    if ((Get-LayoutMode $root) -eq 'vertical') {
-        $nav = Find-NavPane $root
-        if ($null -ne $nav) {
-            $r = $nav.Current.BoundingRectangle
-            $x = [int]($r.X + 12)
-            $y = [int]($r.Y + $r.Height - 48)
-            [void][TcFz]::Click($ProcId, $x, $y, $true)
-            Start-Sleep -Milliseconds 450
-            $sw = Find-NameRetry (Get-UiaRoot $Hwnd64) 'Switch to horizontal tabs' 2500
-            if ($null -eq $sw) { throw 'HARVEST_MISS: Switch to horizontal tabs' }
-            Invoke-El $sw $ProcId 'Switch to horizontal tabs'
-            Start-Sleep -Milliseconds 1200
-        }
-    }
-
-    Wait-LayoutMode $Hwnd64 'horizontal' 8
-    $items = Get-HorizTabItems (Get-UiaRoot $Hwnd64)
-    if ($items.Count -lt $TabCount) {
-        throw "HARVEST_MISS: horizontal tabs $($items.Count), want $TabCount"
-    }
-}
-
-function Select-Tab($root, [uint32]$ProcId, [int]$index, [bool]$vertical) {
-    if ($vertical) { Select-VertTab $root $ProcId $index }
-    else { Select-HorizTab $root $ProcId $index }
-}
-
-function Collapse-VertSidebar($root, [uint32]$ProcId) {
-    $idCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PaneToggleButton')
-    $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $idCond)
-    if ($null -eq $el) { $el = Find-Name $root 'Toggle sidebar' }
-    if ($null -eq $el) { throw 'HARVEST_MISS: collapse PaneToggleButton' }
-    Invoke-El $el $ProcId 'Collapse sidebar'
-    Start-Sleep -Milliseconds 500
-}
-
-# Select each tab once; one strip crop shows active + all inactive siblings.
-function Shot-ActiveCycle(
-    [int64]$Hwnd64,
-    [uint32]$ProcId,
-    [bool]$vertical,
-    [string]$prefix,
-    [string[]]$labels,
-    [int]$cropW,
-    [int]$cropH
-) {
-    for ($i = 0; $i -lt $labels.Count; $i++) {
-        $root = Get-UiaRoot $Hwnd64
-        if ($vertical) { Assert-LayoutMode $root 'vertical' }
-        else { Assert-LayoutMode $root 'horizontal' }
-        Select-Tab $root $ProcId $i $vertical
-        Start-Sleep -Milliseconds 200
-        $tag = if ([string]::IsNullOrEmpty($labels[$i])) { 'None' } else { $labels[$i] }
-        $state = if ($vertical) { 'v' } else { 'h' }
-        Shot-StripCrop $Hwnd64 "${prefix}-${state}-a${i}-${tag}" $cropW $cropH
-    }
-}
-
-function Ensure-VerticalLayout([int64]$Hwnd64, [uint32]$ProcId) {
-    if ((Get-LayoutMode (Get-UiaRoot $Hwnd64)) -eq 'vertical') { return }
-
-    Toggle-Layout $Hwnd64 $ProcId
-    Wait-LayoutMode $Hwnd64 'vertical' 8
-    if ((Get-LayoutMode (Get-UiaRoot $Hwnd64)) -eq 'vertical') { return }
-
-    $root = Get-UiaRoot $Hwnd64
-    $tvCond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'TabViewControl')
-    $tv = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $tvCond)
-    if ($null -ne $tv) {
-        $r = $tv.Current.BoundingRectangle
-        $x = [int]($r.X + $r.Width - 180)
-        $y = [int]($r.Y + $r.Height - 8)
-        [void][TcFz]::Click($ProcId, $x, $y, $true)
-    } else {
-        $rc = [TcFz]::RectOf($Hwnd64)
-        if ($null -eq $rc) { throw 'HARVEST_MISS: window rect' }
-        [void][TcFz]::Click($ProcId, $rc.L + 520, $rc.T + 28, $true)
-    }
-    Start-Sleep -Milliseconds 450
-    $sw = Find-NameRetry (Get-UiaRoot $Hwnd64) 'Switch to vertical tabs' 2500
-    if ($null -eq $sw) {
-        Toggle-Layout $Hwnd64 $ProcId
-        Wait-LayoutMode $Hwnd64 'vertical' 8
-        if ((Get-LayoutMode (Get-UiaRoot $Hwnd64)) -eq 'vertical') { return }
-        throw 'HARVEST_MISS: Switch to vertical tabs'
-    }
-    Invoke-El $sw $ProcId 'Switch to vertical tabs'
-    Start-Sleep -Milliseconds 1200
-    Wait-LayoutMode $Hwnd64 'vertical' 8
-    Assert-LayoutMode (Get-UiaRoot $Hwnd64) 'vertical'
-}
 
 # Tab 0 stays default (None). Tabs 1..9 get every preset swatch.
 $AllPresets = @('Blue', 'Purple', 'Pink', 'Red', 'Orange', 'Yellow', 'Green', 'Teal', 'Graphite')
 $TabCount = 1 + $AllPresets.Count   # 10
+$Labels = @('') + $AllPresets
 
-$tempXdg = Join-Path $env:TEMP "wintty-fuzz-colors-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-@'
-windows-single-instance = true
-window-save-state = never
-windows-settings-ui = true
-vertical-tabs = false
-window-theme = wintty
-theme = Catppuccin Mocha
-no-color-override = strip
-'@ | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
+$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
+$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-$script:FatalWasProduct = $null
-$origXdg = $env:XDG_CONFIG_HOME
-$origTestConfig = $env:WINTTY_TEST_CONFIG
-$origNoColor = $env:NO_COLOR
-$proc = $null
+$script:Findings = [System.Collections.Generic.List[string]]::new()
+$harnessError = ''
+$session = $null
 $result = [ordered]@{
     tabCount = $TabCount
-    presets = $AllPresets
-    phases = @()
-    recolors = @()
+    presets  = $AllPresets
+    phases   = [System.Collections.Generic.List[object]]::new()
+    recolors = [System.Collections.Generic.List[object]]::new()
 }
-function Add-Phase([string]$name, [scriptblock]$body) {
-    try {
-        & $body
-        $script:result.phases += [ordered]@{ name = $name; ok = $true }
-        Write-Host "OK $name" -ForegroundColor Green
-    } catch {
-        $script:result.phases += [ordered]@{ name = $name; ok = $false; error = $_.Exception.Message }
-        throw
+
+function Shot-StripCrop($Session, [string]$Name, [int]$Width, [int]$Height) {
+    $rc = [SeamWin]::RectOf($Session.Hwnd64)
+    if ($null -eq $rc) { return }
+    $w = [Math]::Min($Width, $rc.W); $h = [Math]::Min($Height, $rc.Hh)
+    $bmp = New-Object System.Drawing.Bitmap $w, $h
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, [System.Drawing.Size]::new($w, $h))
+    $bmp.Save((Join-Path $OutDir "shots\$Name.png"))
+    $g.Dispose(); $bmp.Dispose()
+}
+
+# What the manager says each tab wears. The seam writes "color" only when a
+# tab has one, so an absent field is None.
+function Get-Colors($State) {
+    return @($State.tabs | ForEach-Object { if ($_.color) { [string]$_.color } else { '' } })
+}
+
+function Assert-Colors($State, [string[]]$Want, [string]$Where) {
+    $got = Get-Colors $State
+    if ($got.Count -ne $Want.Count) {
+        $script:Findings.Add("${Where}: $($got.Count) tabs, wanted $($Want.Count)")
+        return
+    }
+    for ($i = 0; $i -lt $Want.Count; $i++) {
+        if ($got[$i] -ne $Want[$i]) {
+            $w = if ($Want[$i]) { $Want[$i] } else { 'None' }
+            $g = if ($got[$i]) { $got[$i] } else { 'None' }
+            $script:Findings.Add("${Where}: tab $i wears $g, wanted $w")
+        }
     }
 }
-# Above the try, so the refusal message survives: with the gate inside, the
-# sweep in the finally would bind a null stamp to a mandatory [datetime] and
-# that binding error would replace it, taking the env restores with it.
-Assert-NoWintty -Context 'The tab-color fuzz'
-$script:WinttyStamp = Get-WinttyLaunchStamp
+
+# The strip's side of the claim, horizontal only (header-rect reads the
+# horizontal host). Two readings per tab, neither of them the model field the
+# tab-color op wrote:
+#   ink   - the foreground the strip's ink pass assigned the row: present on
+#           every tagged tab, absent on every None tab;
+#   paint - the row's dominant colour in a screen capture. Inactive tabs
+#           wearing different presets must be painted apart, inactive tabs
+#           wearing the same one alike, and None apart from every preset.
+function Get-DominantColor($Bitmap, $Rc, $Rect) {
+    $bins = @{}
+    $x0 = [Math]::Max(0, $Rect.x - $Rc.L); $y0 = [Math]::Max(0, $Rect.y - $Rc.T)
+    $x1 = [Math]::Min($Bitmap.Width, $x0 + $Rect.w); $y1 = [Math]::Min($Bitmap.Height, $y0 + $Rect.h)
+    for ($y = $y0; $y -lt $y1; $y += 2) {
+        for ($x = $x0; $x -lt $x1; $x += 2) {
+            $p = $Bitmap.GetPixel($x, $y)
+            $key = (($p.R -shr 3) -shl 10) -bor (($p.G -shr 3) -shl 5) -bor ($p.B -shr 3)
+            if (-not $bins.ContainsKey($key)) { $bins[$key] = [System.Collections.Generic.List[object]]::new() }
+            $bins[$key].Add($p)
+        }
+    }
+    if ($bins.Count -eq 0) { return $null }
+    $top = ($bins.GetEnumerator() | Sort-Object { $_.Value.Count } -Descending | Select-Object -First 1).Value
+    return @(
+        [int](($top | Measure-Object -Property R -Average).Average),
+        [int](($top | Measure-Object -Property G -Average).Average),
+        [int](($top | Measure-Object -Property B -Average).Average))
+}
+
+function Get-Distance($A, $B) {
+    return [Math]::Max([Math]::Abs($A[0] - $B[0]), [Math]::Max([Math]::Abs($A[1] - $B[1]), [Math]::Abs($A[2] - $B[2])))
+}
+
+function Assert-StripPaint($Session, [string[]]$Want, [string]$Where) {
+    $state = (Invoke-SeamCommand $Session @{ op = 'get-state' }).state
+    $active = [int]$state.active
+    $rects = @{}
+    for ($i = 0; $i -lt $Want.Count; $i++) {
+        $r = Invoke-SeamCommand $Session @{ op = 'header-rect'; index = $i; part = 'row' }
+        $hasInk = -not [string]::IsNullOrEmpty([string]$r.fg)
+        $tagged = -not [string]::IsNullOrEmpty($Want[$i])
+        if ($hasInk -ne $tagged) {
+            $script:Findings.Add("${Where}: the strip's ink pass gives tab $i $(if ($hasInk) { "ink $($r.fg)" } else { 'no ink' }) while it wears $(if ($tagged) { $Want[$i] } else { 'None' })")
+        }
+        $rects[$i] = $r
+    }
+
+    $rc = [SeamWin]::RectOf($Session.Hwnd64)
+    if ($null -eq $rc) { throw 'HARVEST_MISS: lost the window rect before the paint check' }
+
+    # The strip's visible lane, from its own list's UIA rect. With ten tabs
+    # the list can overflow, and a row scrolled out of the lane still has a
+    # rect; sampling it would read whatever sits there instead.
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Session.Hwnd64))
+    $lane = $null
+    foreach ($id in @('TabListView', 'TabList')) {
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $id)
+        $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($null -ne $el) { $lane = $el.Current.BoundingRectangle; break }
+    }
+    if ($null -eq $lane -or $lane.Width -le 0) { throw 'HARVEST_MISS: no tab list lane to bound the paint check' }
+    foreach ($i in @($rects.Keys)) {
+        $r = $rects[$i]
+        if ($r.x -lt $lane.X - 1 -or $r.y -lt $lane.Y - 1 -or
+            ($r.x + $r.w) -gt ($lane.X + $lane.Width + 1) -or ($r.y + $r.h) -gt ($lane.Y + $lane.Height + 1)) {
+            throw "HARVEST_MISS: ${Where}: tab $i's row lies outside the visible strip (overflow), so it cannot be sampled"
+        }
+        # Every sample must be of this window: topmost-placed is a request,
+        # not a guarantee, and a covered row would report the cover's colour.
+        $owner = [TcPoint]::RootAt([int]($r.x + $r.w / 2), [int]($r.y + $r.h / 2))
+        if ($owner -ne [int64]$Session.Hwnd64) {
+            throw "HARVEST_MISS: ${Where}: tab $i's row is covered by another window, so it cannot be sampled"
+        }
+    }
+    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
+    $g.Dispose()
+    try {
+        $paint = @{}
+        for ($i = 0; $i -lt $Want.Count; $i++) {
+            if ($i -eq $active) { continue }
+            $c = Get-DominantColor $bmp $rc $rects[$i]
+            if ($null -eq $c) { throw "HARVEST_MISS: tab $i's row has no pixels on screen" }
+            $paint[$i] = $c
+        }
+    } finally { $bmp.Dispose() }
+
+    $idx = @($paint.Keys | Sort-Object)
+    for ($a = 0; $a -lt $idx.Count; $a++) {
+        for ($b = $a + 1; $b -lt $idx.Count; $b++) {
+            $i = $idx[$a]; $j = $idx[$b]
+            $d = Get-Distance $paint[$i] $paint[$j]
+            $ni = if ($Want[$i]) { $Want[$i] } else { 'None' }
+            $nj = if ($Want[$j]) { $Want[$j] } else { 'None' }
+            if ($ni -eq $nj -and $d -gt 12) {
+                $script:Findings.Add("${Where}: tabs $i and $j both wear $ni but are painted $d apart")
+            }
+            elseif ($ni -ne $nj -and $d -lt 6) {
+                $script:Findings.Add("${Where}: tab $i ($ni) and tab $j ($nj) are painted alike (distance $d)")
+            }
+        }
+    }
+}
+
+# The vertical strip's own rows over UIA, as the original check read them.
+# MUXC can virtualize a few, so a small shortfall is a warning, not a finding.
+function Assert-VerticalItems([int64]$Hwnd64, [int]$Expected) {
+    $best = 0
+    $deadline = (Get-Date).AddSeconds(12)
+    do {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Hwnd64))
+        $navCond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NavView')
+        $nav = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $navCond)
+        $count = 0
+        if ($null -ne $nav) {
+            $itemCond = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::ListItem)
+            $count = @($nav.FindAll([System.Windows.Automation.TreeScope]::Descendants, $itemCond)).Count
+        }
+        if ($count -gt $best) { $best = $count }
+        if ($count -ge $Expected) { return }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+    if ($best -lt [Math]::Max(5, $Expected - 2)) {
+        $script:Findings.Add("the vertical strip shows $best tab items, expected $Expected")
+    } else {
+        Write-Host "WARN vertical UIA items=$best expected=$Expected (virtualized)" -ForegroundColor Yellow
+    }
+}
+
+function Assert-Layout($State, [bool]$Vertical, [string]$Where) {
+    if ([bool]$State.vertical -ne $Vertical) {
+        $want = if ($Vertical) { 'vertical' } else { 'horizontal' }
+        throw "PRODUCT_FAIL: ${Where}: the layout is not $want"
+    }
+}
+
+# Select each tab once; one strip crop per selection shows the active tab
+# and all its inactive siblings. The colours are asserted at every stop.
+function Invoke-ActiveCycle($Session, [bool]$Vertical, [string]$Prefix, [string[]]$Want) {
+    $cropW = if ($Vertical) { 280 } else { 620 }
+    $cropH = if ($Vertical) { 580 } else { 40 }
+    for ($i = 0; $i -lt $Want.Count; $i++) {
+        $r = Invoke-SeamCommand $Session @{ op = 'select'; index = $i }
+        Assert-Layout $r.state $Vertical "$Prefix select $i"
+        if ($r.state.active -ne $i) { $script:Findings.Add("$Prefix select ${i}: the active tab is $($r.state.active)") }
+        Assert-Colors $r.state $Want "$Prefix with tab $i active"
+        $tag = if ($Want[$i]) { $Want[$i] } else { 'None' }
+        $state = if ($Vertical) { 'v' } else { 'h' }
+        Shot-StripCrop $Session "$Prefix-$state-a$i-$tag" $cropW $cropH
+    }
+    if ($Vertical) { Assert-VerticalItems $Session.Hwnd64 $Want.Count }
+    else { Assert-StripPaint $Session $Want $Prefix }
+}
+
+function Switch-Layout($Session, [bool]$ToVertical) {
+    $r = Invoke-SeamCommand $Session @{ op = 'toggle-layout' }
+    Assert-Layout $r.state $ToVertical 'after toggle-layout'
+    if ($ToVertical -and $r.state.paneWidth -lt 120) {
+        # A collapsed sidebar hides the colour bands a person checks the
+        # crops for; the pane toggle is what the chevron dispatches.
+        $r = Invoke-SeamCommand $Session @{ op = 'toggle-sidebar' }
+    }
+    return $r
+}
+
+function Add-Phase([string]$Name, [scriptblock]$Body) {
+    $before = $script:Findings.Count
+    & $Body
+    $ok = $script:Findings.Count -eq $before
+    $result.phases.Add([ordered]@{ name = $Name; ok = $ok })
+    Write-Host ("{0} {1}" -f $(if ($ok) { 'OK  ' } else { 'FAIL' }), $Name)
+}
 
 try {
-    Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
-    $env:XDG_CONFIG_HOME = $tempXdg
-    $env:WINTTY_TEST_CONFIG = '1'
-    if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
-    $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
-    $pid32 = [uint32]$proc.Id
-    $main = Wait-Ready $proc
-    $hwnd64 = [int64]$main.Hwnd64
-    $script:MainHwnd64 = $hwnd64
-    [void][TcFz]::SetForegroundWindow([TcFz]::P($hwnd64))
-    Start-Sleep -Milliseconds 400
-
-    # Build tab labels array: index -> color name (empty string = None/default).
-    $labels = @('')
-    foreach ($c in $AllPresets) { $labels += $c }
+    Assert-NoWintty -Context 'The tab-color fuzz'
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    [SeamWin]::PlaceOnTop($session.Hwnd64)
+    Write-Host "hwnd=$($session.Hwnd64) pid=$($session.Proc.Id)"
 
     Add-Phase 'spawn-tabs' {
-        $root = Get-UiaRoot $hwnd64
-        for ($n = 1; $n -lt $TabCount; $n++) {
-            Invoke-NewTab (Get-UiaRoot $hwnd64) $pid32
+        $titles = @(0..($TabCount - 1) | ForEach-Object { "color-$_" })
+        $r = Invoke-SeamCommand $session @{ op = 'seed-tabs'; count = $TabCount; titles = $titles }
+        if (@($r.state.tabs).Count -ne $TabCount) {
+            throw "HARVEST_MISS: seed left $(@($r.state.tabs).Count) tabs, wanted $TabCount"
         }
-        Start-Sleep -Milliseconds 700
-        $tabs = Get-HorizTabItems (Get-UiaRoot $hwnd64)
-        if ($tabs.Count -ne $TabCount) {
-            throw "HARVEST_MISS: expected $TabCount tabs, have $($tabs.Count)"
-        }
-        Shot-StripCrop $hwnd64 'h-initial-all-none' 620 40
+        Assert-Layout $r.state $false 'after seeding'
+        Assert-Colors $r.state (@('') * $TabCount) 'fresh tabs'
+        Assert-StripPaint $session (@('') * $TabCount) 'fresh tabs'
+        Shot-StripCrop $session 'h-initial-all-none' 620 40
     }
 
     Add-Phase 'assign-all-presets' {
-        $root = Get-UiaRoot $hwnd64
         for ($i = 1; $i -lt $TabCount; $i++) {
-            Set-TabColor $root $pid32 $hwnd64 $i $AllPresets[$i - 1] $false
-            $root = Get-UiaRoot $hwnd64
+            $r = Invoke-SeamCommand $session @{ op = 'tab-color'; index = $i; color = $AllPresets[$i - 1] }
         }
+        Assert-Colors $r.state $Labels 'after assigning every preset'
+        Assert-StripPaint $session $Labels 'after assigning every preset'
     }
 
     Add-Phase 'horiz-active-inactive-cycle' {
-        Assert-LayoutMode (Get-UiaRoot $hwnd64) 'horizontal'
-        Shot-ActiveCycle $hwnd64 $pid32 $false 'horiz' $labels 620 40
+        Invoke-ActiveCycle $session $false 'horiz' $Labels
     }
 
     Add-Phase 'switch-to-vertical-preserve' {
-        Assert-LayoutMode (Get-UiaRoot $hwnd64) 'horizontal'
-        Select-HorizTab (Get-UiaRoot $hwnd64) $pid32 3
-        Shot-StripCrop $hwnd64 'h-before-switch-a3-Pink' 620 40
-        Ensure-VerticalLayout $hwnd64 $pid32
-        $root = Get-UiaRoot $hwnd64
-        Assert-LayoutMode $root 'vertical'
-        Expand-VertSidebar $root $pid32
-        $null = Wait-VertStripReady $hwnd64 $TabCount
-        Shot $hwnd64 'v-after-switch-full'
+        [void](Invoke-SeamCommand $session @{ op = 'select'; index = 3 })
+        Shot-StripCrop $session 'h-before-switch-a3-Pink' 620 40
+        $r = Switch-Layout $session $true
+        Assert-Colors $r.state $Labels 'after switching to vertical'
     }
 
     Add-Phase 'vert-same-colors-as-horiz' {
-        Assert-LayoutMode (Get-UiaRoot $hwnd64) 'vertical'
-        # Same label set as horizontal -- parity check after layout switch.
-        Shot-ActiveCycle $hwnd64 $pid32 $true 'parity' $labels 280 580
+        Invoke-ActiveCycle $session $true 'parity' $Labels
     }
 
     Add-Phase 'switch-back-horizontal-preserve' {
-        Ensure-HorizontalLayout $hwnd64 $pid32
-        Assert-LayoutMode (Get-UiaRoot $hwnd64) 'horizontal'
-        Shot-ActiveCycle $hwnd64 $pid32 $false 'return' $labels 620 40
+        $r = Switch-Layout $session $false
+        Assert-Colors $r.state $Labels 'after switching back to horizontal'
+        Invoke-ActiveCycle $session $false 'return' $Labels
     }
 
+    $labelsAfter = @('', 'Teal', 'Orange', 'Pink', 'Pink', 'Orange', '', 'Green', 'Teal', 'Green')
     Add-Phase 'recolor-existing-tabs' {
         $changes = @(
             @{ i = 1; from = 'Blue';     to = 'Teal' },
@@ -697,84 +348,49 @@ try {
             @{ i = 6; from = 'Yellow';   to = 'None' },
             @{ i = 9; from = 'Graphite'; to = 'Green' }
         )
-        $root = Get-UiaRoot $hwnd64
         foreach ($ch in $changes) {
-            Set-TabColor $root $pid32 $hwnd64 $ch.i $ch.to $false
-            $root = Get-UiaRoot $hwnd64
-            $result.recolors += [ordered]@{
-                tab = $ch.i; from = $ch.from; to = $ch.to; ok = $true
-            }
+            $r = Invoke-SeamCommand $session @{ op = 'tab-color'; index = $ch.i; color = $ch.to }
+            $got = (Get-Colors $r.state)[$ch.i]
+            $want = if ($ch.to -eq 'None') { '' } else { $ch.to }
+            $result.recolors.Add([ordered]@{ tab = $ch.i; from = $ch.from; to = $ch.to; ok = ($got -eq $want) })
         }
-        $script:labelsAfter = @(
-            '',       # 0 default None
-            'Teal',   # 1 Blue->Teal
-            'Orange', # 2 Purple->Orange
-            'Pink',   # 3 unchanged
-            'Pink',   # 4 Red->Pink
-            'Orange', # 5 unchanged
-            '',       # 6 Yellow->None
-            'Green',  # 7 unchanged
-            'Teal',   # 8 unchanged
-            'Green'   # 9 Graphite->Green
-        )
-        Shot-ActiveCycle $hwnd64 $pid32 $false 'recolor' $script:labelsAfter 620 40
+        Invoke-ActiveCycle $session $false 'recolor' $labelsAfter
     }
 
     Add-Phase 'recolor-vert-parity' {
-        Ensure-VerticalLayout $hwnd64 $pid32
-        Expand-VertSidebar (Get-UiaRoot $hwnd64) $pid32
-        Assert-LayoutMode (Get-UiaRoot $hwnd64) 'vertical'
-        Shot-ActiveCycle $hwnd64 $pid32 $true 'recolor' $script:labelsAfter 280 580
+        [void](Switch-Layout $session $true)
+        Invoke-ActiveCycle $session $true 'recolor' $labelsAfter
     }
 
     Add-Phase 'recolor-horiz-return' {
-        Ensure-HorizontalLayout $hwnd64 $pid32
-        Assert-LayoutMode (Get-UiaRoot $hwnd64) 'horizontal'
-        Shot-ActiveCycle $hwnd64 $pid32 $false 'recolor-return' $script:labelsAfter 620 40
+        [void](Switch-Layout $session $false)
+        Invoke-ActiveCycle $session $false 'recolor-return' $labelsAfter
     }
 
-    $result.phases += [ordered]@{ name = 'complete'; ok = $true }
+    if ($session.Proc.HasExited) {
+        throw "APP_EXIT: the app exited during the run (code $($session.Proc.ExitCode))"
+    }
 }
 catch {
-    # Record and fall through: rethrowing here skipped result.json and the
-    # exit-2 contract entirely, so a failed run reported an unhandled
-    # exception and left no artifact -- exactly when one is most useful.
-    if ($null -ne $proc -and -not $proc.HasExited) {
-        try { Shot $hwnd64 'fail-state' } catch { }
-    }
-    $result.phases += [ordered]@{ name = 'fatal'; ok = $false; error = "$_" }
-    # Which kind of failure it was decides the exit code. A HARVEST_MISS - a
-    # menu item the script could not find, a click the window refused - is a
-    # run that judged nothing, and filing it as a product finding means it is
-    # never retried and shows up as a defect in the build.
-    $script:FatalWasProduct = ("$_" -like 'PRODUCT_FAIL*')
+    $msg = "$($_.Exception.Message)"
+    if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { $script:Findings.Add($msg) }
+    else { $harnessError = $msg }
+    Write-Host "ERROR: $msg" -ForegroundColor Red
 }
 finally {
-    # Only this run's processes. `Get-Process Wintty | Stop-Process` also
-    # kills the developer's real session on the same desktop. Kill the tree:
-    # the shell runs as a child and outlives a kill on the parent alone.
-    if ($null -ne $proc -and -not $proc.HasExited) {
-        try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
-    }
-    if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    if ($null -ne $origTestConfig) { $env:WINTTY_TEST_CONFIG = $origTestConfig }
-    else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
-    if ($null -ne $origNoColor) { $env:NO_COLOR = $origNoColor }
-    else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
-    if ($null -ne $tempXdg -and (Test-Path $tempXdg)) {
-        Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
-    }
-    # After the env restores, not before: a throw in the sweep would otherwise
-    # abandon them and leave the shell pointed at a temp profile.
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
+    if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir 'result.json')
-$fail = @($result.phases | Where-Object { -not $_.ok })
+if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    $script:Findings.Add('crash.log grew during the run')
+}
+
+$result.actuation = 'seam (WINTTY_TEST_SEAM=<session token>); no synthesized OS input'
+$result.findings = $script:Findings
+$result.harness = $harnessError
+$result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-if ($fail.Count -eq 0) { exit 0 }
-# A phase that failed without a fatal error is a real assertion failing; a
-# fatal PRODUCT_FAIL is too. Anything else got in the way of the run.
-if ($null -eq $script:FatalWasProduct -or $script:FatalWasProduct) { exit 2 }
-exit 1
+
+if ($script:Findings.Count -gt 0) { exit 2 }
+if ($harnessError) { exit 1 }
+exit 0

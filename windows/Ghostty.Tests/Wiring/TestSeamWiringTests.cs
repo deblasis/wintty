@@ -733,4 +733,133 @@ public class TestSeamWiringTests
         // And the op it reports under is the one the request named.
         Assert.Equal("opName", seam.Method("ExecuteAsync").Call("RunOnUiThreadAsync").Arg(1));
     }
+
+    /// <summary>
+    /// The menu, scroll, overview-key and search-key ops stand in for a
+    /// right-click, a wheel and two keys, so what they must not do is grow a
+    /// second implementation of any of them, and nothing they add may reach a
+    /// shipping build. The pane menu runs the right-click's own press and
+    /// release halves, capture gate and armed flag included, and the pointer
+    /// handlers call the same two halves; the tab menu is the item's own
+    /// ContextFlyout shown at the item; dismiss closes flyouts and nothing
+    /// else; scroll is the wheel handler's discrete notch into the same native
+    /// call; the two key ops run the one handler the control's KeyDown uses,
+    /// and report whether focus sits where a real key would land.
+    /// </summary>
+    [Fact]
+    public void TheMenuScrollAndKeyOps_TakeTheProductsOwnPaths()
+    {
+        var seam = ShellSource.Load("Testing.TestSeam.cs");
+        var menu = seam.Case("ExecuteOnUiThreadAsync", "\"menu\"");
+        AssertInsideTheBuildGate(seam.Root, menu.Span, "the menu op");
+        Assert.Single(menu.Calls(
+            "manager.ActiveTab.PaneHost.ActiveLeaf.Terminal().TestSeamRightClick"));
+        Assert.Single(menu.Calls("host.TestSeamOpenTabMenu"));
+        Assert.Single(menu.Calls("OpenFlyoutPopups"));
+
+        // Dismiss reaches only popups whose presenter is a menu's or a
+        // flyout's, so it cannot close the palette, the switcher or the
+        // overview. Compared as whole names: a substring test for
+        // "FlyoutPresenter" is satisfied by MenuFlyoutPresenter alone.
+        Assert.Single(seam.Method("OpenFlyoutPopups").Calls("FlyoutPresenterOf"));
+        var presenterTypes = seam.Method("FlyoutPresenterOf").DescendantNodes()
+            .OfType<BinaryPatternSyntax>()
+            .SelectMany(p => new[] { p.Left.ToString(), p.Right.ToString() })
+            .ToList();
+        Assert.Equal(
+            new[]
+            {
+                "Microsoft.UI.Xaml.Controls.MenuFlyoutPresenter",
+                "Microsoft.UI.Xaml.Controls.FlyoutPresenter",
+            },
+            presenterTypes);
+
+        // The right-click: the seam calls the two halves in order, and the
+        // pointer handlers call exactly the same two, so a broken capture
+        // gate or flag breaks both.
+        var terminal = ShellSource.Load("Controls.TerminalControl.xaml.cs");
+        var rightClick = terminal.Method("TestSeamRightClick");
+        Assert.Single(rightClick.Calls("BeginRightClickMenu"));
+        Assert.Single(rightClick.Calls("CompleteRightClickMenu"));
+        Assert.Single(terminal.Method("OnPointerPressed").Calls("BeginRightClickMenu"));
+        Assert.Single(terminal.Method("OnPointerReleased").Calls("CompleteRightClickMenu"));
+        Assert.Contains("NativeMethods.SurfaceMouseCaptured",
+            terminal.Method("BeginRightClickMenu").ToString());
+        var raise = terminal.Method("CompleteRightClickMenu").Call("ContextMenuRequested?.Invoke");
+        Assert.Equal("position", raise.Arg(1));
+        // Nothing but the release half raises the pointer menu.
+        Assert.Equal(2, terminal.Root.Calls("ContextMenuRequested?.Invoke").Count);
+
+        var tabs = ShellSource.Load("Tabs.TabHost.xaml.cs");
+        var openTab = tabs.Method("TestSeamOpenTabMenu");
+        var show = openTab.Call("flyout.ShowAt");
+        Assert.Equal("item", Assert.Single(show.ArgumentList.Arguments).ToString());
+        Assert.Contains("item.ContextFlyout", openTab.ToString());
+
+        var scroll = seam.Case("ExecuteOnUiThreadAsync", "\"scroll\"");
+        AssertInsideTheBuildGate(seam.Root, scroll.Span, "the scroll op");
+        Assert.Single(scroll.Calls("terminal.TestSeamScroll"));
+        var wheel = terminal.Method("TestSeamScroll").Call("NativeMethods.SurfaceMouseScroll");
+        Assert.Equal("0.0", wheel.Arg(1));
+        Assert.Equal("notches", wheel.Arg(2));
+        Assert.Equal("0", wheel.Arg(3));
+        // Same native entry the pointer handler feeds.
+        Assert.Single(terminal.Method("OnPointerWheelChanged")
+            .Calls("NativeMethods.SurfaceMouseScroll"));
+
+        // The overview's keys go through the one handler its KeyDown uses,
+        // and the op reads focus before pressing.
+        var overviewKey = seam.Case("ExecuteOnUiThreadAsync", "\"overview-key\"");
+        AssertInsideTheBuildGate(seam.Root, overviewKey.Span, "the overview-key op");
+        Assert.Single(overviewKey.Calls("window.TestSeamOverviewUI.TestSeamKey"));
+        Assert.Contains("window.TestSeamOverviewUI.TestSeamHoldsFocus", overviewKey.ToString());
+        var overview = ShellSource.Load("Tabs.TabOverviewControl.xaml.cs");
+        Assert.Equal("key", overview.Method("TestSeamKey").Call("HandleKey").Arg(0));
+        Assert.Equal("e.Key", overview.Method("OnKeyDown").Call("HandleKey").Arg(0));
+
+        // The needle box likewise.
+        var searchKey = seam.Case("ExecuteOnUiThreadAsync", "\"search-key\"");
+        AssertInsideTheBuildGate(seam.Root, searchKey.Span, "the search-key op");
+        Assert.Single(searchKey.Calls("bar.TestSeamNeedleKey"));
+        Assert.Contains("bar.TestSeamNeedleFocused", searchKey.ToString());
+        var searchBar = ShellSource.Load("Controls.Search.SearchBarControl.xaml.cs");
+        Assert.Single(searchBar.Method("TestSeamNeedleKey").Calls("HandleNeedleKey"));
+        var fromKeyDown = searchBar.Method("OnNeedleKeyDown").Call("HandleNeedleKey");
+        Assert.Equal("e.Key", fromKeyDown.Arg(0));
+        Assert.Equal("shift", fromKeyDown.Arg(1));
+
+        // Every product-side helper these ops use is compiled out of a
+        // shipping build; the refactored handlers they share stay in.
+        var frame = ShellSource.Load("MainWindow.FrameChords.cs");
+        foreach (var (file, member) in new (ShellSource, string)[]
+        {
+            (terminal, "TestSeamRightClick"), (terminal, "TestSeamScroll"),
+            (terminal, "TestSeamViewport"), (terminal, "TestSeamSearchBar"),
+            (tabs, "TestSeamOpenTabMenu"),
+            (overview, "TestSeamKey"), (overview, "TestSeamHoldsFocus"),
+            (searchBar, "TestSeamNeedleKey"), (searchBar, "TestSeamNeedleFocused"),
+            (frame, "TestSeamOverviewOpen"), (frame, "TestSeamOverviewUI"),
+        })
+        {
+            AssertInsideTheBuildGate(file.Root, Member(file, member).Span, member);
+        }
+        foreach (var (file, member) in new (ShellSource, string)[]
+        {
+            (terminal, "BeginRightClickMenu"), (terminal, "CompleteRightClickMenu"),
+            (overview, "HandleKey"), (searchBar, "HandleNeedleKey"),
+        })
+        {
+            Assert.DoesNotContain("#if", Member(file, member).GetLeadingTrivia().ToFullString());
+        }
+    }
+
+    /// <summary>The one method or property with this name in the file.</summary>
+    private static MemberDeclarationSyntax Member(ShellSource file, string name)
+        => Assert.Single(file.Root.DescendantNodes().OfType<MemberDeclarationSyntax>(),
+            m => m switch
+            {
+                MethodDeclarationSyntax method => method.Identifier.ValueText == name,
+                PropertyDeclarationSyntax property => property.Identifier.ValueText == name,
+                _ => false,
+            });
 }

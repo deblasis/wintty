@@ -1,353 +1,165 @@
 #requires -Version 7
-# Mouse-first Wintty fuzz.
-#
-# Hard rules (the last harness clicked screen 18,18 and activated Claude):
-#   - Never SendInput keyboard. Never BringWindowToTop / SetForegroundWindow.
-#   - Rects only via C# GetWindowRect (PowerShell [ref] RECT lies after one call).
-#   - mouse_event only after WindowFromPoint at that pixel belongs to Wintty's pid.
-#   - If the pixel is Claude/Cursor/splash: refuse, do not move the cursor.
+<#
+    Liveness probe: walk the everyday chrome gestures once and check the app
+    survived them and crash.log did not grow.
+
+    Seam-actuated: the harness synthesizes no OS input and never takes the
+    foreground, so it can run beside someone using the machine. Each gesture
+    the old click stream made goes through the seam op that drives the same
+    handler:
+
+      plus (x2)         the New tab button, UIA Invoke
+      sidebar chevron   toggle-sidebar                     (vertical only)
+      tab click         select
+      grid right-click  menu{pane} (the right-click's press and release
+                        halves), then menu{dismiss}
+      tab right-click   menu{tab}, then menu{dismiss}      (horizontal only)
+      wheel             scroll
+      resize            MoveWindow on the app's own window (not input)
+
+    Two steps are gone rather than moved. The app-icon click opened the
+    Win32 system menu, which only real input reaches. The typed text was
+    posted WM_CHAR, which never reaches Wintty (windows/scripts/README.md,
+    "Driving input"), so it exercised nothing.
+
+    New tab is also gated now: two presses must leave two more tabs.
+
+    Exits 0 clean, 2 findings, 1 could-not-run.
+#>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
-. (Join-Path $PSScriptRoot 'lib/test-config.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
-# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
-# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
-# not run" - which the suite retries and then reports as an area nothing is
-# known about. Every finally below still runs: exit from a trap unwinds
-# through them, and `break` rethrows anything that is not a product failure so
-# a genuine harness failure still leaves with 1.
-trap {
-    if ("$_" -like 'PRODUCT_FAIL*') {
-        Write-Host "$_" -ForegroundColor Red
-        exit 2
-    }
-    break
-}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
-
 Add-Type -AssemblyName System.Drawing
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
-public static class Mz {
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-    public const uint MOUSEEVENTF_WHEEL = 0x0800;
-    public const uint WM_CHAR = 0x0102;
-    public const uint GA_ROOT = 2;
-
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hh, bool r);
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-
-    public class WinRect { public int L, T, R, B; public int W { get { return R - L; } } public int Hh { get { return B - T; } } }
-    public class Hit {
-        public bool Ok;
-        public string Why;
-        public int X, Y;
-        public uint HitPid;
-        public string HitClass;
-    }
-
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd);
-        RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L = r.L, T = r.T, R = r.R, B = r.B };
-        if (wr.W < 80 || wr.Hh < 80) return null;
-        return wr;
-    }
-
-    public static string ClassOf(IntPtr h) {
-        var sb = new StringBuilder(256);
-        GetClassName(h, sb, 256);
-        return sb.ToString();
-    }
-
-    public static uint PidOf(IntPtr h) {
-        uint pid;
-        GetWindowThreadProcessId(h, out pid);
-        return pid;
-    }
-
-    static Hit Miss(string why, int x, int y, uint pid, string cls) {
-        return new Hit { Ok = false, Why = why, X = x, Y = y, HitPid = pid, HitClass = cls };
-    }
-
-    // Screen pixel must belong to pid. No click, no cursor move, on miss.
-    public static Hit Probe(long hwnd, uint pid, int dx, int dy) {
-        var root = P(hwnd);
-        if (!IsWindow(root)) return Miss("dead hwnd", 0, 0, 0, "");
-        var rc = RectOf(hwnd);
-        if (rc == null) return Miss("bad rect", 0, 0, 0, "");
-        if (dx < 4 || dy < 4 || dx > rc.W - 4 || dy > rc.Hh - 4)
-            return Miss("delta outside hwnd", rc.L + dx, rc.T + dy, 0, "");
-        int x = rc.L + dx, y = rc.T + dy;
-        var hit = WindowFromPoint(new POINT { X = x, Y = y });
-        uint hitPid = PidOf(hit);
-        string cls = ClassOf(hit);
-        if (cls == "WinttySplash") return Miss("splash still covering pixel", x, y, hitPid, cls);
-        if (hitPid != pid) return Miss("WindowFromPoint is not Wintty", x, y, hitPid, cls);
-        return new Hit { Ok = true, X = x, Y = y, HitPid = hitPid, HitClass = cls };
-    }
-
-    public static Hit Click(long hwnd, uint pid, int dx, int dy, bool right) {
-        var p = Probe(hwnd, pid, dx, dy);
-        if (!p.Ok) return p;
-        if (!SetCursorPos(p.X, p.Y)) return Miss("SetCursorPos failed", p.X, p.Y, p.HitPid, p.HitClass);
-        Thread.Sleep(40);
-        // Re-check after the cursor move: another window may have popped.
-        var again = Probe(hwnd, pid, dx, dy);
-        if (!again.Ok) return again;
-        if (right) {
-            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, UIntPtr.Zero);
-        } else {
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-        }
-        Thread.Sleep(200);
-        return again;
-    }
-
-    public static Hit WheelAt(long hwnd, uint pid, int dx, int dy, int notches) {
-        var p = Probe(hwnd, pid, dx, dy);
-        if (!p.Ok) return p;
-        if (!SetCursorPos(p.X, p.Y)) return Miss("SetCursorPos failed", p.X, p.Y, p.HitPid, p.HitClass);
-        Thread.Sleep(40);
-        p = Probe(hwnd, pid, dx, dy);
-        if (!p.Ok) return p;
-        for (int i = 0; i < notches; i++) {
-            mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)(-120)), UIntPtr.Zero);
-            Thread.Sleep(40);
-        }
-        return p;
-    }
-}
+$Config = @'
+window-save-state = never
 '@
-
-function Get-Main([int]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [Mz+EnumProc]{
-        param($h,$lp)
-        [uint32]$o=0; [void][Mz]::GetWindowThreadProcessId($h,[ref]$o)
-        if ($o -ne $ProcId -or -not [Mz]::IsWindowVisible($h)) { return $true }
-        $c = New-Object System.Text.StringBuilder 256
-        $t = New-Object System.Text.StringBuilder 512
-        [void][Mz]::GetClassName($h,$c,256); [void][Mz]::GetWindowText($h,$t,512)
-        if ($c.ToString() -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [Mz]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{
-            Hwnd64=$hwnd64; Title=$t.ToString()
-            Area=($rc.W * $rc.Hh)
-        })
-        return $true
-    }
-    [void][Mz]::EnumWindows($cb,[IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending | Select-Object -First 1
-}
-
-function Wait-Main($proc, $sec) {
-    $dl = (Get-Date).AddSeconds($sec)
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL startup exit=$($proc.ExitCode)" }
-        $m = Get-Main $proc.Id
-        if ($m) { return $m }
-    }
-    throw "HARVEST_MISS: no WinUI hwnd"
-}
-
-function Splash-Visible([int]$ProcId) {
-    $script:splashSeen = $false
-    $cb = [Mz+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner = 0
-        [void][Mz]::GetWindowThreadProcessId($hwnd, [ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        $cls = New-Object System.Text.StringBuilder 256
-        [void][Mz]::GetClassName($hwnd, $cls, 256)
-        if ($cls.ToString() -eq 'WinttySplash' -and [Mz]::IsWindowVisible($hwnd)) {
-            $script:splashSeen = $true
-        }
-        return $true
-    }
-    [void][Mz]::EnumWindows($cb, [IntPtr]::Zero)
-    return $script:splashSeen
-}
-
-function Wait-SplashDown($proc) {
-    $dl = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $dl) {
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL during splash exit=$($proc.ExitCode)" }
-        if (Splash-Visible $proc.Id) { Start-Sleep -Milliseconds 200; continue }
-        Start-Sleep -Milliseconds 900
-        if (-not (Splash-Visible $proc.Id)) { return }
-    }
-    throw "HARVEST_MISS: splash never dropped"
-}
-
-function Shot([int64]$Hwnd64, [string]$name) {
-    $rc = [Mz]::RectOf($Hwnd64)
-    if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
-    Write-Host "shot $name $($rc.W)x$($rc.Hh) @ $($rc.L),$($rc.T)"
-    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
-    $p = Join-Path $OutDir "shots\$name.png"
-    $bmp.Save($p); $g.Dispose(); $bmp.Dispose()
-    return $p
-}
-
-function Invoke-WinttyClick([int64]$Hwnd64, [uint32]$ProcId, [int]$dx, [int]$dy, [string]$what, [switch]$Right) {
-    $hit = [Mz]::Click($Hwnd64, $ProcId, $dx, $dy, [bool]$Right)
-    $tag = if ($Right) { 'right' } else { 'left' }
-    if (-not $hit.Ok) {
-        throw "HARVEST_MISS: $what $tag click refused: $($hit.Why) at $($hit.X),$($hit.Y) pid=$($hit.HitPid) class=$($hit.HitClass)"
-    }
-    Write-Host "click $what $tag $($hit.X),$($hit.Y) hit=$($hit.HitClass)"
-}
-
-function Post-Text([int64]$Hwnd64, [string]$text) {
-    $root = [Mz]::P($Hwnd64)
-    $targets = [System.Collections.Generic.List[IntPtr]]::new()
-    $targets.Add($root)
-    $cb = [Mz+EnumProc]{ param($ch,$lp) $targets.Add($ch); return $true }
-    [void][Mz]::EnumChildWindows($root, $cb, [IntPtr]::Zero)
-    foreach ($ch in $text.ToCharArray()) {
-        $wp = [IntPtr][uint16][char]$ch
-        foreach ($t in $targets) { [void][Mz]::PostMessage($t, [Mz]::WM_CHAR, $wp, [IntPtr]::Zero) }
-        Start-Sleep -Milliseconds 12
-    }
-}
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
-Start-Sleep -Milliseconds 400
-# A per-run random temp config root with the WINTTY_TEST_CONFIG guard armed
-# for the child. This harness used to launch against the user's real config
-# (reads and writes both). Enter without a paired Exit is deliberate: the
-# script process exits and takes the env with it, and the helper's sweep
-# reaps the staged root.
-$script:TestConfig = Enter-WinttyTestConfig
-$proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
-$pid32 = [uint32]$proc.Id
-Start-Sleep -Seconds 3
-$main = Wait-Main $proc 40
-Wait-SplashDown $proc
-$main = Get-Main $proc.Id
-if (-not $main) { throw "HARVEST_MISS: WinUI hwnd gone after splash" }
-$hwnd64 = [int64]$main.Hwnd64
-Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title) isWindow=$([Mz]::IsWindow([Mz]::P($hwnd64)))"
-Shot $hwnd64 '00-launch' | Out-Null
-$proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL after launch" }
+$script:Findings = [System.Collections.Generic.List[string]]::new()
+$script:Steps = [System.Collections.Generic.List[string]]::new()
+$harnessError = ''
+$session = $null
 
-$rc = [Mz]::RectOf($hwnd64)
-if ($null -eq $rc) { throw "HARVEST_MISS: lost rect after launch shot" }
-$H = $rc.Hh
+function Shot($Session, [string]$Name) {
+    $rc = [SeamWin]::RectOf($Session.Hwnd64)
+    if ($null -eq $rc) { return }
+    $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
+    $bmp.Save((Join-Path $OutDir "shots\$Name.png"))
+    $g.Dispose(); $bmp.Dispose()
+}
 
-# Coords from the verified 00-launch shot: icon ~18,18; chevron ~20,80;
-# tab ~20,140; + ~H-80; profile chevron ~H-30; grid interior ~320,220.
-Invoke-WinttyClick $hwnd64 $pid32 18 18 'app-icon'
-Shot $hwnd64 '00b-app-menu' | Out-Null
-Invoke-WinttyClick $hwnd64 $pid32 320 220 'grid-dismiss'
-Shot $hwnd64 '00c-app-menu-dismiss' | Out-Null
+function Step($Session, [string]$Name, [hashtable]$Command) {
+    $r = Invoke-SeamCommand $Session $Command
+    $script:Steps.Add($Name)
+    Shot $Session $Name
+    return $r
+}
 
-Invoke-WinttyClick $hwnd64 $pid32 20 ($H - 80) 'plus'
-Shot $hwnd64 '01-click-plus' | Out-Null
-$proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL after plus" }
+# The strip's "+" button, the control the old click landed on, invoked over
+# UIA. Both hosts build one and the hidden host stays in the tree, so only an
+# on-screen button counts.
+function New-TabByButton($Session, [string]$Name) {
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'New tab')
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Session.Hwnd64))
+    $button = $null
+    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+        if (-not $el.Current.IsOffscreen) { $button = $el; break }
+    }
+    if ($null -eq $button) { throw 'HARVEST_MISS: no on-screen New tab button' }
+    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 600
+    return Step $Session $Name @{ op = 'get-state' }
+}
 
-Invoke-WinttyClick $hwnd64 $pid32 20 ($H - 80) 'plus-2'
-Shot $hwnd64 '02-click-plus-2' | Out-Null
+try {
+    Assert-NoWintty -Context 'The probe harness'
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    Write-Host "hwnd=$($session.Hwnd64) pid=$($session.Proc.Id)"
+    [SeamWin]::PlaceOnTop($session.Hwnd64)
+    Shot $session '00-launch'
 
-Invoke-WinttyClick $hwnd64 $pid32 20 80 'chevron'
-Shot $hwnd64 '03-click-chevron' | Out-Null
+    $start = Invoke-SeamCommand $session @{ op = 'get-state' }
+    $tabsBefore = @($start.state.tabs).Count
 
-Invoke-WinttyClick $hwnd64 $pid32 20 140 'tab'
-Shot $hwnd64 '04-click-tab' | Out-Null
+    [void](New-TabByButton $session '01-new-tab')
+    $afterPlus = New-TabByButton $session '02-new-tab-2'
+    $tabsAfterPlus = @($afterPlus.state.tabs).Count
+    if ($tabsAfterPlus -ne $tabsBefore + 2) {
+        $script:Findings.Add("two New tab clicks took the tab count from $tabsBefore to $tabsAfterPlus")
+    }
 
-Invoke-WinttyClick $hwnd64 $pid32 20 ($H - 30) 'profile-chevron'
-Shot $hwnd64 '05-profile-flyout' | Out-Null
+    if ($afterPlus.state.vertical) {
+        [void](Step $session '03-sidebar-toggle' @{ op = 'toggle-sidebar' })
+        [void](Step $session '03b-sidebar-back' @{ op = 'toggle-sidebar' })
+    }
 
-Invoke-WinttyClick $hwnd64 $pid32 320 220 'grid-dismiss-2'
-Shot $hwnd64 '06-dismiss' | Out-Null
+    [void](Step $session '04-select-tab' @{ op = 'select'; index = 0 })
 
-Invoke-WinttyClick $hwnd64 $pid32 400 280 'grid-context' -Right
-Shot $hwnd64 '07-context-grid' | Out-Null
-Invoke-WinttyClick $hwnd64 $pid32 320 220 'grid-dismiss-3'
-Shot $hwnd64 '08-context-dismiss' | Out-Null
+    $pane = Step $session '05-pane-menu' @{ op = 'menu'; target = 'pane' }
+    if (@($pane.menus).Count -eq 0) { $script:Findings.Add('the pane context menu did not open') }
+    [void](Step $session '06-pane-menu-dismiss' @{ op = 'menu'; target = 'dismiss' })
 
-Invoke-WinttyClick $hwnd64 $pid32 20 140 'tab-context' -Right
-Shot $hwnd64 '09-context-tab' | Out-Null
-Invoke-WinttyClick $hwnd64 $pid32 320 220 'grid-dismiss-4'
+    if (-not $afterPlus.state.vertical) {
+        $tab = Step $session '07-tab-menu' @{ op = 'menu'; target = 'tab'; index = 0 }
+        if (@($tab.menus).Count -eq 0) { $script:Findings.Add('the tab context menu did not open') }
+        [void](Step $session '08-tab-menu-dismiss' @{ op = 'menu'; target = 'dismiss' })
+    }
 
-$wheel = [Mz]::WheelAt($hwnd64, $pid32, 400, 300, 6)
-if (-not $wheel.Ok) { throw "HARVEST_MISS: wheel refused: $($wheel.Why) class=$($wheel.HitClass)" }
-Shot $hwnd64 '10-wheel' | Out-Null
+    [void](Step $session '09-wheel' @{ op = 'scroll'; notches = -6 })
 
-$rc = [Mz]::RectOf($hwnd64)
-if ($null -eq $rc) { throw "HARVEST_MISS: lost rect before resize" }
-[void][Mz]::MoveWindow([Mz]::P($hwnd64), $rc.L, $rc.T, 720, 480, $true)
-Start-Sleep -Milliseconds 400
-Shot $hwnd64 '11-resize-small' | Out-Null
-$rc = [Mz]::RectOf($hwnd64)
-[void][Mz]::MoveWindow([Mz]::P($hwnd64), $rc.L, $rc.T, 1400, 900, $true)
-Start-Sleep -Milliseconds 400
-Shot $hwnd64 '12-resize-large' | Out-Null
+    $rc = [SeamWin]::RectOf($session.Hwnd64)
+    if ($null -eq $rc) { throw 'HARVEST_MISS: lost the window rect before resize' }
+    [void][SeamWin]::MoveWindow([SeamWin]::P($session.Hwnd64), $rc.L, $rc.T, 720, 480, $true)
+    Start-Sleep -Milliseconds 400
+    [void](Step $session '10-resize-small' @{ op = 'get-state' })
+    $rc = [SeamWin]::RectOf($session.Hwnd64)
+    [void][SeamWin]::MoveWindow([SeamWin]::P($session.Hwnd64), $rc.L, $rc.T, 1400, 900, $true)
+    Start-Sleep -Milliseconds 400
+    [void](Step $session '11-resize-large' @{ op = 'get-state' })
 
-Post-Text $hwnd64 "mousefuzz"
-Start-Sleep -Milliseconds 400
-Shot $hwnd64 '13-typed' | Out-Null
+    if ($session.Proc.HasExited) {
+        throw "APP_EXIT: the app exited during the run (code $($session.Proc.ExitCode))"
+    }
+}
+catch {
+    $msg = "$($_.Exception.Message)"
+    if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { $script:Findings.Add($msg) }
+    else { $harnessError = $msg }
+    Write-Host "ERROR: $msg" -ForegroundColor Red
+}
+finally {
+    $alive = ($null -ne $session) -and ($null -ne $session.Proc) -and -not $session.Proc.HasExited
+    if ($null -ne $session) { Stop-SeamSession $session }
+}
 
-Post-Text $hwnd64 " 日本語"
-Start-Sleep -Milliseconds 400
-Shot $hwnd64 '14-cjk' | Out-Null
-
-$proc.Refresh()
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
-$alive = -not $proc.HasExited
-@{
-    alive = $alive
-    exitCode = if ($proc.HasExited) { $proc.ExitCode } else { $null }
+if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
+
+[ordered]@{
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); no synthesized OS input'
+    alive     = $alive
     crashGrew = $crashGrew
-    hwnd = "$hwnd64"
-} | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
-Write-Host "alive=$alive crashGrew=$crashGrew"
-# Leave nothing behind: every other harness here refuses to start while a
-# Wintty is running, and this script used to rely on the next one's
-# blanket kill to reap it.
-Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-if (-not $alive -or $crashGrew) { exit 2 }
+    steps     = $script:Steps
+    findings  = $script:Findings
+    harness   = $harnessError
+} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
+Write-Host "alive=$alive crashGrew=$crashGrew findings=$($script:Findings.Count)"
+
+if ($script:Findings.Count -gt 0) { exit 2 }
+if ($harnessError) { exit 1 }
 exit 0
