@@ -35,11 +35,34 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
+# Which process owns the top-level window at a screen point: a read of the
+# window stack, no input. A sample point another window covers is a miss.
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class TcPoint {
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    public static long RootAt(int x, int y) {
+        var h = WindowFromPoint(new POINT { X = x, Y = y });
+        return h == IntPtr.Zero ? 0 : GetAncestor(h, 2).ToInt64();
+    }
+}
+"@
+
 $Config = @'
 window-save-state = never
 vertical-tabs = false
 window-theme = wintty
 theme = Catppuccin Mocha
+# Solid and opaque, so an untagged tab is painted over one flat colour and
+# not a Mica gradient that varies with the wallpaper: the paint oracle below
+# compares pixels and needs the same ground under every tab.
+background-opacity = 1
+background-style = solid
+frame-style = solid
 '@
 
 # Tab 0 stays default (None). Tabs 1..9 get every preset swatch.
@@ -140,6 +163,32 @@ function Assert-StripPaint($Session, [string[]]$Want, [string]$Where) {
 
     $rc = [SeamWin]::RectOf($Session.Hwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: lost the window rect before the paint check' }
+
+    # The strip's visible lane, from its own list's UIA rect. With ten tabs
+    # the list can overflow, and a row scrolled out of the lane still has a
+    # rect; sampling it would read whatever sits there instead.
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([SeamWin]::P($Session.Hwnd64))
+    $lane = $null
+    foreach ($id in @('TabListView', 'TabList')) {
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $id)
+        $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($null -ne $el) { $lane = $el.Current.BoundingRectangle; break }
+    }
+    if ($null -eq $lane -or $lane.Width -le 0) { throw 'HARVEST_MISS: no tab list lane to bound the paint check' }
+    foreach ($i in @($rects.Keys)) {
+        $r = $rects[$i]
+        if ($r.x -lt $lane.X - 1 -or $r.y -lt $lane.Y - 1 -or
+            ($r.x + $r.w) -gt ($lane.X + $lane.Width + 1) -or ($r.y + $r.h) -gt ($lane.Y + $lane.Height + 1)) {
+            throw "HARVEST_MISS: ${Where}: tab $i's row lies outside the visible strip (overflow), so it cannot be sampled"
+        }
+        # Every sample must be of this window: topmost-placed is a request,
+        # not a guarantee, and a covered row would report the cover's colour.
+        $owner = [TcPoint]::RootAt([int]($r.x + $r.w / 2), [int]($r.y + $r.h / 2))
+        if ($owner -ne [int64]$Session.Hwnd64) {
+            throw "HARVEST_MISS: ${Where}: tab $i's row is covered by another window, so it cannot be sampled"
+        }
+    }
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)

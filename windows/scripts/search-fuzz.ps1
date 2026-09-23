@@ -560,6 +560,20 @@ try {
     Write-Host "corpus: $($doc.Length) chars, $((($doc -split "`n").Count)) rows"
     $result.corpusChars = $doc.Length
 
+    # The scroll oracle below judges only a viewport that can move, and that
+    # is decided from the scrollbar libghostty reports. If it never reported
+    # one, total stays 0 and every scroll check would pass without judging
+    # anything. The seeded corpus overflows the window, so the report must
+    # show more rows than fit, and a wheel up from the bottom must move.
+    $probe = Invoke-SeamCommand $script:Session @{ op = 'scroll'; notches = 3 }
+    $pv = $probe.viewport
+    Write-Host "  viewport after seeding: $($pv.total) rows, $($pv.len) visible, offset $($pv.offsetBefore)->$($pv.offsetAfter)"
+    [void](Assert-That ([double]$pv.total -gt [double]$pv.len) 'no-scrollback-report' `
+        "after seeding, the scrollbar libghostty reports holds $($pv.total) rows for $($pv.len) visible" @{ viewport = $pv })
+    [void](Assert-That ([double]$pv.offsetAfter -lt [double]$pv.offsetBefore) 'scroll-did-not-move' `
+        "a wheel up from the bottom of the seeded corpus left the viewport at row $($pv.offsetAfter)" @{ viewport = $pv })
+    [void](Invoke-SeamCommand $script:Session @{ op = 'scroll'; notches = -3 })
+
     # Needle pool. Strict needles are checked against the oracle; the rest
     # only have to not break an invariant (no crash, counter well-formed).
     $strict = @('ZQXW', 'zqxw', 'ZqXw', 'PLMK', 'VRTN', 'ZQXWPLMK', 'NOTHERE9X', 'row 1', 'item 4')
