@@ -73,11 +73,16 @@ public class PinnedRowFocusWiringTests
     {
         var key = Strip().Method("OnPinnedRowKeyDown");
 
-        // Both keys, one arm, and it is the shared seam -- not a private
-        // Activate call that could drift from the click path.
-        var activate = key.Calls("ActivateFromShelf").Single();
+        // Both keys, one arm, and it reaches the shared seam -- not a
+        // private Activate call that could drift from the click path. The
+        // arm goes through ActivateShelfFromKey, which raises the
+        // consumed-close signal for the key and then takes the same seam.
+        var fromKey = key.Calls("ActivateShelfFromKey").Single();
+        Assert.Equal("tab", fromKey.Arg(0));
+        var activate = Strip().Method("ActivateShelfFromKey").Calls("ActivateFromShelf").Single();
         Assert.Equal("tab", activate.Arg(0));
-        var arm = activate.Ancestors().OfType<SwitchSectionSyntax>().First();
+        Assert.Empty(key.Calls("ActivateFromShelf"));
+        var arm = fromKey.Ancestors().OfType<SwitchSectionSyntax>().First();
         Assert.Contains(
             "Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space",
             arm.Labels.ToString());

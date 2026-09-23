@@ -43,7 +43,13 @@ param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
     # Run only the scenarios whose name matches this wildcard.
-    [string]$Only = '*'
+    [string]$Only = '*',
+    # A script dot-sourced after the built-in scenarios, for surfaces a
+    # build adds on top of this tree. It calls Invoke-Scenario like the
+    # scenarios below do.
+    [string]$ExtraScenarios = '',
+    # Config lines appended to the staged config, for keys a build adds.
+    [string[]]$ConfigExtra = @()
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -60,6 +66,7 @@ windows-single-instance = false
 window-save-state = never
 command = cmd.exe
 "@
+if ($ConfigExtra.Count -gt 0) { $config = $config + "`n" + ($ConfigExtra -join "`n") }
 
 $Chars = @{ Return = "`r"; Escape = [string][char]0x1B; Space = ' ' }
 
@@ -248,6 +255,11 @@ Invoke-Scenario 'rename-dialog-escape' 'Escape' -Drive {
 }
 Invoke-Scenario 'pane-menu-escape' 'Escape' -Drive {
     param($s) [void](Seam $s @{ op = 'consumed-close-drive'; surface = 'pane-menu'; held = 'escape' })
+}
+
+if ($ExtraScenarios) {
+    if (-not (Test-Path $ExtraScenarios)) { Write-Host "HARNESS: missing extra scenarios: $ExtraScenarios"; exit 1 }
+    . $ExtraScenarios
 }
 
 # -- Report ---------------------------------------------------------------------

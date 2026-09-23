@@ -319,14 +319,19 @@ public class ConsumedCloseKeyWiringTests
     /// took the KeyDown, so a dialog or flyout closing there cannot hand its
     /// character to a pane in a terminal window.
     /// </summary>
+    /// An entry ending in a dot is a folder: every file under it is exempt.
     private static readonly (string File, string Why)[] NoPaneWindow =
     {
-        ("Settings.Pages.KeybindingsPage.xaml.cs", "a Settings page: its menus and dialogs live in the Settings window"),
+        ("Settings.Pages.", "Settings pages: hosted only by the Settings window, their menus and dialogs close there"),
         ("Settings.ProfileIconPickerControl.xaml.cs", "a Settings control: its dialog lives in the Settings window"),
     };
 
-    private static bool Exempt(ShellSource file) =>
-        NoPaneWindow.Any(x => file.Name.EndsWith(x.File, StringComparison.Ordinal));
+    private static bool Covers(string entry, string name) =>
+        entry.EndsWith('.')
+            ? name.StartsWith(entry, StringComparison.Ordinal) || name.Contains("." + entry, StringComparison.Ordinal)
+            : name.EndsWith(entry, StringComparison.Ordinal);
+
+    private static bool Exempt(ShellSource file) => NoPaneWindow.Any(x => Covers(x.File, file.Name));
 
     private static SyntaxNode Scope(SyntaxNode node) =>
         (SyntaxNode?)node.Ancestors().OfType<BaseMethodDeclarationSyntax>().FirstOrDefault()
@@ -415,11 +420,12 @@ public class ConsumedCloseKeyWiringTests
         foreach (var (file, why) in NoPaneWindow)
         {
             Assert.False(string.IsNullOrWhiteSpace(why));
-            var source = Assert.Single(files, f => f.Name.EndsWith(file, StringComparison.Ordinal));
-            var covers = source.Root.DescendantNodes().Any(n =>
+            var sources = files.Where(f => Covers(file, f.Name)).ToList();
+            Assert.NotEmpty(sources);
+            var covers = sources.Any(source => source.Root.DescendantNodes().Any(n =>
                 n is ObjectCreationExpressionSyntax { Type: var type } && type.ToString() is "MenuFlyout" or "Flyout"
                 || n is InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Name.Identifier.ValueText: "ShowAsync" } } call
-                   && call.ArgumentList.Arguments.Count == 0);
+                   && call.ArgumentList.Arguments.Count == 0));
             Assert.True(covers, $"{file} is exempt but shows no dialog and builds no flyout; drop the exemption");
         }
     }
