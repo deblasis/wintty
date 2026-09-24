@@ -1,122 +1,211 @@
 using System;
+using System.Diagnostics;
 
 namespace Ghostty.Core.Config;
 
-/// <summary>What a report that the watched config file is gone should cause.</summary>
+/// <summary>What a load reporting no config file should cause.</summary>
 public enum ConfigVanishAction
 {
     /// <summary>Nothing. The session claims no config file to lose.</summary>
     Ignore,
 
-    /// <summary>Ask for another delivery, and believe nothing yet.</summary>
+    /// <summary>Not yet proven. Keep the count, and look again.</summary>
     Confirm,
 
-    /// <summary>The asks are spent and it is still gone: a deletion.</summary>
+    /// <summary>Proven gone. The session may stop claiming the file.</summary>
     Accept,
 }
 
 /// <summary>
-/// How many times a vanished config file has to be seen before it counts as
-/// deleted, and the count of how many times it has been.
+/// Decides when a config file that keeps reading as absent has actually been
+/// deleted, rather than being between the two halves of a save.
 /// </summary>
 /// <remarks>
-/// <para>The vanish proves deletion from one observation while a shrink
-/// proves it from a spent budget, and the one-observation standard is what
-/// mid-save firing exploits (issue #1146).</para>
+/// <para>An observation is a LOAD that reported no default config file. Not
+/// a file-existence check, and not a request for one: the load read the disk
+/// and came back with nothing, which is the only thing that answers the
+/// question. Driving this off anything else is what issue #1146 and the
+/// first two revisions of this class got wrong, in both directions: gating
+/// on scheduling a FUTURE look when the look had already happened, and
+/// resetting on <c>File.Exists</c>, which a dangling symlink satisfies while
+/// the open returns not-found, so the load reads it as absent.</para>
 ///
-/// <para>This is a class in Ghostty.Core rather than a counter and a const
-/// in the host for one reason: nothing executes the host. Ghostty.Tests has
-/// no reference to the shell project, so every test about
-/// <c>ConfigService</c> reads its source with Roslyn and asserts on shape.
-/// That cannot see a budget of zero, which turns the asks off and restores
-/// the defect exactly; it cannot see an increment moved out from behind the
-/// scheduled-ask check either. Both of those were measured passing against
-/// the source-shape tests. The state and the arithmetic live here so a test
-/// can drive them instead of reading them.</para>
+/// <para>Two things have to hold, and they rule out different hazards. Each
+/// is pinned separately, and a mutation of either kills a different test.</para>
+///
+/// <para>THE FLOOR rules out a single absence window producing every
+/// observation. Measured on this platform, 150 saves per pattern at roughly
+/// 40k existence samples each, the widest window any save shape leaves is
+/// 22.0ms for rename-away-then-create, with <c>ReplaceFile</c> at 21.2ms and
+/// delete-then-rename at 8.4ms; <c>MoveFileEx</c> with REPLACE_EXISTING
+/// leaves none. <see cref="DefaultFloor"/> is 900ms, about 41 times the
+/// widest, and that multiple is asserted against the measurement rather than
+/// left as a round number.</para>
+///
+/// <para>Note what the floor already implies. It is measured from the FIRST
+/// observation, so at that one the elapsed time is zero and it can never
+/// accept: two observations are required by the floor itself. An earlier
+/// revision carried a separate count of two beside it, which therefore could
+/// not bind, and read like a guard while providing nothing.</para>
+///
+/// <para>THE RESET rules out a stale budget outliving its question, and it
+/// is also what resists repeated correlated sampling. Observations here are
+/// CAUSED by saves, which is issue #1146's own mechanism, so successive ones
+/// are not independent of successive save gaps. Any load that did not report
+/// absence proves a file is there and starts the next absence from nothing.
+/// For two observations to both count, no load may have found the file
+/// between them, and on the watcher's path a completed save raises an event
+/// whose delivery returns Loaded within about 300ms. So two counted
+/// observations 900ms apart need 900ms of continuous re-arming with no
+/// successful load, which produces ONE delivery rather than two. Where no
+/// watcher exists the observations are a reload the user caused (a High
+/// Contrast toggle) and the one look the host schedules a floor later, so it
+/// needs both to land inside two different saves' gaps, 900ms apart.
+/// Deleting the reset removes both of those, not merely some tidiness.</para>
+///
+/// <para>WHAT SURVIVES, stated as the probability argument it is. A save
+/// that stalls longer than the floor between its delete and its rename
+/// defeats this: every observation inside that gap reports absence, nothing
+/// intervenes to reset, and the deletion is accepted mid save. No count of
+/// observations changes that, because a further observation is inside the
+/// same gap; only a longer floor would. A network drive, a scanner or a sync
+/// client holding the file could in principle exceed 900ms. The defences are
+/// the 41x margin over the widest measured window and the reset, and neither
+/// is a proof. What it costs is the defaults config in force until the next
+/// reload: with a watcher that is the save's own settle, and with
+/// auto-reload-config off, the default, it is whatever reload comes next,
+/// which may be a while.</para>
+///
+/// <para>TIME is monotonic. The floor and the look-again are both measured on
+/// <see cref="Stopwatch"/>, never on the wall clock: a clock stepped forward
+/// between two observations would shorten the floor to nothing, which is
+/// #1146, and one stepped back would stretch the look-again by the size of
+/// the step. <see cref="UntilFloor"/> is also clamped to the floor, so no
+/// clock, injected or not, can hand the host a delay longer than it.</para>
 ///
 /// <para>Not thread safe, and not meant to be: every caller is the config
-/// watcher's delivery or a reload, both of which are UI thread only.</para>
+/// watcher's delivery or a reload, both UI thread only.</para>
 /// </remarks>
 public sealed class ConfigVanishConfirmer
 {
     /// <summary>
-    /// Asks before a vanish is believed. Three debounce periods is about a
-    /// second, which outlasts every save in ordinary disk conditions and
-    /// still settles a real deletion quickly enough that the next High
-    /// Contrast toggle is not left waiting on it. It is a heuristic bound,
-    /// not a proof: a swap held wedged longer than the budget, by a frozen
-    /// editor or a network rename that lost its race, is confirmed
-    /// wrongly. That is #1146 narrowed by the budget rather than closed,
-    /// and it heals on the completing settle.
+    /// Elapsed time that must separate the first observation from the one
+    /// that accepts. See the class remarks for the measurements behind it.
     /// </summary>
-    public const int DefaultAttempts = 3;
-
-    private readonly int _maxAttempts;
-    private int _attempts;
-
-    /// <param name="maxAttempts">Asks to spend before believing it. Must be
-    /// at least one: a budget of zero is the defect this exists to prevent,
-    /// so it is refused here rather than left to a reviewer to notice.</param>
-    public ConfigVanishConfirmer(int maxAttempts = DefaultAttempts)
-    {
-        ArgumentOutOfRangeException.ThrowIfLessThan(maxAttempts, 1);
-        _maxAttempts = maxAttempts;
-    }
-
-    /// <summary>Asks spent so far in this stretch.</summary>
-    public int Attempts => _attempts;
+    public static readonly TimeSpan DefaultFloor = TimeSpan.FromMilliseconds(900);
 
     /// <summary>
-    /// A delivery found the watched file gone. <paramref name="ask"/> is
-    /// asked to schedule one more delivery and says whether it did.
+    /// The widest absence window measured across save shapes on this
+    /// platform, which <see cref="DefaultFloor"/> is set as a multiple of.
+    /// Here so a test can assert the relationship rather than the number.
     /// </summary>
+    public static readonly TimeSpan WidestMeasuredSaveWindow =
+        TimeSpan.FromMilliseconds(22);
+
+    private readonly TimeSpan _floor;
+    private readonly Func<TimeSpan> _now;
+
+    private bool _seen;
+    private TimeSpan _first;
+
+    /// <param name="floor">Elapsed time that must separate the first
+    /// observation from the accepting one. Must be positive: a floor of zero
+    /// accepts the first report, which is the defect this exists to prevent,
+    /// so it is refused here rather than left for a reviewer to notice.
+    /// Because it is measured from the first observation, a positive floor
+    /// is also what makes a second observation necessary.</param>
+    /// <param name="now">A monotonic clock, as elapsed time from any fixed
+    /// origin, for tests. Defaults to <see cref="Stopwatch"/>.</param>
+    public ConfigVanishConfirmer(
+        TimeSpan? floor = null,
+        Func<TimeSpan>? now = null)
+    {
+        var resolved = floor ?? DefaultFloor;
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(resolved, TimeSpan.Zero);
+
+        _floor = resolved;
+        _now = now ?? MonotonicNow;
+    }
+
+    /// <summary>Whether a stretch of absence is currently open.</summary>
+    public bool Observing => _seen;
+
+    /// <summary>
+    /// How long until an observation would accept: the floor less what the
+    /// open stretch has already run, or the whole floor with none open.
+    /// A look scheduled this far out is the first one that can conclude.
+    /// </summary>
+    public TimeSpan UntilFloor
+    {
+        get
+        {
+            if (!_seen) return _floor;
+            var elapsed = _now() - _first;
+            if (elapsed < TimeSpan.Zero) return _floor;
+            var left = _floor - elapsed;
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+    }
+
+    /// <summary>A load reported no default config file.</summary>
+    /// <param name="sessionDefaultFilesFound">How many the session believes
+    /// it is running on. Zero means nothing to lose and nothing to
+    /// confirm.</param>
+    /// <param name="ask">Asks for another look sooner than one would
+    /// otherwise arrive, and reports whether it scheduled one.</param>
     /// <remarks>
-    /// An ask the watcher dropped was never put, so it does not count:
-    /// spending the budget on it would confirm a deletion out of silence.
-    ///
-    /// The conclusion restores the budget. A stretch that reached Accept
-    /// is over, and a spent budget carried past its own answer accepts
-    /// the next single report at once: the file can come back through
-    /// paths that settle no delivery, because the app's own writes
-    /// suppress the watcher, and the count those restores raise is what
-    /// makes the next mid-save report dangerous to believe. While the
-    /// count the Accept zeroed still stands, reports are Ignored below,
-    /// so the restored budget is inert until it is needed.
+    /// <paramref name="ask"/> is an ACCELERATOR, not a gate. The observation
+    /// has already happened, so whether another can be scheduled says
+    /// nothing about it. Gating on it was this class's second revision, and
+    /// it made a deletion unprovable whenever no watcher existed, which is
+    /// the DEFAULT configuration: with <c>auto-reload-config</c> off there
+    /// is no watcher to ask, the ask always failed, nothing ever advanced,
+    /// and the session refused every reload for the life of the process.
+    /// That is issue #676 reached through its own fix.
     /// </remarks>
     public ConfigVanishAction Observe(int sessionDefaultFilesFound, Func<bool> ask)
     {
         ArgumentNullException.ThrowIfNull(ask);
 
-        if (!ConfigReloadGate.ShouldConfirmVanish(
-                sessionDefaultFilesFound, _attempts, _maxAttempts))
+        if (sessionDefaultFilesFound <= 0) return ConfigVanishAction.Ignore;
+
+        var now = _now();
+
+        // A clock that runs backwards cannot measure a floor. The default one
+        // cannot, but an injected one can, and restarting the stretch here is
+        // the direction that never accepts early and never waits past one
+        // more floor.
+        if (!_seen || now < _first)
         {
-            var accept = ConfigReloadGate.IsPersistentVanish(
-                sessionDefaultFilesFound, _attempts, _maxAttempts);
-            if (accept) _attempts = 0;
-            return accept ? ConfigVanishAction.Accept : ConfigVanishAction.Ignore;
+            _seen = true;
+            _first = now;
         }
 
-        if (ask()) _attempts++;
+        // Measured from the first observation, so this is false for it
+        // however long the stretch later runs. That is what makes a second
+        // observation necessary, and it is the whole of the count.
+        if (now - _first >= _floor) return ConfigVanishAction.Accept;
+
+        // Only while still asking: accepting needs no further look.
+        ask();
         return ConfigVanishAction.Confirm;
     }
 
     /// <summary>
-    /// Evidence arrived that answers the question: the file is there, or a
-    /// reload applied. The next vanish is a fresh question.
+    /// A load proved a config file is there, so the next absence is a fresh
+    /// question.
     /// </summary>
     /// <remarks>
-    /// Resetting only on an applied reload is not enough, and the gap is
-    /// reachable: a stretch that spends the budget, then a file that comes
-    /// back but will not open for long enough to exhaust the reload's own
-    /// retries, leaves this spent with no applied reload to clear it. The
-    /// next ordinary save that straddles the delivery hop is then believed
-    /// on one observation, which is issue #1146 re-entered through a stale
-    /// budget. Call this wherever the file is seen present.
+    /// Driven by the load's verdict, not by the file appearing to exist. A
+    /// dangling symlink satisfies <c>File.Exists</c> while its open returns
+    /// not-found, so resetting on existence cleared the stretch that the same
+    /// settle's reload then continued, and it oscillated without ever reaching
+    /// a conclusion.
     ///
-    /// The conclusion guards the same invariant from its own side: an
-    /// Accept restores the budget too, because the file can return without
-    /// any delivery ever seeing it (the app's own suppressed writes). See
-    /// <see cref="Observe"/>.
+    /// This is also the whole defence against correlated sampling; see the
+    /// class remarks before removing it.
     /// </remarks>
-    public void Reset() => _attempts = 0;
+    public void Reset() => _seen = false;
+
+    private static TimeSpan MonotonicNow() => Stopwatch.GetElapsedTime(0);
 }

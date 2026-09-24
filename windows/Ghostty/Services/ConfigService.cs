@@ -47,12 +47,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     // holding the file and stops short of retrying forever at one config
     // rebuild per 300ms.
     //
-    // Counted on the ask being SCHEDULED, not on the decline: Resettle does
-    // nothing while this service is suppressing its own writes, and there is
-    // no watcher at all under --no-config. Counting those would spend the
-    // budget on deliveries that never happened and then stop asking with
-    // nothing having been tried. UI thread only, like everything Reload
-    // touches. See the decline in Reload.
+    // Counted on a look being SCHEDULED, not on the decline: an ask nobody
+    // took would spend the budget on reloads that never happened and then
+    // stop asking with nothing having been tried. Only the watcher takes this
+    // ask (ConfigLookAgain.AskWatcher): an unreadable load has already
+    // blocked for the loader's own retry window, and a look of the service's
+    // own would block again. UI thread only, like everything Reload touches.
+    // See the decline in Reload.
     private int _declinedReloadRetries;
     private const int MaxDeclinedReloadRetries = 3;
 
@@ -155,11 +156,22 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         = Ghostty.Core.Diagnostics.HangDumpMode.Triage;
 
     // The High Contrast palette to layer on top of the user's config, or
-    // null when HC is inactive/opted-out. Set by HighContrastMonitor;
-    // consumed in Reload and by HighContrastBackground. Only touched on the
-    // UI thread (the monitor marshals its events, and Reload runs on the UI
-    // thread).
-    private HighContrastColors? _highContrastOverrideColors;
+    // null when HC is inactive/opted-out: the one asked for, and the one the
+    // running config was built with. Requested by HighContrastMonitor;
+    // Wanted is consumed by every config build, Applied by
+    // HighContrastBackground. Only touched on the UI thread (the monitor
+    // marshals its events, and Reload runs on the UI thread).
+    private readonly HighContrastOverrideLatch _highContrast = new();
+
+    // One reload a declined reload schedules for itself when the watcher
+    // could not take its ask, which is always the case with
+    // auto-reload-config off. Every question a decline asks is answered by a
+    // later load, and without this none came: a deleted config file cost a
+    // second High Contrast toggle, and a deleted layered file (one of two)
+    // refused every reload until restart (wintty#1155). ConfigLookAgain.Ask
+    // is the declined reload's side of it, the vanish protocol's
+    // lookAgainAfter the other.
+    private readonly ConfigLookAgain _lookAgain;
     public string LogLevel { get; private set; } = "info";
     public string LogFilter { get; private set; } = string.Empty;
 
@@ -468,14 +480,34 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // created later: the ask reads the field lazily, at report time.
         // The count is read the same way, so a report always sees what
         // the last applied reload recorded.
+        //
+        // The accept LOGS and nothing else. Lowering the count here would
+        // write it from a second place, and it would write it before the
+        // gate reads it three statements into Reload, which turns the
+        // decision into a side effect of call order that nothing pins. The
+        // count falls the ordinary way instead, on the applied path, which
+        // is reached because Reload carries a proven vanish past the gate.
+        //
+        // The look-again is for when the watcher took no ask: with
+        // auto-reload-config off, the default, there is no watcher at all.
+        // It reloads once, at the floor, which is the first moment a
+        // deletion can be proven, so the reload that opened the question
+        // (a High Contrast toggle) lands on that one instead of being lost.
+        //
+        // The delay is clamped to the floor: nothing a decline asks for waits
+        // longer, and a clamp is what keeps a bad delay from throwing inside
+        // Reload or leaving the question waiting.
+        _lookAgain = new ConfigLookAgain(
+            watcherAsk: () => _watcher?.Resettle() == true,
+            new SystemSchedulerTimer(StaticLoggers.ConfigWatcherTimer),
+            onLook: () => _dispatcher.TryEnqueue(OnLookAgain),
+            maxDelay: ConfigVanishConfirmer.DefaultFloor);
         _vanishProtocol = new ConfigVanishProtocol(
             sessionDefaultFilesFound: () => _defaultFilesFound,
             ask: () => _watcher?.Resettle() == true,
             onAccept: () =>
-            {
-                StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
-                RecordDefaultFiles(0);
-            });
+                StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath),
+            lookAgainAfter: _lookAgain.Schedule);
 
         // ConfigNew allocates from libghostty's global allocator. A failed
         // ghostty_init leaves the global state in place but torn down, so the
@@ -725,6 +757,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // first would never be corrected.
         var isOsDark = OsTheme.IsDark();
 
+        // One read of the requested High Contrast palette for the whole
+        // reload, handed to the build, and the palette the build reports it
+        // actually layered, which is what an applied reload records: not one
+        // asked for since, and not one whose override file could not be
+        // written.
+        var highContrastWanted = _highContrast.Wanted;
+        HighContrastColors? highContrastBuilt;
+
         GhosttyConfig newConfig;
         ConfigFilesFound defaultFiles;
         int defaultFilesFound;
@@ -733,13 +773,29 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // The same build a palette theme preview uses, without the
             // preview's overlay: see BuildLiveConfig for the layering.
             newConfig = BuildLiveConfig(
-                overlayPath: null, isOsDark, out defaultFiles, out defaultFilesFound);
+                overlayPath: null, isOsDark, highContrastWanted,
+                out defaultFiles, out defaultFilesFound, out highContrastBuilt);
         }
         catch (Exception ex)
         {
             StaticLoggers.ConfigService.LogReloadFailed(ex);
             return false;
         }
+
+        // This load's verdict is the evidence the vanish question runs on,
+        // so it is fed in here rather than from the watcher's existence
+        // check. Absence is an observation; anything else answers it. The
+        // protocol holds both halves and says why (wintty#1155).
+        //
+        // A verdict its own count contradicts is neither. The gate refuses
+        // it below for exactly that reason, and feeding it here would let a
+        // disagreeing load confirm a deletion the gate exists to refuse, so
+        // the question is left exactly as it was. That is the safe direction
+        // twice over: the stretch neither advances on an untrusted absence
+        // nor resets on an untrusted read.
+        var vanishConfirmed = ConfigReloadGate.VerdictAndCountAgree(
+            defaultFiles, defaultFilesFound)
+            && _vanishProtocol.Observed(defaultFiles);
 
         // A reload only applies a config it could actually read. The rule and
         // its reasons are ConfigReloadGate's, in Ghostty.Core so they can be
@@ -755,30 +811,45 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // path below records the lower count. Refusing instead would be
             // permanent, which is the lockout of issue #676 one layer
             // removed: the count cannot fall from anywhere else.
-            if (!ConfigReloadGate.IsPersistentShrink(
+            //
+            // A confirmed vanish reaches the same conclusion about the
+            // WATCHED file and takes the same path, for the same reason: the
+            // count has just fallen to nothing, so freeing this config and
+            // declining would discard one just proven correct and make the
+            // user ask again. It costs one self-heal window, a file
+            // reappearing before the next reload, spent after the floor has
+            // already passed.
+            if (!vanishConfirmed && !ConfigReloadGate.IsPersistentShrink(
                     defaultFiles, defaultFilesFound, _defaultFilesFound,
                     _shrinkConfirms, MaxShrinkConfirms))
             {
                 NativeMethods.ConfigFree(newConfig);
                 StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
                     ConfigFilePath,
-                    defaultFiles == ConfigFilesFound.Unreadable
-                        ? "it could not be read"
-                        : ConfigReloadGate.IsCountShrink(
-                              defaultFiles, defaultFilesFound, _defaultFilesFound)
-                            ? $"only {defaultFilesFound} of the " +
-                              $"{_defaultFilesFound} layered config files were there"
-                            : "it was not there");
+                    !ConfigReloadGate.VerdictAndCountAgree(defaultFiles, defaultFilesFound)
+                        ? "its verdict and its file count disagreed"
+                        : defaultFiles == ConfigFilesFound.Unreadable
+                            ? "it could not be read"
+                            : ConfigReloadGate.IsCountShrink(
+                                  defaultFiles, defaultFilesFound, _defaultFilesFound)
+                                ? $"only {defaultFilesFound} of the " +
+                                  $"{_defaultFilesFound} layered config files were there"
+                                : "it was not there");
 
                 if (ConfigReloadGate.ShouldRetry(
                         defaultFiles, _declinedReloadRetries, MaxDeclinedReloadRetries))
                 {
                     // Counted only when the watcher actually scheduled the
-                    // delivery. It drops the ask while this service is
-                    // suppressing its own writes, and there is no watcher at all
-                    // under --no-config; counting those would spend the budget
-                    // on deliveries that never happened.
-                    if (_watcher?.Resettle() == true) _declinedReloadRetries++;
+                    // delivery: an ask nobody took is not a look, and counting
+                    // it would spend the budget on reloads that never happened.
+                    //
+                    // The watcher's ask ALONE, never a look of the service's
+                    // own. The loader's open already retries a sharing
+                    // violation for about four seconds on this thread before
+                    // it answers Unreadable, so every look we added was another
+                    // four-second freeze. A declined request stays wanted and
+                    // rides the next reload that comes for any other reason.
+                    if (_lookAgain.AskWatcher()) _declinedReloadRetries++;
                 }
                 else if (ConfigReloadGate.ShouldConfirmShrink(
                         defaultFiles, defaultFilesFound, _defaultFilesFound,
@@ -788,7 +859,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                     // asks about a file that went away are not asks about a
                     // file that would not open, and one counter holding both
                     // is what let a spent unreadable budget skip these asks.
-                    if (_watcher?.Resettle() == true) _shrinkConfirms++;
+                    //
+                    // With no watcher this used to be the whole lockout of
+                    // wintty#1155 on the shrink leg: the watcher's ask was the
+                    // only one counted, so the budget never moved, the shrink
+                    // was never persistent, and a user who deleted one of two
+                    // layered files had every reload refused until restart.
+                    if (_lookAgain.Ask()) _shrinkConfirms++;
                 }
                 else if (defaultFiles == ConfigFilesFound.Unreadable &&
                          _declinedReloadRetries == MaxDeclinedReloadRetries)
@@ -800,44 +877,26 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                     StaticLoggers.ConfigService.LogReloadGaveUp(
                         MaxDeclinedReloadRetries, ConfigFilePath);
                 }
-                else if (defaultFiles == ConfigFilesFound.Absent)
-                {
-                    // This reload just looked at the disk and found no config
-                    // file, which is the same observation the watcher's
-                    // vanished report carries, so it counts toward the same
-                    // confirmation.
-                    //
-                    // It is here because on the vanish path a dropped ask is
-                    // otherwise TERMINAL. A deleted file raises no further
-                    // filesystem events, so the only thing that can revisit
-                    // the question is the Resettle that was just dropped, and
-                    // if it was, nothing ever does: the session declines every
-                    // reload for the life of the process, which is the #676
-                    // lockout made permanent by the fix for it.
-                    //
-                    // A shrink cannot heal it either, because IsCountShrink
-                    // takes only Loaded: an Absent load is deliberately the
-                    // vanish's case, so this branch is the whole of the
-                    // second route. Reloads that are not about the config
-                    // file at all, a High Contrast toggle or an OS scheme
-                    // flip, now carry the question forward.
-                    //
-                    // Nothing is believed here that would not be believed on
-                    // the watcher's path: the same budget, the same asks.
-                    OnConfigFileVanished();
-                }
                 return false;
             }
 
-            StaticLoggers.ConfigService.LogReloadDefaultFilesShrunk(
-                _defaultFilesFound, defaultFilesFound, ConfigFilePath);
+            // Reached only by carrying past the gate, which takes either a
+            // proven vanish or a shrink that outlived its asks. A proven
+            // vanish has already been accounted for, at the moment it was
+            // proven, by the protocol's accept; logging it again here would
+            // report one deletion twice.
+            if (!vanishConfirmed)
+            {
+                StaticLoggers.ConfigService.LogReloadDefaultFilesShrunk(
+                    _defaultFilesFound, defaultFilesFound, ConfigFilePath);
+            }
         }
 
         // Any applied reload ends the run: the next lock is a new one and
-        // the next shrink is a fresh question. The vanish budget is not
-        // reset here but in OnConfigFileSettled, because the evidence that
-        // answers a vanish is the file being present, and that is seen a
-        // step earlier than this.
+        // the next shrink is a fresh question. The vanish question is
+        // answered by this load's verdict, above, not here: a file that
+        // comes back unreadable answers it and never reaches an applied
+        // reload.
         _declinedReloadRetries = 0;
         _shrinkConfirms = 0;
 
@@ -872,6 +931,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // either fence above did not apply anything, so it must not change
         // what the next one compares against.
         RecordDefaultFiles(defaultFilesFound);
+        _highContrast.MarkApplied(highContrastBuilt, attempted: highContrastWanted);
         try
         {
             CacheDiagnostics();
@@ -1047,7 +1107,28 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// Used by <see cref="ConfigFileEditor"/> during writes so our
     /// own save does not trigger a redundant reload.
     /// </summary>
-    public void SuppressWatcher(bool suppress) => _suppressWatcher = suppress;
+    public void SuppressWatcher(bool suppress)
+    {
+        _suppressWatcher = suppress;
+
+        // Lifting the suppression is the end of this service's own write,
+        // and that write ends any stretch the two ask budgets were
+        // counting. Its events were swallowed, so no delivery reloads on
+        // it, and the reload a caller makes afterwards can still decline
+        // (the write landing unreadable, the AppUpdateConfig fence), which
+        // is the one road to a reset it had. A budget left spent here hands
+        // the next stretch of unreadability a gave-up warning with no ask
+        // ever having been tried in it.
+        //
+        // The vanish question is deliberately NOT touched: its stretches
+        // open and close on load verdicts alone, and a write is not a
+        // verdict.
+        if (!suppress)
+        {
+            _declinedReloadRetries = 0;
+            _shrinkConfirms = 0;
+        }
+    }
 
     /// <summary>
     /// Set (or clear, with null) the High Contrast override palette and
@@ -1058,20 +1139,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </summary>
     public void SetHighContrastOverride(HighContrastColors? colors)
     {
-        if (_highContrastOverrideColors == colors) return;
-
-        var previous = _highContrastOverrideColors;
-        _highContrastOverrideColors = colors;
-
-        // Put the latch back when the reload did not happen. Reload can
-        // decline (a config file that will not open, teardown, no app yet),
-        // and the override only reaches the terminal through the config it
-        // builds. Leaving the field moved on a decline makes the guard above
-        // answer "already on this palette" to every later call, so one
-        // refused reload turns High Contrast off for the life of the process.
-        // The same shape RefreshForOsColorScheme's scheme guard has, and it
-        // has bitten there before.
-        if (!Reload()) _highContrastOverrideColors = previous;
+        // Skipped only when the running config already carries this palette.
+        // A declined reload leaves the request wanted but not applied, so it
+        // rides the next reload that applies, including the one the vanish
+        // question schedules for itself, and a repeat of the request tries
+        // again rather than being answered "already on this palette". The
+        // latch says why one field could not do both.
+        if (!_highContrast.Request(colors)) return;
+        Reload();
     }
 
     /// <summary>
@@ -1087,8 +1162,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// colour the terminal will actually settle on is answerable, which is
     /// what the splash needs.
     /// </remarks>
+    ///
+    /// Read from what was APPLIED, not what was asked for: a request whose
+    /// reload declined is not on screen yet, and the splash must match what
+    /// is.
     public uint? HighContrastBackground =>
-        _highContrastOverrideColors is { } hc
+        _highContrast.Applied is { } hc
             ? Ghostty.Core.Accessibility.HighContrastConfigWriter.ColorRefToRgb(hc.Background)
             : null;
 
@@ -1518,7 +1597,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             var overlay = WriteThemePreviewOverlay(themeName);
             if (overlay is null) return false;
             preview = BuildLiveConfig(
-                overlay, isOsDark, out var previewFiles, out var previewFilesFound);
+                overlay, isOsDark, _highContrast.Wanted,
+                out var previewFiles, out var previewFilesFound, out _);
 
             // The same gate a reload takes, for a sharper reason: a preview
             // that could not read the user's config shows the theme over pure
@@ -1661,12 +1741,25 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// readable or not. The verdict alone cannot see one layered file
     /// disappearing while another still reads, which is what an atomic save
     /// of the newer one looks like; the count can.</param>
+    /// <param name="highContrast">The High Contrast palette to layer, or
+    /// null for none: the caller's one read of the latch's Wanted, passed
+    /// in so the palette built is the palette the caller records, never a
+    /// second read of the latch.</param>
+    /// <param name="highContrastLayered">The High Contrast palette this
+    /// config actually carries: null when none was wanted, and null too when
+    /// one was wanted and its override file could not be written, because
+    /// the layer is then skipped. What <see cref="Reload"/> marks as applied,
+    /// so the latch never names a palette the running config does not
+    /// hold.</param>
     private GhosttyConfig BuildLiveConfig(
         string? overlayPath,
         bool isOsDark,
+        HighContrastColors? highContrast,
         out ConfigFilesFound defaultFiles,
-        out int defaultFilesFound)
+        out int defaultFilesFound,
+        out HighContrastColors? highContrastLayered)
     {
+        highContrastLayered = null;
         var config = NativeMethods.ConfigNew();
         try
         {
@@ -1690,12 +1783,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // above it: High Contrast is an accessibility override and has to
             // outrank anything the user asked for, a file named on the command
             // line included.
-            if (_highContrastOverrideColors is { } hcColors)
+            if (highContrast is { } hcColors)
             {
                 var hcBody = Ghostty.Core.Accessibility.HighContrastConfigWriter.Render(hcColors);
                 var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
                 if (hcPath is not null)
+                {
                     NativeMethods.ConfigLoadFile(config, hcPath);
+                    highContrastLayered = hcColors;
+                }
             }
             NativeMethods.ConfigSetColorScheme(config, ToScheme(isOsDark));
             NativeMethods.ConfigFinalize(config);
@@ -2351,64 +2447,48 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         if (_shuttingDown) return;
 
-        // The file is there, which is the evidence that answers an open
-        // vanish question, so the asks stop here rather than on the applied
-        // reload below. Those are not the same moment: a file that comes
-        // back and will not open reaches this line and never reaches an
-        // applied reload, and leaving the budget spent would have the next
-        // ordinary save believed on one observation, which is #1146 through
-        // a stale budget. The restore itself is ConfigVanishProtocol's,
-        // driven against a real watcher in Ghostty.Tests.
-        _vanishProtocol.Settled();
-
+        // No vanish call here. This knows only that File.Exists was true,
+        // which a dangling symlink satisfies while its open returns
+        // not-found, so restoring the question on it cleared what the reload
+        // below then spent and the count oscillated without ever concluding. The
+        // protocol is driven by the load's VERDICT, inside Reload
+        // (wintty#1155).
         Reload();
     }
 
     /// <summary>
-    /// A delivery found the config file gone. That is a report, not a
-    /// verdict: an ordinary atomic save produces one. It is confirmed by
-    /// asking again, and only a report that outlives the whole budget is
-    /// taken as a deletion. Nothing is rebuilt and nothing is pushed even
-    /// then: the running config stays in force, which is what a deletion
-    /// deserves. All that changes is what the next reload compares against.
+    /// The watcher's delivery found the config file gone. Reload, so the
+    /// load's verdict becomes the observation.
     /// </summary>
     /// <remarks>
-    /// Without this the refusal is permanent. Reload declines while the
-    /// session is running on more config files than exist, the count only
-    /// ever rose, and nothing else lowers it, so a session whose config file
-    /// is deleted declines every later reload for the life of the process.
-    /// High Contrast reaches the terminal only through the config a reload
-    /// builds, so that is an accessibility override that can never be turned
-    /// on again (issue #676). Not the OS colour scheme, which
-    /// <see cref="RefreshForOsColorScheme"/> serves by calling ReadFlags
-    /// directly, never reaching Reload at all.
+    /// The watcher can only say the path did not exist at the instant it
+    /// looked, which an ordinary save produces and which is issue #1146. The
+    /// question is answered by a LOAD, so this concludes nothing itself; it
+    /// goes and gets the evidence, and everything downstream hangs off the
+    /// verdict in <see cref="Reload"/>.
     ///
-    /// The vanish proves deletion from one observation while the shrink
-    /// proves it from a spent budget, and the one-observation standard is
-    /// what mid-save firing exploits. So this asks again before believing
-    /// it, on the protocol <c>Reload</c> already uses for a shrink, and only
-    /// a vanish that outlives the whole budget lowers anything. Believing
-    /// one observation lowered the count in the middle of an ordinary save
-    /// and disarmed both guards for the next reload (issue #1146).
-    ///
-    /// Zeroed rather than decremented once confirmed: the watcher watches
-    /// one path and the default files are three, so this says "stop claiming
-    /// to be running on files I can no longer vouch for" and lets the next
-    /// reload re-establish the count from what is actually on disk. The two
-    /// paths it does not watch raise no event at all; those deletions are
-    /// healed from the reload side instead, by the persistent-shrink
-    /// confirmation in <c>Reload</c>.
+    /// The rebuild that costs is the point rather than waste. A deleted file
+    /// raises no further filesystem events, so without going and looking
+    /// there is nothing to observe, and the session would refuse every
+    /// reload for the life of the process: issue #676 reached through its
+    /// own fix (wintty#1155).
     /// </remarks>
     private void OnConfigFileVanished()
     {
         if (_shuttingDown) return;
+        Reload();
+    }
 
-        // The count moves only on the accept the protocol reports, and
-        // the accept fires only on the far side of the whole ask budget:
-        // both halves of that are ConfigVanishProtocol's, driven rather
-        // than read in Ghostty.Tests. This handler adds only the teardown
-        // fence.
-        _vanishProtocol.Vanished();
+    /// <summary>
+    /// A look the service scheduled for itself fired, posted to the UI
+    /// thread: reload, so its verdict is the next answer to whichever
+    /// question asked for it. A fire that finds the question already over
+    /// costs one reload of an unchanged config and nothing else.
+    /// </summary>
+    private void OnLookAgain()
+    {
+        if (_shuttingDown) return;
+        Reload();
     }
 
     /// <summary>
@@ -2437,6 +2517,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         _shuttingDown = true;
         StopWatcher();
+        _lookAgain.Stop();
     }
 
     /// <summary>
@@ -2450,6 +2531,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public void Dispose()
     {
         BeginShutdown();
+        _lookAgain.Dispose();
         // A preview still up at teardown: the revert is fenced off once
         // shutdown starts, so whatever preview config is left is freed here,
         // after the app that cloned it.

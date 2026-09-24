@@ -1322,6 +1322,45 @@ internal static class TestSeam
                 });
             }
 
+            case "high-contrast":
+            {
+                // HighContrastMonitor's own call, without an OS flip: the
+                // palette given ("#rrggbb" each), or none with off=true. The
+                // answer is the state right after the call, which is before
+                // any reload the call scheduled for later has run.
+                Ghostty.Core.Accessibility.HighContrastColors? colors = null;
+                if (!ArgBool(args, "off", false))
+                {
+                    var parts = new uint[4];
+                    string[] names = ["background", "foreground", "selectionBackground", "selectionForeground"];
+                    for (var i = 0; i < names.Length; i++)
+                    {
+                        if (ParseColorRef(ArgString(args, names[i])) is not { } value)
+                            return Error(op, $"'{names[i]}' must be #rrggbb");
+                        parts[i] = value;
+                    }
+                    colors = new Ghostty.Core.Accessibility.HighContrastColors(parts[0], parts[1], parts[2], parts[3]);
+                }
+                ArmConfigChangeLog(window);
+                window.TestSeamConfig.SetHighContrastOverride(colors);
+                return ConfigStateJson(window, op, applied: null);
+            }
+
+            case "reload-config":
+            {
+                // The service's own Reload, as a reload-config action runs
+                // it. Answers whether it applied.
+                ArmConfigChangeLog(window);
+                var applied = window.TestSeamConfig.Reload();
+                return ConfigStateJson(window, op, applied);
+            }
+
+            case "config-state":
+                // The live config now, and every applied reload since the
+                // log was armed, each as it stood the moment it applied.
+                ArmConfigChangeLog(window);
+                return ConfigStateJson(window, op, applied: null);
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
@@ -1532,6 +1571,67 @@ internal static class TestSeam
         json.WriteEndObject();
     }
 
+    /// <summary>
+    /// Every applied reload since the log was armed: the live native
+    /// background and the High Contrast background the service reports,
+    /// recorded when that reload's ConfigChanged fan-out runs. Reload POSTS
+    /// the fan-out to the dispatcher, so an entry is taken a dispatcher turn
+    /// after the reload applied. It still precedes anything that reacts to
+    /// the change (HighContrastMonitor, which on a desktop with High Contrast
+    /// off asks for no palette again, is posted from inside the fan-out), but
+    /// an item already queued between the reload and its fan-out can move the
+    /// live config first. That errs toward a missed palette, a false red,
+    /// never a false green. Because the entry is late, an op's own answer is
+    /// the place to read what a reload did synchronously, not this log.
+    /// </summary>
+    private static readonly List<(uint? Native, uint? HighContrast)> ConfigChanges = new();
+    private static bool _configChangeLogArmed;
+
+    private static void ArmConfigChangeLog(MainWindow window)
+    {
+        if (_configChangeLogArmed) return;
+        _configChangeLogArmed = true;
+        window.TestSeamConfig.ConfigChanged += config =>
+        {
+            var service = (Ghostty.Services.ConfigService)config;
+            ConfigChanges.Add((service.GetLiveNativeColor("background"), service.HighContrastBackground));
+        };
+    }
+
+    private static string ConfigStateJson(MainWindow window, string op, bool? applied)
+        => Json(json =>
+        {
+            var config = window.TestSeamConfig;
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            if (applied is { } a) json.WriteBoolean("applied", a);
+            WriteHex(json, "nativeBackground", config.GetLiveNativeColor("background"));
+            WriteHex(json, "highContrastBackground", config.HighContrastBackground);
+            json.WriteStartArray("changes");
+            foreach (var (native, highContrast) in ConfigChanges)
+            {
+                json.WriteStartObject();
+                WriteHex(json, "nativeBackground", native);
+                WriteHex(json, "highContrastBackground", highContrast);
+                json.WriteEndObject();
+            }
+            json.WriteEndArray();
+            json.WriteEndObject();
+        });
+
+    /// <summary>"#rrggbb" to a Win32 COLORREF (0x00BBGGRR), or null.</summary>
+    private static uint? ParseColorRef(string? hex)
+    {
+        if (hex is not { Length: 7 } || hex[0] != '#') return null;
+        if (!uint.TryParse(hex.AsSpan(1), System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out var rgb))
+            return null;
+        var r = (rgb >> 16) & 0xFF;
+        var g = (rgb >> 8) & 0xFF;
+        var b = rgb & 0xFF;
+        return (b << 16) | (g << 8) | r;
+    }
     private static void WriteHex(Utf8JsonWriter json, string name, uint? rgb)
     {
         if (rgb is { } value) json.WriteString(name, $"#{value:X6}");

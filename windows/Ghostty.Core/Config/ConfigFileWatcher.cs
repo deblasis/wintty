@@ -11,12 +11,24 @@ namespace Ghostty.Core.Config;
 /// through <c>onSettled</c>, after a trailing-edge debounce.
 ///
 /// Built for the way editors actually save. Most do not rewrite the file in
-/// place: they write a temp file and then swap it in, by delete and rename
-/// (<c>File.Move</c> with overwrite), by <c>ReplaceFile</c> (which renames the
-/// original away first), or by renaming the original to a backup and writing
-/// a fresh file under the old name. Each of those passes through a moment
-/// where the config file does not exist, and each raises a burst of watcher
-/// events (Deleted, Renamed away, Renamed in, Changed) rather than one.
+/// place: they write a temp file and then swap it in, by deleting the
+/// original and renaming the temp over it, by <c>ReplaceFile</c> (which
+/// renames the original away first), or by renaming the original to a backup
+/// and writing a fresh file under the old name. Each of those passes through
+/// a moment where the config file does not exist, and each raises a burst of
+/// watcher events (Deleted, Renamed away, Renamed in, Changed) rather than
+/// one.
+///
+/// How wide that moment is, measured on this platform at 150 saves per shape
+/// and roughly 40k existence samples each: rename-away-then-create is the
+/// widest at 22.0ms, <c>ReplaceFile</c> 21.2ms, delete-then-rename 8.4ms.
+///
+/// A single <c>MoveFileEx</c> with REPLACE_EXISTING, which is
+/// <c>File.Move</c> with overwrite and what this app's own writes use, is NOT
+/// one of those shapes: it leaves no gap at all, 0 of 150 saves observed
+/// absent. It was named here as a gap producer until the measurement said
+/// otherwise, so read the list above as the measured set rather than as
+/// every swap that exists.
 ///
 /// Two rules follow from that:
 ///
@@ -339,18 +351,21 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// coming, and without this the user's edit waits for the next save.
     /// This only schedules; the caller bounds how often it asks.
     ///
-    /// The answer is load-bearing, not a courtesy. An ask is dropped while
-    /// the host is suppressing its own writes, and after disposal, and a
-    /// caller that counts those against its retry budget spends the budget
-    /// on deliveries that were never scheduled: it then stops asking
-    /// without anything having been tried.
-    ///
-    /// What the answer does mean is the timer: true says a tick was armed,
-    /// and every tick posts its delivery, including one consumed by a
-    /// failed watcher rebuild. That is what keeps a deleted watched
-    /// DIRECTORY on the protocol: the rebuilds fail while it is missing,
-    /// the ticks still deliver, and the host's asks are answered by real
+    /// What the answer means is the timer, and only that: true says a tick
+    /// was armed, and every tick posts its delivery, including one consumed
+    /// by a failed watcher rebuild. That is what keeps a deleted watched
+    /// DIRECTORY making progress: the rebuilds fail while it is missing, the
+    /// ticks still deliver, and the host's asks are answered by real
     /// deliveries rather than swallowed.
+    ///
+    /// What it does NOT mean is anything about the question the host is
+    /// asking. An ask is dropped while the host is suppressing its own
+    /// writes, and after disposal, and there is no watcher here at all when
+    /// <c>auto-reload-config</c> is off, which is the default. A host that
+    /// treats a false as evidence stops making progress in the case where it
+    /// has the least help, so this is an ACCELERATOR: it buys a sooner look
+    /// and never stands in for one. See <c>ConfigVanishConfirmer</c>, where
+    /// gating on this answer was a defect with a name (wintty#1155).
     /// </remarks>
     public bool Resettle() => Rearm();
 
