@@ -45,7 +45,8 @@ public sealed class FirstPaneCommandWiringTests
         var launched = App.Method("OnLaunched");
         var hold = launched.Call("_sessionManager.HoldForLaunchCommand");
         var guard = hold.Ancestors().OfType<IfStatementSyntax>().First();
-        Assert.Equal("coldCommand is not null", guard.Condition.ToString());
+        // Only when -e is what opens; a jump-list click wins and is saved.
+        Assert.Equal("coldCommand is not null && !honorJumpList", guard.Condition.ToString());
         Assert.True(hold.SpanStart < FreshWindow(launched).SpanStart);
     }
 
@@ -69,20 +70,75 @@ public sealed class FirstPaneCommandWiringTests
     [Fact]
     public void ForwardedPlainLaunch_RestoresTheHeldSession()
     {
+        // A plain launch restores the held session INSTEAD of a default
+        // window, as a plain cold launch would have.
         var open = App.Method("OpenWindowFromLaunch");
-        var attempt = open.Call("TryRestoreHeldSession");
+        var attempt = open.Call("RestoreHeldSession");
         var guard = attempt.Ancestors().OfType<IfStatementSyntax>().First();
         Assert.Equal(
-            "forwardedCommand is null && launch.ProfileId is null && TryRestoreHeldSession()",
+            "forwardedCommand is null && launch.ProfileId is null && RestoreHeldSession()",
             guard.Condition.ToString());
         Assert.IsType<ReturnStatementSyntax>(guard.Statement);
-        // Before the ordinary window.
         Assert.True(guard.SpanStart < open.Call("OpenJumpListWindow").SpanStart);
 
-        var restore = App.Method("TryRestoreHeldSession");
+        var restore = App.Method("RestoreHeldSession");
         restore.Call("manager.ReleaseHeldSession");
         var reopen = restore.Call("OpenRestoredWindows");
         Assert.Equal("showLaunchIconOnFirst: false", reopen.Arg(1));
+        restore.Call("manager.RequestPersist");
+    }
+
+    // Every place the shell creates a regular window, and the jump list's
+    // New Tab, ends a cold -e's hold before it opens anything: the held
+    // session is restored first, then the new window opens (#1136). A census
+    // over the whole shell, so a new opener that forgets it fails here.
+    [Fact]
+    public void EveryWindowOpener_EndsTheHold_BeforeItCreatesTheWindow()
+    {
+        // Where a window is created WITHOUT ending the hold, on purpose:
+        // the cold start itself (it sets the hold), the quick terminal (not
+        // a regular window), the restore (it is the release), and the two
+        // factories (their callers are checked instead).
+        var exempt = new[] { "OnLaunched", "OpenRestoredWindows", "CreateForAdoption", "CreateForNewTab" };
+        var releases = new[] { "RestoreHeldSession", "App.RestoreHeldSessionBeforeNewWindow" };
+
+        var sites = 0;
+        var checkedSites = 0;
+        var problems = new System.Collections.Generic.List<string>();
+        foreach (var file in ShellSource.AllFiles())
+        {
+            var creations = file.Root.DescendantNodes()
+                .Where(n => n is ObjectCreationExpressionSyntax o && o.Type.ToString() == "MainWindow"
+                    || n is InvocationExpressionSyntax i && i.CalleeText() is
+                        "MainWindow.CreateForNewTab" or "CreateForNewTab"
+                        or "MainWindow.CreateForAdoption" or "CreateForAdoption");
+            foreach (var creation in creations)
+            {
+                sites++;
+                var method = creation.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+                var name = method?.Identifier.ValueText ?? "(no method)";
+                if (exempt.Contains(name)) continue;
+                checkedSites++;
+                var release = method!.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                    .FirstOrDefault(i => releases.Contains(i.CalleeText()));
+                if (release is null)
+                    problems.Add($"  {file.Name}: {name} opens a window without ending the hold");
+                else if (release.SpanStart > creation.SpanStart)
+                    problems.Add($"  {file.Name}: {name} ends the hold after it opens the window");
+            }
+        }
+
+        // Non-vacuity: the census found the openers it is about.
+        // Today: 9 creations, 4 checked openers (OpenJumpListWindow,
+        // ReopenClosedWindow, OpenInNewWindow, DetachTabToWindow).
+        Assert.True(sites >= 9, $"found only {sites} window creations; the census stopped matching");
+        Assert.True(checkedSites >= 4, $"checked only {checkedSites} openers");
+        Assert.True(problems.Count == 0, "window openers that skip the hold:\n" + string.Join("\n", problems));
+
+        // The jump list's New Tab opens no window but is a launch all the same.
+        var tab = App.Method("TryOpenJumpListTab");
+        Assert.IsType<ExpressionStatementSyntax>(tab.Body!.Statements[0]);
+        Assert.Equal("RestoreHeldSession()", ((ExpressionStatementSyntax)tab.Body.Statements[0]).Expression.ToString());
     }
 
     [Fact]
@@ -337,15 +393,8 @@ public sealed class FirstPaneCommandWiringTests
         Assert.Contains("surfaceConfig.CloseOnCleanExit =", onLoaded);
         Assert.Contains("PaneCommandPolicy.ClosesOnCleanExit(Snapshot)", onLoaded);
 
-        // Struct: the managed field sits where the header puts it, last,
-        // right after custom_shader.
-        var native = ShellSource.Load("Interop.NativeMethods.cs");
-        var fields = native.Root.DescendantNodes().OfType<StructDeclarationSyntax>()
-            .Single(s => s.Identifier.ValueText == "GhosttySurfaceConfig")
-            .Members.OfType<FieldDeclarationSyntax>()
-            .Select(f => f.Declaration.Variables.Single().Identifier.ValueText)
-            .ToList();
-        Assert.Equal(new[] { "CustomShader", "CloseOnCleanExit" }, fields.TakeLast(2));
+        // Struct layout: held to the header by computed offsets in
+        // GhosttyStructHeaderParityTests (SurfaceConfig_*), not here.
 
         // Native: honoured only when the user did not set wait-after-command,
         // and set before any child exit can be processed.

@@ -72,6 +72,11 @@ internal sealed class SessionManager
     /// clean-shutdown mark, so the saved session stays exactly as it is on
     /// disk for the next plain launch, whatever the user does in the -e
     /// window.
+    /// <para>
+    /// The hold must end the moment the process opens any other window
+    /// (App.RestoreHeldSession, called by every window opener): a window
+    /// opened while it lasts would otherwise never be saved at all.
+    /// </para>
     /// </summary>
     public void HoldForLaunchCommand() => _held = true;
 

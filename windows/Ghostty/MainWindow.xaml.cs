@@ -2144,6 +2144,9 @@ public sealed partial class MainWindow : Window
 
     private void OpenInNewWindow(ProfileSnapshot? snapshot)
     {
+        // A window other than the cold -e one ends the hold (#1136).
+        App.RestoreHeldSessionBeforeNewWindow();
+
         var bootstrap = App.BootstrapHost
             ?? throw new InvalidOperationException(
                 "OpenInNewWindow: no bootstrap host; App.OnLaunched did not run.");
@@ -2213,6 +2216,9 @@ public sealed partial class MainWindow : Window
         if (_tabManager.Tabs.Count <= 1)
             throw new InvalidOperationException(
                 "DetachTabToWindow: guarded menu fired on single-tab window.");
+
+        // A window other than the cold -e one ends the hold (#1136).
+        App.RestoreHeldSessionBeforeNewWindow();
 
         // Source-side: detach the model. The manager's TabRemoved
         // subscribers already drain visual state (RemovePaneHost in

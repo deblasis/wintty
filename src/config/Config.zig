@@ -1189,8 +1189,11 @@ palette: Palette = .{},
 ///     the rules below. A cold `-e` launch opens only that window: it does
 ///     not restore the saved session, and it leaves the saved session
 ///     untouched on disk, even if tabs are added to the window. The next
-///     plain launch restores it, including a plain launch forwarded to the
-///     running `-e` instance, after which that instance saves as usual. When
+///     launch restores it: a plain cold launch, or any other window the
+///     running `-e` instance opens (a forwarded launch, a jump-list task, a
+///     new window, a detached tab), after which it saves as usual. The `-e`
+///     pane closes when its command exits 0 and stays open to show any other
+///     exit, unless `wait-after-command` is set. When
 ///     a `-e` pane is saved that way, its command is not: restored, the pane
 ///     opens its profile, or a plain shell, and never runs the command again.
 ///
@@ -1221,7 +1224,9 @@ command: ?Command = null,
 /// On Windows the first pane of a cold launch that restored no saved session
 /// runs it. When a session is restored it is not used, and no window is
 /// added for it. `-e` wins when both are given, and a launch forwarded to a
-/// running instance does not use it.
+/// running instance does not use it. Like a `-e` pane, its pane closes when
+/// the command exits 0 and stays open to show any other exit, unless
+/// `wait-after-command` is set.
 ///
 /// After the first terminal surface is created (or closed), there is no
 /// way to run this initial command again automatically. As such, setting

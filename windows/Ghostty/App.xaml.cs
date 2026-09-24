@@ -1160,7 +1160,9 @@ public partial class App : Application
         var coldCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(
             Environment.GetCommandLineArgs());
         var initialCommand = coldCommand is null ? _configService.ConfiguredInitialCommand : null;
-        if (coldCommand is not null) _sessionManager.HoldForLaunchCommand();
+        // Only when -e is what opens: a jump-list click on the same command
+        // line opens its own window, which is saved as usual.
+        if (coldCommand is not null && !honorJumpList) _sessionManager.HoldForLaunchCommand();
 
         var restoreState = honorJumpList || coldCommand is not null
             ? null
@@ -1505,7 +1507,7 @@ public partial class App : Application
 
             // The first plain launch into a -e process restores the session
             // that process held back, instead of opening a default window.
-            if (forwardedCommand is null && launch.ProfileId is null && TryRestoreHeldSession())
+            if (forwardedCommand is null && launch.ProfileId is null && RestoreHeldSession())
                 return;
 
             OpenJumpListWindow(
@@ -1777,6 +1779,10 @@ public partial class App : Application
 
     private bool TryOpenJumpListTab(string? profileId)
     {
+        // A jump-list tab is a launch like any other: it ends a cold -e's
+        // hold, so the saved session comes back before the tab opens (#1136).
+        RestoreHeldSession();
+
         var window = LastRegularWindow is { IsQuickTerminal: false } last
             ? last
             : System.Linq.Enumerable.FirstOrDefault(
@@ -1866,21 +1872,35 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// A plain launch forwarded into a process a cold <c>-e</c> started: that
-    /// process never restored the saved session, so this launch does, the way
-    /// a plain cold launch would have, and the process saves normally from
-    /// then on (#1136). True when it handled the launch; false when the
-    /// process was not holding a session (or it had nothing to restore), and
-    /// the caller opens its ordinary window.
+    /// End a cold <c>-e</c>'s hold on the saved session (#1136). Only that
+    /// one-off window is ephemeral: the moment the process gets any other
+    /// window (a forwarded launch of any kind, a jump-list task or pinned
+    /// profile, a new window from the + button or the palette, Detach Tab,
+    /// Reopen Closed Window), the held session is restored first, the way a
+    /// plain cold launch would have restored it, and the process saves
+    /// normally from then on. Every opener of a window calls this before it
+    /// creates one (FirstPaneCommandWiringTests pins the list). Without it,
+    /// the windows opened while the hold lasted would never be saved.
+    /// Returns whether windows were restored; false when nothing was held
+    /// or the held session had nothing to restore.
     /// </summary>
-    private bool TryRestoreHeldSession()
+    private bool RestoreHeldSession()
     {
         if (_sessionManager is not { SessionHeld: true } manager) return false;
         var state = manager.ReleaseHeldSession();
-        if (state is not { Windows.Count: > 0 }) return false;
-        OpenRestoredWindows(state, showLaunchIconOnFirst: false);
+        var restored = state is { Windows.Count: > 0 };
+        if (restored) OpenRestoredWindows(state!, showLaunchIconOnFirst: false);
         manager.RequestPersist();
-        return true;
+        return restored;
+    }
+
+    /// <summary>
+    /// <see cref="RestoreHeldSession"/> for openers outside App (MainWindow's
+    /// new-window and detach paths).
+    /// </summary>
+    internal static void RestoreHeldSessionBeforeNewWindow()
+    {
+        if (Current is App app) app.RestoreHeldSession();
     }
 
     private void OpenJumpListWindow(
@@ -1888,6 +1908,9 @@ public partial class App : Application
         string workingDirectory,
         string? command = null)
     {
+        // A window other than the cold -e one ends the hold (#1136).
+        RestoreHeldSession();
+
         Ghostty.Core.Profiles.ProfileSnapshot? snapshot;
         if (profileId is null)
         {
@@ -1961,6 +1984,9 @@ public partial class App : Application
         if (_configService is null || _bootstrapHost is null ||
             _lifetimeSupervisor is null || _loggerFactory is null) return;
         if (!ClosedWindows.TryPop(out var windowSession)) return;
+
+        // A window other than the cold -e one ends the hold (#1136).
+        RestoreHeldSession();
 
         var restored = new MainWindow(
             _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, windowSession);
