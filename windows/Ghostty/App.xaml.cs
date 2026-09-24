@@ -1149,60 +1149,37 @@ public partial class App : Application
             Environment.GetCommandLineArgs());
         var honorJumpList = coldLaunch.Action != Ghostty.Core.JumpList.JumpListAction.None;
 
-        // `wintty -e <cmd>` works the way `wt <commandline>` does in Windows
-        // Terminal (#1136): the saved session is restored as on any launch,
-        // and the command gets a window of its own on top of it
-        // (WindowEmperor::HandleCommandlineArgs restores every persisted
-        // layout, then dispatches the command line). That window is an
-        // ordinary one and is saved like the rest. `initial-command` from the
-        // config runs in the first pane of a cold launch that restored
-        // nothing; it never adds a window to a restored session, and -e wins
-        // when both are set.
+        // `wintty -e <cmd>` opens its command's window and nothing else
+        // (#1136): no restore, and the saved session is held untouched on
+        // disk (SessionManager.HoldForLaunchCommand), so the one-off window
+        // and any tabs added to it never replace it. The first plain launch
+        // forwarded into this process restores it (OpenWindowFromLaunch),
+        // and from then on the process saves normally. `initial-command`
+        // from the config runs in the first pane of a cold launch that
+        // restored nothing, and -e wins when both are set.
         var coldCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(
             Environment.GetCommandLineArgs());
         var initialCommand = coldCommand is null ? _configService.ConfiguredInitialCommand : null;
-        var launchWantsWindow = coldCommand is not null;
+        if (coldCommand is not null) _sessionManager.HoldForLaunchCommand();
 
-        var restoreState = honorJumpList ? null : _sessionManager.LoadForRestore();
-        var restoredAny = restoreState is { Windows.Count: > 0 };
-        if (restoredAny)
+        var restoreState = honorJumpList || coldCommand is not null
+            ? null
+            : _sessionManager.LoadForRestore();
+        if (restoreState is { Windows.Count: > 0 })
         {
-            // Only the first restored window drives the splash. There is one
-            // splash per process, so arming every window would have them
-            // fight over it: each Track would drag it onto the newest
-            // window, uncovering the earlier ones, and whichever window
-            // rendered first would dismiss it for all of them.
-            // When -e opens its window over the restored session, that window
-            // is the one in front, so it takes the splash instead.
-            var isFirstWindow = !launchWantsWindow;
-            foreach (var ws in restoreState!.Windows)
-            {
-                var restored = new MainWindow(
-                    _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws,
-                    showLaunchIcon: isFirstWindow);
-                isFirstWindow = false;
-                restored.Closed += OnAnyWindowClosedInternal;
-                _sessionManager.Track(restored);
-                restored.Activate();
-            }
+            OpenRestoredWindows(restoreState, showLaunchIconOnFirst: true);
         }
         else if (honorJumpList)
         {
             HandleColdStartJumpList(coldLaunch);
         }
-
-        if (!honorJumpList && (!restoredAny || launchWantsWindow))
+        else
         {
             // The first pane runs -e in the caller's directory, as a forwarded
-            // launch does, else `initial-command` (reachable only when nothing
-            // was restored, since only -e opens a window next to a restored
-            // session), else what any new pane runs (PaneCommandPolicy).
-            // Opened after the restored windows, so the command's window is
-            // the one in front, as in Windows Terminal.
+            // launch does, else `initial-command`, else what any new pane runs
+            // (PaneCommandPolicy).
             var window = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
-                // Either nothing was restored, or this is the -e window over
-                // the restored ones: the window in front, so the splash's.
                 showLaunchIcon: true,
                 initialSnapshot: LaunchFirstPaneSnapshot(
                     coldCommand,
@@ -1524,12 +1501,17 @@ public partial class App : Application
             // the launch to the default shell (#1094). Markers keep their
             // existing priority in the arm below. With no profile named, the
             // pane follows the same rules a cold start's does (#1136).
+            var forwardedCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(req.Args);
+
+            // The first plain launch into a -e process restores the session
+            // that process held back, instead of opening a default window.
+            if (forwardedCommand is null && launch.ProfileId is null && TryRestoreHeldSession())
+                return;
 
             OpenJumpListWindow(
                 launch.ProfileId,
                 req.WorkingDirectory,
-                command: Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(req.Args));
-
+                command: forwardedCommand);
         }
         else
         {
@@ -1854,6 +1836,52 @@ public partial class App : Application
             ConfigService?.DefaultProfileSet ?? false,
             workingDirectory,
             initialCommand);
+
+    /// <summary>
+    /// Open the windows of a restored session, tracked for saving.
+    /// </summary>
+    /// <param name="showLaunchIconOnFirst">
+    /// Only the first restored window drives the splash. There is one
+    /// splash per process, so arming every window would have them fight
+    /// over it: each Track would drag it onto the newest window, uncovering
+    /// the earlier ones, and whichever window rendered first would dismiss
+    /// it for all of them. A restore after startup (a forwarded launch into
+    /// a -e process) has no splash to drive.
+    /// </param>
+    private void OpenRestoredWindows(
+        Ghostty.Core.Session.SessionState state,
+        bool showLaunchIconOnFirst)
+    {
+        var isFirstWindow = showLaunchIconOnFirst;
+        foreach (var ws in state.Windows)
+        {
+            var restored = new MainWindow(
+                _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, ws,
+                showLaunchIcon: isFirstWindow);
+            isFirstWindow = false;
+            restored.Closed += OnAnyWindowClosedInternal;
+            _sessionManager?.Track(restored);
+            restored.Activate();
+        }
+    }
+
+    /// <summary>
+    /// A plain launch forwarded into a process a cold <c>-e</c> started: that
+    /// process never restored the saved session, so this launch does, the way
+    /// a plain cold launch would have, and the process saves normally from
+    /// then on (#1136). True when it handled the launch; false when the
+    /// process was not holding a session (or it had nothing to restore), and
+    /// the caller opens its ordinary window.
+    /// </summary>
+    private bool TryRestoreHeldSession()
+    {
+        if (_sessionManager is not { SessionHeld: true } manager) return false;
+        var state = manager.ReleaseHeldSession();
+        if (state is not { Windows.Count: > 0 }) return false;
+        OpenRestoredWindows(state, showLaunchIconOnFirst: false);
+        manager.RequestPersist();
+        return true;
+    }
 
     private void OpenJumpListWindow(
         string? profileId,

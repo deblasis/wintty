@@ -1186,12 +1186,13 @@ palette: Palette = .{},
 ///
 ///   * `-e` runs its command in the first pane of the window that launch
 ///     opens, and nowhere else. New tabs and splits in that window follow
-///     the rules below. As with Windows Terminal's `wt <commandline>`, a
-///     saved session is still restored, and the command gets a window of
-///     its own next to it, which is saved like any other window. Unlike
-///     Windows Terminal, the command itself is not saved: when that pane is
-///     restored it opens its profile, or a plain shell, and never runs the
-///     command again.
+///     the rules below. A cold `-e` launch opens only that window: it does
+///     not restore the saved session, and it leaves the saved session
+///     untouched on disk, even if tabs are added to the window. The next
+///     plain launch restores it, including a plain launch forwarded to the
+///     running `-e` instance, after which that instance saves as usual. When
+///     a `-e` pane is saved that way, its command is not: restored, the pane
+///     opens its profile, or a plain shell, and never runs the command again.
 ///
 ///   * If `default-profile` is set, every other new pane runs that profile,
 ///     and this `command` is not used.

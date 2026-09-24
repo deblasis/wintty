@@ -25,6 +25,10 @@ internal sealed class SessionManager
     private readonly Func<IEnumerable<MainWindow>> _windows;
     private DispatcherQueueTimer? _debounce;
 
+    // A cold `wintty -e` holds the saved session: it was not restored, so it
+    // must not be written either (#1136).
+    private bool _held;
+
     public SessionManager(
         SessionStore store,
         ConfigService config,
@@ -59,6 +63,31 @@ internal sealed class SessionManager
         state.CleanShutdown = false;
         _store.Save(state);
         return state;
+    }
+
+    /// <summary>
+    /// A cold <c>wintty -e</c> opens only its command's window and restores
+    /// nothing (#1136). Until <see cref="ReleaseHeldSession"/>, this process
+    /// writes no session at all, neither the debounced save nor the
+    /// clean-shutdown mark, so the saved session stays exactly as it is on
+    /// disk for the next plain launch, whatever the user does in the -e
+    /// window.
+    /// </summary>
+    public void HoldForLaunchCommand() => _held = true;
+
+    /// <summary>Whether the saved session is being held (see above).</summary>
+    public bool SessionHeld => _held;
+
+    /// <summary>
+    /// The first plain launch forwarded into a held process restores the
+    /// session: this ends the hold and answers what a cold launch's
+    /// <see cref="LoadForRestore"/> would have, and saving resumes normally.
+    /// </summary>
+    public SessionState? ReleaseHeldSession()
+    {
+        if (!_held) return null;
+        _held = false;
+        return LoadForRestore();
     }
 
     /// <summary>Subscribe a window's change signals to the debounced persist.</summary>
@@ -121,6 +150,7 @@ internal sealed class SessionManager
 
     public void RequestPersist()
     {
+        if (_held) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
         _debounce ??= _dispatcher.CreateTimer();
         _debounce.Interval = TimeSpan.FromMilliseconds(DebounceMs);
@@ -143,6 +173,7 @@ internal sealed class SessionManager
     /// </summary>
     public void PersistLiveWindows()
     {
+        if (_held) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
         var state = new SessionState { CleanShutdown = false };
         foreach (var w in _windows())
@@ -169,6 +200,7 @@ internal sealed class SessionManager
     public void FinalizeCleanShutdown(MainWindow? closingFallback)
     {
         _debounce?.Stop();
+        if (_held) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
 
         var onDisk = _store.Load();

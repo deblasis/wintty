@@ -8,9 +8,9 @@ namespace Ghostty.Tests.SingleInstance;
 
 /// <summary>
 /// The shell side of #1136: every opener of a pane nobody picked a profile
-/// for goes through <c>PaneCommandPolicy</c>, a <c>-e</c> launch restores
-/// the session and adds its own window as Windows Terminal's
-/// <c>wt &lt;commandline&gt;</c> does, and an argv reaches the surface as one.
+/// for goes through <c>PaneCommandPolicy</c>, a cold <c>-e</c> opens only its
+/// window and holds the saved session untouched until a plain launch
+/// restores it, and an argv reaches the surface as one.
 /// The WinUI assembly cannot load in a test host, so what these pin is
 /// shape; the rules themselves are pinned by <c>PaneCommandPolicyTests</c>,
 /// and a launch-level check lives outside the repo for the verification
@@ -31,54 +31,82 @@ public sealed class FirstPaneCommandWiringTests
     }
 
     [Fact]
-    public void ColdStart_DashE_RestoresTheSession_AsWindowsTerminalDoes()
+    public void ColdStart_DashE_DoesNotRestore()
     {
-        // wt <commandline> restores every persisted layout and then opens the
-        // command line's window (WindowEmperor::HandleCommandlineArgs). So a
-        // -e launch does not skip the restore: only a jump-list click does.
         var launched = App.Method("OnLaunched");
         var restore = launched.Call("_sessionManager.LoadForRestore");
         var conditional = restore.Ancestors().OfType<ConditionalExpressionSyntax>().First();
-        Assert.Equal("honorJumpList", conditional.Condition.ToString());
-        Assert.DoesNotContain("coldCommand", conditional.ToString());
+        Assert.Equal("honorJumpList || coldCommand is not null", conditional.Condition.ToString());
     }
 
     [Fact]
-    public void ColdStart_DashE_AddsItsOwnWindow_AfterTheRestoredOnes()
+    public void ColdStart_DashE_HoldsTheSavedSession_BeforeAnyWindowOpens()
     {
         var launched = App.Method("OnLaunched");
-
-        // -e always gets a window, restored session or not. Without it (and
-        // so for initial-command) a window opens only when nothing was
-        // restored: initial-command never adds a window to a restored session.
-        var wants = launched.DescendantNodes().OfType<VariableDeclaratorSyntax>()
-            .Single(v => v.Identifier.ValueText == "launchWantsWindow");
-        Assert.Equal("coldCommand is not null", wants.Initializer!.Value.ToString());
-
-        var fresh = FreshWindow(launched);
-        var guard = fresh.Ancestors().OfType<IfStatementSyntax>().First();
-        Assert.Equal("!honorJumpList && (!restoredAny || launchWantsWindow)", guard.Condition.ToString());
-
-        // After the restored windows, so the command's window is in front.
-        var restoredLoop = launched.DescendantNodes().OfType<ForEachStatementSyntax>()
-            .Single(f => f.Expression.ToString() == "restoreState!.Windows");
-        Assert.True(restoredLoop.SpanStart < fresh.SpanStart);
-
-        // And it is an ordinary window: tracked for the session like the rest.
-        var block = guard.Statement.ToString();
-        Assert.Contains("_sessionManager.Track(window)", block);
+        var hold = launched.Call("_sessionManager.HoldForLaunchCommand");
+        var guard = hold.Ancestors().OfType<IfStatementSyntax>().First();
+        Assert.Equal("coldCommand is not null", guard.Condition.ToString());
+        Assert.True(hold.SpanStart < FreshWindow(launched).SpanStart);
     }
 
     [Fact]
-    public void Session_TreatsEveryWindowAlike()
+    public void ColdStart_OpensOnlyOneKindOfWindow()
     {
-        // No ephemeral-window bookkeeping: Windows Terminal persists the
-        // command line's window and any tabs added to it like any other.
+        // Restored windows, a jump-list window, or the fresh (-e, initial-
+        // command or default) window: one of the three, never -e beside a
+        // restore.
+        var launched = App.Method("OnLaunched");
+        var fresh = FreshWindow(launched);
+        var chain = fresh.Ancestors().OfType<IfStatementSyntax>().Last(
+            i => i.Condition.ToString() == "restoreState is { Windows.Count: > 0 }");
+        Assert.Contains("OpenRestoredWindows(restoreState", chain.Statement.ToString());
+        var elseIf = Assert.IsType<IfStatementSyntax>(chain.Else!.Statement);
+        Assert.Equal("honorJumpList", elseIf.Condition.ToString());
+        Assert.Contains(fresh.ToString(), elseIf.Else!.Statement.ToString());
+        Assert.Contains("_sessionManager.Track(window)", elseIf.Else.Statement.ToString());
+    }
+
+    [Fact]
+    public void ForwardedPlainLaunch_RestoresTheHeldSession()
+    {
+        var open = App.Method("OpenWindowFromLaunch");
+        var attempt = open.Call("TryRestoreHeldSession");
+        var guard = attempt.Ancestors().OfType<IfStatementSyntax>().First();
+        Assert.Equal(
+            "forwardedCommand is null && launch.ProfileId is null && TryRestoreHeldSession()",
+            guard.Condition.ToString());
+        Assert.IsType<ReturnStatementSyntax>(guard.Statement);
+        // Before the ordinary window.
+        Assert.True(guard.SpanStart < open.Call("OpenJumpListWindow").SpanStart);
+
+        var restore = App.Method("TryRestoreHeldSession");
+        restore.Call("manager.ReleaseHeldSession");
+        var reopen = restore.Call("OpenRestoredWindows");
+        Assert.Equal("showLaunchIconOnFirst: false", reopen.Arg(1));
+    }
+
+    [Fact]
+    public void SessionManager_HoldWritesNothing_UntilReleased()
+    {
         var manager = ShellSource.Load("Session.SessionManager.cs");
-        var text = manager.Root.ToString();
-        Assert.DoesNotContain("ExcludedFromSession", text);
-        Assert.DoesNotContain("_restoreSkipped", text);
-        Assert.DoesNotContain("ExcludedFromSession", ShellSource.Load("MainWindow.xaml.cs").Root.ToString());
+        foreach (var name in new[] { "RequestPersist", "PersistLiveWindows", "FinalizeCleanShutdown" })
+        {
+            var body = manager.Method(name).Body!;
+            var guard = body.Statements.OfType<IfStatementSyntax>()
+                .FirstOrDefault(s => s.Condition.ToString() == "_held" && s.Statement is ReturnStatementSyntax);
+            Assert.True(guard is not null, $"{name} has no `if (_held) return;`");
+            var firstEffect = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Where(i => i.ToString().StartsWith("_store.") || i.ToString().StartsWith("_debounce.Start"))
+                .Select(i => i.SpanStart)
+                .DefaultIfEmpty(int.MaxValue)
+                .Min();
+            Assert.True(guard!.SpanStart < firstEffect, $"{name} writes before the hold check");
+        }
+
+        // The release ends the hold and answers a cold launch's restore.
+        var release = manager.Method("ReleaseHeldSession").Body!.ToString();
+        Assert.Contains("_held = false;", release);
+        Assert.Contains("return LoadForRestore();", release);
     }
 
     [Fact]
@@ -112,14 +140,10 @@ public sealed class FirstPaneCommandWiringTests
             call.Arg(1));
         Assert.Equal("initialCommand: initialCommand", call.Arg(2));
 
-        // The splash belongs to the window in front: this one whenever it
-        // opens, and the first restored window only when -e opens none.
+        // It is the only window of the launch, so it takes the splash.
         var icon = fresh.ArgumentList.Arguments
             .Single(a => a.NameColon?.Name.Identifier.ValueText == "showLaunchIcon");
         Assert.Equal("true", icon.Expression.ToString());
-        var firstRestored = launched.DescendantNodes().OfType<VariableDeclaratorSyntax>()
-            .Single(v => v.Identifier.ValueText == "isFirstWindow");
-        Assert.Equal("!launchWantsWindow", firstRestored.Initializer!.Value.ToString());
     }
 
     // ---- forwarded launch and the jump list --------------------------------
@@ -129,7 +153,10 @@ public sealed class FirstPaneCommandWiringTests
     {
         var open = App.Method("OpenWindowFromLaunch");
         var call = open.Call("OpenJumpListWindow");
-        Assert.Contains("LaunchCommand.FromArgs(req.Args)", call.Arg(2));
+        Assert.Equal("command: forwardedCommand", call.Arg(2));
+        var parsed = open.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "forwardedCommand");
+        Assert.Contains("LaunchCommand.FromArgs(req.Args)", parsed.Initializer!.Value.ToString());
     }
 
     [Fact]
