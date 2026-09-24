@@ -19,8 +19,16 @@ namespace Ghostty.Tests.Config;
 /// <remarks>
 /// The service wires exactly this and nothing executes the service, so
 /// these sequences lived only as source shape until the wiring moved into
-/// Ghostty.Core. Every assertion here runs the real thing: real events,
-/// real debounces, real deliveries, real asks.
+/// Ghostty.Core. Every assertion here runs the real thing: real file
+/// operations, the watcher's real debounce and delivery, real asks.
+///
+/// The watcher's EVENTS, though, are raised by hand through
+/// <see cref="ConfigFileWatcher.TestRaiseFileEvent"/> after each file
+/// operation, never by the file system: waiting for real events made every
+/// step here a race the machine could lose, and under load it did (issue
+/// #1161). The seam runs the exact path a real event runs, suppression
+/// consult included. What real events add is covered in
+/// ConfigFileWatcherTests, which keeps the real FileSystemWatcher running.
 /// </remarks>
 public sealed class ConfigVanishProtocolTests : IDisposable
 {
@@ -126,6 +134,34 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     }
 
     /// <summary>
+    /// Run a file operation, then raise the event it causes through the
+    /// seam, synchronously. Replaces waiting for the real file system to
+    /// deliver the event: under load that wait was both the test's clock
+    /// and its verdict, and it failed both ways (issue #1161). The seam
+    /// makes the event a fact; whether it arms the debounce is then the
+    /// code's decision, which is what these tests are about.
+    /// </summary>
+    private void Seam(Action act)
+    {
+        act();
+        Assert.True(_watcher!.TestRaiseFileEvent(),
+            "the file operation's event was suppressed, so it armed nothing");
+    }
+
+    /// <summary>
+    /// Run a file operation whose events the session suppresses, and raise
+    /// the event through the seam anyway: the suppression consult inside
+    /// the seam is the point, since the assertion is that the suppressed
+    /// event armed nothing.
+    /// </summary>
+    private void SeamSuppressed(Action act)
+    {
+        act();
+        Assert.False(_watcher!.TestRaiseFileEvent(),
+            "a suppressed event armed the debounce");
+    }
+
+    /// <summary>
     /// The app's own write, the ConfigFileEditor.WriteAtomic primitives:
     /// it recreates the file from nothing, which is how the settings UI
     /// returns a config a deletion took away, and its events are the
@@ -161,7 +197,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
         // 1. A real deletion, confirmed through the watcher's own
         // deliveries: the report that opens the stretch, then the one
         // past the floor.
-        _timer.WaitForBurst(() => File.Delete(_path));
+        Seam(() => File.Delete(_path));
         FireAndDeliver();
         Assert.Equal(0, _accepted);
         Assert.True(_timer.Armed, "the ask scheduled no next delivery");
@@ -178,8 +214,15 @@ public sealed class ConfigVanishProtocolTests : IDisposable
         // is the app's own evidence the file is back: it records the
         // count, and its VERDICT is what ends the open stretch.
         _ignore = true;
-        WriteLikeTheApp("font-size = 13\n");
-        Thread.Sleep(400);
+        // The write and the event it raises, together: the seam raises the
+        // event through the same path a real event takes and proves the
+        // suppression consult fired. This used to be Thread.Sleep(400), a
+        // wait whose only job was to let the suppressed events arrive
+        // before the assertions below, and which under load passed with the
+        // events still in flight, asserting nothing. The seam makes the
+        // consult synchronous, so the assertions can no longer pass
+        // vacuously.
+        SeamSuppressed(() => WriteLikeTheApp("font-size = 13\n"));
         _count = 1;
         Assert.False(protocol.Observed(ConfigFilesFound.Loaded));
         _ignore = false;
@@ -193,7 +236,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
         // and the floor is 900ms. What would make this report conclude is
         // not elapsed time here but the stretch from step 1 still being
         // open, whose first observation is already a floor in the past.
-        _timer.WaitForBurst(() => File.Delete(_path));
+        Seam(() => File.Delete(_path));
         Assert.True(_timer.Armed);
         _timer.Fire();
         Assert.Single(_post);
@@ -208,7 +251,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
 
         // 4. The swap completes, and the settle that reports it is where
         // the stretch ends the ordinary way.
-        _timer.WaitForBurst(() =>
+        Seam(() =>
         {
             File.WriteAllText(Tmp, "font-size = 14\n");
             File.Move(Tmp, _path);
@@ -231,7 +274,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     {
         Start();
 
-        _timer.WaitForBurst(() => File.Delete(_path));
+        Seam(() => File.Delete(_path));
 
         // The first report opens the stretch and cannot conclude it: the
         // floor is measured from this instant, so nothing has elapsed.
@@ -300,7 +343,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     {
         var protocol = Start(ask: () => false);
 
-        _timer.WaitForBurst(() => File.Delete(_path));
+        Seam(() => File.Delete(_path));
         FireAndDeliver();
 
         // Nothing was scheduled, so no delivery will revisit this. One
@@ -522,7 +565,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     public void With_a_watcher_every_delivery_short_of_the_floor_asks_for_the_next()
     {
         Start();
-        _timer.WaitForBurst(() => File.Delete(_path));
+        Seam(() => File.Delete(_path));
         FireAndDeliver();
 
         var step = TimeSpan.FromMilliseconds(300);
@@ -575,11 +618,11 @@ public sealed class ConfigVanishProtocolTests : IDisposable
         Start();
 
         // A stretch opened on a deletion, not yet past the floor.
-        _timer.WaitForBurst(() => File.Delete(_path));
+        Seam(() => File.Delete(_path));
         FireAndDeliver();
 
         // The file comes back, and the settle's reload finds it.
-        _timer.WaitForBurst(() => File.WriteAllText(_path, "font-size = 15\n"));
+        Seam(() => File.WriteAllText(_path, "font-size = 15\n"));
         FireAndDeliver();
         Assert.Equal(1, _settled);
         Assert.Equal(0, _accepted);
@@ -590,7 +633,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
 
         // The next deletion is a fresh question: its first report proves
         // nothing, however long the previous stretch ran.
-        _timer.WaitForBurst(() => File.Delete(_path));
+        Seam(() => File.Delete(_path));
         FireAndDeliver();
         Assert.Equal(0, _accepted);
 
@@ -628,10 +671,12 @@ public sealed class ConfigVanishProtocolTests : IDisposable
 
     private static void WaitUntil(Func<bool> condition, string failure)
     {
+        // Generous hang guard: the deadline exists so a broken condition
+        // fails instead of hanging the suite, not to measure the machine.
         var sw = Stopwatch.StartNew();
         while (!condition())
         {
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), failure);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(60), failure);
             Thread.Sleep(10);
         }
     }
@@ -648,7 +693,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
                 return;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                       && sw.Elapsed < TimeSpan.FromSeconds(5))
+                                       && sw.Elapsed < TimeSpan.FromSeconds(60))
             {
                 Thread.Sleep(50);
             }
@@ -661,20 +706,17 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     /// </summary>
     private sealed class FakeTimer : ISchedulerTimer
     {
-        private int _scheduleCount;
         private volatile bool _armed;
         private long _lastDelayTicks;
 
         public Action? Callback { get; set; }
         public bool Armed => _armed;
         public bool Disposed { get; private set; }
-        public int ScheduleCount => Volatile.Read(ref _scheduleCount);
         public TimeSpan LastDelay => TimeSpan.FromTicks(Interlocked.Read(ref _lastDelayTicks));
 
         public void Schedule(TimeSpan delay)
         {
             Interlocked.Exchange(ref _lastDelayTicks, delay.Ticks);
-            Interlocked.Increment(ref _scheduleCount);
             _armed = true;
         }
 
@@ -691,38 +733,6 @@ public sealed class ConfigVanishProtocolTests : IDisposable
             if (!_armed) return;
             _armed = false;
             Callback?.Invoke();
-        }
-
-        /// <summary>
-        /// Run <paramref name="act"/>, then wait until the events it caused
-        /// have arrived and gone quiet for longer than any gap inside one
-        /// save, so the burst is complete before the test settles it.
-        /// </summary>
-        public void WaitForBurst(Action act)
-        {
-            var before = ScheduleCount;
-            act();
-
-            var sw = Stopwatch.StartNew();
-            while (ScheduleCount == before)
-            {
-                Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5),
-                    "the file operation raised no watcher event within 5s");
-                Thread.Sleep(10);
-            }
-
-            var last = ScheduleCount;
-            var quiet = Stopwatch.StartNew();
-            while (quiet.Elapsed < TimeSpan.FromMilliseconds(250))
-            {
-                Thread.Sleep(10);
-                var now = ScheduleCount;
-                if (now != last)
-                {
-                    last = now;
-                    quiet.Restart();
-                }
-            }
         }
     }
 }

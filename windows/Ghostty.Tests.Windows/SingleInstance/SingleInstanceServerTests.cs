@@ -46,7 +46,7 @@ public sealed class SingleInstanceServerTests
         using var client = new NamedPipeClientStream(
             ".", pipe, PipeDirection.InOut,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        client.Connect(2000);
+        client.Connect(60_000);
         var payload = PayloadOf(new LaunchRequest(@"C:\wd", new[] { "Wintty.exe" }));
         await client.WriteAsync(payload, 0, payload.Length);
 
@@ -55,13 +55,19 @@ public sealed class SingleInstanceServerTests
         // takes one pending read at a time, so the "no early ACK" half and
         // the "ACK after service" half must be the same read.
         var read = client.ReadAsync(buffer, 0, 1);
+        // The 300ms window is load-safe by construction, not by generosity:
+        // the production server awaits the dispatch before ACKing, the
+        // dispatch is held open below, so no byte can exist to deliver, and
+        // however slow the machine is, silence stays silence. What load CAN
+        // do is delay the positive half, so only that half carries a
+        // hang-guard budget.
         Assert.False(
             read.Wait(TimeSpan.FromMilliseconds(300)),
             "an acknowledgement arrived before the launch was served");
 
         served.SetResult();
         Assert.True(
-            read.Wait(TimeSpan.FromSeconds(5)),
+            read.Wait(TimeSpan.FromSeconds(60)),
             "the acknowledgement must follow the served launch");
         Assert.Equal(1, await read);
         Assert.Equal(LaunchRequest.Ack, buffer[0]);
@@ -80,23 +86,29 @@ public sealed class SingleInstanceServerTests
         using var client = new NamedPipeClientStream(
             ".", pipe, PipeDirection.InOut,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        client.Connect(2000);
+        client.Connect(60_000);
         var payload = PayloadOf(new LaunchRequest(@"C:\wd", new[] { "Wintty.exe" }));
         await client.WriteAsync(payload, 0, payload.Length);
 
         var buffer = new byte[1];
         var read = client.ReadAsync(buffer, 0, 1);
-        if (read.Wait(TimeSpan.FromSeconds(2)))
-        {
-            // Zero is the server hanging up on its side (the session faulted
-            // and the connection went away): no acknowledgement either way.
-            // One byte would have to be the acknowledgement to fail this.
-            var received = await read;
-            Assert.True(
-                received == 0 || buffer[0] != LaunchRequest.Ack,
-                "a faulted dispatch acknowledged a launch it did not serve");
-        }
-        // Timed out: nothing came back, which is the other no-ack shape.
+        // A faulted session ALWAYS closes the connection: RunOneSession's
+        // using owns the server pipe, so the fault's unwind disposes it.
+        // Waiting for the observation unconditionally is what keeps this
+        // test from passing on silence -- under load, "faulted silently"
+        // and "not finished yet" are indistinguishable to any bounded
+        // window, so only "the observation arrived" is a verdict. Zero is
+        // the server hanging up on its side; one byte would have to be the
+        // acknowledgement to fail the next assert. The 60s is a hang guard,
+        // not a measurement.
+        Assert.True(
+            read.Wait(TimeSpan.FromSeconds(60)),
+            "a faulted session must be observable: the connection always closes, " +
+            "so EOF or a byte arrives");
+        var received = await read;
+        Assert.True(
+            received == 0 || buffer[0] != LaunchRequest.Ack,
+            "a faulted dispatch acknowledged a launch it did not serve");
     }
 
     /// <summary>
@@ -125,7 +137,7 @@ public sealed class SingleInstanceServerTests
         using var client = new NamedPipeClientStream(
             ".", pipe, PipeDirection.InOut,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        client.Connect(2000);
+        client.Connect(60_000);
 
         var request = new LaunchRequest(
             @"C:\wd",
@@ -134,12 +146,15 @@ public sealed class SingleInstanceServerTests
         await client.WriteAsync(payload, 0, payload.Length);
         // and then hold the connection open, no half-close, no dispose.
 
-        var servedRequest = await AsyncHelpers.WithTimeout(served.Task, TimeSpan.FromSeconds(5));
+        // All bounds here are hang guards: what is proved is ordering and
+        // payload fidelity, none of which a loaded machine can fake either
+        // way.
+        var servedRequest = await AsyncHelpers.WithTimeout(served.Task, TimeSpan.FromSeconds(60));
         Assert.Equal(request.WorkingDirectory, servedRequest.WorkingDirectory);
         Assert.Equal(request.Args, servedRequest.Args);
 
         var buffer = new byte[1];
-        Assert.True(client.ReadAsync(buffer, 0, 1).Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(client.ReadAsync(buffer, 0, 1).Wait(TimeSpan.FromSeconds(60)));
         Assert.Equal(LaunchRequest.Ack, buffer[0]);
     }
 

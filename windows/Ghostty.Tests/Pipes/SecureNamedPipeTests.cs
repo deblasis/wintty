@@ -19,9 +19,11 @@ public sealed class SecureNamedPipeTests
     /// listening pipe without waiting on anything, so a healthy handshake
     /// spends microseconds here. The number is a hang detector -- it turns
     /// "never" into a reported failure instead of a stuck run -- not a budget
-    /// the handshake is expected to draw down.
+    /// the handshake is expected to draw down, and it is wide enough that a
+    /// loaded machine's scheduling delays cannot be mistaken for a wedged
+    /// handshake.
     /// </summary>
-    private const int HandshakeTimeoutMs = 10_000;
+    private const int HandshakeTimeoutMs = 60_000;
 
     private static string TestPipeName() =>
         "wintty-test-secure-pipe-" + Guid.NewGuid().ToString("N");
@@ -155,7 +157,8 @@ public sealed class SecureNamedPipeTests
         var name = TestPipeName();
         using var server = SecureNamedPipe.CreateServer(name);
         using var client = ConnectSameUser(server, name);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        // Cancellation guard against a wedged I/O, not a latency budget.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 
         // Write, then close: the payload is buffered in the pipe and the
         // close is what gives the reader its end-of-stream. (No
@@ -176,7 +179,8 @@ public sealed class SecureNamedPipeTests
         var name = TestPipeName();
         using var server = SecureNamedPipe.CreateServer(name);
         using var client = ConnectSameUser(server, name);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        // Cancellation guard against a wedged I/O, not a latency budget.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 
         // Two bytes past the cap: small enough to fit any pipe buffer (a
         // buffer-filling write would block until read), more than the

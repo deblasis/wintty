@@ -48,7 +48,10 @@ public sealed class LaunchForwarderTests
         var forwarded = Task.Run(() =>
             LaunchForwarder.TryForward(pipe, SampleRequest(), out _));
 
-        var request = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(5));
+        // The 60s bound is a hang guard for the request's trip through the
+        // pipe, not part of what is proved; a loaded machine can make that
+        // trip take seconds without anyone being wrong.
+        var request = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(60));
         Assert.True(
             await forwarded,
             "the primary acknowledged, so the forward must report served");
@@ -84,7 +87,13 @@ public sealed class LaunchForwarderTests
             NullLogger<SingleInstanceServer>.Instance);
         server.Start();
 
-        var ackBudget = TimeSpan.FromMilliseconds(400);
+        // Five seconds, not a small fraction of one: this budget also caps
+        // the payload write's managed completion, which is thread-pool
+        // scheduled, and a saturated host can make that take seconds. The
+        // subject is that the fallback waits the FULL budget (asserted
+        // below), not that the budget is short, so it is sized as a hang
+        // guard with headroom rather than as a latency claim.
+        var ackBudget = TimeSpan.FromSeconds(5);
         var stopwatch = Stopwatch.StartNew();
         var forwarded = LaunchForwarder.TryForward(
             pipe, SampleRequest(), out var failure, ackTimeout: ackBudget);
@@ -95,8 +104,11 @@ public sealed class LaunchForwarderTests
         Assert.True(
             stopwatch.Elapsed >= ackBudget,
             $"the fallback must wait the full budget (waited {stopwatch.Elapsed})");
+        // Bounded is the property; the ceiling is a hang guard wide enough
+        // for a loaded machine to pay for connect + ack without being
+        // reported as an unbounded fallback.
         Assert.True(
-            stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+            stopwatch.Elapsed < TimeSpan.FromSeconds(60),
             $"the fallback must be bounded by the budget (waited {stopwatch.Elapsed})");
         Assert.True(
             sawRequest.Task.IsCompleted,
@@ -135,7 +147,12 @@ public sealed class LaunchForwarderTests
         var request = SampleRequest();
 
         // A primary whose pipe server appears 3 seconds from now: past the
-        // old single 2-second attempt, inside the retry budget.
+        // old single 2-second attempt, inside the retry budget. The budget
+        // here is widened well past the production 5s on purpose: under load
+        // the 3s delay lands late, and the point of the test is that a
+        // coming-up-late primary is reached, not that it beats a clock it
+        // does not control. The 3s stays, because it is what puts the
+        // primary past the first 2-second attempt.
         var server = new SingleInstanceServer(
             pipe,
             _ => Task.CompletedTask,
@@ -149,7 +166,9 @@ public sealed class LaunchForwarderTests
         try
         {
             var stopwatch = Stopwatch.StartNew();
-            var forwarded = LaunchForwarder.TryForward(pipe, request, out var failure);
+            var forwarded = LaunchForwarder.TryForward(
+                pipe, request, out var failure,
+                connectBudget: TimeSpan.FromSeconds(30));
             stopwatch.Stop();
 
             Assert.True(
@@ -157,7 +176,7 @@ public sealed class LaunchForwarderTests
                 "a primary coming up inside the connect budget must still be forwarded to");
             Assert.Null(failure);
             Assert.True(
-                stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+                stopwatch.Elapsed < TimeSpan.FromSeconds(60),
                 $"the connect budget must stay bounded (took {stopwatch.Elapsed})");
         }
         finally
@@ -199,12 +218,16 @@ public sealed class LaunchForwarderTests
         });
 
         var request = SampleRequest();
-        var ackBudget = TimeSpan.FromMilliseconds(300);
+        // Five seconds: this budget also caps the payload write's managed
+        // completion, which is thread-pool scheduled, and a saturated host
+        // can make that take seconds. What the test proves is the trailing
+        // byte's presence and effect, not the timeout's length.
+        var ackBudget = TimeSpan.FromSeconds(5);
         Assert.False(
             LaunchForwarder.TryForward(pipe, request, out _, ackTimeout: ackBudget),
             "the old primary never acknowledges");
 
-        var bytes = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(5));
+        var bytes = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(60));
         var payloadOnly = bytes[..^1];
         var withCancel = bytes;
 
@@ -218,6 +241,94 @@ public sealed class LaunchForwarderTests
             "payload plus cancel byte must be unparseable for the old primary");
 
         await reader;
+    }
+
+    /// <summary>
+    /// The cancel byte's one residual hazard: a 1-byte write can only block
+    /// when the peer's inbound buffer is EXACTLY full, which takes a
+    /// payload at least as large as that buffer AND a peer that stopped
+    /// reading mid-payload. Every real primary has drained the whole
+    /// payload before the cancel write (parsing it is how it reads), but a
+    /// hostile same-user process can arrange the full buffer exactly, and
+    /// TryForward runs on the launching process's UI thread. So the
+    /// oversize case must not use the unbounded synchronous write: the peer
+    /// here reads precisely payload-length-minus-buffer bytes -- the amount
+    /// that leaves the pipe full with the payload write just completed --
+    /// and then parks, holding the connection. The forward must still
+    /// return.
+    /// </summary>
+    [Fact]
+    public async Task OversizePayload_PeerParkedAtTheBufferEdge_CannotHangTheForward()
+    {
+        var pipe = UniquePipeName();
+        var peerAtEdge = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePeer = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var request = new LaunchRequest(
+            @"C:\wd", new[] { "Wintty.exe", new string('x', 68 * 1024) });
+        var payload = Encoding.UTF8.GetBytes(request.Serialize());
+
+        // A hostile same-user peer: accept, read exactly the number of
+        // bytes that leaves the pipe's inbound buffer exactly full once the
+        // payload write completes, then stop reading forever and hold the
+        // connection open. Never reading past the edge (the requested count
+        // shrinks as it goes) is what makes the arrangement deterministic
+        // instead of a race.
+        var peer = Task.Run(async () =>
+        {
+            using var server = SecureNamedPipe.CreateServer(pipe, PipeDirection.InOut);
+            await server.WaitForConnectionAsync();
+            var edge = payload.Length - server.InBufferSize;
+            var buffer = new byte[4096];
+            var total = 0;
+            while (total < edge)
+            {
+                var want = Math.Min(buffer.Length, edge - total);
+                var read = await server.ReadAsync(buffer.AsMemory(0, want));
+                if (read == 0)
+                    throw new IOException("client left before the buffer edge");
+                total += read;
+            }
+            peerAtEdge.TrySetResult();
+            await releasePeer.Task; // parked: buffer full, nothing more read, no byte back
+        });
+
+        try
+        {
+            // Five seconds, like HungPrimary: this budget also caps the
+            // payload write's managed completion, which is thread-pool
+            // scheduled, and the payload here is the biggest one any test
+            // writes.
+            var ackBudget = TimeSpan.FromSeconds(5);
+            Exception? failure = null;
+            var forwarded = Task.Run(() =>
+                LaunchForwarder.TryForward(pipe, request, out failure, ackTimeout: ackBudget));
+
+            Assert.True(
+                peerAtEdge.Task.Wait(TimeSpan.FromSeconds(60)),
+                "the peer never reached the buffer edge");
+
+            // The subject is that the forward RETURNS. Against the
+            // unbounded synchronous cancel write it never does -- the byte
+            // sits in the write forever, on the launching process's UI
+            // thread. The 60s is the hang guard that catches exactly that;
+            // it measures nothing else.
+            Assert.True(
+                forwarded.Wait(TimeSpan.FromSeconds(60)),
+                "the forward hung on the cancel byte: an oversize payload with a " +
+                "peer parked at the buffer edge must not block the launching process");
+            Assert.False(forwarded.Result, "the parked peer never acknowledges");
+            Assert.Null(failure); // a budget timeout, not an I/O failure
+        }
+        finally
+        {
+            releasePeer.TrySetResult();
+            _ = peer.ContinueWith(
+                t => _ = t.Exception,
+                TaskContinuationOptions.OnlyOnFaulted);
+        }
     }
 
     private static class AsyncHelpers

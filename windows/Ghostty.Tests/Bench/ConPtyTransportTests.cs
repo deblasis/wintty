@@ -9,9 +9,13 @@ public class ConPtyTransportTests
     // No byte-for-byte stdin assertion: conhost line-buffers input, VT-
     // translates keys, and renders output as a screen, so echo symmetry
     // is not the right contract for a ConPTY regression guard.
-    // 10s timeout: hang reintroduction must fail CI fast.
+    // The bounds are hang guards and nothing more: on a loaded machine the
+    // conhost spawn and the first scheduled read can both take seconds, and
+    // a budget tight enough to measure that is one that flakes on a busy
+    // box. 60s still fails fast against the marshalling regression this
+    // test exists for, which produces no output at all.
     [SupportedOSPlatform("windows")]
-    [Fact(Timeout = 10_000)]
+    [Fact(Timeout = 90_000)]
     public async Task Transport_DeliversConhostOutputWithinSeconds()
     {
         string childPath = Path.Combine(AppContext.BaseDirectory, "Ghostty.Bench.EchoChild.exe");
@@ -29,11 +33,11 @@ public class ConPtyTransportTests
         int bytesRead;
         try
         {
-            bytesRead = await readTask.WaitAsync(TimeSpan.FromSeconds(5));
+            bytesRead = await readTask.WaitAsync(TimeSpan.FromSeconds(60));
         }
         catch (TimeoutException)
         {
-            Assert.Fail("ConPtyTransport produced no output within 5s -- regression of UpdateProcThreadAttribute lpValue marshalling");
+            Assert.Fail("ConPtyTransport produced no output within 60s -- regression of UpdateProcThreadAttribute lpValue marshalling");
             throw; // unreachable: Assert.Fail throws, but satisfies definite-assignment.
         }
 

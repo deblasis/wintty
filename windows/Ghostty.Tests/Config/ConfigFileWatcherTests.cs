@@ -35,6 +35,7 @@ public sealed class ConfigFileWatcherTests : IDisposable
     private readonly FakeTimer _timer = new();
     private readonly ListLogger _log = new();
     private bool _ignore;
+    private int _ignoreChecks;
     private int _settled;
     private int _vanished;
     private string? _contentAtSettle;
@@ -61,7 +62,11 @@ public sealed class ConfigFileWatcherTests : IDisposable
             _path,
             _timer,
             TimeSpan.FromMilliseconds(300),
-            ignoreEvents: () => _ignore,
+            ignoreEvents: () =>
+            {
+                Interlocked.Increment(ref _ignoreChecks);
+                return _ignore;
+            },
             post: post ?? (deliver => deliver()),
             onSettled: () =>
             {
@@ -472,7 +477,13 @@ public sealed class ConfigFileWatcherTests : IDisposable
         _ignore = true;
 
         File.WriteAllText(_path, "font-size = 17\n");
-        Thread.Sleep(500);
+        // The suppression flag is consulted when each event ARRIVES, so the
+        // test waits for the arrival (counted in NewWatcher's ignore lambda)
+        // instead of guessing a wall time a loaded machine would blow past.
+        // Waiting also closes the vacuous pass: a write whose events never
+        // arrived tested nothing, and now says so.
+        WaitUntil(() => Volatile.Read(ref _ignoreChecks) >= 1,
+            "the suppressed write's event never arrived, so nothing was tested");
 
         Assert.Equal(0, _timer.ScheduleCount);
         Assert.False(_timer.Armed);
@@ -532,17 +543,77 @@ public sealed class ConfigFileWatcherTests : IDisposable
         var watcher = NewWatcher();
         watcher.Dispose();
 
+        // A write after dispose must produce nothing that settles: the
+        // watcher's FileSystemWatcher is disposed with it, so there is no
+        // event to wait for -- which is the contract under test. What no
+        // delivery can slip through is enforced by state, not time: only a
+        // schedule can make Fire() deliver, and dispose owns the timer.
         File.WriteAllText(_path, "font-size = 18\n");
-        Thread.Sleep(500);
         _timer.Fire();
 
         Assert.Equal(0, _settled);
         Assert.True(_timer.Disposed);
     }
 
+    /// <summary>
+    /// A real save, through the real <c>FileSystemWatcher</c>, reaches a
+    /// settle, and the settle sees the new content.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately says nothing about HOW MANY settles one save produces.
+    /// Under load the events of one save can arrive spread wider than the
+    /// debounce, in which case more than one delivery is the machine's
+    /// doing, not the code's -- and any window drawn to count settles into
+    /// one save is a window a busier machine can overrun (the 600ms this
+    /// used to sleep after flaked three times in thirteen runs; a 2s quiet
+    /// window then failed on a fully saturated box, two settles two seconds
+    /// apart, which is what removed the count from here entirely). The
+    /// collapse property is real and it is pinned where the burst is a fact
+    /// instead of a race: see
+    /// <see cref="A_burst_of_events_settles_once_with_the_real_timer"/>.
+    /// </remarks>
     [Theory]
     [MemberData(nameof(SaveShapes))]
-    public void With_the_real_timer_one_save_is_one_settle(string shape)
+    public void With_the_real_timer_a_real_save_settles_with_the_new_content(string shape)
+    {
+        var settled = 0;
+        string? seen = null;
+        using var watcher = new ConfigFileWatcher(
+            _path,
+            new SystemSchedulerTimer(NullLogger<SystemSchedulerTimer>.Instance),
+            TimeSpan.FromMilliseconds(150),
+            () => false,
+            deliver => deliver(),
+            () =>
+            {
+                seen = File.ReadAllText(_path);
+                Interlocked.Increment(ref settled);
+            },
+            NullLogger<ConfigFileWatcher>.Instance);
+        Assert.True(watcher.Start());
+
+        Save(shape, "font-size = 19\n");
+
+        // The wait is for the OBSERVABLE (a settle that saw the new
+        // content), bounded as a hang guard; how long the machine takes to
+        // deliver the events and run the timer is nobody's verdict.
+        WaitUntil(() => Volatile.Read(ref settled) >= 1 && seen == "font-size = 19\n",
+            "the save produced no settle that saw the new content");
+    }
+
+    /// <summary>
+    /// The debounce collapses a burst of events into one settle, pinned with
+    /// the REAL timer and no file-system timing anywhere: five events raised
+    /// through the seam inside one debounce window produce exactly one
+    /// delivery. This is the property the real-event theory above cannot
+    /// measure on a loaded machine, because there the burst shape is the
+    /// machine's doing (issue #1161); here the burst is a fact and the
+    /// answer is a fact. Each Schedule restarts the one real timer, so a
+    /// burst can only ever be one tick: a second delivery would need a
+    /// second schedule, and no event exists to arm one.
+    /// </summary>
+    [Fact]
+    public void A_burst_of_events_settles_once_with_the_real_timer()
     {
         var settled = 0;
         using var watcher = new ConfigFileWatcher(
@@ -555,24 +626,24 @@ public sealed class ConfigFileWatcherTests : IDisposable
             NullLogger<ConfigFileWatcher>.Instance);
         Assert.True(watcher.Start());
 
-        Save(shape, "font-size = 19\n");
+        for (var i = 0; i < 5; i++)
+            watcher.TestRaiseFileEvent();
 
-        var sw = Stopwatch.StartNew();
-        while (Volatile.Read(ref settled) == 0 && sw.Elapsed < TimeSpan.FromSeconds(5))
-            Thread.Sleep(20);
-        // Well past the debounce, so a second settle from a split burst
-        // would have landed by now.
-        Thread.Sleep(600);
+        // One wait, bounded as a hang guard.
+        WaitUntil(() => Volatile.Read(ref settled) >= 1,
+            "the burst produced no settle at all");
 
         Assert.Equal(1, Volatile.Read(ref settled));
     }
 
     private static void WaitUntil(Func<bool> condition, string failure)
     {
+        // Generous hang guard: the deadline exists so a broken condition
+        // fails instead of hanging the suite, not to measure the machine.
         var sw = Stopwatch.StartNew();
         while (!condition())
         {
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), failure);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(60), failure);
             Thread.Sleep(10);
         }
     }
@@ -598,7 +669,7 @@ public sealed class ConfigFileWatcherTests : IDisposable
                 return;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                       && sw.Elapsed < TimeSpan.FromSeconds(5))
+                                       && sw.Elapsed < TimeSpan.FromSeconds(60))
             {
                 Thread.Sleep(50);
             }
@@ -673,8 +744,8 @@ public sealed class ConfigFileWatcherTests : IDisposable
             var sw = Stopwatch.StartNew();
             while (ScheduleCount == before)
             {
-                Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5),
-                    "the file operation raised no watcher event within 5s");
+                Assert.True(sw.Elapsed < TimeSpan.FromSeconds(60),
+                    "the file operation raised no watcher event within 60s");
                 Thread.Sleep(10);
             }
 

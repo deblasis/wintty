@@ -21,11 +21,13 @@ namespace Ghostty.Tests.Windows;
 internal static class WslDistro
 {
     /// <summary>
-    /// `wsl --list --quiet` on a host with a distro answers immediately;
-    /// anything slower than this is a host problem, and the pwsh spawn probe
-    /// that runs before this gate has already ruled that in or out.
+    /// Hard cap on one `wsl --list --quiet`, a hang guard and nothing more.
+    /// It used to be 2000 ms, and a host under load overran it: the gate then
+    /// skipped for a reason that was the machine's, not wsl's, and a test
+    /// that would have run green never ran. 60s still catches a genuinely
+    /// wedged wsl, which is the skip that has to keep working.
     /// </summary>
-    private const int TimeoutMs = 2_000;
+    private const int TimeoutMs = 60_000;
 
     /// <summary>
     /// Byte-order mark. <c>wsl --list --quiet</c> emits UTF-16 LE with a BOM

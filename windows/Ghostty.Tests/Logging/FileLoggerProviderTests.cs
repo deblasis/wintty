@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -36,7 +37,8 @@ public class FileLoggerProviderTests : IDisposable
 
         logger.LogWarning(new EventId(42, "TestEvent"), "hello");
 
-        await DrainAsync(sink);
+        WaitForLogContent("ghostty-20260417.log", b => b.Contains("hello"),
+            "the first record never reached disk");
         var files = Directory.EnumerateFiles(_tempDir).ToArray();
         Assert.Single(files);
         Assert.Equal("ghostty-20260417.log", Path.GetFileName(files[0]));
@@ -68,8 +70,8 @@ public class FileLoggerProviderTests : IDisposable
 
         logger.LogWarning(new EventId(42, "TestEvent"), "hello");
 
-        await DrainAsync(sink);
-        var body = ReadAllTextShared(Path.Combine(_tempDir, "ghostty-20260417.log"));
+        var body = WaitForLogContent("ghostty-20260417.log", b => b.Contains("hello"),
+            "the record never reached disk");
         Assert.Contains(
             $" | Warn  | {Environment.ProcessId} | 42 | TestCategory | hello",
             body);
@@ -84,11 +86,13 @@ public class FileLoggerProviderTests : IDisposable
         var logger = sink.CreateLogger("TestCategory");
 
         logger.LogInformation(new EventId(1, "First"), "first day");
-        await DrainAsync(sink);
+        WaitForLogContent("ghostty-20260417.log", b => b.Contains("first day"),
+            "the day-1 record never reached disk");
 
         clock.Set(new DateTime(2026, 4, 18, 0, 1, 0, DateTimeKind.Utc));
         logger.LogInformation(new EventId(2, "Second"), "second day");
-        await DrainAsync(sink);
+        WaitForLogContent("ghostty-20260418.log", b => b.Contains("second day"),
+            "the day-2 record never reached disk");
 
         var files = Directory.EnumerateFiles(_tempDir).Select(Path.GetFileName).OrderBy(n => n).ToArray();
         Assert.Equal(new[] { "ghostty-20260417.log", "ghostty-20260418.log" }, files);
@@ -106,8 +110,12 @@ public class FileLoggerProviderTests : IDisposable
         for (int i = 0; i < 5; i++)
             logger.LogWarning(new EventId(i, "E"), "message-{Index}", i);
 
-        await DrainAsync(sink);
-        var files = Directory.EnumerateFiles(_tempDir).Select(Path.GetFileName).OrderBy(n => n).ToArray();
+        // Waiting for the LAST record pins every roll: rolls happen as the
+        // writer consumes, so once the final record is on disk, the rolls it
+        // forced have all happened.
+        var files = WaitForAnyLogContent(b => b.Contains("message-4"),
+            "the last record never reached disk, so the rolls it forces are unproven")
+            .Select(Path.GetFileName).OrderBy(n => n).ToArray();
         Assert.Contains("ghostty-20260417.log", files);
         Assert.Contains("ghostty-20260417-1.log", files); // at least one roll happened
     }
@@ -124,8 +132,9 @@ public class FileLoggerProviderTests : IDisposable
         for (int i = 0; i < 20; i++)
             logger.LogWarning(new EventId(i, "E"), "burst-{Index}", i);
 
-        await DrainAsync(sink);
-        var body = ReadAllTextShared(Path.Combine(_tempDir, "ghostty-20260417.log"));
+        var body = WaitForLogContent("ghostty-20260417.log",
+            b => b.Contains("dropped due to channel overflow"),
+            "the overflow never produced its synthetic record on disk");
         // The synthetic "LogRecordsDropped" warning emits category
         // Ghostty.Core.Logging and its message contains the overflow
         // phrase. The format line writes Category and Message but not
@@ -224,7 +233,11 @@ public class FileLoggerProviderTests : IDisposable
         for (int i = 0; i < 200; i++)
             logger.LogWarning(new EventId(i, "E"), "message-{Index}", i);
 
-        await DrainAsync(sink);
+        // The last record on disk means every record was consumed and every
+        // roll and prune it forced has happened; evaluating the invariants
+        // before that would measure the pruner mid-work.
+        WaitForAnyLogContent(b => b.Contains("message-199"),
+            "the last record never reached disk, so the pruning it forces is unproven");
 
         var files = Directory.EnumerateFiles(_tempDir, "ghostty-*.log").ToArray();
         // The sink is still live here (await using disposes after these
@@ -310,13 +323,80 @@ public class FileLoggerProviderTests : IDisposable
         MaxBytesPerFile = 16 * 1024 * 1024,
     };
 
-    private static async Task DrainAsync(FileLoggerProvider sink)
+    // The writer loop flushes on its own schedule; a fixed sleep is a bet on
+    // the machine's latency that a loaded box loses, and one generous enough
+    // never to lose is just a slower flake that also slows every run. The
+    // async tests instead wait for the OBSERVABLE they assert on, the record
+    // reaching disk, with a generous hang guard; the assertions themselves
+    // are untouched.
+    private static readonly TimeSpan Guard = TimeSpan.FromSeconds(60);
+
+    private static void WaitUntilGuarded(Func<bool> condition, string failure)
     {
-        // Give the writer loop one scheduling slice to flush the batch.
-        for (int i = 0; i < 50; i++)
+        var sw = Stopwatch.StartNew();
+        while (!condition())
         {
-            await Task.Delay(20);
+            Assert.True(sw.Elapsed < Guard, failure);
+            Thread.Sleep(10);
         }
+    }
+
+    /// <summary>
+    /// Wait until the named log file exists and its content satisfies
+    /// <paramref name="contentMatches"/>, and return that content.
+    /// </summary>
+    private string WaitForLogContent(
+        string logFileName, Func<string, bool> contentMatches, string failure)
+    {
+        string? body = null;
+        var path = Path.Combine(_tempDir, logFileName);
+        WaitUntilGuarded(() =>
+        {
+            try
+            {
+                if (!File.Exists(path)) return false;
+                body = ReadAllTextShared(path);
+                return contentMatches(body);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The writer held it against us for a moment, or it vanished
+                // under the live pruner. Not a verdict; try again.
+                return false;
+            }
+        }, failure);
+        return body!;
+    }
+
+    /// <summary>
+    /// Wait until any roll file carries content satisfying
+    /// <paramref name="contentMatches"/>, and return the file list seen.
+    /// </summary>
+    private string[] WaitForAnyLogContent(Func<string, bool> contentMatches, string failure)
+    {
+        string[] files = Array.Empty<string>();
+        WaitUntilGuarded(() =>
+        {
+            files = Directory.EnumerateFiles(_tempDir, "ghostty-*.log").ToArray();
+            foreach (var f in files)
+            {
+                string body;
+                try
+                {
+                    body = ReadAllTextShared(f);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // The live pruner deleted it between the listing and the
+                    // read. That is the budget working; the record we are
+                    // waiting for lives in a newer file.
+                    continue;
+                }
+                if (contentMatches(body)) return true;
+            }
+            return false;
+        }, failure);
+        return files;
     }
 
     private sealed class FakeClock : IClock

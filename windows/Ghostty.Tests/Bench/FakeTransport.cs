@@ -51,17 +51,27 @@ public sealed class FakeTransport : ITransport
         // scripted response write and the test thread blocked forever
         // writing payload. 64 KB comfortably holds every response and payload
         // these tests use (max 4 KB), so writes complete immediately.
-        // The client constructors have no buffer-size parameters: the kernel
-        // buffer is fixed by the server's CreateNamedPipe call, and the
-        // clients deliberately stay synchronous because Runner's sync
-        // Input.Write path already works against them and the deadline tests
-        // prove ReadAsync cancellation needs no FILE_FLAG_OVERLAPPED here.
+        //
+        // The OUTPUT pair is opened Asynchronous on BOTH ends, and the two
+        // ends must agree. Without FILE_FLAG_OVERLAPPED the harness's
+        // PipeStream.ReadAsync is emulated: the blocking read is queued to
+        // the thread pool, so every read depends on a worker being free and
+        // a loaded suite lets the caller's deadline fire while the read is
+        // still queued (issue #917: a TimeoutException that reported a
+        // property of the fake as a claim about the peer). The ends must
+        // MATCH: an async client against a synchronous server made
+        // RunThroughputIteration_IgnoresWrongNonceMatch and two others fail
+        // deterministically, so both flip together.
+        // The INPUT pair stays synchronous: its write side is Runner's sync
+        // Input.Write into a 64 KB kernel buffer, which completes
+        // immediately, and its read side is this class's own dedicated IO
+        // thread, which no deadline is measured against.
         const int PipeBufferSize = 64 * 1024;
         _inputServer = new NamedPipeServerStream(inputPipe,  PipeDirection.In,  maxNumberOfServerInstances: 1, PipeTransmissionMode.Byte, PipeOptions.None, PipeBufferSize, PipeBufferSize);
         _inputClient = new NamedPipeClientStream(".", inputPipe,  PipeDirection.Out);
 
-        _outputServer = new NamedPipeServerStream(outputPipe, PipeDirection.Out, maxNumberOfServerInstances: 1, PipeTransmissionMode.Byte, PipeOptions.None, PipeBufferSize, PipeBufferSize);
-        _outputClient = new NamedPipeClientStream(".", outputPipe, PipeDirection.In);
+        _outputServer = new NamedPipeServerStream(outputPipe, PipeDirection.Out, maxNumberOfServerInstances: 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, PipeBufferSize, PipeBufferSize);
+        _outputClient = new NamedPipeClientStream(".", outputPipe, PipeDirection.In, PipeOptions.Asynchronous);
 
         // Connect both pairs synchronously before starting the IO thread.
         // Order matters: server.WaitForConnection blocks until client connects.

@@ -67,15 +67,20 @@ public class HarnessTests
     [Fact]
     public void SentinelRoundTrip_PositiveTicksUnderReasonableBound()
     {
-        // In-process FakeTransport echo round-trip should be microseconds
-        // to low milliseconds; assert a generous 1s ceiling.
+        // In-process FakeTransport echo round-trips land in microseconds to
+        // low milliseconds when the machine is idle, but the ceiling here is
+        // a hang guard and deliberately nothing more: under load the two
+        // threads a round-trip spans can be descheduled for far longer than
+        // the honest cost, and a bound tight enough to measure latency is a
+        // bound that flakes on a busy machine. 60s still fails fast against
+        // the regression this guards (a fixed sleep or stall per iteration).
         using var t = new FakeTransport();
         long[] timings = Runner.RunRoundTrip(t, warmup: 2, samples: 10);
 
-        long oneSecondInTicks = Stopwatch.Frequency;
+        long guardInTicks = 60 * Stopwatch.Frequency;
         foreach (var ticks in timings)
         {
-            Assert.True(ticks < oneSecondInTicks,
+            Assert.True(ticks < guardInTicks,
                 $"unexpectedly slow round-trip: {ticks} ticks (~{ticks * 1000.0 / Stopwatch.Frequency:F2} ms)");
         }
     }
@@ -118,7 +123,7 @@ public class HarnessTests
         byte[] scratch = new byte[64 * 1024];
 
         var (elapsedTicks, emitBytes) = Runner.RunThroughputIteration(
-            t, payload, terminator, TimeSpan.FromSeconds(5), scratch);
+            t, payload, terminator, TimeSpan.FromSeconds(60), scratch);
 
         Assert.True(elapsedTicks > 0, "elapsed must be positive");
         Assert.Equal(payload.Length + terminator.Length, emitBytes);
@@ -160,7 +165,7 @@ public class HarnessTests
         byte[] scratch = new byte[splitPoint];
 
         var (_, emitBytes) = Runner.RunThroughputIteration(
-            t, payload, terminator, TimeSpan.FromSeconds(5), scratch);
+            t, payload, terminator, TimeSpan.FromSeconds(60), scratch);
 
         Assert.Equal(combined.Length, emitBytes);
     }
@@ -184,7 +189,7 @@ public class HarnessTests
 
         Assert.Throws<EndOfStreamException>(() =>
             Runner.RunThroughputIteration(
-                t, payload, terminator, TimeSpan.FromSeconds(5), scratch));
+                t, payload, terminator, TimeSpan.FromSeconds(60), scratch));
     }
 
     [Fact]
@@ -249,7 +254,7 @@ public class HarnessTests
         byte[] scratch = new byte[64 * 1024];
 
         var (_, emitBytes) = Runner.RunThroughputIteration(
-            t, payload, terminator, TimeSpan.FromSeconds(5), scratch);
+            t, payload, terminator, TimeSpan.FromSeconds(60), scratch);
 
         Assert.Equal(wrongTerminator.Length + terminator.Length, emitBytes);
     }
@@ -268,7 +273,7 @@ public class HarnessTests
         byte[] smallScratch = new byte[128];
 
         var (_, emitBytes) = Runner.RunThroughputIteration(
-            t, payload, terminator, TimeSpan.FromSeconds(5), smallScratch);
+            t, payload, terminator, TimeSpan.FromSeconds(60), smallScratch);
 
         Assert.Equal(payload.Length + terminator.Length, emitBytes);
     }

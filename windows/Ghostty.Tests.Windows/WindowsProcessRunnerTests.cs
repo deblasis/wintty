@@ -11,8 +11,12 @@ public sealed class WindowsProcessRunnerTests
     public async System.Threading.Tasks.Task Run_CmdExit42_ReturnsExitCode42()
     {
         var runner = new WindowsProcessRunner();
+        // The 60s deadline is a hang guard, not part of what is proved: what
+        // is proved is that the child's exit code arrives as Exited/42. At
+        // the old 5s, a loaded machine turned that proof into a TimedOut red
+        // that said nothing about the runner.
         var result = await runner.RunAsync("cmd.exe", new[] { "/c", "exit 42" },
-            TimeSpan.FromSeconds(5), CancellationToken.None);
+            TimeSpan.FromSeconds(60), CancellationToken.None);
         // Assert the outcome first: a host where the spawn hangs reports
         // ExitCode -1, and "expected Exited, got TimedOut" is the diagnosis,
         // where "expected 42, got -1" only looks like a wrong exit code.
@@ -53,9 +57,13 @@ public sealed class WindowsProcessRunnerTests
         sw.Stop();
         // The elapsed range alone is also satisfied by a spawn that never
         // started and stalled; only the outcome proves the kill path ran.
+        // The upper bound is a hang guard: 500ms is the SUBJECT's timeout and
+        // stays, but how long the kill and the await take on a loaded
+        // machine is the machine's business, and at the old 3s ceiling that
+        // business was reported as a runner failure.
         Assert.Equal(ProcessOutcome.TimedOut, result.Outcome);
         Assert.Equal(-1, result.ExitCode);
-        Assert.InRange(sw.ElapsedMilliseconds, 400, 3000);
+        Assert.InRange(sw.ElapsedMilliseconds, 400, 60_000);
     }
 
     [SpawnFact]

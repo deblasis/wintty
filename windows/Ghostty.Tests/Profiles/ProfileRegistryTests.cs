@@ -29,7 +29,11 @@ public class ProfileRegistryTests
     /// </remarks>
     private static async Task WaitForVersion(ProfileRegistry registry, long version)
     {
-        var deadline = Environment.TickCount64 + 10_000;
+        // A hang guard, not a budget: the shape above (return the moment the
+        // version lands) is what keeps the machine out of the assertion. The
+        // deadline only decides whether a broken condition reports or hangs,
+        // so it is wide enough to survive a fully loaded box.
+        var deadline = Environment.TickCount64 + 60_000;
         while (registry.Version < version && Environment.TickCount64 < deadline)
             await Task.Delay(5);
         Assert.True(
