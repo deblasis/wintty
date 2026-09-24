@@ -1331,8 +1331,10 @@ env: RepeatableStringMap = .{},
 /// seen by the next terminal you open without restarting Wintty. A Windows
 /// Terminal tab gets the same with its `reloadEnvironmentVariables` setting.
 ///
-/// On top of that environment Wintty sets only its own variables (such as
-/// `TERM` and `GHOSTTY_RESOURCES_DIR`) and the ones from `env`. Variables
+/// On top of that environment Wintty sets only its own variables. A terminal
+/// Wintty runs itself gets `TERM`, the `GHOSTTY_*` variables and the ones
+/// from `env`; a terminal hosted outside the app gets only the variables
+/// its host sets, such as `TERM`. Variables
 /// set by whatever launched Wintty, for example `FOO=1` in a shell that then
 /// ran it, do not reach the terminal. The one exception is `NO_COLOR`: when
 /// Wintty has removed it to turn color back on, it stays removed.

@@ -1449,6 +1449,9 @@ pub const Surface = struct {
                 env.deinit();
                 return pane;
             }
+            // reload-env = false: the app's own environment, minus the app's
+            // private NO_COLOR note, which is not the terminal's business.
+            _ = env.orderedRemove(internal_os.windows_logon_env.no_color_stripped);
         }
 
         if (comptime builtin.target.os.tag.isDarwin()) {

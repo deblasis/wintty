@@ -1299,7 +1299,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // Read from the parsed config like every Zig key, so includes and
         // CLI flags decide it the same way for the app's own terminals
         // (libghostty) and everything the app builds itself.
-        ReloadEnvironment = GetBool("reload-env");
+        ReloadEnvironment = GetBool("reload-env", whenNotFound: true);
         // windows-settings-ui is a fork-added Zig field, so libghostty
         // parses it and there is no unknown-field diagnostic to suppress;
         // that is why it is deliberately absent from WindowsOnlyKeys. It
@@ -1895,7 +1895,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             : null;
     }
 
-    private unsafe bool GetBool(string key)
+    private bool GetBool(string key) => GetBool(key, whenNotFound: false);
+
+    /// <summary>
+    /// <see cref="GetBool(string)"/> with an explicit answer for a key the
+    /// config does not report: a failed read must not flip a key whose
+    /// default is true (reload-env) into its opt-out.
+    /// </summary>
+    private unsafe bool GetBool(string key, bool whenNotFound)
     {
         byte result = 0;
         var keyBytes = System.Text.Encoding.UTF8.GetBytes(key);
@@ -1906,7 +1913,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 (IntPtr)(&result),
                 (IntPtr)keyPtr,
                 (UIntPtr)keyBytes.Length);
-            return found && result != 0;
+            return found ? result != 0 : whenNotFound;
         }
     }
 
