@@ -907,13 +907,14 @@ public sealed partial class MainWindow : Window
         else
         {
             // Fresh window (no restore, no adopted tab): honor an
-            // explicit snapshot (jump-list new window) or default-profile.
-            // Must reach TabManager's factory -- attaching after spawn
-            // does not update TerminalControl.Snapshot before OnLoaded.
+            // explicit snapshot (jump-list new window), else what any new
+            // pane nobody picked a profile for runs -- the configured
+            // `command` or the default profile (#1136). The quick terminal
+            // comes through here too. Must reach TabManager's factory --
+            // attaching after spawn does not update TerminalControl.Snapshot
+            // before OnLoaded.
             var snap = seedTab is null
-                ? (initialSnapshot
-                    ?? Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(
-                        App.ProfileRegistry))
+                ? (initialSnapshot ?? App.ImplicitDefaultSnapshot())
                 : null;
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
@@ -926,7 +927,8 @@ public sealed partial class MainWindow : Window
             getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
             openProfile: OpenProfile,
             bindingAction: ExecuteBindingAction,
-            getDefaultProfileId: () => App.ProfileRegistry?.DefaultProfileId);
+            getDefaultProfileId: () => App.ProfileRegistry?.DefaultProfileId,
+            openDefaultProfile: OpenDefaultProfile);
         // One shared sweep per window writes TabModel.IsIdle; both strips
         // render from the property. The sweep must run where the models
         // live (the UI thread), so the timer's fire is marshalled.
@@ -2046,6 +2048,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal void OpenJumpListTab(string? profileId)
     {
+        // No profile named: the same new tab Ctrl+T opens (#1136).
+        if (profileId is null)
+        {
+            OpenDefaultProfile(ProfileLaunchTarget.NewTab);
+            return;
+        }
+
         var registry = App.ProfileRegistry;
         var id = profileId ?? registry?.DefaultProfileId;
         if (id is not null && registry is not null
@@ -2108,7 +2117,32 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OpenInNewWindow(ProfileSnapshot snapshot)
+    /// <summary>
+    /// A new tab, pane or window nobody picked a profile for: the Ctrl+T
+    /// chord, the new-tab button's main click, the jump list's plain New
+    /// Tab. It runs what <see cref="App.ImplicitDefaultSnapshot"/> says --
+    /// the configured <c>command</c> unless <c>default-profile</c> is set,
+    /// else the default profile (#1136). A profile the user picks goes
+    /// through <see cref="OpenProfile"/> instead and runs that profile.
+    /// </summary>
+    internal void OpenDefaultProfile(ProfileLaunchTarget target)
+    {
+        var snapshot = App.ImplicitDefaultSnapshot();
+        switch (target)
+        {
+            case ProfileLaunchTarget.NewTab:
+                _tabManager.NewTab(snapshot);
+                break;
+            case ProfileLaunchTarget.NewPane:
+                _tabManager.ActiveTab.PaneHost.Split(PaneOrientation.Horizontal, snapshot);
+                break;
+            case ProfileLaunchTarget.NewWindow:
+                OpenInNewWindow(snapshot);
+                break;
+        }
+    }
+
+    private void OpenInNewWindow(ProfileSnapshot? snapshot)
     {
         var bootstrap = App.BootstrapHost
             ?? throw new InvalidOperationException(

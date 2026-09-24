@@ -130,16 +130,21 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public double BackgroundOpacity { get; private set; } = 1.0;
 
     /// <summary>
-    /// The <c>command</c> key, or null when the configuration does not set
-    /// one. Read from libghostty rather than the file, so an included file
-    /// and <c>--command</c> on the command line count. A launch's first pane
-    /// runs it in place of the default profile's command
-    /// (<see cref="Ghostty.Core.Profiles.FirstPaneCommand"/>): every pane
-    /// that carries a profile hands the surface a command of its own, which
-    /// replaces this key, so without that the key did nothing at all
-    /// (deblasis/wintty#1136).
+    /// The <c>command</c> the user set, or null when they set none. Read from
+    /// libghostty rather than the file, so an included file and
+    /// <c>--command</c> on the command line count, and a default that
+    /// finalize filled in (cmd.exe) does not. New panes nobody picked a
+    /// profile for run it unless <c>default-profile</c> is set
+    /// (<see cref="Ghostty.Core.Profiles.PaneCommandPolicy"/>,
+    /// deblasis/wintty#1136).
     /// </summary>
-    public string? ConfiguredCommand { get; private set; }
+    public Ghostty.Core.Profiles.ConfiguredCommand? ConfiguredCommand { get; private set; }
+
+    /// <summary>
+    /// Whether <c>default-profile</c> is set, which makes it win over
+    /// <see cref="ConfiguredCommand"/> for every new pane.
+    /// </summary>
+    public bool DefaultProfileSet => !string.IsNullOrWhiteSpace(DefaultProfileId);
 
     // Cached during ReadFlagsCore so typed getters do not have to consult
     // _configFileCache on every read; the backing-field pattern keeps the
@@ -1908,14 +1913,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             : null;
     }
 
-    private string? ReadConfiguredCommand()
+    private Ghostty.Core.Profiles.ConfiguredCommand? ReadConfiguredCommand()
     {
-        var str = NativeMethods.ConfigCommand(_config);
+        var str = NativeMethods.ConfigCommand(_config, out var direct);
         try
         {
             if (str.Ptr == IntPtr.Zero || str.Len == UIntPtr.Zero) return null;
             var command = Marshal.PtrToStringUTF8(str.Ptr, (int)str.Len);
-            return string.IsNullOrWhiteSpace(command) ? null : command;
+            return string.IsNullOrWhiteSpace(command)
+                ? null
+                : new Ghostty.Core.Profiles.ConfiguredCommand(command, IsArgv: direct != 0);
         }
         finally
         {

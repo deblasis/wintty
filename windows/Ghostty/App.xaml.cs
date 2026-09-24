@@ -1151,9 +1151,12 @@ public partial class App : Application
 
         // `wintty -e <cmd>` asks for that command in a window, the way
         // `wt -- <cmd>` does, so it neither restores the saved session nor
-        // runs the default profile's shell (#1136).
+        // runs the default profile's shell (#1136). It is a one-off: this
+        // process writes no session either, so the one-off window cannot
+        // replace the layout the next plain launch restores.
         var coldCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(
             Environment.GetCommandLineArgs());
+        if (coldCommand is not null) _sessionManager.SuspendPersistence();
 
         var restoreState = honorJumpList || coldCommand is not null
             ? null
@@ -1183,16 +1186,14 @@ public partial class App : Application
         }
         else
         {
-            // The first pane runs -e, else the configured `command`, else the
-            // default profile's own command. Null leaves MainWindow to resolve
-            // the default profile exactly as before.
+            // The first pane runs -e in the caller's directory, as a forwarded
+            // launch does, else what any new pane runs (PaneCommandPolicy).
             var window = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
                 showLaunchIcon: true,
-                initialSnapshot: FirstPaneSnapshot(
-                    Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(ProfileRegistry),
+                initialSnapshot: LaunchFirstPaneSnapshot(
                     coldCommand,
-                    workingDirectory: null));
+                    workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory));
             window.Closed += OnAnyWindowClosedInternal;
             _sessionManager.Track(window);
             window.Activate();
@@ -1507,13 +1508,14 @@ public partial class App : Application
             // cold start makes the argv after -e the first surface's
             // command, so the primary honours it here rather than degrading
             // the launch to the default shell (#1094). Markers keep their
-            // existing priority in the arm below. The configured `command`
-            // follows through the same helper a cold start uses (#1136).
+            // existing priority in the arm below. With no profile named, the
+            // pane follows the same rules a cold start's does (#1136).
+
             OpenJumpListWindow(
                 launch.ProfileId,
                 req.WorkingDirectory,
-                command: Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(req.Args),
-                implicitDefault: true);
+                command: Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(req.Args));
+
         }
         else
         {
@@ -1794,51 +1796,61 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// The snapshot a launch's first pane opens with when the launch named
-    /// no profile: <paramref name="defaultSnapshot"/> (the default profile,
-    /// or null for none) running <paramref name="launchCommand"/> (-e), else
-    /// the configured <c>command</c>, else its own command. One helper for
-    /// the cold start and the forwarded launch, so the two cannot drift
-    /// (#1136). Returns <paramref name="defaultSnapshot"/> unchanged when
-    /// neither command is set.
+    /// What a new pane nobody picked a profile for runs: the configured
+    /// <c>command</c> when it is set and <c>default-profile</c> is not, else
+    /// the default profile (#1136, <see cref="Ghostty.Core.Profiles.PaneCommandPolicy"/>).
+    /// Null when there is neither a command nor a profile, which leaves the
+    /// surface to libghostty's own default. Static because every opener of a
+    /// default pane reaches it: MainWindow's first tab (and so the quick
+    /// terminal's), new tabs, the jump list, and a split of a <c>-e</c> pane.
     /// </summary>
-    private Ghostty.Core.Profiles.ProfileSnapshot? FirstPaneSnapshot(
-        Ghostty.Core.Profiles.ProfileSnapshot? defaultSnapshot,
+    internal static Ghostty.Core.Profiles.ProfileSnapshot? ImplicitDefaultSnapshot(
+        string? workingDirectory = null)
+        => Ghostty.Core.Profiles.PaneCommandPolicy.ImplicitDefault(
+            Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(ProfileRegistry),
+            ConfigService?.ConfiguredCommand,
+            ConfigService?.DefaultProfileSet ?? false,
+            workingDirectory);
+
+    /// <summary>
+    /// The first pane of the window a launch opens when it named no profile:
+    /// <paramref name="launchCommand"/> (-e) when there is one, else
+    /// <see cref="ImplicitDefaultSnapshot"/>. One helper for the cold start
+    /// and the forwarded launch, so the two cannot drift (#1136).
+    /// </summary>
+    private static Ghostty.Core.Profiles.ProfileSnapshot? LaunchFirstPaneSnapshot(
         string? launchCommand,
         string? workingDirectory)
-        => Ghostty.Core.Profiles.FirstPaneCommand.Apply(
-            defaultSnapshot,
-            Ghostty.Core.Profiles.FirstPaneCommand.Pick(
-                launchCommand, _configService?.ConfiguredCommand),
+        => Ghostty.Core.Profiles.PaneCommandPolicy.LaunchFirstPane(
+            Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(ProfileRegistry),
+            launchCommand,
+            ConfigService?.ConfiguredCommand,
+            ConfigService?.DefaultProfileSet ?? false,
             workingDirectory);
 
     private void OpenJumpListWindow(
         string? profileId,
         string workingDirectory,
-        string? command = null,
-        bool implicitDefault = false)
+        string? command = null)
     {
-        Ghostty.Core.Profiles.ProfileSnapshot? snapshot = null;
-        var registry = ProfileRegistry;
-        var id = profileId ?? registry?.DefaultProfileId;
-        if (id is not null && registry?.Resolve(id) is { } resolved)
+        Ghostty.Core.Profiles.ProfileSnapshot? snapshot;
+        if (profileId is null)
         {
-            snapshot = Ghostty.Core.Profiles.ProfileSnapshotStore.From(
-                resolved, registry.Version);
-            if (!string.IsNullOrEmpty(workingDirectory))
-                snapshot = snapshot with { WorkingDirectory = workingDirectory };
+            // Nobody picked a profile (a bare forwarded launch, the jump
+            // list's New Window task): the first pane of a launch.
+            snapshot = LaunchFirstPaneSnapshot(command, workingDirectory);
         }
-
-        // A forwarded -e command wins over the profile's, the same
-        // precedence a cold start gives it (#1094). A bare forwarded launch
-        // (no profile named) is a launch's first pane like a cold start's,
-        // so it takes the configured `command` too; a jump-list profile
-        // entry named its profile and keeps that profile's command.
-        if (implicitDefault && profileId is null)
-            snapshot = FirstPaneSnapshot(snapshot, command, workingDirectory);
         else
-            snapshot = Ghostty.Core.Profiles.FirstPaneCommand.Apply(
+        {
+            // A profile the user picked runs that profile. A -e on the same
+            // launch still applies to this first pane (#1094).
+            var registry = ProfileRegistry;
+            snapshot = registry?.Resolve(profileId) is { } resolved
+                ? Ghostty.Core.Profiles.ProfileSnapshotStore.From(resolved, registry.Version)
+                : Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(registry);
+            snapshot = Ghostty.Core.Profiles.PaneCommandPolicy.ApplyLaunchCommand(
                 snapshot, command, workingDirectory);
+        }
 
         var window = MainWindow.CreateForNewTab(
             _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, snapshot);
@@ -1847,7 +1859,6 @@ public partial class App : Application
         _sessionManager?.RequestPersist();
         window.Activate();
     }
-
     private static void OnProfilesChangedRebuildJumpList(
         Ghostty.Core.Profiles.IProfileRegistry _)
         => RebuildJumpList();

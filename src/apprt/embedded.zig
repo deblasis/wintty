@@ -757,8 +757,16 @@ pub const Surface = struct {
         if (opts.command) |c_command| {
             const cmd = std.mem.sliceTo(c_command, 0);
             if (cmd.len > 0) {
-                config.command = .{ .shell = cmd };
+                config.command = try configpkg.Command.fromHost(config.arenaAlloc(), cmd);
                 config.@"wait-after-command" = true;
+                // On Windows the host has already decided what this pane
+                // runs, `-e` included, so libghostty's first-surface
+                // `initial-command` must not override it: otherwise whichever
+                // surface happened to initialize first (the hidden quick
+                // terminal, say) would run `-e` as well.
+                if (comptime builtin.os.tag == .windows) {
+                    config.@"initial-command" = null;
+                }
             }
         }
 

@@ -77,7 +77,8 @@ internal static class SessionProfileResolver
                 WorkingDirectory: fb.WorkingDirectory,
                 DisplayName: fb.DisplayName,
                 Icon: new IconSpec.BundledKey("default"),
-                Visuals: EffectiveVisualOverrides.Empty), leaf.Cwd);
+                Visuals: EffectiveVisualOverrides.Empty,
+                CommandIsArgv: fb.CommandIsArgv), leaf.Cwd);
         return null;
     }
 

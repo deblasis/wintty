@@ -1037,8 +1037,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // wants the real shell's banner interleaving with its canned feed.
         _commandUtf8 = PreviewCommand is { Length: > 0 } previewCmd
             ? AllocUtf8(previewCmd)
-            : Snapshot is { ResolvedCommand: { Length: > 0 } cmd }
-                ? AllocUtf8(cmd)
+            : Snapshot is { ResolvedCommand: { Length: > 0 } }
+                // An argv (-e, a direct: command) goes over as one, so it is
+                // never handed to cmd.exe (#1136).
+                ? AllocUtf8(Ghostty.Core.Profiles.PaneCommandPolicy.SurfaceCommand(Snapshot))
                 : AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
         // Preview shader override: set BEFORE the control loads (it is read

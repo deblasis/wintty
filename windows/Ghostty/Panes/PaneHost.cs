@@ -765,10 +765,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
     /// becomes the active leaf. Inherits the active leaf's profile
-    /// snapshot so a split of a pwsh tab does not spawn cmd.exe.
+    /// snapshot so a split of a pwsh tab does not spawn cmd.exe -- except
+    /// a <c>-e</c> command, which belongs to its launch's first pane only:
+    /// a split of that pane runs what any new pane runs (#1136).
     /// </summary>
     public void Split(PaneOrientation orientation)
-        => Split(orientation, snapshot: _activeLeaf.Snapshot);
+        => Split(orientation, snapshot: Ghostty.Core.Profiles.PaneCommandPolicy.Inherit(
+            _activeLeaf.Snapshot, () => App.ImplicitDefaultSnapshot()));
 
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf

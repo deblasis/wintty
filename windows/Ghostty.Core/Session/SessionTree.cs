@@ -41,6 +41,7 @@ internal static class SessionTree
                             ResolvedCommand = snap.ResolvedCommand,
                             WorkingDirectory = snap.WorkingDirectory,
                             DisplayName = snap.DisplayName,
+                            CommandIsArgv = snap.CommandIsArgv,
                         },
                 };
             default:

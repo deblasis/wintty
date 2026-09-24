@@ -522,14 +522,17 @@ internal static partial class NativeMethods
     internal static partial GhosttyString ConfigOpenPathNoCreate();
 
     /// <summary>
-    /// The <c>command</c> key rendered as one string, empty when unset.
+    /// The <c>command</c> the user set, as one string; empty when they set
+    /// none, including when finalize only filled in its default (cmd.exe).
+    /// <paramref name="direct"/> is 1 for a <c>direct:</c> command, returned
+    /// as its argv quoted by the Windows command-line rules.
     /// <c>ghostty_config_get</c> cannot answer for this key (a Command has no
     /// C value), so it has an export of its own. The result is allocated and
     /// must go back through <see cref="StringFree"/>.
     /// </summary>
     [LibraryImport(Dll, EntryPoint = "ghostty_config_command")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial GhosttyString ConfigCommand(GhosttyConfig config);
+    internal static partial GhosttyString ConfigCommand(GhosttyConfig config, out byte direct);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_string_free")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]

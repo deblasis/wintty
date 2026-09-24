@@ -89,6 +89,44 @@ pub const Command = union(enum) {
         }
     }
 
+    /// The prefix an embedding host puts on a per-surface command to hand
+    /// over an argv rather than a shell string. The same spelling as the
+    /// config's `direct:`, which is what it means.
+    pub const host_direct_prefix = "direct:";
+
+    /// A per-surface command handed over by an embedding host.
+    ///
+    /// Without the prefix it is a shell string, as it always was. With it,
+    /// the rest is an argv quoted by the Windows command-line rules (the
+    /// ones std.process.Args.IteratorGeneral follows), split back into a
+    /// `.direct` command. That is how an argv from `wintty -e` or a
+    /// `direct:` config command reaches the pane without passing through
+    /// `cmd.exe`, which would read `&`, `|`, `%` and the rest in its
+    /// arguments as syntax. Unlike the config parser's `direct:`, quoting
+    /// is honoured, so an argument may hold spaces. A prefix with nothing
+    /// usable after it is kept as the shell string it was given.
+    ///
+    /// The shell string is not copied: the caller keeps it alive for as
+    /// long as the command is used, as it did before. The argv is
+    /// allocated with `alloc`.
+    pub fn fromHost(alloc: Allocator, cmd: [:0]const u8) Allocator.Error!Self {
+        if (!std.mem.startsWith(u8, cmd, host_direct_prefix)) return .{ .shell = cmd };
+
+        var args: std.ArrayListUnmanaged([:0]const u8) = .empty;
+        var it = try std.process.Args.IteratorGeneral(.{}).init(
+            alloc,
+            cmd[host_direct_prefix.len..],
+        );
+        defer it.deinit();
+        while (it.next()) |arg| try args.append(alloc, try alloc.dupeZ(u8, arg));
+
+        if (args.items.len == 0) {
+            args.deinit(alloc);
+            return .{ .shell = cmd };
+        }
+        return .{ .direct = try args.toOwnedSlice(alloc) };
+    }
+
     /// Creates a command as a single string, joining arguments as
     /// necessary with spaces. Its not guaranteed that this is a valid
     /// command; it is only meant to be human readable.
@@ -245,6 +283,66 @@ pub const Command = union(enum) {
         try testing.expectEqual(v.direct.len, 2);
         try testing.expectEqualStrings(v.direct[0], "echo");
         try testing.expectEqualStrings(v.direct[1], "hello");
+    }
+
+    test "Command: fromHost without the prefix is the shell string" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        const v = try fromHost(arena.allocator(), "pwsh.exe -NoLogo");
+        try testing.expect(v == .shell);
+        try testing.expectEqualStrings("pwsh.exe -NoLogo", v.shell);
+    }
+
+    test "Command: fromHost direct keeps cmd.exe syntax as plain arguments" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        // Harmless payloads: every one of these would be syntax to cmd.exe.
+        // As argv they are only text handed to the program.
+        const v = try fromHost(
+            arena.allocator(),
+            "direct:findstr r.txt&echo.INJECTED %USERNAME% a^b \"x | y\" \"my file\\\" & echo INJECTED & \\\".txt\"",
+        );
+        try testing.expect(v == .direct);
+        const want = [_][]const u8{
+            "findstr",
+            "r.txt&echo.INJECTED",
+            "%USERNAME%",
+            "a^b",
+            "x | y",
+            "my file\" & echo INJECTED & \".txt",
+        };
+        try testing.expectEqual(want.len, v.direct.len);
+        for (want, v.direct) |w, got| try testing.expectEqualStrings(w, got);
+    }
+
+    test "Command: fromHost direct honours quoted spaces and backslashes" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        const v = try fromHost(
+            arena.allocator(),
+            "direct:\"C:\\Program Files\\x.exe\" \"C:\\a b\\\\\" plain",
+        );
+        try testing.expect(v == .direct);
+        try testing.expectEqual(@as(usize, 3), v.direct.len);
+        try testing.expectEqualStrings("C:\\Program Files\\x.exe", v.direct[0]);
+        try testing.expectEqualStrings("C:\\a b\\", v.direct[1]);
+        try testing.expectEqualStrings("plain", v.direct[2]);
+    }
+
+    test "Command: fromHost with an empty argv keeps the string" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        const v = try fromHost(arena.allocator(), "direct:   ");
+        try testing.expect(v == .shell);
+        try testing.expectEqualStrings("direct:   ", v.shell);
     }
 
     test "Command: argIterator shell" {

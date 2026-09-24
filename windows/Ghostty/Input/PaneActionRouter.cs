@@ -33,6 +33,7 @@ internal sealed class PaneActionRouter
     private readonly Action<string, ProfileLaunchTarget>? _openProfile = null;
     private readonly Action<string>? _bindingAction = null;
     private readonly Func<string?>? _getDefaultProfileId = null;
+    private readonly Action<ProfileLaunchTarget>? _openDefaultProfile = null;
 
     public PaneActionRouter(TabManager tabs)
     {
@@ -44,13 +45,15 @@ internal sealed class PaneActionRouter
         Func<IReadOnlyList<ResolvedProfile>>? getProfiles,
         Action<string, ProfileLaunchTarget>? openProfile,
         Action<string>? bindingAction = null,
-        Func<string?>? getDefaultProfileId = null)
+        Func<string?>? getDefaultProfileId = null,
+        Action<ProfileLaunchTarget>? openDefaultProfile = null)
         : this(tabs)
     {
         _getProfiles = getProfiles;
         _openProfile = openProfile;
         _bindingAction = bindingAction;
         _getDefaultProfileId = getDefaultProfileId;
+        _openDefaultProfile = openDefaultProfile;
     }
 
     public TabManager Tabs => _tabs;
@@ -719,6 +722,14 @@ internal sealed class PaneActionRouter
     /// </summary>
     private void OpenDefaultProfileTab()
     {
+        // A new tab nobody picked a profile for: the owner applies the
+        // configured `command` / default-profile rules (#1136).
+        if (_openDefaultProfile is not null)
+        {
+            _openDefaultProfile(ProfileLaunchTarget.NewTab);
+            return;
+        }
+
         // The registry's own answer, the same one the new-tab button asks
         // for. Deriving it a second time here is how the two drift.
         var defaultId = _getDefaultProfileId?.Invoke();

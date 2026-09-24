@@ -60,7 +60,7 @@ public static class WindowsOnlyKeys
         new("power-saver-mode",
             "How the app reacts to Windows power-saving signals (auto, always, never)."),
         new("default-profile",
-            "Id of the profile opened for a new tab or window when none is specified."),
+            "Id of the profile every new pane runs when you do not pick one. When set, it takes precedence over `command`; when unset, `command` (if set) runs in new panes instead."),
         new("profile-order",
             "Comma-separated list of profile ids defining the order shown in the tab picker and command palette."),
         new("no-color-override",

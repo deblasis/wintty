@@ -30,7 +30,10 @@ internal static class StripContextMenuBuilder
             Text = "New Tab",
             KeyboardAcceleratorTextOverride = "Ctrl+T",
         };
-        newTab.Click += (_, _) => manager.NewTab();
+        // Nobody picked a profile: the same new tab Ctrl+T opens, which runs
+        // the configured `command` or the default profile (#1136). A bare
+        // NewTab() ran libghostty's own default and ignored both.
+        newTab.Click += (_, _) => manager.NewTab(App.ImplicitDefaultSnapshot());
         flyout.Items.Add(newTab);
 
         flyout.Items.Add(new MenuFlyoutSeparator());

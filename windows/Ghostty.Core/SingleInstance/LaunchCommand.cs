@@ -19,11 +19,12 @@ namespace Ghostty.Core.SingleInstance;
 /// The command is rendered as ONE shell-form string, because that is the
 /// seam the shell hands a pane's command through (the profile
 /// snapshot's <c>ResolvedCommand</c>, which the surface config passes to
-/// libghostty as its per-surface command). On Windows libghostty splits a
-/// shell-form command with a CommandLineToArgvW-compatible iterator and
-/// spawns it directly (cmd.exe only when the string needs cmd's
-/// metacharacters), so each part is quoted with those same rules and the
-/// string re-parses to the argv that was forwarded.
+/// libghostty as its per-surface command). The snapshot is flagged as an
+/// argv (<c>ProfileSnapshot.CommandIsArgv</c>), so libghostty splits the
+/// string with a CommandLineToArgvW-compatible iterator and runs it
+/// directly, never through cmd.exe (#1136); a persistent pane splits it
+/// with the same rules. Each part is quoted with those rules so the string
+/// re-parses to the argv that was forwarded.
 ///
 /// Pure (no I/O) so the model is unit-testable without a GUI.
 /// </summary>
@@ -75,7 +76,8 @@ public static class LaunchCommand
     }
 
     // CommandLineToArgvW round-trip quoting: wrap the part in quotes when
-    // it contains whitespace or a quote (or is empty), double the
+    // it contains whitespace (line breaks included: the native splitter
+    // breaks on them too) or a quote (or is empty), double the
     // backslashes that immediately precede a quote or the closing quote,
     // and escape embedded quotes with a backslash. Anything else passes
     // through untouched, which is also what keeps the common case
@@ -85,7 +87,7 @@ public static class LaunchCommand
         var plain = part.Length > 0;
         foreach (var ch in part)
         {
-            if (ch is ' ' or '\t' or '"')
+            if (ch is ' ' or '\t' or '\r' or '\n' or '"')
             {
                 plain = false;
                 break;

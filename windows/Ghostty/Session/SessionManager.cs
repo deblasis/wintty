@@ -24,6 +24,7 @@ internal sealed class SessionManager
     private readonly DispatcherQueue _dispatcher;
     private readonly Func<IEnumerable<MainWindow>> _windows;
     private DispatcherQueueTimer? _debounce;
+    private bool _suspended;
 
     public SessionManager(
         SessionStore store,
@@ -60,6 +61,23 @@ internal sealed class SessionManager
         _store.Save(state);
         return state;
     }
+
+    /// <summary>
+    /// Stop this process writing the session at all: no debounced persist,
+    /// no clean-shutdown mark. For a cold <c>wintty -e</c>, which skips the
+    /// restore and is a one-off: without this its window replaced the saved
+    /// layout on the first tab or move, and its exit re-marked a crashed
+    /// session clean (#1136). One way: nothing in the process turns it back
+    /// on.
+    /// </summary>
+    public void SuspendPersistence()
+    {
+        _suspended = true;
+        _debounce?.Stop();
+    }
+
+    /// <summary>Whether <see cref="SuspendPersistence"/> has run.</summary>
+    public bool PersistenceSuspended => _suspended;
 
     /// <summary>Subscribe a window's change signals to the debounced persist.</summary>
     public void Track(MainWindow window)
@@ -121,6 +139,7 @@ internal sealed class SessionManager
 
     public void RequestPersist()
     {
+        if (_suspended) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
         _debounce ??= _dispatcher.CreateTimer();
         _debounce.Interval = TimeSpan.FromMilliseconds(DebounceMs);
@@ -143,6 +162,7 @@ internal sealed class SessionManager
     /// </summary>
     public void PersistLiveWindows()
     {
+        if (_suspended) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
         var state = new SessionState { CleanShutdown = false };
         foreach (var w in _windows())
@@ -169,6 +189,7 @@ internal sealed class SessionManager
     public void FinalizeCleanShutdown(MainWindow? closingFallback)
     {
         _debounce?.Stop();
+        if (_suspended) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
 
         var onDisk = _store.Load();

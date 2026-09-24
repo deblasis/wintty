@@ -60,4 +60,32 @@ public class SessionSerializerTests
         Assert.Null(SessionSerializer.Deserialize("{ not json"));
         Assert.Null(SessionSerializer.Deserialize(""));
     }
+
+    // #1136: the argv flag survives the file, and a file from before it
+    // existed reads as a plain command.
+    [Fact]
+    public void RoundTrip_KeepsTheArgvFlag_AndOldFilesReadAsShell()
+    {
+        var state = new SessionState();
+        var tab = new TabSession
+        {
+            Tree = new LeafDto
+            {
+                ProfileId = "",
+                Fallback = new LeafCommand { ResolvedCommand = "tool.exe a&b", DisplayName = "tool", CommandIsArgv = true },
+            },
+        };
+        state.Windows.Add(new WindowSession { Tabs = { tab } });
+
+        var back = SessionSerializer.Deserialize(SessionSerializer.Serialize(state));
+        var leaf = Assert.IsType<LeafDto>(back!.Windows[0].Tabs[0].Tree);
+        Assert.True(leaf.Fallback!.CommandIsArgv);
+
+        // An older build wrote no such property; renaming it is the same
+        // file as far as the reader is concerned (unknown names are skipped).
+        var json = SessionSerializer.Serialize(state);
+        Assert.Contains("\"CommandIsArgv\": true", json);
+        var old = SessionSerializer.Deserialize(json.Replace("\"CommandIsArgv\": true", "\"NotAField\": true"));
+        Assert.False(Assert.IsType<LeafDto>(old!.Windows[0].Tabs[0].Tree).Fallback!.CommandIsArgv);
+    }
 }
