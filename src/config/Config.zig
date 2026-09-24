@@ -6343,8 +6343,14 @@ pub fn parseManuallyHook(
         self.@"gtk-single-instance" = .false;
         self.@"quit-after-last-window-closed" = true;
         self.@"quit-after-last-window-closed-delay" = null;
-        if (self.@"shell-integration" != .none) {
-            self.@"shell-integration" = .detect;
+        // On Windows the host runs `-e` in one pane of a session it may also
+        // restore, and applies this to that pane alone (the embedded apprt's
+        // `close_on_clean_exit` surfaces). Switching it here would change
+        // shell integration for every restored pane as well.
+        if (comptime builtin.os.tag != .windows) {
+            if (self.@"shell-integration" != .none) {
+                self.@"shell-integration" = .detect;
+            }
         }
 
         // Do not continue, we consumed everything.

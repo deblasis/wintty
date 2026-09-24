@@ -1073,6 +1073,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // (about 80x28) until a resize reached it.
         surfaceConfig.Width = initialWidth;
         surfaceConfig.Height = initialHeight;
+        // A one-off launch command (-e, initial-command) closes its pane
+        // when it exits 0 and stays open to show a failure, the way Windows
+        // Terminal's closeOnExit "graceful" does (#1175). Every other pane
+        // keeps libghostty's wait-after-command behaviour.
+        surfaceConfig.CloseOnCleanExit =
+            Ghostty.Core.Profiles.PaneCommandPolicy.ClosesOnCleanExit(Snapshot) ? (byte)1 : (byte)0;
 
         // Pin a managed handle to `this` and pass it as per-surface userdata.
         // libghostty echoes this pointer back through close_surface_cb and the

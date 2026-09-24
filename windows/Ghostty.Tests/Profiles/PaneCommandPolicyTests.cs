@@ -232,4 +232,28 @@ public sealed class PaneCommandPolicyTests
         var fallback = DefaultProfile();
         Assert.Same(fallback, PaneCommandPolicy.Inherit(first, () => fallback));
     }
+
+    // ---- closeOnExit "graceful" for a launch command (#1175) ---------------
+
+    [Fact]
+    public void LaunchCommandPane_ClosesOnACleanExit()
+    {
+        var pane = PaneCommandPolicy.LaunchFirstPane(
+            DefaultProfile(), "git log", Nu, defaultProfileSet: false, workingDirectory: null);
+        Assert.True(PaneCommandPolicy.ClosesOnCleanExit(pane));
+
+        var initial = PaneCommandPolicy.LaunchFirstPane(
+            DefaultProfile(), launchArgv: null, configured: null, defaultProfileSet: false,
+            workingDirectory: null, initialCommand: new ConfiguredCommand("htop", false));
+        Assert.True(PaneCommandPolicy.ClosesOnCleanExit(initial));
+    }
+
+    [Fact]
+    public void OtherPanes_KeepTheirExitBehaviour()
+    {
+        Assert.False(PaneCommandPolicy.ClosesOnCleanExit(null));
+        Assert.False(PaneCommandPolicy.ClosesOnCleanExit(DefaultProfile()));
+        Assert.False(PaneCommandPolicy.ClosesOnCleanExit(
+            PaneCommandPolicy.ImplicitDefault(null, Nu, defaultProfileSet: false)));
+    }
 }

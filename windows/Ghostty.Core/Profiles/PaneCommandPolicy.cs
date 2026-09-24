@@ -197,6 +197,18 @@ public static class PaneCommandPolicy
             : snapshot.ResolvedCommand;
     }
 
+    /// <summary>
+    /// Whether the pane running <paramref name="snapshot"/> closes when its
+    /// command exits 0 (and stays open on any other exit): true for a
+    /// one-off launch command (<c>-e</c>, <c>initial-command</c>), as Windows
+    /// Terminal's <c>closeOnExit: graceful</c> does for <c>wt &lt;cmd&gt;</c>.
+    /// Without it the pane sat on "Process exited" and was then saved and
+    /// restored as a stray shell (deblasis/wintty#1175). libghostty ignores
+    /// it when the user set <c>wait-after-command</c> themselves.
+    /// </summary>
+    public static bool ClosesOnCleanExit(ProfileSnapshot? snapshot)
+        => snapshot is { CommandOrigin: PaneCommandOrigin.LaunchCommand };
+
     private static ProfileSnapshot? WithWorkingDirectory(ProfileSnapshot? snapshot, string? workingDirectory)
         => snapshot is not null && !string.IsNullOrEmpty(workingDirectory)
             ? snapshot with { WorkingDirectory = workingDirectory }

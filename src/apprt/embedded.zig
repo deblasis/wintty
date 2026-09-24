@@ -630,6 +630,12 @@ pub const Surface = struct {
         /// it). Zero keeps the placeholder until the first set_size.
         width: u32 = 0,
         height: u32 = 0,
+
+        /// The command is a one-off launch command (`-e`): close the surface
+        /// when it exits 0 and keep it open on any other exit, as Windows
+        /// Terminal's `closeOnExit: graceful` does. Ignored when the user set
+        /// `wait-after-command` themselves, which then holds as configured.
+        close_on_clean_exit: bool = false,
     };
 
     // Options is declared three times: here, as ghostty_surface_config_s in
@@ -658,7 +664,8 @@ pub const Surface = struct {
             if (@offsetOf(Options, "custom_shader") != 112) @compileError("Options layout drifted from ghostty_surface_config_s");
             if (@offsetOf(Options, "width") != 120) @compileError("Options layout drifted from ghostty_surface_config_s");
             if (@offsetOf(Options, "height") != 124) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@sizeOf(Options) != 128) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@offsetOf(Options, "close_on_clean_exit") != 128) @compileError("Options layout drifted from ghostty_surface_config_s");
+            if (@sizeOf(Options) != 136) @compileError("Options layout drifted from ghostty_surface_config_s");
         }
     }
 
@@ -753,6 +760,19 @@ pub const Surface = struct {
             }
         }
 
+        // What the user configured, before a host command forces it on.
+        const user_wait_after_command = config.@"wait-after-command";
+
+        // A one-off launch command gets `-e`'s shell-integration rule (see
+        // `initial-command` in Config.zig): forced integration is unlikely to
+        // suit a command that is probably not a shell. On Windows the config
+        // no longer applies it globally, so it lands on this pane alone.
+        if (comptime builtin.os.tag == .windows) {
+            if (opts.close_on_clean_exit and config.@"shell-integration" != .none) {
+                config.@"shell-integration" = .detect;
+            }
+        }
+
         // If we have a command from the options then we set it.
         if (opts.command) |c_command| {
             const cmd = std.mem.sliceTo(c_command, 0);
@@ -823,6 +843,11 @@ pub const Surface = struct {
             self,
         );
         errdefer self.core_surface.deinit();
+
+        // Set before any child exit can be processed: exits arrive through
+        // the surface mailbox, which this thread has not drained yet.
+        self.core_surface.close_on_clean_exit =
+            opts.close_on_clean_exit and !user_wait_after_command;
 
         // If our options requested a specific font-size, set that.
         if (opts.font_size != 0) {

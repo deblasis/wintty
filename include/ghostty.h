@@ -595,6 +595,11 @@ typedef struct {
   // the end of a struct from an older build.
   uint32_t width;
   uint32_t height;
+
+  // The command is a one-off launch command (-e): close the surface when it
+  // exits 0, keep it open on any other exit (Windows Terminal's closeOnExit
+  // "graceful"). Ignored when the user set wait-after-command themselves.
+  bool close_on_clean_exit;
 } ghostty_surface_config_s;
 
 typedef struct {

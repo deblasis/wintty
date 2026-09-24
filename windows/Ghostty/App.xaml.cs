@@ -1172,7 +1172,9 @@ public partial class App : Application
             // fight over it: each Track would drag it onto the newest
             // window, uncovering the earlier ones, and whichever window
             // rendered first would dismiss it for all of them.
-            var isFirstWindow = true;
+            // When -e opens its window over the restored session, that window
+            // is the one in front, so it takes the splash instead.
+            var isFirstWindow = !launchWantsWindow;
             foreach (var ws in restoreState!.Windows)
             {
                 var restored = new MainWindow(
@@ -1199,7 +1201,9 @@ public partial class App : Application
             // the one in front, as in Windows Terminal.
             var window = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
-                showLaunchIcon: !restoredAny,
+                // Either nothing was restored, or this is the -e window over
+                // the restored ones: the window in front, so the splash's.
+                showLaunchIcon: true,
                 initialSnapshot: LaunchFirstPaneSnapshot(
                     coldCommand,
                     workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory,

@@ -112,10 +112,14 @@ public sealed class FirstPaneCommandWiringTests
             call.Arg(1));
         Assert.Equal("initialCommand: initialCommand", call.Arg(2));
 
-        // The splash belongs to the first restored window when there is one.
+        // The splash belongs to the window in front: this one whenever it
+        // opens, and the first restored window only when -e opens none.
         var icon = fresh.ArgumentList.Arguments
             .Single(a => a.NameColon?.Name.Identifier.ValueText == "showLaunchIcon");
-        Assert.Equal("!restoredAny", icon.Expression.ToString());
+        Assert.Equal("true", icon.Expression.ToString());
+        var firstRestored = launched.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "isFirstWindow");
+        Assert.Equal("!launchWantsWindow", firstRestored.Initializer!.Value.ToString());
     }
 
     // ---- forwarded launch and the jump list --------------------------------
@@ -295,6 +299,48 @@ public sealed class FirstPaneCommandWiringTests
         }
         Assert.DoesNotContain(drop, text[open..end]);
         Assert.Contains("if (comptime builtin.os.tag == .windows) {\n            " + drop, text);
+    }
+
+    [Fact]
+    public void LaunchPane_ClosesOnCleanExit_EndToEndWiring()
+    {
+        // Host: the surface config carries the policy's answer.
+        var control = ShellSource.Load("Controls.TerminalControl.xaml.cs");
+        var onLoaded = control.Method("OnLoaded").Body!.ToString();
+        Assert.Contains("surfaceConfig.CloseOnCleanExit =", onLoaded);
+        Assert.Contains("PaneCommandPolicy.ClosesOnCleanExit(Snapshot)", onLoaded);
+
+        // Struct: the managed field sits where the header puts it, last,
+        // right after custom_shader.
+        var native = ShellSource.Load("Interop.NativeMethods.cs");
+        var fields = native.Root.DescendantNodes().OfType<StructDeclarationSyntax>()
+            .Single(s => s.Identifier.ValueText == "GhosttySurfaceConfig")
+            .Members.OfType<FieldDeclarationSyntax>()
+            .Select(f => f.Declaration.Variables.Single().Identifier.ValueText)
+            .ToList();
+        Assert.Equal(new[] { "CustomShader", "CloseOnCleanExit" }, fields.TakeLast(2));
+
+        // Native: honoured only when the user did not set wait-after-command,
+        // and set before any child exit can be processed.
+        var text = EmbeddedZig();
+        Assert.Contains("close_on_clean_exit: bool = false,", text);
+        Assert.Contains(
+            "self.core_surface.close_on_clean_exit =\n            opts.close_on_clean_exit and !user_wait_after_command;",
+            text);
+        Assert.True(
+            text.IndexOf("const user_wait_after_command = config.@\"wait-after-command\";", System.StringComparison.Ordinal)
+            < text.IndexOf("if (opts.command) |c_command| {", System.StringComparison.Ordinal),
+            "the user's wait-after-command must be read before a host command forces it on");
+    }
+
+    private static string EmbeddedZig()
+    {
+        var asm = typeof(FirstPaneCommandWiringTests).Assembly;
+        var name = asm.GetManifestResourceNames()
+            .Single(n => n.Replace('\\', '.').Replace('/', '.')
+                .EndsWith("Interop.Exports.apprt.embedded.zig", System.StringComparison.Ordinal));
+        using var reader = new System.IO.StreamReader(asm.GetManifestResourceStream(name)!);
+        return reader.ReadToEnd().Replace("\r\n", "\n");
     }
 
     private static int CountOf(string text, string needle)
