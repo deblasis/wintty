@@ -1000,6 +1000,71 @@ internal static class TestSeam
                 });
             }
 
+            case "open-profile":
+            {
+                // A new tab on a named profile, through the window's own
+                // funnel: the same call the profile slot chords make.
+                var id = ArgString(args, "id");
+                if (string.IsNullOrEmpty(id)) return Error(op, "id is required");
+                // OpenProfile falls back to the default profile for an id it
+                // cannot resolve; a driver asking for a named profile must
+                // hear that it is not there rather than get a different one.
+                if (App.ProfileRegistry?.Resolve(id) is null)
+                    return Error(op, $"no profile '{id}'");
+                window.OpenProfile(id, Ghostty.Core.Profiles.ProfileLaunchTarget.NewTab);
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return OkWithState(window, manager, op);
+            }
+
+            case "surface-size":
+            {
+                // The size libghostty holds for a tab's active pane (the
+                // size its pty was last told) and the size it was created
+                // at (the size its pty started with). Read-only. A pane
+                // whose surface does not exist yet answers live=false: no
+                // pty has been started, which is a state and not an error.
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                var handle = terminal.SurfaceHandle;
+                var scale = terminal.TestSeamCompositionScale;
+                if (handle == IntPtr.Zero)
+                {
+                    return Json(json =>
+                    {
+                        json.WriteStartObject();
+                        json.WriteBoolean("ok", true);
+                        json.WriteString("op", op);
+                        json.WriteBoolean("live", false);
+                        json.WriteNumber("scale", scale);
+                        json.WriteEndObject();
+                    });
+                }
+                var sz = Interop.NativeMethods.SurfaceSize(
+                    new Interop.GhosttySurface(handle));
+                var spawn = terminal.SpawnSize;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("live", true);
+                    json.WriteNumber("scale", scale);
+                    json.WriteNumber("cols", sz.Columns);
+                    json.WriteNumber("rows", sz.Rows);
+                    json.WriteNumber("widthPx", sz.WidthPx);
+                    json.WriteNumber("heightPx", sz.HeightPx);
+                    json.WriteNumber("cellWidthPx", sz.CellWidthPx);
+                    json.WriteNumber("cellHeightPx", sz.CellHeightPx);
+                    json.WriteNumber("spawnCols", spawn.Cols);
+                    json.WriteNumber("spawnRows", spawn.Rows);
+                    json.WriteNumber("spawnWidthPx", spawn.WidthPx);
+                    json.WriteNumber("spawnHeightPx", spawn.HeightPx);
+                    json.WriteEndObject();
+                });
+            }
+
             case "surface-dormant":
             {
                 // Tier C dormancy driver: "go" asks the surface's

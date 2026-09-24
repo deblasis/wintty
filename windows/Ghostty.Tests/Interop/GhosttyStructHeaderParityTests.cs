@@ -171,6 +171,67 @@ public class GhosttyStructHeaderParityTests
         AssertLayoutMatchesHeader<GhosttyActionDesktopNotification>(
             "ghostty_action_desktop_notification_s");
 
+    // ghostty_surface_config_s, the struct every surface is created from. It
+    // is declared three times (the header, Surface.Options in
+    // src/apprt/embedded.zig, GhosttySurfaceConfig in Ghostty.Core) and
+    // downstream patches append fields to it, so a field put in a different
+    // place on one side is the failure to catch: it compiles everywhere and
+    // reads the wrong bytes. This holds the C# struct to the header; the test
+    // below holds the Zig side to it.
+    [Fact]
+    public void SurfaceConfig_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttySurfaceConfig>(
+            "ghostty_surface_config_s", aggregates: SurfaceConfigAggregates);
+
+    // embedded.zig asserts Surface.Options' offsets at compile time, against
+    // numbers written in the source. Those numbers are only as good as their
+    // agreement with the header, so read them back and compare. Every field
+    // of the struct has to be asserted there: a field the comptime block
+    // does not name is a field the Zig side could move unnoticed.
+    [Fact]
+    public void SurfaceConfig_ZigComptimeLayout_Matches_Header()
+    {
+        var zig = LoadResource(EmbeddedZigResource);
+        var layout = CLayoutOf("ghostty_surface_config_s", SurfaceConfigAggregates);
+
+        var offsets = Regex.Matches(zig, @"@offsetOf\(Options, ""(?<name>\w+)""\) != (?<value>\d+)")
+            .ToDictionary(m => m.Groups["name"].Value, m => int.Parse(m.Groups["value"].Value));
+        var size = Regex.Match(zig, @"@sizeOf\(Options\) != (?<value>\d+)");
+
+        Assert.True(size.Success, "embedded.zig no longer asserts @sizeOf(Options)");
+        Assert.Equal(layout.Size, int.Parse(size.Groups["value"].Value));
+
+        var problems = new List<string>();
+        foreach (var field in layout.Fields)
+        {
+            if (!offsets.TryGetValue(field.Name, out var zigOffset))
+                problems.Add($"  embedded.zig does not assert the offset of {field.Name}");
+            else if (zigOffset != field.Offset)
+                problems.Add($"  embedded.zig puts {field.Name} at +{zigOffset}, the header at +{field.Offset}");
+        }
+        foreach (var name in offsets.Keys.Except(layout.Fields.Select(f => f.Name)))
+            problems.Add($"  embedded.zig asserts {name}, which ghostty_surface_config_s does not have");
+
+        Assert.True(problems.Count == 0,
+            "Surface.Options in src/apprt/embedded.zig does not match ghostty_surface_config_s:\n" +
+            string.Join("\n", problems));
+    }
+
+    // The platform union is a union of structs, one of them with a nested
+    // anonymous struct, which the field scan does not model. Its size and
+    // alignment come from ghostty_platform_windows_s, the widest member:
+    // two pointers (16) then { bool, uint32_t, uint32_t } (12, aligned 4),
+    // 28 rounded up to the pointer alignment, 32. The managed union is held
+    // to the same numbers, and the fields after it are still computed from
+    // the header, so a change to the union moves them and fails the test.
+    private static readonly IReadOnlyDictionary<string, (int Size, int Align, Type Managed)> SurfaceConfigAggregates =
+        new Dictionary<string, (int Size, int Align, Type Managed)>
+        {
+            ["ghostty_platform_u"] = (32, 8, typeof(GhosttyPlatformUnion)),
+        };
+
+    private const string EmbeddedZigResource = "Ghostty.Tests.Interop.Exports.apprt.embedded.zig";
+
     /// <param name="renamed">
     /// C field name to managed field name, for the places the two genuinely
     /// disagree. Explicit rather than inferred, because "the names need not
@@ -180,7 +241,8 @@ public class GhosttyStructHeaderParityTests
     /// </param>
     private static void AssertLayoutMatchesHeader<T>(
         string typedefName,
-        IReadOnlyDictionary<string, string>? renamed = null) where T : struct
+        IReadOnlyDictionary<string, string>? renamed = null,
+        IReadOnlyDictionary<string, (int Size, int Align, Type Managed)>? aggregates = null) where T : struct
     {
         // x64 is what the whole table below assumes. On a 32-bit runtime every
         // pointer-sized field would compute to 8 while Marshal reports 4, and
@@ -188,7 +250,7 @@ public class GhosttyStructHeaderParityTests
         // modelling the platform.
         Assert.True(IntPtr.Size == 8, "these layouts are computed for a 64-bit runtime");
 
-        var expected = CLayoutOf(typedefName);
+        var expected = CLayoutOf(typedefName, aggregates);
 
         // Ordered by where the runtime actually put them, which is the order
         // that has to match C. Declaration order from reflection would be the
@@ -219,7 +281,14 @@ public class GhosttyStructHeaderParityTests
             // Offsets alone let a widening that padding absorbs through:
             // uint16_t amount -> uint32_t keeps ResizeSplit at {0, 4} and 8
             // bytes while the managed ushort silently reads the low half.
-            if (!TypeMatches(type, c.Type))
+            if (aggregates is not null && aggregates.TryGetValue(c.Type, out var aggregate))
+            {
+                if (type != aggregate.Managed)
+                    problems.Add($"  {name} is {type.Name} but {c.Name} is {c.Type}, mirrored by {aggregate.Managed.Name}");
+                else if (Marshal.SizeOf(type) != aggregate.Size)
+                    problems.Add($"  {type.Name} is {Marshal.SizeOf(type)} bytes but {c.Type} is {aggregate.Size}");
+            }
+            else if (!TypeMatches(type, c.Type))
             {
                 problems.Add($"  {name} is {type.Name} but {c.Name} is {c.Type}");
             }
@@ -295,7 +364,9 @@ public class GhosttyStructHeaderParityTests
     // multiple of its alignment, and the total is rounded up to the largest
     // alignment in the struct. Every type here has alignment equal to its size,
     // so one table serves for both.
-    private static CLayout CLayoutOf(string typedefName)
+    private static CLayout CLayoutOf(
+        string typedefName,
+        IReadOnlyDictionary<string, (int Size, int Align, Type Managed)>? aggregates = null)
     {
         var body = StructBody(typedefName);
 
@@ -312,12 +383,21 @@ public class GhosttyStructHeaderParityTests
             Assert.True(m.Success, $"unparsed field in {typedefName}: {line}");
 
             var type = Regex.Replace(m.Groups["type"].Value.Trim(), @"\s+", " ");
-            var size = SizeOfCType(type, typedefName, line);
+            int size, align;
+            if (aggregates is not null && aggregates.TryGetValue(type, out var aggregate))
+            {
+                (size, align) = (aggregate.Size, aggregate.Align);
+            }
+            else
+            {
+                size = SizeOfCType(type, typedefName, line);
+                align = size;
+            }
 
-            offset = Align(offset, size);
+            offset = Align(offset, align);
             fields.Add(new CField(m.Groups["name"].Value, type, offset));
             offset += size;
-            maxAlign = Math.Max(maxAlign, size);
+            maxAlign = Math.Max(maxAlign, align);
         }
 
         // A struct that parsed to nothing would satisfy every comparison below
@@ -408,13 +488,15 @@ public class GhosttyStructHeaderParityTests
         return body;
     }
 
-    private static string LoadHeader()
+    private static string LoadHeader() => LoadResource(HeaderResource);
+
+    private static string LoadResource(string name)
     {
         var asm = Assembly.GetExecutingAssembly();
-        using var stream = asm.GetManifestResourceStream(HeaderResource);
+        using var stream = asm.GetManifestResourceStream(name);
         Assert.True(
             stream is not null,
-            $"{HeaderResource} is not embedded; see Ghostty.Tests.csproj");
+            $"{name} is not embedded; see Ghostty.Tests.csproj");
 
         using var reader = new StreamReader(stream!);
         return reader.ReadToEnd();

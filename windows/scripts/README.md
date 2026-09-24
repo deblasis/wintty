@@ -310,8 +310,8 @@ markdown is what gets pasted into #937, one comment per run.
 To make a seam harness coexist: call `Assert-NoWinttyFrom -ExePath` instead of
 `Assert-NoWintty`, stage `windows-single-instance = false`, pass
 `Start-SeamSession -PrivateStateBase`, and read crash.log from
-`$session.StateBase` rather than the per-user path. `seam-acceptance.ps1` is
-converted; the rest keep `Assert-NoWintty` until each is converted and its
+`$session.StateBase` rather than the per-user path. `seam-acceptance.ps1` and
+`seam-initial-size.ps1` are converted; the rest keep `Assert-NoWintty` until each is converted and its
 scenario checked against single-instance being off.
 
 Most scripts here used to open with `Get-Process Wintty | Stop-Process -Force`,

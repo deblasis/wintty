@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Ghostty.Core;
 using Ghostty.Core.Input;
 using Ghostty.Core.Interop;
+using Ghostty.Core.Panes;
 using Ghostty.Core.ResizeOverlay;
 using Ghostty.Core.Windows;
 using Ghostty.Core.Search;
@@ -239,6 +240,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// after it is disposed.
     /// </summary>
     internal IntPtr SurfaceHandle => _surface.Handle;
+
+    /// <summary>
+    /// The grid and pixel size the surface had when SurfaceNew returned: the
+    /// size its pty is created at. Read by the test seam; zeros before
+    /// creation.
+    /// </summary>
+    internal (ushort Cols, ushort Rows, uint WidthPx, uint HeightPx) SpawnSize { get; private set; }
 
     /// <summary>
     /// Schedule an immediate repaint of this surface. Used by the
@@ -575,6 +583,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     /// <summary>The keys this surface is armed for right now.</summary>
     internal ConsumedCloseChars TestSeamConsumedCloseArm => _consumedCloseArm.Armed;
+
+    /// <summary>The panel's composition scale, so a driver can say which display scale it measured at.</summary>
+    internal double TestSeamCompositionScale => Panel.CompositionScaleX;
 #endif
 
     /// <summary>
@@ -955,10 +966,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        // Tree-dependent setup runs every Loaded (idempotent):
-        // request focus, walk ancestors for the ScrollViewer fix, and
-        // arm the one-shot LayoutUpdated handler so the surface size
-        // gets primed once layout settles in the new parent.
+        // Tree-dependent setup runs every Loaded (idempotent): walk
+        // ancestors for the ScrollViewer fix, and arm the one-shot
+        // LayoutUpdated handler, which creates the surface on the first
+        // layout pass that gives the panel a size, or pushes the settled
+        // size to a surface that already exists (a reparent).
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
         Panel.LayoutUpdated += OnFirstLayoutUpdated;
         DisableAncestorScrollViewerTabStop();
@@ -975,16 +987,39 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // host is idempotent so doing it on every Loaded is safe and
         // survives any visual-tree reparent.
         SearchBar.SearchHost = this;
+    }
 
-        // Surface creation runs exactly once per control instance,
-        // even across multiple reparents. Subsequent Loaded events
-        // skip this entire block.
+    /// <summary>
+    /// Create the libghostty surface, and with it the pty, at the panel's
+    /// measured size. Called from the first layout pass after Loaded, not
+    /// from Loaded itself, the way Windows Terminal starts its connection
+    /// only once the control has a non-zero laid-out size: Loaded can report
+    /// a height the first layout pass then settles a few pixels lower, and a
+    /// hidden tab is not measured at all until it is first shown. Starting
+    /// earlier means starting at a size the shell formats its startup output
+    /// for and the pane never has.
+    ///
+    /// Returns false, having done nothing, while the panel has no measured
+    /// size; the caller tries again on the next layout pass. A hidden or
+    /// restored background tab therefore starts its shell when it is first
+    /// shown.
+    /// </summary>
+    private bool TryCreateSurface()
+    {
+        if (SurfacePixelSize.Initial(
+                Panel.ActualWidth, Panel.ActualHeight,
+                Panel.CompositionScaleX, Panel.CompositionScaleY) is not (uint initialWidth, uint initialHeight))
+        {
+            return false;
+        }
+
+        // Surface creation runs exactly once per control instance, even
+        // across multiple reparents, and even when it fails part way.
         //
         // MainWindow's picker cleanup leans on that: comparing SurfaceHandle
         // against the pointer it saved only proves reachability while a
         // control's handle can be that pointer or zero and never a recycled
         // third one.
-        if (_surfaceCreated) return;
         _surfaceCreated = true;
 
         if (Host is null)
@@ -1031,6 +1066,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         surfaceConfig.Command = _commandUtf8;
         surfaceConfig.InitialInput = _initialInputUtf8;
         surfaceConfig.CustomShader = _customShaderUtf8;
+        // The pty starts at this size. Without it libghostty would start from
+        // an 800x600 px placeholder and the shell would spawn on that grid
+        // (about 80x28) until a resize reached it.
+        surfaceConfig.Width = initialWidth;
+        surfaceConfig.Height = initialHeight;
 
         // Pin a managed handle to `this` and pass it as per-surface userdata.
         // libghostty echoes this pointer back through close_surface_cb and the
@@ -1051,6 +1091,20 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 $"{AppIdentity.LogTag} SurfaceNew failed: {ex.Message}\n{ex.StackTrace}");
             throw;
         }
+        // libghostty returns null when it could not build the surface (the
+        // renderer's device or swap chain failed). Every native call below
+        // dereferences the handle, so stop here with a managed error rather
+        // than an access violation.
+        if (_surface.Handle == IntPtr.Zero)
+        {
+            SwapChainPanelInterop.Release(panelPtr);
+            _selfHandle.Free();
+            throw new InvalidOperationException(
+                $"libghostty could not create a surface at {initialWidth}x{initialHeight} px.");
+        }
+        var spawn = NativeMethods.SurfaceSize(_surface);
+        SpawnSize = (spawn.Columns, spawn.Rows, spawn.WidthPx, spawn.HeightPx);
+
         // Drop our ref: libghostty does not retain the panel pointer.
         SwapChainPanelInterop.Release(panelPtr);
         Host.Register(_surface, this);
@@ -1094,10 +1148,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         }
 
         // Surface exists and is registered; tell the host the shell has
-        // spawned. Last statement of OnLoaded on purpose: the startup glow
-        // reads the control's bounds right after this, and anything that
-        // still has to happen first belongs above this line.
+        // spawned. Raised last on purpose: the startup glow reads the
+        // control's bounds right after this, and anything that still has to
+        // happen first belongs above this line.
         SurfaceSpawned?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     private void DisableAncestorScrollViewerTabStop()
@@ -1149,6 +1204,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnFirstLayoutUpdated(object? sender, object e)
     {
+        if (!_surfaceCreated)
+        {
+            // Nothing to size yet: create the surface at this pass's size,
+            // or wait for a pass that gives the panel one.
+            if (_surfaceDisposed || !TryCreateSurface()) return;
+            Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+            ArmResizeOverlayGrace();
+            return;
+        }
+
         if (_surface.Handle == IntPtr.Zero) return;
         var w = Panel.ActualWidth;
         var h = Panel.ActualHeight;
@@ -1158,10 +1223,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         var sx = Panel.CompositionScaleX > 0 ? Panel.CompositionScaleX : 1f;
         var sy = Panel.CompositionScaleY > 0 ? Panel.CompositionScaleY : 1f;
         NativeMethods.SurfaceSetContentScale(_surface, sx, sy);
-        NativeMethods.SurfaceSetSize(
-            _surface,
-            (uint)Math.Max(1, w * sx),
-            (uint)Math.Max(1, h * sy));
+        var (pw, ph) = SurfacePixelSize.FromDips(w, h, sx, sy);
+        NativeMethods.SurfaceSetSize(_surface, pw, ph);
 
         // Start the resize-overlay startup grace from this first settled
         // layout (and again after any reparent that re-arms this handler),
@@ -1421,6 +1484,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             allowShow);
     }
 
+
     private void PushSurfaceSize()
     {
         // Read the panel's own layout bounds rather than the
@@ -1429,10 +1493,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // manifests as letterboxing: the DX12 swap chain sizes off one
         // value while the compositor stretches the panel to its own
         // bounds, leaving a gap at the edges.
-        var sx = Panel.CompositionScaleX > 0 ? Panel.CompositionScaleX : 1.0;
-        var sy = Panel.CompositionScaleY > 0 ? Panel.CompositionScaleY : 1.0;
-        var w = (uint)Math.Max(1, Panel.ActualWidth * sx);
-        var h = (uint)Math.Max(1, Panel.ActualHeight * sy);
+        // The same formula the surface was created with (SurfacePixelSize),
+        // so the first push after creation matches it to the pixel and is a
+        // no-op rather than a startup resize.
+        var (w, h) = SurfacePixelSize.FromDips(
+            Panel.ActualWidth, Panel.ActualHeight,
+            Panel.CompositionScaleX, Panel.CompositionScaleY);
 
         // Fire-and-forget. ghostty_surface_set_size records the desired
         // dimensions in an atomic and wakes the renderer thread; the
