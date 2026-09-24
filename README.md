@@ -6,9 +6,13 @@
 <p align="center">
   A native Windows terminal emulator on the Ghostty core.
   <br />
-  A DirectX 12 (GPU) renderer and a WinUI 3 shell on <code>libghostty</code>,
-  the Zig emulation core proven by <a href="https://ghostty.org">Ghostty</a>.
+  Looking for Ghostty on Windows? Wintty runs the same <code>libghostty</code> core
+  with a WinUI 3 shell and a DirectX 12 (GPU) renderer.
   <br />
+  Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans, and we hope much of this work ends up in the official Ghostty for Windows.
+  <br />
+  <a href="https://wintty.io/?utm_source=gh_readme&utm_content=nav">Website</a>
+  ·
   <a href="https://wintty.io/download?utm_source=gh_readme&utm_content=nav">Download</a>
   ·
   <a href="https://wintty.io/docs?utm_source=gh_readme&utm_content=nav">Documentation</a>
