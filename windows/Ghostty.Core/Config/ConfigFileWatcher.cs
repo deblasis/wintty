@@ -276,6 +276,19 @@ public sealed partial class ConfigFileWatcher : IDisposable
 
     private void OnFileRenamed(object sender, RenamedEventArgs e) => Rearm();
 
+    /// <summary>
+    /// Test-only stand-in for a file system event: runs the exact path the
+    /// real <c>Changed</c>/<c>Created</c>/<c>Deleted</c>/<c>Renamed</c>
+    /// handlers run, including the suppression consult. Tests that drive the
+    /// debounce and delivery machinery with hand-raised events stay
+    /// deterministic on a loaded machine, where the events of one save can
+    /// be delivered spread wider than the debounce and one save then reports
+    /// as two (issue #1161). The real event stream itself keeps its own
+    /// coverage over the save shapes, with load-tolerant waits, in
+    /// ConfigFileWatcherTests.
+    /// </summary>
+    internal bool TestRaiseFileEvent() => Rearm();
+
     private void OnWatcherError(object sender, ErrorEventArgs e)
         => HandleWatcherError(sender, e.GetException());
 

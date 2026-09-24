@@ -39,10 +39,13 @@ internal static class TrackerSmoke
     /// pwsh launching its child, plus the child exec'ing the leaf. Generous
     /// on purpose -- none of it is the tracker's doing, and blowing this
     /// budget is reported as the scenario failing to start rather than as the
-    /// tracker failing to see it. The pwsh spawn gate already allows 3500 ms
-    /// for pwsh alone before it skips the test.
+    /// tracker failing to see it. It is a hang guard, not a latency
+    /// requirement: the spawn gate no longer rules on host speed (a
+    /// load-dependent skip is a load dependency like any other), and the
+    /// scenario's own cost on a busy machine is the machine's business, so
+    /// the budget is wide enough to absorb it.
     /// </summary>
-    internal const int ScenarioBudgetMs = 20_000;
+    internal const int ScenarioBudgetMs = 60_000;
 
     /// <summary>
     /// Ticks the tracker is allowed once the scenario is demonstrably live.

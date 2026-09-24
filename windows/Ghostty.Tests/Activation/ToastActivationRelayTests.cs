@@ -10,8 +10,19 @@ namespace Ghostty.Tests.Activation;
 
 public sealed class ToastActivationRelayTests
 {
-    private static readonly TimeSpan Generous = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan ShortEnoughToFailFast = TimeSpan.FromSeconds(2);
+    // Every wait in this file is a hang guard and nothing more: the bounds
+    // exist so a broken test fails instead of hanging the suite, never to
+    // measure the machine. On a loaded box any shorter bound answers "the
+    // thread was descheduled", which is not the question.
+    private static readonly TimeSpan Guard = TimeSpan.FromSeconds(60);
+
+    // How long the blocked handler waits before giving up on the test that
+    // blocked it. It has to be far longer than Guard: if the handler
+    // unblocks first, a gate held across invocation is released before the
+    // probe can observe it, and the defect the ordering assertions exist to
+    // catch walks past (watched that happen with 60s in both). Purely a
+    // self-clean for an abandoned thread; no assertion depends on it.
+    private static readonly TimeSpan HandlerHold = TimeSpan.FromMinutes(10);
 
     [Fact]
     public void Note_ThenSubscribe_ReplaysToTheSubscriber()
@@ -323,33 +334,49 @@ public sealed class ToastActivationRelayTests
     // across the call would let one slow handler block every other thread, and
     // Note runs on a WinRT callback thread while Pending is read from the
     // forwarding path.
+    //
+    // The assertion is an ORDERING, not a timing ratio: the probe's read of
+    // Pending completes while the handler provably still blocked
+    // (release.IsSet is false after the probe finished). A gate held across
+    // invocation makes the probe block behind the handler, so the probe never
+    // finishes and the Wait fails. No elapsed-time comparison anywhere: under
+    // load, "the probe was slow" and "the gate was held" are the same
+    // observation to a clock, and only ordering tells them apart.
     [Fact]
     public void Note_DoesNotHoldTheLockWhileInvokingHandlers()
     {
         var relay = new ToastActivationRelay();
         using var inHandler = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
+        using var probeDone = new ManualResetEventSlim();
 
         relay.Subscribe(_ =>
         {
             inHandler.Set();
-            release.Wait(Generous);
+            release.Wait(HandlerHold);
         });
 
         var noting = RunOnItsOwnThread(() => relay.Note(new ToastActivation("abc")));
-        Assert.True(inHandler.Wait(Generous), "handler never ran");
+        Assert.True(inHandler.Wait(Guard), "handler never ran");
 
         try
         {
-            var probe = RunOnItsOwnThread(() => _ = relay.Pending);
+            var probe = RunOnItsOwnThread(() =>
+            {
+                _ = relay.Pending;
+                probeDone.Set();
+            });
             Assert.True(
-                probe.Join(ShortEnoughToFailFast),
-                "Pending blocked while a handler was running: the gate is held across invocation");
+                probeDone.Wait(Guard),
+                "Pending never returned while a handler was running: the gate is held across invocation");
+            Assert.False(
+                release.IsSet,
+                "the probe finished only after the handler was released, so it measured nothing");
         }
         finally
         {
             release.Set();
-            Assert.True(noting.Join(Generous), "Note never returned");
+            Assert.True(noting.Join(Guard), "Note never returned");
         }
     }
 
@@ -361,25 +388,33 @@ public sealed class ToastActivationRelayTests
 
         using var inHandler = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
+        using var probeDone = new ManualResetEventSlim();
 
         var subscribing = RunOnItsOwnThread(() => relay.Subscribe(_ =>
         {
             inHandler.Set();
-            release.Wait(Generous);
+            release.Wait(HandlerHold);
         }));
-        Assert.True(inHandler.Wait(Generous), "replay never ran");
+        Assert.True(inHandler.Wait(Guard), "replay never ran");
 
         try
         {
-            var probe = RunOnItsOwnThread(() => _ = relay.Pending);
+            var probe = RunOnItsOwnThread(() =>
+            {
+                _ = relay.Pending;
+                probeDone.Set();
+            });
             Assert.True(
-                probe.Join(ShortEnoughToFailFast),
-                "Pending blocked while a replay was running: the gate is held across invocation");
+                probeDone.Wait(Guard),
+                "Pending never returned while a replay was running: the gate is held across invocation");
+            Assert.False(
+                release.IsSet,
+                "the probe finished only after the handler was released, so it measured nothing");
         }
         finally
         {
             release.Set();
-            Assert.True(subscribing.Join(Generous), "Subscribe never returned");
+            Assert.True(subscribing.Join(Guard), "Subscribe never returned");
         }
     }
 
@@ -387,19 +422,18 @@ public sealed class ToastActivationRelayTests
     /// Run <paramref name="body"/> on a thread of its own, never the pool.
     /// </summary>
     /// <remarks>
-    /// These two tests assert that a lock is NOT held across a handler
-    /// invocation, and they do it by blocking inside a handler and timing a
-    /// second caller. On the thread pool that measures the wrong thing: the
-    /// blocked handler occupies a pool thread for as long as the test holds
-    /// it, and the pool grows by roughly one thread per second once it is at
-    /// its floor -- so when the rest of the suite is running in parallel, the
-    /// probe can simply fail to be SCHEDULED inside its two seconds. "No
-    /// thread was available" and "the gate is held across invocation" then
-    /// look identical, and the second is what gets reported.
+    /// The two lock tests above block inside a handler and prove a second
+    /// caller gets through. On the thread pool that measures the wrong
+    /// thing: the blocked handler occupies a pool thread for as long as the
+    /// test holds it, and the pool grows by roughly one thread per second
+    /// once it is at its floor -- so when the rest of the suite runs in
+    /// parallel, the probe can simply fail to be SCHEDULED. "No thread was
+    /// available" and "the gate is held across invocation" look identical to
+    /// a timeout, and the second is what gets reported.
     ///
-    /// A dedicated thread takes scheduling out of the assertion, so the
-    /// timeout can only be answering the question the test is asking. Both
-    /// threads are foreground-free and joined by the test.
+    /// A dedicated thread takes scheduling out of the assertion; the
+    /// ordering assertions above take the clock out of it. Both threads are
+    /// background and joined by the test.
     /// </remarks>
     private static Thread RunOnItsOwnThread(Action body)
     {

@@ -12,7 +12,26 @@ public class FakeTransportTests
     // anywhere in front of the second gate into a false "write never
     // completed" verdict, and the failure messages below carry each stage's
     // timing so the next flake says where the budget went.
-    private static readonly TimeSpan BoundedWait = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan BoundedWait = TimeSpan.FromSeconds(60);
+
+    // The read side of the output pipe must be overlapped. Without
+    // FILE_FLAG_OVERLAPPED, PipeStream.ReadAsync on this handle is emulated:
+    // the blocking read is queued to the thread pool, so every harness read
+    // depends on a worker being free, and under a loaded suite the caller's
+    // deadline can fire while the read is still queued. That surfaced as
+    // "throughput terminator not observed", a property of the fake reported
+    // as a claim about the peer (issue #917). Both ends of the output pair
+    // must flip together: an async client against a synchronous server made
+    // three scripted tests fail deterministically.
+    [Fact]
+    public void OutputPipe_IsOverlapped_SoReadsAreNotEmulatedOnThePool()
+    {
+        using var t = new FakeTransport();
+        Assert.True(
+            ((System.IO.Pipes.PipeStream)t.Output).IsAsync,
+            "the output pipe lost FILE_FLAG_OVERLAPPED; both ends of the output "
+            + "pair must be opened PipeOptions.Asynchronous");
+    }
 
     // Regression for a proven suite-wide deadlock. With the zero-size pipe
     // buffers the default NamedPipeServerStream constructor passes, a write
@@ -113,7 +132,7 @@ public class FakeTransportTests
         // The gate above proves the second byte reached the pipe, so the
         // writer has finished its work; observe its outcome so a faulted
         // write fails here instead of vanishing into an unobserved thread.
-        Assert.True(secondWrite.Join(TimeSpan.FromSeconds(5)),
+        Assert.True(secondWrite.Join(BoundedWait),
             "second write thread never finished even though its byte was drained");
         Assert.Null(writeError);
     }

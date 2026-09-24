@@ -8,17 +8,24 @@ namespace Ghostty.Tests.Windows;
 
 /// <summary>
 /// Answers "can this environment spawn <em>this</em> executable with
-/// redirected pipes, quickly enough to test with?". Some hosts (locked-down
-/// sandboxes, aggressive AV, job objects that deny process creation) fail,
-/// hang, or take seconds over every spawn from the test host, which makes any
-/// spawn-dependent test report a failure of the subject rather than of
-/// the machine.
+/// redirected pipes at all?". Some hosts (locked-down sandboxes, aggressive
+/// AV, job objects that deny process creation) refuse or hang every spawn
+/// from the test host, which makes any spawn-dependent test report a failure
+/// of the subject rather than of the machine.
 ///
-/// The executable and the latency budget are per-instance because the answer
-/// is not the same for every child. cmd.exe is in-box and starts in
-/// milliseconds; pwsh.exe may be absent entirely, and where it is present it
-/// pays a runtime cold start that a cmd measurement says nothing about. A
-/// test is gated on the probe for the exe it actually spawns.
+/// A host that is merely SLOW is not a verdict here. Timing used to skip
+/// these tests too, and that made the skip itself load-dependent: a machine
+/// under load pays seconds for a healthy spawn, so the suite silently
+/// shrank exactly when it was watched most closely, and a test that would
+/// have run green never ran. The consumer tests no longer assert latency --
+/// their deadlines became generous hang guards -- so there is nothing left
+/// for a slow host to invalidate, and the probe only skips on what it can
+/// DECIDE: the image missing or refused, the child running something else,
+/// no exit, or the hard cap.
+///
+/// The executable is per-instance because the answer is not the same for
+/// every child. pwsh.exe may be absent entirely, which cmd.exe says nothing
+/// about. A test is gated on the probe for the exe it actually spawns.
 ///
 /// The probe deliberately drives System.Diagnostics.Process itself rather
 /// than going through IProcessRunner / WindowsProcessRunner. If it used the
@@ -42,38 +49,11 @@ internal sealed class SpawnProbe
     /// <summary>
     /// Hard cap on one sample, covering the spawn as well as the wait, so a
     /// host where Process.Start itself blocks inside a filter driver cannot
-    /// hang discovery with it.
+    /// hang discovery with it. A hang guard, not a latency requirement: a
+    /// host that merely needs a while for a healthy spawn pays it here once
+    /// per test host and the tests still run.
     /// </summary>
-    private const int TimeoutMs = 10_000;
-
-    /// <summary>
-    /// Latency a host must beat before the tests that spawn cmd.exe mean
-    /// anything. A no-op child is milliseconds of work; a host that needs
-    /// seconds for it (anti-malware scanning every image, a throttled
-    /// sandbox) cannot honour the sub-second and few-second timeouts those
-    /// tests assert, so they would fail for the host's reason -- exactly the
-    /// confusion this probe removes. Well clear of a healthy runner, which
-    /// lands in the low hundreds of ms.
-    /// </summary>
-    private const int CmdBudgetMs = 2_000;
-
-    /// <summary>
-    /// The same question for pwsh.exe: the latency past which a host's own
-    /// slowness, rather than the subject, is what a pwsh-spawning test would
-    /// be reporting. A healthy host starts a no-op pwsh in a few hundred ms
-    /// even cold, so 3500 ms is several times the honest cost and still well
-    /// short of the seconds a blocked or scanned spawn takes.
-    ///
-    /// Deliberately NOT derived from a downstream test's deadline any more.
-    /// It used to be: "the tracker smoke tests allow themselves 8000 ms end to
-    /// end, 750 ms of that is fixed tracker cost, halve the rest". Every term
-    /// in that stopped being true when the tracker gained its adaptive cadence
-    /// (the fixed cost is no longer 750 ms and no longer fixed) and the smoke
-    /// tests stopped using a flat budget -- and nothing caught it, because a
-    /// constant computed from another constant has no way to notice the other
-    /// one moved. A gate on the host's health should stand on its own.
-    /// </summary>
-    private const int PwshBudgetMs = 3_500;
+    private const int TimeoutMs = 60_000;
 
     /// <summary>
     /// The diagnosis that fits every verdict about creating or waiting on the
@@ -98,8 +78,7 @@ internal sealed class SpawnProbe
     /// </summary>
     internal static SpawnProbe Cmd { get; } = new(
         "cmd.exe",
-        new[] { "/c", $"exit {ExpectedExitCode}" },
-        CmdBudgetMs);
+        new[] { "/c", $"exit {ExpectedExitCode}" });
 
     /// <summary>
     /// Gate for tests that spawn pwsh.exe. PowerShell 7 is not in-box on
@@ -109,74 +88,34 @@ internal sealed class SpawnProbe
     /// </summary>
     internal static SpawnProbe Pwsh { get; } = new(
         "pwsh.exe",
-        new[] { "-NoLogo", "-NoProfile", "-Command", $"exit {ExpectedExitCode}" },
-        PwshBudgetMs);
+        new[] { "-NoLogo", "-NoProfile", "-Command", $"exit {ExpectedExitCode}" });
 
     private readonly string _fileName;
     private readonly string[] _args;
-    private readonly int _budgetMs;
     private readonly Lazy<string?> _verdict;
 
-    private SpawnProbe(string fileName, string[] args, int budgetMs)
+    private SpawnProbe(string fileName, string[] args)
     {
         _fileName = fileName;
         _args = args;
-        _budgetMs = budgetMs;
         _verdict = new Lazy<string?>(Decide, LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     /// <summary>
-    /// Null when this executable can be spawned here with redirected pipes,
-    /// promptly. Otherwise a reason naming what was probed and what the probe
-    /// observed, suitable for a CI log.
+    /// Null when this executable can be spawned here with redirected pipes.
+    /// Otherwise a reason naming what was probed and what the probe observed,
+    /// suitable for a CI log.
     /// </summary>
     internal string? Unavailable => _verdict.Value;
 
     /// <summary>
-    /// Best of three, decided as soon as two agree.
+    /// One sample decides. Every verdict it can produce is decisive -- a
+    /// refused start, a replaced executable, no exit, the hard cap -- so
+    /// there is nothing a second sample could overturn; the best-of-three
+    /// vote this used to run existed to de-noise TIMING verdicts, which no
+    /// longer exist.
     /// </summary>
-    /// <remarks>
-    /// One sample is not enough to answer this. The hosts worth detecting are
-    /// not uniformly slow: the same machine has produced a trivial spawn in
-    /// tens of ms and, minutes later, in several seconds. A single sample
-    /// therefore skips a host that is mostly fine, or clears one that is about
-    /// to make the timing assertions fail -- and both of those are the
-    /// ambiguity this probe exists to remove.
-    ///
-    /// Two agreeing samples settle it, so a healthy host pays two trivial
-    /// spawns and stops. Anything that is not a timing verdict -- a refused
-    /// start, a wrong exit code, no exit at all -- is decisive on its own and
-    /// short-circuits, because repeating it would only cost the hard cap
-    /// again.
-    /// </remarks>
-    private string? Decide()
-    {
-        string? slow = null;
-        var fast = 0;
-
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            var (verdict, isTiming) = Run();
-            if (verdict is not null && !isTiming) return verdict;
-
-            if (verdict is null)
-            {
-                if (++fast == 2) return null;
-            }
-            else
-            {
-                if (slow is not null) return slow;
-                slow = verdict;
-            }
-        }
-
-        // Not reachable: a sample is fast, slow-on-timing, or decisive, and a
-        // decisive one has already returned. Two samples that did not decide
-        // are therefore one fast and one slow, so whichever of the three the
-        // third turns out to be completes a pair and returns above.
-        throw new UnreachableException(
-            $"spawn probe for {_fileName} ran three samples without deciding");
-    }
+    private string? Decide() => Run();
 
     /// <summary>
     /// One sample, bounded by the hard cap.
@@ -188,11 +127,8 @@ internal sealed class SpawnProbe
     /// cap that only covered the waits would not cover that. Discovery is
     /// single-file behind an ExecutionAndPublication Lazy, so a sample that
     /// blocks forever would block every other test's discovery too.
-    ///
-    /// The bool says whether a non-null verdict is about timing: timing
-    /// verdicts are worth a second opinion, the rest are not.
     /// </remarks>
-    private (string? Verdict, bool IsTiming) Run()
+    private string? Run()
     {
         var sample = Task.Run(Sample);
         // An abandoned worker still finishes eventually, and its failure is
@@ -210,17 +146,15 @@ internal sealed class SpawnProbe
         }
         catch (Exception ex)
         {
-            return (Reason($"threw {ex.GetType().Name}: {ex.Message}", BlockedOrStalling), false);
+            return Reason($"threw {ex.GetType().Name}: {ex.Message}", BlockedOrStalling);
         }
 
-        return (
-            Reason(
-                $"had not finished after {TimeoutMs} ms, spawn included",
-                BlockedOrStalling),
-            false);
+        return Reason(
+            $"had not finished after {TimeoutMs} ms, spawn included",
+            BlockedOrStalling);
     }
 
-    private (string? Verdict, bool IsTiming) Sample()
+    private string? Sample()
     {
         try
         {
@@ -247,7 +181,7 @@ internal sealed class SpawnProbe
             var sw = Stopwatch.StartNew();
             using var process = Process.Start(psi);
             if (process is null)
-                return (Reason("returned no process from Process.Start", BlockedOrStalling), false);
+                return Reason("returned no process from Process.Start", BlockedOrStalling);
 
             // Drain before waiting; the reverse order deadlocks if the child
             // ever fills a pipe.
@@ -258,34 +192,34 @@ internal sealed class SpawnProbe
             {
                 try { process.Kill(entireProcessTree: true); } catch { }
                 Drain(stdout, stderr, sw);
-                return (Reason($"had not exited within the {TimeoutMs} ms cap", BlockedOrStalling), false);
+                return Reason($"had not exited within the {TimeoutMs} ms cap", BlockedOrStalling);
             }
             sw.Stop();
 
             Drain(stdout, stderr, sw);
 
             if (process.ExitCode != ExpectedExitCode)
-                return (
-                    Reason(
-                        $"exited with {process.ExitCode}, not {ExpectedExitCode}",
-                        "Something on this host intercepted or replaced that executable: "
-                            + "it started, but it did not run what it was asked to"),
-                    false);
+                return Reason(
+                    $"exited with {process.ExitCode}, not {ExpectedExitCode}",
+                    "Something on this host intercepted or replaced that executable: "
+                        + "it started, but it did not run what it was asked to");
 
-            return sw.ElapsedMilliseconds > _budgetMs
-                ? (Reason($"took {sw.ElapsedMilliseconds} ms, over the {_budgetMs} ms this host must beat", BlockedOrStalling), true)
-                : (null, false);
+            // A healthy sample, however long it took: the host can spawn this
+            // executable, which is the whole question. Latency is nobody's
+            // business here any more -- the consumer tests assert on
+            // behaviour under generous hang guards, not on clocks.
+            return null;
         }
         catch (System.ComponentModel.Win32Exception ex)
         {
             // Win32 refused the image. Not necessarily a locked-down host:
             // pwsh.exe is not in-box on Windows, so "absent" arrives here too,
             // and the two are indistinguishable from out here.
-            return (Reason($"threw Win32Exception: {ex.Message}", NotFoundOrRefused), false);
+            return Reason($"threw Win32Exception: {ex.Message}", NotFoundOrRefused);
         }
         catch (Exception ex)
         {
-            return (Reason($"threw {ex.GetType().Name}: {ex.Message}", BlockedOrStalling), false);
+            return Reason($"threw {ex.GetType().Name}: {ex.Message}", BlockedOrStalling);
         }
     }
 

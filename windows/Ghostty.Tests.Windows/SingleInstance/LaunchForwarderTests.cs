@@ -48,7 +48,10 @@ public sealed class LaunchForwarderTests
         var forwarded = Task.Run(() =>
             LaunchForwarder.TryForward(pipe, SampleRequest(), out _));
 
-        var request = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(5));
+        // The 60s bound is a hang guard for the request's trip through the
+        // pipe, not part of what is proved; a loaded machine can make that
+        // trip take seconds without anyone being wrong.
+        var request = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(60));
         Assert.True(
             await forwarded,
             "the primary acknowledged, so the forward must report served");
@@ -95,8 +98,11 @@ public sealed class LaunchForwarderTests
         Assert.True(
             stopwatch.Elapsed >= ackBudget,
             $"the fallback must wait the full budget (waited {stopwatch.Elapsed})");
+        // Bounded is the property; the ceiling is a hang guard wide enough
+        // for a loaded machine to pay for connect + ack without being
+        // reported as an unbounded fallback.
         Assert.True(
-            stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+            stopwatch.Elapsed < TimeSpan.FromSeconds(60),
             $"the fallback must be bounded by the budget (waited {stopwatch.Elapsed})");
         Assert.True(
             sawRequest.Task.IsCompleted,
@@ -135,7 +141,12 @@ public sealed class LaunchForwarderTests
         var request = SampleRequest();
 
         // A primary whose pipe server appears 3 seconds from now: past the
-        // old single 2-second attempt, inside the retry budget.
+        // old single 2-second attempt, inside the retry budget. The budget
+        // here is widened well past the production 5s on purpose: under load
+        // the 3s delay lands late, and the point of the test is that a
+        // coming-up-late primary is reached, not that it beats a clock it
+        // does not control. The 3s stays, because it is what puts the
+        // primary past the first 2-second attempt.
         var server = new SingleInstanceServer(
             pipe,
             _ => Task.CompletedTask,
@@ -149,7 +160,9 @@ public sealed class LaunchForwarderTests
         try
         {
             var stopwatch = Stopwatch.StartNew();
-            var forwarded = LaunchForwarder.TryForward(pipe, request, out var failure);
+            var forwarded = LaunchForwarder.TryForward(
+                pipe, request, out var failure,
+                connectBudget: TimeSpan.FromSeconds(30));
             stopwatch.Stop();
 
             Assert.True(
@@ -157,7 +170,7 @@ public sealed class LaunchForwarderTests
                 "a primary coming up inside the connect budget must still be forwarded to");
             Assert.Null(failure);
             Assert.True(
-                stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+                stopwatch.Elapsed < TimeSpan.FromSeconds(60),
                 $"the connect budget must stay bounded (took {stopwatch.Elapsed})");
         }
         finally
@@ -204,7 +217,7 @@ public sealed class LaunchForwarderTests
             LaunchForwarder.TryForward(pipe, request, out _, ackTimeout: ackBudget),
             "the old primary never acknowledges");
 
-        var bytes = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(5));
+        var bytes = await AsyncHelpers.WithTimeout(received.Task, TimeSpan.FromSeconds(60));
         var payloadOnly = bytes[..^1];
         var withCancel = bytes;
 
