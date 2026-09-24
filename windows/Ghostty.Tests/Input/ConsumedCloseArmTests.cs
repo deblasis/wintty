@@ -37,16 +37,55 @@ public class ConsumedCloseArmTests
     [InlineData('a')]
     [InlineData('\u001b')]
     [InlineData(' ')]
-    public void ACharacterTheArmedKeyDoesNotProduceFlowsAndSpendsTheArm(char ch)
+    public void ACharacterTheArmedKeyDoesNotProduceFlowsAndLeavesTheArm(char ch)
     {
-        // Armed for Enter: anything else that arrives first is typing whose
-        // KeyDown this surface never saw, and it must flow. It also proves
-        // the arm's keystroke went elsewhere, so the arm is spent.
+        // Armed for Enter: anything else flows. It does not spend the arm,
+        // because a dead key's accent can arrive ahead of the '\r' that is
+        // still to be dropped; the pane's next KeyDown retires a stale arm.
         var arm = new ConsumedCloseArm();
         arm.Arm(ConsumedCloseChars.Return);
         Assert.False(arm.Consume(ch));
+        Assert.True(arm.IsArmed);
+        Assert.True(arm.Consume('\r'));
+    }
+
+    [Fact]
+    public void ADeadKeysAccentBeforeTheArmedCharacterDoesNotSpendTheArm()
+    {
+        // A dead key pending when Enter closes a surface: TranslateMessage
+        // posts the spacing accent and then '\r'. The accent is not the
+        // armed key's character, so it must not spend the arm, or the '\r'
+        // behind it reaches the shell and submits the line.
+        var arm = new ConsumedCloseArm();
+        arm.Arm(ConsumedCloseChars.Return);
+        Assert.False(arm.Consume('\''));
+        Assert.True(arm.Consume('\r'));
+    }
+
+    [Fact]
+    public void TheArmAndTheChordSuppressAreSpentByTheSameCharacter()
+    {
+        // A swallowed chord on a close key (Ctrl+Shift+Space) whose action
+        // raises the signal: both drops stand for the chord's one character.
+        // If the arm returned first, the chord suppress would survive and
+        // eat the next thing the user types.
+        var arm = new ConsumedCloseArm();
+        arm.Arm(ConsumedCloseChars.Space);
+        var suppress = true;
+        Assert.Equal(CharacterFate.DroppedByArm, ConsumedCloseArm.Decide(ref arm, ref suppress, ' '));
+        Assert.False(suppress);
         Assert.False(arm.IsArmed);
-        Assert.False(arm.Consume('\r'));
+        Assert.Equal(CharacterFate.Forward, ConsumedCloseArm.Decide(ref arm, ref suppress, 'l'));
+    }
+
+    [Fact]
+    public void TheChordSuppressAloneDropsOneCharacter()
+    {
+        var arm = new ConsumedCloseArm();
+        var suppress = true;
+        Assert.Equal(CharacterFate.DroppedByChordSuppress, ConsumedCloseArm.Decide(ref arm, ref suppress, '\u0005'));
+        Assert.False(suppress);
+        Assert.Equal(CharacterFate.Forward, ConsumedCloseArm.Decide(ref arm, ref suppress, 'a'));
     }
 
     [Fact]

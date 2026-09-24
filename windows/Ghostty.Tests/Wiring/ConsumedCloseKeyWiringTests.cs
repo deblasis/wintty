@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -101,14 +102,21 @@ public class ConsumedCloseKeyWiringTests
         var routed = source.Method("OnCharacterReceived");
         Assert.Single(CallsTo(routed, "HandleCharacter"));
 
-        var statements = source.Method("HandleCharacter").Body!.Statements;
-        var guard = Assert.IsType<IfStatementSyntax>(statements[0]);
-        Assert.Contains(
-            guard.Condition.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>(),
-            c => c.CalleeText() == "_consumedCloseArm.Consume");
+        // One decision for both one-shot drops, first, then a return before
+        // anything forwards. The chord suppress is spent there and nowhere
+        // else: a second place that clears it is a second order to get wrong.
+        var handle = source.Method("HandleCharacter");
+        var statements = handle.Body!.Statements;
+        var decide = Assert.Single(CallsTo(statements[0], "ConsumedCloseArm.Decide"));
+        Assert.Equal("ref _consumedCloseArm", decide.Arg(0));
+        Assert.Equal("ref _suppressNextCharacter", decide.Arg(1));
+        var guard = Assert.IsType<IfStatementSyntax>(statements[1]);
+        Assert.Contains("CharacterFate.Forward", guard.Condition.ToString(), StringComparison.Ordinal);
         Assert.True(
             guard.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>().Any(),
-            "a consumed character must return before the forward");
+            "a dropped character must return before the forward");
+        Assert.Empty(handle.AssignsTo("_suppressNextCharacter"));
+        Assert.Empty(CallsTo(handle, "_consumedCloseArm.Consume"));
     }
 
     [Theory]
@@ -337,44 +345,91 @@ public class ConsumedCloseKeyWiringTests
         (SyntaxNode?)node.Ancestors().OfType<BaseMethodDeclarationSyntax>().FirstOrDefault()
         ?? node.Ancestors().OfType<PropertyDeclarationSyntax>().First();
 
+    /// <summary>
+    /// XAML files that belong to the Settings window: their flyouts close
+    /// there, never onto a pane. An entry ending in a dot is a folder.
+    /// </summary>
+    private static readonly (string File, string Why)[] NoPaneWindowXaml =
+    {
+        ("Settings.", "the Settings window's pages and dialogs"),
+        ("Controls.Settings.", "controls only the Settings window's pages host"),
+    };
+
+    /// <summary>`this.x` and `x` name the same thing.</summary>
+    private static string Plain(string expression)
+    {
+        var text = expression.Trim();
+        return text.StartsWith("this.", StringComparison.Ordinal) ? text["this.".Length..] : text;
+    }
+
+    /// <summary>The receiver of a `ShowAsync` call, whatever its shape, or null.</summary>
+    private static string? ShowAsyncReceiver(InvocationExpressionSyntax call) => call.Expression switch
+    {
+        // dlg.ShowAsync(), this._dlg.ShowAsync(), new X().ShowAsync(),
+        // and every overload (ShowAsync(ContentDialogPlacement.InPlace)).
+        MemberAccessExpressionSyntax { Name.Identifier.ValueText: "ShowAsync" } access => access.Expression.ToString(),
+        // dlg?.ShowAsync()
+        MemberBindingExpressionSyntax { Name.Identifier.ValueText: "ShowAsync" }
+            when call.Ancestors().OfType<ConditionalAccessExpressionSyntax>().FirstOrDefault() is { } conditional
+            => conditional.Expression.ToString(),
+        _ => null,
+    };
+
+    /// <summary>
+    /// Classes in the corpus that declare a static ShowAsync of their own
+    /// (CheatSheetLauncher): a call through the class name is that helper,
+    /// whose body the census reads on its own, not a dialog.
+    /// </summary>
+    private static HashSet<string> StaticShowAsyncHelpers(IEnumerable<ShellSource> files) =>
+        files.SelectMany(f => f.Root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+            .Where(m => m.Identifier.ValueText == "ShowAsync"
+                        && m.Modifiers.Any(x => x.IsKind(SyntaxKind.StaticKeyword)))
+            .Select(m => m.Ancestors().OfType<ClassDeclarationSyntax>().First().Identifier.ValueText)
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>The first argument of every Watch and Track call under <paramref name="scope"/>.</summary>
+    private static HashSet<string> WatchedIn(SyntaxNode scope, bool includeTrack) =>
+        scope.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => SignalCall(c) == Signal + ".Watch"
+                        || (includeTrack && c.CalleeText().EndsWith(".Track", StringComparison.Ordinal)))
+            .Where(c => c.ArgumentList.Arguments.Count > 0)
+            .Select(c => Plain(c.ArgumentList.Arguments[0].Expression.ToString()))
+            .ToHashSet(StringComparer.Ordinal);
+
     [Fact]
     public void EveryDialogShownOverAPaneIsWatched()
     {
-        var shows = new List<(ShellSource File, InvocationExpressionSyntax Call)>();
-        foreach (var file in ShellSource.AllFiles())
+        var files = ShellSource.AllFiles().ToList();
+        var helpers = StaticShowAsyncHelpers(files);
+        var shows = new List<(ShellSource File, InvocationExpressionSyntax Call, string Receiver)>();
+        foreach (var file in files)
         {
             foreach (var call in file.Root.DescendantNodes().OfType<InvocationExpressionSyntax>())
             {
-                // `dialog.ShowAsync()` on a local or field: a ContentDialog's
-                // own show. A static helper named ShowAsync takes arguments.
-                if (call.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "ShowAsync" } access
-                    && access.Expression is IdentifierNameSyntax
-                    && call.ArgumentList.Arguments.Count == 0)
-                {
-                    shows.Add((file, call));
-                }
+                if (ShowAsyncReceiver(call) is not { } receiver) continue;
+                var last = receiver.Split('.')[^1];
+                if (helpers.Contains(last)) continue;
+                shows.Add((file, call, Plain(receiver)));
             }
         }
 
         // Non-vacuous: the dialogs this was written against are still found.
         Assert.True(shows.Count >= 8, $"expected at least 8 dialog ShowAsync calls, found {shows.Count}");
 
+        // The watch has to name the dialog being shown: any Watch or Track
+        // elsewhere in the method is not one.
         var unwatched = shows
             .Where(s => !Exempt(s.File))
-            .Where(s =>
-            {
-                var scope = Scope(s.Call);
-                return !scope.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(c =>
-                    c.CalleeText().EndsWith(".Track", StringComparison.Ordinal)
-                    || SignalCall(c) == Signal + ".Watch");
-            })
-            .Select(s => $"{s.File.Name}: {s.Call}")
+            .Where(s => !WatchedIn(Scope(s.Call), includeTrack: true).Contains(s.Receiver))
+            .Select(s => $"{s.File.Name}: {s.Receiver}.ShowAsync")
             .ToList();
         Assert.True(unwatched.Count == 0,
             "these dialogs close on Enter or Escape back onto a pane without "
-            + $"{Signal}.Watch or DialogTracker.Track, so the key's character reaches the pane: "
-            + string.Join("; ", unwatched));
+            + $"{Signal}.Watch or DialogTracker.Track on the dialog shown, so the key's character "
+            + "reaches the pane: " + string.Join("; ", unwatched));
     }
+
+    private static readonly string[] FlyoutTypes = { "MenuFlyout", "Flyout", "CommandBarFlyout" };
 
     [Fact]
     public void EveryFlyoutBuiltForATerminalWindowIsWatched()
@@ -384,13 +439,15 @@ public class ConsumedCloseKeyWiringTests
         {
             foreach (var creation in file.Root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
             {
-                if (creation.Type.ToString() is not ("MenuFlyout" or "Flyout")) continue;
+                if (!FlyoutTypes.Contains(creation.Type.ToString())) continue;
                 // The name the flyout is held under: a local it is declared
-                // into, or a field or local it is assigned to.
+                // into, or a field, local or property it is assigned to. A
+                // flyout returned straight from a helper or passed inline has
+                // no name to watch, and fails: hold it in a local and watch it.
                 var variable = creation.Parent switch
                 {
                     EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax declarator } => declarator.Identifier.ValueText,
-                    AssignmentExpressionSyntax assignment => assignment.Left.ToString(),
+                    AssignmentExpressionSyntax assignment => Plain(assignment.Left.ToString()),
                     _ => "",
                 };
                 made.Add((file, creation, variable));
@@ -401,14 +458,106 @@ public class ConsumedCloseKeyWiringTests
 
         var unwatched = made
             .Where(m => !Exempt(m.File))
-            .Where(m => !Scope(m.New).DescendantNodes().OfType<InvocationExpressionSyntax>().Any(c =>
-                SignalCall(c) == Signal + ".Watch" && c.Arg(0) == m.Variable))
-            .Select(m => $"{m.File.Name}: new {m.New.Type} ({(m.Variable.Length > 0 ? m.Variable : "not assigned to a local")})")
+            .Where(m => m.Variable.Length == 0
+                        || !WatchedIn(Scope(m.New), includeTrack: false).Contains(m.Variable))
+            .Select(m => $"{m.File.Name}: new {m.New.Type} ({(m.Variable.Length > 0 ? m.Variable : "not held in a local")})")
             .ToList();
         Assert.True(unwatched.Count == 0,
             "these flyouts close on Escape or Enter back onto a pane without "
             + $"{Signal}.Watch, so the key's character reaches the pane: "
             + string.Join("; ", unwatched));
+    }
+
+    [Fact]
+    public void NoTeachingTipOpensOverAPane()
+    {
+        // A TeachingTip closes on Escape and hands focus back like a flyout,
+        // but it is neither a FlyoutBase nor a ContentDialog, so there is no
+        // Watch for it. The first one near a pane needs one.
+        var tips = ShellSource.AllFiles()
+            .Where(f => !Exempt(f))
+            .SelectMany(f => f.Root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>()
+                .Where(c => c.Type.ToString() == "TeachingTip")
+                .Select(_ => f.Name))
+            .Concat(PaneWindowXaml()
+                .Where(x => x.Root.Descendants().Any(e => e.Name.LocalName == "TeachingTip"))
+                .Select(x => x.Name))
+            .ToList();
+        Assert.True(tips.Count == 0,
+            "a TeachingTip in a pane window has no consumed-close Watch overload yet; add one "
+            + "to ConsumedCloseKey and watch it: " + string.Join(", ", tips));
+    }
+
+    private const string XamlPrefix = "Ghostty.Tests.XamlCensus.";
+
+    /// <summary>
+    /// Every embedded XAML file's dotted name. Most of the shell's XAML is
+    /// embedded under XamlCensus with its path ("Tabs.NewTabSplitButton.xaml");
+    /// the handful other tests already embed keep their own logical names
+    /// ("Tabs.TabHost.xaml", "Settings.Pages.KeybindingsPage.xaml"), which
+    /// end in the same file name. See Ghostty.Tests.csproj.
+    /// </summary>
+    private static IEnumerable<(string Resource, string Name)> AllXaml()
+    {
+        foreach (var resource in typeof(ShellSource).Assembly.GetManifestResourceNames())
+        {
+            var dotted = resource.Replace('\\', '.').Replace('/', '.');
+            if (!dotted.EndsWith(".xaml", StringComparison.Ordinal)) continue;
+            var name = dotted.StartsWith(XamlPrefix, StringComparison.Ordinal)
+                ? dotted[XamlPrefix.Length..]
+                : dotted.StartsWith("Ghostty.Tests.", StringComparison.Ordinal) ? dotted["Ghostty.Tests.".Length..] : dotted;
+            yield return (resource, name);
+        }
+    }
+
+    /// <summary>"CommandPaletteControl.xaml" out of any dotted XAML name.</summary>
+    private static string XamlFileName(string name)
+    {
+        var parts = name.Split('.');
+        return parts[^2] + "." + parts[^1];
+    }
+
+    /// <summary>Every XAML file outside the Settings window, parsed.</summary>
+    private static List<(string Name, XElement Root)> PaneWindowXaml()
+    {
+        var asm = typeof(ShellSource).Assembly;
+        var found = new List<(string, XElement)>();
+        foreach (var (resource, name) in AllXaml())
+        {
+            if (NoPaneWindowXaml.Any(x => Covers(x.File, name))) continue;
+            using var stream = asm.GetManifestResourceStream(resource)!;
+            found.Add((name, XDocument.Load(stream).Root!));
+        }
+        return found;
+    }
+
+    [Fact]
+    public void EveryFlyoutDeclaredInPaneWindowXamlIsWatched()
+    {
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var xaml = PaneWindowXaml();
+        Assert.True(xaml.Count >= 20, $"expected the shell's XAML under {XamlPrefix}, found {xaml.Count} files");
+
+        var files = ShellSource.AllFiles().ToList();
+        var declared = new List<string>();
+        var unwatched = new List<string>();
+        foreach (var (name, root) in xaml)
+        {
+            foreach (var flyout in root.Descendants().Where(e => FlyoutTypes.Contains(e.Name.LocalName)))
+            {
+                var id = (string?)flyout.Attribute(x + "Name");
+                declared.Add($"{name}:{id}");
+                var codeBehind = files.FirstOrDefault(f => f.Name.EndsWith("." + XamlFileName(name) + ".cs", StringComparison.Ordinal));
+                if (id is null || codeBehind is null || !WatchedIn(codeBehind.Root, includeTrack: false).Contains(id))
+                    unwatched.Add($"{name}: <{flyout.Name.LocalName}> {(id is null ? "(no x:Name)" : id)}");
+            }
+        }
+
+        // Non-vacuous: the new-tab button's profile menu is declared in XAML.
+        Assert.Contains(declared, d => d.EndsWith(":ProfileMenu", StringComparison.Ordinal));
+        Assert.True(unwatched.Count == 0,
+            "these XAML flyouts close on Escape or Enter back onto a pane: give each an x:Name "
+            + $"and call {Signal}.Watch(<name>) in its code-behind: " + string.Join("; ", unwatched));
     }
 
     [Fact]
@@ -423,10 +572,17 @@ public class ConsumedCloseKeyWiringTests
             var sources = files.Where(f => Covers(file, f.Name)).ToList();
             Assert.NotEmpty(sources);
             var covers = sources.Any(source => source.Root.DescendantNodes().Any(n =>
-                n is ObjectCreationExpressionSyntax { Type: var type } && type.ToString() is "MenuFlyout" or "Flyout"
-                || n is InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Name.Identifier.ValueText: "ShowAsync" } } call
-                   && call.ArgumentList.Arguments.Count == 0));
+                n is ObjectCreationExpressionSyntax { Type: var type } && FlyoutTypes.Contains(type.ToString())
+                || n is InvocationExpressionSyntax call && ShowAsyncReceiver(call) is not null));
             Assert.True(covers, $"{file} is exempt but shows no dialog and builds no flyout; drop the exemption");
+        }
+
+        var allXaml = AllXaml().Select(x => x.Name).ToList();
+
+        foreach (var (file, why) in NoPaneWindowXaml)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(why));
+            Assert.Contains(allXaml, n => Covers(file, n));
         }
     }
 }

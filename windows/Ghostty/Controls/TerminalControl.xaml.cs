@@ -2192,21 +2192,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     private bool HandleCharacter(char ch)
     {
-        // The trailing character of a key another surface consumed to close
-        // itself. Spent by any character; only the armed key's own character
-        // is dropped, so a stale arm never eats typing.
-        if (_consumedCloseArm.Consume(ch)) return true;
-
-        // If the matching OnKeyDown short-circuited a bound chord, drop
-        // the WM_CHAR that follows. WinUI 3 raises CharacterReceived
-        // independently of KeyDown handling, so without this the C0
-        // control char (e.g. U+0005 for Ctrl+E) reaches libghostty as
-        // text and the shell interprets it as a readline command.
-        if (_suppressNextCharacter)
-        {
-            _suppressNextCharacter = false;
-            return false;
-        }
+        // Two one-shot drops, decided together so neither can outlive the
+        // character that should spend it:
+        // - the consumed-close arm: the trailing character of a key another
+        //   surface consumed to close itself (only the armed key's own
+        //   character is dropped, so a stale arm never eats typing);
+        // - the bound-chord suppress: if the matching OnKeyDown
+        //   short-circuited a bound chord, the WM_CHAR that follows. WinUI 3
+        //   raises CharacterReceived independently of KeyDown handling, so
+        //   without it the C0 control char (e.g. U+0005 for Ctrl+E) reaches
+        //   libghostty as text and the shell reads it as a readline command.
+        var fate = ConsumedCloseArm.Decide(ref _consumedCloseArm, ref _suppressNextCharacter, ch);
+        if (fate != CharacterFate.Forward) return fate == CharacterFate.DroppedByArm;
 
         // WM_CHAR goes to the fake session as typed text. Control units
         // never type into the fake line: their keys (Enter, Backspace,
