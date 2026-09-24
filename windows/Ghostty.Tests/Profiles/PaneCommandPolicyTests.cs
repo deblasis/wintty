@@ -187,4 +187,49 @@ public sealed class PaneCommandPolicyTests
         Assert.Same(snapshot, PaneCommandPolicy.ApplyLaunchCommand(snapshot, null, null));
         Assert.Null(PaneCommandPolicy.ApplyLaunchCommand(null, " ", null));
     }
+
+    // ---- initial-command: a cold launch's first pane, like -e -----------
+
+    [Fact]
+    public void InitialCommand_RunsInTheLaunchsFirstPane()
+    {
+        var pane = PaneCommandPolicy.LaunchFirstPane(
+            DefaultProfile(), launchArgv: null, Nu, defaultProfileSet: true,
+            workingDirectory: null, initialCommand: new ConfiguredCommand("htop -d 5", IsArgv: false));
+
+        Assert.Equal("htop -d 5", pane!.ResolvedCommand);
+        Assert.Equal(PaneCommandOrigin.LaunchCommand, pane.CommandOrigin);
+        // Written without direct:, it is a shell string, as the user wrote it.
+        Assert.False(pane.CommandIsArgv);
+        Assert.Equal("PowerShell", pane.DisplayName);
+    }
+
+    [Fact]
+    public void InitialCommand_Direct_StaysAnArgv()
+    {
+        var pane = PaneCommandPolicy.LaunchFirstPane(
+            null, launchArgv: null, configured: null, defaultProfileSet: false,
+            workingDirectory: null, initialCommand: new ConfiguredCommand("tool.exe a&b", IsArgv: true));
+        Assert.Equal("direct:tool.exe a&b", PaneCommandPolicy.SurfaceCommand(pane!));
+    }
+
+    [Fact]
+    public void InitialCommand_LosesToDashE()
+    {
+        var pane = PaneCommandPolicy.LaunchFirstPane(
+            DefaultProfile(), "vim notes.md", Nu, defaultProfileSet: false,
+            workingDirectory: null, initialCommand: new ConfiguredCommand("htop", false));
+        Assert.Equal("vim notes.md", pane!.ResolvedCommand);
+        Assert.True(pane.CommandIsArgv);
+    }
+
+    [Fact]
+    public void InitialCommand_IsNotInheritedBySplits()
+    {
+        var first = PaneCommandPolicy.LaunchFirstPane(
+            DefaultProfile(), launchArgv: null, configured: null, defaultProfileSet: false,
+            workingDirectory: null, initialCommand: new ConfiguredCommand("htop", false));
+        var fallback = DefaultProfile();
+        Assert.Same(fallback, PaneCommandPolicy.Inherit(first, () => fallback));
+    }
 }

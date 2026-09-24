@@ -1149,21 +1149,21 @@ public partial class App : Application
             Environment.GetCommandLineArgs());
         var honorJumpList = coldLaunch.Action != Ghostty.Core.JumpList.JumpListAction.None;
 
-        // `wintty -e <cmd>` asks for that command in a window, the way
-        // `wt -- <cmd>` does, so it neither restores the saved session nor
-        // runs the default profile's shell (#1136). Its window is a one-off
-        // and is left out of the saved session (ExcludedFromSession below);
-        // every other window this process opens is saved as usual, because
-        // in single-instance mode it becomes the primary later launches are
-        // forwarded to.
+        // `wintty -e <cmd>` works the way `wt <commandline>` does in Windows
+        // Terminal (#1136): the saved session is restored as on any launch,
+        // and the command gets a window of its own on top of it
+        // (WindowEmperor::HandleCommandlineArgs restores every persisted
+        // layout, then dispatches the command line). That window is an
+        // ordinary one and is saved like the rest. `initial-command` from the
+        // config is the same request, and -e wins when both are set.
         var coldCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(
             Environment.GetCommandLineArgs());
-        if (coldCommand is not null) _sessionManager.NoteRestoreSkipped();
+        var initialCommand = coldCommand is null ? _configService.ConfiguredInitialCommand : null;
+        var launchWantsWindow = coldCommand is not null || initialCommand is not null;
 
-        var restoreState = honorJumpList || coldCommand is not null
-            ? null
-            : _sessionManager.LoadForRestore();
-        if (restoreState is { Windows.Count: > 0 })
+        var restoreState = honorJumpList ? null : _sessionManager.LoadForRestore();
+        var restoredAny = restoreState is { Windows.Count: > 0 };
+        if (restoredAny)
         {
             // Only the first restored window drives the splash. There is one
             // splash per process, so arming every window would have them
@@ -1171,7 +1171,7 @@ public partial class App : Application
             // window, uncovering the earlier ones, and whichever window
             // rendered first would dismiss it for all of them.
             var isFirstWindow = true;
-            foreach (var ws in restoreState.Windows)
+            foreach (var ws in restoreState!.Windows)
             {
                 var restored = new MainWindow(
                     _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws,
@@ -1186,17 +1186,20 @@ public partial class App : Application
         {
             HandleColdStartJumpList(coldLaunch);
         }
-        else
+
+        if (!honorJumpList && (!restoredAny || launchWantsWindow))
         {
             // The first pane runs -e in the caller's directory, as a forwarded
-            // launch does, else what any new pane runs (PaneCommandPolicy).
+            // launch does, else `initial-command`, else what any new pane runs
+            // (PaneCommandPolicy). Opened after the restored windows, so the
+            // command's window is the one in front, as in Windows Terminal.
             var window = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
-                showLaunchIcon: true,
+                showLaunchIcon: !restoredAny,
                 initialSnapshot: LaunchFirstPaneSnapshot(
                     coldCommand,
-                    workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory));
-            window.ExcludedFromSession = coldCommand is not null;
+                    workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory,
+                    initialCommand: initialCommand));
             window.Closed += OnAnyWindowClosedInternal;
             _sessionManager.Track(window);
             window.Activate();
@@ -1834,13 +1837,15 @@ public partial class App : Application
     /// </summary>
     private static Ghostty.Core.Profiles.ProfileSnapshot? LaunchFirstPaneSnapshot(
         string? launchCommand,
-        string? workingDirectory)
+        string? workingDirectory,
+        Ghostty.Core.Profiles.ConfiguredCommand? initialCommand = null)
         => Ghostty.Core.Profiles.PaneCommandPolicy.LaunchFirstPane(
             Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(ProfileRegistry),
             launchCommand,
             ConfigService?.ConfiguredCommand,
             ConfigService?.DefaultProfileSet ?? false,
-            workingDirectory);
+            workingDirectory,
+            initialCommand);
 
     private void OpenJumpListWindow(
         string? profileId,

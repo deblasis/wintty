@@ -1186,7 +1186,9 @@ palette: Palette = .{},
 ///
 ///   * `-e` runs its command in the first pane of the window that launch
 ///     opens, and nowhere else. New tabs and splits in that window follow
-///     the rules below.
+///     the rules below. As with Windows Terminal's `wt <commandline>`, a
+///     saved session is still restored, and the command gets a window of
+///     its own next to it, which is saved like any other window.
 ///
 ///   * If `default-profile` is set, every other new pane runs that profile,
 ///     and this `command` is not used.
@@ -1211,6 +1213,11 @@ command: ?Command = null,
 /// This is the same as "command", but only applies to the first terminal
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.
+///
+/// On Windows this is treated exactly like `-e` (which sets it): the first
+/// pane of a launch runs it, a saved session is still restored, and `-e`
+/// wins when both are given. A launch forwarded to a running instance does
+/// not use it.
 ///
 /// After the first terminal surface is created (or closed), there is no
 /// way to run this initial command again automatically. As such, setting

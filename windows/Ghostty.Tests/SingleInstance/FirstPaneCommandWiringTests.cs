@@ -8,8 +8,9 @@ namespace Ghostty.Tests.SingleInstance;
 
 /// <summary>
 /// The shell side of #1136: every opener of a pane nobody picked a profile
-/// for goes through <c>PaneCommandPolicy</c>, a <c>-e</c> launch neither
-/// restores nor writes the session, and an argv reaches the surface as one.
+/// for goes through <c>PaneCommandPolicy</c>, a <c>-e</c> launch restores
+/// the session and adds its own window as Windows Terminal's
+/// <c>wt &lt;commandline&gt;</c> does, and an argv reaches the surface as one.
 /// The WinUI assembly cannot load in a test host, so what these pin is
 /// shape; the rules themselves are pinned by <c>PaneCommandPolicyTests</c>,
 /// and a launch-level check lives outside the repo for the verification
@@ -30,56 +31,91 @@ public sealed class FirstPaneCommandWiringTests
     }
 
     [Fact]
-    public void ColdStart_DashE_SkipsSessionRestore()
+    public void ColdStart_DashE_RestoresTheSession_AsWindowsTerminalDoes()
     {
-        // `wt -- cmd` opens the command; it does not bring back the layout.
+        // wt <commandline> restores every persisted layout and then opens the
+        // command line's window (WindowEmperor::HandleCommandlineArgs). So a
+        // -e launch does not skip the restore: only a jump-list click does.
         var launched = App.Method("OnLaunched");
         var restore = launched.Call("_sessionManager.LoadForRestore");
         var conditional = restore.Ancestors().OfType<ConditionalExpressionSyntax>().First();
-        Assert.Contains("coldCommand is not null", conditional.Condition.ToString());
-        Assert.Contains("honorJumpList", conditional.Condition.ToString());
+        Assert.Equal("honorJumpList", conditional.Condition.ToString());
+        Assert.DoesNotContain("coldCommand", conditional.ToString());
     }
 
     [Fact]
-    public void ColdStart_DashE_LeavesOnlyItsOwnWindowOutOfTheSession()
+    public void ColdStart_DashE_AddsItsOwnWindow_AfterTheRestoredOnes()
     {
-        // The one-off window must not replace the layout the next plain
-        // launch restores. The PROCESS keeps saving: in single-instance mode
-        // it is the primary every later launch is forwarded to, and those
-        // windows are the user's real work.
         var launched = App.Method("OnLaunched");
-        var note = launched.Call("_sessionManager.NoteRestoreSkipped");
-        var guard = note.Ancestors().OfType<IfStatementSyntax>().First();
-        Assert.Equal("coldCommand is not null", guard.Condition.ToString());
 
-        var member = launched.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left.ToString() == "window.ExcludedFromSession");
-        Assert.Equal("coldCommand is not null", member.Right.ToString());
+        // A launch command, from -e or initial-command, always gets a window,
+        // restored session or not; without one, a window opens only when
+        // nothing was restored.
+        var wants = launched.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "launchWantsWindow");
+        Assert.Equal("coldCommand is not null || initialCommand is not null", wants.Initializer!.Value.ToString());
 
-        // Nothing switches persistence off for the whole process any more.
-        var manager = ShellSource.Load("Session.SessionManager.cs");
-        Assert.DoesNotContain("SuspendPersistence", manager.Root.ToString());
-        Assert.DoesNotContain("_restoreSkipped", manager.Method("RequestPersist").Body!.ToString());
+        var fresh = FreshWindow(launched);
+        var guard = fresh.Ancestors().OfType<IfStatementSyntax>().First();
+        Assert.Equal("!honorJumpList && (!restoredAny || launchWantsWindow)", guard.Condition.ToString());
+
+        // After the restored windows, so the command's window is in front.
+        var restoredLoop = launched.DescendantNodes().OfType<ForEachStatementSyntax>()
+            .Single(f => f.Expression.ToString() == "restoreState!.Windows");
+        Assert.True(restoredLoop.SpanStart < fresh.SpanStart);
+
+        // And it is an ordinary window: tracked for the session like the rest.
+        var block = guard.Statement.ToString();
+        Assert.Contains("_sessionManager.Track(window)", block);
     }
+
+    [Fact]
+    public void Session_TreatsEveryWindowAlike()
+    {
+        // No ephemeral-window bookkeeping: Windows Terminal persists the
+        // command line's window and any tabs added to it like any other.
+        var manager = ShellSource.Load("Session.SessionManager.cs");
+        var text = manager.Root.ToString();
+        Assert.DoesNotContain("ExcludedFromSession", text);
+        Assert.DoesNotContain("_restoreSkipped", text);
+        Assert.DoesNotContain("ExcludedFromSession", ShellSource.Load("MainWindow.xaml.cs").Root.ToString());
+    }
+
+    [Fact]
+    public void ColdStart_InitialCommand_IsTheLaunchCommand_AndDashEWins()
+    {
+        var launched = App.Method("OnLaunched");
+        var initial = launched.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "initialCommand");
+        Assert.Equal(
+            "coldCommand is null ? _configService.ConfiguredInitialCommand : null",
+            initial.Initializer!.Value.ToString());
+    }
+
+    private static ObjectCreationExpressionSyntax FreshWindow(MethodDeclarationSyntax launched)
+        => launched.DescendantNodes().OfType<ObjectCreationExpressionSyntax>()
+            .Single(o => o.Type.ToString() == "MainWindow"
+                && o.ArgumentList!.Arguments.Any(a => a.NameColon?.Name.Identifier.ValueText == "initialSnapshot"));
 
     [Fact]
     public void ColdStart_FreshWindow_OpensOnTheLaunchsFirstPane_InTheCallersDirectory()
     {
         var launched = App.Method("OnLaunched");
-        var fresh = launched.DescendantNodes().OfType<ObjectCreationExpressionSyntax>()
-            .Where(o => o.Type.ToString() == "MainWindow"
-                && o.ArgumentList!.Arguments.Any(a => a.NameColon?.Name.Identifier.ValueText == "showLaunchIcon"
-                    && a.Expression.ToString() == "true"))
-            .ToList();
-        Assert.Single(fresh);
+        var fresh = FreshWindow(launched);
 
-        var seed = fresh[0].ArgumentList!.Arguments
+        var seed = fresh.ArgumentList!.Arguments
             .Single(a => a.NameColon?.Name.Identifier.ValueText == "initialSnapshot");
         var call = seed.Expression.AssertCallTo("LaunchFirstPaneSnapshot");
         Assert.Equal("coldCommand", call.Arg(0));
         Assert.Equal(
             "workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory",
             call.Arg(1));
+        Assert.Equal("initialCommand: initialCommand", call.Arg(2));
+
+        // The splash belongs to the first restored window when there is one.
+        var icon = fresh.ArgumentList.Arguments
+            .Single(a => a.NameColon?.Name.Identifier.ValueText == "showLaunchIcon");
+        Assert.Equal("!restoredAny", icon.Expression.ToString());
     }
 
     // ---- forwarded launch and the jump list --------------------------------
@@ -205,10 +241,15 @@ public sealed class FirstPaneCommandWiringTests
         var flags = config.Method("ReadFlagsCore");
         Assert.Contains(flags.AssignsTo("ConfiguredCommand"),
             a => a.Right.ToString() == "ReadConfiguredCommand()");
+        Assert.Contains(flags.AssignsTo("ConfiguredInitialCommand"),
+            a => a.Right.ToString() == "ReadConfiguredInitialCommand()");
 
-        var read = config.Method("ReadConfiguredCommand");
-        var call = read.Call("NativeMethods.ConfigCommand");
-        Assert.Equal("out var direct", call.Arg(1));
+        var command = config.Method("ReadConfiguredCommand").Call("NativeMethods.ConfigCommand");
+        Assert.Equal("out var direct", command.Arg(1));
+        var initial = config.Method("ReadConfiguredInitialCommand").Call("NativeMethods.ConfigInitialCommand");
+        Assert.Equal("out var direct", initial.Arg(1));
+
+        var read = config.Method("ReadCommand");
         Assert.Contains("IsArgv: direct != 0", read.Body!.ToString());
         var free = read.Call("NativeMethods.StringFree");
         Assert.NotEmpty(free.Ancestors().OfType<FinallyClauseSyntax>());
@@ -263,48 +304,5 @@ public sealed class FirstPaneCommandWiringTests
              i = text.IndexOf(needle, i + needle.Length, System.StringComparison.Ordinal))
             n++;
         return n;
-    }
-
-    [Fact]
-    public void SessionManager_SkipsTheExcludedWindow_AndKeepsTheOthers()
-    {
-        var manager = ShellSource.Load("Session.SessionManager.cs");
-
-        // The live capture skips only the excluded window, before capturing it.
-        var persist = manager.Method("PersistLiveWindows");
-        var loop = persist.DescendantNodes().OfType<ForEachStatementSyntax>().Single();
-        var skip = loop.Statement.DescendantNodes().OfType<IfStatementSyntax>().First();
-        Assert.Equal("w.ExcludedFromSession", skip.Condition.ToString());
-        Assert.IsType<ContinueStatementSyntax>(skip.Statement);
-        Assert.True(skip.SpanStart < persist.Call("w.CaptureSession").SpanStart);
-
-        // A write is remembered, after it happens.
-        var save = persist.Call("_store.Save");
-        var wrote = persist.AssignsTo("_wroteThisRun").Single();
-        Assert.True(wrote.SpanStart > save.SpanStart);
-    }
-
-    [Fact]
-    public void SessionManager_CleanShutdown_LeavesAnUntouchedPreviousSessionAlone()
-    {
-        // A -e process that saved no window of its own must not mark the
-        // previous session clean, nor replace it with the -e window.
-        var manager = ShellSource.Load("Session.SessionManager.cs");
-        var finalize = manager.Method("FinalizeCleanShutdown");
-        var body = finalize.Body!;
-        var guard = body.Statements.OfType<IfStatementSyntax>()
-            .Single(s => s.Condition.ToString() == "_restoreSkipped && !_wroteThisRun");
-        // It ends the method either way: the previous session is never
-        // marked clean or replaced by the -e window from here.
-        var block = Assert.IsType<BlockSyntax>(guard.Statement);
-        Assert.IsType<ReturnStatementSyntax>(block.Statements.Last());
-        Assert.True(guard.SpanStart < finalize.Call("_store.Load").SpanStart);
-
-        // Only a real window is saved from inside it, and the -e window is
-        // dropped from the fallback before anything reads it.
-        var drop = body.Statements.OfType<IfStatementSyntax>()
-            .Single(s => s.Condition.ToString() == "closingFallback is { ExcludedFromSession: true }");
-        Assert.True(drop.SpanStart < guard.SpanStart);
-        Assert.Contains("closingFallback?.CaptureSession()", block.ToString());
     }
 }

@@ -356,4 +356,36 @@ public class SessionTreeTests
         // itself, an unknown or empty id as no snapshot (a plain shell).
         Assert.Null(SessionProfileResolver.ResolveLeaf(null, dto));
     }
+
+    // A restored command pane keeps where its command came from, so a split
+    // of it follows the configuration as it is now, as Ctrl+T does (#1136).
+    [Fact]
+    public void ConfiguredCommandPane_RestoresWithItsOrigin()
+    {
+        var leaf = new LeafPane
+        {
+            Snapshot = Snap("") with
+            {
+                ResolvedCommand = "nu.exe",
+                CommandOrigin = PaneCommandOrigin.ConfiguredCommand,
+            },
+        };
+
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(leaf));
+        Assert.True(dto.Fallback!.FromConfiguredCommand);
+
+        var restored = SessionProfileResolver.ResolveLeaf(null, dto);
+        Assert.Equal(PaneCommandOrigin.ConfiguredCommand, restored!.CommandOrigin);
+
+        var now = Snap("pwsh");
+        Assert.Same(now, PaneCommandPolicy.Inherit(restored, () => now));
+    }
+
+    [Fact]
+    public void ProfilePane_RestoresAsAProfile()
+    {
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(Leaf("gone")));
+        Assert.False(dto.Fallback!.FromConfiguredCommand);
+        Assert.Equal(PaneCommandOrigin.Profile, SessionProfileResolver.ResolveLeaf(null, dto)!.CommandOrigin);
+    }
 }

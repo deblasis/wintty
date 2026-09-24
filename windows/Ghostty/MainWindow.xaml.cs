@@ -540,14 +540,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal bool IsClosing => _isClosed;
 
-    /// <summary>
-    /// This window is left out of the saved session: it is the window a cold
-    /// <c>wintty -e</c> opened, a one-off that must not replace the layout
-    /// the next plain launch restores (#1136). Every other window the same
-    /// process opens, forwarded launches included, is saved as usual.
-    /// </summary>
-    internal bool ExcludedFromSession { get; set; }
-
     internal MainWindow(
         ConfigService configService,
         GhosttyHost bootstrapHost,

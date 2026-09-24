@@ -534,6 +534,15 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyString ConfigCommand(GhosttyConfig config, out byte direct);
 
+    /// <summary>
+    /// The <c>initial-command</c> key (or <c>-e</c>, which sets it), in the
+    /// same forms as <see cref="ConfigCommand"/>; empty when unset. Must go
+    /// back through <see cref="StringFree"/>.
+    /// </summary>
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_initial_command")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyString ConfigInitialCommand(GhosttyConfig config, out byte direct);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_string_free")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void StringFree(GhosttyString str);

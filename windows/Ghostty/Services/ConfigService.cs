@@ -141,6 +141,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public Ghostty.Core.Profiles.ConfiguredCommand? ConfiguredCommand { get; private set; }
 
     /// <summary>
+    /// The <c>initial-command</c> key, or null when unset. libghostty does not
+    /// apply it on Windows (the host owns the first pane), so a cold launch
+    /// hands it to its first pane the way it does <c>-e</c>, which sets the
+    /// same key and wins when both are given (#1136).
+    /// </summary>
+    public Ghostty.Core.Profiles.ConfiguredCommand? ConfiguredInitialCommand { get; private set; }
+
+    /// <summary>
     /// Whether <c>default-profile</c> is set, which makes it win over
     /// <see cref="ConfiguredCommand"/> for every new pane.
     /// </summary>
@@ -1318,6 +1326,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // (libghostty) and everything the app builds itself.
         ReloadEnvironment = GetBool("reload-env", whenNotFound: true);
         ConfiguredCommand = ReadConfiguredCommand();
+        ConfiguredInitialCommand = ReadConfiguredInitialCommand();
         // windows-settings-ui is a fork-added Zig field, so libghostty
         // parses it and there is no unknown-field diagnostic to suppress;
         // that is why it is deliberately absent from WindowsOnlyKeys. It
@@ -1914,8 +1923,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     }
 
     private Ghostty.Core.Profiles.ConfiguredCommand? ReadConfiguredCommand()
+        => ReadCommand(NativeMethods.ConfigCommand(_config, out var direct), direct);
+
+    private Ghostty.Core.Profiles.ConfiguredCommand? ReadConfiguredInitialCommand()
+        => ReadCommand(NativeMethods.ConfigInitialCommand(_config, out var direct), direct);
+
+    // Takes ownership of str: it is freed here whatever the answer.
+    private static Ghostty.Core.Profiles.ConfiguredCommand? ReadCommand(GhosttyString str, byte direct)
     {
-        var str = NativeMethods.ConfigCommand(_config, out var direct);
         try
         {
             if (str.Ptr == IntPtr.Zero || str.Len == UIntPtr.Zero) return null;

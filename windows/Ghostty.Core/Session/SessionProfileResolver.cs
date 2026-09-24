@@ -78,7 +78,10 @@ internal static class SessionProfileResolver
                 DisplayName: fb.DisplayName,
                 Icon: new IconSpec.BundledKey("default"),
                 Visuals: EffectiveVisualOverrides.Empty,
-                CommandIsArgv: fb.CommandIsArgv), leaf.Cwd);
+                CommandIsArgv: fb.CommandIsArgv,
+                CommandOrigin: fb.FromConfiguredCommand
+                    ? PaneCommandOrigin.ConfiguredCommand
+                    : PaneCommandOrigin.Profile), leaf.Cwd);
         return null;
     }
 

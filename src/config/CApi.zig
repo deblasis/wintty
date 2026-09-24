@@ -244,6 +244,24 @@ export fn ghostty_config_command(self: *Config, direct_out: ?*bool) String {
     return .fromSlice(str);
 }
 
+/// The `initial-command` key (the config key, `--initial-command`, or `-e`,
+/// which sets it), as one string in the same forms as ghostty_config_command,
+/// or an empty string when it is unset. Free with ghostty_string_free.
+///
+/// The Windows host owns the first pane, so libghostty never applies this
+/// key there itself; the host reads it here and gives it to the first pane
+/// of a cold launch, the same way it does `-e`.
+export fn ghostty_config_initial_command(self: *Config, direct_out: ?*bool) String {
+    if (direct_out) |d| d.* = false;
+    const command = self.@"initial-command" orelse return .empty;
+    const str = commandString(global.alloc(), command) catch |err| {
+        log.err("error rendering initial-command err={}", .{err});
+        return .empty;
+    };
+    if (direct_out) |d| d.* = command == .direct;
+    return .fromSlice(str);
+}
+
 fn commandString(
     alloc: std.mem.Allocator,
     command: @import("command.zig").Command,
@@ -612,6 +630,43 @@ test "ghostty_config_command: unset, shell and direct" {
         const s = ghostty_config_command(&cfg, null);
         defer s.deinit();
         try testing.expectEqualStrings("nvim a b", s.ptr.?[0..s.len]);
+    }
+}
+
+test "ghostty_config_initial_command: unset, shell and direct" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+    var direct_flag = true;
+
+    {
+        const s = ghostty_config_initial_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expect(s.ptr == null);
+        try testing.expect(!direct_flag);
+    }
+
+    var shell: @import("command.zig").Command = undefined;
+    try shell.parseCLI(arena, "htop -d 5");
+    cfg.@"initial-command" = shell;
+    {
+        const s = ghostty_config_initial_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expectEqualStrings("htop -d 5", s.ptr.?[0..s.len]);
+        try testing.expect(!direct_flag);
+    }
+
+    // What -e sets: a direct argv, handed back quoted.
+    const argv = [_][:0]const u8{ "pwsh", "-File", "C:\\a b\\x.ps1" };
+    cfg.@"initial-command" = .{ .direct = &argv };
+    {
+        const s = ghostty_config_initial_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expectEqualStrings("pwsh -File \"C:\\a b\\x.ps1\"", s.ptr.?[0..s.len]);
+        try testing.expect(direct_flag);
     }
 }
 

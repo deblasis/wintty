@@ -47,6 +47,8 @@ internal static class SessionTree
                             WorkingDirectory = snap.WorkingDirectory,
                             DisplayName = snap.DisplayName,
                             CommandIsArgv = snap.CommandIsArgv,
+                            FromConfiguredCommand = snap.CommandOrigin
+                                == Ghostty.Core.Profiles.PaneCommandOrigin.ConfiguredCommand,
                         },
                 };
             default:

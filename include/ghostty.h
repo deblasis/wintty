@@ -1294,6 +1294,9 @@ GHOSTTY_API bool ghostty_config_get(ghostty_config_t, void*, const char*, uintpt
 // ghostty_string_free. When the out bool is given it reports a `direct:`
 // command, returned as its argv quoted by the Windows command-line rules.
 GHOSTTY_API ghostty_string_s ghostty_config_command(ghostty_config_t, bool*);
+// The `initial-command` key (or `-e`), in the same forms; empty when unset.
+// Free with ghostty_string_free.
+GHOSTTY_API ghostty_string_s ghostty_config_initial_command(ghostty_config_t, bool*);
 GHOSTTY_API ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
                                                               const char*,
                                                               uintptr_t);

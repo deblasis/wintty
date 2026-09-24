@@ -99,17 +99,28 @@ public static class PaneCommandPolicy
     /// snapshot would hand the choice back to libghostty. Without <c>-e</c>
     /// this is <see cref="ImplicitDefault"/>.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="initialCommand"/> is the config's <c>initial-command</c>,
+    /// passed only for a cold launch: it is the same request as <c>-e</c>
+    /// (<c>-e</c> is its command-line spelling), so it gets the same pane, and
+    /// <c>-e</c> wins when both are set. libghostty no longer applies it on
+    /// Windows, because the host owns the first pane.
+    /// </remarks>
     public static ProfileSnapshot? LaunchFirstPane(
         ProfileSnapshot? defaultProfile,
         string? launchArgv,
         ConfiguredCommand? configured,
         bool defaultProfileSet,
-        string? workingDirectory)
+        string? workingDirectory,
+        ConfiguredCommand? initialCommand = null)
     {
-        if (string.IsNullOrWhiteSpace(launchArgv))
-            return ImplicitDefault(defaultProfile, configured, defaultProfileSet, workingDirectory);
+        if (!string.IsNullOrWhiteSpace(launchArgv))
+            return ApplyLaunchCommand(defaultProfile, launchArgv, workingDirectory);
 
-        return ApplyLaunchCommand(defaultProfile, launchArgv, workingDirectory);
+        if (initialCommand is { } ic && !string.IsNullOrWhiteSpace(ic.Text))
+            return ApplyLaunchCommand(defaultProfile, ic.Text.Trim(), ic.IsArgv, workingDirectory);
+
+        return ImplicitDefault(defaultProfile, configured, defaultProfileSet, workingDirectory);
     }
 
     /// <summary>
@@ -121,17 +132,29 @@ public static class PaneCommandPolicy
         ProfileSnapshot? snapshot,
         string? launchArgv,
         string? workingDirectory)
+        => ApplyLaunchCommand(snapshot, launchArgv, isArgv: true, workingDirectory);
+
+    /// <summary>
+    /// <see cref="ApplyLaunchCommand(ProfileSnapshot?, string?, string?)"/>
+    /// for a launch command that may be a shell string: <c>initial-command</c>
+    /// written without <c>direct:</c> is one, as the user wrote it.
+    /// </summary>
+    public static ProfileSnapshot? ApplyLaunchCommand(
+        ProfileSnapshot? snapshot,
+        string? command,
+        bool isArgv,
+        string? workingDirectory)
     {
-        if (string.IsNullOrWhiteSpace(launchArgv))
+        if (string.IsNullOrWhiteSpace(command))
             return WithWorkingDirectory(snapshot, workingDirectory);
 
         if (snapshot is null)
-            return CommandSnapshot(launchArgv, isArgv: true, PaneCommandOrigin.LaunchCommand, workingDirectory);
+            return CommandSnapshot(command, isArgv, PaneCommandOrigin.LaunchCommand, workingDirectory);
 
         return WithWorkingDirectory(snapshot, workingDirectory) with
         {
-            ResolvedCommand = launchArgv,
-            CommandIsArgv = true,
+            ResolvedCommand = command,
+            CommandIsArgv = isArgv,
             CommandOrigin = PaneCommandOrigin.LaunchCommand,
         };
     }
