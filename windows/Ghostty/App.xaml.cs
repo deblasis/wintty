@@ -822,6 +822,12 @@ public partial class App : Application
             void RemoveNoColorFromEnv()
             {
                 Environment.SetEnvironmentVariable("NO_COLOR", null);
+                // New terminals start from a fresh logon environment
+                // (reload-env), which still carries a NO_COLOR set in the
+                // registry. This marker says the app stripped it on purpose,
+                // so the terminal's environment drops it too. Without it, a
+                // NO_COLOR simply absent at launch would read as stripped.
+                Environment.SetEnvironmentVariable("WINTTY_NO_COLOR_STRIPPED", "1");
                 noColorLog.LogInformation(
                     "Removed NO_COLOR from the environment so terminal colors work.");
             }
@@ -840,6 +846,14 @@ public partial class App : Application
                         mode);
             }
 
+            // The strip marker is this launch's decision, never an inherited
+            // one: an update relaunch copies the old process's environment,
+            // marker included, and the preference may have changed since.
+            // Cleared here; set again below only if this launch strips, or
+            // if the policy is "strip" and NO_COLOR is already gone.
+            Environment.SetEnvironmentVariable("WINTTY_NO_COLOR_STRIPPED", null);
+            if (string.Equals(_configService.NoColorOverride, Ghostty.Core.Env.NoColorPolicy.Strip, StringComparison.OrdinalIgnoreCase))
+                Environment.SetEnvironmentVariable("WINTTY_NO_COLOR_STRIPPED", "1");
             var noColorNotice = Ghostty.Core.Env.NoColorStartup.Resolve(
                 present: Environment.GetEnvironmentVariable("NO_COLOR") is not null,
                 overrideMode: _configService.NoColorOverride,

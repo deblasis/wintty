@@ -37,6 +37,7 @@ pub const uri = @import("uri.zig");
 // Functions and types
 pub const CFReleaseThread = @import("cf_release_thread.zig");
 pub const TempDir = @import("TempDir.zig");
+pub const windows_logon_env = @import("windows_logon_env.zig");
 pub const launchedFromDesktop = desktop.launchedFromDesktop;
 pub const launchedByDbusActivation = dbus.launchedByDbusActivation;
 pub const launchedBySystemd = systemd.launchedBySystemd;
@@ -65,6 +66,7 @@ pub const getConfigEditCommand = edit.getConfigEditCommand;
 
 test {
     _ = file;
+    _ = windows_logon_env;
     _ = openpkg;
     _ = stderr;
     _ = edit;

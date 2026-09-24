@@ -1434,9 +1434,25 @@ pub const Surface = struct {
     }
 
     pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
-        _ = self;
         var env = try global.environMap();
         errdefer env.deinit();
+
+        // Windows: like a Windows Terminal tab, a new terminal starts from
+        // the environment a fresh logon gives this user, read now, not from
+        // the environment Wintty was launched with (`reload-env`).
+        if (comptime builtin.target.os.tag == .windows) {
+            if (self.app.config.@"reload-env") {
+                const pane = internal_os.windows_logon_env.paneEnv(env.allocator, &env) catch |err| {
+                    log.warn("fresh logon environment unavailable, using the app's err={}", .{err});
+                    return env;
+                };
+                env.deinit();
+                return pane;
+            }
+            // reload-env = false: the app's own environment, minus the app's
+            // private NO_COLOR note, which is not the terminal's business.
+            _ = env.orderedRemove(internal_os.windows_logon_env.no_color_stripped);
+        }
 
         if (comptime builtin.target.os.tag.isDarwin()) {
             if (env.get("__XCODE_BUILT_PRODUCTS_DIR_PATHS") != null) {
