@@ -384,7 +384,14 @@ function Receive-SeamResponse([Parameter(Mandatory)]$Session, [string]$OpName = 
 function Invoke-SeamCommand([Parameter(Mandatory)]$Session, [Parameter(Mandatory)][hashtable]$Command) {
     Send-SeamCommand $Session $Command
     $response = Receive-SeamResponse $Session $Command['op']
-    Write-Host ("OK {0}" -f $Command['op'])
+    # A palette the seam had to re-open after a light dismiss says so, so a
+    # recovery never passes silently where a product regression could hide.
+    if ($response.recovered) {
+        Write-Host ("OK {0} (recovered: the palette was re-opened after a light dismiss)" -f $Command['op'])
+    }
+    else {
+        Write-Host ("OK {0}" -f $Command['op'])
+    }
     return $response
 }
 

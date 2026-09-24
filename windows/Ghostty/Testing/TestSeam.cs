@@ -1062,6 +1062,10 @@ internal static class TestSeam
 
             case "palette-type":
             {
+                // A light dismiss can have closed a palette an earlier step
+                // opened: re-open one instead of sampling "closed" once,
+                // and say so in the readout.
+                var paletteRecovered = await EnsurePaletteOpenAsync(window);
                 if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
                 // Into the search box, so the view model hears it the way it
                 // hears typing. perCharMs > 0 types it a character at a time,
@@ -1115,11 +1119,15 @@ internal static class TestSeam
                     return Error(op, "the theme filter did not settle within 5s");
                 }
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return PaletteThemeJson(window, op, atLastKey);
+                return PaletteThemeJson(window, op, atLastKey, paletteRecovered);
             }
 
             case "palette-key":
             {
+                // A light dismiss can have closed a palette an earlier step
+                // opened: re-open one instead of sampling "closed" once,
+                // and say so in the readout.
+                var paletteRecovered = await EnsurePaletteOpenAsync(window);
                 if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
                 Windows.System.VirtualKey? key = ArgString(args, "key") switch
                 {
@@ -1160,7 +1168,7 @@ internal static class TestSeam
                 if (!await WaitForPaletteSettledAsync(window))
                     return Error(op, "the theme preview did not settle within 5s");
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return PaletteThemeJson(window, op);
+                return PaletteThemeJson(window, op, recovered: paletteRecovered);
             }
 
             case "consumed-close-arms":
@@ -1178,16 +1186,19 @@ internal static class TestSeam
                 var surface = ArgString(args, "surface") ?? "";
                 var held = ParseCloseChars(ArgString(args, "held"));
                 Ghostty.Input.ConsumedCloseKey.TestSeamHeldKeys = held;
+                string? refused;
+                bool paletteRecovered;
                 try
                 {
-                    var refused = await DriveConsumedCloseAsync(window, manager, surface, args);
+                    (refused, paletteRecovered) =
+                        await DriveConsumedCloseAsync(window, manager, surface, args);
                     if (refused is not null) return Error(op, refused);
                 }
                 finally
                 {
                     Ghostty.Input.ConsumedCloseKey.TestSeamHeldKeys = null;
                 }
-                return ConsumedCloseArmsJson(window, manager, op);
+                return ConsumedCloseArmsJson(window, manager, op, paletteRecovered);
             }
 
             case "terminal-character":
@@ -1442,9 +1453,12 @@ internal static class TestSeam
     /// The theme readout: the file's `theme`, whether a palette preview is
     /// up and which, the terminal's colours as the live native config states
     /// them, the chrome's resolved colours, and the palette UI's own state.
+    /// `recovered` says the palette was re-opened for this read after a
+    /// light dismiss.
     /// </summary>
     private static string PaletteThemeJson(
-        MainWindow window, string op, (bool Pending, int Count, int Applies)? atLastKey = null)
+        MainWindow window, string op, (bool Pending, int Count, int Applies)? atLastKey = null,
+        bool recovered = false)
         => Json(json =>
         {
             var config = window.TestSeamConfig;
@@ -1452,6 +1466,7 @@ internal static class TestSeam
             json.WriteStartObject();
             json.WriteBoolean("ok", true);
             json.WriteString("op", op);
+            if (recovered) json.WriteBoolean("recovered", true);
             if (atLastKey is { } last)
             {
                 json.WriteStartObject("atLastKey");
@@ -2009,11 +2024,13 @@ internal static class TestSeam
     }
 
     /// <summary>Every pane's arm, by tab and leaf, and which surfaces are up.</summary>
-    private static string ConsumedCloseArmsJson(MainWindow window, TabManager manager, string op) => Json(json =>
+    private static string ConsumedCloseArmsJson(
+        MainWindow window, TabManager manager, string op, bool paletteRecovered = false) => Json(json =>
     {
         json.WriteStartObject();
         json.WriteBoolean("ok", true);
         json.WriteString("op", op);
+        if (paletteRecovered) json.WriteBoolean("recovered", true);
         json.WriteBoolean("paletteOpen", window.TestSeamPaletteOpen);
         json.WriteBoolean("overviewOpen", window.TestSeamOverviewOpen);
         json.WriteNumber("activeTab", manager.IndexOf(manager.ActiveTab));
@@ -2035,31 +2052,67 @@ internal static class TestSeam
     });
 
     /// <summary>
-    /// Drives one surface's consumed close. Returns a refusal, or null when
-    /// the close ran. Each case reaches the act the surface's own handler
-    /// reaches, so a surface whose act stops raising the signal fails here.
+    /// Waits for the command palette to be open: true when it is open by
+    /// the budget's end. Open is synchronous, so a false here means a
+    /// toggle that failed to open one, not a slow one.
     /// </summary>
-    private static async Task<string?> DriveConsumedCloseAsync(
+    private static async Task<bool> WaitForPaletteOpenAsync(MainWindow window)
+    {
+        for (var i = 0; i < 200 && !window.TestSeamPaletteOpen; i++)
+            await Task.Delay(25);
+        return window.TestSeamPaletteOpen;
+    }
+
+    /// <summary>
+    /// The palette, open. A light dismiss (a press outside the popup, a
+    /// focus disturbance) can close a palette an earlier step opened, and
+    /// a driver that then samples once reads "closed" and fails a scenario
+    /// whose product behaviour is fine. Re-open one instead and say so, so
+    /// a driver can tell a recovery from a palette that survived. Returns
+    /// false when the palette was already open or could not be opened.
+    /// </summary>
+    private static async Task<bool> EnsurePaletteOpenAsync(MainWindow window)
+    {
+        if (window.TestSeamPaletteOpen) return false;
+        window.TestSeamTogglePalette();
+        var open = await WaitForPaletteOpenAsync(window);
+        if (open) await WaitForLowPriorityAsync(window.DispatcherQueue);
+        return open;
+    }
+
+    /// <summary>
+    /// Drives one surface's consumed close. Returns a refusal, or null when
+    /// the close ran, with whether the palette had to be re-opened. Each
+    /// case reaches the act the surface's own handler reaches, so a surface
+    /// whose act stops raising the signal fails here.
+    /// </summary>
+    private static async Task<(string? Refusal, bool PaletteRecovered)> DriveConsumedCloseAsync(
         MainWindow window, TabManager manager, string surface, JsonElement args)
     {
         var key = ParseCloseKey(ArgString(args, "key"));
+        var paletteRecovered = false;
         switch (surface)
         {
             case "palette":
             {
                 // key=escape or enter: the search box's own key handler.
                 // Enter with no match selected runs nothing, which is the
-                // point: the signal comes before the act.
-                if (!window.TestSeamPaletteOpen) return "the palette is not open";
+                // point: the signal comes before the act. A light dismiss
+                // can have closed a palette an earlier step opened: re-open
+                // one instead of sampling "closed" once, and say it in the
+                // ack.
+                paletteRecovered = await EnsurePaletteOpenAsync(window);
+                if (!window.TestSeamPaletteOpen) return ("the palette is not open", false);
                 if (key is not ({ } k and (Windows.System.VirtualKey.Escape or Windows.System.VirtualKey.Enter)))
-                    return "palette takes key=escape or key=enter";
+                    return ("palette takes key=escape or key=enter", false);
                 window.TestSeamPaletteUI.TestSeamKey(k);
                 break;
             }
             case "palette-item":
                 // An invoked result row: ItemClick's act, with "held" naming
                 // the key that invoked it.
-                if (!window.TestSeamPaletteOpen) return "the palette is not open";
+                paletteRecovered = await EnsurePaletteOpenAsync(window);
+                if (!window.TestSeamPaletteOpen) return ("the palette is not open", false);
                 window.TestSeamPaletteUI.TestSeamActivate();
                 break;
             case "search":
@@ -2067,12 +2120,12 @@ internal static class TestSeam
                 // key=escape: the needle box's and the bar's Escape. Without
                 // a key: the close button's Click, with "held".
                 var terminal = LeafTerminal(manager, args);
-                if (terminal is null) return "no such tab or leaf";
+                if (terminal is null) return ("no such tab or leaf", false);
                 terminal.OpenSearch();
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
                 if (key == Windows.System.VirtualKey.Escape) terminal.TestSeamSearchBar.TestSeamNeedleKey(Windows.System.VirtualKey.Escape, shift: false);
                 else if (key is null) terminal.TestSeamSearchBar.TestSeamCloseClick();
-                else return "search takes key=escape or no key (the close button)";
+                else return ("search takes key=escape or no key (the close button)", false);
                 break;
             }
             case "overview":
@@ -2084,22 +2137,22 @@ internal static class TestSeam
                     window.TestSeamShowOverview();
                     await WaitForLowPriorityAsync(window.DispatcherQueue);
                 }
-                if (!window.TestSeamOverviewOpen) return "the overview did not open";
+                if (!window.TestSeamOverviewOpen) return ("the overview did not open", false);
                 var ran = key is { } k
                     ? window.TestSeamOverviewUI.TestSeamKey(k)
                     : window.TestSeamOverviewUI.TestSeamTileClick();
-                if (!ran) return "the overview had no selected tile to choose";
+                if (!ran) return ("the overview had no selected tile to choose", false);
                 break;
             }
             case "shelf":
             {
                 // key=enter or space on a pinned row of the vertical strip.
                 var strip = window.TestSeamVerticalStrip;
-                if (strip is null) return "the vertical strip is not the active host";
+                if (strip is null) return ("the vertical strip is not the active host", false);
                 var tab = TabAt(manager, ArgInt(args, "index", -1));
-                if (tab is null) return "no tab at index";
+                if (tab is null) return ("no tab at index", false);
                 if (key is not { } k || !strip.TestSeamShelfKey(tab, k))
-                    return "shelf takes a pinned tab's index and key=enter or key=space";
+                    return ("shelf takes a pinned tab's index and key=enter or key=space", false);
                 break;
             }
             case "strip-select":
@@ -2107,10 +2160,10 @@ internal static class TestSeam
                 // A tab row's selection, the act MUXC's (vertical) or
                 // TabView's (horizontal) Enter and Space reach, with "held".
                 var tab = TabAt(manager, ArgInt(args, "index", -1));
-                if (tab is null) return "no tab at index";
+                if (tab is null) return ("no tab at index", false);
                 if (window.TestSeamVerticalStrip is { } strip) strip.TestSeamNavSelect(tab);
                 else if (window.TestSeamTabHost is { } host) host.TestSeamSelect(tab);
-                else return "no tab strip";
+                else return ("no tab strip", false);
                 break;
             }
             case "notice":
@@ -2119,7 +2172,7 @@ internal static class TestSeam
                 // key=enter or space, the bar's own KeyDown act; without a
                 // key, a dismiss while the bar holds focus (an action button
                 // or the close button), with "held".
-                if (Ghostty.App.NotificationService is not { } service) return "no notification service";
+                if (Ghostty.App.NotificationService is not { } service) return ("no notification service", false);
                 var notice = new Ghostty.Core.Notifications.Notice
                 {
                     Title = "consumed-close seam notice",
@@ -2131,12 +2184,12 @@ internal static class TestSeam
                 if (!NoticeFocused(window))
                 {
                     service.Dismiss(notice);
-                    return "the notice bar never took focus";
+                    return ("the notice bar never took focus", false);
                 }
                 if (key is { } k)
                 {
                     if (!window.TestSeamNotificationHost.TestSeamBarKey(notice, k))
-                        return "the notice bar refused the key";
+                        return ("the notice bar refused the key", false);
                 }
                 else
                 {
@@ -2155,7 +2208,7 @@ internal static class TestSeam
                     await WaitForLowPriorityAsync(window.DispatcherQueue);
                     dialog = OpenDialog(window);
                 }
-                if (dialog is null) return "the rename dialog did not open";
+                if (dialog is null) return ("the rename dialog did not open", false);
                 dialog.Hide();
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
                 break;
@@ -2166,16 +2219,16 @@ internal static class TestSeam
                 var flyout = window.TestSeamOpenPaneMenu();
                 for (var i = 0; i < 40 && !flyout.IsOpen; i++)
                     await WaitForLowPriorityAsync(window.DispatcherQueue);
-                if (!flyout.IsOpen) return "the pane menu did not open";
+                if (!flyout.IsOpen) return ("the pane menu did not open", false);
                 flyout.Hide();
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
                 break;
             }
             default:
-                return $"unknown surface '{surface}'";
+                return ($"unknown surface '{surface}'", false);
         }
         await WaitForLowPriorityAsync(window.DispatcherQueue);
-        return null;
+        return (null, paletteRecovered);
     }
 
     private static bool NoticeFocused(MainWindow window)
