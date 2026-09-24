@@ -87,7 +87,13 @@ public sealed class LaunchForwarderTests
             NullLogger<SingleInstanceServer>.Instance);
         server.Start();
 
-        var ackBudget = TimeSpan.FromMilliseconds(400);
+        // Five seconds, not a small fraction of one: this budget also caps
+        // the payload write's managed completion, which is thread-pool
+        // scheduled, and a saturated host can make that take seconds. The
+        // subject is that the fallback waits the FULL budget (asserted
+        // below), not that the budget is short, so it is sized as a hang
+        // guard with headroom rather than as a latency claim.
+        var ackBudget = TimeSpan.FromSeconds(5);
         var stopwatch = Stopwatch.StartNew();
         var forwarded = LaunchForwarder.TryForward(
             pipe, SampleRequest(), out var failure, ackTimeout: ackBudget);
@@ -212,7 +218,11 @@ public sealed class LaunchForwarderTests
         });
 
         var request = SampleRequest();
-        var ackBudget = TimeSpan.FromMilliseconds(300);
+        // Five seconds: this budget also caps the payload write's managed
+        // completion, which is thread-pool scheduled, and a saturated host
+        // can make that take seconds. What the test proves is the trailing
+        // byte's presence and effect, not the timeout's length.
+        var ackBudget = TimeSpan.FromSeconds(5);
         Assert.False(
             LaunchForwarder.TryForward(pipe, request, out _, ackTimeout: ackBudget),
             "the old primary never acknowledges");

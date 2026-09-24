@@ -157,11 +157,22 @@ public static class LaunchForwarder
             // opening a second window for one the fallback is about to
             // open itself; a current primary stopped reading at the end of
             // the payload and never sees the byte.
+            //
+            // The write is synchronous on purpose. An overlapped write's
+            // managed completion needs a thread-pool slot, and a wait
+            // capped at a few hundred milliseconds abandons the byte
+            // exactly when the machine is busiest -- under a saturated
+            // test host the completion once lost its race with the cap
+            // and the old primary parsed the payload cleanly. A 1-byte
+            // write into the outbound queue the peer has just drained
+            // completes in the kernel without any pool involvement, and
+            // once Write returns the byte is queued ahead of the
+            // end-of-stream this caller's dispose produces, so delivery
+            // order is guaranteed whatever the load.
             try
             {
                 var cancel = new[] { LaunchRequest.Cancel };
-                client.WriteAsync(cancel, 0, cancel.Length)
-                    .Wait(TimeSpan.FromMilliseconds(500));
+                client.Write(cancel, 0, cancel.Length);
             }
             catch { /* the primary may already be gone; the launch is the fallback's now */ }
 
