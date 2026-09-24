@@ -1,6 +1,7 @@
 using System;
 using Ghostty.Core.Input;
 using Ghostty.Core.Profiles;
+using Ghostty.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -18,6 +19,9 @@ internal sealed partial class NewTabSplitButton : UserControl
     public NewTabSplitButton()
     {
         InitializeComponent();
+        // Escape dismisses the profile menu and Enter opens a row; either
+        // hands focus to a pane with the key's character queued.
+        ConsumedCloseKey.Watch(ProfileMenu);
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
     }
@@ -195,6 +199,9 @@ internal sealed partial class NewTabSplitButton : UserControl
         var modifiers = App.ModifierKeyState;
         if (modifiers is null) return;
 
+        // Enter or Space on the focused button opens a tab whose pane takes
+        // focus, and the key's character is already queued behind it.
+        ConsumedCloseKey.RaiseForHeldKeys();
         Owner.OpenProfile(defaultId, ClickModifierClassifier.Classify(modifiers));
     }
 

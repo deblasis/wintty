@@ -112,6 +112,8 @@ internal static class TabContextMenuBuilder
         Action<TabModel, SnapZone>? detachWithZone = null)
     {
         var flyout = new MenuFlyout();
+        // Escape or Enter here can hand focus back to a pane.
+        Ghostty.Input.ConsumedCloseKey.Watch(flyout);
 
         // The Close item routes through requestClose so it shows the
         // multi-pane confirmation dialog when needed. Close Others
@@ -290,6 +292,7 @@ internal static class TabContextMenuBuilder
                     Content = picker,
                     Placement = FlyoutPlacementMode.Bottom,
                 };
+                Ghostty.Input.ConsumedCloseKey.Watch(pickerFlyout);
 
                 picker.ZoneSelected += (_, zone) =>
                 {
@@ -377,6 +380,8 @@ internal static class TabContextMenuBuilder
         Action<TabGroup, TabColor> requestColorGroup)
     {
         var flyout = new MenuFlyout();
+        // Escape or Enter here can hand focus back to a pane.
+        Ghostty.Input.ConsumedCloseKey.Watch(flyout);
 
         var rename = new MenuFlyoutItem { Text = "Rename Group" };
         rename.Click += async (_, _) =>
@@ -450,6 +455,7 @@ internal static class TabContextMenuBuilder
             Placement = FlyoutPlacementMode.Bottom,
             ShouldConstrainToRootBounds = true,
         };
+        Ghostty.Input.ConsumedCloseKey.Watch(subFlyout);
 
         picker.ColorSelected += (_, color) =>
         {

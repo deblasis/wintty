@@ -355,7 +355,11 @@ public sealed class TabStripSyncWiringTests
         // activation walk, because the churn raise is exactly what must
         // never reach the manager as an activation.
         var chipFork = ChipSelectionArm(handler);
-        var activate = handler.Calls("_manager.Activate").ToList();
+        // The walk activates through ActivateFromSelection, which raises the
+        // consumed-close signal and then calls the manager, and only there.
+        var activate = handler.Calls("ActivateFromSelection").ToList();
+        Assert.Single(ShellSource.Load(TabHostSource).Method("ActivateFromSelection").Calls("_manager.Activate"));
+        Assert.Empty(handler.Calls("_manager.Activate"));
         Assert.True(
             standDown.Count == 1
                 && standDown[0].SpanStart < chipFork.SpanStart

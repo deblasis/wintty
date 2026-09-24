@@ -191,8 +191,14 @@ public sealed class NotificationHostWiringTests
             .ToList();
         Assert.True(keyGuard.Count == 1, "expected one Enter-or-Space guard inside the KeyDown handler");
 
-        var dismisses = keyGuard[0].DescendantNodes().OfType<InvocationExpressionSyntax>()
+        // Directly, or through DismissFromKey, which raises the
+        // consumed-close signal for the key and then dismisses.
+        static bool CallsDismiss(SyntaxNode scope) => scope.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Any(i => i.Expression.ToString().EndsWith(".Dismiss"));
+        var viaAct = keyGuard[0].DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Any(i => i.Expression.ToString() == "DismissFromKey");
+        var dismisses = CallsDismiss(keyGuard[0])
+            || (viaAct && CallsDismiss(Host().Method("DismissFromKey")));
         Assert.True(
             dismisses,
             "the Enter/Space branch must actually call Dismiss on the notice: a handler that only "

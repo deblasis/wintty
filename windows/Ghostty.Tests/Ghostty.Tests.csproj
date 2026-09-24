@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!--
@@ -271,5 +271,9 @@
   <ItemGroup>
     <!-- One shared file, linked: the four test hosts cannot drift. -->
     <Compile Include="..\build\TestHostArming.cs" Link="TestHostArming.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Every shell XAML the explicit items above do not already embed, for the consumed-close census (ConsumedCloseKeyWiringTests): a flyout declared in markup is found the same way one built in code is. Last, so the Exclude sees every earlier item. -->
+    <EmbeddedResource Include="..\Ghostty\**\*.xaml" Exclude="@(EmbeddedResource);..\Ghostty\bin\**;..\Ghostty\obj\**" LogicalName="Ghostty.Tests.XamlCensus.%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

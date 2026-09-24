@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Core.Search;
+using Ghostty.Input;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -66,7 +67,7 @@ public sealed partial class SearchBarControl : UserControl
     private void OnControlKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key != VirtualKey.Escape) return;
-        RaiseClosed();
+        CloseFromKey(VirtualKey.Escape);
         e.Handled = true;
     }
 
@@ -228,7 +229,7 @@ public sealed partial class SearchBarControl : UserControl
                 return true;
 
             case VirtualKey.Escape:
-                RaiseClosed();
+                CloseFromKey(VirtualKey.Escape);
                 return true;
 
             default:
@@ -243,6 +244,9 @@ public sealed partial class SearchBarControl : UserControl
     /// <summary>Whether the needle box itself holds keyboard focus, where those keys land.</summary>
     internal bool TestSeamNeedleFocused
         => XamlRoot is { } root && ReferenceEquals(FocusManager.GetFocusedElement(root), NeedleBox);
+
+    /// <summary>The close button's Click, which a key or a mouse can raise.</summary>
+    internal void TestSeamCloseClick() => CloseFromKey(null);
 #endif
 
     private void OnPrevClick(object sender, RoutedEventArgs e) =>
@@ -252,7 +256,22 @@ public sealed partial class SearchBarControl : UserControl
         SearchHost?.NavigateNext();
 
     private void OnCloseClick(object sender, RoutedEventArgs e) =>
+        CloseFromKey(null);
+
+    /// <summary>
+    /// Every close the user asks for, keyboard or button. The close hands
+    /// focus back to the pane inside the same keystroke, and the key's
+    /// character (Escape's 0x1B, or '\r' for Enter on the focused close
+    /// button) was queued before this ran, so it lands on that pane or a
+    /// sibling unless the panes are armed first. A button Click cannot say
+    /// which key raised it, if any, so it arms for whichever close key is
+    /// down; a mouse click arms nothing.
+    /// </summary>
+    private void CloseFromKey(VirtualKey? key)
+    {
+        ConsumedCloseKey.RaiseFor(key);
         RaiseClosed();
+    }
 
     private void RaiseClosed()
     {

@@ -4,6 +4,7 @@ using Ghostty.Branding;
 using Ghostty.Controls;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Tabs;
+using Ghostty.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -253,7 +254,7 @@ internal sealed partial class TabOverviewControl : UserControl
     private void OnTileClick(object sender, ItemClickEventArgs e)
     {
         if (e.ClickedItem is UIElement tile && _tabByTile.TryGetValue(tile, out var tab))
-            TabChosen?.Invoke(this, tab);
+            Choose(tab, key: null);
     }
 
     private void OnScrimTapped(object sender, TappedRoutedEventArgs e)
@@ -273,13 +274,13 @@ internal sealed partial class TabOverviewControl : UserControl
         switch (key)
         {
             case Windows.System.VirtualKey.Escape:
-                Dismissed?.Invoke(this, EventArgs.Empty);
+                Dismiss(Windows.System.VirtualKey.Escape);
                 return true;
             case Windows.System.VirtualKey.Enter:
                 if (TilesView.SelectedItem is UIElement tile &&
                     _tabByTile.TryGetValue(tile, out var tab))
                 {
-                    TabChosen?.Invoke(this, tab);
+                    Choose(tab, Windows.System.VirtualKey.Enter);
                     return true;
                 }
                 return false;
@@ -288,9 +289,39 @@ internal sealed partial class TabOverviewControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Every way out the keyboard can take closes the overview and hands
+    /// focus to a pane inside the same keystroke, and the key's character
+    /// (Enter's '\r', Space's 0x20 on a tile) was queued before the close
+    /// ran. The panes are armed first so none of them forwards it. A tile's
+    /// ItemClick cannot say which key raised it, if any, so it arms for
+    /// whichever close key is down; a mouse click arms nothing.
+    /// </summary>
+    private void Choose(TabModel tab, Windows.System.VirtualKey? key)
+    {
+        ConsumedCloseKey.RaiseFor(key);
+        TabChosen?.Invoke(this, tab);
+    }
+
+    /// <summary>Escape's way out: see <see cref="Choose"/>. Its character is 0x1B.</summary>
+    private void Dismiss(Windows.System.VirtualKey key)
+    {
+        ConsumedCloseKey.Raise(key);
+        Dismissed?.Invoke(this, EventArgs.Empty);
+    }
+
 #if TESTSEAM
     /// <summary>A key pressed in the overview, through the real handler, for the test seam.</summary>
     internal bool TestSeamKey(Windows.System.VirtualKey key) => HandleKey(key);
+
+    /// <summary>The selected tile's ItemClick, which a key or a mouse can raise.</summary>
+    internal bool TestSeamTileClick()
+    {
+        if (TilesView.SelectedItem is not UIElement tile || !_tabByTile.TryGetValue(tile, out var tab))
+            return false;
+        Choose(tab, key: null);
+        return true;
+    }
 
     /// <summary>
     /// Whether keyboard focus is inside the overview, which is where the

@@ -28,6 +28,9 @@ internal static class CheatSheetLauncher
             var defaults = configService.EnumerateDefaultKeybinds();
             var catalog = KeybindCatalog.Build(binds, defaults);
             var dialog = new CheatSheetDialog(catalog, ownerHwnd) { XamlRoot = root };
+            // Opened from a window's chord, the sheet closes on Enter or
+            // Escape back onto that window's pane.
+            Ghostty.Input.ConsumedCloseKey.Watch(dialog);
             await dialog.ShowAsync();
         }
         catch (Exception ex)

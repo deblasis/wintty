@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Ghostty.Core;
 using Ghostty.Core.Tabs;
 using Ghostty.Core.Windows;
+using Ghostty.Input;
 using Ghostty.Services;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
@@ -2756,6 +2757,20 @@ internal sealed partial class VerticalTabStrip : UserControl
             return;
         }
 
+        ActivateFromNavSelection(tab);
+    }
+
+    /// <summary>
+    /// A body row's selection, which MUXC raises for a click, an arrow key,
+    /// and Enter or Space on a focused row. Activation hands focus to the
+    /// tab's pane; for Enter or Space the key's character was queued before
+    /// MUXC ran, so the panes are armed for whichever close key is down (an
+    /// arrow or a click arms nothing).
+    /// </summary>
+    private void ActivateFromNavSelection(TabModel tab)
+    {
+        ConsumedCloseKey.RaiseForHeldKeys();
+
         _syncing = true;
         try { _manager.Activate(tab); }
         finally { _syncing = false; }
@@ -2764,6 +2779,20 @@ internal sealed partial class VerticalTabStrip : UserControl
         RecolorNavItems();
         RefreshSelectionChrome();
     }
+
+#if TESTSEAM
+    /// <summary>A body row's selection through the strip's own activation.</summary>
+    internal void TestSeamNavSelect(TabModel tab) => ActivateFromNavSelection(tab);
+
+    /// <summary>A pinned row's Enter or Space through the row's own act.</summary>
+    internal bool TestSeamShelfKey(TabModel tab, Windows.System.VirtualKey key)
+    {
+        if (key is not (Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)) return false;
+        if (RowElementOf(tab) is null) return false;
+        ActivateShelfFromKey(tab, key);
+        return true;
+    }
+#endif
 
     /// <summary>
     /// The activation a shelf row gets, from a click (the drag machine's
@@ -2785,6 +2814,18 @@ internal sealed partial class VerticalTabStrip : UserControl
         RefreshSelectionChrome();
     }
 
+    /// <summary>
+    /// A pinned row's Enter or Space. Activation hands focus to the tab's
+    /// pane, and the key's character ('\r' or 0x20) was queued before this
+    /// handler ran, so the panes are armed first or the one that takes focus
+    /// types it into its shell.
+    /// </summary>
+    private void ActivateShelfFromKey(TabModel tab, Windows.System.VirtualKey key)
+    {
+        ConsumedCloseKey.Raise(key);
+        ActivateFromShelf(tab);
+    }
+
     private void OnPinnedRowKeyDown(object sender, KeyRoutedEventArgs e)
     {
         // A drag owns the keyboard (Escape cancels it) and a drag never
@@ -2795,7 +2836,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             case Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space:
                 e.Handled = true;
-                ActivateFromShelf(tab);
+                ActivateShelfFromKey(tab, e.Key);
                 break;
             // Two axes, because the band has two. A step of one along the
             // row for Left/Right, a step of one COLUMN for Up/Down -- which

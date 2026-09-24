@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using Ghostty.Core.Notifications;
+using Ghostty.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -227,7 +228,7 @@ public sealed partial class NotificationHost : UserControl
                 if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)
                 {
                     e.Handled = true;
-                    _service?.Dismiss(notice);
+                    DismissFromKey(notice, e.Key);
                 }
             };
             // Loaded is not one-shot: WinUI can refire it on a reparent or a
@@ -262,12 +263,44 @@ public sealed partial class NotificationHost : UserControl
             // removal path -- firing after the user has since clicked into a
             // pane, opened Settings, or started renaming a tab does not yank
             // focus back out from under them.
-            var returnFocus = notice.FocusOnShow && BarHasFocus(bar);
+            var hadFocus = BarHasFocus(bar);
+            var returnFocus = notice.FocusOnShow && hadFocus;
+            // A focused bar leaving hands focus to a pane, either through
+            // FocusReturn or through the framework's own pick when its
+            // element goes. When a key made it leave (Enter or Space on an
+            // action button or the close button, inside that keystroke)
+            // the key's character is already queued behind it.
+            if (hadFocus) ConsumedCloseKey.RaiseForHeldKeys();
             Stack.Children.Remove(bar);
             UpdateVisibility();
             if (returnFocus) FocusReturn?.Invoke();
         }
     }
+
+    /// <summary>
+    /// A focused bar's own Enter or Space, which dismisses it. The dismiss
+    /// hands focus back to a pane inside the keystroke, so the panes are
+    /// armed for the key's character before the notice goes.
+    /// </summary>
+    private void DismissFromKey(Notice notice, Windows.System.VirtualKey key)
+    {
+        ConsumedCloseKey.Raise(key);
+        _service?.Dismiss(notice);
+    }
+
+#if TESTSEAM
+    /// <summary>
+    /// Enter or Space on the bar showing <paramref name="notice"/>, through
+    /// the bar's own act. False when no bar shows it or it takes no keys.
+    /// </summary>
+    internal bool TestSeamBarKey(Notice notice, Windows.System.VirtualKey key)
+    {
+        if (!notice.FocusOnShow || !_bars.ContainsKey(notice)) return false;
+        if (key is not (Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)) return false;
+        DismissFromKey(notice, key);
+        return true;
+    }
+#endif
 
     /// <summary>
     /// Whether <paramref name="bar"/>, or something inside it, currently

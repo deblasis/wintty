@@ -128,6 +128,10 @@ internal sealed class DialogClipboardConfirmer : IClipboardConfirmer
                         DefaultButton = ContentDialogButton.Close, // Safety default: Cancel
                         XamlRoot = xamlRoot,
                     };
+                    // Enter answers this dialog (Cancel is the default) and
+                    // hands focus back to the pane that asked; its '\r' must
+                    // not follow and submit that pane's prompt line.
+                    Ghostty.Input.ConsumedCloseKey.Watch(dialog);
 
                     var result = await dialog.ShowAsync();
                     var accepted = result == ContentDialogResult.Primary;

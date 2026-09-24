@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -1061,6 +1062,10 @@ internal static class TestSeam
 
             case "palette-type":
             {
+                // A light dismiss can have closed a palette an earlier step
+                // opened: re-open one instead of sampling "closed" once,
+                // and say so in the readout.
+                var paletteRecovered = await EnsurePaletteOpenAsync(window);
                 if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
                 // Into the search box, so the view model hears it the way it
                 // hears typing. perCharMs > 0 types it a character at a time,
@@ -1114,11 +1119,15 @@ internal static class TestSeam
                     return Error(op, "the theme filter did not settle within 5s");
                 }
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return PaletteThemeJson(window, op, atLastKey);
+                return PaletteThemeJson(window, op, atLastKey, paletteRecovered);
             }
 
             case "palette-key":
             {
+                // A light dismiss can have closed a palette an earlier step
+                // opened: re-open one instead of sampling "closed" once,
+                // and say so in the readout.
+                var paletteRecovered = await EnsurePaletteOpenAsync(window);
                 if (!window.TestSeamPaletteOpen) return Error(op, "the palette is not open");
                 Windows.System.VirtualKey? key = ArgString(args, "key") switch
                 {
@@ -1159,7 +1168,81 @@ internal static class TestSeam
                 if (!await WaitForPaletteSettledAsync(window))
                     return Error(op, "the theme preview did not settle within 5s");
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
-                return PaletteThemeJson(window, op);
+                return PaletteThemeJson(window, op, recovered: paletteRecovered);
+            }
+
+            case "consumed-close-arms":
+                // Reads only: which close keys every pane in the window is
+                // armed for right now.
+                return ConsumedCloseArmsJson(window, manager, op);
+
+            case "consumed-close-drive":
+            {
+                // One surface's consumed close, through the surface's own
+                // act: the same method its KeyDown, Click or ItemClick
+                // reaches, one call below the framework. No OS input.
+                // "held" names the key a Click, ItemClick or framework close
+                // would have been pressed with, since none is down here.
+                var surface = ArgString(args, "surface") ?? "";
+                var held = ParseCloseChars(ArgString(args, "held"));
+                Ghostty.Input.ConsumedCloseKey.TestSeamHeldKeys = held;
+                string? refused;
+                bool paletteRecovered;
+                try
+                {
+                    (refused, paletteRecovered) =
+                        await DriveConsumedCloseAsync(window, manager, surface, args);
+                    if (refused is not null) return Error(op, refused);
+                }
+                finally
+                {
+                    Ghostty.Input.ConsumedCloseKey.TestSeamHeldKeys = null;
+                }
+                return ConsumedCloseArmsJson(window, manager, op, paletteRecovered);
+            }
+
+            case "terminal-character":
+            {
+                // One character through a pane's real post-guard character
+                // decision, in process: the handler half of a WM_CHAR. A
+                // character the arm does not drop reaches the shell, which
+                // is send-text's power, so it shares send-text's opt-in.
+                if (!_inputAllowed)
+                    return Error(op, $"terminal-character is off; set {InputEnvVar}=1 to arm it");
+                var text = ArgString(args, "char");
+                if (string.IsNullOrEmpty(text)) return Error(op, "terminal-character needs char");
+                if (LeafTerminal(manager, args) is not { } terminal)
+                    return Error(op, "no such tab or leaf");
+                var before = terminal.TestSeamConsumedCloseArm;
+                var suppressed = terminal.TestSeamCharacter(text[0]);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteString("armedBefore", before.ToString());
+                    json.WriteBoolean("suppressed", suppressed);
+                    json.WriteString("armed", terminal.TestSeamConsumedCloseArm.ToString());
+                    json.WriteEndObject();
+                });
+            }
+
+            case "terminal-retire":
+            {
+                // The retire a real key press performs as OnKeyDown's first
+                // statement, on one pane.
+                if (LeafTerminal(manager, args) is not { } terminal)
+                    return Error(op, "no such tab or leaf");
+                var wasArmed = terminal.RetireStaleCharacterSuppress();
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("wasArmed", wasArmed);
+                    json.WriteString("armed", terminal.TestSeamConsumedCloseArm.ToString());
+                    json.WriteEndObject();
+                });
             }
 
             case "get-theme":
@@ -1370,9 +1453,12 @@ internal static class TestSeam
     /// The theme readout: the file's `theme`, whether a palette preview is
     /// up and which, the terminal's colours as the live native config states
     /// them, the chrome's resolved colours, and the palette UI's own state.
+    /// `recovered` says the palette was re-opened for this read after a
+    /// light dismiss.
     /// </summary>
     private static string PaletteThemeJson(
-        MainWindow window, string op, (bool Pending, int Count, int Applies)? atLastKey = null)
+        MainWindow window, string op, (bool Pending, int Count, int Applies)? atLastKey = null,
+        bool recovered = false)
         => Json(json =>
         {
             var config = window.TestSeamConfig;
@@ -1380,6 +1466,7 @@ internal static class TestSeam
             json.WriteStartObject();
             json.WriteBoolean("ok", true);
             json.WriteString("op", op);
+            if (recovered) json.WriteBoolean("recovered", true);
             if (atLastKey is { } last)
             {
                 json.WriteStartObject("atLastKey");
@@ -1892,6 +1979,274 @@ internal static class TestSeam
             node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(node) > 0
                 ? Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, 0)
                 : null;
+        }
+        return null;
+    }
+
+    /// <summary>"return", "escape", "space" (comma-separated for more than one).</summary>
+    private static Ghostty.Core.Input.ConsumedCloseChars? ParseCloseChars(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        var chars = Ghostty.Core.Input.ConsumedCloseChars.None;
+        foreach (var part in text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            chars |= part switch
+            {
+                "return" or "enter" => Ghostty.Core.Input.ConsumedCloseChars.Return,
+                "escape" => Ghostty.Core.Input.ConsumedCloseChars.Escape,
+                "space" => Ghostty.Core.Input.ConsumedCloseChars.Space,
+                _ => Ghostty.Core.Input.ConsumedCloseChars.None,
+            };
+        }
+        return chars;
+    }
+
+    private static Windows.System.VirtualKey? ParseCloseKey(string? text) => text switch
+    {
+        "enter" => Windows.System.VirtualKey.Enter,
+        "escape" => Windows.System.VirtualKey.Escape,
+        "space" => Windows.System.VirtualKey.Space,
+        _ => null,
+    };
+
+    /// <summary>
+    /// The terminal at args.tab (default the active tab) and args.leaf, a
+    /// leaf index in PaneTree order (default the tab's active leaf).
+    /// </summary>
+    private static Ghostty.Controls.TerminalControl? LeafTerminal(TabManager manager, JsonElement args)
+    {
+        var tab = TabAt(manager, ArgInt(args, "tab", manager.IndexOf(manager.ActiveTab)));
+        if (tab is null) return null;
+        var leafIndex = ArgInt(args, "leaf", -1);
+        if (leafIndex < 0) return tab.PaneHost.ActiveLeaf.Terminal();
+        var leaves = Ghostty.Core.Panes.PaneTree.Leaves(((PaneHost)tab.PaneHost).RootNode).ToList();
+        return leafIndex < leaves.Count ? leaves[leafIndex].Terminal() : null;
+    }
+
+    /// <summary>Every pane's arm, by tab and leaf, and which surfaces are up.</summary>
+    private static string ConsumedCloseArmsJson(
+        MainWindow window, TabManager manager, string op, bool paletteRecovered = false) => Json(json =>
+    {
+        json.WriteStartObject();
+        json.WriteBoolean("ok", true);
+        json.WriteString("op", op);
+        if (paletteRecovered) json.WriteBoolean("recovered", true);
+        json.WriteBoolean("paletteOpen", window.TestSeamPaletteOpen);
+        json.WriteBoolean("overviewOpen", window.TestSeamOverviewOpen);
+        json.WriteNumber("activeTab", manager.IndexOf(manager.ActiveTab));
+        json.WriteStartArray("panes");
+        for (var t = 0; t < manager.Tabs.Count; t++)
+        {
+            var leaves = Ghostty.Core.Panes.PaneTree.Leaves(((PaneHost)manager.Tabs[t].PaneHost).RootNode).ToList();
+            for (var l = 0; l < leaves.Count; l++)
+            {
+                json.WriteStartObject();
+                json.WriteNumber("tab", t);
+                json.WriteNumber("leaf", l);
+                json.WriteString("armed", leaves[l].Terminal().TestSeamConsumedCloseArm.ToString());
+                json.WriteEndObject();
+            }
+        }
+        json.WriteEndArray();
+        json.WriteEndObject();
+    });
+
+    /// <summary>
+    /// Waits for the command palette to be open: true when it is open by
+    /// the budget's end. Open is synchronous, so a false here means a
+    /// toggle that failed to open one, not a slow one.
+    /// </summary>
+    private static async Task<bool> WaitForPaletteOpenAsync(MainWindow window)
+    {
+        for (var i = 0; i < 200 && !window.TestSeamPaletteOpen; i++)
+            await Task.Delay(25);
+        return window.TestSeamPaletteOpen;
+    }
+
+    /// <summary>
+    /// The palette, open. A light dismiss (a press outside the popup, a
+    /// focus disturbance) can close a palette an earlier step opened, and
+    /// a driver that then samples once reads "closed" and fails a scenario
+    /// whose product behaviour is fine. Re-open one instead and say so, so
+    /// a driver can tell a recovery from a palette that survived. Returns
+    /// false when the palette was already open or could not be opened.
+    /// </summary>
+    private static async Task<bool> EnsurePaletteOpenAsync(MainWindow window)
+    {
+        if (window.TestSeamPaletteOpen) return false;
+        window.TestSeamTogglePalette();
+        var open = await WaitForPaletteOpenAsync(window);
+        if (open) await WaitForLowPriorityAsync(window.DispatcherQueue);
+        return open;
+    }
+
+    /// <summary>
+    /// Drives one surface's consumed close. Returns a refusal, or null when
+    /// the close ran, with whether the palette had to be re-opened. Each
+    /// case reaches the act the surface's own handler reaches, so a surface
+    /// whose act stops raising the signal fails here.
+    /// </summary>
+    private static async Task<(string? Refusal, bool PaletteRecovered)> DriveConsumedCloseAsync(
+        MainWindow window, TabManager manager, string surface, JsonElement args)
+    {
+        var key = ParseCloseKey(ArgString(args, "key"));
+        var paletteRecovered = false;
+        switch (surface)
+        {
+            case "palette":
+            {
+                // key=escape or enter: the search box's own key handler.
+                // Enter with no match selected runs nothing, which is the
+                // point: the signal comes before the act. A light dismiss
+                // can have closed a palette an earlier step opened: re-open
+                // one instead of sampling "closed" once, and say it in the
+                // ack.
+                paletteRecovered = await EnsurePaletteOpenAsync(window);
+                if (!window.TestSeamPaletteOpen) return ("the palette is not open", false);
+                if (key is not ({ } k and (Windows.System.VirtualKey.Escape or Windows.System.VirtualKey.Enter)))
+                    return ("palette takes key=escape or key=enter", false);
+                window.TestSeamPaletteUI.TestSeamKey(k);
+                break;
+            }
+            case "palette-item":
+                // An invoked result row: ItemClick's act, with "held" naming
+                // the key that invoked it.
+                paletteRecovered = await EnsurePaletteOpenAsync(window);
+                if (!window.TestSeamPaletteOpen) return ("the palette is not open", false);
+                window.TestSeamPaletteUI.TestSeamActivate();
+                break;
+            case "search":
+            {
+                // key=escape: the needle box's and the bar's Escape. Without
+                // a key: the close button's Click, with "held".
+                var terminal = LeafTerminal(manager, args);
+                if (terminal is null) return ("no such tab or leaf", false);
+                terminal.OpenSearch();
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                if (key == Windows.System.VirtualKey.Escape) terminal.TestSeamSearchBar.TestSeamNeedleKey(Windows.System.VirtualKey.Escape, shift: false);
+                else if (key is null) terminal.TestSeamSearchBar.TestSeamCloseClick();
+                else return ("search takes key=escape or no key (the close button)", false);
+                break;
+            }
+            case "overview":
+            {
+                // key=escape or enter: the overview's KeyDown. Without a
+                // key: a tile's ItemClick, with "held".
+                if (!window.TestSeamOverviewOpen)
+                {
+                    window.TestSeamShowOverview();
+                    await WaitForLowPriorityAsync(window.DispatcherQueue);
+                }
+                if (!window.TestSeamOverviewOpen) return ("the overview did not open", false);
+                var ran = key is { } k
+                    ? window.TestSeamOverviewUI.TestSeamKey(k)
+                    : window.TestSeamOverviewUI.TestSeamTileClick();
+                if (!ran) return ("the overview had no selected tile to choose", false);
+                break;
+            }
+            case "shelf":
+            {
+                // key=enter or space on a pinned row of the vertical strip.
+                var strip = window.TestSeamVerticalStrip;
+                if (strip is null) return ("the vertical strip is not the active host", false);
+                var tab = TabAt(manager, ArgInt(args, "index", -1));
+                if (tab is null) return ("no tab at index", false);
+                if (key is not { } k || !strip.TestSeamShelfKey(tab, k))
+                    return ("shelf takes a pinned tab's index and key=enter or key=space", false);
+                break;
+            }
+            case "strip-select":
+            {
+                // A tab row's selection, the act MUXC's (vertical) or
+                // TabView's (horizontal) Enter and Space reach, with "held".
+                var tab = TabAt(manager, ArgInt(args, "index", -1));
+                if (tab is null) return ("no tab at index", false);
+                if (window.TestSeamVerticalStrip is { } strip) strip.TestSeamNavSelect(tab);
+                else if (window.TestSeamTabHost is { } host) host.TestSeamSelect(tab);
+                else return ("no tab strip", false);
+                break;
+            }
+            case "notice":
+            {
+                // A notice raised from a command: its bar takes focus. With
+                // key=enter or space, the bar's own KeyDown act; without a
+                // key, a dismiss while the bar holds focus (an action button
+                // or the close button), with "held".
+                if (Ghostty.App.NotificationService is not { } service) return ("no notification service", false);
+                var notice = new Ghostty.Core.Notifications.Notice
+                {
+                    Title = "consumed-close seam notice",
+                    FocusOnShow = true,
+                };
+                service.Show(notice);
+                for (var i = 0; i < 20 && !NoticeFocused(window); i++)
+                    await Task.Delay(25);
+                if (!NoticeFocused(window))
+                {
+                    service.Dismiss(notice);
+                    return ("the notice bar never took focus", false);
+                }
+                if (key is { } k)
+                {
+                    if (!window.TestSeamNotificationHost.TestSeamBarKey(notice, k))
+                        return ("the notice bar refused the key", false);
+                }
+                else
+                {
+                    service.Dismiss(notice);
+                }
+                break;
+            }
+            case "rename-dialog":
+            {
+                // The tab rename dialog, answered with "held" (Enter commits,
+                // Escape cancels): the dialog's own close.
+                _ = window.TestSeamPromptTabTitle();
+                Microsoft.UI.Xaml.Controls.ContentDialog? dialog = null;
+                for (var i = 0; i < 40 && dialog is null; i++)
+                {
+                    await WaitForLowPriorityAsync(window.DispatcherQueue);
+                    dialog = OpenDialog(window);
+                }
+                if (dialog is null) return ("the rename dialog did not open", false);
+                dialog.Hide();
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                break;
+            }
+            case "pane-menu":
+            {
+                // The pane context menu, dismissed with "held".
+                var flyout = window.TestSeamOpenPaneMenu();
+                for (var i = 0; i < 40 && !flyout.IsOpen; i++)
+                    await WaitForLowPriorityAsync(window.DispatcherQueue);
+                if (!flyout.IsOpen) return ("the pane menu did not open", false);
+                flyout.Hide();
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                break;
+            }
+            default:
+                return ($"unknown surface '{surface}'", false);
+        }
+        await WaitForLowPriorityAsync(window.DispatcherQueue);
+        return (null, paletteRecovered);
+    }
+
+    private static bool NoticeFocused(MainWindow window)
+    {
+        for (Microsoft.UI.Xaml.DependencyObject? node = window.TestSeamFocusedElement; node is not null;
+             node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+        {
+            if (node is Microsoft.UI.Xaml.Controls.InfoBar) return true;
+        }
+        return false;
+    }
+
+    private static Microsoft.UI.Xaml.Controls.ContentDialog? OpenDialog(MainWindow window)
+    {
+        if (window.Content?.XamlRoot is not { } root) return null;
+        foreach (var popup in Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(root))
+        {
+            if (popup.Child is Microsoft.UI.Xaml.Controls.ContentDialog dialog) return dialog;
         }
         return null;
     }

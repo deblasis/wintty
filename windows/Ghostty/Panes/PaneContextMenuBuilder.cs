@@ -1,6 +1,7 @@
 using System;
 using Ghostty.Core.Input;
 using Ghostty.Core.Panes;
+using Ghostty.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -30,6 +31,9 @@ internal static class PaneContextMenuBuilder
             // overflow the hwnd; the OS still keeps it on-screen.
             ShouldConstrainToRootBounds = false,
         };
+        // Escape dismisses the menu and Enter runs an item; either hands
+        // focus back to the pane under it with the key's character queued.
+        ConsumedCloseKey.Watch(flyout);
 
         // Populate on each open so Copy's enabled state and the Zoom icon
         // reflect current selection/zoom. Opening fires before the flyout is
