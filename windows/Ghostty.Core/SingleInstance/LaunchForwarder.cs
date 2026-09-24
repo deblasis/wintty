@@ -96,7 +96,7 @@ public static class LaunchForwarder
                 return false;
             }
 
-            return TryAwaitAck(client, budget, out failure);
+            return TryAwaitAck(client, payload.Length, budget, out failure);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -140,6 +140,7 @@ public static class LaunchForwarder
 
     private static bool TryAwaitAck(
         NamedPipeClientStream client,
+        int payloadLength,
         TimeSpan budget,
         out Exception? failure)
     {
@@ -158,21 +159,37 @@ public static class LaunchForwarder
             // open itself; a current primary stopped reading at the end of
             // the payload and never sees the byte.
             //
-            // The write is synchronous on purpose. An overlapped write's
+            // The safe shape of this write has two terms. (1) A 1-byte
+            // write can only block when the peer's inbound buffer is
+            // exactly full, and below that buffer size it always has room:
+            // OutBufferSize is the peer's inbound buffer, and every real
+            // primary has drained the whole payload by now, because
+            // parsing it is how it reads. (2) An overlapped write's
             // managed completion needs a thread-pool slot, and a wait
             // capped at a few hundred milliseconds abandons the byte
             // exactly when the machine is busiest -- under a saturated
             // test host the completion once lost its race with the cap
-            // and the old primary parsed the payload cleanly. A 1-byte
-            // write into the outbound queue the peer has just drained
-            // completes in the kernel without any pool involvement, and
-            // once Write returns the byte is queued ahead of the
-            // end-of-stream this caller's dispose produces, so delivery
-            // order is guaranteed whatever the load.
+            // and the old primary parsed the payload cleanly. So under the
+            // buffer size the write is synchronous: a 1-byte write into
+            // the outbound queue the peer has just drained completes in
+            // the kernel without any pool involvement, and once Write
+            // returns the byte is queued ahead of the end-of-stream this
+            // caller's dispose produces, so delivery order is guaranteed
+            // whatever the load. At or over the buffer size term (1)
+            // fails -- a peer parked with the pipe full could hold the
+            // write, and the thread running the launching process's UI,
+            // forever -- so there the old bounded write stays: dropping
+            // the byte costs the old primary one doubled window in a case
+            // that takes a hostile or wedged peer plus a 64 KiB command
+            // line, while hanging the launcher costs it every launch.
             try
             {
                 var cancel = new[] { LaunchRequest.Cancel };
-                client.Write(cancel, 0, cancel.Length);
+                if (payloadLength < client.OutBufferSize)
+                    client.Write(cancel, 0, cancel.Length);
+                else
+                    client.WriteAsync(cancel, 0, cancel.Length)
+                        .Wait(TimeSpan.FromMilliseconds(500));
             }
             catch { /* the primary may already be gone; the launch is the fallback's now */ }
 

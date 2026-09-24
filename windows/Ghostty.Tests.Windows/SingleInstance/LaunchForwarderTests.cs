@@ -243,6 +243,94 @@ public sealed class LaunchForwarderTests
         await reader;
     }
 
+    /// <summary>
+    /// The cancel byte's one residual hazard: a 1-byte write can only block
+    /// when the peer's inbound buffer is EXACTLY full, which takes a
+    /// payload at least as large as that buffer AND a peer that stopped
+    /// reading mid-payload. Every real primary has drained the whole
+    /// payload before the cancel write (parsing it is how it reads), but a
+    /// hostile same-user process can arrange the full buffer exactly, and
+    /// TryForward runs on the launching process's UI thread. So the
+    /// oversize case must not use the unbounded synchronous write: the peer
+    /// here reads precisely payload-length-minus-buffer bytes -- the amount
+    /// that leaves the pipe full with the payload write just completed --
+    /// and then parks, holding the connection. The forward must still
+    /// return.
+    /// </summary>
+    [Fact]
+    public async Task OversizePayload_PeerParkedAtTheBufferEdge_CannotHangTheForward()
+    {
+        var pipe = UniquePipeName();
+        var peerAtEdge = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePeer = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var request = new LaunchRequest(
+            @"C:\wd", new[] { "Wintty.exe", new string('x', 68 * 1024) });
+        var payload = Encoding.UTF8.GetBytes(request.Serialize());
+
+        // A hostile same-user peer: accept, read exactly the number of
+        // bytes that leaves the pipe's inbound buffer exactly full once the
+        // payload write completes, then stop reading forever and hold the
+        // connection open. Never reading past the edge (the requested count
+        // shrinks as it goes) is what makes the arrangement deterministic
+        // instead of a race.
+        var peer = Task.Run(async () =>
+        {
+            using var server = SecureNamedPipe.CreateServer(pipe, PipeDirection.InOut);
+            await server.WaitForConnectionAsync();
+            var edge = payload.Length - server.InBufferSize;
+            var buffer = new byte[4096];
+            var total = 0;
+            while (total < edge)
+            {
+                var want = Math.Min(buffer.Length, edge - total);
+                var read = await server.ReadAsync(buffer.AsMemory(0, want));
+                if (read == 0)
+                    throw new IOException("client left before the buffer edge");
+                total += read;
+            }
+            peerAtEdge.TrySetResult();
+            await releasePeer.Task; // parked: buffer full, nothing more read, no byte back
+        });
+
+        try
+        {
+            // Five seconds, like HungPrimary: this budget also caps the
+            // payload write's managed completion, which is thread-pool
+            // scheduled, and the payload here is the biggest one any test
+            // writes.
+            var ackBudget = TimeSpan.FromSeconds(5);
+            Exception? failure = null;
+            var forwarded = Task.Run(() =>
+                LaunchForwarder.TryForward(pipe, request, out failure, ackTimeout: ackBudget));
+
+            Assert.True(
+                peerAtEdge.Task.Wait(TimeSpan.FromSeconds(60)),
+                "the peer never reached the buffer edge");
+
+            // The subject is that the forward RETURNS. Against the
+            // unbounded synchronous cancel write it never does -- the byte
+            // sits in the write forever, on the launching process's UI
+            // thread. The 60s is the hang guard that catches exactly that;
+            // it measures nothing else.
+            Assert.True(
+                forwarded.Wait(TimeSpan.FromSeconds(60)),
+                "the forward hung on the cancel byte: an oversize payload with a " +
+                "peer parked at the buffer edge must not block the launching process");
+            Assert.False(forwarded.Result, "the parked peer never acknowledges");
+            Assert.Null(failure); // a budget timeout, not an I/O failure
+        }
+        finally
+        {
+            releasePeer.TrySetResult();
+            _ = peer.ContinueWith(
+                t => _ = t.Exception,
+                TaskContinuationOptions.OnlyOnFaulted);
+        }
+    }
+
     private static class AsyncHelpers
     {
         public static async Task<T> WithTimeout<T>(Task<T> task, TimeSpan budget)
