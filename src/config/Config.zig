@@ -1188,7 +1188,10 @@ palette: Palette = .{},
 ///     opens, and nowhere else. New tabs and splits in that window follow
 ///     the rules below. As with Windows Terminal's `wt <commandline>`, a
 ///     saved session is still restored, and the command gets a window of
-///     its own next to it, which is saved like any other window.
+///     its own next to it, which is saved like any other window. Unlike
+///     Windows Terminal, the command itself is not saved: when that pane is
+///     restored it opens its profile, or a plain shell, and never runs the
+///     command again.
 ///
 ///   * If `default-profile` is set, every other new pane runs that profile,
 ///     and this `command` is not used.
@@ -1214,10 +1217,10 @@ command: ?Command = null,
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.
 ///
-/// On Windows this is treated exactly like `-e` (which sets it): the first
-/// pane of a launch runs it, a saved session is still restored, and `-e`
-/// wins when both are given. A launch forwarded to a running instance does
-/// not use it.
+/// On Windows the first pane of a cold launch that restored no saved session
+/// runs it. When a session is restored it is not used, and no window is
+/// added for it. `-e` wins when both are given, and a launch forwarded to a
+/// running instance does not use it.
 ///
 /// After the first terminal surface is created (or closed), there is no
 /// way to run this initial command again automatically. As such, setting

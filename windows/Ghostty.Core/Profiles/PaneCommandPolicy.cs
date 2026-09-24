@@ -101,10 +101,9 @@ public static class PaneCommandPolicy
     /// </summary>
     /// <remarks>
     /// <paramref name="initialCommand"/> is the config's <c>initial-command</c>,
-    /// passed only for a cold launch: it is the same request as <c>-e</c>
-    /// (<c>-e</c> is its command-line spelling), so it gets the same pane, and
-    /// <c>-e</c> wins when both are set. libghostty no longer applies it on
-    /// Windows, because the host owns the first pane.
+    /// passed only for a cold launch that restored nothing: it then gets the
+    /// pane <c>-e</c> would, and <c>-e</c> wins when both are set. libghostty
+    /// no longer applies it on Windows, because the host owns the first pane.
     /// </remarks>
     public static ProfileSnapshot? LaunchFirstPane(
         ProfileSnapshot? defaultProfile,

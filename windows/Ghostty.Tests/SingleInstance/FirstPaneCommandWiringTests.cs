@@ -48,12 +48,12 @@ public sealed class FirstPaneCommandWiringTests
     {
         var launched = App.Method("OnLaunched");
 
-        // A launch command, from -e or initial-command, always gets a window,
-        // restored session or not; without one, a window opens only when
-        // nothing was restored.
+        // -e always gets a window, restored session or not. Without it (and
+        // so for initial-command) a window opens only when nothing was
+        // restored: initial-command never adds a window to a restored session.
         var wants = launched.DescendantNodes().OfType<VariableDeclaratorSyntax>()
             .Single(v => v.Identifier.ValueText == "launchWantsWindow");
-        Assert.Equal("coldCommand is not null || initialCommand is not null", wants.Initializer!.Value.ToString());
+        Assert.Equal("coldCommand is not null", wants.Initializer!.Value.ToString());
 
         var fresh = FreshWindow(launched);
         var guard = fresh.Ancestors().OfType<IfStatementSyntax>().First();

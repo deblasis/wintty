@@ -1155,11 +1155,13 @@ public partial class App : Application
         // (WindowEmperor::HandleCommandlineArgs restores every persisted
         // layout, then dispatches the command line). That window is an
         // ordinary one and is saved like the rest. `initial-command` from the
-        // config is the same request, and -e wins when both are set.
+        // config runs in the first pane of a cold launch that restored
+        // nothing; it never adds a window to a restored session, and -e wins
+        // when both are set.
         var coldCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(
             Environment.GetCommandLineArgs());
         var initialCommand = coldCommand is null ? _configService.ConfiguredInitialCommand : null;
-        var launchWantsWindow = coldCommand is not null || initialCommand is not null;
+        var launchWantsWindow = coldCommand is not null;
 
         var restoreState = honorJumpList ? null : _sessionManager.LoadForRestore();
         var restoredAny = restoreState is { Windows.Count: > 0 };
@@ -1190,9 +1192,11 @@ public partial class App : Application
         if (!honorJumpList && (!restoredAny || launchWantsWindow))
         {
             // The first pane runs -e in the caller's directory, as a forwarded
-            // launch does, else `initial-command`, else what any new pane runs
-            // (PaneCommandPolicy). Opened after the restored windows, so the
-            // command's window is the one in front, as in Windows Terminal.
+            // launch does, else `initial-command` (reachable only when nothing
+            // was restored, since only -e opens a window next to a restored
+            // session), else what any new pane runs (PaneCommandPolicy).
+            // Opened after the restored windows, so the command's window is
+            // the one in front, as in Windows Terminal.
             var window = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
                 showLaunchIcon: !restoredAny,
