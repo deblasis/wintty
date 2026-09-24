@@ -97,7 +97,11 @@ function Invoke-Scenario {
     Write-Host "== $Name" -ForegroundColor Cyan
     $s = $null
     try {
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -AllowInput -PrivateStateBase
+        # A caller that set WINTTY_STATE_BASE under %TEMP% keeps every
+        # scenario's logs there (Start-SeamSession adopts it), so it can run
+        # its own health check over the whole run; otherwise each scenario
+        # gets a private one.
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -AllowInput `n            -PrivateStateBase:([string]::IsNullOrWhiteSpace($env:WINTTY_STATE_BASE))
         [void](Seam $s @{ op = 'split'; orientation = 'vertical' })
         & $Setup $s
 
