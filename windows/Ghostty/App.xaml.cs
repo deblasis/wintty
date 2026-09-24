@@ -822,6 +822,12 @@ public partial class App : Application
             void RemoveNoColorFromEnv()
             {
                 Environment.SetEnvironmentVariable("NO_COLOR", null);
+                // New terminals start from a fresh logon environment
+                // (reload-env), which still carries a NO_COLOR set in the
+                // registry. This marker says the app stripped it on purpose,
+                // so the terminal's environment drops it too. Without it, a
+                // NO_COLOR simply absent at launch would read as stripped.
+                Environment.SetEnvironmentVariable("WINTTY_NO_COLOR_STRIPPED", "1");
                 noColorLog.LogInformation(
                     "Removed NO_COLOR from the environment so terminal colors work.");
             }

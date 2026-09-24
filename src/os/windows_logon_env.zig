@@ -17,9 +17,11 @@
 //!   - the test harness's variables (`XDG_CONFIG_HOME` and every `WINTTY_*`
 //!     key), and only while the harness marker `WINTTY_TEST_CONFIG` is set,
 //!     so a test run's panes stay inside the run;
-//!   - a removed `NO_COLOR`: the app strips it from its own environment when
-//!     the user asks for color, and that choice must reach new terminals even
-//!     when the user's registry still sets it.
+//!   - a stripped `NO_COLOR`: when the app removes it from its own environment
+//!     to turn color on, it also sets `WINTTY_NO_COLOR_STRIPPED`, and new
+//!     terminals then drop the registry's NO_COLOR too. A NO_COLOR that was
+//!     only absent when Wintty started is not a strip: one set in the system
+//!     settings afterwards reaches new terminals.
 //!
 //! Everything a terminal adds on top (TERM, GHOSTTY_RESOURCES_DIR, the `env`
 //! config entries) is applied later by termio, exactly as before.
@@ -36,17 +38,21 @@ const EnvMap = std.process.Environ.Map;
 /// the harness's own variables are carried into new terminals.
 pub const test_marker = "WINTTY_TEST_CONFIG";
 
+/// Set in the app's own environment when it strips NO_COLOR on purpose.
+pub const no_color_stripped = "WINTTY_NO_COLOR_STRIPPED";
+
 /// True for the variables the test harness uses to keep a run isolated:
 /// the config root and Wintty's own `WINTTY_*` keys (state base, daemon
 /// pipe, log and data locations, the marker itself).
 pub fn isTestLever(key: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(key, no_color_stripped)) return false;
     if (std.ascii.eqlIgnoreCase(key, "XDG_CONFIG_HOME")) return true;
     return key.len > "WINTTY_".len and std.ascii.startsWithIgnoreCase(key, "WINTTY_");
 }
 
 /// Compose a terminal's base environment: `fresh` (the logon block), plus
 /// the test levers from `process` while the harness marker is set, minus
-/// `NO_COLOR` when the app has removed it from `process`. Pure, so the rule
+/// `NO_COLOR` when the app has stripped it. Pure, so the rule
 /// is testable without a logon block. The result is allocated with `alloc`
 /// and owned by the caller.
 pub fn compose(
@@ -64,7 +70,7 @@ pub fn compose(
         }
     }
 
-    if (process.get("NO_COLOR") == null) _ = out.orderedRemove("NO_COLOR");
+    if (process.get(no_color_stripped) != null) _ = out.orderedRemove("NO_COLOR");
 
     return out;
 }
@@ -149,15 +155,26 @@ const userenv = struct {
 
     const LOAD_LIBRARY_SEARCH_SYSTEM32: std.os.windows.DWORD = 0x0000_0800;
 
+    var create_addr = std.atomic.Value(usize).init(0);
+    var destroy_addr = std.atomic.Value(usize).init(0);
+
     /// The two entry points, or null when userenv.dll or either export is
-    /// missing. The module stays loaded for the life of the process, which
-    /// is what a system DLL loaded by name normally does anyway.
+    /// missing. Resolved once per process from System32 only, so a new
+    /// terminal does not take another module reference each time; racing
+    /// callers store the same addresses.
     fn createEnvironmentBlock() ?Fns {
-        const name = std.unicode.utf8ToUtf16LeStringLiteral("userenv.dll");
-        const module = kernel32.LoadLibraryExW(name, null, LOAD_LIBRARY_SEARCH_SYSTEM32) orelse return null;
-        const create = kernel32.GetProcAddress(module, "CreateEnvironmentBlock") orelse return null;
-        const destroy = kernel32.GetProcAddress(module, "DestroyEnvironmentBlock") orelse return null;
-        return .{ .create = @ptrCast(create), .destroy = @ptrCast(destroy) };
+        if (create_addr.load(.acquire) == 0 or destroy_addr.load(.acquire) == 0) {
+            const name = std.unicode.utf8ToUtf16LeStringLiteral("userenv.dll");
+            const module = kernel32.LoadLibraryExW(name, null, LOAD_LIBRARY_SEARCH_SYSTEM32) orelse return null;
+            const create = kernel32.GetProcAddress(module, "CreateEnvironmentBlock") orelse return null;
+            const destroy = kernel32.GetProcAddress(module, "DestroyEnvironmentBlock") orelse return null;
+            create_addr.store(@intFromPtr(create), .release);
+            destroy_addr.store(@intFromPtr(destroy), .release);
+        }
+        return .{
+            .create = @ptrFromInt(create_addr.load(.acquire)),
+            .destroy = @ptrFromInt(destroy_addr.load(.acquire)),
+        };
     }
 };
 
@@ -230,28 +247,31 @@ test "compose carries the harness variables only under the marker" {
     }
 }
 
-test "compose honours a NO_COLOR the app removed" {
+test "compose drops NO_COLOR only when the app stripped it" {
     const alloc = testing.allocator;
     var fresh = try mapOf(alloc, &.{.{ "NO_COLOR", "1" }});
     defer fresh.deinit();
 
-    var stripped = try mapOf(alloc, &.{});
+    // The app stripped it (and said so): the registry's NO_COLOR goes too.
+    var stripped = try mapOf(alloc, &.{.{ no_color_stripped, "1" }});
     defer stripped.deinit();
     {
         var out = try compose(alloc, &fresh, &stripped);
         defer out.deinit();
         try testing.expect(out.get("NO_COLOR") == null);
+        try testing.expect(out.get(no_color_stripped) == null);
     }
 
-    var kept = try mapOf(alloc, &.{.{ "NO_COLOR", "1" }});
-    defer kept.deinit();
+    // Absent at launch, no strip: a NO_COLOR the user set in the system
+    // settings since reaches the terminal, as in a Windows Terminal tab.
+    var absent = try mapOf(alloc, &.{});
+    defer absent.deinit();
     {
-        var out = try compose(alloc, &fresh, &kept);
+        var out = try compose(alloc, &fresh, &absent);
         defer out.deinit();
         try testing.expectEqualStrings("1", out.get("NO_COLOR").?);
     }
 }
-
 test "compose never adds NO_COLOR the logon block lacks" {
     const alloc = testing.allocator;
     var fresh = try mapOf(alloc, &.{.{ "PATH", "C:\\Windows" }});
@@ -271,14 +291,27 @@ test "isTestLever" {
     try testing.expect(!isTestLever("WINTTY_"));
     try testing.expect(!isTestLever("PATH"));
     try testing.expect(!isTestLever("XDG_DATA_HOME"));
+    try testing.expect(!isTestLever(no_color_stripped));
 }
 
 test "freshLogonMap reads a real logon block" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    // A variable only this process holds. bInherit FALSE means a logon block
+    // never carries it; with TRUE (this process's block layered on, so a
+    // launcher's `FOO=1` reaches every terminal) SystemRoot and PATH would
+    // still be there, and only this probe fails.
+    const k32 = struct {
+        extern "kernel32" fn SetEnvironmentVariableW(n: [*:0]const u16, v: ?[*:0]const u16) callconv(.winapi) std.os.windows.BOOL;
+    };
+    const probe = std.unicode.utf8ToUtf16LeStringLiteral("WINDOWS_LOGON_ENV_LAUNCHER_ONLY");
+    _ = k32.SetEnvironmentVariableW(probe, std.unicode.utf8ToUtf16LeStringLiteral("1"));
+    defer _ = k32.SetEnvironmentVariableW(probe, null);
+
     const alloc = testing.allocator;
     var map = try freshLogonMap(alloc);
     defer map.deinit();
     // Every logon block names the system root and carries a PATH.
     try testing.expect(map.get("SystemRoot") != null);
     try testing.expect(map.get("PATH") != null);
+    try testing.expect(map.get("WINDOWS_LOGON_ENV_LAUNCHER_ONLY") == null);
 }

@@ -125,6 +125,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public event Action<IConfigService>? ConfigChanged;
     public string ConfigFilePath { get; }
     public bool AutoReloadEnabled { get; private set; }
+    public bool ReloadEnvironment { get; private set; } = true;
     public bool SettingsUiEnabled { get; private set; }
     public double BackgroundOpacity { get; private set; } = 1.0;
 
@@ -1295,6 +1296,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private void ReadFlagsCore()
     {
         AutoReloadEnabled = GetBool("auto-reload-config");
+        // Read from the parsed config like every Zig key, so includes and
+        // CLI flags decide it the same way for the app's own terminals
+        // (libghostty) and everything the app builds itself.
+        ReloadEnvironment = GetBool("reload-env");
         // windows-settings-ui is a fork-added Zig field, so libghostty
         // parses it and there is no unknown-field diagnostic to suppress;
         // that is why it is deliberately absent from WindowsOnlyKeys. It

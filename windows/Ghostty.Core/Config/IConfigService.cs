@@ -20,6 +20,13 @@ public interface IConfigService : IDisposable
     /// <summary>Whether auto-reload-config is enabled.</summary>
     bool AutoReloadEnabled { get; }
 
+    /// <summary>
+    /// <c>reload-env</c>, from the parsed config (includes and CLI flags
+    /// included): whether a new terminal starts from a fresh logon
+    /// environment. Default true.
+    /// </summary>
+    bool ReloadEnvironment => true;
+
     /// <summary>Whether windows-settings-ui is enabled.</summary>
     bool SettingsUiEnabled { get; }
 

@@ -1328,8 +1328,8 @@ env: RepeatableStringMap = .{},
 /// logon gives your user: the system and user variables as they are in the
 /// registry now, with both PATH scopes merged. A variable you add, change or
 /// remove in the system settings, or a PATH entry an installer writes, is
-/// seen by the next terminal you open without restarting Wintty. This is
-/// what Windows Terminal does with its `reloadEnvironmentVariables` setting.
+/// seen by the next terminal you open without restarting Wintty. A Windows
+/// Terminal tab gets the same with its `reloadEnvironmentVariables` setting.
 ///
 /// On top of that environment Wintty sets only its own variables (such as
 /// `TERM` and `GHOSTTY_RESOURCES_DIR`) and the ones from `env`. Variables
