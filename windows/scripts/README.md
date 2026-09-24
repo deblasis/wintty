@@ -423,8 +423,10 @@ Two more things will stop a seam session that used to work:
   `WINTTY_TEST_SEAM_INPUT=1`) only in a harness that genuinely needs the shell
   to run something. The harnesses that arm it: `seam-cwd-tab-label.ps1` (the
   cwd round trip), `mouse-fuzz-inspector.ps1` (shell seeding so the inspector
-  has surface state), `mouse-fuzz-undo-osc.ps1` (the OSC title command) and
-  `search-fuzz.ps1` (the scrollback corpus its oracle counts against).
+  has surface state), `mouse-fuzz-undo-osc.ps1` (the OSC title command),
+  `seam-title-tab-label.ps1` (the shells' `title` commands, per tab and per
+  pane) and `search-fuzz.ps1` (the scrollback corpus its oracle counts
+  against).
   That list expanding is a policy change and belongs in the PR that does it.
 
 ## Driving input

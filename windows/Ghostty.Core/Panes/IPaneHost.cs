@@ -48,6 +48,17 @@ internal interface IPaneHost
     /// not reported one (no shell integration, or not at a prompt yet).</summary>
     event EventHandler<string?>? CwdChanged;
 
+    /// <summary>Raised when the title the tab should show changes: the
+    /// active leaf's surface reported a new one (shell OSC 0/2 or a
+    /// per-pane override), or a focus change handed the tab a different
+    /// leaf. Same scope as <see cref="CwdChanged"/>, and like it, raised by
+    /// every tab's host whether or not that tab is selected, so a
+    /// background tab keeps following its shell. Null means the newly
+    /// active leaf has not reported a title yet; the tab then falls back
+    /// to its folder, then its profile name, then its launch process,
+    /// rather than keep the title of a pane that is no longer focused.</summary>
+    event EventHandler<string?>? TitleChanged;
+
     /// <summary>Raised when the active leaf rings the bell (libghostty
     /// ring-bell action). Only the active leaf is forwarded, matching
     /// <see cref="ProgressChanged"/>; background panes ring audibly but

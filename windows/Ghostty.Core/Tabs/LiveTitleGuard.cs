@@ -1,11 +1,12 @@
 namespace Ghostty.Core.Tabs;
 
 /// <summary>
-/// TitleChanged from a surface that is no longer the active leaf must
-/// not write into <see cref="TabManager.ActiveTab"/>. Dispose of a
-/// closing tab queues those callbacks after ActiveTab has already
-/// switched, which used to stamp the remaining tab with the dead
-/// tab's last OSC title (e.g. cmd.exe).
+/// Only the active leaf's surface names its tab. The pane host checks every
+/// TitleChanged against its active leaf's terminal before forwarding it, so a
+/// title from a background split, or from a pane soft-closed and kept alive
+/// for undo, cannot relabel the tab. The guard used to sit in the window's
+/// title coordinator, where the same stale callback from a closing tab
+/// stamped the remaining tab with the dead tab's last title (e.g. cmd.exe).
 /// </summary>
 public static class LiveTitleGuard
 {

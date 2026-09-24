@@ -24,8 +24,10 @@ namespace Ghostty.Core.Tabs;
 ///   - the active tab's <see cref="TabModel.EffectiveTitle"/> changes,
 ///     whichever tier moved it
 ///   - the active tab's <see cref="IPaneHost.LeafFocused"/> fires
-/// The actual leaf-title-changed hook lives in MainWindow because
-/// the leaf's <c>Terminal</c> is WinUI-only.
+/// Each tab's own label follows its pane host's
+/// <see cref="IPaneHost.TitleChanged"/>, wired per tab in
+/// <see cref="CreateTab"/> and <see cref="WireAdoptedTab"/>, so a
+/// background tab keeps following its shell.
 /// </summary>
 internal sealed class TabManager
 {
@@ -791,6 +793,10 @@ internal sealed class TabManager
         // The directory the tab names, from whichever pane is focused.
         EventHandler<string?> cwdHandler = (_, cwd) => tab.ShellReportedCwd = cwd;
         host.CwdChanged += cwdHandler;
+        // The title, the same way: every tab follows its own shell,
+        // selected or not, and a host only ever names the tab that owns it.
+        EventHandler<string?> titleHandler = (_, title) => tab.ShellReportedTitle = title;
+        host.TitleChanged += titleHandler;
         EventHandler renderedHandler = (_, _) => tab.Settle();
         host.FirstRendered += renderedHandler;
         // Forward the active-leaf bell to the window level (taskbar badge)
@@ -818,6 +824,7 @@ internal sealed class TabManager
         {
             host.ProgressChanged -= progressHandler;
             host.CwdChanged -= cwdHandler;
+            host.TitleChanged -= titleHandler;
             host.FirstRendered -= renderedHandler;
             host.BellRang -= bellRangHandler;
             host.BellAcknowledged -= bellAckHandler;
@@ -967,6 +974,8 @@ internal sealed class TabManager
         tab.PaneHost.ProgressChanged += progressHandler;
         EventHandler<string?> cwdHandler = (_, cwd) => tab.ShellReportedCwd = cwd;
         tab.PaneHost.CwdChanged += cwdHandler;
+        EventHandler<string?> titleHandler = (_, title) => tab.ShellReportedTitle = title;
+        tab.PaneHost.TitleChanged += titleHandler;
         // An adopted tab is not restarted, so nothing begins settling here;
         // the bridge is wired all the same so a tab that arrives mid-start
         // (a restore) settles when its pane paints.
@@ -995,6 +1004,7 @@ internal sealed class TabManager
         {
             tab.PaneHost.ProgressChanged -= progressHandler;
             tab.PaneHost.CwdChanged -= cwdHandler;
+            tab.PaneHost.TitleChanged -= titleHandler;
             tab.PaneHost.FirstRendered -= renderedHandler;
             tab.PaneHost.BellRang -= bellRangHandler;
             tab.PaneHost.BellAcknowledged -= bellAckHandler;

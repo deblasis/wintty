@@ -1,10 +1,7 @@
 using System;
 using System.ComponentModel;
-using Ghostty.Controls;
 using Ghostty.Core;
-using Ghostty.Core.Panes;
 using Ghostty.Core.Tabs;
-using Ghostty.Panes;
 using Ghostty.Tabs;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -23,14 +20,16 @@ namespace Ghostty.Shell;
 ///      <c>AppWindow.TitleBar.RightInset</c> so the OS min/max/
 ///      close buttons get DPI- and theme-aware spacing instead of
 ///      the hard-coded 146 DIP from the original PR.
-///   3. Mirroring the active leaf's TitleChanged stream into
-///      <c>TabModel.ShellReportedTitle</c> and the
-///      <c>Window.Title</c>.
+///   3. Keeping <c>Window.Title</c> on the active tab's label. The
+///      label itself is not fed from here: every tab follows its own
+///      pane host's <c>TitleChanged</c>, wired in <c>TabManager</c>, so
+///      a background tab keeps following its shell and no host can
+///      name a tab it does not belong to.
 ///   4. Keeping the vertical-mode title TextBlock in sync with the
 ///      active tab's <c>EffectiveTitle</c>.
 ///
 /// MainWindow stays the composition root and forwards
-/// <c>AppWindow.Changed</c> + the active tab/leaf change events.
+/// <c>AppWindow.Changed</c>; the tab events come from TabManager.
 /// </summary>
 internal sealed class TitleBarCoordinator
 {
@@ -48,8 +47,6 @@ internal sealed class TitleBarCoordinator
     private readonly Func<bool> _isVerticalMode;
 
     private TabModel? _boundTab;
-    private TabModel? _titleHookedTab;
-    private LeafPane? _activeLeaf;
 
     /// <summary>
     /// Fired when a caption-inset change has reflowed the strip's content.
@@ -87,13 +84,12 @@ internal sealed class TitleBarCoordinator
 
         // Tab/title plumbing.
         _tabs.ActiveTabChanged += (_, _) => RebindVerticalTitle();
-        _tabs.ActiveTabChanged += (_, _) => HookActiveTabTitle();
-        // WordTitle, not EffectiveTitle: the window title is words only, so
-        // the home glyph the strips draw reads "Home" here.
-        _tabs.WindowTitleChanged += (_, _) => _window.Title = _tabs.ActiveTab.WordTitle;
-
         RebindVerticalTitle();
-        HookActiveTabTitle();
+
+        // The window caption: set now, then on every WindowTitleChanged.
+        // Both writes go through WindowTitleFollower.Sync, the one place the
+        // caption is computed. Nothing else in this class writes Window.Title.
+        new WindowTitleFollower(_tabs, title => _window.Title = title);
     }
 
     /// <summary>
@@ -207,46 +203,5 @@ internal sealed class TitleBarCoordinator
     // in it. With no tab at all this strip is naming the window, and the
     // product name is still the right answer to that.
     private void UpdateVerticalTitleText()
-        => _verticalTitleText.Text = _boundTab?.WordTitle ?? AppIdentity.ProductName;
-
-    /// <summary>
-    /// Subscribe the active tab's active leaf to live title-change
-    /// updates and write the title into
-    /// <see cref="TabModel.ShellReportedTitle"/>. Re-runs every time
-    /// the active tab changes or the active leaf within the active
-    /// tab changes. Lives here (not inside TabManager) because it
-    /// touches WinUI types that Ghostty.Core cannot reach.
-    /// </summary>
-    private void HookActiveTabTitle()
-    {
-        if (_titleHookedTab is { } previousTab)
-            previousTab.PaneHost.LeafFocused -= OnActiveTabLeafFocused;
-        if (_activeLeaf is { } previous)
-            previous.Terminal().TitleChanged -= OnLiveTitleChanged;
-
-        var tab = _tabs.ActiveTab;
-        _titleHookedTab = tab;
-        var leaf = tab.PaneHost.ActiveLeaf;
-        _activeLeaf = leaf;
-        leaf.Terminal().TitleChanged += OnLiveTitleChanged;
-        tab.ShellReportedTitle = leaf.Terminal().CurrentTitle;
-        _window.Title = tab.WordTitle;
-
-        tab.PaneHost.LeafFocused += OnActiveTabLeafFocused;
-    }
-
-    private void OnActiveTabLeafFocused(object? sender, LeafPane leaf)
-    {
-        if (_activeLeaf is { } previous)
-            previous.Terminal().TitleChanged -= OnLiveTitleChanged;
-        _activeLeaf = leaf;
-        leaf.Terminal().TitleChanged += OnLiveTitleChanged;
-        _tabs.ActiveTab.ShellReportedTitle = leaf.Terminal().CurrentTitle;
-    }
-
-    private void OnLiveTitleChanged(object? sender, string title)
-    {
-        if (!LiveTitleGuard.Accepts(sender, _activeLeaf?.Terminal())) return;
-        _tabs.ActiveTab.ShellReportedTitle = title;
-    }
+        => _verticalTitleText.Text = _boundTab is { } tab ? tab.WordTitle : AppIdentity.ProductName;
 }
