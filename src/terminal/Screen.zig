@@ -8542,6 +8542,41 @@ test "Screen: resize less cols with scrollback keeps cursor row" {
     try testing.expectEqual(@as(size.CellCountInt, 0), s.cursor.y);
 }
 
+test "Screen: resize less cols reflow keeps a prompt-line with no trailing newline" {
+    // The pane-split shrink: a shell prompt sits at the cursor with no
+    // trailing newline because it is waiting for input. Reflowing to the
+    // narrower split width must keep the prompt text on screen and the
+    // cursor at its end. Regression: the prompt row came back blank after
+    // the shrink while the cursor stayed where the prompt ended, and the
+    // prompt only reappeared after the user pressed Enter.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 134, .rows = 24 });
+    defer s.deinit();
+    const str = "C:\\Users\\Alessandro>";
+    try s.testWriteString(str);
+
+    // Pre: the prompt ends on row 0 with the cursor right after it.
+    try testing.expectEqual(@as(size.CellCountInt, 20), s.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 0), s.cursor.y);
+
+    // The split halves the pane: 134 -> 67 cols.
+    try s.resize(.{ .cols = 67, .rows = 24 });
+
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
+        defer alloc.free(contents);
+        const expected = "C:\\Users\\Alessandro>";
+        try testing.expectEqualStrings(expected, contents);
+    }
+
+    // The cursor still ends the prompt.
+    try testing.expectEqual(@as(size.CellCountInt, 20), s.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 0), s.cursor.y);
+}
+
 test "Screen: resize more rows, less cols with reflow with scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
