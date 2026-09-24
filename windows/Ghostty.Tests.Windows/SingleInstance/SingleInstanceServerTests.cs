@@ -92,17 +92,23 @@ public sealed class SingleInstanceServerTests
 
         var buffer = new byte[1];
         var read = client.ReadAsync(buffer, 0, 1);
-        if (read.Wait(TimeSpan.FromSeconds(2)))
-        {
-            // Zero is the server hanging up on its side (the session faulted
-            // and the connection went away): no acknowledgement either way.
-            // One byte would have to be the acknowledgement to fail this.
-            var received = await read;
-            Assert.True(
-                received == 0 || buffer[0] != LaunchRequest.Ack,
-                "a faulted dispatch acknowledged a launch it did not serve");
-        }
-        // Timed out: nothing came back, which is the other no-ack shape.
+        // A faulted session ALWAYS closes the connection: RunOneSession's
+        // using owns the server pipe, so the fault's unwind disposes it.
+        // Waiting for the observation unconditionally is what keeps this
+        // test from passing on silence -- under load, "faulted silently"
+        // and "not finished yet" are indistinguishable to any bounded
+        // window, so only "the observation arrived" is a verdict. Zero is
+        // the server hanging up on its side; one byte would have to be the
+        // acknowledgement to fail the next assert. The 60s is a hang guard,
+        // not a measurement.
+        Assert.True(
+            read.Wait(TimeSpan.FromSeconds(60)),
+            "a faulted session must be observable: the connection always closes, " +
+            "so EOF or a byte arrives");
+        var received = await read;
+        Assert.True(
+            received == 0 || buffer[0] != LaunchRequest.Ack,
+            "a faulted dispatch acknowledged a launch it did not serve");
     }
 
     /// <summary>
