@@ -455,4 +455,77 @@ public class ProfileRegistryTests
         await Assert.ThrowsAsync<TaskCanceledException>(() => tcs.Task);
         Assert.Equal(0, eventsAfterDispose);
     }
+
+    private const string KnownHosts = "devel.local ssh-ed25519 AAAA\n192.168.0.9 ssh-ed25519 BBBB\n";
+
+    [Fact]
+    public void SshHosts_OffByDefault_KnownHostsNotEvenRead()
+    {
+        var reads = 0;
+        var src = new FakeProfileConfigSource();
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance,
+            readKnownHosts: () => { reads++; return KnownHosts; });
+
+        Assert.DoesNotContain(registry.Profiles, p => p.Id.StartsWith("ssh-", StringComparison.Ordinal));
+        Assert.Equal(0, reads);
+    }
+
+    [Fact]
+    public void SshHosts_ToggleAndUser_TakeEffectOnConfigReload()
+    {
+        var src = new FakeProfileConfigSource();
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance,
+            readKnownHosts: () => KnownHosts);
+
+        src.SshHostsDiscovery = true;
+        src.SshHostsUser = "jgill";
+        src.Raise();
+        var host = Assert.Single(registry.Profiles, p => p.Id == "ssh-devel-local");
+        Assert.Equal("ssh jgill@devel.local", host.Command);
+
+        src.SshHostsDiscovery = false;
+        src.Raise();
+        Assert.DoesNotContain(registry.Profiles, p => p.Id == "ssh-devel-local");
+    }
+
+    [Fact]
+    public void SshHosts_HiddenId_And_UserOverride_ApplyLikeOtherDiscovered()
+    {
+        var src = new FakeProfileConfigSource
+        {
+            SshHostsDiscovery = true,
+            ParsedProfiles = new Dictionary<string, ProfileDef>
+            {
+                ["ssh-devel-local"] = UserDef("ssh-devel-local", "Devel box", "ssh -p 2200 root@devel.local"),
+            },
+        };
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance,
+            readKnownHosts: () => KnownHosts + "other.example ssh-ed25519 CCCC\n");
+
+        var overridden = Assert.Single(registry.Profiles, p => p.Id == "ssh-devel-local");
+        Assert.Equal("ssh -p 2200 root@devel.local", overridden.Command);
+
+        src.HiddenProfileIds = new HashSet<string> { "ssh-other-example" };
+        src.Raise();
+        Assert.DoesNotContain(registry.Profiles, p => p.Id == "ssh-other-example");
+    }
+
+    [Fact]
+    public void SshHosts_UnreadableFile_KeepsTheRestOfTheList()
+    {
+        var src = new FakeProfileConfigSource
+        {
+            SshHostsDiscovery = true,
+            ParsedProfiles = new Dictionary<string, ProfileDef> { ["a"] = UserDef("a") },
+        };
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance,
+            readKnownHosts: () => throw new System.IO.IOException("locked"));
+
+        Assert.Single(registry.Profiles, p => p.Id == "a");
+        Assert.DoesNotContain(registry.Profiles, p => p.Id.StartsWith("ssh-", StringComparison.Ordinal));
+    }
 }

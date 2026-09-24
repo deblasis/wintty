@@ -64,6 +64,20 @@ public interface IProfileConfigSource
     IReadOnlyList<string> ProfileWarnings { get; }
 
     /// <summary>
+    /// Value of <c>ssh-hosts-discovery</c>: when true, each host in the
+    /// user's <c>~/.ssh/known_hosts</c> becomes a profile. Off unless
+    /// explicitly set to true.
+    /// </summary>
+    bool SshHostsDiscovery => false;
+
+    /// <summary>
+    /// Value of <c>ssh-hosts-user</c>: the login used for discovered ssh
+    /// hosts, or <see langword="null"/> to let ssh pick it (its own config,
+    /// else the Windows user name).
+    /// </summary>
+    string? SshHostsUser => null;
+
+    /// <summary>
     /// Raised on the UI dispatcher after <c>ConfigService</c> finishes
     /// a successful reload. Fires once per reload regardless of whether
     /// the profile-view values actually changed -- consumers must treat

@@ -1038,7 +1038,16 @@ public partial class App : Application
             source: _configService,
             discover: (bypass, ct) => _discoveryService.DiscoverAsync(bypass, ct),
             dispatcher: action => uiDispatcher.TryEnqueue(() => action()),
-            log: factory.CreateLogger<Ghostty.Core.Profiles.ProfileRegistry>());
+            log: factory.CreateLogger<Ghostty.Core.Profiles.ProfileRegistry>(),
+            // ssh-hosts-discovery source; only read when the option is on.
+            // A missing file is simply no hosts.
+            readKnownHosts: () =>
+            {
+                var path = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".ssh", "known_hosts");
+                return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
+            });
         ProfileRegistry = _profileRegistry;
         _profileRegistry.ProfilesChanged += OnProfilesChangedRebuildJumpList;
         RebuildJumpList();

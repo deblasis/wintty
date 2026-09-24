@@ -416,6 +416,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public string? DefaultProfileId => _profileView.DefaultProfileId;
     public IReadOnlySet<string> HiddenProfileIds => _profileView.HiddenProfileIds;
     public IReadOnlyList<string> ProfileWarnings => _profileView.ProfileWarnings;
+    public bool SshHostsDiscovery => _profileView.SshHostsDiscovery;
+    public string? SshHostsUser => _profileView.SshHostsUser;
 
     public event Action? ProfileConfigChanged;
 

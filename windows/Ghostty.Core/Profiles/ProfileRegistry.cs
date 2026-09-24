@@ -40,6 +40,7 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
     private readonly IProfileConfigSource _source;
     private readonly Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> _discover;
     private readonly Action<Action> _dispatcher;
+    private readonly Func<string?>? _readKnownHosts;
     private readonly ILogger<ProfileRegistry> _log;
     private readonly Lock _sync = new();
 
@@ -63,7 +64,8 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         IProfileConfigSource source,
         Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> discover,
         Action<Action> dispatcher,
-        ILogger<ProfileRegistry>? log = null)
+        ILogger<ProfileRegistry>? log = null,
+        Func<string?>? readKnownHosts = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(discover);
@@ -72,6 +74,7 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         _source = source;
         _discover = discover;
         _dispatcher = dispatcher;
+        _readKnownHosts = readKnownHosts;
         _log = log ?? NullLogger<ProfileRegistry>.Instance;
 
         RecomposeAndFire();
@@ -102,6 +105,23 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
 
     private void OnSourceChanged() => RecomposeAndFire();
 
+    private IReadOnlyList<DiscoveredProfile> ReadSshHosts()
+    {
+        if (_readKnownHosts is null || !_source.SshHostsDiscovery)
+            return Array.Empty<DiscoveredProfile>();
+        try
+        {
+            return SshKnownHosts.Parse(_readKnownHosts(), _source.SshHostsUser);
+        }
+        catch (Exception ex)
+        {
+            // An unreadable known_hosts costs the ssh entries, never the
+            // rest of the profile list.
+            LogDiscoveryRefreshFailed(ex);
+            return Array.Empty<DiscoveredProfile>();
+        }
+    }
+
     private void RecomposeAndFire()
     {
         // Disposed-guard: a probe that ignores its cancellation token
@@ -117,12 +137,17 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         string? nextDefault;
         IReadOnlyList<string> nextWarnings;
 
+        // ssh hosts are rebuilt on every recompose (config reload) rather
+        // than going through the 24h discovery cache, because they depend
+        // on config: the toggle and ssh-hosts-user. Read outside the lock.
+        var sshHosts = ReadSshHosts();
+
         lock (_sync)
         {
             var resolvedSet = ProfileOrderResolver.Resolve(
                 user: [.. _source.ParsedProfiles.Values],
                 overrides: _source.ProfileOverrides,
-                discovered: _discovered,
+                discovered: sshHosts.Count == 0 ? _discovered : [.. _discovered, .. sshHosts],
                 profileOrder: _source.ProfileOrder,
                 defaultProfileId: _source.DefaultProfileId,
                 hiddenIds: _source.HiddenProfileIds);
