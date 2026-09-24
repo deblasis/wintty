@@ -22,10 +22,18 @@
          config is the legacy file's.
 
     Applied reloads are read from the seam's config-change log, recorded
-    inside the ConfigChanged fan-out, because on a desktop with High Contrast
-    off the app's own HighContrastMonitor asks for no palette right after
-    every applied reload: the palette is on screen for that one reload, and
-    the log is where it is visible.
+    when each reload's ConfigChanged fan-out runs, because on a desktop with
+    High Contrast off the app's own HighContrastMonitor asks for no palette
+    right after every applied reload: the palette is on screen for that one
+    reload, and the log is where it is visible. The fan-out is posted, so
+    the log cannot say whether the request's own reload declined; that is
+    read from the op's answer, which is the live config right after it.
+    Each heal must also take at least -FloorAtLeastMs: a heal sooner than
+    the floor means the first report was believed.
+
+    What it does not cover: the watcher path (auto-reload-config on), a
+    locked or unreadable file, and anything that needs the OS High Contrast
+    actually on.
 
     Zero OS input is synthesized. The config root and the state base are
     temp directories of this run, single-instance is off, and cleanup stops
@@ -40,7 +48,11 @@ param(
     # How long an applied reload carrying the palette may take. The floor is
     # 900ms and the shrink budget three 300ms looks; the rest is headroom
     # for a loaded machine.
-    [int]$HealWithinMs = 4000
+    [int]$HealWithinMs = 4000,
+    # The least a heal may take. The vanish floor is 900ms and the shrink
+    # budget three 300ms looks, so a heal sooner than this did not wait for
+    # either: the first report was believed, which is #1146.
+    [int]$FloorAtLeastMs = 700
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -66,6 +78,14 @@ $Hc = @{
     op = 'high-contrast'
     background = '#0A1B2C'; foreground = '#F0E0D0'
     selectionBackground = '#3D4E5F'; selectionForeground = '#FFFFFF'
+}
+
+# Whether the High Contrast op's own answer shows its reload declined. That
+# answer is read synchronously after the op's Reload returned, so it is the
+# live config that reload left; the change log is posted and would show
+# nothing yet whether the reload declined or applied.
+function Test-Declined($Answer) {
+    return $Answer.nativeBackground -eq '#102030' -and $null -eq $Answer.highContrastBackground
 }
 
 # Poll the change log until an applied reload after $Since entries carries
@@ -106,11 +126,13 @@ try {
     Remove-Item $cfg -Force
     $before = @((Seam $s @{ op = 'config-state' }).changes).Count
     $asked = Seam $s $Hc
-    Check 's1.toggle: the first reload is declined' (@($asked.changes).Count -eq $before) "changes=$(@($asked.changes).Count) before=$before"
+    Check 's1.toggle: the first reload is declined' (Test-Declined $asked) "native=$($asked.nativeBackground) hc=$($asked.highContrastBackground)"
 
     $got = Wait-PaletteApplied $s $before $Hc.background
     Check 's1.heal: one request lands with no further input' ($null -ne $got) $(
         if ($got) { "after $($got.Ms)ms" } else { "no applied reload carried $($Hc.background) within ${HealWithinMs}ms" })
+    Check 's1.floor: the heal waited out the floor' ($null -ne $got -and $got.Ms -ge $FloorAtLeastMs) $(
+        if ($got) { "after $($got.Ms)ms, at least ${FloorAtLeastMs}ms required" } else { 'no heal to time' })
 
     Seam $s @{ op = 'high-contrast'; off = $true } | Out-Null
     [System.IO.File]::WriteAllText($cfg, "windows-single-instance = false`nwindow-save-state = never`nbackground = #405060`n")
@@ -132,11 +154,13 @@ try {
     Remove-Item $cfg -Force
     $before = @((Seam $s @{ op = 'config-state' }).changes).Count
     $asked = Seam $s $Hc
-    Check 's2.toggle: the first reload is declined' (@($asked.changes).Count -eq $before) "changes=$(@($asked.changes).Count) before=$before"
+    Check 's2.toggle: the first reload is declined' (Test-Declined $asked) "native=$($asked.nativeBackground) hc=$($asked.highContrastBackground)"
 
     $got = Wait-PaletteApplied $s $before $Hc.background
     Check 's2.heal: one request lands with no further input' ($null -ne $got) $(
         if ($got) { "after $($got.Ms)ms" } else { "no applied reload carried $($Hc.background) within ${HealWithinMs}ms" })
+    Check 's2.floor: the heal waited out its budget' ($null -ne $got -and $got.Ms -ge $FloorAtLeastMs) $(
+        if ($got) { "after $($got.Ms)ms, at least ${FloorAtLeastMs}ms required" } else { 'no heal to time' })
 
     Seam $s @{ op = 'high-contrast'; off = $true } | Out-Null
     $re = Seam $s @{ op = 'reload-config' }

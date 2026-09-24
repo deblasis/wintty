@@ -1572,13 +1572,17 @@ internal static class TestSeam
     }
 
     /// <summary>
-    /// Every applied reload since the log was armed, as it stood the moment
-    /// it applied: the live native background and the High Contrast
-    /// background the service reports. Recorded inside the ConfigChanged
-    /// fan-out, which runs synchronously at the end of an applied reload, so
-    /// an entry is the state that reload produced, before anything that
-    /// reacts to it (HighContrastMonitor, which on a desktop with High
-    /// Contrast off asks for no palette again) has run.
+    /// Every applied reload since the log was armed: the live native
+    /// background and the High Contrast background the service reports,
+    /// recorded when that reload's ConfigChanged fan-out runs. Reload POSTS
+    /// the fan-out to the dispatcher, so an entry is taken a dispatcher turn
+    /// after the reload applied. It still precedes anything that reacts to
+    /// the change (HighContrastMonitor, which on a desktop with High Contrast
+    /// off asks for no palette again, is posted from inside the fan-out), but
+    /// an item already queued between the reload and its fan-out can move the
+    /// live config first. That errs toward a missed palette, a false red,
+    /// never a false green. Because the entry is late, an op's own answer is
+    /// the place to read what a reload did synchronously, not this log.
     /// </summary>
     private static readonly List<(uint? Native, uint? HighContrast)> ConfigChanges = new();
     private static bool _configChangeLogArmed;

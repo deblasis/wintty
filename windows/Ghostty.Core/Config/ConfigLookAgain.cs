@@ -8,14 +8,22 @@ namespace Ghostty.Core.Config;
 /// watcher cannot give it one.
 /// </summary>
 /// <remarks>
-/// <para>Every question a declined reload asks (a file that vanished, a
-/// layered file missing from a count, a file that would not open) is
-/// answered by a LATER load. The watcher's <c>Resettle</c> schedules that
-/// load when there is a watcher. With <c>auto-reload-config</c> off, the
-/// default, there is none, and a question that waited on it waited for the
-/// life of the process: wintty#1155 for the vanished file, and the same
-/// lockout on the layered-file shrink, where the budget only counted asks
-/// the watcher took. This is the look those questions get instead.</para>
+/// <para>Two questions a declined reload asks (a file that vanished, a
+/// layered file missing from a count) are answered by a LATER load. The
+/// watcher's <c>Resettle</c> schedules that load when there is a watcher.
+/// With <c>auto-reload-config</c> off, the default, there is none, and a
+/// question that waited on it waited for the life of the process:
+/// wintty#1155 for the vanished file, and the same lockout on the
+/// layered-file shrink, where the budget only counted asks the watcher
+/// took. This is the look those questions get instead.</para>
+///
+/// <para>A file that will not open does NOT get one (<see cref="AskWatcher"/>).
+/// The loader's own open already retries a sharing violation for about four
+/// seconds, on the UI thread, before it reports the file unreadable, so a
+/// look of ours is another four-second freeze: three of them turned one
+/// High Contrast toggle into four freezes over about seventeen seconds. A
+/// request declined on a locked file stays wanted and rides the next reload
+/// that happens for any other reason.</para>
 ///
 /// <para>One timer for all of them. A decline asks one question at a time,
 /// and re-arming replaces a pending fire, so a burst of declines lands on
@@ -68,19 +76,26 @@ public sealed class ConfigLookAgain : IDisposable
     }
 
     /// <summary>
-    /// A declined reload's ask for one more look: the watcher's delivery when
+    /// A declined shrink's ask for one more look: the watcher's delivery when
     /// it takes the ask, and otherwise one look <see cref="SettleDelay"/>
-    /// from now. Answers whether either was scheduled, which is what a
-    /// declined reload's ask budgets count.
+    /// from now. Answers whether either was scheduled, which is what the
+    /// shrink budget counts.
     /// </summary>
     /// <remarks>
     /// The fallback is the whole difference with no watcher. The watcher's
     /// ask used to be the only one, so a budget counting asks somebody took
     /// never moved: a layered-file shrink was never confirmed and a user who
     /// deleted one of two layered config files had every reload refused until
-    /// restart. With it, both budgets run at the watcher's own cadence.
+    /// restart. With it, the shrink budget runs at the watcher's own cadence.
     /// </remarks>
     public bool Ask() => _watcherAsk() || Schedule(SettleDelay);
+
+    /// <summary>
+    /// The watcher's ask alone, with no look of the service's own: for a
+    /// file that would not open, whose every load already blocks for the
+    /// loader's own retry window. See the class remarks.
+    /// </summary>
+    public bool AskWatcher() => _watcherAsk();
 
     /// <summary>
     /// Arm one look <paramref name="delay"/> from now, clamped, and answer

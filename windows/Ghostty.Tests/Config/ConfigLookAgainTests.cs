@@ -47,7 +47,7 @@ public class ConfigLookAgainTests
             {
                 if (ConfigReloadGate.ShouldRetry(found, Retries, Max))
                 {
-                    if (look.Ask()) Retries++;
+                    if (look.AskWatcher()) Retries++;
                 }
                 else if (ConfigReloadGate.ShouldConfirmShrink(found, count, Count, Confirms, Max))
                 {
@@ -110,48 +110,48 @@ public class ConfigLookAgainTests
     }
 
     /// <summary>
-    /// The same shape on the locked-file budget: a request declined because
-    /// an editor or a scanner held the file is retried by the service's own
-    /// looks, and lands once the file reads, rather than waiting for some
-    /// unrelated reload with no watcher to ask.
+    /// A file that will not open gets NO look of the service's own. Every
+    /// load of it has already blocked for the loader's sharing-violation
+    /// retry, about four seconds on the UI thread, before answering
+    /// Unreadable, so a look would be one more freeze: the three this budget
+    /// once allowed turned a single High Contrast toggle into four freezes
+    /// over about seventeen seconds. With no watcher the decline asks for
+    /// nothing, spends nothing, and the declined request rides the next
+    /// reload that comes for any other reason.
     /// </summary>
     [Fact]
-    public void With_no_watcher_a_locked_file_is_retried_through_its_own_looks()
+    public void With_no_watcher_a_locked_file_takes_no_look_of_its_own()
     {
         var look = NoWatcher();
         var session = new Session { Count = 1 };
 
         Assert.False(session.Reload(look, ConfigFilesFound.Unreadable, 1));
-        Assert.True(_timer.Armed, "a declined unreadable load with no watcher scheduled no look");
 
-        // Still held at the first look; free by the second.
-        var fires = 0;
-        RunLooks(() => ++fires == 1
-            ? session.Reload(look, ConfigFilesFound.Unreadable, 1)
-            : session.Reload(look, ConfigFilesFound.Loaded, 1));
-
-        Assert.Equal(1, session.Applied);
-        Assert.Equal(TimeSpan.FromMilliseconds(600), _elapsed);
+        Assert.False(_timer.Armed, "a locked file scheduled a look of the service's own");
+        Assert.Equal(0, session.Retries);
+        Assert.Equal(1, session.Reloads);
     }
 
     /// <summary>
-    /// And the retries stay bounded: a file that never opens is looked at
-    /// the budget's worth of times and then left alone, as with a watcher.
+    /// With a watcher, the locked file is retried through the watcher's own
+    /// deliveries as before, and the budget stays bounded.
     /// </summary>
     [Fact]
-    public void With_no_watcher_a_file_that_never_opens_is_looked_at_a_bounded_number_of_times()
+    public void With_a_watcher_a_locked_file_is_retried_a_bounded_number_of_times()
     {
-        var look = NoWatcher();
+        var watcherAsks = 0;
+        var look = new ConfigLookAgain(
+            watcherAsk: () => { watcherAsks++; return true; }, _timer, onLook: () => { },
+            maxDelay: ConfigVanishConfirmer.DefaultFloor);
         var session = new Session { Count = 1 };
 
-        session.Reload(look, ConfigFilesFound.Unreadable, 1);
-        RunLooks(() => session.Reload(look, ConfigFilesFound.Unreadable, 1));
+        for (var i = 0; i < 10; i++)
+            session.Reload(look, ConfigFilesFound.Unreadable, 1);
 
-        Assert.Equal(0, session.Applied);
-        Assert.Equal(1 + Max, session.Reloads);
+        Assert.Equal(Max, session.Retries);
+        Assert.Equal(Max, watcherAsks);
         Assert.False(_timer.Armed);
     }
-
     /// <summary>
     /// With a watcher that takes the ask, the service schedules nothing of
     /// its own: the watcher's delivery is the look.

@@ -372,9 +372,9 @@ public class ConfigWatcherWiringTests
     /// <summary>
     /// The budget is spent on looks that were scheduled, not on declines.
     /// An ask nobody took is not a look, so counting it stops the retrying
-    /// with nothing having been tried. What counts as taken, the watcher's
-    /// delivery or the service's own look, is <c>ConfigLookAgain.Ask</c>'s
-    /// answer, driven in <c>Config.ConfigLookAgainTests</c>.
+    /// with nothing having been tried. For a file that will not open only the
+    /// watcher's delivery counts (<c>ConfigLookAgain.AskWatcher</c>), driven
+    /// in <c>Config.ConfigLookAgainTests</c>.
     /// </summary>
     [Fact]
     public void The_retry_budget_only_counts_a_look_that_was_scheduled()
@@ -388,7 +388,7 @@ public class ConfigWatcherWiringTests
 
         var condition = Assert.IsType<InvocationExpressionSyntax>(
             retry.Ancestors().OfType<IfStatementSyntax>().First().Condition);
-        Assert.Equal("_lookAgain.Ask", condition.Expression.ToString());
+        Assert.Equal("_lookAgain.AskWatcher", condition.Expression.ToString());
     }
 
     /// <summary>
@@ -663,24 +663,34 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// Both of a declined reload's ask budgets count the look-again's ask,
-    /// not the watcher's alone.
+    /// The shrink budget counts the look-again's ask, and the locked-file
+    /// budget counts the watcher's alone.
     /// </summary>
     /// <remarks>
-    /// The watcher's ask alone was the second lockout of wintty#1155: with no
-    /// watcher the shrink budget never moved, a shrink was never judged
-    /// persistent, and a user who deleted one of two layered config files had
-    /// every reload refused until restart. The retries had the same shape,
-    /// so a High Contrast request declined on a locked file waited for an
-    /// unrelated reload. <c>ConfigLookAgain.Ask</c> takes the watcher's ask
-    /// first and schedules its own look when that fails.
+    /// The watcher's ask alone on the shrink was the second lockout of
+    /// wintty#1155: with no watcher the budget never moved, a shrink was never
+    /// judged persistent, and a user who deleted one of two layered config
+    /// files had every reload refused until restart.
+    /// <c>ConfigLookAgain.Ask</c> takes the watcher's ask first and schedules
+    /// its own look when that fails.
+    ///
+    /// The locked file is the other way round on purpose. Its load has
+    /// already blocked for the loader's own sharing-violation retry, about
+    /// four seconds on the UI thread, so a look of the service's own is one
+    /// more freeze: three of them turned one toggle into four freezes over
+    /// about seventeen seconds. <c>ConfigLookAgain.AskWatcher</c> schedules
+    /// nothing of its own.
     /// </remarks>
     [Fact]
-    public void Both_ask_budgets_count_the_look_again_not_the_watcher_alone()
+    public void The_shrink_counts_the_look_again_and_the_locked_file_the_watcher_alone()
     {
         var (_, guard) = ReloadGuard();
 
-        foreach (var budget in new[] { "_declinedReloadRetries", "_shrinkConfirms" })
+        foreach (var (budget, expected) in new[]
+                 {
+                     ("_declinedReloadRetries", "_lookAgain.AskWatcher"),
+                     ("_shrinkConfirms", "_lookAgain.Ask"),
+                 })
         {
             var spend = Assert.Single(guard.Statement.DescendantNodes()
                 .OfType<PostfixUnaryExpressionSyntax>()
@@ -689,7 +699,7 @@ public class ConfigWatcherWiringTests
                 .Where(p => p.Parent is ExpressionStatementSyntax { Parent: IfStatementSyntax }));
             var ask = Assert.IsType<InvocationExpressionSyntax>(
                 spend.Ancestors().OfType<IfStatementSyntax>().First().Condition);
-            Assert.Equal("_lookAgain.Ask", ask.Expression.ToString());
+            Assert.Equal(expected, ask.Expression.ToString());
         }
 
         Assert.Empty(guard.Statement.Calls("_watcher?.Resettle"));

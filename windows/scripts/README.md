@@ -134,6 +134,16 @@ answer. Prefer that shape over "take a screenshot and have a human look at
 it". It is a standard to move the directory towards, not one it currently
 meets.
 
+## A config file deleted while the app runs
+
+`seam-config-vanish.ps1` (suite name `config-vanish`) checks #1155 end to end
+through the seam, with auto-reload-config off: a deleted config file, or one
+of two layered files, heals on one High Contrast request, not before the
+floor, and a recreated file applies on one reload. It reads the request's own
+reload from the op's answer and later reloads from a change log, and it says
+nothing about the watcher path or a locked file. It launches its own instance
+on a temp config root and private state base, like `contrast-oracle.ps1`.
+
 ## Not in the suite
 
 | script | why |

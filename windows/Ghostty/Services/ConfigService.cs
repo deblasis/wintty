@@ -49,11 +49,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     //
     // Counted on a look being SCHEDULED, not on the decline: an ask nobody
     // took would spend the budget on reloads that never happened and then
-    // stop asking with nothing having been tried. The watcher takes the ask
-    // when there is one and it is not suppressed; otherwise the service
-    // schedules the look itself (ConfigLookAgain.Ask), which is what keeps the
-    // budget moving with auto-reload-config off. UI thread only, like
-    // everything Reload touches. See the decline in Reload.
+    // stop asking with nothing having been tried. Only the watcher takes this
+    // ask (ConfigLookAgain.AskWatcher): an unreadable load has already
+    // blocked for the loader's own retry window, and a look of the service's
+    // own would block again. UI thread only, like everything Reload touches.
+    // See the decline in Reload.
     private int _declinedReloadRetries;
     private const int MaxDeclinedReloadRetries = 3;
 
@@ -839,11 +839,17 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 if (ConfigReloadGate.ShouldRetry(
                         defaultFiles, _declinedReloadRetries, MaxDeclinedReloadRetries))
                 {
-                    // Counted only when a look was actually scheduled, by the
-                    // watcher or, failing that, by the service itself: an ask
-                    // nobody took is not a look, and counting it would spend
-                    // the budget on reloads that never happened.
-                    if (_lookAgain.Ask()) _declinedReloadRetries++;
+                    // Counted only when the watcher actually scheduled the
+                    // delivery: an ask nobody took is not a look, and counting
+                    // it would spend the budget on reloads that never happened.
+                    //
+                    // The watcher's ask ALONE, never a look of the service's
+                    // own. The loader's open already retries a sharing
+                    // violation for about four seconds on this thread before
+                    // it answers Unreadable, so every look we added was another
+                    // four-second freeze. A declined request stays wanted and
+                    // rides the next reload that comes for any other reason.
+                    if (_lookAgain.AskWatcher()) _declinedReloadRetries++;
                 }
                 else if (ConfigReloadGate.ShouldConfirmShrink(
                         defaultFiles, defaultFilesFound, _defaultFilesFound,
