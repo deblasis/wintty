@@ -1151,12 +1151,14 @@ public partial class App : Application
 
         // `wintty -e <cmd>` asks for that command in a window, the way
         // `wt -- <cmd>` does, so it neither restores the saved session nor
-        // runs the default profile's shell (#1136). It is a one-off: this
-        // process writes no session either, so the one-off window cannot
-        // replace the layout the next plain launch restores.
+        // runs the default profile's shell (#1136). Its window is a one-off
+        // and is left out of the saved session (ExcludedFromSession below);
+        // every other window this process opens is saved as usual, because
+        // in single-instance mode it becomes the primary later launches are
+        // forwarded to.
         var coldCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(
             Environment.GetCommandLineArgs());
-        if (coldCommand is not null) _sessionManager.SuspendPersistence();
+        if (coldCommand is not null) _sessionManager.NoteRestoreSkipped();
 
         var restoreState = honorJumpList || coldCommand is not null
             ? null
@@ -1194,6 +1196,7 @@ public partial class App : Application
                 initialSnapshot: LaunchFirstPaneSnapshot(
                     coldCommand,
                     workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory));
+            window.ExcludedFromSession = coldCommand is not null;
             window.Closed += OnAnyWindowClosedInternal;
             _sessionManager.Track(window);
             window.Activate();
@@ -1811,6 +1814,17 @@ public partial class App : Application
             ConfigService?.ConfiguredCommand,
             ConfigService?.DefaultProfileSet ?? false,
             workingDirectory);
+
+    /// <summary>
+    /// The configured <c>command</c> when it is what new panes run (no
+    /// <c>default-profile</c> set), else null. The UI that names what a new
+    /// tab opens reads this, so it does not call a profile the default when
+    /// the profile is not what runs (#1136).
+    /// </summary>
+    internal static string? CommandInEffect
+        => Ghostty.Core.Profiles.PaneCommandPolicy.CommandInEffect(
+            ConfigService?.ConfiguredCommand,
+            ConfigService?.DefaultProfileSet ?? false);
 
     /// <summary>
     /// The first pane of the window a launch opens when it named no profile:

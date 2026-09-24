@@ -299,4 +299,61 @@ public class SessionTreeTests
         Assert.Equal("pwsh -NoProfile -c echo ${env:BUILD_ID}",
             survivor.Snapshot.ResolvedCommand);
     }
+
+    // #1136: the argv flag is what keeps a restored command pane (a direct:
+    // config command, say) off cmd.exe. Losing it at capture compiles and
+    // passes every other test, and brings `cmd.exe /C` back.
+    [Fact]
+    public void CaptureLeaf_KeepsTheArgvFlag()
+    {
+        var leaf = new LeafPane
+        {
+            Snapshot = Snap("") with
+            {
+                ResolvedCommand = "tool.exe r.txt&echo.X",
+                CommandIsArgv = true,
+                CommandOrigin = PaneCommandOrigin.ConfiguredCommand,
+            },
+        };
+
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(leaf));
+
+        Assert.NotNull(dto.Fallback);
+        Assert.True(dto.Fallback!.CommandIsArgv);
+        Assert.Equal("tool.exe r.txt&echo.X", dto.Fallback.ResolvedCommand);
+    }
+
+    [Fact]
+    public void CaptureLeaf_PlainCommand_IsNotAnArgv()
+    {
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(Leaf("pwsh")));
+        Assert.False(dto.Fallback!.CommandIsArgv);
+    }
+
+    // #1136: -e belongs to its launch. Saved as a fallback it would run again,
+    // unasked, at the next launch, so it is not saved: the pane restores as
+    // its profile, or as a plain shell when it has none.
+    [Theory]
+    [InlineData("pwsh")]
+    [InlineData("")]
+    public void CaptureLeaf_LaunchCommand_SavesNoCommand(string profileId)
+    {
+        var leaf = new LeafPane
+        {
+            Snapshot = Snap(profileId) with
+            {
+                ResolvedCommand = "python deploy.py",
+                CommandIsArgv = true,
+                CommandOrigin = PaneCommandOrigin.LaunchCommand,
+            },
+        };
+
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(leaf));
+
+        Assert.Equal(profileId, dto.ProfileId);
+        Assert.Null(dto.Fallback);
+        // And restore does not invent one: a known profile comes back as
+        // itself, an unknown or empty id as no snapshot (a plain shell).
+        Assert.Null(SessionProfileResolver.ResolveLeaf(null, dto));
+    }
 }

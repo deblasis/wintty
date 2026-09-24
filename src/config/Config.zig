@@ -1199,7 +1199,13 @@ palette: Palette = .{},
 ///     default shell when there are no profiles.
 ///
 /// A `direct:` command stays direct there too: it is never passed through
-/// `cmd.exe`.
+/// `cmd.exe`. A profile command that starts with `direct:` is run the same
+/// way.
+///
+/// Two limits. `default-profile` is read from the main config file only,
+/// not from an included file or the command line, while `command` is read
+/// from all three. And with `default-profile` set but no profile loaded yet
+/// (none declared, discovery not finished), a new pane runs this command.
 command: ?Command = null,
 
 /// This is the same as "command", but only applies to the first terminal

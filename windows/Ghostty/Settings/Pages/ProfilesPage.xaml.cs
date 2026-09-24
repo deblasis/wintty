@@ -88,8 +88,11 @@ internal sealed partial class ProfilesPage : Page
                 WarningsBar.IsOpen = true;
             }
 
-            DefaultProfileCard.Description =
-                _registry.DefaultProfileId ?? "(no default profile set)";
+            // When `command` is set and default-profile is not, the command is
+            // what every new pane runs, so no profile is the default (#1136).
+            DefaultProfileCard.Description = App.CommandInEffect is { } command
+                ? $"None: new panes run the configured command ({command}). Set a default profile to use it instead."
+                : _registry.DefaultProfileId ?? "(no default profile set)";
 
             // Build the desired ordered list (visible first, then hidden)
             // and upsert into ProfilesGroup.Cards in place. Visible and

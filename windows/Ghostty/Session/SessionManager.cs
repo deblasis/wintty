@@ -24,7 +24,13 @@ internal sealed class SessionManager
     private readonly DispatcherQueue _dispatcher;
     private readonly Func<IEnumerable<MainWindow>> _windows;
     private DispatcherQueueTimer? _debounce;
-    private bool _suspended;
+
+    // A cold `wintty -e` skipped the restore, so the file on disk is still
+    // the previous session, untouched by this process (#1136).
+    private bool _restoreSkipped;
+
+    // This process has written the session at least once.
+    private bool _wroteThisRun;
 
     public SessionManager(
         SessionStore store,
@@ -63,21 +69,15 @@ internal sealed class SessionManager
     }
 
     /// <summary>
-    /// Stop this process writing the session at all: no debounced persist,
-    /// no clean-shutdown mark. For a cold <c>wintty -e</c>, which skips the
-    /// restore and is a one-off: without this its window replaced the saved
-    /// layout on the first tab or move, and its exit re-marked a crashed
-    /// session clean (#1136). One way: nothing in the process turns it back
-    /// on.
+    /// A cold <c>wintty -e</c> skipped the restore (#1136). Its own window is
+    /// <see cref="MainWindow.ExcludedFromSession"/>, so the writes below
+    /// leave it out; this records that the file on disk is still the
+    /// previous session, which the clean-shutdown mark must then leave alone
+    /// unless this process saved windows of its own. The process keeps
+    /// saving every other window it opens: in the default single-instance
+    /// mode it becomes the primary that later launches are forwarded to.
     /// </summary>
-    public void SuspendPersistence()
-    {
-        _suspended = true;
-        _debounce?.Stop();
-    }
-
-    /// <summary>Whether <see cref="SuspendPersistence"/> has run.</summary>
-    public bool PersistenceSuspended => _suspended;
+    public void NoteRestoreSkipped() => _restoreSkipped = true;
 
     /// <summary>Subscribe a window's change signals to the debounced persist.</summary>
     public void Track(MainWindow window)
@@ -139,7 +139,6 @@ internal sealed class SessionManager
 
     public void RequestPersist()
     {
-        if (_suspended) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
         _debounce ??= _dispatcher.CreateTimer();
         _debounce.Interval = TimeSpan.FromMilliseconds(DebounceMs);
@@ -162,17 +161,20 @@ internal sealed class SessionManager
     /// </summary>
     public void PersistLiveWindows()
     {
-        if (_suspended) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
         var state = new SessionState { CleanShutdown = false };
         foreach (var w in _windows())
         {
+            // A cold -e window is a one-off (#1136).
+            if (w.ExcludedFromSession) continue;
             var ws = w.CaptureSession();
             if (ws is not null && ws.Tabs.Count > 0) state.Windows.Add(ws);
         }
-        // Nothing to save mid-session: skip rather than blank the file.
+        // Nothing to save mid-session: skip rather than blank the file. That
+        // also covers a -e process with only its -e window open.
         if (state.Windows.Count == 0) return;
         _store.Save(state);
+        _wroteThisRun = true;
     }
 
     /// <summary>
@@ -189,8 +191,23 @@ internal sealed class SessionManager
     public void FinalizeCleanShutdown(MainWindow? closingFallback)
     {
         _debounce?.Stop();
-        if (_suspended) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
+
+        // The -e window is never the one saved (#1136).
+        if (closingFallback is { ExcludedFromSession: true }) closingFallback = null;
+
+        // A -e process that has saved nothing of its own: the file on disk
+        // is the previous session. Marking it clean would change what the
+        // next launch restores, so it is left alone, unless the window
+        // closing now is a real one this process served (a forwarded launch
+        // that quit inside the debounce), which is saved as the session.
+        if (_restoreSkipped && !_wroteThisRun)
+        {
+            var own = closingFallback?.CaptureSession();
+            if (own is not null && own.Tabs.Count > 0)
+                _store.Save(new SessionState { CleanShutdown = true, Windows = { own } });
+            return;
+        }
 
         var onDisk = _store.Load();
         if (onDisk is { Windows.Count: > 0 })

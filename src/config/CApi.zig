@@ -688,22 +688,43 @@ test "finalize: a command the user set is not marked defaulted" {
     Config.testing_desktop_defaults = true;
     defer Config.testing_desktop_defaults = false;
 
+    // A theme file, so finalize takes the loadTheme path that rebuilds the
+    // whole config from its replay steps. The flag is recorded after that
+    // rebuild; recorded before it, the rebuild would drop it.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "t3-theme", .data = "background = #123456\n" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
+    const theme_arg = try std.fmt.allocPrint(
+        alloc,
+        "--theme={s}{s}t3-theme",
+        .{ root, std.fs.path.sep_str },
+    );
+    defer alloc.free(theme_arg);
+
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
-    // Through the parser, as a config file or `--command` sets it: finalize
-    // rebuilds the config from what was parsed when it applies a theme, so
-    // a value assigned directly would not survive it.
+    // Through the parser, as a config file or `--command` sets it: the
+    // rebuild replays what was parsed, so a value assigned directly would
+    // not survive it.
+    const args = [_][]const u8{ "--command=pwsh", theme_arg };
     var it: struct {
-        data: []const []const u8 = &.{"--command=pwsh"},
+        data: []const []const u8,
         i: usize = 0,
         pub fn next(self: *@This()) ?[]const u8 {
             if (self.i >= self.data.len) return null;
             defer self.i += 1;
             return self.data[self.i];
         }
-    } = .{};
+    } = .{ .data = &args };
     try cfg.loadIter(alloc, &it);
     try cfg.finalize();
+
+    // Not vacuous: the theme really was applied, so the rebuild ran.
+    try testing.expectEqual(@as(u8, 0x12), cfg.background.r);
+    try testing.expectEqual(@as(u8, 0x34), cfg.background.g);
+    try testing.expectEqual(@as(u8, 0x56), cfg.background.b);
     try testing.expect(!cfg._command_defaulted);
 
     const s = ghostty_config_command(&cfg, null);

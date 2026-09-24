@@ -139,11 +139,15 @@ internal sealed partial class NewTabSplitButton : UserControl
         if (_vm is null) return;
         ProfileMenu.Items.Clear();
 
+        // The star marks what the main click opens. When that is the
+        // configured `command`, no profile row is it (#1136).
+        var markDefault = App.CommandInEffect is null;
+
         foreach (var row in _vm.Rows)
         {
             var item = new MenuFlyoutItem
             {
-                Text = row.IsDefault ? row.Name + "  *" : row.Name,
+                Text = markDefault && row.IsDefault ? row.Name + "  *" : row.Name,
                 Tag = row.Id,
                 Icon = BuildMenuIcon(row.Icon),
             };

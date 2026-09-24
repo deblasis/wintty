@@ -70,10 +70,25 @@ public sealed class PaneCommandPolicyTests
     }
 
     [Fact]
-    public void CommandPane_SplitsIntoTheCommand()
+    public void CommandPane_SplitsIntoWhatANewPaneRunsNow()
     {
+        // Asked afresh, so a reload that changed `command` (or set a
+        // default-profile) reaches the split the same way it reaches Ctrl+T.
         var pane = PaneCommandPolicy.ImplicitDefault(null, Nu, defaultProfileSet: false);
-        Assert.Same(pane, PaneCommandPolicy.Inherit(pane, () => DefaultProfile()));
+        var now = PaneCommandPolicy.ImplicitDefault(
+            null, new ConfiguredCommand("fish", false), defaultProfileSet: false);
+        Assert.Same(now, PaneCommandPolicy.Inherit(pane, () => now));
+    }
+
+    [Theory]
+    [InlineData("nu.exe --login", false, "nu.exe --login")]
+    [InlineData("nu.exe --login", true, null)]
+    [InlineData("  ", false, null)]
+    [InlineData(null, false, null)]
+    public void CommandInEffect_OnlyWithoutADefaultProfile(string? text, bool defaultProfileSet, string? want)
+    {
+        ConfiguredCommand? configured = text is null ? null : new ConfiguredCommand(text, false);
+        Assert.Equal(want, PaneCommandPolicy.CommandInEffect(configured, defaultProfileSet));
     }
 
     [Fact]

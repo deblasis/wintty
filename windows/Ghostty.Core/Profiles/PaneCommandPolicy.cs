@@ -56,6 +56,13 @@ public static class PaneCommandPolicy
     /// the command replaced the default, so wearing the default profile's
     /// name and icon would label the pane as something it is not.
     /// </summary>
+    /// <remarks>
+    /// One gap, by design: with <c>default-profile</c> set but no profile
+    /// loaded at all (none declared and discovery not finished), this
+    /// returns null, and a pane with no snapshot runs libghostty's own
+    /// <c>command</c>, which is the configured one when it is set. Picking
+    /// anything else would mean inventing a shell the user did not name.
+    /// </remarks>
     public static ProfileSnapshot? ImplicitDefault(
         ProfileSnapshot? defaultProfile,
         ConfiguredCommand? configured,
@@ -72,6 +79,16 @@ public static class PaneCommandPolicy
 
         return WithWorkingDirectory(defaultProfile, workingDirectory);
     }
+
+    /// <summary>
+    /// The configured command when it is what new panes run (set, and no
+    /// <c>default-profile</c>), else null. For the UI that names what a new
+    /// tab opens: when this is non-null, no profile is "the default".
+    /// </summary>
+    public static string? CommandInEffect(ConfiguredCommand? configured, bool defaultProfileSet)
+        => !defaultProfileSet && configured is { } c && !string.IsNullOrWhiteSpace(c.Text)
+            ? c.Text.Trim()
+            : null;
 
     /// <summary>
     /// The first pane of the window a launch opens when the launch named no
@@ -121,16 +138,18 @@ public static class PaneCommandPolicy
 
     /// <summary>
     /// What a pane opened from <paramref name="source"/> (a split) runs: the
-    /// same snapshot, except that <c>-e</c> belongs to its launch's first
-    /// pane only, so a pane opened from that one gets
-    /// <paramref name="implicitDefault"/> instead.
+    /// same profile when the source runs a profile. A source that runs
+    /// something nobody picked gets <paramref name="implicitDefault"/>,
+    /// asked afresh: <c>-e</c> belongs to its launch's first pane only, and
+    /// a <c>command</c> pane's split follows the configuration as it is now,
+    /// so after a reload it runs what Ctrl+T runs, not the old command.
     /// </summary>
     public static ProfileSnapshot? Inherit(
         ProfileSnapshot? source,
         Func<ProfileSnapshot?> implicitDefault)
     {
         ArgumentNullException.ThrowIfNull(implicitDefault);
-        return source is { CommandOrigin: PaneCommandOrigin.LaunchCommand }
+        return source is { CommandOrigin: PaneCommandOrigin.LaunchCommand or PaneCommandOrigin.ConfiguredCommand }
             ? implicitDefault()
             : source;
     }
@@ -141,6 +160,13 @@ public static class PaneCommandPolicy
     /// <see cref="SurfaceArgvPrefix"/> so libghostty splits it and runs it
     /// directly.
     /// </summary>
+    /// <remarks>
+    /// The prefix is read in band, so a profile whose command line itself
+    /// begins with <c>direct:</c> is also run as an argv, split by the
+    /// Windows rules, rather than as a shell string. That matches what
+    /// <c>direct:</c> means in the config, and it is the safe direction:
+    /// the command never reaches <c>cmd.exe</c>.
+    /// </remarks>
     public static string SurfaceCommand(ProfileSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);

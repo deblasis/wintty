@@ -41,19 +41,25 @@ public sealed class FirstPaneCommandWiringTests
     }
 
     [Fact]
-    public void ColdStart_DashE_WritesNoSession()
+    public void ColdStart_DashE_LeavesOnlyItsOwnWindowOutOfTheSession()
     {
         // The one-off window must not replace the layout the next plain
-        // launch restores, so the process stops persisting, before any
-        // window exists to trigger a write.
+        // launch restores. The PROCESS keeps saving: in single-instance mode
+        // it is the primary every later launch is forwarded to, and those
+        // windows are the user's real work.
         var launched = App.Method("OnLaunched");
-        var suspend = launched.Call("_sessionManager.SuspendPersistence");
-        var guard = suspend.Ancestors().OfType<IfStatementSyntax>().First();
+        var note = launched.Call("_sessionManager.NoteRestoreSkipped");
+        var guard = note.Ancestors().OfType<IfStatementSyntax>().First();
         Assert.Equal("coldCommand is not null", guard.Condition.ToString());
 
-        Assert.True(
-            suspend.SpanStart < launched.Call("_sessionManager.LoadForRestore").SpanStart,
-            "persistence must be suspended before the restore decision and the first window");
+        var member = launched.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "window.ExcludedFromSession");
+        Assert.Equal("coldCommand is not null", member.Right.ToString());
+
+        // Nothing switches persistence off for the whole process any more.
+        var manager = ShellSource.Load("Session.SessionManager.cs");
+        Assert.DoesNotContain("SuspendPersistence", manager.Root.ToString());
+        Assert.DoesNotContain("_restoreSkipped", manager.Method("RequestPersist").Body!.ToString());
     }
 
     [Fact]
@@ -209,25 +215,96 @@ public sealed class FirstPaneCommandWiringTests
     }
 
     [Fact]
-    public void SessionManager_WritesNothing_WhileSuspended()
+    public void UI_DoesNotCallAProfileTheDefault_WhenTheCommandRuns()
+    {
+        var page = ShellSource.Load("Settings.Pages.ProfilesPage.xaml.cs");
+        Assert.Contains("App.CommandInEffect", page.Root.ToString());
+
+        var button = ShellSource.Load("Tabs.NewTabSplitButton.xaml.cs");
+        var rebuild = button.Method("RebuildFlyout").Body!.ToString();
+        Assert.Contains("var markDefault = App.CommandInEffect is null;", rebuild);
+        Assert.Contains("markDefault && row.IsDefault", rebuild);
+    }
+
+    [Fact]
+    public void Native_DropsInitialCommand_OnEverySurface()
+    {
+        // The host owns -e on Windows. If only surfaces given a host command
+        // dropped initial-command, a surface without one (the hidden quick
+        // terminal with no profile) initializing first would run -e too.
+        var asm = typeof(FirstPaneCommandWiringTests).Assembly;
+        var name = asm.GetManifestResourceNames()
+            .Single(n => n.Replace('\\', '.').Replace('/', '.')
+                .EndsWith("Interop.Exports.apprt.embedded.zig", System.StringComparison.Ordinal));
+        using var reader = new System.IO.StreamReader(asm.GetManifestResourceStream(name)!);
+        var text = reader.ReadToEnd().Replace("\r\n", "\n");
+
+        const string drop = "config.@\"initial-command\" = null;";
+        Assert.Equal(1, CountOf(text, drop));
+
+        // Not inside the `if (opts.command)` block.
+        var open = text.IndexOf("if (opts.command) |c_command| {", System.StringComparison.Ordinal);
+        Assert.True(open >= 0);
+        var depth = 0;
+        var end = open;
+        for (; end < text.Length; end++)
+        {
+            if (text[end] == '{') depth++;
+            else if (text[end] == '}' && --depth == 0) break;
+        }
+        Assert.DoesNotContain(drop, text[open..end]);
+        Assert.Contains("if (comptime builtin.os.tag == .windows) {\n            " + drop, text);
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var n = 0;
+        for (var i = text.IndexOf(needle, System.StringComparison.Ordinal); i >= 0;
+             i = text.IndexOf(needle, i + needle.Length, System.StringComparison.Ordinal))
+            n++;
+        return n;
+    }
+
+    [Fact]
+    public void SessionManager_SkipsTheExcludedWindow_AndKeepsTheOthers()
     {
         var manager = ShellSource.Load("Session.SessionManager.cs");
-        foreach (var name in new[] { "RequestPersist", "PersistLiveWindows", "FinalizeCleanShutdown" })
-        {
-            var body = manager.Method(name).Body!;
-            var guard = body.Statements.OfType<IfStatementSyntax>()
-                .FirstOrDefault(s => s.Condition.ToString() == "_suspended"
-                    && s.Statement is ReturnStatementSyntax);
-            Assert.True(guard is not null, $"{name} has no `if (_suspended) return;`");
 
-            // Before anything reads or writes the store, or arms the timer.
-            var firstEffect = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
-                .Where(i => i.ToString().StartsWith("_store.") || i.ToString().StartsWith("_debounce.Start"))
-                .Select(i => i.SpanStart)
-                .DefaultIfEmpty(int.MaxValue)
-                .Min();
-            Assert.True(guard!.SpanStart < firstEffect,
-                $"{name} writes before the suspension check");
-        }
+        // The live capture skips only the excluded window, before capturing it.
+        var persist = manager.Method("PersistLiveWindows");
+        var loop = persist.DescendantNodes().OfType<ForEachStatementSyntax>().Single();
+        var skip = loop.Statement.DescendantNodes().OfType<IfStatementSyntax>().First();
+        Assert.Equal("w.ExcludedFromSession", skip.Condition.ToString());
+        Assert.IsType<ContinueStatementSyntax>(skip.Statement);
+        Assert.True(skip.SpanStart < persist.Call("w.CaptureSession").SpanStart);
+
+        // A write is remembered, after it happens.
+        var save = persist.Call("_store.Save");
+        var wrote = persist.AssignsTo("_wroteThisRun").Single();
+        Assert.True(wrote.SpanStart > save.SpanStart);
+    }
+
+    [Fact]
+    public void SessionManager_CleanShutdown_LeavesAnUntouchedPreviousSessionAlone()
+    {
+        // A -e process that saved no window of its own must not mark the
+        // previous session clean, nor replace it with the -e window.
+        var manager = ShellSource.Load("Session.SessionManager.cs");
+        var finalize = manager.Method("FinalizeCleanShutdown");
+        var body = finalize.Body!;
+        var guard = body.Statements.OfType<IfStatementSyntax>()
+            .Single(s => s.Condition.ToString() == "_restoreSkipped && !_wroteThisRun");
+        // It ends the method either way: the previous session is never
+        // marked clean or replaced by the -e window from here.
+        var block = Assert.IsType<BlockSyntax>(guard.Statement);
+        Assert.IsType<ReturnStatementSyntax>(block.Statements.Last());
+        Assert.True(guard.SpanStart < finalize.Call("_store.Load").SpanStart);
+
+        // Only a real window is saved from inside it, and the -e window is
+        // dropped from the fallback before anything reads it.
+        var drop = body.Statements.OfType<IfStatementSyntax>()
+            .Single(s => s.Condition.ToString() == "closingFallback is { ExcludedFromSession: true }");
+        Assert.True(drop.SpanStart < guard.SpanStart);
+        Assert.Contains("closingFallback?.CaptureSession()", block.ToString());
     }
 }
