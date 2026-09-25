@@ -70,6 +70,32 @@ function Record([string]$Op, [long]$ElapsedMs, [string]$Note) {
     Write-Host ("{0,-14} {1,8} ms  {2}" -f $Op, $ElapsedMs, $Note)
 }
 
+# Best-effort evidence when the UI thread never answers: a mini dump of
+# the hung app plus cdb's all-thread stacks beside it. Observation only --
+# this changes nothing about the run's sequencing, it just refuses to let
+# a hang go unexplained. Every step is guarded; a tooling failure must not
+# mask the finding that triggered it.
+function Capture-HangStacks([Parameter(Mandatory)]$Session) {
+    try {
+        $pid0 = $Session.Proc.Id
+        $dump = Join-Path $OutDir ("hang-{0}.dmp" -f $pid0)
+        # comsvcs' MiniDump entry point writes the dump in-process; 'mini'
+        # carries every thread's stack, which is all this needs.
+        Start-Process -FilePath rundll32.exe `
+            -ArgumentList "comsvcs.dll,MiniDump", $pid0, $dump, "mini" `
+            -Wait -NoNewWindow | Out-Null
+        if (-not (Test-Path $dump)) { return }
+        Record 'hang-dump' 0 ("mini dump of pid {0} taken" -f $pid0)
+        $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+        if (-not (Test-Path $cdb)) { return }
+        $stacks = Join-Path $OutDir 'hang-stacks.txt'
+        & $cdb -z $dump -c "~*k; q" *> $stacks
+    }
+    catch {
+        Record 'hang-dump' 0 ("stack capture failed: {0}" -f $_.Exception.Message)
+    }
+}
+
 # One op, one timed ack. Latency is measured with a stopwatch around the
 # round trip: send, then the response line for exactly this op. The read
 # carries a generous hang guard so a UI thread that never comes back fails
@@ -83,7 +109,10 @@ function Invoke-Timed([Parameter(Mandatory)]$Session, [hashtable]$Command) {
         # The guard is never the check, but when it fires on the close the
         # UI thread has been gone past all healthy bounds, and that IS the
         # finding: record it so the run exits 2 (finding) rather than 1
-        # (could-not-run).
+        # (could-not-run). Before anything else, snapshot the hung app's
+        # thread stacks -- a park and a starvation look identical from the
+        # pipe, and the stack is the only thing that tells them apart.
+        Capture-HangStacks $Session
         $script:Findings.Add(("CLOSE_FREEZE_HANG: no answer to '{0}' within the {1} s guard; the UI thread never came back" -f
             $Command['op'], $AckHangGuardSeconds))
         Record $Command['op'] ($AckHangGuardSeconds * 1000) "HANG: no ack within the guard"
