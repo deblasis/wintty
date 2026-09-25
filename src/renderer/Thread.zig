@@ -63,19 +63,22 @@ cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
 cursor_c_cancel: xev.Completion = .{},
 
-/// Safety-net drain while the surface is not visible. Producers push
-/// to this thread's mailbox and then notify `wakeup`; on the IOCP
-/// backend that notify can be lost in the window between a completion
-/// firing and its re-arm (#1036), and while hidden nothing else ticks
-/// this loop (focus loss already canceled the cursor timer, and the
-/// termio's output-driven wakes are gated), so the mailbox can sit
-/// full with this thread asleep. This timer drains it every few
-/// seconds regardless of wakes, bounding any lost-notify stall. It is
-/// armed on the `.visible = false` transition and canceled on
-/// `.visible = true`.
-hidden_drain_h: xev.Timer,
-hidden_drain_c: xev.Completion = .{},
-hidden_drain_c_cancel: xev.Completion = .{},
+/// Safety net for a lost wakeup notify. Producers push to this
+/// thread's mailbox (or mark the terminal dirty) and then notify
+/// `wakeup`; on the IOCP backend that notify can be lost in the
+/// window between a completion firing and its re-arm (#1036). While
+/// hidden nothing else ticks this loop (focus loss already canceled
+/// the cursor timer, and termio's output-driven wakes are gated), and
+/// while visible an unfocused surface has no periodic wake either --
+/// focus loss cancels the cursor blink -- so a lost notify would
+/// otherwise strand a frame until the surface's next output. This
+/// timer ticks every few seconds regardless of wakes: hidden it
+/// drains the mailbox alone, visible it also draws any frame the
+/// terminal still owes (see `hasPendingFrame`). Armed for the whole
+/// life of the thread; a tick with nothing stranded is one empty
+/// mailbox drain and a cheap dirty peek.
+safety_net_h: xev.Timer,
+safety_net_c: xev.Completion = .{},
 
 /// Incremental scrollback compression scheduling.
 compression: Compression = undefined,
@@ -165,9 +168,9 @@ pub fn init(
     var cursor_timer = try xev.Timer.init();
     errdefer cursor_timer.deinit();
 
-    // The safety-net drain for hidden surfaces (see hidden_drain_h).
-    var hidden_drain_timer = try xev.Timer.init();
-    errdefer hidden_drain_timer.deinit();
+    // The safety net for lost wakeup notifies (see safety_net_h).
+    var safety_net_timer = try xev.Timer.init();
+    errdefer safety_net_timer.deinit();
 
     // The mailbox for messaging this thread
     var mailbox = try Mailbox.create(alloc);
@@ -182,7 +185,7 @@ pub fn init(
         .render_h = render_h,
         .draw_now = draw_now,
         .cursor_h = cursor_timer,
-        .hidden_drain_h = hidden_drain_timer,
+        .safety_net_h = safety_net_timer,
         .surface = surface,
         .renderer = renderer_impl,
         .state = state,
@@ -206,7 +209,7 @@ pub fn deinit(self: *Thread) void {
     self.render_h.deinit();
     self.draw_now.deinit();
     self.cursor_h.deinit();
-    self.hidden_drain_h.deinit();
+    self.safety_net_h.deinit();
     if (comptime terminalpkg.compression_enabled)
         self.compression.deinit();
     self.loop.deinit();
@@ -276,6 +279,14 @@ fn threadMain_(self: *Thread) !void {
     // Arm the animation timer in case the renderer already needs
     // animation wakes (e.g. custom shaders loaded at startup).
     self.armAnimationTimer();
+
+    // Arm the safety net for the thread's whole life. It used to cover
+    // only hidden surfaces, armed on hide and canceled on show, but a
+    // visible surface that lost its notify has no other tick either:
+    // focus loss canceled the cursor blink, and output-driven wakes
+    // are one-shot notifies that can be lost (#1036). See
+    // safetyNetCallback for what each tick does in each state.
+    self.armSafetyNet();
 
     // Run
     log.debug("starting renderer thread", .{});
@@ -370,17 +381,11 @@ fn drainMailbox(self: *Thread) !void {
                 // no-ops when nothing changed.
                 self.compression.wake(self);
 
-                // The safety-net drain: while hidden, nothing else ticks
-                // this loop, so a lost wakeup notify (see hidden_drain_h)
-                // would leave producers blocked on a full mailbox. Arm
-                // the slow drain on the way in, cancel it on the way out
-                // -- the loop is properly awake again by the time a
-                // visible transition is processed.
-                if (v) {
-                    self.cancelHiddenDrain();
-                } else {
-                    self.armHiddenDrain();
-                }
+                // The safety net needs nothing from this transition: it
+                // is armed for the thread's whole life (see threadMain)
+                // and its tick adapts to `flags.visible` on its own.
+                // Canceling it on the way back to visible used to leave
+                // a show-time surface with no net at all.
 
                 // Note that we're explicitly today not stopping any
                 // cursor timers, draw timers, etc. These things have very
@@ -681,46 +686,34 @@ fn renderCallback(
 /// regain). Resetting a pending timer is always safe: every call
 /// recomputes the wake, so the deadline only ever moves toward the
 /// actual next wake.
-/// How often the hidden-surface safety-net drain fires. Slow on
-/// purpose: it exists to bound a lost-notify stall (#1036), not to do
-/// work -- anything real still arrives through the wakeup async, and
-/// the cost of a false alarm is one mailbox drain of an empty queue.
-const hidden_drain_interval_ms: u64 = 2_000;
+/// How often the safety net ticks. Slow on purpose: it exists to
+/// bound a lost-notify stall (#1036), not to do work -- anything real
+/// still arrives through the wakeup async, and the cost of a false
+/// alarm is one mailbox drain of an empty queue plus, while visible,
+/// a cheap dirty peek.
+const safety_net_interval_ms: u64 = 2_000;
 
-/// Arm the safety-net drain (idempotent): a repeating timer whose
-/// callback drains the mailbox and re-arms itself while the surface
-/// stays hidden. Called on the `.visible = false` transition.
-fn armHiddenDrain(self: *Thread) void {
-    if (self.hidden_drain_c.state() == .active) return;
-    self.hidden_drain_h.run(
+/// Arm the safety net (idempotent): a repeating timer whose callback
+/// drains the mailbox and, while the surface is visible, draws any
+/// frame the terminal still owes. Armed once at thread start and
+/// never canceled; the tick reads `flags.visible` to decide what the
+/// surface needs on this pass.
+fn armSafetyNet(self: *Thread) void {
+    if (self.safety_net_c.state() == .active) return;
+    self.safety_net_h.run(
         &self.loop,
-        &self.hidden_drain_c,
-        hidden_drain_interval_ms,
+        &self.safety_net_c,
+        safety_net_interval_ms,
         Thread,
         self,
-        hiddenDrainCallback,
+        safetyNetCallback,
     );
 }
 
-/// Cancel an armed safety-net drain. Called on `.visible = true`; also
-/// safe on the teardown path where the loop is about to stop anyway
-/// (the timer deinit after thread join handles that case).
-fn cancelHiddenDrain(self: *Thread) void {
-    if (self.hidden_drain_c.state() != .active) return;
-    if (self.hidden_drain_c_cancel.state() == .active) return;
-    self.hidden_drain_h.cancel(
-        &self.loop,
-        &self.hidden_drain_c,
-        &self.hidden_drain_c_cancel,
-        Thread,
-        self,
-        hiddenDrainCancelCallback,
-    );
-}
-
-/// The tail of the hidden drain: keep the timer going while hidden.
-/// Extracted so the idiom is unit-tested against the real xev backend.
-fn hiddenDrainRearm(
+/// The tail of the safety net: keep the timer going for the life of
+/// the thread. Extracted so the idiom is unit-tested against the real
+/// xev backend.
+fn safetyNetRearm(
     loop: *xev.Loop,
     timer: *xev.Timer,
     c: *xev.Completion,
@@ -733,11 +726,11 @@ fn hiddenDrainRearm(
     // timer re-inserts the elapsed deadline on the IOCP backend and
     // starves the port wait; that starved the stop async and hung
     // Surface.deinit's join on the UI thread.
-    timer.run(loop, c, hidden_drain_interval_ms, Userdata, userdata, cb);
+    timer.run(loop, c, safety_net_interval_ms, Userdata, userdata, cb);
     return .disarm;
 }
 
-fn hiddenDrainCallback(
+fn safetyNetCallback(
     self_: ?*Thread,
     _: *xev.Loop,
     _: *xev.Completion,
@@ -755,21 +748,26 @@ fn hiddenDrainCallback(
     // lost; the not-full condition signal inside the drain wakes any
     // blocked producer immediately.
     t.drainMailbox() catch |err|
-        log.err("error draining mailbox (hidden safety net) err={}", .{err});
+        log.err("error draining mailbox (safety net) err={}", .{err});
 
-    // Stay armed while hidden; the .visible = true transition cancels.
-    if (!t.flags.visible) return hiddenDrainRearm(&t.loop, &t.hidden_drain_h, &t.hidden_drain_c, Thread, t, hiddenDrainCallback);
-    return .disarm;
-}
+    // While hidden this is the whole tick: output-driven wakes are
+    // gated off, the mailbox is the only channel, and the drain
+    // unblocks it.
+    //
+    // While visible the mailbox is not where output strands: the pty
+    // thread marks the terminal dirty and notifies `wakeup` directly
+    // (termio's queueRender), so a lost notify leaves the frame state
+    // sitting in the terminal -- dirty rows, a moved cursor -- with
+    // nothing left to tick this loop, because focus loss canceled the
+    // blink timer and every other wake is a one-shot that already
+    // fired. Ask the terminal whether a frame is owed and draw it;
+    // on a clean terminal the ask is a cheap peek, not a frame.
+    if (t.flags.visible and t.renderer.hasPendingFrame(t.state)) {
+        _ = renderCallback(t, undefined, undefined, {});
+    }
 
-fn hiddenDrainCancelCallback(
-    _: ?*Thread,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.CancelError!void,
-) xev.CallbackAction {
-    _ = r catch {};
-    return .disarm;
+    // Stay armed for the life of the thread.
+    return safetyNetRearm(&t.loop, &t.safety_net_h, &t.safety_net_c, Thread, t, safetyNetCallback);
 }
 
 fn armAnimationTimer(self: *Thread) void {
@@ -1275,8 +1273,8 @@ test "hidden drain idiom: a timer that re-runs itself lets a posted async throug
                 self.starved = true;
                 return .disarm;
             }
-            // The idiom under test: same as hiddenDrainCallback's tail.
-            return hiddenDrainRearm(self.loop, self.timer, self.timer_c, @This(), self, onTimer);
+            // The idiom under test: same as safetyNetCallback's tail.
+            return safetyNetRearm(self.loop, self.timer, self.timer_c, @This(), self, onTimer);
         }
 
         fn onStop(
@@ -1309,8 +1307,8 @@ test "hidden drain idiom: a timer that re-runs itself lets a posted async throug
     try testing.expect(st.timer_fires < 5);
 }
 
-// The idiom test above drives hiddenDrainRearm directly, so it cannot
-// catch a revert of hiddenDrainCallback's callsite (back to a bare
+// The idiom test above drives safetyNetRearm directly, so it cannot
+// catch a revert of safetyNetCallback's callsite (back to a bare
 // `return .rearm;`) while the helper itself stays correct. This census
 // closes that gap: it scans every xev.Timer callback's own source text
 // for the literal string that reintroduces the starvation bug.
@@ -1350,4 +1348,43 @@ test "no xev.Timer callback in this file returns .rearm" {
     // A scan that matched nothing would pass while proving nothing. Five is
     // what the file carries today; it may grow, and must not silently shrink.
     try std.testing.expect(found >= 5);
+}
+
+// The safety net exists to bound a lost wakeup notify (#1036), and its
+// drain alone only bounds it for HIDDEN surfaces. Output never touches
+// the mailbox: the pty thread marks the terminal dirty and notifies
+// `wakeup` straight from termio's queueRender, so on a visible surface
+// a lost notify strands frame state in the terminal with no pending
+// wake -- focus loss already canceled the cursor blink, and every
+// other wake is a one-shot that already fired. The callback must
+// therefore draw what the terminal still owes while visible, and the
+// net must never be canceled on the way back to a visible state (the
+// shape this file shipped before the strand was understood). The
+// idiom test cannot catch a revert of either, so this census pins the
+// callback's and the startup path's own source.
+test "safety net draws pending frames on visible surfaces" {
+    const src = @embedFile("Thread.zig");
+
+    // Identify the callback by its signature, the way the .rearm
+    // census identifies callbacks, so renames cannot slip past it.
+    const sig = "fn safetyNetCallback(";
+    const start = std.mem.indexOf(u8, src, sig) orelse
+        return error.SafetyNetCallbackMissing;
+    const end = start + (std.mem.indexOf(u8, src[start..], "\n}\n") orelse
+        return error.BodyNotClosed);
+    const body = src[start..end];
+
+    // The visible-side draw, gated by the pending-frame peek.
+    try std.testing.expect(std.mem.indexOf(u8, body, "t.flags.visible and t.renderer.hasPendingFrame(t.state)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "renderCallback(t, undefined, undefined, {})") != null);
+    // The mailbox drain stays: hidden surfaces rely on it alone.
+    try std.testing.expect(std.mem.indexOf(u8, body, "drainMailbox") != null);
+
+    // Armed at thread start, and no cancel path anywhere: canceling on
+    // the `.visible = true` transition is the exact revert that left
+    // shown surfaces unbounded. The needles are split so this test's
+    // own embedded source cannot satisfy or trip them (a whole-file
+    // @embedFile census matches itself otherwise).
+    try std.testing.expect(std.mem.indexOf(u8, src, "self.armSafetyNet" ++ "();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "cancelSafetyNet" ++ "(") == null);
 }

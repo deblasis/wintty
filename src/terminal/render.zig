@@ -431,6 +431,80 @@ pub const RenderState = struct {
         self.endUpdate();
     }
 
+    /// True if the terminal holds state the next `update` would consume:
+    /// a full-rebuild flag, screen-level dirtiness, a dimension or
+    /// viewport change, a cursor move, or any dirty row.
+    ///
+    /// This is `beginUpdate`'s dirty determination without the update.
+    /// Nothing is cleared and nothing is copied -- `beginUpdate` and
+    /// `update` remain the only consumers of dirty state -- so it is
+    /// safe to ask repeatedly, including from a timer that only wants
+    /// to know whether a frame is owed. The caller must hold the
+    /// terminal lock (the same lock `beginUpdate` requires).
+    pub fn anyDirty(self: *RenderState, t: *Terminal) bool {
+        const s: *Screen = t.screens.active;
+
+        // The full-rebuild checks, in `beginUpdate`'s order and with its
+        // cheap-first layout: a screen key change, terminal-level dirty
+        // flags, screen-level dirty flags, dimensions, viewport pin.
+        if (t.screens.active_key != self.screen) return true;
+        {
+            const Int = @typeInfo(Terminal.Dirty).@"struct".backing_integer.?;
+            const v: Int = @bitCast(t.flags.dirty);
+            if (v > 0) return true;
+        }
+        {
+            const Int = @typeInfo(Screen.Dirty).@"struct".backing_integer.?;
+            const v: Int = @bitCast(t.screens.active.dirty);
+            if (v > 0) return true;
+        }
+        if (self.rows != s.pages.rows or
+            self.cols != s.pages.cols
+        ) return true;
+        if (self.viewport_pin) |old| {
+            if (!old.eql(s.pages.getTopLeft(.viewport))) return true;
+        }
+
+        // A cursor move strands a frame without dirtying any row: the
+        // cursor reaches the frame as a uniform, so the parser can move
+        // it while every cell stays clean. `beginUpdate` copies the
+        // cursor on every call, so after a consumed update these match.
+        if (self.cursor.active.x != s.cursor.x or
+            self.cursor.active.y != s.cursor.y
+        ) return true;
+
+        // The row walk, without the consuming clears: a page-level dirty
+        // flag owes the whole chunk, otherwise the packed row dirty bits
+        // say per row. Clean groups skip exactly the way `beginUpdate`'s
+        // scan does, so an idle terminal costs one contiguous masked test
+        // per group of rows.
+        var y: usize = 0;
+        var page_it = s.pages.getTopLeft(.viewport).pageIterator(.right_down, null);
+        while (y < self.rows) {
+            const chunk = page_it.next() orelse break;
+            const p: *page.Page = chunk.node.page();
+            if (p.dirty) return true;
+
+            const take: usize = @min(
+                @as(usize, chunk.end - chunk.start),
+                self.rows - y,
+            );
+            const page_rows: []page.Row = p.rows.ptr(p.memory)[chunk.start..][0..take];
+
+            var i: usize = 0;
+            while (take - i >= RowDirtyMask.group_len) : (i += RowDirtyMask.group_len) {
+                // `match` is true when the whole group is clean.
+                if (!RowDirtyMask.match(page_rows, i)) return true;
+            }
+            for (page_rows[i..]) |*page_row| {
+                if (page_row.dirty) return true;
+            }
+
+            y += take;
+        }
+        return false;
+    }
+
     /// Begin an update of the render state to the latest terminal
     /// state. Every begin must be completed with an `endUpdate` call
     /// before the render state is read.
@@ -1847,6 +1921,69 @@ test "begin and end update" {
         try testing.expect(cells[0].get(1).style.flags.bold);
         try testing.expect(cells[0].get(2).style.flags.italic);
     }
+}
+
+test "anyDirty tracks what update would consume" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+
+    // A render state that has never seen this terminal owes it a
+    // frame: the dimension check alone forces the rebuild.
+    try testing.expect(state.anyDirty(&t));
+
+    try state.update(alloc, &t);
+    try testing.expect(!state.anyDirty(&t));
+
+    // New output dirties a row. The peek sees it and, because it
+    // consumes nothing, a real update after the peek still lands it.
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice("XY");
+    }
+    try testing.expect(state.anyDirty(&t));
+    try state.update(alloc, &t);
+    try testing.expect(!state.anyDirty(&t));
+}
+
+test "anyDirty sees a cursor move that dirties no row" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+    try testing.expect(!state.anyDirty(&t));
+
+    // Position the cursor without writing a cell: the frame is owed
+    // for the cursor uniform alone, which a row-dirty scan would miss.
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice("\x1b[2;3H");
+    }
+    try testing.expect(state.anyDirty(&t));
+
+    // Consuming the frame clears it again.
+    try state.update(alloc, &t);
+    try testing.expect(!state.anyDirty(&t));
 }
 
 test "endUpdate skips unchanged style runs" {

@@ -363,6 +363,19 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
+    /// The Nth leaf's terminal, in <see cref="PaneTree.Leaves"/> order,
+    /// or null when the index is out of range. Read-only seam access so
+    /// a harness can address the pane a split just demoted.
+    /// </summary>
+    internal TerminalControl? TestSeamLeafTerminal(int index)
+    {
+        var leaves = PaneTree.Leaves(_root).ToList();
+        return index >= 0 && index < leaves.Count
+            ? leaves[index].Terminal()
+            : null;
+    }
+
+    /// <summary>
     /// Which leaf actually holds keyboard focus, or -1 when focus is
     /// outside this host. Walks up from <paramref name="focused"/> because
     /// focus settles on a child of the leaf's control as often as on the

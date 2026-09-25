@@ -1712,6 +1712,29 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             };
         }
 
+        /// True if the terminal holds frame state the next `updateFrame`
+        /// would consume. Read-only: nothing is cleared, so a caller that
+        /// asks and then decides to draw loses nothing to the ask.
+        ///
+        /// This is the "does anyone owe a frame" check for a timer that
+        /// bounds a lost wakeup notify: output marks the terminal dirty
+        /// and notifies the render thread straight from the pty read, so
+        /// when that notify is lost the dirty state sits here unconsumed
+        /// and this is the only way to see it.
+        ///
+        /// The terminal lock is taken briefly, exactly as `updateFrame`
+        /// takes it. The answer can be stale the moment it returns,
+        /// which is sound for the ask: a stale false converges on the
+        /// next ask, a stale true draws one redundant frame.
+        pub fn hasPendingFrame(self: *Self, state: *renderer.State) bool {
+            // A dormant terminal's pages are torn down; same guard as
+            // the compression scheduler's wake.
+            if (state.dormant.load(.acquire)) return false;
+            state.lockDemand(global.io());
+            defer state.unlockDemand(global.io());
+            return self.terminal_state.anyDirty(state.terminal);
+        }
+
         /// Update the frame data.
         pub fn updateFrame(
             self: *Self,
