@@ -421,7 +421,7 @@ internal static class TestSeam
     /// harnesses read their assertions off it, so the pass is part of its
     /// contract; layout-frame is new and owes no one that.
     /// </remarks>
-    private static bool IsObserver(string op) => op is "layout-frame";
+    private static bool IsObserver(string op) => op is "layout-frame" or "surface-state";
 
     /// <summary>
     /// The one marshal: every command, whatever it touches, runs on the
@@ -1167,6 +1167,61 @@ internal static class TestSeam
                     json.WriteBoolean("sent", sent);
                     json.WriteBoolean("dormant", Interop.NativeMethods.SurfaceIsDormant(
                         new Interop.GhosttySurface(handle)));
+                    json.WriteEndObject();
+                });
+            }
+
+            case "surface-fault":
+            {
+                // Reproduce the GPU-less startup crash's precondition on
+                // healthy hardware: the next N surface creations report
+                // what libghostty reports when the renderer device cannot
+                // be built (a zero handle), which is the state that used
+                // to AV (pin era) or throw out of the layout handler.
+                // {"count": N} arms N failures, {"count": 0} disarms.
+                // Strict numeric parse: a non-numeric count silently
+                // disarming would be indistinguishable from an armed one.
+                if (!args.TryGetProperty("count", out var countEl)
+                    || countEl.ValueKind != JsonValueKind.Number
+                    || !countEl.TryGetInt32(out var count)
+                    || count < 0)
+                {
+                    return Error(op, "surface-fault needs a non-negative integer count (0 disarms)");
+                }
+                Controls.TerminalControl.TestSeamFaultSurfaceNew = count;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("armed", count);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "surface-state":
+            {
+                // Readback for the surface-creation retry: what the fault
+                // left behind, with no native call on a zero handle.
+                // retriesLeft is -1 when no retry is armed; attempted says
+                // whether a creation ever ran, so "never attempted"
+                // (false/-1) is distinguishable from "gave up" (true/-1).
+                // An observer op: polls must not force layout passes, or
+                // the polls would share the retry's creation path and a
+                // driver could never tell which one recovered the pane.
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("index", index);
+                    json.WriteBoolean("hasSurface", terminal.TestSeamHasSurface);
+                    json.WriteBoolean("attempted", terminal.TestSeamSurfaceAttempted);
+                    json.WriteNumber("retriesLeft", terminal.TestSeamSurfaceRetriesLeft);
                     json.WriteEndObject();
                 });
             }

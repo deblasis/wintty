@@ -37,8 +37,9 @@ public class PaneStartupGlowWiringTests
     /// does not exist or is not registered, and the handler would find no
     /// leaf to mount the glow over. Raised a line earlier, the first pane
     /// opens dark and nothing fails. Creation runs from the first layout pass
-    /// that gives the panel a size (TryCreateSurface), so the raise is the
-    /// last thing it does before reporting success, and Loaded raises nothing.
+    /// that gives the panel a size (through TrySettleSurfaceCreation), so the
+    /// raise is the last thing it does before reporting success, and Loaded
+    /// raises nothing.
     /// </summary>
     [Fact]
     public void SurfaceSpawned_IsRaised_AsTheLastStepOfSurfaceCreation()
@@ -52,7 +53,13 @@ public class PaneStartupGlowWiringTests
         Assert.Equal("return true;", body[^1].ToString());
 
         Assert.DoesNotContain("SurfaceSpawned", Terminal().Method("OnLoaded").ToString());
-        Assert.Contains("TryCreateSurface()", Terminal().Method("OnFirstLayoutUpdated").ToString());
+        // Creation still runs from the first layout pass that gives the
+        // panel a size, but the pass drives TrySettleSurfaceCreation - the
+        // settle the retry timer shares - and the settle calls
+        // TryCreateSurface. Assert the chain, so moving creation off the
+        // first-layout path still goes red here.
+        Assert.Contains("TrySettleSurfaceCreation()", Terminal().Method("OnFirstLayoutUpdated").ToString());
+        Assert.Contains("TryCreateSurface()", Terminal().Method("TrySettleSurfaceCreation").ToString());
     }
 
     /// <summary>
