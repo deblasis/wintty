@@ -43,7 +43,16 @@ param(
     [int]$ReadinessTimeoutSeconds = 30,
     # Five minutes: far past the defect's whole 60 s budget twice over, and
     # only there so a never-answering UI thread ends the run, not the day.
-    [int]$AckHangGuardSeconds = 300
+    [int]$AckHangGuardSeconds = 300,
+    # The default shape closes a LIVE quiet child: teardown kills it, and
+    # the skip is what keeps the notice from parking the join. The
+    # -NaturalExit shape exercises the racing case instead: tab 1's shell
+    # is told to exit on its own while the flood keeps the mailbox full,
+    # so the notice push is already inside its budget when the close
+    # latches teardown, and only the abort token can end it.
+    [int]$FloodChunks = 300,
+    [switch]$NaturalExit,
+    [double]$ExitLeadSeconds = 1.5
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -180,12 +189,17 @@ try {
 
     # The quiet child first: its command echo in the grid is the
     # ready-prompt oracle for tab 1, and ping emits no OSC, so tab 1's
-    # teardown contributes no streaming pushes of its own.
-    Invoke-SeamCommand $session @{ op = 'send-text'; index = 1; text = "ping -n 600 127.0.0.1`r" } | Out-Null
-    Wait-Until {
-        $r = Invoke-SeamCommand $session @{ op = 'screen-text'; index = 1 }
-        ($r.text -split "`n" -match 'ping').Count -gt 0
-    } $ReadinessTimeoutSeconds 'tab 1 to echo the ping command' | Out-Null
+    # teardown contributes no streaming pushes of its own. The
+    # -NaturalExit shape replaces this: tab 1's shell exits on its own
+    # below, and a ping running under it would queue the exit behind 600
+    # seconds of ICMP.
+    if (-not $NaturalExit) {
+        Invoke-SeamCommand $session @{ op = 'send-text'; index = 1; text = "ping -n 600 127.0.0.1`r" } | Out-Null
+        Wait-Until {
+            $r = Invoke-SeamCommand $session @{ op = 'screen-text'; index = 1 }
+            ($r.text -split "`n" -match 'ping').Count -gt 0
+        } $ReadinessTimeoutSeconds 'tab 1 to echo the ping command' | Out-Null
+    }
 
     # The flood: chunks of distinct OSC titles, bounded and paced. The
     # bounds matter more than the volume: an unbounded pipe-saturating
@@ -202,13 +216,28 @@ try {
     # a raw ESC in the input stream would be PSReadLine's to interpret,
     # not the shell's.
     Invoke-SeamCommand $session @{ op = 'send-text'; index = 0; text =
-        "`$c = -join (1..128 | ForEach-Object { `"``e]0;flood-`$_``a`" }); 1..300 | ForEach-Object { [Console]::Write(`$c); Start-Sleep -Milliseconds 15 }`r" } | Out-Null
+        "`$c = -join (1..128 | ForEach-Object { `"``e]0;flood-`$_``a`" }); 1..$FloodChunks | ForEach-Object { [Console]::Write(`$c); Start-Sleep -Milliseconds 15 }`r" } | Out-Null
     $floodTitle = Wait-Until {
         $r = Invoke-SeamCommand $session @{ op = 'tab-labels' }
         $t = $r.labels | Where-Object { $_.index -eq 0 }
         if ($t -and $t.shellTitle -and $t.shellTitle -match 'flood') { $t.shellTitle }
     } $ReadinessTimeoutSeconds 'a flood title to land on tab 0'
     Record 'flood-live' 0 "shell title now '$floodTitle'"
+
+    # The racing shape: tab 1's shell exits on its own, INTO the full
+    # mailbox the flood keeps topped up, so its child-exit notice is
+    # already parked inside a delivery budget when the close below
+    # latches teardown. A probe-default run never enters this block, and
+    # `exit` is the pty child itself finishing -- no kill, no close, the
+    # natural path whose only cure is the abort token (the skip cannot
+    # fire: processExitCommon ran before teardown latched). The lead
+    # covers the shell's own shutdown; the close then joins a wait thread
+    # whose push has been in flight for the lead's duration.
+    if ($NaturalExit) {
+        Invoke-SeamCommand $session @{ op = 'send-text'; index = 1; text = "exit`r" } | Out-Null
+        [System.Threading.Thread]::Sleep([int]($ExitLeadSeconds * 1000))
+        Record 'natural-exit' 0 "tab 1 shell told to exit, waited $($ExitLeadSeconds) s"
+    }
 
     # The measurement. The seam serves one command at a time -- the
     # connection loop awaits each response before reading the next line
