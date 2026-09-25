@@ -135,15 +135,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // the layout handler; its predecessor dereferenced the zero handle
     // natively and AV'd the process (the GPU-less startup crash).
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _surfaceRetryTimer;
-    private int _surfaceRetryTicksLeft;
+    private int _surfaceRetryAttemptsLeft;
 
     // Retry cadence and budget for a failed surface creation. Each failed
     // attempt is cheap - the device init fails before the pty spawns, so no
     // shell is started - but the attempts still burn a loaded machine, so
-    // the budget is finite: after a minute of failures the pane degrades
-    // and a later new tab (a fresh control) tries again with its own budget.
+    // the budget is finite: after a minute of failed attempts the pane
+    // degrades and a later new tab (a fresh control) tries again with its
+    // own budget. The budget counts ATTEMPTS, not ticks: a tick while the
+    // pane is unmeasured (a background tab, a leaf mid-reparent) spends
+    // nothing, so hiding the pane during the retry window cannot spend its
+    // way to a degraded pane it never let retry.
     private static readonly TimeSpan SurfaceRetryInterval = TimeSpan.FromMilliseconds(500);
-    private const int SurfaceRetryMaxTicks = 120;
+    private const int SurfaceRetryMaxAttempts = 120;
 
     // Set in OnKeyDown when we short-circuit a bound chord; consumed
     // (and cleared) by the matching OnCharacterReceived. WinUI 3 fires
@@ -1026,7 +1030,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// budget runs out. The app stays up either way; this method never
     /// throws on the failure paths a GPU-less machine produces.
     /// </summary>
-    private bool TryCreateSurface()
+    private bool TryCreateSurface(bool viaRetryTick = false)
     {
         if (SurfacePixelSize.Initial(
                 Panel.ActualWidth, Panel.ActualHeight,
@@ -1121,6 +1125,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         }
         catch (Exception ex)
         {
+            // A managed exception out of the P/Invoke itself (missing
+            // export, marshaling OOM) is not the GPU-less failure this
+            // file tolerates - it escapes and kills the app - but the
+            // attempt's references are released all the same so the
+            // balance stays total right up to the death.
+            SwapChainPanelInterop.Release(panelPtr);
+            if (_selfHandle.IsAllocated) _selfHandle.Free();
+            FreePendingSurfaceConfig();
             System.Diagnostics.Debug.WriteLine(
                 $"{AppIdentity.LogTag} SurfaceNew failed: {ex.Message}\n{ex.StackTrace}");
             throw;
@@ -1180,8 +1192,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // Request focus so keyboard input starts flowing immediately.
         // Focus lives on the UserControl now, not the panel. Preview
         // surfaces (AutoFocus = false) opt out: they live inside other
-        // windows whose focus must stay put.
-        if (AutoFocus)
+        // windows whose focus must stay put. A retry-tick success can land
+        // while the pane is a hidden background tab (a collapsed pane keeps
+        // its last measured size, so the size gate passes), and programmatic
+        // focus there would steal the keystrokes of the pane the user is
+        // actually in - so only a pane that is in the visible tree asks;
+        // a recovered hidden pane gains focus from the user's next click,
+        // like any pane that loads late.
+        if (AutoFocus && IsEffectivelyVisible())
         {
             this.Focus(FocusState.Programmatic);
         }
@@ -1205,7 +1223,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private void ScheduleSurfaceCreationRetry()
     {
         if (_surfaceRetryTimer is not null) return;
-        _surfaceRetryTicksLeft = SurfaceRetryMaxTicks;
+        _surfaceRetryAttemptsLeft = SurfaceRetryMaxAttempts;
         var timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         timer.Interval = SurfaceRetryInterval;
         timer.IsRepeating = true;
@@ -1215,7 +1233,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         Ghostty.Logging.StaticLoggers.App.LogWarning(
             "Terminal surface creation failed (renderer device not ready?); retrying every {IntervalMs} ms for up to {BudgetSeconds} s",
             (int)SurfaceRetryInterval.TotalMilliseconds,
-            (int)(SurfaceRetryInterval.TotalMilliseconds * SurfaceRetryMaxTicks / 1000));
+            (int)(SurfaceRetryInterval.TotalMilliseconds * SurfaceRetryMaxAttempts / 1000));
     }
 
     private void OnSurfaceRetryTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
@@ -1225,14 +1243,29 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             StopSurfaceCreationRetry();
             return;
         }
-        if (_surfaceRetryTicksLeft-- <= 0)
+        // The budget counts attempts, not ticks: an unmeasured pane cannot
+        // attempt (the size gate in TryCreateSurface would refuse), so the
+        // tick is skipped without spending. A pane the user hid mid-retry
+        // keeps its budget for when it is shown again.
+        if (SurfacePixelSize.Initial(
+                Panel.ActualWidth, Panel.ActualHeight,
+                Panel.CompositionScaleX, Panel.CompositionScaleY) is null)
+        {
+            return;
+        }
+        if (_surfaceRetryAttemptsLeft-- <= 0)
         {
             StopSurfaceCreationRetry();
             Ghostty.Logging.StaticLoggers.App.LogWarning(
                 "Terminal surface creation did not succeed within the retry budget; pane left without a terminal surface");
             return;
         }
-        TrySettleSurfaceCreation();
+        if (TrySettleSurfaceCreation(viaRetryTick: true))
+        {
+            // Stop now rather than letting the timer survive one extra tick
+            // to notice the new surface on the next pass.
+            StopSurfaceCreationRetry();
+        }
     }
 
     private void StopSurfaceCreationRetry()
@@ -1247,11 +1280,30 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// One creation attempt plus the settle work every success needs,
     /// shared by the first-layout driver and the retry timer.
     /// </summary>
-    private bool TrySettleSurfaceCreation()
+    private bool TrySettleSurfaceCreation(bool viaRetryTick = false)
     {
-        if (_surfaceDisposed || !TryCreateSurface()) return false;
+        if (_surfaceDisposed || !TryCreateSurface(viaRetryTick)) return false;
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
         ArmResizeOverlayGrace();
+        return true;
+    }
+
+    /// <summary>
+    /// Whether this control sits in a visible tree: attached to a XamlRoot
+    /// with no collapsed element on the path to the root. A detached or
+    /// hidden pane must not pull programmatic focus when a retry brings its
+    /// surface up (the user's keystrokes belong to the pane they are in).
+    /// </summary>
+    private bool IsEffectivelyVisible()
+    {
+        if (XamlRoot is null) return false;
+        DependencyObject? node = this;
+        while (node is not null)
+        {
+            if (node is UIElement element && element.Visibility != Visibility.Visible)
+                return false;
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
         return true;
     }
 
@@ -1286,11 +1338,20 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal bool TestSeamHasSurface => _surface.Handle != IntPtr.Zero;
 
     /// <summary>
-    /// Seam readback: ticks left in the retry budget, or -1 when no retry
+    /// Seam readback: attempts left in the retry budget, or -1 when no retry
     /// is armed (never armed, succeeded, given up, or stopped).
     /// </summary>
     internal int TestSeamSurfaceRetriesLeft =>
-        _surfaceRetryTimer is null ? -1 : _surfaceRetryTicksLeft;
+        _surfaceRetryTimer is null ? -1 : _surfaceRetryAttemptsLeft;
+
+    /// <summary>
+    /// Seam readback: whether a creation was ATTEMPTED at least once (the
+    /// latch is set before the attempt). Together with
+    /// <see cref="TestSeamSurfaceRetriesLeft"/> this tells a driver
+    /// "never attempted" (false/-1) apart from "gave up" (true/-1), which
+    /// a bare -1 cannot.
+    /// </summary>
+    internal bool TestSeamSurfaceAttempted => _surfaceCreated;
 #endif
 
     private void DisableAncestorScrollViewerTabStop()
@@ -1463,6 +1524,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_commandUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_commandUtf8);
         if (_initialInputUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_initialInputUtf8);
         if (_customShaderUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_customShaderUtf8);
+        _customShaderUtf8 = IntPtr.Zero;
 
         _surface = default;
         _workingDirectoryUtf8 = IntPtr.Zero;

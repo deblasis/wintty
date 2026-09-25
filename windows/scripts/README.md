@@ -152,6 +152,7 @@ on a temp config root and private state base, like `contrast-oracle.ps1`.
 | `gen-bell.ps1` | generates a test asset |
 | `aot-fuzz.ps1`, `vtabs-visual-qa.ps1`, `release-smoke.ps1` | runners in their own right. `aot-fuzz` targets the NativeAOT publish, which the suite can also do with `-ExePath` |
 | `tab-tag-ink.ps1` | one regression, not a sweep: it measures whether a colour-tagged tab's pin glyph is painted in the tag foreground (#883). Like `contrast-oracle.ps1` it needs the seam pipe to itself |
+| `surface-create-fault-check.ps1` | the GPU-less startup crash regression harness (surface-fault seam op): arms a creation that cannot succeed, requires the app to stay up, retry and degrade. Run by hand against a Debug+TESTSEAM build; `-SkipGiveUp` for the quick form, since the give-up leg waits out the full 60 s retry budget |
 
 ## Filming motion
 
