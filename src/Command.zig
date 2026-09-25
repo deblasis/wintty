@@ -864,16 +864,38 @@ fn windowsCmdScriptSwitch(argv: []const []const u8) ?usize {
 /// Windows batch files are run by cmd.exe: CreateProcessW hands a
 /// .bat/.cmd target to `%COMSPEC% /c`, and the command line this module
 /// composed is parsed a second time, by a tokenizer with different
-/// rules. It splits commands on unquoted `& | < > ( ) ^`, splits
-/// parameters on ` \t,;=`, and expands `%VAR%` (and `!VAR!` under
-/// delayed expansion) even inside quotes. An argument body like
-/// `r.txt&echo.X` written bare therefore runs a second command
-/// (issue #1172). A batch invocation is serialized by the rules below
-/// instead of the C runtime's.
+/// rules. It splits commands on unquoted `& | < > ( )`, and `^` escapes
+/// the byte that follows; it splits parameters on ` \t,;=`; and it
+/// expands `%VAR%` (and `!VAR!` under delayed expansion) even inside
+/// quotes. An argument body like `r.txt&echo.X` written bare therefore
+/// runs a second command (issue #1172). A batch invocation is serialized
+/// by the rules below instead of the C runtime's.
 fn windowsBatchTarget(argv0: []const u8) bool {
     const trimmed = mem.trim(u8, argv0, "\"' \t\r\n");
     const base = std.fs.path.basenameWindows(trimmed);
-    const ext = std.fs.path.extension(base);
+
+    // The loader keys its cmd.exe special-case on the file it RESOLVES,
+    // not on the spelling: Win32 strips trailing dots and spaces when it
+    // opens a name, and an alternate-data-stream suffix names a stream of
+    // the base file, so `x.cmd.`, `x.cmd ` and `x.cmd:stream` all run as
+    // the batch. Detection that reads only the spelled extension would
+    // leave them on the C runtime rules, where the hostile tail runs as a
+    // second command (probe round 3e, case B1, measured live). The strip
+    // is end-only: a leading-dot name like `.cmd` keeps over-detecting,
+    // which is the safe direction.
+    var end = base.len;
+    while (end > 0 and (base[end - 1] == '.' or base[end - 1] == ' ')) end -= 1;
+    const stripped = base[0..end];
+
+    // Cut an ADS suffix: everything from the first colon that is not the
+    // drive's. A drive-relative `C:x.cmd` carries its colon at index 1.
+    const colon_from: usize = if (stripped.len > 1 and stripped[1] == ':') 2 else 0;
+    const no_ads = if (mem.indexOfScalarPos(u8, stripped, colon_from, ':')) |i|
+        stripped[0..i]
+    else
+        stripped;
+
+    const ext = std.fs.path.extension(no_ads);
     return std.ascii.eqlIgnoreCase(ext, ".bat") or
         std.ascii.eqlIgnoreCase(ext, ".cmd");
 }
@@ -883,7 +905,9 @@ fn windowsBatchTarget(argv0: []const u8) bool {
 /// of them needs quoting; anything else stays verbatim.
 const windows_batch_quote_bytes = " \t\r\n,;=&<>|()^\"";
 
-/// Serialize one element of a batch-file invocation for cmd.exe.
+/// Serialize one element of a batch-file invocation for cmd.exe. Only
+/// ever called for arguments: a target path that would need quoting is
+/// refused before this runs (see `windowsBatchPathNeedsQuoting`).
 /// Quoting keeps everything cmd splits, redirects or chains on inside
 /// the pair, and an embedded quote doubles (`""`), which cmd reads as
 /// one literal quote and which leaves the quote state balanced, so no
@@ -911,11 +935,27 @@ fn windowsBatchQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
 
 /// Whether the element carries a byte with no safe serialization for
 /// cmd.exe: `%VAR%` expands even inside quotes and has no command-line
-/// escape, and `!VAR!` joins in whenever delayed expansion is on. The
-/// compose refuses the spawn rather than guess: an expandable body is
-/// a live injection and a quoted one silently corrupts the argument.
+/// escape, `!VAR!` joins in whenever delayed expansion is on, and a raw
+/// `\r` or `\n` acts as a line boundary in several cmd contexts
+/// regardless of quote state. The compose refuses the spawn rather than
+/// guess: an expandable body is a live injection and a quoted one
+/// silently corrupts the argument.
 fn windowsBatchArgUnsafe(arg: []const u8) bool {
-    return mem.indexOfAny(u8, arg, "%!") != null;
+    return mem.indexOfAny(u8, arg, "%!\r\n") != null;
+}
+
+/// Whether the batch target's own path would need quoting: it carries a
+/// byte cmd treats specially, or it is empty. This is refused outright,
+/// because CreateProcessW wraps a quoted batch line in an extra quote
+/// pair when it composes `%COMSPEC% /c` (measured with a COMSPEC spy
+/// that prints its own GetCommandLineW, probe round 3d), and cmd then
+/// strips that pair and drops the invocation: every quoted batch-path
+/// spawn is a silent no-op on current Windows, with or without
+/// arguments, hostile or benign (rounds 3c-3e). There is no compose that
+/// runs such a target, so the compose refuses instead of writing a line
+/// the OS swallows.
+fn windowsBatchPathNeedsQuoting(argv0: []const u8) bool {
+    return mem.indexOfAny(u8, argv0, windows_batch_quote_bytes) != null;
 }
 
 /// Serialize `arg` with the MS C runtime quoting rules, which
@@ -946,7 +986,8 @@ fn windowsQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
     try writer.writeByte('"');
 }
 
-/// Build the `lpCommandLine` for `argv`.
+/// Build the `lpCommandLine` for `argv`. `argv` must be non-empty; the
+/// only caller guarantees it by falling back to `path`.
 ///
 /// Arguments are quoted with the C runtime rules, except the script of a
 /// cmd.exe `/C` (or `/K`) invocation. cmd.exe parses that tail with its
@@ -957,19 +998,24 @@ fn windowsQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
 ///
 /// One pair is all cmd needs. It keeps a line's quoting untouched only
 /// when the line holds exactly two quotes, no `&<>()@^|` between them,
-/// and the text between them names an executable; otherwise it strips
-/// the outer pair and runs the rest as written. A script that carries
-/// its own quotes or a metacharacter fails that test and is stripped
-/// back to what the user wrote, and a script that passes it is a bare
-/// quoted program path, which is meant to stay quoted.
+/// one or more whitespace characters between them, and the text between
+/// them names an executable; otherwise it strips the outer pair and runs
+/// the rest as written. A script that carries its own quotes or a
+/// metacharacter fails that test and is stripped back to what the user
+/// wrote, and a script that passes it is a bare quoted program path,
+/// which is meant to stay quoted.
 ///
-/// A batch-file target (argv[0] ending in `.bat` or `.cmd`) never
-/// reaches that branch: CreateProcessW runs it through cmd.exe, which
-/// re-parses the whole line. Every element of such an invocation is
-/// serialized with cmd's rules instead (see `windowsBatchQuoteArg`),
-/// and `%` or `!` anywhere in it is refused with
-/// `error.BatchArgumentUnsafe`, because both expand even inside quotes
-/// and have no command-line escape.
+/// A batch-file target (argv[0] spelling a `.bat` or `.cmd` file, see
+/// `windowsBatchTarget`) never reaches that branch: CreateProcessW runs
+/// it through cmd.exe, which re-parses the whole line. Every element of
+/// such an invocation is serialized with cmd's rules instead (see
+/// `windowsBatchQuoteArg`), with three fail-closed exceptions refused as
+/// `error.BatchArgumentUnsafe`: a target path that would need quoting
+/// (CreateProcessW wraps such a line in an extra quote pair and cmd
+/// strips that pair and drops the invocation outright, probe rounds
+/// 3c-3e), and any element carrying `%`/`!` (quote-blind expansion, no
+/// command-line escape) or a raw `\r`/`\n` (line boundary regardless of
+/// quote state).
 ///
 /// `pub` for the Exec wrap tests, which pin the composed line at the
 /// seam (wrap output fed straight through this function); the only
@@ -994,10 +1040,23 @@ pub fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const 
         };
 
         if (batch_target) {
-            // No log at the refusal site: the termio io thread already
-            // reports the failed spawn, and error-level logs fail any
-            // test run that exercises this branch.
+            // No error-level log at either refusal site: the termio io
+            // thread already reports the failed spawn, and error-level
+            // logs fail any test run that exercises these branches. The
+            // debug lines name the argument index, never its content:
+            // arguments can carry secrets.
             if (windowsBatchArgUnsafe(arg)) {
+                log.debug(
+                    "refusing batch-file spawn: argument {d} carries a byte cmd.exe expands or splits even quoted",
+                    .{arg_i},
+                );
+                return error.BatchArgumentUnsafe;
+            }
+            if (arg_i == 0 and windowsBatchPathNeedsQuoting(arg)) {
+                log.debug(
+                    "refusing batch-file spawn: the target path needs quoting, which cmd.exe silently drops",
+                    .{},
+                );
                 return error.BatchArgumentUnsafe;
             }
             try windowsBatchQuoteArg(writer, arg);
@@ -1189,25 +1248,111 @@ test "windowsCreateCommandLine: a batch target keeps benign arguments bare" {
     );
 }
 
-test "windowsCreateCommandLine: a batch target quotes its own path when cmd needs it" {
+test "windowsCreateCommandLine: a batch target whose path needs quoting is refused" {
     const alloc = testing.allocator;
 
-    // Unquoted, a path whose directories carry a metacharacter splits
-    // at the `&` and runs junk tokens, and a space splits the path into
-    // arguments. Quoted, both reach the batch as one token.
-    const meta = try windowsCreateCommandLine(alloc, &.{
-        "C:\\a&b\\x.cmd",
-        "arg",
-    });
-    defer alloc.free(meta);
-    try testing.expectEqualStrings("\"C:\\a&b\\x.cmd\" arg", meta);
+    // CreateProcessW wraps a quoted batch line in an extra quote pair when
+    // it composes `%COMSPEC% /c`, and cmd then strips that pair and drops
+    // the invocation: every quoted batch path is a silent no-op on current
+    // Windows (probe rounds 3c-3e), with or without arguments, hostile or
+    // benign. The compose refuses instead of writing a line the OS
+    // swallows.
+    try testing.expectError(
+        error.BatchArgumentUnsafe,
+        windowsCreateCommandLine(alloc, &.{ "C:\\a&b\\x.cmd", "arg" }),
+    );
+    try testing.expectError(
+        error.BatchArgumentUnsafe,
+        windowsCreateCommandLine(alloc, &.{ "C:\\p a\\x.cmd", "y.txt" }),
+    );
+    try testing.expectError(
+        error.BatchArgumentUnsafe,
+        windowsCreateCommandLine(alloc, &.{"C:\\p a\\x.cmd"}),
+    );
+    try testing.expectError(
+        error.BatchArgumentUnsafe,
+        windowsCreateCommandLine(alloc, &.{"\"C:\\p a\\x.cmd\""}),
+    );
+}
 
-    const spacey = try windowsCreateCommandLine(alloc, &.{
-        "C:\\p a\\x.cmd",
-        "y.txt",
+test "windowsCreateCommandLine: a batch target is detected in every spelling Windows resolves" {
+    const alloc = testing.allocator;
+
+    // The loader keys its cmd.exe special-case on the file it RESOLVES: it
+    // strips trailing dots and spaces when opening a name and maps an ADS
+    // suffix onto the base file, so these spellings run as the batch they
+    // point at. Detection that reads only the spelled extension leaves them
+    // on the C runtime rules, where the hostile body runs as a second
+    // command (probe round 3e, case B1, measured live). Over-detection is
+    // the safe direction: arguments get quoted, never bare.
+    const dot = try windowsCreateCommandLine(alloc, &.{
+        "C:\\Temp\\x.cmd.",
+        "r.txt&echo.X>injected.txt",
     });
-    defer alloc.free(spacey);
-    try testing.expectEqualStrings("\"C:\\p a\\x.cmd\" y.txt", spacey);
+    defer alloc.free(dot);
+    try testing.expectEqualStrings(
+        "C:\\Temp\\x.cmd. \"r.txt&echo.X>injected.txt\"",
+        dot,
+    );
+
+    const ads = try windowsCreateCommandLine(alloc, &.{
+        "C:\\Temp\\x.cmd:stream",
+        "r.txt&echo.X>injected.txt",
+    });
+    defer alloc.free(ads);
+    try testing.expectEqualStrings(
+        "C:\\Temp\\x.cmd:stream \"r.txt&echo.X>injected.txt\"",
+        ads,
+    );
+
+    const upper = try windowsCreateCommandLine(alloc, &.{
+        "C:\\Temp\\A.BAT",
+        "r.txt&echo.X>injected.txt",
+    });
+    defer alloc.free(upper);
+    try testing.expectEqualStrings(
+        "C:\\Temp\\A.BAT \"r.txt&echo.X>injected.txt\"",
+        upper,
+    );
+}
+
+test "windowsCreateCommandLine: a batch target quotes every cmd-special argument" {
+    const alloc = testing.allocator;
+
+    // The quote set's remaining command-separating members, a delimiter
+    // byte, and an empty argument. The last argument pairs a space with a
+    // trailing backslash: quoting is forced by the space, and the
+    // backslash then stays literal inside the pair (cmd has no `\"` rule,
+    // so one trailing backslash stays one backslash). A backslash-only
+    // argument carries nothing cmd treats specially and stays bare.
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "a.cmd",
+        "x|echo.X>injected.txt",
+        "a(b)",
+        "--flag=v;w",
+        "",
+        "C:\\di r\\",
+    });
+    defer alloc.free(line);
+    try testing.expectEqualStrings(
+        "a.cmd \"x|echo.X>injected.txt\" \"a(b)\" \"--flag=v;w\" \"\" \"C:\\di r\\\"",
+        line,
+    );
+}
+
+test "windowsCreateCommandLine: a cmd.exe /c script is untouched by the batch rules" {
+    const alloc = testing.allocator;
+
+    // The verbatim-script branch matches cmd.exe as argv[0]; a batch target
+    // matches a .bat/.cmd extension. The two never overlap, and the script
+    // tail keeps its own quoting either way.
+    const line = try windowsCreateCommandLine(alloc, &.{
+        "cmd.exe",
+        "/c",
+        "x.cmd",
+    });
+    defer alloc.free(line);
+    try testing.expectEqualStrings("cmd.exe /c \"x.cmd\"", line);
 }
 
 test "windowsCreateCommandLine: a batch target argument's embedded quotes double" {
@@ -1246,6 +1391,10 @@ test "windowsCreateCommandLine: a batch target refuses % and ! arguments" {
         error.BatchArgumentUnsafe,
         windowsCreateCommandLine(alloc, &.{ "a.cmd", "x", "%PATH%" }),
     );
+    try testing.expectError(
+        error.BatchArgumentUnsafe,
+        windowsCreateCommandLine(alloc, &.{ "a.cmd", "x\r\ny&calc" }),
+    );
 }
 
 test "windowsCreateCommandLine: a non-batch target keeps the C runtime rules" {
@@ -1260,6 +1409,47 @@ test "windowsCreateCommandLine: a non-batch target keeps the C runtime rules" {
     });
     defer alloc.free(line);
     try testing.expectEqualStrings("tool.exe r.txt&echo.X", line);
+}
+
+test "Command: a batch target whose path needs quoting refuses to spawn" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+
+    var td = try TempDir.init();
+    defer td.deinit();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try td.dir.realPath(testing.io, &path_buf);
+    const dir_path = try std.fmt.allocPrintSentinel(
+        alloc,
+        "{s}",
+        .{path_buf[0..dir_len]},
+        0,
+    );
+    defer alloc.free(dir_path);
+    // The space in the name is the point: CreateProcessW wraps such a line
+    // in an extra quote pair and cmd drops the whole invocation, so the
+    // compose must refuse before any spawn. The file never has to exist;
+    // the refusal happens in the compose, before CreateProcessW.
+    const bat_path = try std.fmt.allocPrintSentinel(
+        alloc,
+        "{s}\\s p.cmd",
+        .{dir_path},
+        0,
+    );
+    defer alloc.free(bat_path);
+
+    var cmd: Command = .{
+        .path = bat_path,
+        .args = &.{ bat_path, "r.txt" },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    };
+
+    try testing.expectError(error.BatchArgumentUnsafe, cmd.testingStart());
 }
 
 test "Command: a batch file target's argument cannot run a second command" {
@@ -1286,6 +1476,16 @@ test "Command: a batch file target's argument cannot run a second command" {
         0,
     );
     defer alloc.free(dir_path);
+
+    // A temp path carrying a byte cmd treats specially (a space in the
+    // user name, for one) cannot reach the bare-path shape this test
+    // exercises; the refusal tests own that case.
+    for (dir_path) |byte| {
+        if (mem.indexOfScalar(u8, windows_batch_quote_bytes, byte) != null) {
+            return error.SkipZigTest;
+        }
+    }
+
     const bat_path = try std.fmt.allocPrintSentinel(
         alloc,
         "{s}\\hostile.cmd",
