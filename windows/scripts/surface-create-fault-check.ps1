@@ -142,8 +142,10 @@ try {
     [void](Invoke-ArmSurfaceFault $session 1)
     [void](Invoke-SeamCommandBounded $session @{ op = 'seed-tabs'; count = 2 } 15000)
 
+    $survivorSurfaced = $false
     $surfaced = $false
     $sawRetryArmed = $false
+    $tickDriven = $false
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ([DateTime]::UtcNow -lt $deadline) {
         Assert-AppAlive $session 'during recovery poll'
@@ -151,13 +153,34 @@ try {
         foreach ($index in 0..1) {
             $st = Invoke-SeamCommandBounded $session @{ op = 'surface-state'; index = $index } 5000
             if ($st.retriesLeft -ge 0) { $sawRetryArmed = $true }
-            if ($index -eq 1 -and $st.hasSurface) { $surfaced = $true }
+            if ($st.hasSurface) {
+                # Index 0 is the surviving first tab: its creation predates
+                # this harness, so its surface is asserted too - in the rare
+                # ordering where it is the pane that needs the retry, its
+                # return to hasSurface is still checked here.
+                if ($index -eq 0) { $survivorSurfaced = $true }
+                if ($index -eq 1) {
+                    $surfaced = $true
+                    # First sight of the faulted pane's surface. The polls
+                    # are observers (they force no layout pass) and the
+                    # layout driver is latched out once the faulted first
+                    # attempt has run, so a surface already present with a
+                    # spent budget (attempted, retriesLeft -1) can only have
+                    # been recovered by the retry tick between two polls:
+                    # the first poll was simply late. Accept that pair in
+                    # place of a sighting of the armed budget; a LATER
+                    # surfacing still requires the budget seen armed.
+                    if (-not $tickDriven) {
+                        $tickDriven = [bool]$st.attempted -and $st.retriesLeft -lt 0
+                    }
+                }
+            }
         }
-        if ($surfaced) { break }
+        if ($surfaced -and $survivorSurfaced) { break }
     }
-    if (-not $surfaced) {
+    if (-not $surfaced -or -not $survivorSurfaced) {
         $script:Findings.Add('recovery: the faulted tab never gained a surface within 30s - the retry did not land')
-    } elseif (-not $sawRetryArmed) {
+    } elseif (-not $sawRetryArmed -and -not $tickDriven) {
         $script:Findings.Add('recovery: the tab surfaced but no retry budget was ever observed armed - the retry path did not drive this recovery')
     } else {
         Write-Host 'recovery: faulted once, retry armed, surface came up'
@@ -177,11 +200,15 @@ try {
     if ($armedIndex -lt 0) {
         $script:Findings.Add('persistent: no retry budget observed on any faulted pane within 30s - the retry never armed')
     } else {
-        $st = Invoke-SeamCommandBounded $session @{ op = 'surface-state'; index = $armedIndex } 5000
+        Write-Host "persistent: retry armed on tab $armedIndex"
+    }
+    # Every pane created under the fault stays surface-less. The faulted
+    # tabs are the NewTab growth (indices 1..2); the survivor's healthy
+    # surface predates the arming and is not polled here.
+    foreach ($index in 1..2) {
+        $st = Invoke-SeamCommandBounded $session @{ op = 'surface-state'; index = $index } 5000
         if ($st.hasSurface) {
-            $script:Findings.Add("persistent: tab $armedIndex reported a surface although every creation is faulted")
-        } else {
-            Write-Host "persistent: panes surface-less, retry armed on tab $armedIndex, app alive"
+            $script:Findings.Add("persistent: tab $index reported a surface although every creation is faulted")
         }
     }
 

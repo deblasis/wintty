@@ -1030,7 +1030,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// budget runs out. The app stays up either way; this method never
     /// throws on the failure paths a GPU-less machine produces.
     /// </summary>
-    private bool TryCreateSurface(bool viaRetryTick = false)
+    private bool TryCreateSurface()
     {
         if (SurfacePixelSize.Initial(
                 Panel.ActualWidth, Panel.ActualHeight,
@@ -1260,7 +1260,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 "Terminal surface creation did not succeed within the retry budget; pane left without a terminal surface");
             return;
         }
-        if (TrySettleSurfaceCreation(viaRetryTick: true))
+        if (TrySettleSurfaceCreation())
         {
             // Stop now rather than letting the timer survive one extra tick
             // to notice the new surface on the next pass.
@@ -1280,9 +1280,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// One creation attempt plus the settle work every success needs,
     /// shared by the first-layout driver and the retry timer.
     /// </summary>
-    private bool TrySettleSurfaceCreation(bool viaRetryTick = false)
+    private bool TrySettleSurfaceCreation()
     {
-        if (_surfaceDisposed || !TryCreateSurface(viaRetryTick)) return false;
+        if (_surfaceDisposed || !TryCreateSurface()) return false;
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
         ArmResizeOverlayGrace();
         return true;
