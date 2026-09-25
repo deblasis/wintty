@@ -96,6 +96,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private GhosttySurface _surface;
     private IntPtr _workingDirectoryUtf8;
     private IntPtr _commandUtf8;
+    // What _commandUtf8 says, kept as text: the child-exited toast names it
+    // (deblasis/wintty#1193). Null when the surface runs the default shell.
+    private string? _surfaceCommandText;
     private IntPtr _initialInputUtf8;
     private IntPtr _customShaderUtf8;
 
@@ -1114,13 +1117,17 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             : AllocEmptyUtf8();
         // PreviewCommand wins over the snapshot: a preview surface never
         // wants the real shell's banner interleaving with its canned feed.
-        _commandUtf8 = PreviewCommand is { Length: > 0 } previewCmd
-            ? AllocUtf8(previewCmd)
+        // The same text is latched for the child-exited toast, which names
+        // what ran (deblasis/wintty#1193); null means the default shell.
+        var surfaceCommand = PreviewCommand is { Length: > 0 } previewCmd
+            ? previewCmd
             : Snapshot is { ResolvedCommand: { Length: > 0 } }
                 // An argv (-e, a direct: command) goes over as one, so it is
                 // never handed to cmd.exe (#1136).
-                ? AllocUtf8(Ghostty.Core.Profiles.PaneCommandPolicy.SurfaceCommand(Snapshot))
-                : AllocEmptyUtf8();
+                ? Ghostty.Core.Profiles.PaneCommandPolicy.SurfaceCommand(Snapshot)
+                : null;
+        _surfaceCommandText = surfaceCommand;
+        _commandUtf8 = surfaceCommand is not null ? AllocUtf8(surfaceCommand) : AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
         // Preview shader override: set BEFORE the control loads (it is read
         // once at surface creation in OnLoaded).
@@ -1815,6 +1822,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // so the key stays consistent for the surface's lifetime.
     private readonly string _toastSurfaceKey = Guid.NewGuid().ToString();
     internal string ToastSurfaceKey => _toastSurfaceKey;
+
+    /// <summary>
+    /// The command text this surface was created to run, exactly as
+    /// <see cref="TryCreateSurface"/> handed it to libghostty (an argv keeps
+    /// its <c>direct:</c> marker); null when the surface runs the default
+    /// shell. The child-exited toast reads it to name what ran
+    /// (deblasis/wintty#1193); the policy decides how much of it is safe to
+    /// show, so nothing here redacts or truncates.
+    /// </summary>
+    internal string? SurfaceCommandText => _surfaceCommandText;
 
     private void OnGotFocus(object sender, RoutedEventArgs e)
     {

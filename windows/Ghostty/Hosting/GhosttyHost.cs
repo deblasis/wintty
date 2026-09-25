@@ -1188,8 +1188,11 @@ internal sealed partial class GhosttyHost : IDisposable
                     _dispatcher.TryEnqueue(() =>
                     {
                         if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
+                        // c.SurfaceCommandText is the text the surface was
+                        // created to run; the policy decides how much of it
+                        // a toast may show (deblasis/wintty#1193).
                         var req = Ghostty.Core.Notifications.NotificationPolicy.ChildExited(
-                            info.ExitCode, info.RuntimeMs, c.ToastSurfaceKey, c.IsActive);
+                            info.ExitCode, info.RuntimeMs, c.SurfaceCommandText, c.ToastSurfaceKey, c.IsActive);
                         if (req is not null) _toasts.Show(req);
                     });
                     // Return 0 ("not handled") so the core keeps its in-terminal
