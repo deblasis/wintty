@@ -274,6 +274,7 @@ $NotInSuite = [ordered]@{
     # a harness that could not run even if the build were right.
     'crash-matrix.ps1'              = 'gates a published NativeAOT build against the crash coverage map; pointed at the Debug build this suite stages, CoreCLR answers differently and every row fails for the build rather than the product. Its exits are 0 for the map holding, 1 for it not holding or for a launch that could not happen, and nothing for findings'
     'crash-canary.ps1'              = 'a measurement, not a gate: it exits 0 whether canaries are found or not, so a pass rules nothing out and would read as more than it is here. It also needs a crash the Debug build this suite stages does not produce, since CoreCLR swallows native-seh; no envelope means exit 1, and there is no findings exit'
+    'surface-create-fault-check.ps1' = 'the GPU-less startup crash regression harness: it arms the surface-fault seam op and drives real tabs through a creation that cannot succeed, requiring the app to stay up, retry, and degrade. Run by hand or by a verification pass against a Debug+TESTSEAM build (-SkipGiveUp for the quick form); the give-up leg holds the desktop for the length of the retry budget, which is longer than a suite slot should sit on one harness'
     # The seam''s investigation tools. seam-acceptance.ps1 is the one that
     # aggregates and is in the manifest above; these four are pointed at a
     # live process by hand, and none of them answers the question the suite

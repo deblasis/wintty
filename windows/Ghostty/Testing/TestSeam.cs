@@ -1098,6 +1098,50 @@ internal static class TestSeam
                 });
             }
 
+            case "surface-fault":
+            {
+                // Reproduce the GPU-less startup crash's precondition on
+                // healthy hardware: the next N surface creations report
+                // what libghostty reports when the renderer device cannot
+                // be built (a zero handle), which is the state that used
+                // to AV (pin era) or throw out of the layout handler.
+                // {"count": N} arms N failures, {"count": 0} disarms.
+                if (!args.TryGetProperty("count", out _))
+                    return Error(op, "surface-fault needs count (0 disarms)");
+                var count = ArgInt(args, "count", 0);
+                if (count < 0) return Error(op, "count must be >= 0");
+                Controls.TerminalControl.TestSeamFaultSurfaceNew = count;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("armed", count);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "surface-state":
+            {
+                // Readback for the surface-creation retry: what the fault
+                // left behind, with no native call on a zero handle.
+                // retriesLeft is -1 when no retry is armed.
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("index", index);
+                    json.WriteBoolean("hasSurface", terminal.TestSeamHasSurface);
+                    json.WriteNumber("retriesLeft", terminal.TestSeamSurfaceRetriesLeft);
+                    json.WriteEndObject();
+                });
+            }
+
             case "header-rect":
             {
                 var index = ArgInt(args, "index", -1);

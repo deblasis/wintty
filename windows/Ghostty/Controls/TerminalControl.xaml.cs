@@ -127,6 +127,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private bool _surfaceCreated;
     private bool _surfaceDisposed;
 
+    // A surface that libghostty could not create (renderer device init
+    // failed: a GPU-less machine or a cold-composition boot window) is a
+    // "not yet", not a verdict. The creation retries on this timer and, if
+    // the budget runs out, degrades to a pane without a terminal surface:
+    // logged, alive, no throw. The throw this replaced killed the app from
+    // the layout handler; its predecessor dereferenced the zero handle
+    // natively and AV'd the process (the GPU-less startup crash).
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _surfaceRetryTimer;
+    private int _surfaceRetryTicksLeft;
+
+    // Retry cadence and budget for a failed surface creation. Each failed
+    // attempt is cheap - the device init fails before the pty spawns, so no
+    // shell is started - but the attempts still burn a loaded machine, so
+    // the budget is finite: after a minute of failures the pane degrades
+    // and a later new tab (a fresh control) tries again with its own budget.
+    private static readonly TimeSpan SurfaceRetryInterval = TimeSpan.FromMilliseconds(500);
+    private const int SurfaceRetryMaxTicks = 120;
+
     // Set in OnKeyDown when we short-circuit a bound chord; consumed
     // (and cleared) by the matching OnCharacterReceived. WinUI 3 fires
     // BOTH OnKeyDown (raw key) and OnCharacterReceived (WM_CHAR text)
@@ -1002,7 +1020,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// Returns false, having done nothing, while the panel has no measured
     /// size; the caller tries again on the next layout pass. A hidden or
     /// restored background tab therefore starts its shell when it is first
-    /// shown.
+    /// shown. Also returns false when libghostty could not build the surface
+    /// (renderer device init failed): that attempt is released and the
+    /// creation retries on a timer, degrading to a surface-less pane if the
+    /// budget runs out. The app stays up either way; this method never
+    /// throws on the failure paths a GPU-less machine produces.
     /// </summary>
     private bool TryCreateSurface()
     {
@@ -1083,6 +1105,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
         try
         {
+#if TESTSEAM
+            if (TestSeamFaultSurfaceNew > 0)
+            {
+                // Seam-injected failure: the next N creations report what
+                // libghostty reports when the renderer device cannot be
+                // built (the GPU-less startup crash's precondition),
+                // without needing that hardware to reproduce it.
+                TestSeamFaultSurfaceNew--;
+                _surface = default;
+            }
+            else
+#endif
             _surface = NativeMethods.SurfaceNew(app, surfaceConfig);
         }
         catch (Exception ex)
@@ -1091,16 +1125,21 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 $"{AppIdentity.LogTag} SurfaceNew failed: {ex.Message}\n{ex.StackTrace}");
             throw;
         }
-        // libghostty returns null when it could not build the surface (the
-        // renderer's device or swap chain failed). Every native call below
-        // dereferences the handle, so stop here with a managed error rather
-        // than an access violation.
+        // libghostty returns null when it could not build the surface - the
+        // renderer's device or swap chain failed. On a GPU-less machine (or
+        // in a cold-composition boot window on one) this is transient: the
+        // same launch succeeds once the machine settles. Every native call
+        // below dereferences the handle, so the zero handle must never reach
+        // them; the pre-retry code either AV'd on it or threw from the
+        // layout handler, and both killed the app at startup. Give the
+        // device time to come up, then degrade to a surface-less pane.
         if (_surface.Handle == IntPtr.Zero)
         {
             SwapChainPanelInterop.Release(panelPtr);
-            _selfHandle.Free();
-            throw new InvalidOperationException(
-                $"libghostty could not create a surface at {initialWidth}x{initialHeight} px.");
+            if (_selfHandle.IsAllocated) _selfHandle.Free();
+            FreePendingSurfaceConfig();
+            ScheduleSurfaceCreationRetry();
+            return false;
         }
         var spawn = NativeMethods.SurfaceSize(_surface);
         SpawnSize = (spawn.Columns, spawn.Rows, spawn.WidthPx, spawn.HeightPx);
@@ -1155,6 +1194,105 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return true;
     }
 
+    // Surface-creation retry ----------------------------------------------
+
+    /// <summary>
+    /// Arm the bounded retry for a surface libghostty could not create.
+    /// Ticks until a creation succeeds, the control is disposed, or the
+    /// budget runs out; the last one logs and leaves a live pane without a
+    /// terminal surface - degraded, never dead.
+    /// </summary>
+    private void ScheduleSurfaceCreationRetry()
+    {
+        if (_surfaceRetryTimer is not null) return;
+        _surfaceRetryTicksLeft = SurfaceRetryMaxTicks;
+        var timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+        timer.Interval = SurfaceRetryInterval;
+        timer.IsRepeating = true;
+        timer.Tick += OnSurfaceRetryTick;
+        _surfaceRetryTimer = timer;
+        timer.Start();
+        Ghostty.Logging.StaticLoggers.App.LogWarning(
+            "Terminal surface creation failed (renderer device not ready?); retrying every {IntervalMs} ms for up to {BudgetSeconds} s",
+            (int)SurfaceRetryInterval.TotalMilliseconds,
+            (int)(SurfaceRetryInterval.TotalMilliseconds * SurfaceRetryMaxTicks / 1000));
+    }
+
+    private void OnSurfaceRetryTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        if (_surfaceDisposed || _surface.Handle != IntPtr.Zero)
+        {
+            StopSurfaceCreationRetry();
+            return;
+        }
+        if (_surfaceRetryTicksLeft-- <= 0)
+        {
+            StopSurfaceCreationRetry();
+            Ghostty.Logging.StaticLoggers.App.LogWarning(
+                "Terminal surface creation did not succeed within the retry budget; pane left without a terminal surface");
+            return;
+        }
+        TrySettleSurfaceCreation();
+    }
+
+    private void StopSurfaceCreationRetry()
+    {
+        if (_surfaceRetryTimer is not { } timer) return;
+        _surfaceRetryTimer = null;
+        timer.Stop();
+        timer.Tick -= OnSurfaceRetryTick;
+    }
+
+    /// <summary>
+    /// One creation attempt plus the settle work every success needs,
+    /// shared by the first-layout driver and the retry timer.
+    /// </summary>
+    private bool TrySettleSurfaceCreation()
+    {
+        if (_surfaceDisposed || !TryCreateSurface()) return false;
+        Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+        ArmResizeOverlayGrace();
+        return true;
+    }
+
+    /// <summary>
+    /// Free the per-attempt config strings of a failed creation, the same
+    /// buffers DisposeSurface frees after a successful one. The next attempt
+    /// reallocates them from the still-held snapshot.
+    /// </summary>
+    private void FreePendingSurfaceConfig()
+    {
+        if (_workingDirectoryUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_workingDirectoryUtf8);
+        if (_commandUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_commandUtf8);
+        if (_initialInputUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_initialInputUtf8);
+        if (_customShaderUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_customShaderUtf8);
+        _workingDirectoryUtf8 = IntPtr.Zero;
+        _commandUtf8 = IntPtr.Zero;
+        _initialInputUtf8 = IntPtr.Zero;
+        _customShaderUtf8 = IntPtr.Zero;
+    }
+
+#if TESTSEAM
+    /// <summary>
+    /// Seam fault: the number of NEXT surface creations that report the
+    /// libghostty-null-surface failure. Armed by the surface-fault seam op
+    /// to reproduce the GPU-less startup crash's precondition on hardware
+    /// that has a working renderer. UI-thread-only, like everything that
+    /// creates surfaces.
+    /// </summary>
+    internal static int TestSeamFaultSurfaceNew;
+
+    /// <summary>Seam readback: whether this control holds a live surface.</summary>
+    internal bool TestSeamHasSurface => _surface.Handle != IntPtr.Zero;
+
+    /// <summary>
+    /// Seam readback: ticks left in the retry budget, or -1 when no retry
+    /// is armed (never armed, succeeded, given up, or stopped).
+    /// </summary>
+    internal int TestSeamSurfaceRetriesLeft =>
+        _surfaceRetryTimer is null ? -1 : _surfaceRetryTicksLeft;
+#endif
+
     private void DisableAncestorScrollViewerTabStop()
     {
         // Only the framework-injected ScrollViewer ABOVE the app content
@@ -1207,10 +1345,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (!_surfaceCreated)
         {
             // Nothing to size yet: create the surface at this pass's size,
-            // or wait for a pass that gives the panel one.
-            if (_surfaceDisposed || !TryCreateSurface()) return;
-            Panel.LayoutUpdated -= OnFirstLayoutUpdated;
-            ArmResizeOverlayGrace();
+            // or wait for a pass that gives the panel one. A creation the
+            // device refused returns false too and leaves this subscription
+            // in place; the retry timer drives the next attempts.
+            TrySettleSurfaceCreation();
             return;
         }
 
@@ -1308,6 +1446,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         _bellAudio = null;
 
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+        StopSurfaceCreationRetry();
 
         if (_surface.Handle != IntPtr.Zero)
         {
