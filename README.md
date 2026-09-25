@@ -138,3 +138,13 @@ Wintty is built on [Ghostty](https://ghostty.org) by
 credit for the terminal emulation core, and much of the speed, is theirs.
 Anything not Windows-specific (macOS, Linux/GTK, the full libghostty story)
 lives upstream: [ghostty.org/docs](https://ghostty.org/docs).
+
+## Star History
+
+<a href="https://star-history.dera.page/deblasis/wintty">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=deblasis/wintty&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=deblasis/wintty" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=deblasis/wintty" />
+ </picture>
+</a>
