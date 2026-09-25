@@ -1340,14 +1340,17 @@ test "windowsCreateCommandLine: a batch target quotes every cmd-special argument
     const alloc = testing.allocator;
 
     // The quote set's remaining command-separating members, a delimiter
-    // byte, and an empty argument. The last argument pairs a space with a
-    // trailing backslash: quoting is forced by the space, and the
+    // byte, and an empty argument. The first argument carries ONLY the
+    // pipe: every other member of the quote set also forces quoting
+    // somewhere else in the suite, so this is the case that fails if the
+    // pipe is ever dropped from the set. The last argument pairs a space
+    // with a trailing backslash: quoting is forced by the space, and the
     // backslash then stays literal inside the pair (cmd has no `\"` rule,
     // so one trailing backslash stays one backslash). A backslash-only
     // argument carries nothing cmd treats specially and stays bare.
     const line = try windowsCreateCommandLine(alloc, &.{
         "a.cmd",
-        "x|echo.X>injected.txt",
+        "x|y",
         "a(b)",
         "--flag=v;w",
         "",
@@ -1355,7 +1358,7 @@ test "windowsCreateCommandLine: a batch target quotes every cmd-special argument
     });
     defer alloc.free(line);
     try testing.expectEqualStrings(
-        "a.cmd \"x|echo.X>injected.txt\" \"a(b)\" \"--flag=v;w\" \"\" \"C:\\di r\\\"",
+        "a.cmd \"x|y\" \"a(b)\" \"--flag=v;w\" \"\" \"C:\\di r\\\"",
         line,
     );
 }
