@@ -305,7 +305,10 @@ public class ConsumedCloseKeyWiringTests
 
         var primary = button.Method("OnPrimaryClick").Body!.Statements.ToList();
         var raise = primary.FindIndex(s => AsCall(s) is { } c && SignalCall(c) == Signal + ".RaiseForHeldKeys");
-        var open = primary.FindIndex(s => AsCall(s)?.CalleeText() == "Owner.OpenProfile");
+        // The primary click opens what nobody picked a profile for, through
+        // OpenDefaultProfile: the configured command unless default-profile
+        // is set (#1136). A profile the user picks goes through OpenProfile.
+        var open = primary.FindIndex(s => AsCall(s)?.CalleeText() == "Owner.OpenDefaultProfile");
         Assert.True(raise >= 0 && open >= 0 && raise < open,
             "OnPrimaryClick must raise for held keys before it opens the tab that takes focus");
     }

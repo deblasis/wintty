@@ -318,7 +318,9 @@ public sealed class FirstPaneCommandWiringTests
     public void Surface_GetsAnArgvAsOne()
     {
         var control = ShellSource.Load("Controls.TerminalControl.xaml.cs");
-        control.Method("OnLoaded").Call("Ghostty.Core.Profiles.PaneCommandPolicy.SurfaceCommand");
+        // The surface is created from the first layout pass, not from
+        // OnLoaded itself (a hidden tab has no size until it is shown).
+        control.Method("TryCreateSurface").Call("Ghostty.Core.Profiles.PaneCommandPolicy.SurfaceCommand");
     }
 
     [Fact]
@@ -387,11 +389,13 @@ public sealed class FirstPaneCommandWiringTests
     [Fact]
     public void LaunchPane_ClosesOnCleanExit_EndToEndWiring()
     {
-        // Host: the surface config carries the policy's answer.
+        // Host: the surface config carries the policy's answer. The surface
+        // is created from the first layout pass, not from OnLoaded itself
+        // (a hidden tab has no size until it is shown).
         var control = ShellSource.Load("Controls.TerminalControl.xaml.cs");
-        var onLoaded = control.Method("OnLoaded").Body!.ToString();
-        Assert.Contains("surfaceConfig.CloseOnCleanExit =", onLoaded);
-        Assert.Contains("PaneCommandPolicy.ClosesOnCleanExit(Snapshot)", onLoaded);
+        var create = control.Method("TryCreateSurface").Body!.ToString();
+        Assert.Contains("surfaceConfig.CloseOnCleanExit =", create);
+        Assert.Contains("PaneCommandPolicy.ClosesOnCleanExit(Snapshot)", create);
 
         // Struct layout: held to the header by computed offsets in
         // GhosttyStructHeaderParityTests (SurfaceConfig_*), not here.
