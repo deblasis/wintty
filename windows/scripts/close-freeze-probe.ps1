@@ -56,7 +56,12 @@ param(
     [int]$FloodChunks = 300,
     [switch]$NaturalExit,
     [double]$ExitDelaySeconds = 6,
-    [double]$ExitLeadSeconds = 1
+    [double]$ExitLeadSeconds = 1,
+    # The close target. Tab 1 (default) is the quiet or scheduled-exit
+    # tab and tab 0 carries the flood; -CloseIndex 0 closes the
+    # FLOODING tab itself, whose pty reader is joined mid-push -- the
+    # residual park tracked in #1189, quantified on the fixed build.
+    [int]$CloseIndex = 1
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -261,7 +266,7 @@ try {
     # dispatcher-time; a teardown that parks the UI thread inside the
     # joins shows up as an ack late by the park.
     $closeSw = [System.Diagnostics.Stopwatch]::StartNew()
-    Send-SeamCommand $session @{ op = 'close'; index = 1 }
+    Send-SeamCommand $session @{ op = 'close'; index = $CloseIndex }
     $closeResult = Read-SeamGuarded $session 'close'
     $closeSw.Stop()
     Record 'close' $closeSw.ElapsedMilliseconds ("tabs after close: " + @($closeResult.state.tabs).Count)
