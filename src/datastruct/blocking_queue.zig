@@ -819,58 +819,58 @@ test "BlockingQueue pushWake aborts mid-budget once the flag rises" {
 
     try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
 
-    var abort = std.atomic.Value(bool).init(false);
-
     // The race the preset flag cannot cover: the producer is already
-    // inside its budget when teardown starts. The wake count is the
-    // rendezvous -- the harness waits for two windows to pass, so the
-    // abort below lands squarely between attempts, not between the check
-    // and the first push.
+    // inside its budget when teardown starts. The producer's OWN wake
+    // callback raises the flag on its second call, so the abort is
+    // stored between attempts two and three by the very thread that
+    // will observe it: no cross-thread rendezvous for the harness to
+    // lose, no preemption window between an observation and a store,
+    // and the wake count asserted below is exact rather than bounded.
     const Pusher = struct {
         q: *Q,
-        abort: *std.atomic.Value(bool),
+        abort: std.atomic.Value(bool) = .init(false),
         wakes: std.atomic.Value(u32) = .init(0),
         done: std.atomic.Value(bool) = .init(false),
         result: Q.Size = 0,
 
-        fn wake(wakes: *std.atomic.Value(u32)) void {
-            _ = wakes.fetchAdd(1, .monotonic);
+        fn wake(self: *@This()) void {
+            if (self.wakes.fetchAdd(1, .monotonic) == 1) {
+                // Second wake: teardown starts now, squarely between
+                // two attempts.
+                self.abort.store(true, .release);
+            }
         }
 
         fn run(self: *@This(), thread_io: std.Io) void {
             self.result = self.q.pushWake(
                 thread_io,
                 2,
-                &self.wakes,
+                self,
                 wake,
                 5 * std.time.ns_per_ms,
                 40,
                 .persist,
-                self.abort,
+                &self.abort,
             );
             self.done.store(true, .release);
         }
     };
 
-    var pusher: Pusher = .{ .q = q, .abort = &abort };
+    var pusher: Pusher = .{ .q = q };
     const thread = try std.Thread.spawn(.{}, Pusher.run, .{ &pusher, io });
-    while (pusher.wakes.load(.acquire) < 2) {
-        std.Thread.yield() catch {};
-    }
-
-    // Teardown starts here. The budget still holds 38 windows; an abort
-    // honored at the next check ends the push after a handful of wakes.
-    // Nothing below reads a clock: the wake count is the measure. An
-    // ignored abort spends the whole budget and lands on exactly 40
-    // wakes; an honored one lands in single digits even if this thread
-    // is preempted for a slice between the rendezvous above and the
-    // store below, which is what the half-budget bound absorbs.
-    abort.store(true, .release);
     thread.join();
 
+    // Honored: the third loop-top check sees the flag, wakes the
+    // consumer once more (every give-up here wakes) and returns without
+    // latching. Exactly three wakes: two budget wakes -- the second one
+    // raised the flag -- plus the abort wake. An implementation that
+    // ignores the flag spends all 40 windows and latches, landing on 40
+    // wakes with the latch set, so the exact count below is the red
+    // under that mutation. Nothing here reads a clock or depends on how
+    // long the test thread was scheduled.
     try testing.expect(pusher.done.load(.acquire));
     try testing.expectEqual(@as(Q.Size, 0), pusher.result);
-    try testing.expect(pusher.wakes.load(.acquire) < 20);
+    try testing.expectEqual(@as(u32, 3), pusher.wakes.load(.acquire));
     try testing.expect(!q.wedged.load(.acquire));
     try testing.expect(q.pop(io).? == 1);
 }

@@ -382,9 +382,11 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // too late to stop that push, but it aborted it between attempt
     // windows, which is what bounds this join. If we killed the child via
     // subprocess.stop() above, processExitCommon sees the flag and skips
-    // the push outright. Either way the surface is gone from the app's
-    // list (App.deleteSurface ran before Surface.deinit reached this
-    // join), so the notice would have been discarded on arrival anyway.
+    // the push outright. On the real-close path the surface is already
+    // gone from the app's list (App.deleteSurface ran before
+    // Surface.deinit reached this join), so the notice would have been
+    // discarded on arrival anyway; see processExitCommon for the other
+    // teardown shapes and what the skip costs on each.
     if (comptime builtin.os.tag == .windows) {
         if (exec.process_wait_thread) |wt| wt.join();
     }
@@ -475,12 +477,8 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     // this function's caller is a thread that teardown joins out of
     // existence: `winProcessWaitThread` is joined by `threadExit`, which
     // the UI thread reaches through `Surface.deinit`'s io-thread join.
-    // Past this point the surface is already gone from the app's list
-    // (`App.deleteSurface` runs before `Surface.deinit` starts joining),
-    // so `App.surfaceMessage`'s `hasSurface` gate discards the notice on
-    // arrival -- the push below would spend its whole delivery budget
-    // against a full app mailbox that only the parked UI thread drains,
-    // on the UI thread itself (#1064).
+    // Against a full app mailbox the push below would spend its whole
+    // delivery budget on the UI thread itself (#1064).
     //
     // The two shapes:
     //
@@ -491,10 +489,26 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     //     `pushRequired` as its abort token ends it at the next attempt
     //     window -- one 250 ms window, not the 60 s budget.
     //
-    // The skip is safe because nothing that a live surface needs travels
-    // this path at teardown: `threadExit` only runs at real surface
-    // destruction, never at dormancy, and the discarded notice could not
-    // have delivered anything even if it had landed.
+    // What the skip loses, by teardown shape. On a real close: nothing.
+    // `App.deleteSurface` removed the surface from the app list before
+    // `Surface.deinit` started joining, so `App.surfaceMessage`'s
+    // `hasSurface` gate would have discarded the notice on arrival. On
+    // the embedded init-failure path: nothing either -- the errdefers
+    // run core deinit while the surface is still listed, but the only
+    // app-mailbox consumer is the very thread sitting in that join, so
+    // the notice cannot be consumed before deleteSurface discards it.
+    // The exception is `Termio.threadEnter`'s errdefer (io startup
+    // failure on a live surface, e.g. a failed wait-thread spawn or
+    // input queueing): there threadExit runs on the io thread while the
+    // surface is alive and the app thread keeps draining, so the notice
+    // WAS deliverable and this skip drops it. The cost is confined to a
+    // pane already telling the user it is non-functional: without the
+    // notice its close confirmation may ask once about a child this
+    // teardown itself killed, and `close-on-clean-exit` will not
+    // auto-close it. That trade unblocks every real close, which is the
+    // point. The POSIX drain-run edge (`Thread.zig`'s abnormal-exit
+    // loop after the errdefer threadExit) has the same live-but-broken
+    // shape and the same cost.
     if (execdata.teardown.load(.acquire)) {
         log.debug("child exited during teardown, skipping child_exited notice", .{});
         return;

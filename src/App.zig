@@ -929,7 +929,9 @@ test "app mailbox pushRequired gives up the moment teardown latches" {
     // inline capacity is heap allocated, so testing.allocator fails this
     // test if the aborted drop skips the free. It goes through
     // `pushBounded` directly because `pwd_change` is a droppable message
-    // and the required path asserts on those.
+    // and the required path asserts on those -- the assert lives in
+    // `apprt.surface.Mailbox.pushRequired` (surface.zig), the wrapper
+    // this test bypasses by driving `App.Mailbox` itself, not here.
     const pwd = "/" ++ ("d" ** 400);
     const req = try apprt.surface.Message.WriteReq.init(alloc, @as([]const u8, pwd));
     try testing.expect(req == .alloc);
