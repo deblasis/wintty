@@ -5,7 +5,8 @@
     Seam-actuated (#930). Seed two tabs, split the active one, undo the
     split through chord{0x5A,ctrl,shift} (Ctrl+Shift+Z, the binding), close
     a tab through the seam's close op, reopen it through
-    chord{0x54,ctrl,shift} (Ctrl+Shift+T), and set the window title from
+    chord{0x44,ctrl,shift} (Ctrl+Shift+D, the binding since the new-tab
+    chord moved back to Ctrl+Shift+T), and set the window title from
     the shell with the seam's send-text op (armed per-harness with
     -AllowInput; the old WM_CHAR posts almost certainly never delivered,
     which is why the OSC leg used to print OSC_UNVERIFIED and exit 0).
@@ -129,17 +130,27 @@ try {
         $script:Findings.Add("close left $tabsAfterClose tabs of $tabsBefore")
     }
 
-    Invoke-Chord $session 0x54
+    # The chord is reopen's own (Ctrl+Shift+D); a count alone cannot tell a
+    # restore from a fresh tab, so also wait for the closed tab's seeded
+    # title to come back before calling the leg done.
+    Invoke-Chord $session 0x44
     $tabsAfterReopen = TabCount $session
+    $restoredTitle = ''
     $deadline = (Get-Date).AddSeconds(5)
-    while ($tabsAfterReopen -le $tabsAfterClose -and (Get-Date) -lt $deadline) {
+    while ((($tabsAfterReopen -le $tabsAfterClose) -or ($restoredTitle -ne 'undo-a')) -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 250
         $tabsAfterReopen = TabCount $session
+        $labels = Invoke-SeamCommand $session @{ op = 'tab-labels' }
+        $hit = @($labels.labels) | Where-Object { $_.title -eq 'undo-a' } | Select-Object -First 1
+        $restoredTitle = if ($null -ne $hit) { [string]$hit.title } else { '' }
     }
-    Write-Host "tabs $tabsAfterReopen after reopen"
+    Write-Host "tabs $tabsAfterReopen after reopen (restored '$restoredTitle')"
     Shot $session '04-reopen'
     if ($tabsAfterReopen -le $tabsAfterClose) {
         $script:Findings.Add("Reopen Closed Tab left $tabsAfterReopen tabs, wanted more than $tabsAfterClose")
+    }
+    if ($restoredTitle -ne 'undo-a') {
+        $script:Findings.Add("reopen did not restore the closed tab's seeded title 'undo-a' (titles now: $((@((Invoke-SeamCommand $session @{ op = 'tab-labels' }).labels) | ForEach-Object { $_.title }) -join ', '))")
     }
 
     # OSC title round trip, read in-process: the seeded UserOverrideTitle
