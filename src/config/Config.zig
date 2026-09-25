@@ -1211,6 +1211,13 @@ palette: Palette = .{},
 /// `cmd.exe`. A profile command that starts with `direct:` is run the same
 /// way.
 ///
+/// An argv command's program is resolved as a bare name the way
+/// CreateProcess does it: a `.exe` on the PATH runs, but a bare `.cmd` or
+/// `.bat` script name on the PATH does not start it (observed: `-e
+/// tool.cmd` with the tool's directory first on the PATH never runs the
+/// tool, while the same script given by full path runs). Name the
+/// interpreter or give the script's path.
+///
 /// Two limits. `default-profile` is read from the main config file only,
 /// not from an included file or the command line, while `command` is read
 /// from all three. And with `default-profile` set but no profile loaded yet
