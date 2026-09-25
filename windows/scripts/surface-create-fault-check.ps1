@@ -250,11 +250,19 @@ try {
 }
 catch {
     $harnessError = $_.Exception.Message
-    if ($session -and $session.Proc -and $session.Proc.HasExited) {
-        # Death is a product finding, not a could-not-run: show the oracle,
-        # then let the trap classify the run as exit 2.
-        Show-CrashLog $session
-        throw "PRODUCT_FAIL: the app under test died - $harnessError"
+    # A dying app holds its pipe open through fail-fast and WER teardown,
+    # so the first sign of trouble can be a hang or a closed pipe while the
+    # process is on its way out. Wait briefly for the exit that classifies
+    # the run before calling it could-not-run: death is a product finding,
+    # not infrastructure.
+    if ($session -and $session.Proc) {
+        if (-not $session.Proc.HasExited) {
+            [void]$session.Proc.WaitForExit(10000)
+        }
+        if ($session.Proc.HasExited) {
+            Show-CrashLog $session
+            throw ("PRODUCT_FAIL: the app under test died (exit code {0}) - {1}" -f $session.Proc.ExitCode, $harnessError)
+        }
     }
 }
 finally {
