@@ -252,10 +252,22 @@ pub fn BlockingQueue(
         /// -- for the UI pair, 40 windows of 50ms with a wake re-issued
         /// after each.
         ///
+        /// `abort`, when non-null, is the producer's own teardown flag:
+        /// written once, `.release`, by the thread that is about to be
+        /// joined out of existence, and read here `.acquire` before every
+        /// attempt. It exists for the producer whose consumer joins it
+        /// back -- on Windows the process wait thread is joined by
+        /// `Exec.threadExit`, which the UI thread joins through
+        /// `Surface.deinit`, so a budget this function spends there is a
+        /// budget the UI thread spends with it. A null abort is the
+        /// ordinary producer with no one joining it.
+        ///
         /// Mutation-testing note: `wakeFn` is a comptime function
         /// parameter, so `_ = wakeFn;` does not compile ("pointless
         /// discard of function parameter"). Neutralise the call instead,
-        /// e.g. `if (attempts > 1_000_000) wakeFn(ctx);`.
+        /// e.g. `if (attempts > 1_000_000) wakeFn(ctx);`. The abort check
+        /// has no such guard; the tests below fail on a neutralised
+        /// check by wake count and by the latch, and hang on nothing.
         pub fn pushWake(
             self: *Self,
             io: std.Io,
@@ -265,6 +277,7 @@ pub fn BlockingQueue(
             timeout_ns: u64,
             max_attempts: usize,
             wedge: Wedge,
+            abort: ?*const std.atomic.Value(bool),
         ) Size {
             if (wedge == .fail_fast and self.wedged.load(.acquire)) {
                 const result = self.push(io, value, .{ .instant = {} });
@@ -282,6 +295,25 @@ pub fn BlockingQueue(
 
             var attempts: usize = 0;
             while (true) {
+                // The producer's own teardown. Checked before every
+                // attempt, the first included, so a flag that was already
+                // set when this call started costs nothing at all, and a
+                // flag raised mid-budget costs at most the attempt window
+                // in flight -- never the rest of the budget. The aborting
+                // producer still wakes the consumer once, for the same
+                // reason the latched fail-fast path above does.
+                //
+                // An abort is a decision by the producer, not a fault in
+                // the consumer: it neither sets nor clears the wedge
+                // latch, so streaming pushes are not failed fast against
+                // a consumer that was never wedged.
+                if (abort) |a| {
+                    if (a.load(.acquire)) {
+                        wakeFn(ctx);
+                        return 0;
+                    }
+                }
+
                 const result = self.push(io, value, .{ .ns = timeout_ns });
                 if (result > 0) {
                     // Load before storing: this is every push's path and
@@ -494,6 +526,7 @@ test "BlockingQueue pushWake wakes the consumer on every window it loses" {
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     );
 
     // The invariant: a producer that cannot land its value must have
@@ -538,6 +571,7 @@ test "BlockingQueue pushWake lands once a wake frees a slot" {
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     );
 
     try testing.expectEqual(@as(Q.Size, 1), result);
@@ -567,6 +601,7 @@ test "BlockingQueue pushWake stops spending the budget once it has lost one" {
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     ));
     try testing.expectEqual(@as(usize, 3), woken);
 
@@ -582,6 +617,7 @@ test "BlockingQueue pushWake stops spending the budget once it has lost one" {
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     ));
 
     // One wake, not three: it tried once and gave up, but it still woke
@@ -600,6 +636,7 @@ test "BlockingQueue pushWake stops spending the budget once it has lost one" {
         1 * std.time.ns_per_ms,
         3,
         .persist,
+        null,
     ));
     try testing.expectEqual(@as(usize, 3), woken);
 
@@ -627,6 +664,7 @@ test "BlockingQueue pushWake spends the budget again once the consumer drains" {
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     ));
     try testing.expect(q.wedged.load(.acquire));
 
@@ -642,6 +680,7 @@ test "BlockingQueue pushWake spends the budget again once the consumer drains" {
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     ));
     try testing.expectEqual(@as(usize, 0), woken);
     try testing.expect(!q.wedged.load(.acquire));
@@ -657,6 +696,7 @@ test "BlockingQueue pushWake spends the budget again once the consumer drains" {
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     ));
     try testing.expectEqual(@as(usize, 3), woken);
 
@@ -685,6 +725,7 @@ test "BlockingQueue pushWake clears the latch when a persist push lands the slow
         1 * std.time.ns_per_ms,
         3,
         .fail_fast,
+        null,
     ));
     try testing.expect(q.wedged.load(.acquire));
 
@@ -714,6 +755,7 @@ test "BlockingQueue pushWake clears the latch when a persist push lands the slow
         1 * std.time.ns_per_ms,
         3,
         .persist,
+        null,
     ));
 
     // It went the slow way: the first window had to expire before the
@@ -725,4 +767,110 @@ test "BlockingQueue pushWake clears the latch when a persist push lands the slow
 
 fn countWake(woken: *usize) void {
     woken.* += 1;
+}
+
+test "BlockingQueue pushWake aborts before the first attempt" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // Teardown already latched: this is the common close, where the
+    // child the teardown itself kills reports its exit to a producer
+    // whose flag was set before the kill.
+    var abort = std.atomic.Value(bool).init(true);
+
+    var woken: usize = 0;
+    const result = q.pushWake(
+        io,
+        2,
+        &woken,
+        countWake,
+        1 * std.time.ns_per_ms,
+        50,
+        .fail_fast,
+        &abort,
+    );
+
+    // Gave up at the first check: one wake (the abort still wakes, like
+    // every give-up here), nothing queued, and -- the part a streaming
+    // producer depends on -- no wedge latch against a consumer that was
+    // never at fault.
+    try testing.expectEqual(@as(Q.Size, 0), result);
+    try testing.expectEqual(@as(usize, 1), woken);
+    try testing.expect(!q.wedged.load(.acquire));
+    try testing.expect(q.pop(io).? == 1);
+    try testing.expect(q.pop(io) == null);
+}
+
+test "BlockingQueue pushWake aborts mid-budget once the flag rises" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // The race the preset flag cannot cover: the producer is already
+    // inside its budget when teardown starts. The producer's OWN wake
+    // callback raises the flag on its second call, so the abort is
+    // stored between attempts two and three by the very thread that
+    // will observe it: no cross-thread rendezvous for the harness to
+    // lose, no preemption window between an observation and a store,
+    // and the wake count asserted below is exact rather than bounded.
+    const Pusher = struct {
+        q: *Q,
+        abort: std.atomic.Value(bool) = .init(false),
+        wakes: std.atomic.Value(u32) = .init(0),
+        done: std.atomic.Value(bool) = .init(false),
+        result: Q.Size = 0,
+
+        fn wake(self: *@This()) void {
+            if (self.wakes.fetchAdd(1, .monotonic) == 1) {
+                // Second wake: teardown starts now, squarely between
+                // two attempts.
+                self.abort.store(true, .release);
+            }
+        }
+
+        fn run(self: *@This(), thread_io: std.Io) void {
+            self.result = self.q.pushWake(
+                thread_io,
+                2,
+                self,
+                wake,
+                5 * std.time.ns_per_ms,
+                40,
+                .persist,
+                &self.abort,
+            );
+            self.done.store(true, .release);
+        }
+    };
+
+    var pusher: Pusher = .{ .q = q };
+    const thread = try std.Thread.spawn(.{}, Pusher.run, .{ &pusher, io });
+    thread.join();
+
+    // Honored: the third loop-top check sees the flag, wakes the
+    // consumer once more (every give-up here wakes) and returns without
+    // latching. Exactly three wakes: two budget wakes -- the second one
+    // raised the flag -- plus the abort wake. An implementation that
+    // ignores the flag spends all 40 windows and latches, landing on 40
+    // wakes with the latch set, so the exact count below is the red
+    // under that mutation. Nothing here reads a clock or depends on how
+    // long the test thread was scheduled.
+    try testing.expect(pusher.done.load(.acquire));
+    try testing.expectEqual(@as(Q.Size, 0), pusher.result);
+    try testing.expectEqual(@as(u32, 3), pusher.wakes.load(.acquire));
+    try testing.expect(!q.wedged.load(.acquire));
+    try testing.expect(q.pop(io).? == 1);
 }

@@ -578,6 +578,9 @@ fn pushMailboxBounded(
         // thread is the textbook stream: without this the search box
         // costs the whole budget on every character typed into it.
         .fail_fast,
+        // No teardown abort: the search thread is not joined by its
+        // producers.
+        null,
     );
     if (size == 0) {
         log.warn("search mailbox full, message dropped", .{});

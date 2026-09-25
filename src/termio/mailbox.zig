@@ -299,6 +299,9 @@ pub const Mailbox = union(enum) {
                     timeout_ns,
                     max_attempts,
                     wedge,
+                    // No teardown abort: the writer thread this queue
+                    // feeds is never joined by its producers.
+                    null,
                 );
                 if (size == 0) {
                     log.warn("io mailbox full, message dropped", .{});

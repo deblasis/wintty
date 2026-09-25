@@ -655,6 +655,7 @@ pub const Mailbox = struct {
                 // rather than once per message is what keeps a wedged app
                 // thread from stalling them for as long as it is wedged.
                 .fail_fast,
+                null,
             ),
 
             .instant, .ns => self.mailbox.push(global.io(), msg, timeout),
@@ -708,20 +709,30 @@ pub const Mailbox = struct {
     /// surface is being destroyed, so the budget is spent delivering a
     /// message guaranteed to be discarded.
     ///
-    /// That path is worth closing and is filed as a follow-up
-    /// (suppressing the teardown push in `Exec`), not fixed here: the
-    /// flag would be written on the io thread and read on the wait
-    /// thread, so it needs an ordering argument rather than an
-    /// assignment, and it can only narrow the window -- the wait thread
-    /// can already be inside `processExitCommon` when the flag is set.
+    /// That path is closed by the `abort` parameter: `Exec.threadExit`
+    /// latches its teardown flag with `.release` before it stops the
+    /// subprocess, and hands the same flag here. A push that has not
+    /// started skips outright; a push already inside its budget aborts
+    /// at the next attempt window through the queue's own check, so the
+    /// join chain above it is bounded by one window (250 ms) rather
+    /// than this budget. The flag is written on the io thread and read
+    /// on the wait thread, which is why it is an atomic with a stated
+    /// ordering rather than an assignment, and why the abort lives in
+    /// the queue's retry loop instead of only at this function's top: a
+    /// check only at the top could narrow the window, never close it.
     ///
     /// It is bounded either way: past the budget the message is still
     /// given up and freed.
-    pub fn pushRequired(self: Mailbox, msg: Message) Queue.Size {
+    pub fn pushRequired(
+        self: Mailbox,
+        msg: Message,
+        abort: ?*const std.atomic.Value(bool),
+    ) Queue.Size {
         return self.pushRequiredBounded(
             msg,
             Queue.wake_retry_timeout_ns,
             Queue.wake_retry_attempts,
+            abort,
         );
     }
 
@@ -733,8 +744,9 @@ pub const Mailbox = struct {
         msg: Message,
         timeout_ns: u64,
         max_attempts: usize,
+        abort: ?*const std.atomic.Value(bool),
     ) Queue.Size {
-        const result = self.pushBounded(msg, timeout_ns, max_attempts, .persist);
+        const result = self.pushBounded(msg, timeout_ns, max_attempts, .persist, abort);
 
         // Wake up our app loop
         self.rt_app.wakeup();
@@ -748,6 +760,7 @@ pub const Mailbox = struct {
         timeout_ns: u64,
         max_attempts: usize,
         wedge: Queue.Wedge,
+        abort: ?*const std.atomic.Value(bool),
     ) Queue.Size {
         const size = self.mailbox.pushWake(
             global.io(),
@@ -757,9 +770,19 @@ pub const Mailbox = struct {
             timeout_ns,
             max_attempts,
             wedge,
+            abort,
         );
         if (size == 0) {
-            log.warn("app mailbox full, message dropped", .{});
+            // An aborted give-up is a teardown decision, not a consumer
+            // fault, and does not even imply the queue was full. The
+            // flag can rise between the last failed attempt and this
+            // read either way, so the label is best-effort; the drop
+            // itself was correct regardless.
+            if (abort != null and abort.?.load(.acquire)) {
+                log.debug("app mailbox push aborted at teardown, message dropped", .{});
+            } else {
+                log.warn("app mailbox full, message dropped", .{});
+            }
             msg.deinit();
         }
 
@@ -805,7 +828,7 @@ test "app mailbox push frees the message it has to give up" {
     const size = mailbox.pushBounded(.{ .surface_message = .{
         .surface = undefined,
         .message = .{ .pwd_change = req },
-    } }, 1 * std.time.ns_per_ms, 3, .fail_fast);
+    } }, 1 * std.time.ns_per_ms, 3, .fail_fast, null);
 
     try testing.expectEqual(@as(Mailbox.Queue.Size, 0), size);
 }
@@ -837,6 +860,7 @@ test "app mailbox pushRequired ignores a latch that push respects" {
         window_ns,
         3,
         .fail_fast,
+        null,
     ));
     try testing.expect(queue.wedged.load(.acquire));
 
@@ -855,11 +879,72 @@ test "app mailbox pushRequired ignores a latch that push respects" {
         } },
         window_ns,
         3,
+        null,
     ));
 
     // One-directional: load on the build machine can only lengthen this,
     // never shorten it, so a busy host cannot make this flaky.
     try testing.expect(start.untilNow(io, .awake).toMilliseconds() >= 30);
+}
+
+test "app mailbox pushRequired gives up the moment teardown latches" {
+    const testing = std.testing;
+    const build_config = @import("build_config.zig");
+
+    // The only runtime whose `wakeup` ignores its receiver, which is what
+    // lets this test hand it an undefined one.
+    if (build_config.app_runtime != .none) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    const queue = try Mailbox.Queue.create(alloc);
+    defer queue.destroy(alloc);
+
+    var rt_app: apprt.App = undefined;
+    const mailbox: Mailbox = .{ .rt_app = &rt_app, .mailbox = queue };
+
+    // The close-time shape: full, and the only thread that drains it is
+    // the one parked inside teardown. The latch test above proved the
+    // required push spends its whole budget here; this one proves the
+    // teardown token ends that spend at the first check.
+    while (queue.push(io, .{ .quit = {} }, .{ .instant = {} }) > 0) {}
+    var teardown = std.atomic.Value(bool).init(true);
+
+    try testing.expectEqual(@as(Mailbox.Queue.Size, 0), mailbox.pushRequired(
+        .{ .surface_message = .{
+            .surface = undefined,
+            .message = .{ .child_exited = .{ .exit_code = 0, .runtime_ms = 0 } },
+        } },
+        &teardown,
+    ));
+
+    // An abort is a producer decision, not a consumer fault: the latch
+    // that fail-fast streaming pushes respect must stay clear, so a
+    // later healthy producer is not failed fast against a consumer that
+    // was never wedged.
+    try testing.expect(!queue.wedged.load(.acquire));
+
+    // The give-up path still owns the message. A pwd longer than the
+    // inline capacity is heap allocated, so testing.allocator fails this
+    // test if the aborted drop skips the free. It goes through
+    // `pushBounded` directly because `pwd_change` is a droppable message
+    // and the required path asserts on those -- the assert lives in
+    // `apprt.surface.Mailbox.pushRequired` (surface.zig), the wrapper
+    // this test bypasses by driving `App.Mailbox` itself, not here.
+    const pwd = "/" ++ ("d" ** 400);
+    const req = try apprt.surface.Message.WriteReq.init(alloc, @as([]const u8, pwd));
+    try testing.expect(req == .alloc);
+    try testing.expectEqual(@as(Mailbox.Queue.Size, 0), mailbox.pushBounded(
+        .{ .surface_message = .{
+            .surface = undefined,
+            .message = .{ .pwd_change = req },
+        } },
+        1 * std.time.ns_per_ms,
+        3,
+        .fail_fast,
+        &teardown,
+    ));
 }
 
 // Wasm API.

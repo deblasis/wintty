@@ -6,6 +6,7 @@ const apprt = @import("../apprt.zig");
 const build_config = @import("../build_config.zig");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
+const global = @import("../global.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const Config = @import("../config.zig").Config;
@@ -347,7 +348,17 @@ pub const Mailbox = struct {
     /// is an event and belongs on `push`. `Message.dropAllowed` is the
     /// list, and this assert is the other half of `push`'s: neither
     /// function will carry a message the other one owns.
-    pub fn pushRequired(self: Mailbox, msg: Message) App.Mailbox.Queue.Size {
+    ///
+    /// `abort` is the producer's teardown flag, handed straight through
+    /// to the app mailbox. The child-exit notice is pushed from a thread
+    /// that teardown joins, so at close time it carries the flag its own
+    /// teardown set, which is what stops it spending a delivery budget
+    /// on a message the teardown itself guarantees is discarded.
+    pub fn pushRequired(
+        self: Mailbox,
+        msg: Message,
+        abort: ?*const std.atomic.Value(bool),
+    ) App.Mailbox.Queue.Size {
         assert(!msg.dropAllowed());
 
         return self.app.pushRequired(.{
@@ -355,7 +366,7 @@ pub const Mailbox = struct {
                 .surface = self.surface,
                 .message = msg,
             },
-        });
+        }, abort);
     }
 };
 
@@ -581,4 +592,45 @@ test "the child-exit notice is the one message push may not carry" {
     try std.testing.expect((Message{ .password_input = true }).dropAllowed());
     try std.testing.expect((Message{ .renderer_health = .healthy }).dropAllowed());
     try std.testing.expect((Message{ .search_total = null }).dropAllowed());
+}
+
+test "surface mailbox pushRequired forwards the teardown token" {
+    // One level up from the App mailbox test of the same name: this pins
+    // the FORWARD. The only production caller of this wrapper is the
+    // child-exit notice, and a forward that hands the app mailbox null
+    // instead of the token compiles clean and passes every other test,
+    // quietly reopening the racing case of the close freeze: the
+    // in-flight notice spends its whole delivery budget again. The null
+    // mutation makes this test spend the real budget (240 windows of
+    // 250 ms) before failing on the latch -- that duration is the defect
+    // it pins, the same way the App-level test does.
+    if (build_config.app_runtime != .none) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const io = global.io();
+
+    const queue = try App.Mailbox.Queue.create(alloc);
+    defer queue.destroy(alloc);
+
+    // The runtime whose wakeup ignores its receiver, which is what lets
+    // this test hand it and the surface undefined values: neither is
+    // touched on the abort path.
+    var rt_app: apprt.App = undefined;
+    var surface: Surface = undefined;
+    const mailbox: Mailbox = .{
+        .surface = &surface,
+        .app = .{ .rt_app = &rt_app, .mailbox = queue },
+    };
+
+    // The close-time shape: full, teardown already latched. An honoring
+    // forward gives up at the first check without latching the wedge;
+    // the null forward latches it.
+    while (queue.push(io, .{ .quit = {} }, .{ .instant = {} }) > 0) {}
+    var teardown = std.atomic.Value(bool).init(true);
+
+    try std.testing.expectEqual(@as(App.Mailbox.Queue.Size, 0), mailbox.pushRequired(
+        .{ .child_exited = .{ .exit_code = 0, .runtime_ms = 0 } },
+        &teardown,
+    ));
+    try std.testing.expect(!queue.wedged.load(.acquire));
 }
