@@ -608,6 +608,50 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     /// <summary>The panel's composition scale, so a driver can say which display scale it measured at.</summary>
     internal double TestSeamCompositionScale => Panel.CompositionScaleX;
+
+    /// <summary>
+    /// The hook's implementation: when the surface-fault seam op has armed a
+    /// count, consume one and report the libghostty-null-surface failure.
+    /// UI-thread-only, like everything that creates surfaces. Its
+    /// declaration lives outside this region (above TryCreateSurface) so a
+    /// shipping build - which compiles neither member - still sees the
+    /// declaration, drops the implementation, and removes the call.
+    /// </summary>
+    partial void SeamFaultSurfaceNew(ref bool faulted)
+    {
+        if (TestSeamFaultSurfaceNew > 0)
+        {
+            TestSeamFaultSurfaceNew--;
+            faulted = true;
+        }
+    }
+
+    /// <summary>
+    /// Seam fault: the number of NEXT surface creations that report the
+    /// libghostty-null-surface failure. Armed by the surface-fault seam op
+    /// to reproduce the GPU-less startup crash's precondition on hardware
+    /// that has a working renderer.
+    /// </summary>
+    internal static int TestSeamFaultSurfaceNew;
+
+    /// <summary>Seam readback: whether this control holds a live surface.</summary>
+    internal bool TestSeamHasSurface => _surface.Handle != IntPtr.Zero;
+
+    /// <summary>
+    /// Seam readback: attempts left in the retry budget, or -1 when no retry
+    /// is armed (never armed, succeeded, given up, or stopped).
+    /// </summary>
+    internal int TestSeamSurfaceRetriesLeft =>
+        _surfaceRetryTimer is null ? -1 : _surfaceRetryAttemptsLeft;
+
+    /// <summary>
+    /// Seam readback: whether a creation was ATTEMPTED at least once (the
+    /// latch is set before the attempt). Together with
+    /// <see cref="TestSeamSurfaceRetriesLeft"/> this tells a driver
+    /// "never attempted" (false/-1) apart from "gave up" (true/-1), which
+    /// a bare -1 cannot.
+    /// </summary>
+    internal bool TestSeamSurfaceAttempted => _surfaceCreated;
 #endif
 
     /// <summary>
@@ -1012,6 +1056,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
 
     /// <summary>
+    /// The test seam's surface-creation fault hook, implemented inside the
+    /// file's one #if TESTSEAM region below - everything the seam touches
+    /// stays there, which is what the seam wiring guard pins. A shipping
+    /// build has no implementation, so the compiler removes the declaration
+    /// and every call site (argument evaluations included).
+    /// </summary>
+    partial void SeamFaultSurfaceNew(ref bool faulted);
+
+    /// <summary>
     /// Create the libghostty surface, and with it the pty, at the panel's
     /// measured size. Called from the first layout pass after Loaded, not
     /// from Loaded itself, the way Windows Terminal starts its connection
@@ -1109,19 +1162,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
         try
         {
-#if TESTSEAM
-            if (TestSeamFaultSurfaceNew > 0)
+            // The seam's fault hook is a partial method so the whole seam
+            // stays in this file's one #if TESTSEAM region: TESTSEAM builds
+            // implement it there; a shipping build has no implementation, and
+            // the compiler removes the call (argument evaluations included).
+            var seamFaulted = false;
+            SeamFaultSurfaceNew(ref seamFaulted);
+            if (seamFaulted)
             {
-                // Seam-injected failure: the next N creations report what
-                // libghostty reports when the renderer device cannot be
-                // built (the GPU-less startup crash's precondition),
-                // without needing that hardware to reproduce it.
-                TestSeamFaultSurfaceNew--;
+                // Seam-injected failure: this creation reports what libghostty
+                // reports when the renderer device cannot be built (the
+                // GPU-less startup crash's precondition), without needing that
+                // hardware to reproduce it.
                 _surface = default;
             }
             else
-#endif
-            _surface = NativeMethods.SurfaceNew(app, surfaceConfig);
+            {
+                _surface = NativeMethods.SurfaceNew(app, surfaceConfig);
+            }
         }
         catch (Exception ex)
         {
@@ -1323,36 +1381,6 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         _initialInputUtf8 = IntPtr.Zero;
         _customShaderUtf8 = IntPtr.Zero;
     }
-
-#if TESTSEAM
-    /// <summary>
-    /// Seam fault: the number of NEXT surface creations that report the
-    /// libghostty-null-surface failure. Armed by the surface-fault seam op
-    /// to reproduce the GPU-less startup crash's precondition on hardware
-    /// that has a working renderer. UI-thread-only, like everything that
-    /// creates surfaces.
-    /// </summary>
-    internal static int TestSeamFaultSurfaceNew;
-
-    /// <summary>Seam readback: whether this control holds a live surface.</summary>
-    internal bool TestSeamHasSurface => _surface.Handle != IntPtr.Zero;
-
-    /// <summary>
-    /// Seam readback: attempts left in the retry budget, or -1 when no retry
-    /// is armed (never armed, succeeded, given up, or stopped).
-    /// </summary>
-    internal int TestSeamSurfaceRetriesLeft =>
-        _surfaceRetryTimer is null ? -1 : _surfaceRetryAttemptsLeft;
-
-    /// <summary>
-    /// Seam readback: whether a creation was ATTEMPTED at least once (the
-    /// latch is set before the attempt). Together with
-    /// <see cref="TestSeamSurfaceRetriesLeft"/> this tells a driver
-    /// "never attempted" (false/-1) apart from "gave up" (true/-1), which
-    /// a bare -1 cannot.
-    /// </summary>
-    internal bool TestSeamSurfaceAttempted => _surfaceCreated;
-#endif
 
     private void DisableAncestorScrollViewerTabStop()
     {
