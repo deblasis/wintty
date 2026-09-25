@@ -357,6 +357,15 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     assert(td.backend == .exec);
     const exec = &td.backend.exec;
 
+    // Latch teardown before anything that can wake the wait thread into
+    // its child-exit push. subprocess.stop() below kills the child, which
+    // is exactly what wakes winProcessWaitThread, so the store has to be
+    // first: it is what lets that push skip itself (processExitCommon
+    // checks this flag) instead of spending its delivery budget against
+    // an app mailbox that the UI thread -- which is parked in this very
+    // join -- is by construction not draining. See processExitCommon.
+    exec.teardown.store(true, .release);
+
     if (exec.exited) self.subprocess.externalExit();
     self.subprocess.stop();
 
@@ -369,10 +378,13 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
 
     // Join the Windows process-exit watcher thread. If the child already
     // exited naturally, winProcessWaitThread has already called
-    // processExitCommon and returned. If we killed it via subprocess.stop()
-    // above, it will call processExitCommon now - the extra child_exited
-    // push is harmless because td is still valid until join() returns and
-    // surface_mailbox is thread-safe.
+    // processExitCommon and returned; the teardown flag above was raised
+    // too late to stop that push, but it aborted it between attempt
+    // windows, which is what bounds this join. If we killed the child via
+    // subprocess.stop() above, processExitCommon sees the flag and skips
+    // the push outright. Either way the surface is gone from the app's
+    // list (App.deleteSurface ran before Surface.deinit reached this
+    // join), so the notice would have been discarded on arrival anyway.
     if (comptime builtin.os.tag == .windows) {
         if (exec.process_wait_thread) |wt| wt.join();
     }
@@ -458,20 +470,45 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     // rebase that collapses this line, the first child exit panics in a
     // Debug build rather than losing the notice quietly.
     //
-    // What that budget costs at teardown, on Windows: the caller here is
-    // `winProcessWaitThread`, `threadExit` joins that thread, and
-    // `Surface.deinit` joins the io thread on the UI thread, so a full
-    // app mailbox at close spends the whole background budget on the UI
-    // thread -- delivering the push `threadExit` above calls harmless,
-    // which `App.surfaceMessage`'s `hasSurface` gate then discards. See
-    // `App.Mailbox.pushRequired`; suppressing that teardown push is
-    // filed separately.
-    _ = td.surface_mailbox.pushRequired(.{
-        .child_exited = .{
-            .exit_code = exit_code,
-            .runtime_ms = runtime_ms,
+    // Unless teardown has latched. `execdata.teardown` is set by
+    // `threadExit` before it stops the subprocess, and on this platform
+    // this function's caller is a thread that teardown joins out of
+    // existence: `winProcessWaitThread` is joined by `threadExit`, which
+    // the UI thread reaches through `Surface.deinit`'s io-thread join.
+    // Past this point the surface is already gone from the app's list
+    // (`App.deleteSurface` runs before `Surface.deinit` starts joining),
+    // so `App.surfaceMessage`'s `hasSurface` gate discards the notice on
+    // arrival -- the push below would spend its whole delivery budget
+    // against a full app mailbox that only the parked UI thread drains,
+    // on the UI thread itself (#1064).
+    //
+    // The two shapes:
+    //
+    //   * Killed by the close itself: teardown latched before the kill,
+    //     so the load below skips the push outright. Zero added stall.
+    //   * Natural exit racing the close: the push is already inside its
+    //     budget when the flag rises, and the same flag handed to
+    //     `pushRequired` as its abort token ends it at the next attempt
+    //     window -- one 250 ms window, not the 60 s budget.
+    //
+    // The skip is safe because nothing that a live surface needs travels
+    // this path at teardown: `threadExit` only runs at real surface
+    // destruction, never at dormancy, and the discarded notice could not
+    // have delivered anything even if it had landed.
+    if (execdata.teardown.load(.acquire)) {
+        log.debug("child exited during teardown, skipping child_exited notice", .{});
+        return;
+    }
+
+    _ = td.surface_mailbox.pushRequired(
+        .{
+            .child_exited = .{
+                .exit_code = exit_code,
+                .runtime_ms = runtime_ms,
+            },
         },
-    });
+        &execdata.teardown,
+    );
 }
 
 fn processExit(
@@ -782,6 +819,15 @@ pub const ThreadData = struct {
     /// builtin.os.tag == .windows; always null on other platforms.
     process_wait_thread: if (builtin.os.tag == .windows) ?std.Thread else void =
         if (builtin.os.tag == .windows) null else {},
+
+    /// Latched by `threadExit` before it stops the subprocess, and handed
+    /// to the child-exit push as its abort token. The wait thread reads
+    /// it, so it is an atomic with a stated ordering rather than a plain
+    /// bool. Windows-only by use rather than by type: POSIX sets it too
+    /// (the flag is harmless there) so the field needs no platform
+    /// conditional, but the stall it exists to close is the Windows join
+    /// chain through `process_wait_thread`.
+    teardown: std.atomic.Value(bool) = .init(false),
 
     /// The timer to detect termios state changes.
     termios_timer: xev.Timer,

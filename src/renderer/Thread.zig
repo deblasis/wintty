@@ -1128,6 +1128,9 @@ fn pushMailboxBounded(
         // pre-existing leak above cheaper to reach. It stays `.persist`
         // until that path frees what it gives up.
         .persist,
+        // No teardown abort: this producer is never joined by its
+        // consumer, so there is no flag to hand it.
+        null,
     );
 }
 

@@ -347,7 +347,17 @@ pub const Mailbox = struct {
     /// is an event and belongs on `push`. `Message.dropAllowed` is the
     /// list, and this assert is the other half of `push`'s: neither
     /// function will carry a message the other one owns.
-    pub fn pushRequired(self: Mailbox, msg: Message) App.Mailbox.Queue.Size {
+    ///
+    /// `abort` is the producer's teardown flag, handed straight through
+    /// to the app mailbox. The child-exit notice is pushed from a thread
+    /// that teardown joins, so at close time it carries the flag its own
+    /// teardown set, which is what stops it spending a delivery budget
+    /// on a message the teardown itself guarantees is discarded.
+    pub fn pushRequired(
+        self: Mailbox,
+        msg: Message,
+        abort: ?*const std.atomic.Value(bool),
+    ) App.Mailbox.Queue.Size {
         assert(!msg.dropAllowed());
 
         return self.app.pushRequired(.{
@@ -355,7 +365,7 @@ pub const Mailbox = struct {
                 .surface = self.surface,
                 .message = msg,
             },
-        });
+        }, abort);
     }
 };
 
