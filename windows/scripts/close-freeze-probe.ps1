@@ -16,13 +16,17 @@
 
     Closing tab 1 through the seam's close op runs the real CloseTab on
     the UI thread. Measured: the close op's own ack latency, then
-    get-state latency for a few passes after it. A close that parks the
-    UI thread inside surface teardown shows up as an ack delayed by the
-    mailbox's full push budget (240 windows of 250 ms) while a healthy
-    close answers in dispatcher time. Per-op latencies land in
-    timeline.json; the verdict compares the worst latency against a
-    threshold, not against an expectation of speed, so a busy machine can
-    only widen healthy latencies, not manufacture a 60 s one.
+    get-state latency for a few passes after it. The seam serves one
+    command at a time, so the ack is the earliest signal there is; it
+    returns after CloseTab's synchronous teardown plus one Low-priority
+    settle, and the flood is bounded and long over by the time a healthy
+    close settles, so a healthy ack is dispatcher time. A close that
+    parks the UI thread inside surface teardown shows up as an ack
+    delayed by the mailbox's full push budget (240 windows of 250 ms)
+    instead. Per-op latencies land in timeline.json; the verdict compares
+    the worst latency against a threshold, not against an expectation of
+    speed, so a busy machine can only widen healthy latencies, not
+    manufacture a 60 s one.
 
     Exits 0 clean, 2 finding (worst latency at or over the threshold),
     1 could-not-run. No OS input is synthesized; the seam drives the real
@@ -71,65 +75,58 @@ function Record([string]$Op, [long]$ElapsedMs, [string]$Note) {
 }
 
 # Best-effort evidence when the UI thread never answers: a mini dump of
-# the hung app plus cdb's all-thread stacks beside it. Observation only --
-# this changes nothing about the run's sequencing, it just refuses to let
-# a hang go unexplained. Every step is guarded; a tooling failure must not
-# mask the finding that triggered it.
+# the hung app (comsvcs; its SYSTEM-only ACL is a known limit, the file is
+# kept anyway) and cdb's all-thread stacks attached live. Observation only
+# -- this changes nothing about the run's sequencing, it just refuses to
+# let a hang go unexplained. Every step is guarded; a tooling failure must
+# not mask the finding that triggered it.
 function Capture-HangStacks([Parameter(Mandatory)]$Session) {
     try {
         $pid0 = $Session.Proc.Id
         $dump = Join-Path $OutDir ("hang-{0}.dmp" -f $pid0)
-        # comsvcs' MiniDump entry point writes the dump in-process; 'mini'
-        # carries every thread's stack, which is all this needs.
         Start-Process -FilePath rundll32.exe `
             -ArgumentList "comsvcs.dll,MiniDump", $pid0, $dump, "mini" `
             -Wait -NoNewWindow | Out-Null
-        if (-not (Test-Path $dump)) { return }
-        Record 'hang-dump' 0 ("mini dump of pid {0} taken" -f $pid0)
         $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
         if (-not (Test-Path $cdb)) { return }
         $stacks = Join-Path $OutDir 'hang-stacks.txt'
-        & $cdb -z $dump -c "~*k; q" *> $stacks
+        # Attach, print every thread's stack, then detach: a park and a
+        # starved dispatcher look identical from the pipe, and the stack is
+        # the only thing that tells them apart. A local-only symbol path so
+        # the debugger never waits on a symbol server.
+        $env:_NT_SYMBOL_PATH = $OutDir
+        & $cdb -p $pid0 -g -G -y $OutDir -c "~*k; qd" *> $stacks
+        Record 'hang-dump' 0 ("thread stacks captured from pid {0}" -f $pid0)
     }
     catch {
         Record 'hang-dump' 0 ("stack capture failed: {0}" -f $_.Exception.Message)
     }
 }
 
-# One op, one timed ack. Latency is measured with a stopwatch around the
-# round trip: send, then the response line for exactly this op. The read
-# carries a generous hang guard so a UI thread that never comes back fails
-# the harness instead of parking it -- the guard is never the check, the
-# threshold below is.
-function Invoke-Timed([Parameter(Mandatory)]$Session, [hashtable]$Command) {
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Send-SeamCommand $Session $Command
+# One guarded read of one response line. The guard is never the check; it
+# exists so a UI thread that never comes back fails the harness instead of
+# parking it. When it fires, the stacks are captured first, the finding is
+# recorded so the run exits 2 (finding) rather than 1 (could-not-run).
+function Read-SeamGuarded([Parameter(Mandatory)]$Session, [string]$OpName) {
     $read = $Session.Reader.ReadLineAsync()
     if (-not $read.Wait($AckHangGuardSeconds * 1000)) {
-        # The guard is never the check, but when it fires on the close the
-        # UI thread has been gone past all healthy bounds, and that IS the
-        # finding: record it so the run exits 2 (finding) rather than 1
-        # (could-not-run). Before anything else, snapshot the hung app's
-        # thread stacks -- a park and a starvation look identical from the
-        # pipe, and the stack is the only thing that tells them apart.
         Capture-HangStacks $Session
-        $script:Findings.Add(("CLOSE_FREEZE_HANG: no answer to '{0}' within the {1} s guard; the UI thread never came back" -f
-            $Command['op'], $AckHangGuardSeconds))
-        Record $Command['op'] ($AckHangGuardSeconds * 1000) "HANG: no ack within the guard"
+        $script:Findings.Add(("UI_THREAD_HANG: no answer to '{0}' within the {1} s guard; the UI thread never came back after the close" -f
+            $OpName, $AckHangGuardSeconds))
+        Record $OpName ($AckHangGuardSeconds * 1000) "HANG: no ack within the guard"
         throw ("HARNESS: no answer to '{0}' within the {1} s hang guard" -f
-            $Command['op'], $AckHangGuardSeconds)
+            $OpName, $AckHangGuardSeconds)
     }
     $line = $read.Result
     if ($null -eq $line) {
-        throw ("HARNESS: the seam closed the connection during '{0}'" -f $Command['op'])
+        throw ("HARNESS: the seam closed the connection during '{0}'" -f $OpName)
     }
     $response = $line | ConvertFrom-Json
     if ($null -eq $response -or -not $response.ok) {
-        throw ("PRODUCT_FAIL: {0} -> {1}" -f $Command['op'],
+        throw ("PRODUCT_FAIL: {0} -> {1}" -f $OpName,
             $(if ($response) { $response.error } else { 'non-JSON line' }))
     }
-    $sw.Stop()
-    return @($response, $sw.ElapsedMilliseconds)
+    return $response
 }
 
 # Condition-wait helper: poll $Body until it returns a value, fail after
@@ -190,18 +187,22 @@ try {
         ($r.text -split "`n" -match 'ping').Count -gt 0
     } $ReadinessTimeoutSeconds 'tab 1 to echo the ping command' | Out-Null
 
-    # The flood: chunks of distinct OSC titles in a tight write loop. A
-    # chunk keeps the pty pipe saturated, so the reader always has a
-    # backlog the moment the app thread stops draining, and distinct
-    # titles cannot be collapsed by any change-detection on the way to
-    # the mailbox. The shell-reported title is the landing proof -- a
-    # set_title that made it through the app mailbox and back out to the
-    # tab model. The backtick escapes are doubled here so the SHELL's
-    # parser expands them (`e is ESC, `a is BEL in pwsh); a raw ESC in
-    # the input stream would be PSReadLine's to interpret, not the
-    # shell's.
+    # The flood: chunks of distinct OSC titles, bounded and paced. The
+    # bounds matter more than the volume: an unbounded pipe-saturating
+    # loop was tried first and it collapses the app on its own (XAML
+    # churn ballooned RSS past 10 GB, every thread crawled, the close
+    # took 104 s on the FIXED build -- a resource story, not the park
+    # under test). What the park needs is far cheaper: 64 mailbox slots
+    # filled within a few ms of the app thread stopping its drain, which
+    # a paced 8k-titles/s delivers, and the chunks keep coming through
+    # the whole teardown window. Distinct titles defeat any
+    # change-detection on the way to the mailbox; the shell-reported
+    # title is the landing proof. The backtick escapes are doubled here
+    # so the SHELL's parser expands them (`e is ESC, `a is BEL in pwsh);
+    # a raw ESC in the input stream would be PSReadLine's to interpret,
+    # not the shell's.
     Invoke-SeamCommand $session @{ op = 'send-text'; index = 0; text =
-        "`$c = -join (1..128 | ForEach-Object { `"``e]0;flood-`$_``a`" }); while(`$true){ [Console]::Write(`$c) }`r" } | Out-Null
+        "`$c = -join (1..128 | ForEach-Object { `"``e]0;flood-`$_``a`" }); 1..300 | ForEach-Object { [Console]::Write(`$c); Start-Sleep -Milliseconds 15 }`r" } | Out-Null
     $floodTitle = Wait-Until {
         $r = Invoke-SeamCommand $session @{ op = 'tab-labels' }
         $t = $r.labels | Where-Object { $_.index -eq 0 }
@@ -209,19 +210,30 @@ try {
     } $ReadinessTimeoutSeconds 'a flood title to land on tab 0'
     Record 'flood-live' 0 "shell title now '$floodTitle'"
 
-    # The measurement. The close ack returns after CloseTab and one
-    # dispatcher pass settled; if the UI thread parks inside teardown the
-    # ack is late by exactly the park.
-    $closeResult, $closeMs = Invoke-Timed $session @{ op = 'close'; index = 1 }
-    Record 'close' $closeMs ("tabs after close: " + @($closeResult.state.tabs).Count)
+    # The measurement. The seam serves one command at a time -- the
+    # connection loop awaits each response before reading the next line
+    # (TestSeam.ServeConnectionAsync) -- so nothing can be measured
+    # alongside an in-flight close; the close's own ack, arriving after
+    # CloseTab's synchronous teardown plus its Low-priority settle, IS
+    # the oracle. The flood is bounded and long over by the time a
+    # healthy close settles, so Low priority drains and a healthy ack is
+    # dispatcher-time; a teardown that parks the UI thread inside the
+    # joins shows up as an ack late by the park.
+    $closeSw = [System.Diagnostics.Stopwatch]::StartNew()
+    Send-SeamCommand $session @{ op = 'close'; index = 1 }
+    $closeResult = Read-SeamGuarded $session 'close'
+    $closeSw.Stop()
+    Record 'close' $closeSw.ElapsedMilliseconds ("tabs after close: " + @($closeResult.state.tabs).Count)
+    $st = $closeResult
 
     # Recovery passes: each is a fresh UI-thread round trip after the
-    # close. A park inside the close delays the first of these too (the
-    # pipe serves one client in order), so both views of the park land in
-    # the timeline.
+    # close, on a connection whose queue is empty again.
     for ($i = 0; $i -lt $PostClosePolls; $i++) {
-        $st, $ms = Invoke-Timed $session @{ op = 'get-state' }
-        Record 'get-state' $ms ("tabCount=" + @($st.state.tabs).Count)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        Send-SeamCommand $session @{ op = 'get-state' }
+        $st = Read-SeamGuarded $session 'get-state'
+        $sw.Stop()
+        Record 'get-state' $sw.ElapsedMilliseconds ("tabCount=" + @($st.state.tabs).Count)
     }
 
     $worst = ($script:Timeline | Measure-Object -Property ms -Maximum).Maximum
