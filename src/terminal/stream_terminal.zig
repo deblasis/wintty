@@ -3169,6 +3169,66 @@ test "semantic prompt fresh line new prompt" {
     try testing.expect(t.flags.shell_redraws_prompt == .true);
 }
 
+test "semantic prompt redraw=0 keeps a marked prompt line across resize" {
+    // The shape of a cmd pane here: an OSC 133;A marks the line as prompt
+    // content, the body follows, 133;B hands the cursor to input, and the
+    // cursor waits at the end of the body. A pane split or any other shrink
+    // resizes the surface, and by Kitty's contract the terminal clears
+    // marked prompt lines on resize expecting the shell to repaint them.
+    // A shell that cannot repaint (cmd) declares redraw=0, and then the
+    // line must come through byte for byte. Both halves pinned: with
+    // redraw=0 the prompt text survives; with the bare mark it is cleared,
+    // which is the blank-prompt defect the option exists to prevent.
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 134, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = .init(&t) });
+    defer s.deinit();
+
+    s.nextSlice("\x1b]133;A;redraw=0\x07");
+    s.nextSlice("C:\\Users\\Alessandro>");
+    s.nextSlice("\x1b]133;B\x07");
+    try testing.expectEqual(.input, t.screens.active.cursor.semantic_content);
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+
+    try t.resize(testing.allocator, .{ .cols = 67, .rows = 24 });
+
+    {
+        const contents = try t.screens.active.dumpStringAlloc(
+            testing.allocator,
+            .{ .viewport = .{} },
+        );
+        defer testing.allocator.free(contents);
+        try testing.expect(
+            std.mem.indexOf(u8, contents, "C:\\Users\\Alessandro>") != null,
+        );
+    }
+
+    // The bare mark, as an integration that believes its shell repaints,
+    // sends the same line through the same shrink and loses it.
+    var t2: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 134, .rows = 24 });
+    defer t2.deinit(testing.allocator);
+
+    var s2: Stream = .init(.{ .allocator = testing.allocator, .handler = .init(&t2) });
+    defer s2.deinit();
+
+    s2.nextSlice("\x1b]133;A\x07");
+    s2.nextSlice("C:\\Users\\Alessandro>");
+    s2.nextSlice("\x1b]133;B\x07");
+    try testing.expect(t2.flags.shell_redraws_prompt == .true);
+
+    try t2.resize(testing.allocator, .{ .cols = 67, .rows = 24 });
+
+    const contents2 = try t2.screens.active.dumpStringAlloc(
+        testing.allocator,
+        .{ .viewport = .{} },
+    );
+    defer testing.allocator.free(contents2);
+    try testing.expect(
+        std.mem.indexOf(u8, contents2, "C:\\Users\\Alessandro>") == null,
+    );
+}
+
 test "semantic prompt end of input, then start output" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10 });
     defer t.deinit(testing.allocator);

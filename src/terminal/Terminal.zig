@@ -4340,6 +4340,43 @@ test "Terminal: resize resets synchronized output" {
     try testing.expect(!t.modes.get(.synchronized_output));
 }
 
+// A shell prompt waiting for input is a row whose text ends mid-line with
+// no trailing newline, and the cursor parked at its end. Splitting a pane
+// shrinks the surface (135 -> 67 cols in the field report), and every line
+// on screen is shorter than the new width, so the reflow has nothing to
+// wrap: the screen must come through the resize byte for byte and the
+// cursor must stay at the end of the prompt. This is the shape of the
+// pane-split blank-out (the original pane's viewport read back blank with
+// the cursor preserved), reproduced without a pty: no console bytes are
+// involved, the resize alone decides.
+test "Terminal: shrink reflow keeps an idle prompt row intact" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 135, .rows = 24 });
+    defer t.deinit(alloc);
+
+    // cmd's banner tail and prompt, exactly as a settled prompt looks:
+    // every row shorter than both the old and the new width, no trailing
+    // newline on the prompt, cursor at its end.
+    try t.printString("Microsoft Windows [Version 10.0.26200.6584]\r\n");
+    try t.printString("C:\\Users\\Alessandro>");
+    try testing.expectEqual(@as(size.CellCountInt, 1), t.screens.active.cursor.y);
+    try testing.expectEqual(@as(size.CellCountInt, 20), t.screens.active.cursor.x);
+
+    try t.resize(alloc, .{ .cols = 67, .rows = 24 });
+
+    const screen = t.screens.active;
+    try testing.expectEqual(@as(size.CellCountInt, 67), screen.pages.cols);
+    const contents = try screen.dumpStringAlloc(alloc, .{ .viewport = .{} });
+    defer alloc.free(contents);
+    // The banner row and the prompt row both survive: with no line longer
+    // than the new width, nothing wraps, nothing scrolls, nothing moves.
+    try testing.expect(std.mem.indexOf(u8, contents, "Microsoft Windows [Version") != null);
+    try testing.expect(std.mem.indexOf(u8, contents, "C:\\Users\\Alessandro>") != null);
+    try testing.expectEqual(@as(size.CellCountInt, 1), screen.cursor.y);
+    try testing.expectEqual(@as(size.CellCountInt, 20), screen.cursor.x);
+}
+
 test "Terminal: resize rejects zero dimensions before mutation" {
     const alloc = testing.allocator;
     const io_impl = testing.io;
