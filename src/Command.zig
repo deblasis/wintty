@@ -905,7 +905,11 @@ fn windowsQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
 /// its own quotes or a metacharacter fails that test and is stripped
 /// back to what the user wrote, and a script that passes it is a bare
 /// quoted program path, which is meant to stay quoted.
-fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
+///
+/// `pub` for the Exec wrap tests, which pin the composed line at the
+/// seam (wrap output fed straight through this function); the only
+/// production caller remains `startWindows` below.
+pub fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const writer = &buf.writer;
