@@ -1388,8 +1388,9 @@ test "powershell: user-supplied args are left untouched" {
 
 /// Setup cmd.exe shell integration. cmd has no rc file or pre/post-exec
 /// hooks, but it re-expands the PROMPT env var on every prompt and supports
-/// `$e` (ESC) on Windows 10+. We wrap the prompt body in OSC 133;A / 133;B
-/// (prompt-start / input-start) and report cwd via OSC 9;9. PROMPT cannot
+/// `$e` (ESC) on Windows 10+. We wrap the prompt body in OSC 133;A;redraw=0 /
+/// 133;B (prompt-start marked not-redrawable, input-start) and report cwd via
+/// OSC 9;9. PROMPT cannot
 /// emit command start/end (C/D) marks. Unlike the script-based shells, cmd
 /// has no way to read GHOSTTY_SHELL_FEATURES at runtime, so these marks are
 /// always emitted (the gated features do not apply to cmd anyway).
@@ -1470,9 +1471,14 @@ fn setupCmd(
     // would silently turn cmd integration off with nothing to say so.
     if (std.mem.indexOf(u8, body, prompt_mark_sentinel) == null) {
         // `$e` = ESC, terminator ST = `$e\`. OSC 9;9 carries cwd via `$p`.
+        // The A mark carries `redraw=0`: cmd cannot repaint its prompt, and
+        // without the opt-out Ghostty clears the marked line on every resize
+        // (a pane split, a font change, the user dragging the edge) waiting
+        // for a repaint that never comes, leaving the prompt blank until
+        // Enter. With it, Ghostty leaves prompt lines alone on resize.
         const wrapped = try std.fmt.allocPrint(
             alloc_arena,
-            "$e]133;A$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
+            "$e]133;A;redraw=0$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
             .{body},
         );
         try env.put("PROMPT", wrapped);
@@ -1538,6 +1544,33 @@ test "cmd: PROMPT carries OSC 133 marks" {
     try testing.expect(std.mem.indexOf(u8, prompt, "133;A") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "133;B") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "9;9") != null);
+}
+
+test "cmd: the prompt-start mark declares the shell cannot redraw" {
+    // An OSC 133;A hands the prompt line to the terminal's resize machinery:
+    // by Kitty's contract the default (`redraw=true`) says the shell repaints
+    // its own prompt, so Ghostty clears the line on every resize and waits
+    // for the shell to write it back. cmd never will: it has no redraw hook
+    // and conhost re-renders only its own idea of the line, so a split or
+    // any other shrink leaves the prompt blank with the cursor parked at its
+    // end until the user presses Enter. `redraw=0` is the documented opt-out
+    // ("Ghostty will NOT clear any prompt lines on resize"), and PROMPT is
+    // the only channel cmd has to say it, so the wrap must carry it.
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(.cmd);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
+
+    const prompt = env.get("PROMPT") orelse return error.NoPrompt;
+    try testing.expect(std.mem.indexOf(u8, prompt, "133;A;redraw=0") != null);
 }
 
 test "cmd: preserves existing PROMPT body" {
