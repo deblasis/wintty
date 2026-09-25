@@ -874,30 +874,45 @@ fn windowsBatchTarget(argv0: []const u8) bool {
     const trimmed = mem.trim(u8, argv0, "\"' \t\r\n");
     const base = std.fs.path.basenameWindows(trimmed);
 
-    // The loader keys its cmd.exe special-case on the file it RESOLVES,
-    // not on the spelling: Win32 strips trailing dots and spaces when it
-    // opens a name, and an alternate-data-stream suffix names a stream of
-    // the base file, so `x.cmd.`, `x.cmd ` and `x.cmd:stream` all run as
-    // the batch. Detection that reads only the spelled extension would
-    // leave them on the C runtime rules, where the hostile tail runs as a
-    // second command (probe round 3e, case B1, measured live). The strip
-    // is end-only: a leading-dot name like `.cmd` keeps over-detecting,
-    // which is the safe direction.
-    var end = base.len;
-    while (end > 0 and (base[end - 1] == '.' or base[end - 1] == ' ')) end -= 1;
-    const stripped = base[0..end];
-
-    // Cut an ADS suffix: everything from the first colon that is not the
-    // drive's. A drive-relative `C:x.cmd` carries its colon at index 1.
-    const colon_from: usize = if (stripped.len > 1 and stripped[1] == ':') 2 else 0;
-    const no_ads = if (mem.indexOfScalarPos(u8, stripped, colon_from, ':')) |i|
-        stripped[0..i]
+    // Detection errs toward detecting a batch; the other direction is the
+    // original injection. The odd spellings behave differently from each
+    // other and each class is treated for what it does:
+    //
+    //   - Trailing dots and spaces: the loader strips them when it opens
+    //     the file, so `x.cmd.` runs the batch - cmd does NOT strip them,
+    //     and with the pre-fix bare compose the hostile tail following
+    //     such a spelling ran as a second command (probe round 3d, case
+    //     B1, measured live).
+    //   - An alternate-data-stream suffix: the loader actually rejects
+    //     the spelling (CreateProcessW fails, probe round 3a R9), so
+    //     nothing runs at all. Cutting the suffix anyway is deliberate
+    //     over-approximation: if a Windows release ever runs one, the
+    //     arguments are already serialized for cmd.
+    //
+    // The ADS cut runs FIRST so a dot before the colon (`x.cmd.:stream`)
+    // is not mistaken for a trailing dot. The end-strip is end-only.
+    const colon_from: usize = if (base.len > 1 and base[1] == ':') 2 else 0;
+    const no_ads = if (mem.indexOfScalarPos(u8, base, colon_from, ':')) |i|
+        base[0..i]
     else
-        stripped;
+        base;
+    var end = no_ads.len;
+    while (end > 0 and (no_ads[end - 1] == '.' or no_ads[end - 1] == ' ')) end -= 1;
 
-    const ext = std.fs.path.extension(no_ads);
-    return std.ascii.eqlIgnoreCase(ext, ".bat") or
-        std.ascii.eqlIgnoreCase(ext, ".cmd");
+    const stem = no_ads[0..end];
+    const ext = std.fs.path.extension(stem);
+    if (std.ascii.eqlIgnoreCase(ext, ".bat") or
+        std.ascii.eqlIgnoreCase(ext, ".cmd"))
+    {
+        return true;
+    }
+    // Dotfile spellings: the extension reader sees no extension in `.cmd`
+    // (a leading dot reads as a dotfile marker). If the loader's own
+    // extension check disagrees, the miss is the original injection, so
+    // over-detect by testing the stem itself: a target named exactly
+    // `.cmd` or `.bat` gets its arguments serialized either way.
+    return std.ascii.eqlIgnoreCase(stem, ".bat") or
+        std.ascii.eqlIgnoreCase(stem, ".cmd");
 }
 
 /// The bytes cmd treats specially in an invocation tail: parameter
@@ -905,14 +920,16 @@ fn windowsBatchTarget(argv0: []const u8) bool {
 /// of them needs quoting; anything else stays verbatim.
 const windows_batch_quote_bytes = " \t\r\n,;=&<>|()^\"";
 
-/// Serialize one element of a batch-file invocation for cmd.exe. Only
-/// ever called for arguments: a target path that would need quoting is
-/// refused before this runs (see `windowsBatchPathNeedsQuoting`).
-/// Quoting keeps everything cmd splits, redirects or chains on inside
-/// the pair, and an embedded quote doubles (`""`), which cmd reads as
-/// one literal quote and which leaves the quote state balanced, so no
-/// metacharacter ever sits outside a pair. Backslashes and carets are
-/// literal inside quotes, so neither needs escaping.
+/// Serialize one element of a batch-file invocation for cmd.exe. Every
+/// element of the invocation goes through this; the target path is
+/// checked first and refused when it would need quoting (see
+/// `windowsBatchPathNeedsQuoting`), so a path that reaches here is clean
+/// and comes out byte-identical. Quoting keeps everything cmd splits,
+/// redirects or chains on inside the pair, and an embedded quote doubles
+/// (`""`), which cmd reads as one literal quote and which leaves the
+/// quote state balanced, so no metacharacter ever sits outside a pair.
+/// Backslashes and carets are literal inside quotes, so neither needs
+/// escaping.
 fn windowsBatchQuoteArg(writer: *std.Io.Writer, arg: []const u8) !void {
     if (arg.len == 0) {
         try writer.writeAll("\"\"");
@@ -945,15 +962,16 @@ fn windowsBatchArgUnsafe(arg: []const u8) bool {
 }
 
 /// Whether the batch target's own path would need quoting: it carries a
-/// byte cmd treats specially, or it is empty. This is refused outright,
-/// because CreateProcessW wraps a quoted batch line in an extra quote
-/// pair when it composes `%COMSPEC% /c` (measured with a COMSPEC spy
-/// that prints its own GetCommandLineW, probe round 3d), and cmd then
-/// strips that pair and drops the invocation: every quoted batch-path
-/// spawn is a silent no-op on current Windows, with or without
-/// arguments, hostile or benign (rounds 3c-3e). There is no compose that
-/// runs such a target, so the compose refuses instead of writing a line
-/// the OS swallows.
+/// byte cmd treats specially. (An empty path is unreachable here:
+/// `windowsBatchTarget` needs an extension to see a batch at all.) Such
+/// a path is refused outright, because CreateProcessW wraps a quoted
+/// batch line in an extra quote pair when it composes `%COMSPEC% /c`
+/// (measured with a COMSPEC spy that prints its own GetCommandLineW,
+/// probe round 3d), and cmd then strips that pair and drops the
+/// invocation: every quoted batch-path spawn is a silent no-op on
+/// current Windows, with or without arguments, hostile or benign
+/// (rounds 3c-3e). There is no compose that runs such a target, so the
+/// compose refuses instead of writing a line the OS swallows.
 fn windowsBatchPathNeedsQuoting(argv0: []const u8) bool {
     return mem.indexOfAny(u8, argv0, windows_batch_quote_bytes) != null;
 }
@@ -1278,42 +1296,40 @@ test "windowsCreateCommandLine: a batch target whose path needs quoting is refus
 test "windowsCreateCommandLine: a batch target is detected in every spelling Windows resolves" {
     const alloc = testing.allocator;
 
-    // The loader keys its cmd.exe special-case on the file it RESOLVES: it
-    // strips trailing dots and spaces when opening a name and maps an ADS
-    // suffix onto the base file, so these spellings run as the batch they
-    // point at. Detection that reads only the spelled extension leaves them
-    // on the C runtime rules, where the hostile body runs as a second
-    // command (probe round 3e, case B1, measured live). Over-detection is
-    // the safe direction: arguments get quoted, never bare.
-    const dot = try windowsCreateCommandLine(alloc, &.{
-        "C:\\Temp\\x.cmd.",
-        "r.txt&echo.X>injected.txt",
-    });
-    defer alloc.free(dot);
-    try testing.expectEqualStrings(
-        "C:\\Temp\\x.cmd. \"r.txt&echo.X>injected.txt\"",
-        dot,
-    );
-
-    const ads = try windowsCreateCommandLine(alloc, &.{
-        "C:\\Temp\\x.cmd:stream",
-        "r.txt&echo.X>injected.txt",
-    });
-    defer alloc.free(ads);
-    try testing.expectEqualStrings(
-        "C:\\Temp\\x.cmd:stream \"r.txt&echo.X>injected.txt\"",
-        ads,
-    );
-
-    const upper = try windowsCreateCommandLine(alloc, &.{
-        "C:\\Temp\\A.BAT",
-        "r.txt&echo.X>injected.txt",
-    });
-    defer alloc.free(upper);
-    try testing.expectEqualStrings(
-        "C:\\Temp\\A.BAT \"r.txt&echo.X>injected.txt\"",
-        upper,
-    );
+    // Detection errs toward detecting a batch; the other direction is the
+    // original injection. Trailing dots and spaces are stripped by the
+    // loader when it opens the file, so the batch runs - cmd does not
+    // strip them, and with the pre-fix bare compose the hostile tail
+    // after such a spelling ran as a second command (probe round 3d, B1,
+    // measured live). An ADS spelling is actually rejected by the loader
+    // (round 3a, R9: CreateProcessW fails), and is cut anyway on purpose:
+    // over-detection only quotes arguments, never bare. The cases pin the
+    // shapes: plain trailing dot, ADS, dot before the ADS colon, a
+    // leading-dot name (over-detection), a trailing separator
+    // (basenameWindows trims it), and case-insensitive classification.
+    const cases = [_]struct { path: []const u8 }{
+        .{ .path = "C:\\Temp\\x.cmd." },
+        .{ .path = "C:\\Temp\\x.cmd:stream" },
+        .{ .path = "C:\\Temp\\x.cmd.:stream" },
+        .{ .path = "C:\\Temp\\.cmd" },
+        .{ .path = "C:\\Temp\\x.cmd\\" },
+        .{ .path = "C:\\Temp\\A.BAT" },
+    };
+    for (cases) |c| {
+        const actual = try windowsCreateCommandLine(alloc, &.{
+            c.path,
+            "r.txt&echo.X>injected.txt",
+        });
+        defer alloc.free(actual);
+        const expected = try std.fmt.allocPrintSentinel(
+            alloc,
+            "{s} \"r.txt&echo.X>injected.txt\"",
+            .{c.path},
+            0,
+        );
+        defer alloc.free(expected);
+        try testing.expectEqualStrings(expected, actual);
+    }
 }
 
 test "windowsCreateCommandLine: a batch target quotes every cmd-special argument" {
