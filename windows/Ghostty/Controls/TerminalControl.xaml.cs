@@ -1037,8 +1037,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // wants the real shell's banner interleaving with its canned feed.
         _commandUtf8 = PreviewCommand is { Length: > 0 } previewCmd
             ? AllocUtf8(previewCmd)
-            : Snapshot is { ResolvedCommand: { Length: > 0 } cmd }
-                ? AllocUtf8(cmd)
+            : Snapshot is { ResolvedCommand: { Length: > 0 } }
+                // An argv (-e, a direct: command) goes over as one, so it is
+                // never handed to cmd.exe (#1136).
+                ? AllocUtf8(Ghostty.Core.Profiles.PaneCommandPolicy.SurfaceCommand(Snapshot))
                 : AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
         // Preview shader override: set BEFORE the control loads (it is read
@@ -1071,6 +1073,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // (about 80x28) until a resize reached it.
         surfaceConfig.Width = initialWidth;
         surfaceConfig.Height = initialHeight;
+        // A one-off launch command (-e, initial-command) closes its pane
+        // when it exits 0 and stays open to show a failure, the way Windows
+        // Terminal's closeOnExit "graceful" does (#1175). Every other pane
+        // keeps libghostty's wait-after-command behaviour.
+        surfaceConfig.CloseOnCleanExit =
+            Ghostty.Core.Profiles.PaneCommandPolicy.ClosesOnCleanExit(Snapshot) ? (byte)1 : (byte)0;
 
         // Pin a managed handle to `this` and pass it as per-surface userdata.
         // libghostty echoes this pointer back through close_surface_cb and the

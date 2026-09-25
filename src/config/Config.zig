@@ -1177,11 +1177,63 @@ palette: Palette = .{},
 /// arguments. For example, `ghostty -e fish --with --custom --args`.
 /// This flag sets the `initial-command` configuration, see that for more
 /// information.
+///
+/// On Windows, where Wintty also has profiles, this is the order that
+/// decides what a new pane runs:
+///
+///   * A profile you pick for a tab or window (the new-tab menu, the jump
+///     list, the command palette) runs that profile's command.
+///
+///   * `-e` runs its command in the first pane of the window that launch
+///     opens, and nowhere else. New tabs and splits in that window follow
+///     the rules below. A cold `-e` launch opens only that window: it does
+///     not restore the saved session, and it leaves the saved session
+///     untouched on disk, even if tabs are added to the window. The next
+///     launch restores it: a plain cold launch, or any other window the
+///     running `-e` instance opens (a forwarded launch, a jump-list task, a
+///     new window, a detached tab), after which it saves as usual. The `-e`
+///     pane closes when its command exits 0 and stays open to show any other
+///     exit, unless `wait-after-command` is set. When
+///     a `-e` pane is saved that way, its command is not: restored, the pane
+///     opens its profile, or a plain shell, and never runs the command again.
+///
+///   * If `default-profile` is set, every other new pane runs that profile,
+///     and this `command` is not used.
+///
+///   * If `default-profile` is not set and this `command` is, every other
+///     new pane (the first pane, new tabs, splits, the quick terminal) runs
+///     this command.
+///
+///   * If neither is set, new panes run the first profile in the list, or the
+///     default shell when there are no profiles.
+///
+/// A `direct:` command stays direct there too: it is never passed through
+/// `cmd.exe`. A profile command that starts with `direct:` is run the same
+/// way.
+///
+/// An argv command's program is resolved as a bare name the way
+/// CreateProcess does it: a `.exe` on the PATH runs, but a bare `.cmd` or
+/// `.bat` script name on the PATH does not start it (observed: `-e
+/// tool.cmd` with the tool's directory first on the PATH never runs the
+/// tool, while the same script given by full path runs). Name the
+/// interpreter or give the script's path.
+///
+/// Two limits. `default-profile` is read from the main config file only,
+/// not from an included file or the command line, while `command` is read
+/// from all three. And with `default-profile` set but no profile loaded yet
+/// (none declared, discovery not finished), a new pane runs this command.
 command: ?Command = null,
 
 /// This is the same as "command", but only applies to the first terminal
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.
+///
+/// On Windows the first pane of a cold launch that restored no saved session
+/// runs it. When a session is restored it is not used, and no window is
+/// added for it. `-e` wins when both are given, and a launch forwarded to a
+/// running instance does not use it. Like a `-e` pane, its pane closes when
+/// the command exits 0 and stays open to show any other exit, unless
+/// `wait-after-command` is set.
 ///
 /// After the first terminal surface is created (or closed), there is no
 /// way to run this initial command again automatically. As such, setting
@@ -4123,6 +4175,13 @@ _replay_steps: std.ArrayList(Replay.Step) = .empty,
 /// Set to true if Ghostty was executed as xdg-terminal-exec on Linux.
 @"_xdg-terminal-exec": bool = false,
 
+/// True when finalize filled in `command` because nothing set it (the
+/// SHELL variable, the passwd entry, or `cmd.exe` on Windows). A host that
+/// needs to know whether the user asked for a command reads this, because
+/// after finalize `command` is never null on a desktop build. Copied by
+/// clone, so a cloned config that is finalized again keeps the answer.
+_command_defaulted: bool = false,
+
 pub fn deinit(self: *Config) void {
     if (self._arena) |arena| arena.deinit();
     self.* = undefined;
@@ -5999,6 +6058,11 @@ fn applyThemeOverlay(self: *Config, iter: *cli.args.LineIterator) !void {
     self.* = new_config;
 }
 
+/// Test builds skip finalize's desktop default lookups (the default shell
+/// and home directory). A test that needs to see what finalize really fills
+/// in sets this for its own duration. Never read outside test builds.
+pub var testing_desktop_defaults: bool = false;
+
 /// Call this once after you are done setting configuration. This
 /// is idempotent but will waste memory if called multiple times.
 pub fn finalize(self: *Config) !void {
@@ -6061,11 +6125,19 @@ pub fn finalize(self: *Config) !void {
     else
         .home;
 
+    // Whether the user set a command, before the defaults below fill one
+    // in. Recorded after loadTheme, which rebuilds this config from its
+    // replay steps and would otherwise drop the flag.
+    const command_was_set = self.command != null;
+    defer {
+        if (!command_was_set and self.command != null) self._command_defaulted = true;
+    }
+
     // If we are missing either a command or home directory, we need
     // to look up defaults which is kind of expensive. We only do this
     // on desktop.
     if ((comptime !builtin.target.cpu.arch.isWasm()) and
-        (comptime !builtin.is_test))
+        (!builtin.is_test or testing_desktop_defaults))
     {
         if (self.command == null or wd == .home) command: {
             // First look up the command using the SHELL env var if needed.
@@ -6284,8 +6356,14 @@ pub fn parseManuallyHook(
         self.@"gtk-single-instance" = .false;
         self.@"quit-after-last-window-closed" = true;
         self.@"quit-after-last-window-closed-delay" = null;
-        if (self.@"shell-integration" != .none) {
-            self.@"shell-integration" = .detect;
+        // On Windows the host runs `-e` in one pane of a session it may also
+        // restore, and applies this to that pane alone (the embedded apprt's
+        // `close_on_clean_exit` surfaces). Switching it here would change
+        // shell integration for every restored pane as well.
+        if (comptime builtin.os.tag != .windows) {
+            if (self.@"shell-integration" != .none) {
+                self.@"shell-integration" = .detect;
+            }
         }
 
         // Do not continue, we consumed everything.
@@ -6525,6 +6603,10 @@ pub fn clone(
 
     // Copy the conditional set
     result._conditional_set = self._conditional_set;
+
+    // `command` was copied above in its finalized form, so whether the user
+    // set it has to travel with it.
+    result._command_defaulted = self._command_defaulted;
 
     return result;
 }

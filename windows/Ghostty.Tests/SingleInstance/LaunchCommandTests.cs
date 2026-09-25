@@ -89,4 +89,14 @@ public sealed class LaunchCommandTests
                 "Wintty.exe", "-e", "git", "log", "--pretty=%h %s",
             }));
     }
+
+    // The native splitter breaks arguments on line breaks as well as
+    // spaces, so a part holding one must be quoted or it arrives as two.
+    [Theory]
+    [InlineData("a\nb")]
+    [InlineData("a\r\nb")]
+    public void FromArgs_QuotesAPartWithALineBreak(string part)
+        => Assert.Equal(
+            "pwsh -c \"" + part + "\"",
+            LaunchCommand.FromArgs(new[] { "Wintty.exe", "-e", "pwsh", "-c", part }));
 }

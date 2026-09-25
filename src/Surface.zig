@@ -167,6 +167,13 @@ config_conditional_state: configpkg.ConditionalState,
 /// This is used to determine if we need to confirm, hold open, etc.
 child_exited: bool = false,
 
+/// Close on a clean exit even when `wait-after-command` holds the surface
+/// open: exit code 0 closes it, any other code keeps it open to show the
+/// status. This is Windows Terminal's `closeOnExit: graceful`. An embedding
+/// host sets it for a surface running a one-off launch command (`-e`),
+/// unless the user set `wait-after-command` themselves.
+close_on_clean_exit: bool = false,
+
 /// We maintain our focus state and assume we're focused by default.
 /// If we're not initially focused then apprts can call focusCallback
 /// to let us know.
@@ -1472,11 +1479,41 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
 
     // Waiting after command we stop here. The terminal is updated, our
     // state is updated, and now its up to the user to decide what to do.
-    if (self.config.wait_after_command) return;
+    if (keepOpenAfterExit(
+        self.config.wait_after_command,
+        self.close_on_clean_exit,
+        info.exit_code,
+    )) return;
 
     // If we aren't waiting after the command, then we exit immediately
     // with no confirmation.
     self.close();
+}
+
+/// Whether a surface whose child exited (normally, past the abnormal-exit
+/// window) stays open. `wait-after-command` holds it open, except that a
+/// surface marked `close_on_clean_exit` still closes on exit code 0.
+fn keepOpenAfterExit(
+    wait_after_command: bool,
+    close_on_clean_exit: bool,
+    exit_code: u32,
+) bool {
+    if (!wait_after_command) return false;
+    return !(close_on_clean_exit and exit_code == 0);
+}
+
+test "keepOpenAfterExit: graceful close for a launch command" {
+    const testing = std.testing;
+    // Not waiting: always closes.
+    try testing.expect(!keepOpenAfterExit(false, false, 0));
+    try testing.expect(!keepOpenAfterExit(false, false, 3));
+    // Waiting: stays open whatever the code.
+    try testing.expect(keepOpenAfterExit(true, false, 0));
+    try testing.expect(keepOpenAfterExit(true, false, 3));
+    // Graceful: a clean exit closes, a failure stays to show the status.
+    try testing.expect(!keepOpenAfterExit(true, true, 0));
+    try testing.expect(keepOpenAfterExit(true, true, 1));
+    try testing.expect(keepOpenAfterExit(true, true, 0xC000013A));
 }
 
 /// Called when the child process exited abnormally.

@@ -1149,25 +1149,27 @@ public partial class App : Application
             Environment.GetCommandLineArgs());
         var honorJumpList = coldLaunch.Action != Ghostty.Core.JumpList.JumpListAction.None;
 
-        var restoreState = honorJumpList ? null : _sessionManager.LoadForRestore();
+        // `wintty -e <cmd>` opens its command's window and nothing else
+        // (#1136): no restore, and the saved session is held untouched on
+        // disk (SessionManager.HoldForLaunchCommand), so the one-off window
+        // and any tabs added to it never replace it. The first plain launch
+        // forwarded into this process restores it (OpenWindowFromLaunch),
+        // and from then on the process saves normally. `initial-command`
+        // from the config runs in the first pane of a cold launch that
+        // restored nothing, and -e wins when both are set.
+        var coldCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(
+            Environment.GetCommandLineArgs());
+        var initialCommand = coldCommand is null ? _configService.ConfiguredInitialCommand : null;
+        // Only when -e is what opens: a jump-list click on the same command
+        // line opens its own window, which is saved as usual.
+        if (coldCommand is not null && !honorJumpList) _sessionManager.HoldForLaunchCommand();
+
+        var restoreState = honorJumpList || coldCommand is not null
+            ? null
+            : _sessionManager.LoadForRestore();
         if (restoreState is { Windows.Count: > 0 })
         {
-            // Only the first restored window drives the splash. There is one
-            // splash per process, so arming every window would have them
-            // fight over it: each Track would drag it onto the newest
-            // window, uncovering the earlier ones, and whichever window
-            // rendered first would dismiss it for all of them.
-            var isFirstWindow = true;
-            foreach (var ws in restoreState.Windows)
-            {
-                var restored = new MainWindow(
-                    _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws,
-                    showLaunchIcon: isFirstWindow);
-                isFirstWindow = false;
-                restored.Closed += OnAnyWindowClosedInternal;
-                _sessionManager.Track(restored);
-                restored.Activate();
-            }
+            OpenRestoredWindows(restoreState, showLaunchIconOnFirst: true);
         }
         else if (honorJumpList)
         {
@@ -1175,9 +1177,16 @@ public partial class App : Application
         }
         else
         {
+            // The first pane runs -e in the caller's directory, as a forwarded
+            // launch does, else `initial-command`, else what any new pane runs
+            // (PaneCommandPolicy).
             var window = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
-                showLaunchIcon: true);
+                showLaunchIcon: true,
+                initialSnapshot: LaunchFirstPaneSnapshot(
+                    coldCommand,
+                    workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory,
+                    initialCommand: initialCommand));
             window.Closed += OnAnyWindowClosedInternal;
             _sessionManager.Track(window);
             window.Activate();
@@ -1492,11 +1501,19 @@ public partial class App : Application
             // cold start makes the argv after -e the first surface's
             // command, so the primary honours it here rather than degrading
             // the launch to the default shell (#1094). Markers keep their
-            // existing priority in the arm below.
+            // existing priority in the arm below. With no profile named, the
+            // pane follows the same rules a cold start's does (#1136).
+            var forwardedCommand = Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(req.Args);
+
+            // The first plain launch into a -e process restores the session
+            // that process held back, instead of opening a default window.
+            if (forwardedCommand is null && launch.ProfileId is null && RestoreHeldSession())
+                return;
+
             OpenJumpListWindow(
                 launch.ProfileId,
                 req.WorkingDirectory,
-                command: Ghostty.Core.SingleInstance.LaunchCommand.FromArgs(req.Args));
+                command: forwardedCommand);
         }
         else
         {
@@ -1762,6 +1779,10 @@ public partial class App : Application
 
     private bool TryOpenJumpListTab(string? profileId)
     {
+        // A jump-list tab is a launch like any other: it ends a cold -e's
+        // hold, so the saved session comes back before the tab opens (#1136).
+        RestoreHeldSession();
+
         var window = LastRegularWindow is { IsQuickTerminal: false } last
             ? last
             : System.Linq.Enumerable.FirstOrDefault(
@@ -1776,24 +1797,137 @@ public partial class App : Application
         return true;
     }
 
+    /// <summary>
+    /// What a new pane nobody picked a profile for runs: the configured
+    /// <c>command</c> when it is set and <c>default-profile</c> is not, else
+    /// the default profile (#1136, <see cref="Ghostty.Core.Profiles.PaneCommandPolicy"/>).
+    /// Null when there is neither a command nor a profile, which leaves the
+    /// surface to libghostty's own default. Static because every opener of a
+    /// default pane reaches it: MainWindow's first tab (and so the quick
+    /// terminal's), new tabs, the jump list, and a split of a <c>-e</c> pane.
+    /// </summary>
+    internal static Ghostty.Core.Profiles.ProfileSnapshot? ImplicitDefaultSnapshot(
+        string? workingDirectory = null)
+        => Ghostty.Core.Profiles.PaneCommandPolicy.ImplicitDefault(
+            Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(ProfileRegistry),
+            ConfigService?.ConfiguredCommand,
+            ConfigService?.DefaultProfileSet ?? false,
+            workingDirectory);
+
+    /// <summary>
+    /// The configured <c>command</c> when it is what new panes run (no
+    /// <c>default-profile</c> set), else null. The UI that names what a new
+    /// tab opens reads this, so it does not call a profile the default when
+    /// the profile is not what runs (#1136).
+    /// </summary>
+    internal static string? CommandInEffect
+        => Ghostty.Core.Profiles.PaneCommandPolicy.CommandInEffect(
+            ConfigService?.ConfiguredCommand,
+            ConfigService?.DefaultProfileSet ?? false);
+
+    /// <summary>
+    /// The first pane of the window a launch opens when it named no profile:
+    /// <paramref name="launchCommand"/> (-e) when there is one, else
+    /// <see cref="ImplicitDefaultSnapshot"/>. One helper for the cold start
+    /// and the forwarded launch, so the two cannot drift (#1136).
+    /// </summary>
+    private static Ghostty.Core.Profiles.ProfileSnapshot? LaunchFirstPaneSnapshot(
+        string? launchCommand,
+        string? workingDirectory,
+        Ghostty.Core.Profiles.ConfiguredCommand? initialCommand = null)
+        => Ghostty.Core.Profiles.PaneCommandPolicy.LaunchFirstPane(
+            Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(ProfileRegistry),
+            launchCommand,
+            ConfigService?.ConfiguredCommand,
+            ConfigService?.DefaultProfileSet ?? false,
+            workingDirectory,
+            initialCommand);
+
+    /// <summary>
+    /// Open the windows of a restored session, tracked for saving.
+    /// </summary>
+    /// <param name="showLaunchIconOnFirst">
+    /// Only the first restored window drives the splash. There is one
+    /// splash per process, so arming every window would have them fight
+    /// over it: each Track would drag it onto the newest window, uncovering
+    /// the earlier ones, and whichever window rendered first would dismiss
+    /// it for all of them. A restore after startup (a forwarded launch into
+    /// a -e process) has no splash to drive.
+    /// </param>
+    private void OpenRestoredWindows(
+        Ghostty.Core.Session.SessionState state,
+        bool showLaunchIconOnFirst)
+    {
+        var isFirstWindow = showLaunchIconOnFirst;
+        foreach (var ws in state.Windows)
+        {
+            var restored = new MainWindow(
+                _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, ws,
+                showLaunchIcon: isFirstWindow);
+            isFirstWindow = false;
+            restored.Closed += OnAnyWindowClosedInternal;
+            _sessionManager?.Track(restored);
+            restored.Activate();
+        }
+    }
+
+    /// <summary>
+    /// End a cold <c>-e</c>'s hold on the saved session (#1136). Only that
+    /// one-off window is ephemeral: the moment the process gets any other
+    /// window (a forwarded launch of any kind, a jump-list task or pinned
+    /// profile, a new window from the + button or the palette, Detach Tab,
+    /// Reopen Closed Window), the held session is restored first, the way a
+    /// plain cold launch would have restored it, and the process saves
+    /// normally from then on. Every opener of a window calls this before it
+    /// creates one (FirstPaneCommandWiringTests pins the list). Without it,
+    /// the windows opened while the hold lasted would never be saved.
+    /// Returns whether windows were restored; false when nothing was held
+    /// or the held session had nothing to restore.
+    /// </summary>
+    private bool RestoreHeldSession()
+    {
+        if (_sessionManager is not { SessionHeld: true } manager) return false;
+        var state = manager.ReleaseHeldSession();
+        var restored = state is { Windows.Count: > 0 };
+        if (restored) OpenRestoredWindows(state!, showLaunchIconOnFirst: false);
+        manager.RequestPersist();
+        return restored;
+    }
+
+    /// <summary>
+    /// <see cref="RestoreHeldSession"/> for openers outside App (MainWindow's
+    /// new-window and detach paths).
+    /// </summary>
+    internal static void RestoreHeldSessionBeforeNewWindow()
+    {
+        if (Current is App app) app.RestoreHeldSession();
+    }
+
     private void OpenJumpListWindow(
         string? profileId,
         string workingDirectory,
         string? command = null)
     {
-        Ghostty.Core.Profiles.ProfileSnapshot? snapshot = null;
-        var registry = ProfileRegistry;
-        var id = profileId ?? registry?.DefaultProfileId;
-        if (id is not null && registry?.Resolve(id) is { } resolved)
+        // A window other than the cold -e one ends the hold (#1136).
+        RestoreHeldSession();
+
+        Ghostty.Core.Profiles.ProfileSnapshot? snapshot;
+        if (profileId is null)
         {
-            snapshot = Ghostty.Core.Profiles.ProfileSnapshotStore.From(
-                resolved, registry.Version);
-            if (!string.IsNullOrEmpty(workingDirectory))
-                snapshot = snapshot with { WorkingDirectory = workingDirectory };
-            // A forwarded -e command wins over the profile's, the same
-            // precedence a cold start gives it (#1094).
-            if (!string.IsNullOrEmpty(command))
-                snapshot = snapshot with { ResolvedCommand = command };
+            // Nobody picked a profile (a bare forwarded launch, the jump
+            // list's New Window task): the first pane of a launch.
+            snapshot = LaunchFirstPaneSnapshot(command, workingDirectory);
+        }
+        else
+        {
+            // A profile the user picked runs that profile. A -e on the same
+            // launch still applies to this first pane (#1094).
+            var registry = ProfileRegistry;
+            snapshot = registry?.Resolve(profileId) is { } resolved
+                ? Ghostty.Core.Profiles.ProfileSnapshotStore.From(resolved, registry.Version)
+                : Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(registry);
+            snapshot = Ghostty.Core.Profiles.PaneCommandPolicy.ApplyLaunchCommand(
+                snapshot, command, workingDirectory);
         }
 
         var window = MainWindow.CreateForNewTab(
@@ -1803,7 +1937,6 @@ public partial class App : Application
         _sessionManager?.RequestPersist();
         window.Activate();
     }
-
     private static void OnProfilesChangedRebuildJumpList(
         Ghostty.Core.Profiles.IProfileRegistry _)
         => RebuildJumpList();
@@ -1851,6 +1984,9 @@ public partial class App : Application
         if (_configService is null || _bootstrapHost is null ||
             _lifetimeSupervisor is null || _loggerFactory is null) return;
         if (!ClosedWindows.TryPop(out var windowSession)) return;
+
+        // A window other than the cold -e one ends the hold (#1136).
+        RestoreHeldSession();
 
         var restored = new MainWindow(
             _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, windowSession);

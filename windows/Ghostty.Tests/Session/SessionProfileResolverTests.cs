@@ -401,4 +401,35 @@ public class SessionProfileResolverTests
         Assert.False(SessionProfileResolver.ShouldDropLeaf(
             new FakeProfileRegistry(), Leaf(id, "whatever.exe")));
     }
+
+    // #1136: an argv pane (a direct: configured command, or -e with no
+    // profile to wear) restores as an argv. Restored as a plain string it
+    // would reach cmd.exe, which reads & % | in its arguments as syntax.
+    [Fact]
+    public void ResolveLeaf_FallbackArgv_RestoresAsAnArgv()
+    {
+        var leaf = new LeafDto
+        {
+            ProfileId = "",
+            Fallback = new LeafCommand
+            {
+                ResolvedCommand = "tool.exe a&b",
+                DisplayName = "tool",
+                CommandIsArgv = true,
+            },
+        };
+
+        var snap = SessionProfileResolver.ResolveLeaf(new FakeProfileRegistry(), leaf);
+
+        Assert.NotNull(snap);
+        Assert.True(snap!.CommandIsArgv);
+        Assert.Equal("direct:tool.exe a&b", PaneCommandPolicy.SurfaceCommand(snap));
+    }
+
+    [Fact]
+    public void ResolveLeaf_FallbackShell_StaysAShellString()
+    {
+        var snap = SessionProfileResolver.ResolveLeaf(new FakeProfileRegistry(), Leaf("gone", "cmd.exe /k ver"));
+        Assert.False(snap!.CommandIsArgv);
+    }
 }

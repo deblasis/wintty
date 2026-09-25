@@ -119,6 +119,22 @@ internal sealed class LeafCommand
     public string ResolvedCommand { get; set; } = "";
     public string? WorkingDirectory { get; set; }
     public string DisplayName { get; set; } = "";
+
+    /// <summary>
+    /// <see cref="ResolvedCommand"/> is an argv (a <c>-e</c> command, or a
+    /// <c>direct:</c> configured command): restore must hand it back as one,
+    /// never as a string <c>cmd.exe</c> would read (#1136). Absent in older
+    /// files, which read as false.
+    /// </summary>
+    public bool CommandIsArgv { get; set; }
+
+    /// <summary>
+    /// <see cref="ResolvedCommand"/> came from the configured <c>command</c>,
+    /// not a profile. A restored pane keeps that origin, so a split of it
+    /// follows the configuration as it is at the time of the split, the way
+    /// Ctrl+T does (#1136). Absent in older files, which read as false.
+    /// </summary>
+    public bool FromConfiguredCommand { get; set; }
 }
 
 /// <summary>

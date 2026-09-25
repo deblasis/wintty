@@ -139,11 +139,15 @@ internal sealed partial class NewTabSplitButton : UserControl
         if (_vm is null) return;
         ProfileMenu.Items.Clear();
 
+        // The star marks what the main click opens. When that is the
+        // configured `command`, no profile row is it (#1136).
+        var markDefault = App.CommandInEffect is null;
+
         foreach (var row in _vm.Rows)
         {
             var item = new MenuFlyoutItem
             {
-                Text = row.IsDefault ? row.Name + "  *" : row.Name,
+                Text = markDefault && row.IsDefault ? row.Name + "  *" : row.Name,
                 Tag = row.Id,
                 Icon = BuildMenuIcon(row.Icon),
             };
@@ -192,9 +196,7 @@ internal sealed partial class NewTabSplitButton : UserControl
 
     private void OnPrimaryClick(object sender, RoutedEventArgs e)
     {
-        var registry = App.ProfileRegistry;
-        var defaultId = registry?.DefaultProfileId;
-        if (defaultId is null || Owner is null) return;
+        if (Owner is null) return;
 
         var modifiers = App.ModifierKeyState;
         if (modifiers is null) return;
@@ -202,7 +204,10 @@ internal sealed partial class NewTabSplitButton : UserControl
         // Enter or Space on the focused button opens a tab whose pane takes
         // focus, and the key's character is already queued behind it.
         ConsumedCloseKey.RaiseForHeldKeys();
-        Owner.OpenProfile(defaultId, ClickModifierClassifier.Classify(modifiers));
+        // The main click picks no profile: it opens what any new pane runs,
+        // the configured `command` or the default profile (#1136). The rows
+        // below it are the profile picks.
+        Owner.OpenDefaultProfile(ClickModifierClassifier.Classify(modifiers));
     }
 
     private void OnRowClick(object sender, RoutedEventArgs e)

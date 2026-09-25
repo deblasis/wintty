@@ -34,13 +34,21 @@ internal static class SessionTree
                 {
                     ProfileId = snap?.ProfileId,
                     Cwd = leaf.LastCwd,
+                    // A -e command belongs to its launch only (#1136): saved,
+                    // it would run again, unasked, at the next launch (a
+                    // deploy script, an ssh session). The pane restores as
+                    // its profile, or as a plain shell when it has none.
                     Fallback = snap is null
+                        || snap.CommandOrigin == Ghostty.Core.Profiles.PaneCommandOrigin.LaunchCommand
                         ? null
                         : new LeafCommand
                         {
                             ResolvedCommand = snap.ResolvedCommand,
                             WorkingDirectory = snap.WorkingDirectory,
                             DisplayName = snap.DisplayName,
+                            CommandIsArgv = snap.CommandIsArgv,
+                            FromConfiguredCommand = snap.CommandOrigin
+                                == Ghostty.Core.Profiles.PaneCommandOrigin.ConfiguredCommand,
                         },
                 };
             default:

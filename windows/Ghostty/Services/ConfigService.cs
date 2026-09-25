@@ -129,6 +129,31 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public bool SettingsUiEnabled { get; private set; }
     public double BackgroundOpacity { get; private set; } = 1.0;
 
+    /// <summary>
+    /// The <c>command</c> the user set, or null when they set none. Read from
+    /// libghostty rather than the file, so an included file and
+    /// <c>--command</c> on the command line count, and a default that
+    /// finalize filled in (cmd.exe) does not. New panes nobody picked a
+    /// profile for run it unless <c>default-profile</c> is set
+    /// (<see cref="Ghostty.Core.Profiles.PaneCommandPolicy"/>,
+    /// deblasis/wintty#1136).
+    /// </summary>
+    public Ghostty.Core.Profiles.ConfiguredCommand? ConfiguredCommand { get; private set; }
+
+    /// <summary>
+    /// The <c>initial-command</c> key, or null when unset. libghostty does not
+    /// apply it on Windows (the host owns the first pane), so a cold launch
+    /// hands it to its first pane the way it does <c>-e</c>, which sets the
+    /// same key and wins when both are given (#1136).
+    /// </summary>
+    public Ghostty.Core.Profiles.ConfiguredCommand? ConfiguredInitialCommand { get; private set; }
+
+    /// <summary>
+    /// Whether <c>default-profile</c> is set, which makes it win over
+    /// <see cref="ConfiguredCommand"/> for every new pane.
+    /// </summary>
+    public bool DefaultProfileSet => !string.IsNullOrWhiteSpace(DefaultProfileId);
+
     // Cached during ReadFlagsCore so typed getters do not have to consult
     // _configFileCache on every read; the backing-field pattern keeps the
     // hot path allocation-free and matches BackgroundStyle / BackgroundTint*
@@ -1300,6 +1325,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // CLI flags decide it the same way for the app's own terminals
         // (libghostty) and everything the app builds itself.
         ReloadEnvironment = GetBool("reload-env", whenNotFound: true);
+        ConfiguredCommand = ReadConfiguredCommand();
+        ConfiguredInitialCommand = ReadConfiguredInitialCommand();
         // windows-settings-ui is a fork-added Zig field, so libghostty
         // parses it and there is no unknown-field diagnostic to suppress;
         // that is why it is deliberately absent from WindowsOnlyKeys. It
@@ -1893,6 +1920,29 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         return ParseHexColor(hex) is { } parsed
             ? ((uint)parsed.R << 16) | ((uint)parsed.G << 8) | parsed.B
             : null;
+    }
+
+    private Ghostty.Core.Profiles.ConfiguredCommand? ReadConfiguredCommand()
+        => ReadCommand(NativeMethods.ConfigCommand(_config, out var direct), direct);
+
+    private Ghostty.Core.Profiles.ConfiguredCommand? ReadConfiguredInitialCommand()
+        => ReadCommand(NativeMethods.ConfigInitialCommand(_config, out var direct), direct);
+
+    // Takes ownership of str: it is freed here whatever the answer.
+    private static Ghostty.Core.Profiles.ConfiguredCommand? ReadCommand(GhosttyString str, byte direct)
+    {
+        try
+        {
+            if (str.Ptr == IntPtr.Zero || str.Len == UIntPtr.Zero) return null;
+            var command = Marshal.PtrToStringUTF8(str.Ptr, (int)str.Len);
+            return string.IsNullOrWhiteSpace(command)
+                ? null
+                : new Ghostty.Core.Profiles.ConfiguredCommand(command, IsArgv: direct != 0);
+        }
+        finally
+        {
+            NativeMethods.StringFree(str);
+        }
     }
 
     private bool GetBool(string key) => GetBool(key, whenNotFound: false);

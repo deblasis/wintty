@@ -263,14 +263,23 @@ public class TabStripPolishWiringTests
         var callee = arm.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Select(i => i.Expression.ToString()).Single();
 
-        // The registry's own answer, opened when there is one and a bare tab
-        // when there is not -- pinned as parsed, because both the condition
-        // and the branches invert into something that still reads right.
         var method = router.Method(callee);
         Assert.Contains(method.DescendantNodes().OfType<ConditionalAccessExpressionSyntax>(),
             c => c.Expression.ToString() == "_getDefaultProfileId");
 
-        var branch = method.DescendantNodes().OfType<IfStatementSyntax>().First();
+        var branches = method.DescendantNodes().OfType<IfStatementSyntax>().ToList();
+
+        // The window's funnel runs first when the owner supplies one: the
+        // configured `command` / default-profile rules decide (#1136).
+        Assert.Equal("_openDefaultProfile is not null", branches[0].Condition.ToString());
+        Assert.Contains(branches[0].Statement.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>(),
+            i => i.Expression.ToString() == "_openDefaultProfile"
+                 && i.ArgumentList.Arguments[0].Expression.ToString() == "ProfileLaunchTarget.NewTab");
+
+        // The registry's own answer, opened when there is one and a bare tab
+        // when there is not -- pinned as parsed, because both the condition
+        // and the branches invert into something that still reads right.
+        var branch = branches[1];
         Assert.Equal("defaultId is not null && _openProfile is not null", branch.Condition.ToString());
         Assert.Contains(branch.Statement.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>(),
             i => i.Expression.ToString() == "_openProfile"

@@ -214,6 +214,104 @@ export fn ghostty_config_get(
     return c_get.get(self, key, ptr);
 }
 
+/// The `command` the user set, as one string, or an empty string when they
+/// set none. Always allocated when non-empty: free it with
+/// ghostty_string_free (unlike ghostty_config_builtin_theme's static result).
+///
+/// "The user set" is the point. finalize fills an unset `command` with a
+/// default (`cmd.exe` on Windows), and that default is not a request: a host
+/// that treated it as one ran cmd.exe in place of the user's profile. So a
+/// defaulted command answers empty here.
+///
+/// ghostty_config_get cannot read this key at all: a Command is a union with
+/// no C value. Asking libghostty rather than reading the config file keeps
+/// `config-file` includes and `--command` in the answer.
+///
+/// `direct_out`, when given, says which form came back. A `direct:` command
+/// is returned as its argv quoted by the Windows command-line rules
+/// (CommandLineToArgvW, which std.process.Args.IteratorGeneral also
+/// follows), so a host can hand it back as argv without it ever becoming a
+/// shell string; a shell-form command is returned as written.
+export fn ghostty_config_command(self: *Config, direct_out: ?*bool) String {
+    if (direct_out) |d| d.* = false;
+    if (self._command_defaulted) return .empty;
+    const command = self.command orelse return .empty;
+    const str = commandString(global.alloc(), command) catch |err| {
+        log.err("error rendering command err={}", .{err});
+        return .empty;
+    };
+    if (direct_out) |d| d.* = command == .direct;
+    return .fromSlice(str);
+}
+
+/// The `initial-command` key (the config key, `--initial-command`, or `-e`,
+/// which sets it), as one string in the same forms as ghostty_config_command,
+/// or an empty string when it is unset. Free with ghostty_string_free.
+///
+/// The Windows host owns the first pane, so libghostty never applies this
+/// key there itself; the host reads it here and gives it to the first pane
+/// of a cold launch, the same way it does `-e`.
+export fn ghostty_config_initial_command(self: *Config, direct_out: ?*bool) String {
+    if (direct_out) |d| d.* = false;
+    const command = self.@"initial-command" orelse return .empty;
+    const str = commandString(global.alloc(), command) catch |err| {
+        log.err("error rendering initial-command err={}", .{err});
+        return .empty;
+    };
+    if (direct_out) |d| d.* = command == .direct;
+    return .fromSlice(str);
+}
+
+fn commandString(
+    alloc: std.mem.Allocator,
+    command: @import("command.zig").Command,
+) std.mem.Allocator.Error![:0]const u8 {
+    switch (command) {
+        .shell => |v| return try alloc.dupeZ(u8, v),
+        .direct => |argv| {
+            var buf: std.ArrayList(u8) = .empty;
+            errdefer buf.deinit(alloc);
+            for (argv, 0..) |arg, i| {
+                if (i > 0) try buf.append(alloc, ' ');
+                try appendWindowsArg(alloc, &buf, arg);
+            }
+            return try buf.toOwnedSliceSentinel(alloc, 0);
+        },
+    }
+}
+
+/// One argument quoted so the Windows command-line rules split it back out
+/// unchanged: quoted when it is empty or holds whitespace or a quote, with
+/// the backslashes before a quote (or before the closing quote) doubled and
+/// each quote escaped.
+fn appendWindowsArg(
+    alloc: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    arg: []const u8,
+) std.mem.Allocator.Error!void {
+    const needs_quotes = arg.len == 0 or
+        std.mem.indexOfAny(u8, arg, " \t\r\n\"") != null;
+    if (!needs_quotes) return buf.appendSlice(alloc, arg);
+
+    try buf.append(alloc, '"');
+    var backslashes: usize = 0;
+    for (arg) |c| {
+        if (c == '\\') {
+            backslashes += 1;
+            continue;
+        }
+        if (c == '"') {
+            try buf.appendNTimes(alloc, '\\', backslashes * 2 + 1);
+        } else {
+            try buf.appendNTimes(alloc, '\\', backslashes);
+        }
+        try buf.append(alloc, c);
+        backslashes = 0;
+    }
+    try buf.appendNTimes(alloc, '\\', backslashes * 2);
+    try buf.append(alloc, '"');
+}
+
 export fn ghostty_config_trigger(
     self: *Config,
     str: [*]const u8,
@@ -483,6 +581,211 @@ test "ghostty_config_get: struct cval conversion" {
     try testing.expectEqual(@as(u8, 56), out.b);
 }
 
+test "ghostty_config_command: unset, shell and direct" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+    var direct_flag = true;
+
+    // Unset is an empty answer, not a default shell.
+    cfg.command = null;
+    {
+        const s = ghostty_config_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expect(s.ptr == null);
+        try testing.expectEqual(@as(usize, 0), s.len);
+        try testing.expect(!direct_flag);
+    }
+
+    // The shell form comes back as written, and says so.
+    var shell: @import("command.zig").Command = undefined;
+    try shell.parseCLI(arena, "pwsh -NoLogo -File \"C:\\a b\\x.ps1\"");
+    cfg.command = shell;
+    {
+        const s = ghostty_config_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expectEqualStrings(
+            "pwsh -NoLogo -File \"C:\\a b\\x.ps1\"",
+            s.ptr.?[0..s.len],
+        );
+        try testing.expect(!direct_flag);
+    }
+
+    // The direct form loses its prefix, keeps its arguments, and says so.
+    var direct: @import("command.zig").Command = undefined;
+    try direct.parseCLI(arena, "direct:nvim a b");
+    cfg.command = direct;
+    {
+        const s = ghostty_config_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expectEqualStrings("nvim a b", s.ptr.?[0..s.len]);
+        try testing.expect(direct_flag);
+    }
+
+    // The flag is optional.
+    {
+        const s = ghostty_config_command(&cfg, null);
+        defer s.deinit();
+        try testing.expectEqualStrings("nvim a b", s.ptr.?[0..s.len]);
+    }
+}
+
+test "ghostty_config_initial_command: unset, shell and direct" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+    var direct_flag = true;
+
+    {
+        const s = ghostty_config_initial_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expect(s.ptr == null);
+        try testing.expect(!direct_flag);
+    }
+
+    var shell: @import("command.zig").Command = undefined;
+    try shell.parseCLI(arena, "htop -d 5");
+    cfg.@"initial-command" = shell;
+    {
+        const s = ghostty_config_initial_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expectEqualStrings("htop -d 5", s.ptr.?[0..s.len]);
+        try testing.expect(!direct_flag);
+    }
+
+    // What -e sets: a direct argv, handed back quoted.
+    const argv = [_][:0]const u8{ "pwsh", "-File", "C:\\a b\\x.ps1" };
+    cfg.@"initial-command" = .{ .direct = &argv };
+    {
+        const s = ghostty_config_initial_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expectEqualStrings("pwsh -File \"C:\\a b\\x.ps1\"", s.ptr.?[0..s.len]);
+        try testing.expect(direct_flag);
+    }
+}
+
+test "ghostty_config_command: a direct argv round-trips through the Windows rules" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // cmd.exe metacharacters, a quote and trailing backslashes: nothing in
+    // the rendering may let a shell or a re-split see anything but these
+    // four arguments.
+    const argv = [_][:0]const u8{ "findstr", "r.txt&echo.INJECTED", "a\"b", "C:\\dir\\" };
+    cfg.command = .{ .direct = &argv };
+
+    var direct_flag = false;
+    const s = ghostty_config_command(&cfg, &direct_flag);
+    defer s.deinit();
+    try testing.expect(direct_flag);
+    const rendered = s.ptr.?[0..s.len];
+    try testing.expectEqualStrings("findstr r.txt&echo.INJECTED \"a\\\"b\" C:\\dir\\", rendered);
+
+    var it = try std.process.Args.IteratorGeneral(.{}).init(alloc, rendered);
+    defer it.deinit();
+    for (argv) |want| try testing.expectEqualStrings(want, it.next().?);
+    try testing.expect(it.next() == null);
+}
+
+test "ghostty_config_command: a defaulted command is not a request" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A finalized config the user put no command in, finalized the way a
+    // desktop build does it: on Windows that fills `command` with cmd.exe.
+    // The host must still hear "unset", or it runs cmd.exe in place of the
+    // user's default profile.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    Config.testing_desktop_defaults = true;
+    defer Config.testing_desktop_defaults = false;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.finalize();
+
+    // Not vacuous: finalize really did fill it in.
+    try testing.expect(cfg.command != null);
+    try testing.expectEqualStrings("cmd.exe", cfg.command.?.shell);
+    {
+        var direct_flag = true;
+        const s = ghostty_config_command(&cfg, &direct_flag);
+        defer s.deinit();
+        try testing.expect(s.ptr == null);
+        try testing.expect(!direct_flag);
+    }
+
+    // A clone carries the answer with the value, and finalizing the clone
+    // again does not turn the default into a request.
+    var copy = try cfg.clone(alloc);
+    defer copy.deinit();
+    try copy.finalize();
+    {
+        const s = ghostty_config_command(&copy, null);
+        defer s.deinit();
+        try testing.expect(s.ptr == null);
+    }
+}
+
+test "finalize: a command the user set is not marked defaulted" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    Config.testing_desktop_defaults = true;
+    defer Config.testing_desktop_defaults = false;
+
+    // A theme file, so finalize takes the loadTheme path that rebuilds the
+    // whole config from its replay steps. The flag is recorded after that
+    // rebuild; recorded before it, the rebuild would drop it.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "t3-theme", .data = "background = #123456\n" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
+    const theme_arg = try std.fmt.allocPrint(
+        alloc,
+        "--theme={s}{s}t3-theme",
+        .{ root, std.fs.path.sep_str },
+    );
+    defer alloc.free(theme_arg);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    // Through the parser, as a config file or `--command` sets it: the
+    // rebuild replays what was parsed, so a value assigned directly would
+    // not survive it.
+    const args = [_][]const u8{ "--command=pwsh", theme_arg };
+    var it: struct {
+        data: []const []const u8,
+        i: usize = 0,
+        pub fn next(self: *@This()) ?[]const u8 {
+            if (self.i >= self.data.len) return null;
+            defer self.i += 1;
+            return self.data[self.i];
+        }
+    } = .{ .data = &args };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    // Not vacuous: the theme really was applied, so the rebuild ran.
+    try testing.expectEqual(@as(u8, 0x12), cfg.background.r);
+    try testing.expectEqual(@as(u8, 0x34), cfg.background.g);
+    try testing.expectEqual(@as(u8, 0x56), cfg.background.b);
+    try testing.expect(!cfg._command_defaulted);
+
+    const s = ghostty_config_command(&cfg, null);
+    defer s.deinit();
+    try testing.expectEqualStrings("pwsh", s.ptr.?[0..s.len]);
+}
 test "ghostty_config_keybinds: count and get" {
     const testing = std.testing;
     const alloc = testing.allocator;
