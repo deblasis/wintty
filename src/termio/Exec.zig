@@ -3493,7 +3493,9 @@ fn maybeInjectUtf8Preamble(
     // prepending demotes those constructs silently.
     switch (findPreambleConflict(args, preamble)) {
         .none => return appendSuffix(alloc, args, preamble),
-        // cmd re-parses its `/C`/`/K` command line, so the tail must be
+        // cmd re-parses its `/C`/`/K` command line. A single-element tail
+        // is the script itself and is written verbatim (the builder wraps
+        // it in the one pair cmd needs); a multi-element tail is
         // re-serialized with MS-C-runtime argv quoting to round-trip.
         .cmd_script => |idx| return wrapScript(alloc, args, idx, preamble.prefix(), true),
         .pwsh_command => |idx| {
@@ -3768,6 +3770,13 @@ fn buildWrappedScript(
     // cmd treat every redirection operator after it as literal text. A
     // `cmd.exe /c <script>` target then exits 1 without running
     // anything (#1184).
+    //
+    // The one shape the old re-quote served is a single element that is
+    // nothing but a space-bearing program path: the re-quote accidentally
+    // restored the grouping the caller's shell stripped, and verbatim
+    // loses it (cmd fails with `'C:\Program' is not recognized`). Such a
+    // path needs its own quotes inside the script; see the test named
+    // "bare spaced program path" below.
     if (quote_tail and tail.len == 1) {
         try writer.writeAll(tail[0]);
         return try buf.toOwnedSliceSentinel(0);
@@ -5297,6 +5306,135 @@ test "maybeInjectUtf8Preamble windows: multi-token cmd /c tail still re-quotes p
     try testing.expectEqualStrings(
         "chcp 65001 >nul && dir \"C:\\Program Files\"",
         out[2],
+    );
+}
+
+test "maybeInjectUtf8Preamble windows: composed cmd /c line carries exactly one quote pair" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The seam where #1184 lived: each half was individually green while
+    // the composed lpCommandLine held four quotes. Feed the wrap's actual
+    // output through the builder that serializes it for CreateProcessW.
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/c", "echo done>C:\\Users\\u\\done.txt",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+    const line = try Command.windowsCreateCommandLine(alloc, out);
+
+    try testing.expectEqualStrings(
+        "cmd.exe /c \"chcp 65001 >nul && echo done>C:\\Users\\u\\done.txt\"",
+        line,
+    );
+    // The builder's pair is the only quote pair on the line.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, line, "\""));
+}
+
+test "maybeInjectUtf8Preamble windows: quote-initial single-token script passes through verbatim" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Documented residual, pre-existing on both sides of the fix: an
+    // element that begins with a quote keeps that quote at the start of
+    // the `&&`-right segment once cmd strips the outer pair, and cmd then
+    // parses the script's redirections as literal text, so the script
+    // does not run. The old CRT re-quote fared no better (it escaped the
+    // quote as `\"`, which cmd cannot parse). The working spelling is to
+    // pass the script unquoted. Pinned here so the boundary is recorded
+    // where the next person will look.
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/c", "\"echo done>C:\\t\\done.txt\"",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+    const line = try Command.windowsCreateCommandLine(alloc, out);
+
+    try testing.expectEqualStrings(
+        "cmd.exe /c \"chcp 65001 >nul && \"echo done>C:\\t\\done.txt\"\"",
+        line,
+    );
+}
+
+test "maybeInjectUtf8Preamble windows: bare spaced program path loses its accidental quoting" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The one traded-away shape (#1184 review): a single element that is
+    // nothing but a space-bearing program path. CommandLineToArgvW strips
+    // the grouping quotes, the verbatim wrap keeps it unquoted, and cmd
+    // fails with `'C:\Program' is not recognized`. The old CRT re-quote
+    // accidentally restored the grouping for exactly this shape (and
+    // broke every script-shaped element to do it). A spaced path that
+    // must run needs its own quotes inside the script:
+    // `-e cmd.exe /c "\"C:\Program Files\My App\app.exe\""`, which the
+    // verbatim wrap now passes through intact.
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/c", "C:\\Program Files\\My App\\app.exe",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings(
+        "chcp 65001 >nul && C:\\Program Files\\My App\\app.exe",
+        out[2],
+    );
+}
+
+test "maybeInjectUtf8Preamble windows: cmd /c script under never policy is untouched" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The third route to a cmd script: no preamble wrap at all, so the
+    // builder's own pair is the only quoting. cmd strips it (the `>`
+    // between the quotes fails its preserve test) and the script runs.
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/c", "echo done>C:\\t\\done.txt",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .never);
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings("echo done>C:\\t\\done.txt", out[2]);
+
+    const line = try Command.windowsCreateCommandLine(alloc, out);
+    try testing.expectEqualStrings(
+        "cmd.exe /c \"echo done>C:\\t\\done.txt\"",
+        line,
+    );
+}
+
+test "maybeInjectUtf8Preamble windows: caller-supplied /s keeps its place in the wrap" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // /S before /C: the conflict scan skips /s, the wrap collapses the
+    // script after /c, and the builder (which treats /s as a plain
+    // switch) composes `cmd.exe /s /c "chcp ... && script"`. /S only
+    // makes the outer-pair strip unconditional, which the shape already
+    // relies on.
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/s", "/c", "echo done>C:\\t\\done.txt",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    try testing.expectEqual(@as(usize, 4), out.len);
+    try testing.expectEqualStrings("/s", out[1]);
+    try testing.expectEqualStrings("/c", out[2]);
+    try testing.expectEqualStrings(
+        "chcp 65001 >nul && echo done>C:\\t\\done.txt",
+        out[3],
     );
 }
 
