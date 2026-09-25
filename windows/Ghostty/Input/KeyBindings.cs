@@ -152,11 +152,12 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Z, PaneAction.Undo),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Y, PaneAction.Redo),
 
-        // Reopen closed tab/window (browser / VS Code convention). Ctrl+Shift+T
-        // is freed from new_tab (remapped to Ctrl+T in the Windows-curated
-        // Config.zig defaults). Apprt-matched because reopen is an apprt
-        // concern (libghostty has no closed-item stack on Windows).
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.T, PaneAction.ReopenClosedTab),
+        // Reopen closed tab/window. Ctrl+Shift+T is new_tab's chord again
+        // (Windows Terminal reflex, and the same chord the non-Windows
+        // curated defaults bind), so reopen lives on Ctrl+Shift+D; no other
+        // residual action claims D. Apprt-matched because reopen is an apprt
+        // concern (libghostty has no closed-item stack on Windows). #1187
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.D, PaneAction.ReopenClosedTab),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.N, PaneAction.ReopenClosedWindow),
 
         // Toggle the terminal inspector (Chromium-style Ctrl+Shift+I). Matched
