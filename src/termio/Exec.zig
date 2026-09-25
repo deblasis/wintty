@@ -3598,12 +3598,15 @@ fn appendSuffix(
 /// an argv array). The cmd `/C` interaction described below applies
 /// only to the quoted (`true`) path.
 ///
-/// Quoted path: the tail is re-serialized with MS-C-runtime quoting
-/// rules, so a token that contains whitespace is re-wrapped in quotes
-/// when joined back and `C:\Program Files` survives the round trip. A
-/// token containing a literal double quote does not: see the limits on
-/// `writeQuotedArg`. Whatever we write, cmd.exe re-tokenizes the script
-/// itself, so it has to reach cmd byte for byte; that is why
+/// Quoted path: a single-element tail is the script itself and is
+/// written verbatim (see `buildWrappedScript` for why re-quoting it
+/// composes a line cmd.exe cannot run). A multi-element tail is
+/// re-serialized with MS-C-runtime quoting rules, so a token that
+/// contains whitespace is re-wrapped in quotes when joined back and
+/// `C:\Program Files` survives the round trip. A token containing a
+/// literal double quote does not: see the limits on `writeQuotedArg`.
+/// Whatever we write, cmd.exe re-tokenizes the script itself, so it has
+/// to reach cmd byte for byte; that is why
 /// `windowsCreateCommandLine` in Command.zig writes the script verbatim
 /// inside a single quote pair instead of escaping it again.
 ///
@@ -3733,8 +3736,11 @@ fn wrapEncodedCommand(
 /// Join `tail` after `prefix_text` into a single script element.
 ///
 /// `quote_tail` selects how the tail is serialized:
-/// - `true` (cmd `/C`/`/K`): re-quote each arg with MS-C-runtime rules
-///   so cmd, which re-parses its command line, sees the same tokens.
+/// - `true` (cmd `/C`/`/K`): a single-element tail is the script itself
+///   and is written verbatim (the builder's cmd branch supplies the one
+///   quote pair around it); a multi-element tail is re-quoted per arg
+///   with MS-C-runtime rules so cmd, which re-parses its command line,
+///   sees the same tokens.
 /// - `false` (pwsh `-Command`): write each arg verbatim, space-joined.
 ///   A pwsh `-Command` value is SCRIPT text, not an argv array; quoting
 ///   a token that contains spaces (e.g. `. 'C:/x/ghostty.ps1'`) would
@@ -3752,6 +3758,21 @@ fn buildWrappedScript(
     const writer = &buf.writer;
 
     try writer.writeAll(prefix_text);
+
+    // A single-element tail IS the script, not one token of it, so the
+    // cmd path writes it verbatim. `windowsCreateCommandLine`'s cmd
+    // branch wraps the whole prefix+script in the one quote pair cmd.exe
+    // needs; re-quoting the element here would nest a second pair inside
+    // it, and after cmd strips the outer pair the script's own quote
+    // would sit at the START of the `&&`-right segment, where it makes
+    // cmd treat every redirection operator after it as literal text. A
+    // `cmd.exe /c <script>` target then exits 1 without running
+    // anything (#1184).
+    if (quote_tail and tail.len == 1) {
+        try writer.writeAll(tail[0]);
+        return try buf.toOwnedSliceSentinel(0);
+    }
+
     for (tail, 0..) |arg, i| {
         if (i > 0) try writer.writeByte(' ');
         if (quote_tail) try writeQuotedArg(writer, arg) else try writer.writeAll(arg);
@@ -4650,6 +4671,36 @@ test "execCommand windows: cmd /c with quoted path preserves quoting on wrap" {
     );
 }
 
+test "execCommand windows: cmd /c single quoted script is wrapped verbatim" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // The tokenizer strips the grouping quotes, so the whole script
+    // arrives as ONE tail element (`-e cmd.exe /c "<script>"` lands the
+    // same way after CommandLineToArgvW). That element IS the script:
+    // re-quoting it would nest a second pair inside the one pair the
+    // command-line builder wraps the script in, and cmd.exe would then
+    // see the script's own quote at the start of the `&&`-right segment
+    // and treat its redirection operators as literal text (#1184).
+    // (No metacharacters here: a `>` would take the raw-string cmd.exe
+    // wrapping path instead of this one; the argv-level tests below
+    // cover the full repro shape.)
+    const result = try testExecWindowsShell(
+        arena.allocator(),
+        "cmd.exe /c \"echo hi there\"",
+    );
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("cmd.exe", result[0]);
+    try testing.expectEqualStrings("/c", result[1]);
+    try testing.expectEqualStrings(
+        "chcp 65001 >nul && echo hi there",
+        result[2],
+    );
+}
+
 test "execCommand windows: pwsh with -c short form wraps user script" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -5148,6 +5199,105 @@ test "maybeInjectUtf8Preamble windows: -EncodedCommand skipped when policy never
     const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", b64 };
     const out = try maybeInjectUtf8Preamble(alloc, args, .never);
     try testing.expectEqualStrings(b64, out[2]);
+}
+
+// --- cmd /c wrap: a single-element tail is the script itself and must
+// carry no quotes of its own; the cmd branch of the command-line builder
+// supplies the one pair around it. A second pair here puts the script's
+// own quote at the start of the `&&`-right segment after cmd's
+// outer-pair strip, which makes cmd treat the script's redirections as
+// literal text (#1184). ---
+
+test "maybeInjectUtf8Preamble windows: single-token cmd /c script is not re-quoted" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The exact -e shape from #1184: CommandLineToArgvW strips the
+    // grouping quotes, so the script (spaces and redirection included)
+    // arrives as one argv element.
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/c", "echo done>C:\\Users\\u\\done.txt",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings("cmd.exe", out[0]);
+    try testing.expectEqualStrings("/c", out[1]);
+    try testing.expectEqualStrings(
+        "chcp 65001 >nul && echo done>C:\\Users\\u\\done.txt",
+        out[2],
+    );
+}
+
+test "maybeInjectUtf8Preamble windows: single-token cmd /k script is not re-quoted" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/K", "title my session & echo hi",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings("/K", out[1]);
+    try testing.expectEqualStrings(
+        "chcp 65001 >nul && title my session & echo hi",
+        out[2],
+    );
+}
+
+test "maybeInjectUtf8Preamble windows: single-token cmd /c script keeps its own quotes verbatim" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A script whose quotes sit mid-segment must keep them exactly where
+    // the user wrote them; C-runtime re-quoting would also escape them
+    // as `\"`, which cmd cannot parse.
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe",
+        "/c",
+        "dir \"C:\\Program Files\" && echo done>C:\\Users\\u\\done.txt",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings(
+        "chcp 65001 >nul && dir \"C:\\Program Files\" && echo done>C:\\Users\\u\\done.txt",
+        out[2],
+    );
+}
+
+test "maybeInjectUtf8Preamble windows: multi-token cmd /c tail still re-quotes per arg" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The boundary of the fix: per-token quoting stays for a tail of
+    // separate argv elements, because the tokenizer already stripped the
+    // quotes that grouped them (`dir "C:\Program Files"` split into two
+    // elements must regain its quotes mid-segment to survive cmd's
+    // re-tokenization).
+    const args: []const [:0]const u8 = &.{
+        "cmd.exe", "/c", "dir", "C:\\Program Files",
+    };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings(
+        "chcp 65001 >nul && dir \"C:\\Program Files\"",
+        out[2],
+    );
 }
 
 /// Like `utf16LeBase64FromUtf8` but emits a leading UTF-16 BOM (U+FEFF),
