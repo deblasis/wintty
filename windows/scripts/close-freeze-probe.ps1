@@ -80,6 +80,13 @@ function Invoke-Timed([Parameter(Mandatory)]$Session, [hashtable]$Command) {
     Send-SeamCommand $Session $Command
     $read = $Session.Reader.ReadLineAsync()
     if (-not $read.Wait($AckHangGuardSeconds * 1000)) {
+        # The guard is never the check, but when it fires on the close the
+        # UI thread has been gone past all healthy bounds, and that IS the
+        # finding: record it so the run exits 2 (finding) rather than 1
+        # (could-not-run).
+        $script:Findings.Add(("CLOSE_FREEZE_HANG: no answer to '{0}' within the {1} s guard; the UI thread never came back" -f
+            $Command['op'], $AckHangGuardSeconds))
+        Record $Command['op'] ($AckHangGuardSeconds * 1000) "HANG: no ack within the guard"
         throw ("HARNESS: no answer to '{0}' within the {1} s hang guard" -f
             $Command['op'], $AckHangGuardSeconds)
     }
@@ -228,13 +235,13 @@ finally {
 }
 
 $script:Timeline | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'timeline.json')
-if ($harnessError) {
-    Write-Host "HARNESS: $harnessError"
-    exit 1
-}
 if ($script:Findings.Count -gt 0) {
     $script:Findings | ForEach-Object { Write-Host "FINDING: $_" }
     $script:Findings | Set-Content (Join-Path $OutDir 'findings.txt')
     exit 2
+}
+if ($harnessError) {
+    Write-Host "HARNESS: $harnessError"
+    exit 1
 }
 exit 0
