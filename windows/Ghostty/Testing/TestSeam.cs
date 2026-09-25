@@ -796,6 +796,79 @@ internal static class TestSeam
                 });
             }
 
+            case "surface-refresh":
+            {
+                // Probe: ask libghostty to schedule a fresh frame for the
+                // tab's active pane. A capture harness uses it to separate
+                // "the cells hold the text but no frame presented it"
+                // (refresh revives the text) from "the cells never got the
+                // text" (refresh changes nothing). Read-only.
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var handle = tab.PaneHost.ActiveLeaf.Terminal().SurfaceHandle;
+                if (handle == IntPtr.Zero)
+                    return Error(op, $"tab {index} has no live surface");
+                Interop.NativeMethods.SurfaceRefresh(new Interop.GhosttySurface(handle));
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteEndObject();
+                });
+            }
+            case "screen-text":
+            {
+                // Read-only: a leaf's viewport as libghostty sees it,
+                // flattened from the cell grid, with the cursor's grid
+                // position. leaf=-1 reads the active leaf. A capture
+                // harness pairs this with pixels to separate "the buffer
+                // never got the text" (this is missing) from "the buffer
+                // has it and the frame does not" (this is present).
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var host = (Panes.PaneHost)tab.PaneHost;
+                var terminal = host.TestSeamLeafTerminal(
+                    ArgInt(args, "leaf", -1))
+                    ?? host.ActiveLeaf.Terminal();
+                if (terminal.SurfaceHandle == IntPtr.Zero)
+                    return Error(op, $"tab {index} has no live surface");
+                var grid = Interop.NativeMethods.SurfaceReadCells(
+                    new Interop.GhosttySurface(terminal.SurfaceHandle));
+                if (grid is null)
+                    return Error(op, $"tab {index} cell read failed");
+                var g = grid.Value;
+                var sb = new System.Text.StringBuilder((g.Rows + 1) * g.Cols);
+                for (var y = 0; y < g.Rows; y++)
+                {
+                    for (var x = 0; x < g.Cols; x++)
+                    {
+                        var cp = g.Cells[y * g.Cols + x].Codepoint;
+                        sb.Append(cp == 0 ? ' ' : (char)cp);
+                    }
+                    sb.Append('\n');
+                }
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("index", index);
+                    json.WriteNumber("leaf",
+                        ArgInt(args, "leaf", -1));
+                    json.WriteNumber("rows", g.Rows);
+                    json.WriteNumber("cols", g.Cols);
+                    json.WriteNumber("cursorRow", g.CursorRow);
+                    json.WriteNumber("cursorCol", g.CursorCol);
+                    json.WriteBoolean("cursorInViewport", g.CursorInViewport);
+                    json.WriteString("text", sb.ToString());
+                    json.WriteEndObject();
+                });
+            }
+
             case "send-text":
             {
                 // The one op that is not "drive the UI". Bytes handed to a
