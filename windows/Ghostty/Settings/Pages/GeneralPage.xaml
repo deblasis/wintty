@@ -71,7 +71,7 @@
 
                 <ctrl:SettingsCard
                     Header="Undo timeout (ms)"
-                    Description="How long a pane split, close, resize, or zoom can be undone (Ctrl+Shift+Z), in milliseconds. Set to 0 to disable undo. Ghostty default is 5000 (5 seconds)."
+                    Description="How long a pane split, close, resize, or zoom can be undone (Ctrl+Shift+Z), in milliseconds. Set to 0 to disable undo. Wintty default is 5000 (5 seconds)."
                     ctrl:SettingsCard.ConfigKey="undo-timeout">
                     <!-- Milliseconds (the config's native Duration granularity)
                          so no value is lost in a seconds round-trip. Maximum

@@ -169,7 +169,7 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                 const str =
                     \\Your system cannot allocate any more pty devices.
                     \\
-                    \\Ghostty requires a pty device to launch a new terminal.
+                    \\Wintty requires a pty device to launch a new terminal.
                     \\This error is usually due to having too many terminal
                     \\windows open or having another program that is using too
                     \\many pty devices.
@@ -189,7 +189,7 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     \\was too large, or the underlying pty failed to accept
                     \\the write.
                     \\
-                    \\Ghostty can't continue since it can't guarantee that
+                    \\Wintty can't continue since it can't guarantee that
                     \\initial terminal state will be as desired. Please review
                     \\the value of `input` in your configuration file and
                     \\ensure that all the path values exist and are readable.

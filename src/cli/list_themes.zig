@@ -230,8 +230,8 @@ fn themesDiagnostic(count: usize, has_resources_dir: bool) ?[]const u8 {
     return if (has_resources_dir)
         "No themes found, check to make sure that the themes were installed correctly."
     else
-        "Could not find the Ghostty resources directory. Please ensure " ++
-            "that Ghostty is installed correctly.";
+        "Could not find the Wintty resources directory. Please ensure " ++
+            "that Wintty is installed correctly.";
 }
 
 fn resolveAutoThemePath(alloc: std.mem.Allocator) ![]u8 {
@@ -342,7 +342,7 @@ const Preview = struct {
 
         const writer = self.tty.writer();
         try self.vx.enterAltScreen(writer);
-        try self.vx.setTitle(writer, "👻 Ghostty Theme Preview 👻");
+        try self.vx.setTitle(writer, "👻 Wintty Theme Preview 👻");
         try self.vx.queryTerminal(writer, .fromSeconds(1));
         try self.vx.setMouseMode(writer, true);
         if (self.vx.caps.color_scheme_updates)
@@ -931,18 +931,18 @@ const Preview = struct {
                 child.fill(.{ .style = self.ui_standard() });
 
                 const save_instructions = [_][]const u8{
-                    "To apply this theme, add the following line to your Ghostty configuration:",
+                    "To apply this theme, add the following line to your Wintty configuration:",
                     "",
                     try std.fmt.allocPrint(alloc, "theme = {s}", .{theme.theme}),
                     "",
                     "Save the configuration file and then reload it to apply the new theme.",
                     "",
                     "Or press 'w' to write an auto theme file to your system's preferred default config path.",
-                    "Then add the following line to your Ghostty configuration and reload:",
+                    "Then add the following line to your Wintty configuration and reload:",
                     "",
                     "config-file = ?auto/theme.ghostty",
                     "",
-                    "For more details on configuration and themes, visit the Ghostty documentation:",
+                    "For more details on configuration and themes, visit the Wintty documentation:",
                     "",
                     "https://ghostty.org/docs/config/reference",
                 };
@@ -1914,14 +1914,14 @@ test "themesDiagnostic blames the resources directory only when there is none" {
     try testing.expect(std.mem.indexOf(
         u8,
         without,
-        "Could not find the Ghostty resources directory",
+        "Could not find the Wintty resources directory",
     ) != null);
 
     const with = themesDiagnostic(0, true) orelse return error.NoDiagnostic;
     try testing.expect(std.mem.indexOf(
         u8,
         with,
-        "Could not find the Ghostty resources directory",
+        "Could not find the Wintty resources directory",
     ) == null);
     try testing.expect(std.mem.indexOf(u8, with, "No themes found") != null);
 }

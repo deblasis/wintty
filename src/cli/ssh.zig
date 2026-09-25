@@ -14,11 +14,11 @@ const terminfo_install = @import("../terminfo/install.zig");
 const log = std.log.scoped(.ssh);
 
 const usage =
-    \\Usage: ghostty +ssh [flags] [--] <ssh args...>
+    \\Usage: wintty +ssh [flags] [--] <ssh args...>
     \\
     \\Flags:
     \\  --forward-env[=bool]  Enable TERM / SendEnv forwarding. Default: true.
-    \\  --terminfo[=bool]     Install Ghostty terminfo on first connect. Default: true.
+    \\  --terminfo[=bool]     Install Wintty terminfo on first connect. Default: true.
     \\  --cache[=bool]        Use the terminfo install cache. Default: true.
     \\  --ssh=<path>          Path to the ssh binary. Default: first `ssh` on PATH.
     \\  --verbose             Print +ssh status lines to stderr.
@@ -246,7 +246,7 @@ fn runInner(
 
         const cache: ?DiskCache = if (opts.cache) cache: {
             const path = DiskCache.defaultPath(alloc, "wintty") catch |err| {
-                warnPrint(stderr, "ghostty terminfo cache unavailable: {t}", .{err});
+                warnPrint(stderr, "Wintty terminfo cache unavailable: {t}", .{err});
                 break :session .{ .term = "xterm-256color" };
             };
             break :cache .{ .path = path };

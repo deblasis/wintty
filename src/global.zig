@@ -461,9 +461,9 @@ pub fn reportInitError(err: anyerror) void {
 fn initErrorText(err: anyerror, buf: []u8) []const u8 {
     return initErrorMessage(err) orelse std.fmt.bufPrint(
         buf,
-        "Error: ghostty failed to initialize err={t}\n",
+        "Error: Wintty failed to initialize err={t}\n",
         .{err},
-    ) catch "Error: ghostty failed to initialize.\n";
+    ) catch "Error: Wintty failed to initialize.\n";
 }
 
 /// The bespoke text for `err`, or null for errors with no wording of their
@@ -515,7 +515,7 @@ test "initErrorText still explains an error with no wording of its own" {
     // `resourcesDir`.
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "Error: ghostty failed to initialize err=OutOfMemory\n",
+        "Error: Wintty failed to initialize err=OutOfMemory\n",
         initErrorText(error.OutOfMemory, &buf),
     );
 
@@ -529,7 +529,7 @@ test "initErrorText still explains an error with no wording of its own" {
     // hold the formatted line.
     var tiny: [4]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "Error: ghostty failed to initialize.\n",
+        "Error: Wintty failed to initialize.\n",
         initErrorText(error.OutOfMemory, &tiny),
     );
 }
