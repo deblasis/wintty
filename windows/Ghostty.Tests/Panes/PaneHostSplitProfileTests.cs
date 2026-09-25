@@ -41,7 +41,10 @@ public class PaneHostSplitProfileTests
     public void PaneHost_NoArgSplit_InheritsActiveLeafSnapshot()
     {
         var src = ReadEmbedded(@"Panes\PaneHost.cs");
-        Assert.Contains("snapshot: _activeLeaf.Snapshot", src);
+        // The split inherits the active leaf's snapshot; what the fallback
+        // is (and when it applies) is PaneCommandPolicy's to decide (#1136).
+        Assert.Contains("PaneCommandPolicy.Inherit(", src);
+        Assert.Contains("_activeLeaf.Snapshot, () => App.ImplicitDefaultSnapshot()", src);
         Assert.DoesNotContain("Legacy keyboard-Split path; no profile", src);
     }
 

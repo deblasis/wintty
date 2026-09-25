@@ -18,7 +18,10 @@ public class ColdStartDefaultProfileTests
     public void MainWindow_SeedsDefaultProfileIntoTabManager()
     {
         var main = ReadEmbedded("MainWindow.xaml.cs");
-        Assert.Contains("SessionProfileResolver.ResolveDefault", main);
+        // The seed is the explicit snapshot when the launch carries one, else
+        // what any new pane nobody picked a profile for runs: the configured
+        // `command` or the default profile (#1136).
+        Assert.Contains("initialSnapshot ?? App.ImplicitDefaultSnapshot()", main);
         Assert.Contains("initialSnapshot:", main);
     }
 
