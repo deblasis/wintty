@@ -94,8 +94,8 @@ fn runArgs(
     // Its possible to build Ghostty without font discovery!
     if (comptime font.Discover == void) {
         try stderr.print(
-            \\Ghostty was built without a font discovery mechanism. This is a compile-time
-            \\option. Please review how Ghostty was built from source, contact the
+            \\Wintty was built without a font discovery mechanism. This is a compile-time
+            \\option. Please review how Wintty was built from source, contact the
             \\maintainer to enable a font discovery mechanism, and try again.
         ,
             .{},
@@ -219,7 +219,7 @@ fn lookup(
 
     const face = font_grid.resolver.collection.getFace(idx) catch |err| switch (err) {
         error.SpecialHasNoFace => {
-            try stdout.print("U+{0X:0>2} « {0u} » is handled by Ghostty's internal sprites.\n", .{cp});
+            try stdout.print("U+{0X:0>2} « {0u} » is handled by Wintty's internal sprites.\n", .{cp});
             return null;
         },
         else => {

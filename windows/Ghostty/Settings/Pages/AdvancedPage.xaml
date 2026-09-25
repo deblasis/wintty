@@ -74,7 +74,7 @@
             </ctrl:SettingsGroup>
 
             <TextBlock
-                Text="Remaining Ghostty config keys will land here once libghostty exposes key enumeration."
+                Text="Remaining Wintty config keys will land here once libghostty exposes key enumeration."
                 TextWrapping="Wrap"
                 Margin="0,16,0,0"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

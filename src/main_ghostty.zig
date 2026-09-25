@@ -64,9 +64,9 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
 
     if (comptime build_config.app_runtime == .none) {
         const stdout = std.io.getStdOut().writer();
-        try stdout.print("Usage: ghostty +<action> [flags]\n\n", .{});
+        try stdout.print("Usage: wintty +<action> [flags]\n\n", .{});
         try stdout.print(
-            \\This is the Ghostty helper CLI that accompanies the graphical Ghostty app.
+            \\This is the Wintty helper CLI that accompanies the graphical Wintty app.
             \\To launch the terminal directly, please launch the graphical app
             \\(i.e. Ghostty.app on macOS). This CLI can be used to perform various
             \\actions such as inspecting the version, listing fonts, etc.

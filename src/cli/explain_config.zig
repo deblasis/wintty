@@ -79,9 +79,9 @@ pub fn run(alloc: Allocator) !u8 {
         var stderr: std.Io.File = .stderr();
         var buffer: [4096]u8 = undefined;
         var stderr_writer = stderr.writer(global.io(), &buffer);
-        try stderr_writer.interface.writeAll("Usage: ghostty +explain-config <option>\n");
-        try stderr_writer.interface.writeAll("       ghostty +explain-config --option=<option>\n");
-        try stderr_writer.interface.writeAll("       ghostty +explain-config --keybind=<action>\n");
+        try stderr_writer.interface.writeAll("Usage: wintty +explain-config <option>\n");
+        try stderr_writer.interface.writeAll("       wintty +explain-config --option=<option>\n");
+        try stderr_writer.interface.writeAll("       wintty +explain-config --keybind=<action>\n");
         try stderr_writer.end();
         return 1;
     };
