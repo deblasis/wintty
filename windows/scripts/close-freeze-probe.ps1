@@ -47,12 +47,16 @@ param(
     # The default shape closes a LIVE quiet child: teardown kills it, and
     # the skip is what keeps the notice from parking the join. The
     # -NaturalExit shape exercises the racing case instead: tab 1's shell
-    # is told to exit on its own while the flood keeps the mailbox full,
-    # so the notice push is already inside its budget when the close
-    # latches teardown, and only the abort token can end it.
+    # is scheduled to exit on its own (sleep N, then exit, read as one
+    # line) while the flood's backlog still pins the mailbox full, so the
+    # notice push is already inside its delivery budget when the close
+    # latches teardown, and only the abort token can end it. Passing
+    # -FloodChunks 600 keeps the flood itself still sending at the close,
+    # which is the shape the racing case was specified against.
     [int]$FloodChunks = 300,
     [switch]$NaturalExit,
-    [double]$ExitLeadSeconds = 1.5
+    [double]$ExitDelaySeconds = 6,
+    [double]$ExitLeadSeconds = 1
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -224,19 +228,27 @@ try {
     } $ReadinessTimeoutSeconds 'a flood title to land on tab 0'
     Record 'flood-live' 0 "shell title now '$floodTitle'"
 
-    # The racing shape: tab 1's shell exits on its own, INTO the full
-    # mailbox the flood keeps topped up, so its child-exit notice is
-    # already parked inside a delivery budget when the close below
-    # latches teardown. A probe-default run never enters this block, and
-    # `exit` is the pty child itself finishing -- no kill, no close, the
-    # natural path whose only cure is the abort token (the skip cannot
-    # fire: processExitCommon ran before teardown latched). The lead
-    # covers the shell's own shutdown; the close then joins a wait thread
-    # whose push has been in flight for the lead's duration.
+    # The racing shape: tab 1's shell exits on its own ON A SCHEDULE,
+    # INTO the full mailbox the flood's backlog keeps pinned, so its
+    # child-exit notice is parked inside a delivery budget when the close
+    # below latches teardown. The schedule matters: the first version of
+    # this shape typed a bare `exit` while the flood ran, and the shell
+    # could not act on it (or the notice landed during the lead), so the
+    # close always met either a delivered notice or a live child it
+    # killed -- the skip path, green with or without the token. Here the
+    # shell reads one whole line (sleep, then exit) the moment it is
+    # sent, the echo proves it took, and the child dies a known
+    # $ExitDelaySeconds later with the backlog still deep. No kill, no
+    # skip: processExitCommon ran before teardown latched, and the close
+    # joins a wait thread whose push has been in flight for the lead.
     if ($NaturalExit) {
-        Invoke-SeamCommand $session @{ op = 'send-text'; index = 1; text = "exit`r" } | Out-Null
-        [System.Threading.Thread]::Sleep([int]($ExitLeadSeconds * 1000))
-        Record 'natural-exit' 0 "tab 1 shell told to exit, waited $($ExitLeadSeconds) s"
+        Invoke-SeamCommand $session @{ op = 'send-text'; index = 1; text = "Start-Sleep -Seconds $ExitDelaySeconds; exit`r" } | Out-Null
+        Wait-Until {
+            $r = Invoke-SeamCommand $session @{ op = 'screen-text'; index = 1 }
+            ($r.text -split "`n" -match 'Start-Sleep').Count -gt 0
+        } $ReadinessTimeoutSeconds 'tab 1 to echo the scheduled exit' | Out-Null
+        [System.Threading.Thread]::Sleep([int](($ExitDelaySeconds + $ExitLeadSeconds) * 1000))
+        Record 'natural-exit' 0 "tab 1 shell exits after $ExitDelaySeconds s, waited $ExitLeadSeconds s past it"
     }
 
     # The measurement. The seam serves one command at a time -- the
