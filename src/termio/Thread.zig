@@ -162,6 +162,7 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
             OpenptyFailed,
             InputNotFound,
             InputFailed,
+            BatchArgumentUnsafe,
         };
 
         switch (@as(Err, @errorCast(err))) {
@@ -193,6 +194,22 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     \\initial terminal state will be as desired. Please review
                     \\the value of `input` in your configuration file and
                     \\ensure that all the path values exist and are readable.
+                ;
+
+                t.eraseDisplay(.complete, false);
+                t.printString(str) catch {};
+            },
+
+            error.BatchArgumentUnsafe => {
+                const str =
+                    \\The command was refused before it started. A batch file
+                    \\(.bat or .cmd) target was given a path or argument that
+                    \\cmd.exe would re-parse into additional commands, expand
+                    \\or silently drop, and no safe serialization exists for
+                    \\it.
+                    \\
+                    \\This terminal is non-functional. Please close it and try
+                    \\again.
                 ;
 
                 t.eraseDisplay(.complete, false);
