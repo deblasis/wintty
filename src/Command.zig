@@ -878,10 +878,12 @@ fn windowsBatchTarget(argv0: []const u8) bool {
     // original injection. The odd spellings behave differently from each
     // other and each class is treated for what it does:
     //
-    //   - Trailing dots and spaces: the loader strips them when it opens
-    //     the file, so `x.cmd.` runs the batch - cmd does NOT strip them,
-    //     and with the pre-fix bare compose the hostile tail following
-    //     such a spelling ran as a second command (probe round 3d, case
+    //   - Trailing dots and spaces: the loader's batch special-case keys
+    //     on the file it resolves, so a `x.cmd.` spelling still takes the
+    //     cmd.exe path, but cmd itself cannot resolve the spelled name
+    //     and the batch does not run; what made the spelling dangerous
+    //     was the pre-fix bare compose, in which the hostile tail
+    //     following it ran as a second command (probe round 3d, case
     //     B1, measured live).
     //   - An alternate-data-stream suffix: the loader actually rejects
     //     the spelling (CreateProcessW fails, probe round 3a R9), so
@@ -1297,11 +1299,13 @@ test "windowsCreateCommandLine: a batch target is detected in every spelling Win
     const alloc = testing.allocator;
 
     // Detection errs toward detecting a batch; the other direction is the
-    // original injection. Trailing dots and spaces are stripped by the
-    // loader when it opens the file, so the batch runs - cmd does not
-    // strip them, and with the pre-fix bare compose the hostile tail
-    // after such a spelling ran as a second command (probe round 3d, B1,
-    // measured live). An ADS spelling is actually rejected by the loader
+    // original injection. A trailing-dot spelling still takes the cmd.exe
+    // path (the loader's batch special-case keys on the file it resolves),
+    // but cmd cannot resolve the spelled name and the batch does not run:
+    // what made the spelling dangerous was the pre-fix bare compose, in
+    // which the hostile tail after it ran as a second command (probe
+    // round 3d, B1, measured live). An ADS spelling is actually rejected
+    // by the loader
     // (round 3a, R9: CreateProcessW fails), and is cut anyway on purpose:
     // over-detection only quotes arguments, never bare. The cases pin the
     // shapes: plain trailing dot, ADS, dot before the ADS colon, a
