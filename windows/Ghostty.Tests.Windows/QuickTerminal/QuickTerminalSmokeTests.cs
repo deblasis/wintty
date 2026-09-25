@@ -29,7 +29,7 @@ public class QuickTerminalSmokeTests
     //  4. Press Ctrl+` again. The window hides.
     //  5. Alt+Tab does NOT show the quake window in the switcher.
     //  6. The quake window has no taskbar icon.
-    //  7. Splits (Alt+Shift+D / Alt+Shift+E, the curated split chords),
+    //  7. Splits (Alt+Shift+= / Alt+Shift+-, the curated split chords),
     //     tabs (Ctrl+T and Ctrl+Shift+T), command palette
     //     (Ctrl+Shift+P), and profile chords all work
     //     inside the quake window the same as in regular windows.
