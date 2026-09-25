@@ -18,7 +18,10 @@ public static class NotificationPolicy
     // (deblasis/wintty#1193). So the subject is the command's PROGRAM,
     // never its arguments, and even the program is capped -- the ellipsis
     // is the visible truncation indicator, so a long name is never
-    // silently shortened.
+    // silently shortened. The one documented exception is the WSL launch,
+    // whose subject names the distro ("WSL: Ubuntu-24.04"): the same words
+    // the tab tooltip uses, plain-text-gated and capped like every other
+    // subject.
     private const int MaxProgramChars = 80;
     private const string TruncationIndicator = "…";
 
@@ -98,6 +101,12 @@ public static class NotificationPolicy
 
         var display = ProcessDisplayName.For(basename, text);
         if (display.Length <= MaxProgramChars) return display;
-        return display[..MaxProgramChars] + TruncationIndicator;
+
+        // Back the cut off rather than split a UTF-16 surrogate pair: a
+        // lone surrogate is not a legal XML character and the toast sink
+        // would drop the whole notification over it.
+        var cut = MaxProgramChars;
+        if (char.IsHighSurrogate(display[cut - 1])) cut--;
+        return display[..cut] + TruncationIndicator;
     }
 }

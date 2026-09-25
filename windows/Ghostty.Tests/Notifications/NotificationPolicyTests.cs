@@ -1,3 +1,4 @@
+using System.Linq;
 using Ghostty.Core.Notifications;
 using Xunit;
 
@@ -139,5 +140,60 @@ public class NotificationPolicyTests
         var req = NotificationPolicy.ChildExited(exitCode: 0, runtimeMs: 5000, command: "", surfaceKey: "0x99", isSurfaceActive: false);
         Assert.NotNull(req);
         Assert.Equal("The shell exited normally (code 0).", req!.Body);
+    }
+
+    // A command whose first token never closes its quote has no readable
+    // program; the toast falls back to the copy it had before it named
+    // anything.
+    [Fact]
+    public void ChildExited_UnterminatedQuoteCommand_KeepsTheShellCopy()
+    {
+        var req = NotificationPolicy.ChildExited(
+            exitCode: 7, runtimeMs: 5000, command: "\"C:\\Program Files\\tool.exe --flag",
+            surfaceKey: "0x99", isSurfaceActive: false);
+        Assert.NotNull(req);
+        Assert.Equal("The shell exited with code 7.", req!.Body);
+    }
+
+    [Fact]
+    public void ChildExited_WhitespaceCommand_KeepsTheShellCopy()
+    {
+        var req = NotificationPolicy.ChildExited(
+            exitCode: 7, runtimeMs: 5000, command: "   ",
+            surfaceKey: "0x99", isSurfaceActive: false);
+        Assert.NotNull(req);
+        Assert.Equal("The shell exited with code 7.", req!.Body);
+    }
+
+    // The pinned "program, never arguments" line has one documented
+    // exception: a wsl.exe launch names its distro ("WSL: Ubuntu-24.04"),
+    // the same words the tab tooltip uses, and the distro is IsPlain-gated.
+    // Pinned here so the exception stays a decision, not an accident.
+    [Fact]
+    public void ChildExited_WslCommandNamesTheDistroLikeTheTabTooltip()
+    {
+        var req = NotificationPolicy.ChildExited(
+            exitCode: 0, runtimeMs: 5000, command: "wsl.exe -d Ubuntu-24.04",
+            surfaceKey: "0x99", isSurfaceActive: false);
+        Assert.NotNull(req);
+        Assert.Equal("Process exited", req!.Title);
+        Assert.Equal("WSL: Ubuntu-24.04 exited normally (code 0).", req.Body);
+    }
+
+    // A basename whose 80th UTF-16 unit is the high half of a surrogate
+    // pair must lose the whole character, not half of it: a lone surrogate
+    // is not a legal XML character and can make the toast sink drop the
+    // notification entirely. The visible budget backs off by one instead.
+    [Fact]
+    public void ChildExited_AstralCharAtTheTruncationBoundaryIsNotSplit()
+    {
+        var req = NotificationPolicy.ChildExited(
+            exitCode: 3, runtimeMs: 5000,
+            command: new string('a', 79) + "\U0001F389.exe --flag",
+            surfaceKey: "0x99", isSurfaceActive: false);
+        Assert.NotNull(req);
+        Assert.True(req!.Body.All(c => !char.IsSurrogate(c)), "no lone surrogate reaches the toast body");
+        Assert.Contains(new string('a', 79) + "\u2026", req.Body);
+        Assert.DoesNotContain("--flag", req.Body);
     }
 }

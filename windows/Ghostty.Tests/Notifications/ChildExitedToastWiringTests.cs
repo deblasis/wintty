@@ -42,6 +42,35 @@ public class ChildExitedToastWiringTests
 
         Assert.True(policy < code, "the exit code is an argument of the policy call");
         Assert.True(code < command, "the command travels with the exit code in the same call");
+
+        // Both trailing inputs are strings, so a positional swap compiles
+        // and every policy unit test still passes; pin each one inside the
+        // call's own argument list, in the order the signature declares.
+        var args = CallArguments(handler, policy);
+        var commandArg = CSharpSourceText.RequireIndex(
+            args, "c.SurfaceCommandText",
+            "the surface's command is no longer an argument of the policy call");
+        var keyArg = CSharpSourceText.RequireIndex(
+            args, "c.ToastSurfaceKey",
+            "the surface key is no longer an argument of the policy call");
+        Assert.True(commandArg < keyArg, "the command precedes the surface key in the policy call");
+    }
+
+    // The text between the policy call's opening paren and its matching
+    // close: the argument list itself, not the whole case block.
+    private static string CallArguments(string member, int callStart)
+    {
+        var open = member.IndexOf('(', callStart);
+        Assert.True(open >= 0, "the policy call has an argument list");
+        var depth = 0;
+        for (var i = open; i < member.Length; i++)
+        {
+            if (member[i] == '(') depth++;
+            else if (member[i] == ')' && --depth == 0) return member[open..(i + 1)];
+        }
+
+        Assert.Fail("the policy call is never closed");
+        return string.Empty;
     }
 
     // The control remembers the command it was created with, at the moment
