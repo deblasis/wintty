@@ -246,10 +246,9 @@ public sealed class StripInkGroundWiringTests
         // at all.
         var arm = draw.Ancestors().OfType<ElseClauseSyntax>().First();
         Assert.IsNotType<IfStatementSyntax>(arm.Statement);
-        Assert.True(arm.Statement.DescendantNodes()
+        Assert.Single(arm.Statement.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText().EndsWith("MutedInkBrush", StringComparison.Ordinal))
-            .Count() == 1);
+            .Where(c => c.CalleeText().EndsWith("MutedInkBrush", StringComparison.Ordinal)));
         foreach (var other in recolor.DescendantNodes().OfType<ElseClauseSyntax>()
             .Where(c => !c.Equals(arm))
             // An `else if` clause's statement IS the nested if, so the

@@ -361,7 +361,7 @@ public sealed class ThemeResolutionTests
         0x5B705Bu, // stock-light, htab-chip-count measured 3.55
         0x808080u, // the known mid grey that defeats any fixed alpha
         0x61705Cu, // stock-light/vert-wide, vtab-pinned-title measured 3.41
-        0x516152u, // stock-dark/vert, vtab-boundary-stroke (surface retired)
+        0x516152u, // stock-light/vert-compact, vtab-boundary-stroke (surface retired)
         0x757575u, // the pole-flip band: catches a frozen-pole ladder
     };
 
