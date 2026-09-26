@@ -3234,11 +3234,17 @@ public sealed partial class MainWindow : Window
             var (tint, _, tintOpacity) = ResolveAcrylicTuning();
             return Core.Shell.BackdropGround.Estimate(
                 ((uint)tint.R << 16) | ((uint)tint.G << 8) | tint.B,
-                // The window's own UISettings, the one the root grid is painted from.
-                // A freshly activated instance answers for whatever moment it was
-                // created in, so an OS flip could leave the row painted for one
-                // desktop and its ink scored against the other.
-                Services.OsTheme.IsDark(_systemUiSettings),
+                // The polarity the window actually paints, not the desktop's
+                // own: ApplyTheme hands _themeManager.ElementTheme to the
+                // root, and under an explicit window-theme that is the
+                // override even when the OS desktop disagrees -- the caption
+                // buttons went over to the painted truth for the same reason
+                // (#235). The raw OS read here scored the chrome's ink
+                // against a light ground on a window painting dark, and the
+                // muted ladder picked the black pole for every row (#936).
+                // Under the default the manager resolves from the OS anyway,
+                // so the system-tracking answer is unchanged.
+                _themeManager.IsDarkMode,
                 ChromeGroundStyle,
                 tintOpacity);
         }
