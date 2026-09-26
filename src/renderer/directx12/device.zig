@@ -920,10 +920,12 @@ fn compositionSwapChainDesc(width: u32, height: u32, paced: bool) dxgi.DXGI_SWAP
         // everywhere this desc is used, and every filmed resize ran
         // with it. Those films show the stale frame 1:1 top-left with
         // the exposed strip BLACK, never stretched, so this field is
-        // not what made the flash; the strip is the SwapChainPanel
-        // area the chain content does not cover, filled by the swap
-        // chain background color (DirectX12.setBackgroundColor) and the
-        // panel host. XAML's panel applies its own display scale to a
+        // not what made the flash; the strip is tied to the swap chain
+        // background color (DirectX12.setBackgroundColor) by film
+        // evidence -- adding that fill alone took the strip from black
+        // to near-background -- while the exact compositor geometry is
+        // unproven and the host cannot paint the panel. XAML's
+        // panel applies its own display scale to a
         // handle-bound swap chain; the counter-transform that undoes it
         // (SetMatrixTransform 1/scale, the Windows Terminal
         // AtlasEngine pattern) is applied by DirectX12 alongside the
