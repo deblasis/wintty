@@ -494,9 +494,10 @@ function Measure-SelectionStroke($Cap, [string]$Leg, [string]$Surface,
         right  = [Math]::Max(1, [int][Math]::Round(([double]$stroke.thickness.right) * $scale))
         bottom = [Math]::Max(1, [int][Math]::Round(([double]$stroke.thickness.bottom) * $scale))
     }
+    $skips = [System.Collections.Generic.List[string]]::new()
     foreach ($name in 'left', 'top', 'right', 'bottom') {
         $t = $thick[$name]
-        if ($stroke.thickness.$name -lt 0.5) { continue }
+        if ($stroke.thickness.$name -lt 0.5) { $skips.Add("${name}: no stroke on this side"); continue }
         $trim = [Math]::Max(2, 2 * $t)
         $bx = [double]$r.x; $by = [double]$r.y
         $bw = [double]$r.w; $bh = [double]$r.h
@@ -524,20 +525,30 @@ function Measure-SelectionStroke($Cap, [string]$Leg, [string]$Surface,
         }
         if (([double]$g.X -lt $Cap.L) -or ([double]$g.Y -lt $Cap.T) -or
             ([double]($g.X + $g.Width) -gt ($Cap.L + $Cap.W)) -or
-            ([double]($g.Y + $g.Height) -gt ($Cap.T + $Cap.H))) { continue }
+            ([double]($g.Y + $g.Height) -gt ($Cap.T + $Cap.H))) {
+            $skips.Add("${name}: ground band falls outside the capture")
+            continue
+        }
         $gl = ConvertTo-Local $Cap $g 0
         $bl = ConvertTo-Local $Cap $band 0
-        if ($null -eq $gl -or $null -eq $bl) { continue }
+        if ($null -eq $gl -or $null -eq $bl) {
+            $skips.Add("${name}: band/ground rect degenerate after localising")
+            continue
+        }
         $si = [ContrastSampler]::Flat($Cap.Bmp, $bl.X, $bl.Y, $bl.W, $bl.H)
         $sg = [ContrastSampler]::Flat($Cap.Bmp, $gl.X, $gl.Y, $gl.W, $gl.H)
-        if (-not $si.Ok -or -not $sg.Ok) { continue }
+        if (-not $si.Ok -or -not $sg.Ok) {
+            $why = if (-not $si.Ok) { $si.Why } else { $sg.Why }
+            $skips.Add("${name}: sampler refused ($why)")
+            continue
+        }
         $ratio = [ContrastMath]::Ratio($si.BgR, $si.BgG, $si.BgB, $sg.BgR, $sg.BgG, $sg.BgB)
         $declared = '#{0:X6}' -f ([uint32]($stroke.argb -band 0xFFFFFF))
         Add-Row $Leg $Surface 'glyph' $ratio $si.BgHex $sg.BgHex `
             ("the {0} edge of the selection stroke against the strip beside it; the strip declares {1}" -f $name, $declared)
         return
     }
-    Add-Unmeasured $Leg $Surface 'every stroked edge sits against the capture rim, so no ground band had room'
+    Add-Unmeasured $Leg $Surface ("no stroked edge was measurable: " + ($skips -join '; '))
 }
 
 # ---- the legs --------------------------------------------------------------

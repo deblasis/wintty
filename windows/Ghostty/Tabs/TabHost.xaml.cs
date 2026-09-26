@@ -234,14 +234,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     /// <summary>
     /// The selection stroke as the strip is holding it right now. The band
-    /// is the template's own selected-border element ("SelectedBorder"),
+    /// is the template's own stroke-carrying element ("TabContainer"),
     /// NOT the TabViewItem: the item is padded well past the stroke, and a
     /// band taken off the item would sample that padding and score the
     /// stroke against itself (#931's "the drawn band, not the row"). The
     /// colour is the brush actually pushed into the item's
-    /// TabViewSelectedItemBorderBrush resource, and the thicknesses are
-    /// that element's live BorderThickness -- the template's selected state
-    /// read back rather than re-derived.
+    /// TabViewSelectedItemBorderBrush resource -- the template themes
+    /// TabContainer.BorderBrush from that key (XBF strings in
+    /// Microsoft.UI.Xaml.Controls.pri) -- and the thicknesses are that
+    /// element's live BorderThickness, the template's selected state read
+    /// back rather than re-derived.
     ///
     /// Read off the tree rather than kept in a field on purpose: a chrome
     /// pass that stops pushing the brush, or a template change that moves
@@ -260,7 +262,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             || !item.Resources.TryGetValue(
                 "TabViewSelectedItemBorderBrush", out var pushed)
             || pushed is not SolidColorBrush ink
-            || FindDescendantByName(item, "SelectedBorder") is not Border band)
+            || FindDescendantByName(item, "TabContainer") is not Border band)
             return default;
         var c = ink.Color;
         return new TabSelectionStroke(

@@ -27,7 +27,7 @@ namespace Ghostty.Tests.Wiring;
 /// What these can catch: the vertical readout detached from the live
 /// border, the horizontal readout's key drifting from the chrome pass's
 /// push (so the seam reads a brush nothing pushes), the band reverting to
-/// the padded item instead of the template's SelectedBorder, the stroke
+/// the padded item instead of the template's TabContainer, the stroke
 /// push escaping its selected-only guard, layout-frame losing the stroke
 /// for one host or gaining settle side effects mid-leg.
 ///
@@ -140,11 +140,12 @@ public class SelectionStrokeSeamWiringTests
         var getter = host.Method("TestSeamSelectionStroke").ToString();
         Assert.Contains($"\"{key}\"", getter);
 
-        // The band is the template's SelectedBorder, not the item: the item
-        // is padded well past the stroke, and a band taken off the item
-        // samples that padding and scores the stroke against itself.
+        // The band is the template's TabContainer (the stroke-carrying
+        // element the template themes from the pushed key), not the item:
+        // the item is padded well past the stroke, and a band taken off the
+        // item samples that padding and scores the stroke against itself.
         Assert.Contains("FindDescendantByName", getter);
-        Assert.Contains("\"SelectedBorder\"", getter);
+        Assert.Contains("\"TabContainer\"", getter);
     }
 
     /// <summary>
