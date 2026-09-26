@@ -88,7 +88,7 @@ internal sealed partial class QuickTerminalSlideAnimator : IDisposable
 
     private void Run(QuickTerminalPosition position, double width, double height, TimeSpan duration, bool appearing, Action? onCompleted)
     {
-        if (!Ghostty.Services.SystemAnimations.Enabled())
+        if (!Ghostty.Services.SystemAnimations.Enabled(Ghostty.Motion.MotionSurfaceClass.Overlay))
         {
             // Reduce-motion cut: the reveal IS the animation, so without
             // it the run is its end state and its completion. SnapToShown

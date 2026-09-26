@@ -13,6 +13,7 @@ namespace Ghostty.Tests.Tabs;
 /// the composition wiring it feeds is in the strips and the
 /// SendInput-level harness is the noted follow-up.
 /// </summary>
+[Collection("PaneMotionSerial")]
 public class TabDragReorderTests
 {
     // Four rows of 40px: arranged centers 20, 60, 100, 140.

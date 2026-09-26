@@ -25,6 +25,7 @@ namespace Ghostty.Tests.Motion;
 /// surface reds here while a moved or unguarded call site reds there.
 /// Neither file is a witness on its own.
 /// </summary>
+[Collection("PaneMotionSerial")]
 public sealed class PaneMotionLifecycleDispatchTests
 {
     private sealed class RecordingCoordinator : IPaneMotionCoordinator
