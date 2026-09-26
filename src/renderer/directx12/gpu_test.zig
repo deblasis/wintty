@@ -1052,6 +1052,18 @@ test "Device: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
     try std.testing.expect(!com.FAILED(hr));
     try std.testing.expectEqual(dxgi.DXGI_SCALING.STRETCH, desc.Scaling);
     try std.testing.expectEqual(dxgi.DXGI_ALPHA_MODE.PREMULTIPLIED, desc.AlphaMode);
+
+    // The factory2 creation path is the paced one: the TRUE waitable
+    // flag (0x40, dxgi.h; 16 is RESTRICT_SHARED_RESOURCE_DRIVER) must
+    // be accepted here and must yield a live waitable. This is the
+    // measured half of the legality split in Device.composition
+    // SwapChainDesc's doc; if the constant or the entry point ever
+    // regresses, this fails rather than letting pacing go silently
+    // dead behind warn-guarded calls.
+    try std.testing.expectEqual(@as(u32, 0x40), device.swap_chain_flags);
+    try std.testing.expectEqual(@as(u32, 0x40), desc.Flags);
+    try std.testing.expect(device.swap_chain2 != null);
+    try std.testing.expect(device.frame_latency_waitable != null);
 }
 
 test "Device: shared texture mode has no swap chain or dcomp" {
@@ -1743,6 +1755,13 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
 
     try std.testing.expectEqual(handle, second.swap_chain_surface_handle.?);
     try std.testing.expect(!com.FAILED(second.device.GetDeviceRemovedReason()));
+
+    // The panel path is the unpaced one: no creation flags at all, and
+    // therefore no frame-latency waitable. Pinning both here is what
+    // keeps a future "just enable pacing on the panel too" from
+    // shipping a chain this entry point rejects.
+    try std.testing.expectEqual(@as(u32, 0), second.swap_chain_flags);
+    try std.testing.expect(second.frame_latency_waitable == null);
 
     // The proof is a Present into the reused surface from the new device.
     const sc = second.swap_chain orelse return error.NoSwapChain;

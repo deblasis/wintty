@@ -1241,6 +1241,16 @@ pub const Surface = struct {
             .y = @floatCast(y_scaled),
         };
 
+        // The renderer keeps its own copy of the scale for its swap
+        // chain presentation state (DX12's counter-transform for the
+        // XAML panel scale). Store it whether or not the core callback
+        // below succeeds; it is applied on the render thread at the
+        // next frame the scale changed for.
+        self.core_surface.renderer.setContentScale(
+            self.content_scale.x,
+            self.content_scale.y,
+        );
+
         self.core_surface.contentScaleCallback(self.content_scale) catch |err| {
             log.err("error in content scale callback err={}", .{err});
             return;
@@ -3007,11 +3017,14 @@ pub const CAPI = struct {
         // the window size via GetClientRect. Forward the desired dimensions
         // so the resize detection loop in beginFrame picks up the change.
         surface.core_surface.renderer.setTargetSize(w, h);
-        // Wake the renderer thread so it applies the new size in
-        // beginFrame without waiting for the ~8ms draw-timer tick.
-        // Single futex op, safe from any thread. The 120Hz draw timer
-        // is the backstop if the wakeup is coalesced.
+        // Two wakes, two classes. The coalescing `wakeup` drains the
+        // mailbox (the reflow round trip) and renders; the non-coalescing
+        // `resize_now` forces the frame that applies the new swap chain
+        // size (a pending resize is itself a redraw reason) and arms the
+        // one-shot 8 ms backstop that re-checks it. Both are safe from
+        // any thread.
         surface.core_surface.renderer_thread.wakeup.notify() catch {};
+        surface.core_surface.renderer_thread.resize_now.notify() catch {};
     }
 
     /// Return the size information a surface has.

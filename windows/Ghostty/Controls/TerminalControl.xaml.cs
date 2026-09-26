@@ -989,11 +989,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         ApplyGutterBrush();
     }
 
-    // Last gutter colour written to SurfaceRoot, so a repaint that
-    // resolves to the same value neither allocates a brush nor dirties
-    // the pane's visual. Reloads are frequent (Ctrl+Shift+Wheel walks
-    // background-opacity one step per notch) and every leaf of every tab
-    // is repainted on each one, plus every leaf repaints on attach.
+    // Last gutter colour written to SurfaceRoot, so a repaint
+    // that resolves to the same value neither allocates a brush nor
+    // dirties the pane's visual. Reloads are frequent (Ctrl+Shift+Wheel
+    // walks background-opacity one step per notch) and every leaf of
+    // every tab is repainted on each one, plus every leaf repaints on
+    // attach.
     private uint? _lastGutterArgb;
 
     /// <summary>
@@ -1001,6 +1002,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// the control is built, on every attach, and by MainWindow on a
     /// config reload -- the three ways this leaf's fill can fall behind
     /// the surface it abuts.
+    ///
+    /// This fill covers the gutter around the panel, not the band a
+    /// resize exposes inside it. That band cannot be painted from here:
+    /// SwapChainPanel throws on the Background setter ("Setting
+    /// 'Background' property is not supported on SwapChainPanel",
+    /// COMException 0x80004005, measured as a startup crash 0xC000027B
+    /// during the rc.8 resize-flash work), so what the panel shows
+    /// beyond the presented chain content is addressed on the renderer
+    /// side, through the swap chain's own background color.
     /// </summary>
     internal void ApplyGutterBrush()
     {
@@ -1746,12 +1756,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             Panel.CompositionScaleX, Panel.CompositionScaleY);
 
         // Fire-and-forget. ghostty_surface_set_size records the desired
-        // dimensions in an atomic and wakes the renderer thread; the
-        // next beginFrame on that thread (within one wakeup hop or, at
-        // worst, one ~8 ms draw-timer tick) compares desired_size to
-        // applied_width/height and calls ResizeBuffers before the next
-        // Present. We never block here, never touch draw_mutex, and
-        // never do GPU work on the UI thread.
+        // dimensions in an atomic and wakes the renderer thread twice:
+        // the coalescing wakeup drains the mailbox and renders, and the
+        // non-coalescing resize wake forces the frame that applies the
+        // resize (a pending resize is itself a redraw reason) while
+        // arming a one-shot 8 ms backstop that re-checks it. We never
+        // block here, never touch draw_mutex, and never do GPU work on
+        // the UI thread.
         NativeMethods.SurfaceSetSize(_surface, w, h);
     }
 

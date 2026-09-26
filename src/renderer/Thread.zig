@@ -58,6 +58,16 @@ animation_wake: rendererpkg.Renderer.AnimationWake.Kind = .draw,
 draw_now: xev.Async,
 draw_now_c: xev.Completion = .{},
 
+/// Dedicated wake for a resize. `wakeup` coalesces, and the frame it
+/// forces may decide nothing needs drawing; a resize must ride neither
+/// of those. ghostty_surface_set_size notifies this alongside the
+/// wakeup: every notify forces one full render pass (the frame that
+/// applies the new swap chain size -- a pending resize is itself a
+/// redraw reason in drawFrameLocked), and arms the one-shot backstop
+/// below.
+resize_now: xev.Async,
+resize_now_c: xev.Completion = .{},
+
 /// The timer used for cursor blinking
 cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
@@ -79,6 +89,23 @@ cursor_c_cancel: xev.Completion = .{},
 /// mailbox drain and a cheap dirty peek.
 safety_net_h: xev.Timer,
 safety_net_c: xev.Completion = .{},
+
+/// One-shot backstop for a resize wake that drew yet still left the
+/// swap chain un-resized (a failed ResizeBuffers, a device rebuild in
+/// flight). Armed -- moved, on a burst of resizes -- by every resize
+/// wake; the callback draws once more if a resize is still pending and
+/// disarms. No re-arm loop: a permanently-failing resize must not spin
+/// at 8 ms, and later resize wakes re-arm this. What it does NOT cover:
+/// a resize_now notify lost in the IOCP re-arm window (#1036 family)
+/// never reaches this timer either, because arming happens inside the
+/// callback that lost it -- that case is covered by the parallel
+/// coalescing wakeup and by the pending-resize redraw term on any later
+/// wake, not by this timer. The 2 s safety net above helps only when
+/// the terminal is also dirty (its draw gates on hasPendingFrame), so a
+/// stranded resize on a clean terminal waits for the next wake.
+resize_backstop_h: xev.Timer,
+resize_backstop_c: xev.Completion = .{},
+resize_backstop_cancel: xev.Completion = .{},
 
 /// Incremental scrollback compression scheduling.
 compression: Compression = undefined,
@@ -164,6 +191,12 @@ pub fn init(
     var draw_now = try xev.Async.init();
     errdefer draw_now.deinit();
 
+    // The dedicated resize wake and its one-shot backstop, see comments.
+    var resize_now = try xev.Async.init();
+    errdefer resize_now.deinit();
+    var resize_backstop_timer = try xev.Timer.init();
+    errdefer resize_backstop_timer.deinit();
+
     // Setup a timer for blinking the cursor
     var cursor_timer = try xev.Timer.init();
     errdefer cursor_timer.deinit();
@@ -184,8 +217,10 @@ pub fn init(
         .stop = stop_h,
         .render_h = render_h,
         .draw_now = draw_now,
+        .resize_now = resize_now,
         .cursor_h = cursor_timer,
         .safety_net_h = safety_net_timer,
+        .resize_backstop_h = resize_backstop_timer,
         .surface = surface,
         .renderer = renderer_impl,
         .state = state,
@@ -208,8 +243,10 @@ pub fn deinit(self: *Thread) void {
     self.wakeup.deinit();
     self.render_h.deinit();
     self.draw_now.deinit();
+    self.resize_now.deinit();
     self.cursor_h.deinit();
     self.safety_net_h.deinit();
+    self.resize_backstop_h.deinit();
     if (comptime terminalpkg.compression_enabled)
         self.compression.deinit();
     self.loop.deinit();
@@ -262,6 +299,7 @@ fn threadMain_(self: *Thread) !void {
     self.wakeup.wait(&self.loop, &self.wakeup_c, Thread, self, wakeupCallback);
     self.stop.wait(&self.loop, &self.stop_c, Thread, self, stopCallback);
     self.draw_now.wait(&self.loop, &self.draw_now_c, Thread, self, drawNowCallback);
+    self.resize_now.wait(&self.loop, &self.resize_now_c, Thread, self, resizeNowCallback);
 
     // Send an initial wakeup message so that we render right away.
     try self.wakeup.notify();
@@ -625,6 +663,79 @@ fn drawNowCallback(
     t.armAnimationTimer();
 
     return .rearm;
+}
+
+/// How long a resize wake's backstop waits before re-checking. Roughly
+/// one frame at 120 Hz: long enough that a normal applying frame (which
+/// composes on the next vblank) has had its chance, short enough that a
+/// stalled resize stays bounded far under the 2 s safety net.
+const resize_backstop_ms: u64 = 8;
+
+fn resizeNowCallback(
+    self_: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Async.WaitError!void,
+) xev.CallbackAction {
+    _ = r catch |err| {
+        log.err("error in resize now err={}", .{err});
+        return .rearm;
+    };
+
+    const t = self_.?;
+
+    // Drain first, so a `.resize` mailbox message racing this wake sets
+    // the renderer's screen size before the draw. Then force the full
+    // render pass: the pending-resize term in drawFrameLocked makes this
+    // the frame that resizes the swap chain, whichever order the race
+    // resolved in.
+    t.drainMailbox() catch |err|
+        log.err("error draining mailbox (resize) err={}", .{err});
+    if (t.flags.visible) {
+        _ = renderCallback(t, undefined, undefined, {});
+    }
+
+    // Arm (or move) the one-shot backstop.
+    t.armResizeBackstop();
+
+    return .rearm;
+}
+
+/// Arm the resize backstop, or move its deadline if a previous resize
+/// already armed it (the Timer.reset idiom: a burst of resize events
+/// keeps one backstop, due 8 ms after the last one).
+fn armResizeBackstop(self: *Thread) void {
+    self.resize_backstop_h.reset(
+        &self.loop,
+        &self.resize_backstop_c,
+        &self.resize_backstop_cancel,
+        resize_backstop_ms,
+        Thread,
+        self,
+        resizeBackstopCallback,
+    );
+}
+
+fn resizeBackstopCallback(
+    self_: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch |err| switch (err) {
+        // A reset supersedes this run; the replacement timer carries on.
+        error.Canceled => return .disarm,
+        else => unreachable,
+    };
+    const t = self_ orelse return .disarm;
+
+    // One re-check, then disarm either way (no 8 ms spin on a resize
+    // that keeps failing: later resize wakes re-arm this, and the
+    // safety net applies a still-pending resize on its next tick).
+    if (t.flags.visible and t.renderer.hasPendingResize()) {
+        _ = renderCallback(t, undefined, undefined, {});
+    }
+    return .disarm;
 }
 
 fn renderCallback(

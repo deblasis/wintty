@@ -200,6 +200,30 @@ retirement: *Retirement,
 
 swap_chain: ?*dxgi.IDXGISwapChain1,
 
+/// The DXGI_SWAP_CHAIN_FLAG_* bits `swap_chain` was created with. A
+/// ResizeBuffers call must pass the same set or DXGI rejects it with
+/// DXGI_ERROR_INVALID_CALL, so DirectX12.resizeSwapChain reads this
+/// instead of recomputing a flag list that could drift from creation
+/// (it did drift, twice, during the rc.8 prototype: creation carried a
+/// flag the panel path's entry point rejects, and the whole surface
+/// never came up -- see compositionSwapChainDesc).
+swap_chain_flags: u32 = 0,
+
+/// QueryInterface of `swap_chain` for the IDXGISwapChain2 surface:
+/// frame-latency waitable, maximum frame latency, matrix transform.
+/// Owned by Device (Release in deinit), acquired in init and re-acquired
+/// on every swap chain recreation (TDR recovery goes back through
+/// Device.init). Null when there is no swap chain or the QI fails, in
+/// which case the renderer runs un-paced and un-transformed, as before.
+swap_chain2: ?*dxgi.IDXGISwapChain2 = null,
+
+/// The frame-latency waitable from GetFrameLatencyWaitableObject. NOT
+/// owned: the swap chain closes it, so it lives and dies with the swap
+/// chain object and must be re-read whenever the swap chain is created.
+/// The renderer waits it at most once per Present (auto-reset event;
+/// see DirectX12.beginFrame).
+frame_latency_waitable: ?std.os.windows.HANDLE = null,
+
 /// DirectComposition surface handle backing the swap chain in
 /// SwapChainPanel mode. Owned by Device: created in init, closed in
 /// deinit. The embedder retrieves it via
@@ -469,6 +493,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
 
     // -- Swap chain + composition (surface-dependent) --
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
+    var swap_chain_flags: u32 = 0;
     var swap_chain_surface_handle: ?std.os.windows.HANDLE = null;
     var dcomp_device_ptr: ?*dcomp.IDCompositionDevice = null;
     var dcomp_target_ptr: ?*dcomp.IDCompositionTarget = null;
@@ -479,12 +504,14 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         .hwnd => |hwnd| {
             // HWND surface: composition swap chain + DirectComposition.
             // DX12 command queues implement IUnknown, which DXGI needs.
-            swap_chain = try createCompositionSwapChain(
+            const result = try createCompositionSwapChain(
                 factory.?,
                 command_queue.?,
                 opts.width,
                 opts.height,
             );
+            swap_chain = result.swap_chain;
+            swap_chain_flags = result.flags;
             errdefer _ = swap_chain.?.Release();
 
             // Wire up DirectComposition: device -> target -> visual -> swap chain.
@@ -529,6 +556,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
                 opts.surface_handle,
             );
             swap_chain = result.swap_chain;
+            swap_chain_flags = result.flags;
             swap_chain_surface_handle = result.handle;
         },
         .composition => {
@@ -536,12 +564,14 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
             // it to a panel or HWND. The embedder retrieves the pointer
             // via ghostty_surface_get_swap_chain and binds it to a
             // Windows.UI.Composition visual for per-pixel alpha.
-            swap_chain = try createCompositionSwapChain(
+            const result = try createCompositionSwapChain(
                 factory.?,
                 command_queue.?,
                 opts.width,
                 opts.height,
             );
+            swap_chain = result.swap_chain;
+            swap_chain_flags = result.flags;
             errdefer _ = swap_chain.?.Release();
         },
         .shared_texture => |cfg| {
@@ -572,6 +602,54 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         _ = st.resource.Release();
     };
 
+    // Frame-latency pacing, where the swap chain was created paced: QI
+    // the IDXGISwapChain2 surface (also wanted unpaced, for the matrix
+    // transform), cap the queue at one in-flight frame, and take the
+    // waitable the renderer waits before each frame. Only chains created
+    // with the waitable flag accept SetMaximumFrameLatency and expose a
+    // waitable; the panel path's chain is created unpaced (its creation
+    // entry point rejects the flag -- see compositionSwapChainDesc), so
+    // there pacing is Present(1,0)'s own vblank block and this block
+    // only supplies the swap_chain2 pointer. The waitable is re-read on
+    // every swap chain creation, which is what makes the TDR-recovery
+    // path (deinitGpu + initGpu) get a live one instead of the dead
+    // swap chain's handle. A QI failure logs and degrades to the
+    // previous behavior rather than failing surface creation:
+    // IDXGISwapChain2 has shipped since Windows 8.1, so this is
+    // belt-and-braces, not an expected path.
+    const paced = (swap_chain_flags &
+        dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) != 0;
+    var swap_chain2: ?*dxgi.IDXGISwapChain2 = null;
+    var frame_latency_waitable: ?std.os.windows.HANDLE = null;
+    if (swap_chain) |sc| {
+        const hr = sc.vtable.QueryInterface(
+            @ptrCast(sc),
+            &dxgi.IDXGISwapChain2.IID,
+            @ptrCast(&swap_chain2),
+        );
+        if (FAILED(hr)) {
+            log.warn(
+                "QueryInterface for IDXGISwapChain2 failed: 0x{x}; no matrix transform or pacing",
+                .{@as(u32, @bitCast(hr))},
+            );
+        } else {
+            errdefer _ = swap_chain2.?.Release();
+            if (paced) {
+                const latency_hr = swap_chain2.?.SetMaximumFrameLatency(1);
+                if (FAILED(latency_hr)) {
+                    log.warn(
+                        "SetMaximumFrameLatency(1) failed: 0x{x}",
+                        .{@as(u32, @bitCast(latency_hr))},
+                    );
+                }
+                frame_latency_waitable = swap_chain2.?.GetFrameLatencyWaitableObject();
+                if (frame_latency_waitable == null) {
+                    log.warn("GetFrameLatencyWaitableObject returned null", .{});
+                }
+            }
+        }
+    }
+
     // Deferred-release queue. Backed by the C allocator because Device.init
     // takes no allocator and the buffers/textures that retire into it also
     // reach it from value-receiver deinits.
@@ -587,6 +665,9 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         .fence_value = std.atomic.Value(u64).init(0),
         .fence_event = fence_event,
         .swap_chain = swap_chain,
+        .swap_chain_flags = swap_chain_flags,
+        .swap_chain2 = swap_chain2,
+        .frame_latency_waitable = frame_latency_waitable,
         .swap_chain_surface_handle = swap_chain_surface_handle,
         .dcomp_device = dcomp_device_ptr,
         .dcomp_target = dcomp_target_ptr,
@@ -647,6 +728,10 @@ pub fn deinit(self: *Device) void {
     if (self.dcomp_visual) |v| _ = v.Release();
     if (self.dcomp_target) |t| _ = t.Release();
     if (self.dcomp_device) |d| _ = d.Release();
+    // swap_chain2 first: it is a QI of swap_chain, and releasing the
+    // underlying object through either pointer is the same final release.
+    // frame_latency_waitable needs no close: the swap chain owns it.
+    if (self.swap_chain2) |sc2| _ = sc2.Release();
     if (self.swap_chain) |sc| _ = sc.Release();
     // Close the composition surface handle after releasing the swap
     // chain that presents into it.
@@ -784,7 +869,26 @@ fn enableDebugLayer() void {
 
 /// Build the swap-chain description shared by every composition path
 /// (HWND, SwapChainPanel via surface handle, and bare composition).
-fn compositionSwapChainDesc(width: u32, height: u32) dxgi.DXGI_SWAP_CHAIN_DESC1 {
+///
+/// `paced` selects the frame-latency waitable flag, and legality decides
+/// it, not preference: IDXGIFactoryMedia::CreateSwapChainForComposition
+/// SurfaceHandle -- the only entry point that can target a DComposition
+/// surface handle, i.e. the app's production SwapChainPanel binding --
+/// was measured rejecting a nonzero Flags value with
+/// DXGI_ERROR_INVALID_CALL (0x887a0001): every creation retry failed
+/// under both scaling values until Flags went to 0, an app that never
+/// rendered and an empty window. Honesty note on that measurement: it
+/// was taken while the flag constant in dxgi.zig carried 16, which the
+/// SDK calls RESTRICT_SHARED_RESOURCE_DRIVER, not the waitable 64 -- so
+/// what is directly measured is "this entry point rejects that nonzero
+/// flag", and the panel path staying unpaced (Flags = 0) is the
+/// conservative reading that holds under either value.
+/// IDXGIFactory2::CreateSwapChainForComposition accepting the true
+/// waitable flag rests on the Windows Terminal precedent and the DXGI
+/// docs, not on a run in this tree. Callers must pass the
+/// same flag decision to every ResizeBuffers on the chain they built
+/// (Device carries it in swap_chain_flags for exactly that).
+fn compositionSwapChainDesc(width: u32, height: u32, paced: bool) dxgi.DXGI_SWAP_CHAIN_DESC1 {
     // DXGI rejects 0-dimension swap chains.
     const actual_width = @max(width, 1);
     const actual_height = @max(height, 1);
@@ -797,16 +901,25 @@ fn compositionSwapChainDesc(width: u32, height: u32) dxgi.DXGI_SWAP_CHAIN_DESC1 
         .SampleDesc = .{ .Count = 1, .Quality = 0 },
         .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
         .BufferCount = frame_count,
-        // STRETCH causes DirectComposition to interpolate stale content
-        // into the bigger area for one frame, which is preferable to
-        // the black bar NONE produces with the
-        // CreateSwapChainForComposition path. The bounded one-frame
-        // stretch artifact is acceptable: setTargetSize wakes the
-        // renderer thread immediately, and the 120 Hz draw timer is a
-        // backstop, so the renderer typically converges within one
-        // frame. If the renderer thread ever stalls (TDR recovery, slow
-        // GPU) the stretch becomes a visible smear -- accept that as a
-        // graceful degradation rather than a black bar.
+        // STRETCH, and it must stay STRETCH: DXGI_SCALING_NONE is valid
+        // only for CreateSwapChainForHwnd swap chains. Every chain this
+        // desc builds is a composition chain (panel via surface handle,
+        // bare composition, hwnd-hosted-via-DComp), and DXGI rejects
+        // NONE at creation with DXGI_ERROR_INVALID_CALL (0x887a0001) --
+        // measured: 132 consecutive creation failures, an app that never
+        // rendered, and an empty window on screen. The preceding
+        // investigation's Phase A attribution (STRETCH magnifying stale
+        // content during a resize) is wrong at this layer: filmed
+        // resizes show the stale frame 1:1 top-left with the exposed
+        // strip BLACK, never stretched. The strip is the SwapChainPanel
+        // area the chain content does not cover; what fills it is
+        // addressed by the swap chain background color
+        // (DirectX12.setBackgroundColor) and the panel host, not by
+        // this field. XAML's panel applies its own display scale to a
+        // handle-bound swap chain; the counter-transform that undoes it
+        // (SetMatrixTransform 1/scale, the Windows Terminal
+        // AtlasEngine pattern) is applied by DirectX12 alongside the
+        // background color.
         .Scaling = .STRETCH,
         // FLIP_SEQUENTIAL is required for premultiplied alpha to
         // composite correctly through SwapChainPanel. FLIP_DISCARD
@@ -814,7 +927,16 @@ fn compositionSwapChainDesc(width: u32, height: u32) dxgi.DXGI_SWAP_CHAIN_DESC1 
         // premultiplied alpha compositing through DWM.
         .SwapEffect = .FLIP_SEQUENTIAL,
         .AlphaMode = .PREMULTIPLIED,
-        .Flags = 0,
+        // The frame-latency waitable caps the present queue (paired
+        // with SetMaximumFrameLatency(1) and a wait before each frame)
+        // on the paths whose creation entry point accepts the flag, so
+        // a new-size frame composes on the first vblank after its
+        // Present instead of behind up to two stale frames. Only legal
+        // with the factory2 creation path -- see the function comment.
+        .Flags = if (paced)
+            dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+        else
+            0,
     };
 }
 
@@ -823,8 +945,9 @@ fn createCompositionSwapChain(
     queue: *d3d12.ID3D12CommandQueue,
     width: u32,
     height: u32,
-) !*dxgi.IDXGISwapChain1 {
-    const desc = compositionSwapChainDesc(width, height);
+) !CompositionSwapChain {
+    // Factory2 composition creation accepts the waitable flag.
+    const desc = compositionSwapChainDesc(width, height, true);
 
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
     // DX12 passes the command queue (not the device) to swap chain creation.
@@ -838,12 +961,21 @@ fn createCompositionSwapChain(
         log.err("CreateSwapChainForComposition failed: 0x{x}", .{@as(u32, @bitCast(hr))});
         return error.SwapChainCreationFailed;
     }
-    return swap_chain.?;
+    return .{ .swap_chain = swap_chain.?, .flags = desc.Flags };
 }
+
+/// A swap chain plus the DXGI flags it was created with, so every later
+/// ResizeBuffers on it can repeat them (DXGI_ERROR_INVALID_CALL on a
+/// mismatch). See compositionSwapChainDesc for how `flags` is decided.
+const CompositionSwapChain = struct {
+    swap_chain: *dxgi.IDXGISwapChain1,
+    flags: u32,
+};
 
 const SurfaceHandleSwapChain = struct {
     swap_chain: *dxgi.IDXGISwapChain1,
     handle: std.os.windows.HANDLE,
+    flags: u32,
 };
 
 /// Create a composition swap chain bound to a DirectComposition surface
@@ -899,7 +1031,11 @@ fn createSurfaceHandleSwapChain(
         _ = d3d12.CloseHandle(handle);
     };
 
-    const desc = compositionSwapChainDesc(width, height);
+    // Unpaced, and it must stay that way: this entry point rejects the
+    // frame-latency waitable flag (see compositionSwapChainDesc). Every
+    // FAILED(hr) here used to be preceded by two full sessions of
+    // 0x887a0001 retried every 500ms before the flag was isolated.
+    const desc = compositionSwapChainDesc(width, height, false);
 
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
     // DX12 passes the command queue (not the device) to swap chain creation.
@@ -915,7 +1051,7 @@ fn createSurfaceHandleSwapChain(
         return error.SwapChainCreationFailed;
     }
 
-    return .{ .swap_chain = swap_chain.?, .handle = handle };
+    return .{ .swap_chain = swap_chain.?, .handle = handle, .flags = desc.Flags };
 }
 
 fn createDCompDevice() !*dcomp.IDCompositionDevice {
@@ -978,6 +1114,44 @@ test "Device struct fields" {
     try std.testing.expect(@hasField(Device, "fence_value"));
     try std.testing.expect(@hasField(Device, "fence_event"));
     try std.testing.expect(@hasField(Device, "swap_chain"));
+    try std.testing.expect(@hasField(Device, "swap_chain_flags"));
+    try std.testing.expect(@hasField(Device, "swap_chain2"));
+    try std.testing.expect(@hasField(Device, "frame_latency_waitable"));
+}
+
+test "composition swap chain desc: STRETCH scaling, flag legality" {
+    // Pinned where they are set. STRETCH is not a style choice: every
+    // chain this desc builds is a composition chain, and DXGI rejects
+    // DXGI_SCALING_NONE at creation with DXGI_ERROR_INVALID_CALL
+    // (0x887a0001, measured on this app's panel path: the surface never
+    // initialized). The waitable flag is decided by the CREATION ENTRY
+    // POINT, not preference: legal on CreateSwapChainForComposition,
+    // rejected (same 0x887a0001, also measured) by the
+    // CreateSwapChainForCompositionSurfaceHandle path the SwapChainPanel
+    // binding must use. If either half regresses, the app either fails
+    // to create its swap chain or paces a chain that has no waitable.
+    const paced = compositionSwapChainDesc(640, 480, true);
+    try std.testing.expectEqual(dxgi.DXGI_SCALING.STRETCH, paced.Scaling);
+    try std.testing.expectEqual(
+        dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+        paced.Flags,
+    );
+    // The literals are load-bearing: an earlier draft of the dxgi.zig
+    // constant carried 16 (the SDK's RESTRICT_SHARED_RESOURCE_DRIVER),
+    // every pacing call then failed silently, and a test comparing the
+    // constant against itself stayed green the whole time. Pin the ABI
+    // value (dxgi.h, 10.0.26100.0) so that cannot recur.
+    try std.testing.expectEqual(@as(u32, 0x40), paced.Flags);
+    try std.testing.expectEqual(
+        @as(u32, 0x40),
+        dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+    );
+    try std.testing.expectEqual(frame_count, paced.BufferCount);
+    try std.testing.expectEqual(dxgi.DXGI_ALPHA_MODE.PREMULTIPLIED, paced.AlphaMode);
+
+    const unpaced = compositionSwapChainDesc(640, 480, false);
+    try std.testing.expectEqual(@as(u32, 0), unpaced.Flags);
+    try std.testing.expectEqual(dxgi.DXGI_SCALING.STRETCH, unpaced.Scaling);
 }
 
 test "frame_count is 3" {
