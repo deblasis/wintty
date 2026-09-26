@@ -855,7 +855,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         {
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 4, 0),
-            Opacity = 0.7,
+            // No element opacity on top of the chip's ink. The ink from
+            // TabColorPalette.ForegroundRgb is chosen to clear its floor as
+            // drawn; 0.7 of it composites down to ~70% strength, which
+            // measured 3.55:1 on stock-light against a 4.5 floor (#936).
         };
         var chevron = new FontIcon
         {
@@ -3822,19 +3825,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// Scored by ThemeResolution at the ink's own alpha rather than by
     /// PreferLightForeground, because 70% ink is a blend of the pole and the
     /// ground and the pole that wins opaque is not always the pole that wins
-    /// blended.
+    /// blended. The alpha comes back from the same scoring: at a fixed 70%
+    /// the better pole tops out near 4.4:1 on the mid greys a translucent
+    /// strip renders on a light desktop, so the muting ladder steps up until
+    /// the floor is cleared (#936).
     /// </summary>
     private void RefreshShellInactiveInk()
     {
-        // Nothing to calibrate off the palette path: there the unselected
-        // titles are left on the element theme's own foreground.
+        // Nothing to calibrate off the palette path: RecolorTabText carries
+        // the default path's own calibrated answer.
         if (_shellActiveTextBrush is null) return;
 
         _stripBackdropPacked = _chromeFillRgb ?? _chromeGroundPacked;
-        _shellInactiveTextBrush = new SolidColorBrush(
-            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
-                ? Windows.UI.Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
-                : Windows.UI.Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
+        _shellInactiveTextBrush = MutedInkBrush(_stripBackdropPacked);
         RecolorTabText();
         // The field's wash and its terminals are scored against the
         // same ground this just moved, so they re-ask here rather than
@@ -3942,9 +3945,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
     //
     // Shell theme off (default): only the active tab sits on the terminal
     // background fill (SetSelectedTabColors paints the selected-tab
-    // background). Give that one title the contrast-safe brush; leave the
-    // others on the inherited theme foreground (white on the default dark,
-    // unselected tab background).
+    // background). Give that one title the contrast-safe brush. The
+    // unselected titles take the same muted-ink answer the vertical strip
+    // recalibrates with: leaving them on the element theme's own foreground
+    // drew the theme's ink on a surface that theme has never heard of, and
+    // that measured 2.63:1 on stock-light against a 4.5 floor (#936).
     private void RecolorTabText()
     {
         bool shell = _shellActiveTextBrush is not null && _shellInactiveTextBrush is not null;
@@ -3978,10 +3983,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 tb.Foreground = _defaultActiveTextBrush;
                 SetHomeGlyphForeground(iconRow, _defaultActiveTextBrush);
             }
-            else
+            else if (active)
             {
+                // No measured fill yet (SetSelectedTabColors has not run):
+                // keep the theme's own foreground rather than mute the one
+                // active title.
                 tb.ClearValue(TextBlock.ForegroundProperty);
                 SetHomeGlyphForeground(iconRow, null);
+            }
+            else
+            {
+                var ink = MutedInkBrush(_stripBackdropPacked);
+                tb.Foreground = ink;
+                SetHomeGlyphForeground(iconRow, ink);
             }
         }
 
@@ -3995,6 +4009,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // ThemeResolution works in.
     private static uint PackColor(Windows.UI.Color c) =>
         ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
+    /// <summary>
+    /// The strip's muted-ink answer for a ground: the better pole at the
+    /// preferred alpha where that clears AA, else the muting ladder stepped
+    /// up until it does (#936). Both the shell path and the default path
+    /// draw their unselected titles from this one answer, so an under-floor
+    /// title is a wiring bug and not a second ink rule.
+    /// </summary>
+    private static SolidColorBrush MutedInkBrush(uint ground)
+    {
+        var ink = ThemeResolution.ReadableMutedForeground(ground, InactiveInkAlpha);
+        return new SolidColorBrush(Windows.UI.Color.FromArgb(ink.Alpha,
+            (byte)(ink.Pole >> 16), (byte)(ink.Pole >> 8), (byte)ink.Pole));
+    }
 
     private ElementTheme _cachedTheme = ElementTheme.Default;
 

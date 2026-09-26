@@ -9,23 +9,26 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// Unselected tab titles are drawn at 70% over the strip, so the pole they
-/// are drawn in has to be chosen against whatever the strip actually is. That
+/// Unselected tab titles are drawn muted over the strip, so the ink they are
+/// drawn in has to be chosen against whatever the strip actually is. That
 /// used to be the palette's tab-bar shade in every case, because the strip
 /// was always painted with it. It is not any more: a frosted or crystal frame
 /// leaves the strip bare so the backdrop shows through, and the shade the
 /// palette names is then a colour nothing renders.
 ///
-/// The arithmetic of the choice lives in Ghostty.Core and is tested there.
-/// These are the wiring: which surface the choice is made against, that both
-/// layouts are told the same one, and that every input which moves it
-/// re-asks. Whether the text is then legible is only observable on a live
-/// window, which is how this shipped in the first place.
+/// The arithmetic of the choice lives in Ghostty.Core
+/// (<c>ThemeResolution.ReadableMutedForeground</c>, the muting ladder) and is
+/// tested there. These are the wiring: which surface every draw is made
+/// against, that both layouts and both theme paths draw from the one answer,
+/// that the alpha the ink is painted at is the alpha it was scored at, and
+/// that every input which moves the ground re-asks. Whether the text is then
+/// legible is only observable on a live window, which is how the fixed-alpha
+/// rule shipped in the first place (#936).
 ///
 /// Written against the syntax rather than the text, so the mutations that
-/// matter fail: swapping the two poles, scoring against the wrong field, and
-/// dropping the recalibration from one of the pushes all keep every literal
-/// in place.
+/// matter fail: scoring against the wrong field, painting at a fixed alpha
+/// the ladder never scored, and dropping the recalibration from one of the
+/// pushes all keep every literal in place.
 /// </summary>
 public sealed class StripInkGroundWiringTests
 {
@@ -33,12 +36,13 @@ public sealed class StripInkGroundWiringTests
     private const string HorizontalStrip = "Tabs.TabHost.xaml.cs";
 
     /// <summary>
-    /// Each strip and the number of muted-ink sites it has: the vertical one
-    /// picks a pole on the palette path and again in the fallback, the
-    /// horizontal one only on the palette path.
+    /// Each strip and the number of muted-ink draws it has: the vertical one
+    /// draws on the palette path and again in its per-row fallback, the
+    /// horizontal one on the palette path and again for the default path's
+    /// unselected titles.
     ///
     /// The count is here rather than left to "at least one" because every
-    /// rule below walks the sites it finds. A rule that walks an empty list
+    /// rule below walks the draws it finds. A rule that walks an empty list
     /// passes for the same reason it would pass on the branch that has the
     /// bug, which pins nothing at all -- and the query going quiet is exactly
     /// what a rename of the helper does.
@@ -46,86 +50,111 @@ public sealed class StripInkGroundWiringTests
     public static TheoryData<string, int> BothStrips => new()
     {
         { VerticalStrip, 2 },
-        { HorizontalStrip, 1 },
+        { HorizontalStrip, 2 },
     };
 
     /// <summary>
-    /// Every place a pole is picked for the muted ink, found by the call that
-    /// picks it rather than by the method it sits in: a rule naming methods
-    /// would quietly stop covering a third site the day one appears.
+    /// Every place a strip draws its muted ink, found by the helper it calls
+    /// rather than by the method it sits in: a rule naming methods would
+    /// quietly stop covering a third site the day one appears.
     /// </summary>
-    private static List<ConditionalExpressionSyntax> InkPicks(string file, int expected)
+    private static List<InvocationExpressionSyntax> MutedInkDraws(string file, int expected)
     {
-        var picks = ShellSource.Load(file).Root.DescendantNodes()
-            .OfType<ConditionalExpressionSyntax>()
-            .Where(c => c.Condition is InvocationExpressionSyntax call
-                && call.CalleeText().EndsWith(
-                    "PreferLightForegroundAtAlpha", StringComparison.Ordinal))
+        var draws = ShellSource.Load(file).Root.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith(
+                "MutedInkBrush", StringComparison.Ordinal))
             .ToList();
 
         Assert.True(
-            picks.Count == expected,
-            $"expected {expected} muted-ink site(s) in {file}, found {picks.Count}");
-        return picks;
+            draws.Count == expected,
+            $"expected {expected} muted-ink draw(s) in {file}, found {draws.Count}");
+        return draws;
     }
 
     /// <summary>
-    /// The pole is scored against the strip's own ground field, at the same
-    /// alpha the ink is then painted with.
+    /// Every draw is made against the strip's own ground field.
     ///
-    /// Both arguments, because either one going stale reproduces the bug on
-    /// its own: the wrong ground is what shipped, and scoring an opaque pole
-    /// for ink that is 70% is the other half of the same mistake.
+    /// Reading anything else is the base branch's behaviour: the palette's
+    /// tab-bar shade cannot see a bare strip, and the terminal background is
+    /// the selected row's fill, a different surface.
     /// </summary>
     [Theory]
     [MemberData(nameof(BothStrips))]
-    public void ThePole_IsScoredAgainstTheStripGroundAtTheInkAlpha(string file, int sites)
+    public void TheMutedInk_IsDrawnAgainstTheStripGround(string file, int draws)
     {
-        foreach (var pick in InkPicks(file, sites))
-        {
-            var call = (InvocationExpressionSyntax)pick.Condition;
-            Assert.Equal("_stripBackdropPacked", call.Arg(0));
-            Assert.Equal("InactiveInkAlpha", call.Arg(1));
-        }
+        foreach (var draw in MutedInkDraws(file, draws))
+            Assert.Equal("_stripBackdropPacked", draw.Arg(0));
     }
 
     /// <summary>
-    /// White on true and black on false, and both at the alpha that was
-    /// scored. Swapping the branches inverts the fix into the bug on every
-    /// ground at once, and it compiles.
+    /// The answer is painted at the alpha it was scored at, in the pole it
+    /// was scored in.
+    ///
+    /// Both halves, because either one going stale reproduces the old bug in
+    /// a new coat: scoring an opaque pole for muted ink is the mistake the
+    /// first fix removed, and painting at a fixed alpha the ladder never
+    /// scored is how #936's mid-grey failures shipped -- the ink cleared 4.5
+    /// in the arithmetic that picked it and still rendered at 4.4.
     /// </summary>
     [Theory]
     [MemberData(nameof(BothStrips))]
-    public void ThePoles_AreNotSwapped_AndArePaintedAtTheAlphaTheyWereScoredAt(
-        string file, int sites)
+    public void TheAnswer_IsPaintedAtTheAlphaItWasScoredAt_InThePoleItWasScoredIn(
+        string file, int draws)
     {
-        foreach (var pick in InkPicks(file, sites))
-        {
-            AssertPole(pick.WhenTrue, "0xFF");
-            AssertPole(pick.WhenFalse, "0x00");
-        }
+        MutedInkDraws(file, draws); // the census, so an empty file cannot pass
 
-        static void AssertPole(ExpressionSyntax branch, string channel)
-        {
-            var call = branch.AssertCallTo("FromArgb");
-            Assert.Equal("InactiveInkAlpha", call.Arg(0));
-            Assert.Equal(new[] { channel, channel, channel },
-                new[] { call.Arg(1), call.Arg(2), call.Arg(3) });
-        }
+        var helper = ShellSource.Load(file).Method("MutedInkBrush");
+
+        var ask = helper.Call("ThemeResolution.ReadableMutedForeground");
+        Assert.Equal("ground", ask.Arg(0));
+        Assert.Equal("InactiveInkAlpha", ask.Arg(1));
+
+        var painted = Assert.Single(helper.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("FromArgb", StringComparison.Ordinal)));
+        Assert.Equal("ink.Alpha", painted.Arg(0));
+        Assert.Equal("(byte)(ink.Pole >> 16)", painted.Arg(1));
+        Assert.Equal("(byte)(ink.Pole >> 8)", painted.Arg(2));
+        Assert.Equal("(byte)ink.Pole", painted.Arg(3));
     }
 
     /// <summary>
-    /// Nothing in either strip still picks the muted ink off the opaque
-    /// luminance split. That helper answers for ink with no alpha in it, and
-    /// it is one identifier away from the one these sites want.
+    /// Nothing in either strip still scores the pole itself, at any alpha.
+    /// The scoring - pole, alpha, floor - lives in ThemeResolution now; a
+    /// strip that picks its own pole has a second ink rule, and a second ink
+    /// rule is how the two layouts drifted apart in the first place.
     /// </summary>
     [Theory]
     [MemberData(nameof(BothStrips))]
-    public void NoStrip_StillPicksTheMutedInkAsIfItWereOpaque(string file, int sites)
+    public void NoStrip_StillScoresTheMutedInkItself(string file, int draws)
     {
-        InkPicks(file, sites);
+        MutedInkDraws(file, draws);
         Assert.Empty(ShellSource.Load(file).Root
-            .Calls("ThemeResolution.PreferLightForeground"));
+            .DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith(
+                "PreferLightForegroundAtAlpha", StringComparison.Ordinal)
+                || c.CalleeText() == "ThemeResolution.PreferLightForeground"));
+    }
+
+    /// <summary>
+    /// And no strip paints a brush at the preferred alpha directly: the only
+    /// alpha that reaches a brush is the one the answer returned. This is the
+    /// fact that fails if a site "simplifies" the helper call back into a
+    /// fixed-alpha construction.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(BothStrips))]
+    public void NoStrip_PaintsAtThePreferredAlphaDirectly(string file, int draws)
+    {
+        MutedInkDraws(file, draws);
+        Assert.Empty(ShellSource.Load(file).Root
+            .DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("FromArgb", StringComparison.Ordinal)
+                && c.ArgumentList.Arguments.Count > 0
+                && c.Arg(0) == "InactiveInkAlpha"));
     }
 
     /// <summary>
@@ -140,9 +169,9 @@ public sealed class StripInkGroundWiringTests
     /// </summary>
     [Theory]
     [MemberData(nameof(BothStrips))]
-    public void TheGround_IsTheFillWhenPainted_AndTheBackdropWhenBare(string file, int sites)
+    public void TheGround_IsTheFillWhenPainted_AndTheBackdropWhenBare(string file, int draws)
     {
-        InkPicks(file, sites);
+        MutedInkDraws(file, draws);
 
         var assignment = Assert.Single(
             ShellSource.Load(file).Method("RefreshShellInactiveInk")
@@ -159,9 +188,9 @@ public sealed class StripInkGroundWiringTests
 
     /// <summary>
     /// Both inputs re-ask. The window resolves the palette before it resolves
-    /// the frame, so the pole picked while the palette lands is made against
-    /// the previous frame's surface; only these two calls are late enough to
-    /// be right, and losing either leaves the ink one config reload behind.
+    /// the frame, so the ink drawn while the palette lands is one frame
+    /// behind; only these two calls are late enough to be right, and losing
+    /// either leaves the ink one config reload behind.
     /// </summary>
     [Theory]
     [InlineData(VerticalStrip, "SetChromeFill")]
@@ -185,5 +214,69 @@ public sealed class StripInkGroundWiringTests
 
         Assert.Equal("ground", apply.Call("_verticalTabHost.SetRowSeparator").Arg(1));
         Assert.Equal("ground", apply.Call("_horizontalTabHost.SetChromeGround").Arg(0));
+    }
+
+    /// <summary>
+    /// The horizontal strip's default path draws its unselected titles from
+    /// the same answer the palette path does. Leaving them on the element
+    /// theme's own foreground was the one arm that never heard of the strip,
+    /// and it measured 2.63:1 on stock-light against a 4.5 floor (#936) --
+    /// the vertical strip had no such arm, which is why the defect was one
+    /// layout wide. The census covers the count; this names the arm so the
+    /// failure reads as a sentence.
+    /// </summary>
+    [Fact]
+    public void TheDefaultPath_DrawsItsInactiveTitlesFromTheAnswer()
+    {
+        var recolor = ShellSource.Load(HorizontalStrip).Method("RecolorTabText");
+        var draw = Assert.Single(recolor.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("MutedInkBrush", StringComparison.Ordinal)));
+        Assert.Equal("_stripBackdropPacked", draw.Arg(0));
+    }
+
+    /// <summary>
+    /// The close affordance takes the row's ink. It used to carry nothing and
+    /// ride the element theme's button foreground, which on a light element
+    /// theme over a mid-rendered strip drew dark-on-mid at 2.02:1 against a
+    /// 3.0 floor (#936). Every arm feeds it: colored rows, the active row,
+    /// and the inactive rows.
+    /// </summary>
+    [Fact]
+    public void TheCloseGlyph_TakesTheRowInk()
+    {
+        var row = ShellSource.Load("Tabs.VerticalTabNavRow.cs");
+        var applyInk = row.Method("ApplyInk");
+        Assert.Equal(
+            new[] { "_closeGlyph.Foreground" },
+            applyInk.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                .Select(a => a.Left.ToString()).ToList());
+
+        var recolor = ShellSource.Load(VerticalStrip).Method("RecolorNavItems");
+        var feeds = recolor.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("ApplyInk", StringComparison.Ordinal))
+            .ToList();
+        // RecolorNavItems also feeds the pinned rows and the group headers;
+        // this rule is the close glyph's, so the census is the nav-row feeds.
+        var navRowFeeds = feeds.Where(c =>
+            c.CalleeText().Contains("VerticalTabNavRow", StringComparison.Ordinal)).ToList();
+        Assert.Equal(3, navRowFeeds.Count);
+    }
+
+    /// <summary>
+    /// The chip is not muted twice. Its ink is chosen to clear its floor as
+    /// drawn; an element opacity on top of that composites the ink down to
+    /// ~70% strength, which is the 2.73:1 member count of #936 and #884's
+    /// root cause B. 0.7 cannot clear AA on any ground, so the fix is
+    /// removing the second mute, not re-tuning it.
+    /// </summary>
+    [Fact]
+    public void TheChipCount_IsNotMutedByElementOpacity()
+    {
+        var addChip = ShellSource.Load(HorizontalStrip).Method("AddGroupChip");
+        Assert.DoesNotContain(
+            addChip.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "Opacity");
     }
 }

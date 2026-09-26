@@ -243,8 +243,11 @@ public class VerticalTabGroupHeaderWiringTests
     /// <summary>
     /// The row renders the group in one Refresh; the chevron's arms are
     /// matched through the parsed literals' decoded values, so the polarity
-    /// is the pin; the ink pass recolors text only -- the swatch is the
-    /// group's content, not chrome.
+    /// is the pin; the ink pass recolors the chrome parts -- title, count and
+    /// the collapse chevron, which is the affordance the strip drives, and
+    /// which drew element-theme ink at 2.58:1 against a 3.0 floor until it
+    /// joined the pass (#936) -- while the swatch stays out of it: the group
+    /// color is content, not chrome.
     /// </summary>
     [Fact]
     public void TheHeaderRow_RendersTheGroup_AndKeepsItsSwatchOutOfTheInk()
@@ -265,9 +268,17 @@ public class VerticalTabGroupHeaderWiringTests
 
         var ink = Header().Method("ApplyInk");
         Assert.Equal(
-            new[] { "_title.Foreground", "_count.Foreground" },
+            new[] { "_title.Foreground", "_count.Foreground", "_chevron.Foreground" },
             ink.DescendantNodes().OfType<AssignmentExpressionSyntax>()
                 .Select(a => a.Left.ToString()).ToList());
+
+        // And the count is not muted twice: the ink arrives already
+        // de-emphasised, and an element opacity on top of it is an effective
+        // ~49% ink that clears no floor on any ground -- the measured 2.73:1
+        // (#936, and #884's root cause B).
+        Assert.DoesNotContain(
+            Header().Root.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "Opacity");
     }
 
     /// <summary>
