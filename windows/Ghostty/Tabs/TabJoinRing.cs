@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using Ghostty.Core.Tabs;
+using Ghostty.Motion;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -222,7 +223,7 @@ internal sealed partial class TabJoinRing : Grid
         spring.DampingRatio = TabStripMotion.JoinArmDampingRatio;
         spring.Period = TimeSpan.FromMilliseconds(TabStripMotion.JoinArmPeriodMs);
         spring.FinalValue = new Vector3(scale, scale, 1f);
-        visual.StartAnimation("Scale", spring);
+        AnimationActivityRegistry.StartCompositionAnimation(visual, _ring, "Scale", spring);
     }
 
     private Visual? RingVisual()

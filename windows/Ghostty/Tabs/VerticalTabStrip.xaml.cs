@@ -9,6 +9,7 @@ using Ghostty.Core;
 using Ghostty.Core.Tabs;
 using Ghostty.Core.Windows;
 using Ghostty.Input;
+using Ghostty.Motion;
 using Ghostty.Services;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
@@ -1039,7 +1040,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             _fieldMotion.Remove(group);
             Land();
         };        _fieldMotion[group] = new FieldFlight(board, Land);
-        board.Begin();
+        AnimationActivityRegistry.BeginStoryboard(board, field, "(Canvas.Top)");
     }
 
     /// <summary>
@@ -1121,7 +1122,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             _fieldMotion.Remove(group);
             Land();
         };        _fieldMotion[group] = new FieldFlight(board, Land);
-        board.Begin();
+        AnimationActivityRegistry.BeginStoryboard(board, field, "Opacity");
     }
 
     /// <summary>
@@ -3571,7 +3572,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         var follow = visual.Compositor.CreateExpressionAnimation(
             "Vector3(0, P.pointer.y - P.anchor.y, 0)");
         follow.SetReferenceParameter("P", properties);
-        visual.StartAnimation("Translation", follow);
+        AnimationActivityRegistry.StartCompositionAnimation(visual, drag.Item, "Translation", follow);
         drag.Visual = visual;
         drag.Properties = properties;
         drag.Follow = follow;
@@ -3609,7 +3610,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (drag.MotionOn)
             visual.Scale = new Vector3(TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
         if (drag.Follow is not null)
-            visual.StartAnimation("Translation", drag.Follow);
+            AnimationActivityRegistry.StartCompositionAnimation(visual, item, "Translation", drag.Follow);
         // The commit churned the member containers too: every rebuilt row
         // lost its translation and its accent, so the stack re-arms or it
         // tears -- members sitting at their layout slots while the header
@@ -3771,8 +3772,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         foreach (var row in VisibleRunRows(drag.Group))
         {
             ElementCompositionPreview.SetIsTranslationEnabled(row, true);
-            ElementCompositionPreview.GetElementVisual(row)
-                .StartAnimation("Translation", drag.Follow);
+            AnimationActivityRegistry.StartCompositionAnimation(
+                ElementCompositionPreview.GetElementVisual(row), row, "Translation", drag.Follow);
             (row.Content as VerticalTabNavRow)?.SetCoDragAccent(true, AccentBrush);
             drag.CoDragRows.Add(row);
         }
@@ -4052,7 +4053,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             ElementCompositionPreview.SetIsTranslationEnabled(item, true);
             visual.Properties.InsertVector3("Translation", new Vector3(0, (float)-delta, 0));
             if (drag.Glide is not null)
-                visual.StartAnimation("Translation", drag.Glide);
+                AnimationActivityRegistry.StartCompositionAnimation(visual, item, "Translation", drag.Glide);
             _gapMotionHeaders[group] = (item, batch);
         }
         catch (Exception ex) when (IsLayoutReadFailure(ex))
@@ -4100,7 +4101,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         lift.DampingRatio = TabStripMotion.LiftDampingRatio;
         lift.Period = TimeSpan.FromMilliseconds(TabStripMotion.LiftPeriodMs);
         lift.FinalValue = new Vector3(TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
-        visual.StartAnimation("Scale", lift);
+        AnimationActivityRegistry.StartCompositionAnimation(
+            visual, drag.Item, "Scale", lift);
     }
     // Neighbours currently riding a gap glide, by tab. Doubles as the
     // leak census: anything still in here after the drag's teardown is a
@@ -4187,7 +4189,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             ElementCompositionPreview.SetIsTranslationEnabled(item, true);
             visual.Properties.InsertVector3("Translation", new Vector3(0, (float)-delta, 0));
             if (drag.Glide is not null)
-                visual.StartAnimation("Translation", drag.Glide);
+                AnimationActivityRegistry.StartCompositionAnimation(visual, item, "Translation", drag.Glide);
             _gapMotion[tab] = (item, batch);
         }
         catch (Exception ex) when (IsLayoutReadFailure(ex))
@@ -5153,7 +5155,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             if (!ReferenceEquals(_pinFlight, flight)) return;
             StartPinSettle(flight);
         };
-        visual.StartAnimation("Translation", fly);
+        AnimationActivityRegistry.StartCompositionAnimation(visual, ghost, "Translation", fly);
         flying.End();
         DragTrace($"DRAG flight start dy={start.Y - dest.Y:0}");
     }
@@ -5178,7 +5180,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             if (!ReferenceEquals(_pinFlight, flight)) return;
             StartPinHandback(flight);
         };
-        flight.Visual.StartAnimation("Scale", spring);
+        AnimationActivityRegistry.StartCompositionAnimation(
+            flight.Visual, flight.Ghost, "Scale", spring);
         settling.End();
     }
 
@@ -5201,9 +5204,10 @@ internal sealed partial class VerticalTabStrip : UserControl
             if (!ReferenceEquals(_pinFlight, flight)) return;
             FinishPinFlight("landed");
         };
-        flight.Visual.StartAnimation("Opacity", fadeOut);
-        ElementCompositionPreview.GetElementVisual(flight.Row)
-            .StartAnimation("Opacity", fadeIn);
+        AnimationActivityRegistry.StartCompositionAnimation(
+            flight.Visual, flight.Ghost, "Opacity", fadeOut);
+        AnimationActivityRegistry.StartCompositionAnimation(
+            ElementCompositionPreview.GetElementVisual(flight.Row), flight.Row, "Opacity", fadeIn);
         handing.End();
     }
 
@@ -5387,7 +5391,8 @@ internal sealed partial class VerticalTabStrip : UserControl
                         ResetDragVisual(drag);
                         DragTrace($"DRAG settle ghosts={CountLeakedMotion()}");
                     };
-                    visual.StartAnimation("Translation", spring);
+                    AnimationActivityRegistry.StartCompositionAnimation(
+                        visual, drag.Item, "Translation", spring);
                     batch.End();
                     settled = true;
                 }

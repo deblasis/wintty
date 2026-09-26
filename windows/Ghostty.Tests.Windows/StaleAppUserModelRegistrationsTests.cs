@@ -17,7 +17,7 @@ namespace Ghostty.Tests.Windows;
 /// able to make it one. What the shipped list contains is asserted on the list itself, without
 /// going near a key.
 /// </summary>
-public sealed class StaleAppUserModelRegistrationsTests : IDisposable
+public sealed partial class StaleAppUserModelRegistrationsTests : IDisposable
 {
     private const string Root = @"Software\Classes\AppUserModelId";
 
