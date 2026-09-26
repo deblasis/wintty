@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -57,26 +58,29 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private int _declinedReloadRetries;
     private const int MaxDeclinedReloadRetries = 3;
 
-    // The shrink confirmations' own budget, with the same shape and the
-    // same reset. It is a separate counter because the two ask about
-    // different stretches: this one counts asks about a file that went
-    // away, while _declinedReloadRetries counts asks about a file that
-    // would not open. Sharing one counter let a gave-up unreadable
-    // stretch arrive spent at the first shrink decline, and IsPersistentShrink
-    // read that as the confirmation budget being exhausted, so the shrink
-    // applied as a deletion with no confirming asks at all. UI thread only,
-    // like everything Reload touches. See the decline in Reload.
-    private int _shrinkConfirms;
-    private const int MaxShrinkConfirms = 3;
+    // The shrink confirmation's floor, not a count of asks. It replaced a
+    // three-ask budget shaped like the locked-file retries: a burst of
+    // watcher deliveries inside a single save (the train of colour-change
+    // events a High Contrast flip fires) spent the whole budget within one
+    // save stretch, applied the remaining file, and the save's own settle
+    // restored the full config behind it (issue #1171). The stretch opens
+    // at the first decline that found the count lower and ends where the
+    // ask budgets ended: an applied reload, or the lift of our own write's
+    // suppression. It is measured on the monotonic clock, and the floor it
+    // is held against is ConfigVanishConfirmer's own, so a shrunken count
+    // and a vanished watched file are held to the same standard of proof.
+    // Time is the dimension no burst of deliveries can compress. UI thread
+    // only, like everything Reload touches. See the decline in Reload.
+    private TimeSpan? _shrinkSince;
 
     // The vanish confirmations' budget, and a third counter for the reason
-    // the second one exists. This counts asks about the WATCHED file being
-    // gone, which the watcher raises; _shrinkConfirms counts asks about a
-    // count that dropped, which a reload raises about files the watcher
-    // never sees. A deletion can present as both, and sharing a counter
+    // the second one existed. This counts asks about the WATCHED file being
+    // gone, which the watcher raises; the shrink stretch measures a count
+    // that dropped, which a reload raises about files the watcher never
+    // sees. A deletion can present as both, and sharing one confirmation
     // would let one stretch arrive spent at the other's first observation
-    // and confirm it with no asks of its own, which is exactly what sharing
-    // cost between the other two.
+    // and confirm it with no proof of its own, which is exactly what
+    // sharing cost between the other two.
     //
     // The whole wiring is an object from Ghostty.Core rather than a counter
     // and two calls here because nothing executes this file: Ghostty.Tests
@@ -829,14 +833,32 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         if (ConfigReloadGate.Decide(defaultFiles, defaultFilesFound, _defaultFilesFound)
             == ConfigReloadDecision.Decline)
         {
-            // A shrink that is still a shrink after its whole ask budget is
-            // a deletion of a layered file the watcher does not watch, not a
+            // The monotonic clock, sampled once per reload: the shrink
+            // stretch below is measured against it, the way the vanish
+            // confirmation measures its absences. Never the wall clock; a
+            // step between two observations would shorten the floor, which
+            // is #1146 in another shape.
+            var now = Stopwatch.GetElapsedTime(0);
+            var shrinkElapsed = _shrinkSince is { } since && now >= since
+                ? now - since
+                : TimeSpan.Zero;
+
+            // A shrink that is still a shrink after the floor has run is a
+            // deletion of a layered file the watcher does not watch, not a
             // save in flight: no rename is coming for it. The config in hand
             // was built from every file that does exist, so applying it is
             // the user's configuration as it now stands, and the applied
             // path below records the lower count. Refusing instead would be
             // permanent, which is the lockout of issue #676 one layer
             // removed: the count cannot fall from anywhere else.
+            //
+            // The floor replaced a count of confirming asks, which a burst
+            // of watcher deliveries inside a single save (a High Contrast
+            // flip) spent within one save stretch, applying the remaining
+            // file until the save's own settle restored the full config
+            // behind it (#1171). It is the vanish confirmation's floor, so
+            // both deletions are held to the same standard of proof: no
+            // measured save shape outlives it.
             //
             // A confirmed vanish reaches the same conclusion about the
             // WATCHED file and takes the same path, for the same reason: the
@@ -847,7 +869,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // already passed.
             if (!vanishConfirmed && !ConfigReloadGate.IsPersistentShrink(
                     defaultFiles, defaultFilesFound, _defaultFilesFound,
-                    _shrinkConfirms, MaxShrinkConfirms))
+                    shrinkElapsed, ConfigVanishConfirmer.DefaultFloor))
             {
                 NativeMethods.ConfigFree(newConfig);
                 StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
@@ -879,19 +901,22 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 }
                 else if (ConfigReloadGate.ShouldConfirmShrink(
                         defaultFiles, defaultFilesFound, _defaultFilesFound,
-                        _shrinkConfirms, MaxShrinkConfirms))
+                        shrinkElapsed, ConfigVanishConfirmer.DefaultFloor))
                 {
-                    // The same scheduled-only count, on the shrink budget:
-                    // asks about a file that went away are not asks about a
-                    // file that would not open, and one counter holding both
-                    // is what let a spent unreadable budget skip these asks.
+                    // A service-owned look, not the watcher alone: with no
+                    // watcher this used to be the whole lockout of
+                    // wintty#1155 on the shrink leg, where a user who deleted
+                    // one of two layered files had every reload refused until
+                    // restart. The look keeps the stretch running at the
+                    // watcher's cadence whatever took the ask.
                     //
-                    // With no watcher this used to be the whole lockout of
-                    // wintty#1155 on the shrink leg: the watcher's ask was the
-                    // only one counted, so the budget never moved, the shrink
-                    // was never persistent, and a user who deleted one of two
-                    // layered files had every reload refused until restart.
-                    if (_lookAgain.Ask()) _shrinkConfirms++;
+                    // The stretch opens at the FIRST decline that found the
+                    // count lower, and the floor is what closes it: the ask
+                    // is the accelerator, not the proof. The watcher's
+                    // deliveries no longer spend anything here, so a burst of
+                    // them inside a single save can confirm nothing.
+                    if (_shrinkSince is null) _shrinkSince = now;
+                    _lookAgain.Ask();
                 }
                 else if (defaultFiles == ConfigFilesFound.Unreadable &&
                          _declinedReloadRetries == MaxDeclinedReloadRetries)
@@ -907,7 +932,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             }
 
             // Reached only by carrying past the gate, which takes either a
-            // proven vanish or a shrink that outlived its asks. A proven
+            // proven vanish or a shrink that outlived the floor. A proven
             // vanish has already been accounted for, at the moment it was
             // proven, by the protocol's accept; logging it again here would
             // report one deletion twice.
@@ -924,7 +949,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // comes back unreadable answers it and never reaches an applied
         // reload.
         _declinedReloadRetries = 0;
-        _shrinkConfirms = 0;
+        _shrinkSince = null;
 
         var oldConfig = _config;
 
@@ -1138,13 +1163,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         _suppressWatcher = suppress;
 
         // Lifting the suppression is the end of this service's own write,
-        // and that write ends any stretch the two ask budgets were
-        // counting. Its events were swallowed, so no delivery reloads on
-        // it, and the reload a caller makes afterwards can still decline
-        // (the write landing unreadable, the AppUpdateConfig fence), which
-        // is the one road to a reset it had. A budget left spent here hands
-        // the next stretch of unreadability a gave-up warning with no ask
-        // ever having been tried in it.
+        // and that write ends any stretch the ask budget was counting and
+        // the shrink stretch was measuring. Its events were swallowed, so
+        // no delivery reloads on it, and the reload a caller makes
+        // afterwards can still decline (the write landing unreadable, the
+        // AppUpdateConfig fence), which is the one road to a reset it had.
+        // A budget left spent here hands the next stretch of unreadability
+        // a gave-up warning with no ask ever having been tried in it.
         //
         // The vanish question is deliberately NOT touched: its stretches
         // open and close on load verdicts alone, and a write is not a
@@ -1152,7 +1177,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         if (!suppress)
         {
             _declinedReloadRetries = 0;
-            _shrinkConfirms = 0;
+            _shrinkSince = null;
         }
     }
 

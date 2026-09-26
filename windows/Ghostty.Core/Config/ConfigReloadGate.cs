@@ -79,8 +79,8 @@ public static class ConfigReloadGate
     /// host lowers its count. One report is not, because an ordinary save
     /// produces one: see <c>ConfigVanishConfirmer</c>, which holds that
     /// question and the measurements it is pinned against. A layered file
-    /// the watcher does not watch raises no event at all, and a shrink after
-    /// its own budget is a deletion the same way: see
+    /// the watcher does not watch raises no event at all, and a shrink that
+    /// outlives the same floor is a deletion the same way: see
     /// <see cref="IsPersistentShrink"/>.</para>
     /// </remarks>
     public static ConfigReloadDecision Decide(
@@ -163,52 +163,69 @@ public static class ConfigReloadGate
             && defaultFilesFound < sessionDefaultFilesFound;
 
     /// <summary>
-    /// Whether a count-shrink decline should spend one ask of the shrink
-    /// confirmation budget on looking again. A budget of its own, not the
-    /// one <see cref="ShouldRetry"/> spends on a locked file: asks about a
-    /// file that went away are not asks about a file that would not open,
-    /// and one counter holding both let a gave-up locked-file stretch
-    /// arrive spent here.
+    /// Whether a count-shrink decline should ask for one more look. A
+    /// question of its own, not the one <see cref="ShouldRetry"/> spends on
+    /// a locked file: asks about a file that went away are not asks about a
+    /// file that would not open, and one counter holding both let a gave-up
+    /// locked-file stretch arrive spent here.
     /// </summary>
     /// <remarks>
-    /// The ask is the confirmation protocol for deletions the watcher
-    /// cannot see: it watches one path, and the default files are layered
+    /// <para>The ask is the accelerator for deletions the watcher cannot
+    /// see: it watches one path, and the default files are layered
     /// candidates, so a deleted file it does not watch raises no event at
-    /// all. While the budget lasts, a save mid swap is still the expected
-    /// answer, and its completing rename settles and reloads with the count
-    /// restored, ending the asks.
+    /// all. While the stretch is younger than the floor, a save mid swap is
+    /// still the expected answer, and its completing rename settles and
+    /// reloads with the count restored, ending the asks.</para>
+    ///
+    /// <para>The floor, not a count of asks, is what ends the asking: a
+    /// burst of watcher deliveries inside a single save (a High Contrast
+    /// flip) spent a count budget within one save stretch and applied the
+    /// remaining file before the save's own settle restored the full
+    /// config (issue #1171). Time is the dimension no burst can compress.
+    /// With no watcher the service's own looks run at
+    /// <see cref="ConfigLookAgain.SettleDelay"/>, so the same floor costs
+    /// about three of them.</para>
     /// </remarks>
     public static bool ShouldConfirmShrink(
         ConfigFilesFound found,
         int defaultFilesFound,
         int sessionDefaultFilesFound,
-        int attemptsSoFar,
-        int maxAttempts) =>
+        TimeSpan stretchElapsed,
+        TimeSpan floor) =>
         IsCountShrink(found, defaultFilesFound, sessionDefaultFilesFound)
-            && attemptsSoFar < maxAttempts;
+            && stretchElapsed < floor;
 
     /// <summary>
-    /// Whether a count shrink has outlived the whole shrink confirmation
-    /// budget, which no ordinary save in flight can do: each ask waits out
-    /// a full quiet period, and a rename that slow has lost its race with
-    /// its own editor. A wedged swap can outstay the budget all the same,
-    /// and is then applied wrongly, transiently, until its settle
+    /// Whether a count shrink has outlived the floor, which no ordinary
+    /// save in flight can do: the widest absence window any save shape
+    /// leaves on this platform is 22ms against a 900ms floor, 41 times the
+    /// widest (the measurements and their limits are
+    /// <see cref="ConfigVanishConfirmer"/>'s, and the floor is that same
+    /// one). A swap that stalls longer than the floor defeats this all the
+    /// same, and is then applied wrongly, transiently, until its settle
     /// restores the count.
     /// </summary>
     /// <remarks>
-    /// So it is a deletion, of a layered file the watcher does not watch,
-    /// and the host should believe the disk: apply what the load built and
-    /// let the applied reload record the lower count. Refusing instead is
-    /// permanent, because nothing else lowers the session count; that is
-    /// the accessibility lockout of issue #676 all over again, one layer
-    /// removed.
+    /// <para>So it is a deletion, of a layered file the watcher does not
+    /// watch, and the host should believe the disk: apply what the load
+    /// built and let the applied reload record the lower count. Refusing
+    /// instead is permanent, because nothing else lowers the session
+    /// count; that is the accessibility lockout of issue #676 all over
+    /// again, one layer removed.</para>
+    ///
+    /// <para>The stretch is measured by the host from the FIRST shrink
+    /// observation, so a floor of zero would confirm the first one and is
+    /// not a meaningful argument; the caller passes the shared
+    /// <see cref="ConfigVanishConfirmer.DefaultFloor"/>. A clock that runs
+    /// backwards reads as a young stretch, which declines and asks again:
+    /// the fail-safe direction, never confirming early.</para>
     /// </remarks>
     public static bool IsPersistentShrink(
         ConfigFilesFound found,
         int defaultFilesFound,
         int sessionDefaultFilesFound,
-        int attemptsSoFar,
-        int maxAttempts) =>
+        TimeSpan stretchElapsed,
+        TimeSpan floor) =>
         IsCountShrink(found, defaultFilesFound, sessionDefaultFilesFound)
-            && attemptsSoFar >= maxAttempts;
+            && stretchElapsed >= floor;
 }

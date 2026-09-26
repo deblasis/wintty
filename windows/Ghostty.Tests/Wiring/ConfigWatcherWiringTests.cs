@@ -226,10 +226,12 @@ public class ConfigWatcherWiringTests
 
     /// <summary>
     /// A count shrink is either a save mid swap or a file gone for good,
-    /// and an ask for one more look is what tells them apart: the save's
-    /// completing rename answers it, a deletion answers nothing. Locked
-    /// files ask through ShouldRetry on their own; the shrink asks here,
-    /// beside it, on its own budget.
+    /// and time is what tells them apart: the save's completing rename
+    /// answers it, a deletion answers nothing. Locked files ask through
+    /// ShouldRetry on their own; the shrink asks here, beside it, for as
+    /// long as its stretch is younger than the floor. The floor is the
+    /// vanish confirmation's own, so a shrunken count is held to the same
+    /// standard of proof as a vanished watched file.
     /// </summary>
     [Fact]
     public void A_shrunk_count_decline_asks_for_one_more_look_on_its_own_budget()
@@ -240,8 +242,8 @@ public class ConfigWatcherWiringTests
         Assert.Equal("defaultFiles", ask.Arg(0));
         Assert.Equal("defaultFilesFound", ask.Arg(1));
         Assert.Equal("_defaultFilesFound", ask.Arg(2));
-        Assert.Equal("_shrinkConfirms", ask.Arg(3));
-        Assert.Equal("MaxShrinkConfirms", ask.Arg(4));
+        Assert.Equal("shrinkElapsed", ask.Arg(3));
+        Assert.Equal("ConfigVanishConfirmer.DefaultFloor", ask.Arg(4));
 
         // An else-if on the chain ShouldRetry heads, not a condition of its
         // own and not folded into one: each covers a different decline, and
@@ -255,25 +257,36 @@ public class ConfigWatcherWiringTests
             "ConfigReloadGate.ShouldRetry",
             Assert.IsType<InvocationExpressionSyntax>(head.Condition).Expression.ToString());
 
-        // The ask spends the shrink budget, not the locked-file one: one
-        // counter carrying both meanings is what let a gave-up unreadable
-        // stretch skip these asks.
-        var spend = Assert.Single(askIf.Statement.DescendantNodes()
-            .OfType<PostfixUnaryExpressionSyntax>()
-            .Where(p => p.OperatorToken.Kind() == SyntaxKind.PlusPlusToken)
-            .Where(p => p.Operand.ToString() == "_shrinkConfirms"));
+        // The stretch opens here, at the FIRST decline that found the count
+        // lower, and nowhere else in the decline: the ask is the
+        // accelerator, the stretch is the proof, and a burst of watcher
+        // deliveries spends nothing.
+        var open = Assert.Single(askIf.Statement.DescendantNodes()
+            .OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.ToString() == "_shrinkSince is null"));
+        var statement = Assert.IsType<ExpressionStatementSyntax>(open.Statement);
+        var assignment = Assert.IsType<AssignmentExpressionSyntax>(statement.Expression);
+        Assert.True(assignment.Left.ToString().EndsWith("_shrinkSince", StringComparison.Ordinal));
+        Assert.Equal("now", assignment.Right.ToString());
+
+        // The ask is a look of the service's own, never a spend of the
+        // locked-file budget: one counter carrying both meanings is what
+        // let a gave-up unreadable stretch skip these asks.
+        var look = Assert.Single(askIf.Statement.Calls("_lookAgain.Ask"));
+        Assert.True(askIf.Statement.Span.Contains(look.Span));
         Assert.Empty(askIf.Statement.DescendantNodes()
             .OfType<PostfixUnaryExpressionSyntax>()
-            .Where(p => p.Operand.ToString() == "_declinedReloadRetries"));
+            .Where(p => p.OperatorToken.Kind() == SyntaxKind.PlusPlusToken)
+            .Where(p => p.Operand.ToString().EndsWith("_declinedReloadRetries", StringComparison.Ordinal)));
     }
 
     /// <summary>
-    /// The shrink confirmations and the locked-file retries are separate
-    /// budgets, because they count different stretches: asks about a file
-    /// that would not open, and asks about a file that went away. The
-    /// deletion guard reads the shrink budget alone, so a spent unreadable
-    /// budget cannot make the first shrink decline apply as a deletion
-    /// with zero confirming asks.
+    /// The shrink stretch and the locked-file retries ask about different
+    /// stretches: a file that went away, and a file that would not open.
+    /// The deletion guard measures its own stretch against the shared
+    /// floor, so a spent unreadable budget cannot make the first shrink
+    /// decline apply as a deletion, and no burst of deliveries can spend
+    /// the proof early.
     /// </summary>
     [Fact]
     public void Shrink_confirmations_spend_their_own_budget()
@@ -285,20 +298,20 @@ public class ConfigWatcherWiringTests
         Assert.Equal("MaxDeclinedReloadRetries", retry.Arg(2));
 
         var heal = Assert.Single(guard.Statement.Calls("ConfigReloadGate.IsPersistentShrink"));
-        Assert.Equal("_shrinkConfirms", heal.Arg(3));
-        Assert.Equal("MaxShrinkConfirms", heal.Arg(4));
+        Assert.Equal("shrinkElapsed", heal.Arg(3));
+        Assert.Equal("ConfigVanishConfirmer.DefaultFloor", heal.Arg(4));
     }
 
     /// <summary>
-    /// A shrink that survives the whole ask budget is a deletion of a
-    /// layered file the watcher does not watch, and believing the disk is
-    /// the only way the session recovers: no event is coming for that
-    /// file, so a refusal here is permanent. The config in hand was built
-    /// from every file that does exist, so applying it is the user's
-    /// configuration as it now stands.
+    /// A shrink that outlives the floor is a deletion of a layered file
+    /// the watcher does not watch, and believing the disk is the only way
+    /// the session recovers: no event is coming for that file, so a
+    /// refusal here is permanent. The config in hand was built from every
+    /// file that does exist, so applying it is the user's configuration as
+    /// it now stands.
     /// </summary>
     [Fact]
-    public void A_shrink_that_outlives_the_asks_is_applied_as_a_deletion()
+    public void A_shrink_that_outlives_the_floor_is_applied_as_a_deletion()
     {
         var (_, guard) = ReloadGuard();
 
@@ -306,12 +319,12 @@ public class ConfigWatcherWiringTests
         Assert.Equal("defaultFiles", heal.Arg(0));
         Assert.Equal("defaultFilesFound", heal.Arg(1));
         Assert.Equal("_defaultFilesFound", heal.Arg(2));
-        Assert.Equal("_shrinkConfirms", heal.Arg(3));
-        Assert.Equal("MaxShrinkConfirms", heal.Arg(4));
+        Assert.Equal("shrinkElapsed", heal.Arg(3));
+        Assert.Equal("ConfigVanishConfirmer.DefaultFloor", heal.Arg(4));
 
         // The decline's cost only runs when neither proof landed: not a
         // confirmed vanish of the watched file, and not a shrink that
-        // outlived its asks. Both operands are decomposed rather than
+        // outlived the floor. Both operands are decomposed rather than
         // matched as text, because a condition that merely CONTAINS the
         // heal is also satisfied by one that inverts it.
         var inner = heal.Ancestors().OfType<IfStatementSyntax>().First();
@@ -392,13 +405,15 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// Both budgets end when a reload applies, not when a decline stretch
-    /// does. Without the reset, one exhausted budget suppresses the
-    /// resettles and the one-per-stretch gave-up warning for every later
-    /// stretch of the session.
+    /// The locked-file budget and the shrink stretch both end when a
+    /// reload applies, not when a decline stretch does. Without the reset,
+    /// one exhausted budget suppresses the resettles and the
+    /// one-per-stretch gave-up warning for every later stretch, and a
+    /// stretch left open would let the next shrink arrive carrying this
+    /// stretch's elapsed time.
     /// </summary>
     [Fact]
-    public void An_applied_reload_resets_both_budgets()
+    public void An_applied_reload_resets_the_budget_and_closes_the_stretch()
     {
         var resets = ConfigService().Method("Reload")
             .DescendantNodes().OfType<AssignmentExpressionSyntax>();
@@ -408,22 +423,25 @@ public class ConfigWatcherWiringTests
         Assert.Equal("0", retry.Right.ToString());
 
         var confirms = Assert.Single(resets
-            .Where(a => a.Left.ToString() == "_shrinkConfirms"));
-        Assert.Equal("0", confirms.Right.ToString());
+            .Where(a => a.Left.ToString().EndsWith("_shrinkSince", StringComparison.Ordinal)
+                && a.Right.ToString() == "null"));
+        Assert.Equal("null", confirms.Right.ToString());
     }
 
     /// <summary>
-    /// Lifting the write suppression frees both ask budgets, not only an
-    /// applied reload. Our own write ends whatever stretch the budgets were
-    /// counting, but its events were swallowed, so no delivery reloads on
-    /// it and the reload a caller makes afterwards can still decline. A
-    /// budget left spent makes the next stretch of unreadability arrive at
-    /// the cap and log gave-up with no ask having been tried in it.
+    /// Lifting the write suppression ends the shrink stretch and frees the
+    /// locked-file budget, not only an applied reload. Our own write ends
+    /// whatever stretch they were carrying, but its events were swallowed,
+    /// so no delivery reloads on it and the reload a caller makes
+    /// afterwards can still decline. A budget left spent makes the next
+    /// stretch of unreadability arrive at the cap and log gave-up with no
+    /// ask having been tried in it; a stretch left open would let the next
+    /// shrink arrive carrying this stretch's elapsed time.
     /// </summary>
     /// <remarks>
     /// Only the LIFT frees them. Resetting on the bracket's opening half
-    /// would spend the budgets' meaning while a decline inside the bracket
-    /// is still trying to spend the budgets themselves.
+    /// would spend their meaning while a decline inside the bracket is
+    /// still trying to spend it.
     /// </remarks>
     [Fact]
     public void Lifting_the_write_suppression_frees_both_ask_budgets()
@@ -435,11 +453,15 @@ public class ConfigWatcherWiringTests
 
         var resets = guard.Statement.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() is "_declinedReloadRetries" or "_shrinkConfirms")
+            .Where(a => a.Left.ToString().EndsWith("_declinedReloadRetries", StringComparison.Ordinal)
+                || a.Left.ToString().EndsWith("_shrinkSince", StringComparison.Ordinal))
             .ToArray();
 
         Assert.Equal(2, resets.Length);
-        Assert.All(resets, a => Assert.Equal("0", a.Right.ToString()));
+        Assert.Equal("0", Assert.Single(resets,
+            a => a.Left.ToString().EndsWith("_declinedReloadRetries", StringComparison.Ordinal)).Right.ToString());
+        Assert.Equal("null", Assert.Single(resets,
+            a => a.Left.ToString().EndsWith("_shrinkSince", StringComparison.Ordinal)).Right.ToString());
 
         // The vanish question is not theirs to close: its stretches open and
         // close on load verdicts, and a write is not one.
@@ -663,14 +685,15 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// The shrink budget counts the look-again's ask, and the locked-file
-    /// budget counts the watcher's alone.
+    /// The shrink asks the look-again, whose ask keeps the stretch running
+    /// with no watcher at all, and the locked-file budget counts the
+    /// watcher's alone.
     /// </summary>
     /// <remarks>
     /// The watcher's ask alone on the shrink was the second lockout of
-    /// wintty#1155: with no watcher the budget never moved, a shrink was never
-    /// judged persistent, and a user who deleted one of two layered config
-    /// files had every reload refused until restart.
+    /// wintty#1155: with no watcher the confirmation never moved, a shrink
+    /// was never judged persistent, and a user who deleted one of two
+    /// layered config files had every reload refused until restart.
     /// <c>ConfigLookAgain.Ask</c> takes the watcher's ask first and schedules
     /// its own look when that fails.
     ///
@@ -682,26 +705,25 @@ public class ConfigWatcherWiringTests
     /// nothing of its own.
     /// </remarks>
     [Fact]
-    public void The_shrink_counts_the_look_again_and_the_locked_file_the_watcher_alone()
+    public void The_shrink_asks_the_look_again_and_the_locked_file_the_watcher_alone()
     {
         var (_, guard) = ReloadGuard();
 
-        foreach (var (budget, expected) in new[]
-                 {
-                     ("_declinedReloadRetries", "_lookAgain.AskWatcher"),
-                     ("_shrinkConfirms", "_lookAgain.Ask"),
-                 })
-        {
-            var spend = Assert.Single(guard.Statement.DescendantNodes()
-                .OfType<PostfixUnaryExpressionSyntax>()
-                .Where(p => p.OperatorToken.Kind() == SyntaxKind.PlusPlusToken)
-                .Where(p => p.Operand.ToString() == budget)
-                .Where(p => p.Parent is ExpressionStatementSyntax { Parent: IfStatementSyntax }));
-            var ask = Assert.IsType<InvocationExpressionSyntax>(
-                spend.Ancestors().OfType<IfStatementSyntax>().First().Condition);
-            Assert.Equal(expected, ask.Expression.ToString());
-        }
+        // The locked-file budget still counts only asks somebody took:
+        // the increment rides the ask's own condition.
+        var spend = Assert.Single(guard.Statement.DescendantNodes()
+            .OfType<PostfixUnaryExpressionSyntax>()
+            .Where(p => p.OperatorToken.Kind() == SyntaxKind.PlusPlusToken)
+            .Where(p => p.Operand.ToString() == "_declinedReloadRetries")
+            .Where(p => p.Parent is ExpressionStatementSyntax { Parent: IfStatementSyntax }));
+        var ask = Assert.IsType<InvocationExpressionSyntax>(
+            spend.Ancestors().OfType<IfStatementSyntax>().First().Condition);
+        Assert.Equal("_lookAgain.AskWatcher", ask.Expression.ToString());
 
+        // The shrink asks unconditionally: nothing is spent, so there is
+        // nothing to gate on the ask being taken. It is the one look-again
+        // ask in the decline, and never the watcher alone.
+        Assert.Single(guard.Statement.Calls("_lookAgain.Ask"));
         Assert.Empty(guard.Statement.Calls("_watcher?.Resettle"));
     }
 
@@ -995,5 +1017,76 @@ public class ConfigWatcherWiringTests
             .OfType<ConstructorDeclarationSyntax>());
         Assert.Contains(ctor.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
             a => a.Left.ToString() == "_now" && a.Right.ToString() == "now ?? MonotonicNow");
+    }
+
+    /// <summary>
+    /// The shrink stretch is measured on the same monotonic clock as the
+    /// vanish floor, and the confirmer's own pin does not reach it: the
+    /// stretch is computed in the service, from the one clock sample the
+    /// decline takes. A wall-clock sample stepped forward between two
+    /// shrink observations would read the floor as met and apply the
+    /// remaining layered file mid-save (#1146's shape through this door);
+    /// no behavioural test can step the system clock, so the source is
+    /// the only place this is visible.
+    /// </summary>
+    [Fact]
+    public void The_shrink_stretch_is_measured_on_a_monotonic_clock()
+    {
+        var reload = ConfigService().Method("Reload");
+
+        // One sample in the method, and it reads the Stopwatch at origin
+        // zero, which is the confirmer's own MonotonicNow shape.
+        var sample = Assert.Single(reload.Calls("Stopwatch.GetElapsedTime"));
+        Assert.Equal("(0)", sample.ArgumentList.ToString());
+
+        // The stretch answers from that sample and the open stretch alone,
+        // and a backwards clock reads young: never negative, so no step can
+        // push a young stretch past the floor.
+        var elapsed = Assert.Single(reload.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Identifier.ValueText == "shrinkElapsed"));
+        var stretch = Assert.IsType<ConditionalExpressionSyntax>(elapsed.Initializer!.Value);
+        Assert.Equal("_shrinkSince is { } since && now >= since", stretch.Condition.ToString());
+        Assert.Equal("now - since", stretch.WhenTrue.ToString());
+        Assert.Equal("TimeSpan.Zero", stretch.WhenFalse.ToString());
+
+        // The persistent decision consumes that stretch, after the sample.
+        // And no wall-clock type is named in the method the stretch lives
+        // in, which is the whole claim: there is no second clock.
+        var heal = Assert.Single(reload.Calls("ConfigReloadGate.IsPersistentShrink"));
+        Assert.True(heal.SpanStart > sample.SpanStart);
+        Assert.Empty(reload.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(i => i.Identifier.ValueText is "DateTime" or "DateTimeOffset"));
+    }
+
+    /// <summary>
+    /// The stretch has exactly three writes in the file, and the census is
+    /// over the whole file because the claim is over the whole decline: it
+    /// opens at the confirm branch's first look, and closes on an applied
+    /// reload and on the suppression lift, and nowhere else. A second open
+    /// anywhere else in the decline (the locked-file branch, "for
+    /// symmetry") would hand a real shrink an unreadable stretch's
+    /// accumulated time and confirm it before its own floor ran. The field
+    /// is born null: an initializer would make every stretch born old, and
+    /// the first shrink ever would apply the remaining layered file as a
+    /// deletion on sight.
+    /// </summary>
+    [Fact]
+    public void The_shrink_stretch_opens_once_and_is_born_null()
+    {
+        var service = ConfigService();
+
+        var writes = service.Root.AssignsTo("_shrinkSince").ToArray();
+        Assert.Equal(3, writes.Length);
+
+        var open = Assert.Single(writes, w => w.Right.ToString() != "null");
+        Assert.Equal("now", open.Right.ToString());
+        var guard = Assert.IsType<IfStatementSyntax>(open.Ancestors()
+            .OfType<IfStatementSyntax>().First());
+        Assert.Equal("_shrinkSince is null", guard.Condition.ToString());
+
+        // Born null, never born old.
+        var (variable, _) = service.Field("_shrinkSince");
+        Assert.Null(variable.Initializer);
     }
 }
