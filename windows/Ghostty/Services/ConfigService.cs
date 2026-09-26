@@ -76,7 +76,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     // indistinguishable from a file emptied on purpose. The hold is what
     // keeps the save's half-written state off the live surfaces; the budget
     // is what lets a deliberate emptying take effect. Same count as the
-    // other two budgets, and reset the same way, on any applied reload.
+    // other two budgets, reset on any applied reload like them, and on any
+    // look that is not an empty read, which is every ordinary look, so
+    // SuppressWatcher's unsuppress reset needs no counterpart here.
     // UI thread only, like everything Reload touches. See the decline in
     // Reload.
     private int _emptyReadLooks;
@@ -977,6 +979,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
                 ConfigFilePath,
                 "it read as empty, which a save rewriting the file in place passes through");
+
+            // The ask's return is deliberately unused: this budget counts
+            // looks observed, not asks taken, so unlike the unreadable and
+            // shrink declines there is no per-ask accounting to branch on.
             _lookAgain.Ask();
             return false;
         }

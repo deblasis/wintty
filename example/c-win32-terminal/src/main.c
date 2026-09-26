@@ -381,7 +381,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int show) {
 
     // 4. Create ghostty config
     ghostty_config_t config = ghostty_config_new();
-    ghostty_config_load_default_files(config, NULL);
+    ghostty_config_load_default_files(config, NULL, NULL);
     ghostty_config_load_recursive_files(config);
     ghostty_config_finalize(config);
 

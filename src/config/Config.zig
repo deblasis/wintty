@@ -5454,6 +5454,26 @@ test "DefaultFiles.Result.mergeLayered adds the counts" {
     );
 }
 
+test "DefaultFiles.Result.mergeLayered adds the empty read counts" {
+    const testing = std.testing;
+
+    // The empty count has to survive the merge the same way the file count
+    // does: the reload holds a look whose emptiness is news against the
+    // record, and a dropped sum would make a macOS reload forget an empty
+    // it had already seen.
+    try testing.expectEqual(
+        DefaultFiles.Result{ .result = .loaded, .found = 4, .empty_reads = 3 },
+        (DefaultFiles.Result{ .result = .loaded, .found = 2, .empty_reads = 1 })
+            .mergeLayered(.{ .result = .loaded, .found = 2, .empty_reads = 2 }),
+    );
+    try testing.expectEqual(
+        @as(u32, 0),
+        (DefaultFiles.Result{ .result = .loaded, .found = 2, .empty_reads = 1 })
+            .mergeLayered(.{ .result = .loaded, .found = 1, .empty_reads = 0 })
+            .empty_reads,
+    );
+}
+
 test "loadDefaultFilesFrom counts an empty config file as read" {
     const testing = std.testing;
     const alloc = testing.allocator;

@@ -213,8 +213,9 @@ public static class ConfigReloadGate
             && attemptsSoFar >= maxAttempts;
 
     /// <summary>
-    /// Whether this look read a default config file as empty while the
-    /// session is running on a config that had something in it.
+    /// Whether this look read a default config file as empty in a way the
+    /// session has not seen before: the empty count grew past the one the
+    /// config in force was built from.
     /// </summary>
     /// <remarks>
     /// <para>An in-place save passes through a moment where the file is
@@ -225,18 +226,30 @@ public static class ConfigReloadGate
     /// other question, how the read went, from the count the loader reports
     /// beside it (issue #1138).</para>
     ///
-    /// <para>Only while the session's own config had something in it. A
-    /// session with no config file has nothing to protect, and its first
-    /// save applies whatever it is, empty included. And not while the
-    /// session's config was itself built from an empty read: applying the
-    /// same emptiness again is what the file says, and the hold must
-    /// release or a deliberately emptied file would never take effect.</para>
+    /// <para>Only while the session is running on a config that had
+    /// something in it. A session with no config file has nothing to
+    /// protect, and its first save applies whatever it is, empty included.</para>
     ///
-    /// <para>A bound worth naming: a session already running one empty
-    /// layer cannot see a later truncate of a sibling layer. The counts come
-    /// out identical (one empty read then, one now), and no rule over these
-    /// numbers can tell a steady state from a save in flight. It self-heals
-    /// on the save's completing write, which raises its own event.</para>
+    /// <para>And only when the emptiness is news. A look whose counts match
+    /// the record behind the running config is the session's own steady
+    /// state, not a save in flight: applying it rebuilds the config already
+    /// in force. This is the release half of the rule, twice over. A file
+    /// emptied on purpose is held while the count climbs, and once the
+    /// all-empty read is what is in force, further empty looks match the
+    /// record and apply. And a session running one permanently empty layer
+    /// beside a content one, the state an interrupted pre-fix in-place save
+    /// leaves behind, is not taxed with a hold on every reload it will ever
+    /// do, because its steady looks read exactly what the record says.</para>
+    ///
+    /// <para>What the counts see, and what they cannot: a truncate of a
+    /// layer that had content always raises the empty count past the record,
+    /// in every layered arrangement, and is held. An atomic save (write
+    /// beside, rename over) reads the old bytes in its window, counts
+    /// unchanged, and is waved through for the same reason the steady state
+    /// is: what applies is the config already in force, and the completing
+    /// rename raises its own event. A layer the watcher does not watch is
+    /// picked up on the next look for any reason and held the same way, by
+    /// its raised count.</para>
     /// </remarks>
     public static bool IsEmptyRead(
         ConfigFilesFound found,
@@ -244,13 +257,15 @@ public static class ConfigReloadGate
         int sessionDefaultFilesFound,
         int sessionEmptyReads) =>
         found == ConfigFilesFound.Loaded
-            && emptyReads > 0
-            && sessionEmptyReads < sessionDefaultFilesFound;
+            && emptyReads > sessionEmptyReads
+            && sessionDefaultFilesFound > 0;
 
     /// <summary>
     /// Whether an empty read has been seen enough times running to apply.
-    /// A count of consecutive looks, not of asks: the looks are the
-    /// observation, and one that nobody scheduled is not evidence.
+    /// A count of consecutive looks, and every look answers the question,
+    /// scheduled or not: an empty load is cheap, unlike the unreadable path
+    /// whose loader retries are the reason the other two budgets count only
+    /// scheduled asks.
     /// </summary>
     public static bool ShouldApplyEmptyRead(int looksSoFar, int maxLooks) =>
         looksSoFar >= maxLooks;

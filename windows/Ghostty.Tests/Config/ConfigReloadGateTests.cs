@@ -281,10 +281,17 @@ public class ConfigReloadGateTests
     /// answer (issue #1138).
     /// </summary>
     /// <remarks>
-    /// The fourth row is the deliberate-empty case coming back around: the
-    /// session's own config was built from an empty read, so another empty
-    /// read changes nothing and is not held. It is what keeps a user who
-    /// really did empty their config out of a permanent decline.
+    /// The equal-count rows are the deliberate-empty case coming back
+    /// around: the session's own config was built from an empty read, so
+    /// another empty read changes nothing and is not held. It is what keeps
+    /// a user who really did empty their config out of a permanent decline.
+    /// The same release covers the steady mixed state (one permanently empty
+    /// layer beside a content one, the state an interrupted pre-fix in-place
+    /// save leaves behind): its looks match the record, so holding them
+    /// would tax every future reload of that session for nothing.
+    /// A row whose look reads fewer files than the session records is also a
+    /// count shrink, which the gate declines before the empty hold is ever
+    /// reached; this table judges the predicate in isolation.
     /// </remarks>
     [Theory]
     [InlineData(ConfigFilesFound.Loaded, 1, 1, 0, true)]
@@ -292,6 +299,8 @@ public class ConfigReloadGateTests
     [InlineData(ConfigFilesFound.Loaded, 1, 2, 0, true)]
     [InlineData(ConfigFilesFound.Loaded, 1, 1, 1, false)]
     [InlineData(ConfigFilesFound.Loaded, 1, 2, 2, false)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 1, false)]
+    [InlineData(ConfigFilesFound.Loaded, 2, 2, 1, true)]
     [InlineData(ConfigFilesFound.Loaded, 0, 1, 0, false)]
     [InlineData(ConfigFilesFound.Loaded, 1, 0, 0, false)]
     [InlineData(ConfigFilesFound.Unreadable, 1, 1, 0, false)]
@@ -321,6 +330,9 @@ public class ConfigReloadGateTests
     [InlineData(2, 3, false)]
     [InlineData(3, 3, true)]
     [InlineData(4, 3, true)]
+    // The budget itself has to be read: a gate that ignores maxLooks and
+    // hard-codes three passes every row above.
+    [InlineData(1, 1, true)]
     public void An_empty_read_applies_once_it_has_been_seen_enough_times_running(
         int looksSoFar, int maxLooks, bool expected)
     {
