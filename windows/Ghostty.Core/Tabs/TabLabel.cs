@@ -28,7 +28,11 @@ internal static class TabLabel
     /// </summary>
     internal static string? Meaningful(string? title)
     {
-        if (string.IsNullOrWhiteSpace(title)) return null;
+        // A shell-reported title is hostile input (OSC 0/2 admits any UTF-8),
+        // so it gets the same refusal a reported directory gets: anything
+        // carrying control or bidi characters never becomes the label and the
+        // caller falls through to the next title tier.
+        if (string.IsNullOrWhiteSpace(title) || !IsPlain(title)) return null;
         return IsRooted(title.AsSpan().TrimStart()) ? null : title;
     }
 

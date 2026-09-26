@@ -61,6 +61,17 @@ public class TabLabelCwdTests
     public void Meaningful_KeepsATitleThatSaysSomething(string title)
         => Assert.Equal(title, TabLabel.Meaningful(title));
 
+    [Theory]
+    [InlineData("a\u0007b")]          // C0 control (BEL)
+    [InlineData("line1\nline2")]      // a second line
+    [InlineData("a\u2028b")]          // line separator
+    [InlineData("a\u2029b")]          // paragraph separator
+    [InlineData("safe\u202Eevil")]    // right-to-left override
+    [InlineData("a\u200Fb")]          // right-to-left mark
+    [InlineData("a\u2066b")]          // left-to-right isolate
+    public void Meaningful_DropsATitleCarryingControlOrBidiCharacters(string title)
+        => Assert.Null(TabLabel.Meaningful(title));
+
     [Fact]
     public void EffectiveTitle_IsTheFolder_WhenTheShellOnlyReportsItsOwnPath()
     {
@@ -89,6 +100,28 @@ public class TabLabelCwdTests
         // And the user's own name still beats everything.
         tab.UserOverrideTitle = "notes";
         Assert.Equal("notes", tab.EffectiveTitle);
+    }
+
+    /// <summary>
+    /// A title carrying control or bidi characters is refused at the label,
+    /// the same verdict a reported directory gets (<see cref="TabLabel.IsPlain"/>),
+    /// so every surface the label feeds inherits the refusal: the strip, the
+    /// window caption and taskbar (WordTitle) and the tooltip line. The raw
+    /// report is still stored -- the filter sits where the tab is named, not
+    /// where the pane speaks.
+    /// </summary>
+    [Fact]
+    public void AHostileShellTitle_NeverBecomesTheLabel()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.AttachProfileSnapshot(NamedProfile("Primary"));
+
+        tab.ShellReportedTitle = "safe\u202Eevil";
+
+        Assert.Equal("safe\u202Eevil", tab.ShellReportedTitle);
+        Assert.Equal("Primary", tab.EffectiveTitle);
+        Assert.Equal("Primary", tab.WordTitle);
+        Assert.Equal("Primary", tab.TooltipText);
     }
 
     /// <summary>
