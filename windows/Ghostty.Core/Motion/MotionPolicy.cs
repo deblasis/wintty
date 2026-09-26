@@ -126,7 +126,8 @@ public sealed record ResolvedMotion(ResolvedMotionLevel Level, bool PaneScaleMot
 /// The seats, in order, merged most-severe-wins (Full &lt; Reduced &lt; Off):
 /// 1. Energy saver: fires when the mode is Always or any of
 ///    BatterySaverOn / OnBattery / TransparencyEffectsOff is set.
-///    RemoteSession is masked out of this test.
+///    RemoteSession is masked out of this test. Power saving on resolves
+///    fully off: not reduced - off.
 /// 2. System animations disabled at the OS.
 /// 3. High contrast applied.
 /// 4. EssentialSource hardware ceilings the level at Reduced. The remote
@@ -148,11 +149,12 @@ public static class MotionPolicy
         var level = ResolvedMotionLevel.Full;
 
         // Seat 1: energy saver. The mode can force it, and the composite
-        // can fire it, with RemoteSession masked out of the test.
+        // can fire it, with RemoteSession masked out of the test. The law:
+        // power saving on means animations off. Not reduced - off.
         if (inputs.PowerMode == PowerSaverModeEx.Always
             || (inputs.PowerTriggers & LevelTriggers) != 0)
         {
-            level = ResolvedMotionLevel.Reduced;
+            level = ResolvedMotionLevel.Off;
         }
 
         // Seat 2: the OS has animations off; nothing animates.

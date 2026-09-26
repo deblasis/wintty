@@ -52,11 +52,12 @@ public class MotionPolicyTests
     [InlineData(PowerTriggersEx.BatterySaverOn)]
     [InlineData(PowerTriggersEx.OnBattery)]
     [InlineData(PowerTriggersEx.TransparencyEffectsOff)]
-    public void Energy_saver_trigger_routes_resolve_reduced(PowerTriggersEx trigger)
+    public void Energy_saver_trigger_routes_resolve_off(PowerTriggersEx trigger)
     {
+        // The law: power saving on means animations off. Not reduced - off.
         var resolved = MotionPolicy.Resolve(Inputs(triggers: trigger));
 
-        Assert.Equal(ResolvedMotionLevel.Reduced, resolved.Level);
+        Assert.Equal(ResolvedMotionLevel.Off, resolved.Level);
         // Power state alone says nothing about transport: the allowance
         // stays open.
         Assert.True(resolved.PaneScaleMotionAllowed);
@@ -67,10 +68,11 @@ public class MotionPolicyTests
     {
         // The forced-mode trap: Always fires the seat on the mode alone,
         // with an empty trigger set. An implementation that only looks at
-        // the composite reads this row as Full.
+        // the composite reads this row as Full. No remote session, so the
+        // pane-scale allowance is independent of the mode and stays open.
         var resolved = MotionPolicy.Resolve(Inputs(powerMode: PowerSaverModeEx.Always));
 
-        Assert.Equal(ResolvedMotionLevel.Reduced, resolved.Level);
+        Assert.Equal(ResolvedMotionLevel.Off, resolved.Level);
         Assert.True(resolved.PaneScaleMotionAllowed);
     }
 
@@ -87,7 +89,7 @@ public class MotionPolicyTests
             powerMode: PowerSaverModeEx.Never,
             triggers: PowerTriggersEx.BatterySaverOn));
 
-        Assert.Equal(ResolvedMotionLevel.Reduced, resolved.Level);
+        Assert.Equal(ResolvedMotionLevel.Off, resolved.Level);
     }
 
     [Fact]
@@ -111,7 +113,7 @@ public class MotionPolicyTests
             triggers: PowerTriggersEx.BatterySaverOn | PowerTriggersEx.RemoteSession,
             isRemoteSession: true));
 
-        Assert.Equal(ResolvedMotionLevel.Reduced, resolved.Level);
+        Assert.Equal(ResolvedMotionLevel.Off, resolved.Level);
         Assert.False(resolved.PaneScaleMotionAllowed);
     }
 
@@ -205,9 +207,9 @@ public class MotionPolicyTests
     [Fact]
     public void Energy_saver_and_disabled_animations_merge_to_off()
     {
-        // The row that separates most-severe merge from first-hit-wins:
-        // seat 1 fires first, but the disabled animations are more severe
-        // and must win.
+        // Both seats resolve off, so this row now pins the severity map
+        // itself: a seat-1 mapping back to Reduced (or anything short of
+        // Off) fails here even though the other seat fired.
         var resolved = MotionPolicy.Resolve(Inputs(
             powerMode: PowerSaverModeEx.Always,
             systemAnimationsEnabled: false));
@@ -250,27 +252,43 @@ public class MotionPolicyTests
     [Fact]
     public void Essential_source_ceiling_does_not_stack_and_does_not_raise()
     {
-        // Two Reduced-shaped seats stay Reduced (a ceiling never deepens
-        // anything), and the ceiling never lifts an Off.
+        // The ceiling never deepens anything (an Off from another seat
+        // stays Off) and never lifts an Off.
         Assert.Equal(
-            ResolvedMotionLevel.Reduced,
+            ResolvedMotionLevel.Off,
             MotionPolicy.Resolve(Inputs(triggers: PowerTriggersEx.BatterySaverOn, hardware: HardwareCeiling.EssentialSource)).Level);
         Assert.Equal(
             ResolvedMotionLevel.Off,
             MotionPolicy.Resolve(Inputs(highContrastApplied: true, hardware: HardwareCeiling.EssentialSource)).Level);
     }
 
+    [Fact]
+    public void The_essential_ceiling_and_the_lever_off_merge_to_off()
+    {
+        // The one row that separates most-severe merge from first-hit-wins
+        // under the off-resolving severity map: the ceiling sits earlier in
+        // the seat order and a first hit would return Reduced here; the
+        // lever's Off is more severe and must win.
+        var resolved = MotionPolicy.Resolve(Inputs(
+            hardware: HardwareCeiling.EssentialSource,
+            lever: UserMotionLever.Off));
+
+        Assert.Equal(ResolvedMotionLevel.Off, resolved.Level);
+        Assert.True(resolved.PaneScaleMotionAllowed);
+    }
+
     [Theory]
-    [InlineData(PowerSaverModeEx.Auto, PowerTriggersEx.None, ResolvedMotionLevel.Full)]
-    [InlineData(PowerSaverModeEx.Auto, PowerTriggersEx.BatterySaverOn, ResolvedMotionLevel.Reduced)]
-    [InlineData(PowerSaverModeEx.Always, PowerTriggersEx.None, ResolvedMotionLevel.Reduced)]
+    [InlineData(HardwareCeiling.Unspecified, PowerSaverModeEx.Auto, PowerTriggersEx.None, ResolvedMotionLevel.Full)]
+    [InlineData(HardwareCeiling.EssentialSource, PowerSaverModeEx.Auto, PowerTriggersEx.None, ResolvedMotionLevel.Reduced)]
+    [InlineData(HardwareCeiling.Unspecified, PowerSaverModeEx.Always, PowerTriggersEx.None, ResolvedMotionLevel.Off)]
     public void Pane_scale_motion_is_barred_at_every_resolved_level(
-        PowerSaverModeEx powerMode, PowerTriggersEx triggers, ResolvedMotionLevel expectedLevel)
+        HardwareCeiling hardware, PowerSaverModeEx powerMode, PowerTriggersEx triggers, ResolvedMotionLevel expectedLevel)
     {
         var resolved = MotionPolicy.Resolve(Inputs(
             powerMode: powerMode,
             triggers: triggers,
-            isRemoteSession: true));
+            isRemoteSession: true,
+            hardware: hardware));
 
         Assert.Equal(expectedLevel, resolved.Level);
         Assert.False(resolved.PaneScaleMotionAllowed);
