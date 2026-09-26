@@ -1,10 +1,12 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using DynamicDependency = Microsoft.Windows.ApplicationModel.DynamicDependency;
 
@@ -56,13 +58,14 @@ internal sealed class XamlProbe
     /// <summary>Why the runtime could not be brought up at all, if it could not.</summary>
     private static Exception? BootstrapFailure;
 
-    /// <summary>The two facet probes. Created in the static constructor AFTER
+    /// <summary>The facet probes. Created in the static constructor AFTER
     /// the bootstrap, in its body rather than as field initializers: an
     /// initializer would run before the bootstrap and see a half-initialized
     /// type -- no queue, no recorded failure -- and decide from a state that
     /// cannot exist once initialization completes.</summary>
     internal static readonly XamlProbe Storyboard;
     internal static readonly XamlProbe Composition;
+    internal static readonly XamlProbe DependencyObjects;
 
     /// <summary>
     /// The probe's own cap. A dry run answers in milliseconds when it
@@ -84,6 +87,13 @@ internal sealed class XamlProbe
         Composition = Storyboard.Unavailable is null
             ? new XamlProbe(CompositionDryRun, ProbeCap)
             : Storyboard;
+        // Dependency objects (a Storyboard driving a Brush) are their own
+        // facet, NOT an inheritance from the storyboard verdict: on hosts
+        // where UIElement CREATION hangs, timeline-and-brush activation can
+        // still come up -- a different path, no visual, no composition
+        // pipeline -- and the dependency-facet tests must be decided by
+        // what THEY need, not by what the element facets need.
+        DependencyObjects = new XamlProbe(DependencyObjectsDryRun, ProbeCap);
     }
 
     private XamlProbe(Action dryRun, TimeSpan cap)
@@ -133,6 +143,30 @@ internal sealed class XamlProbe
         var visual = ElementCompositionPreview.GetElementVisual(host);
         visual.StopAnimation("Opacity");
         _ = visual.Compositor;
+    }
+
+    /// <summary>
+    /// The dependency-object facet's dry run: a storyboard whose timeline
+    /// targets a Brush -- no UIElement, no visual, no composition pipeline,
+    /// which is exactly the surface the registry's brush-keyed overload and
+    /// its lifecycle tests around storyboard reuse exercise.
+    /// </summary>
+    private static void DependencyObjectsDryRun()
+    {
+        // The type is spelled out: the class's own Storyboard probe field
+        // shadows the type name here.
+        var brush = new SolidColorBrush(Colors.Black);
+        var storyboard = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+        var anim = new ColorAnimation
+        {
+            From = Colors.Black,
+            To = Colors.Black,
+            Duration = new Duration(TimeSpan.FromMilliseconds(1)),
+        };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(anim, brush);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(anim, "Color");
+        storyboard.Children.Add(anim);
+        storyboard.Stop();
     }
 
     /// <summary>Why the gated tests skip on this host, or null to run.</summary>

@@ -1,10 +1,12 @@
 using System;
 using System.Threading.Tasks;
 using Ghostty.Motion;
+using Microsoft.UI;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Xunit;
 
@@ -121,8 +123,7 @@ public class AnimationActivityRegistryLifecycleTests
     }
 
     [XamlCompositionFact]
-    public async Task AForeverCompositionEntry_StandsUntilItIsReleased()
-    {
+    public async Task AForeverCompositionEntry_StandsUntilItIsReleased()    {
         var host = new Grid();
 
         await XamlProbe.OnDispatcherAsync<object?>(() =>
@@ -150,5 +151,99 @@ public class AnimationActivityRegistryLifecycleTests
             visual.StopAnimation("Scale");
             return null;
         });
+    }
+
+    [XamlDependencyFact]
+    public async Task AReusedStoryboard_DoesNotRootATargetItFinished()
+    {
+        // The switcher popup's two field boards are fields: they run for the
+        // popup's whole life and drive a different card or brush per use. A
+        // Completed handler that stays subscribed after it fires keeps every
+        // past use's target rooted through the board -- the exact law the
+        // registry's class doc states it holds nothing alive. The entry
+        // counts cannot see this (a second release is a no-op), so the pin
+        // is the ROOTING itself: after the first target is finished and the
+        // board has moved to a second one, only the registry's subscription
+        // could still be holding the first target, and it must be gone.
+        var board = default(Storyboard);
+        var firstRef = default(WeakReference);
+        var completed = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var afterFirstStop = 0;
+
+        await XamlProbe.OnDispatcherAsync<object?>(() =>
+        {
+            board = new Storyboard();
+
+            // First use: a brush target, the ActiveFieldFill shape.
+            var first = new SolidColorBrush(Colors.Black);
+            firstRef = new WeakReference(first);
+            var anim1 = new ColorAnimation
+            {
+                From = Colors.Black,
+                To = Colors.Gray,
+                Duration = new Duration(TimeSpan.FromMinutes(10)),
+            };
+            Storyboard.SetTarget(anim1, first);
+            Storyboard.SetTargetProperty(anim1, "Color");
+            board.Children.Add(anim1);
+
+            var before = AnimationActivityRegistry.TotalActive;
+            AnimationActivityRegistry.BeginStoryboard(board, first, "Color");
+            Assert.Equal(before + 1, AnimationActivityRegistry.TotalActive);
+
+            board.Completed += (_, _) => completed.TrySetResult(null);
+            board.Stop();
+            return null;
+        });
+
+        await Signal(completed);
+        afterFirstStop = await XamlProbe.OnDispatcherAsync(
+            () => AnimationActivityRegistry.TotalActive);
+        Assert.Equal(0, afterFirstStop);
+
+        // Second use: the popup's own sequence -- clear the old children
+        // (which drops the timeline's strong hold on the first target),
+        // target a new one, reuse the same board.
+        var secondSignal = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await XamlProbe.OnDispatcherAsync<object?>(() =>
+        {
+            board!.Children.Clear();
+            var second = new SolidColorBrush(Colors.White);
+            var anim2 = new ColorAnimation
+            {
+                From = Colors.White,
+                To = Colors.Gray,
+                Duration = new Duration(TimeSpan.FromMinutes(10)),
+            };
+            Storyboard.SetTarget(anim2, second);
+            Storyboard.SetTargetProperty(anim2, "Color");
+            board.Children.Add(anim2);
+
+            var before = AnimationActivityRegistry.TotalActive;
+            AnimationActivityRegistry.BeginStoryboard(board, second, "Color");
+            Assert.Equal(before + 1, AnimationActivityRegistry.TotalActive);
+            board.Completed += (_, _) => secondSignal.TrySetResult(null);
+            board.Stop();
+            return null;
+        });
+
+        await Signal(secondSignal);
+
+        // The pin. With the subscription removed at its own Completed,
+        // nothing in the process holds the first target: two blocking
+        // collects around finalization settle every reachable reference.
+        // With a handler that stays subscribed, the board -- alive for the
+        // whole test -- holds the release closure, the closure holds the
+        // first target, and the first WeakReference stays alive.
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+
+        Assert.False(
+            firstRef!.IsAlive,
+            "the registry's Completed subscription is still rooting the target "
+            + "of a storyboard run that already finished");
     }
 }

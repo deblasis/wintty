@@ -20,7 +20,9 @@ namespace Ghostty.Motion;
 /// Entries leave the registry three ways:
 ///
 /// - a Storyboard's <c>Completed</c> (WinUI 3 raises it from <c>Stop</c> as
-///   well as from a natural finish, so both paths land here);
+///   well as from a natural finish, so both paths land here; the
+///   subscription removes itself when it fires, so a reused board
+///   accumulates nothing);
 /// - the element's <c>Unloaded</c>, which the registry subscribes to itself
 ///   the first time an element registers -- and <see cref="OnElementUnloaded"/>
 ///   for owners that tear an element's motion down explicitly (a disposed
@@ -92,7 +94,7 @@ internal static class AnimationActivityRegistry
     internal static void BeginStoryboard(Storyboard storyboard, UIElement element, string property)
     {
         var release = Increment(element, property);
-        storyboard.Completed += (_, _) => release();
+        SubscribeCompleted(storyboard, release);
         storyboard.Begin();
     }
 
@@ -104,7 +106,7 @@ internal static class AnimationActivityRegistry
     internal static void BeginStoryboard(Storyboard storyboard, Brush brush, string property)
     {
         var release = IncrementObject(brush, property);
-        storyboard.Completed += (_, _) => release();
+        SubscribeCompleted(storyboard, release);
         storyboard.Begin();
     }
 
@@ -118,8 +120,30 @@ internal static class AnimationActivityRegistry
     internal static void BeginStoryboard(Storyboard storyboard, string property)
     {
         var release = IncrementObject(storyboard, property);
-        storyboard.Completed += (_, _) => release();
+        SubscribeCompleted(storyboard, release);
         storyboard.Begin();
+    }
+
+    /// <summary>
+    /// Subscribe <paramref name="storyboard"/>'s Completed to
+    /// <paramref name="release"/>, once. The handler is the self-removing
+    /// kind: it holds its own name, and its first act is to unsubscribe
+    /// itself. A handler that stayed subscribed would outlive its fire on a
+    /// REUSED board -- the switcher popup's two field boards run for the
+    /// popup's whole life -- and the closure's hold on the target would
+    /// root one element or brush per use, for the board's life. The
+    /// registry's law is that it holds nothing alive, so the subscription
+    /// dies with the one fire it exists for.
+    /// </summary>
+    private static void SubscribeCompleted(Storyboard storyboard, Action release)
+    {
+        EventHandler<object>? handler = null;
+        handler = (_, _) =>
+        {
+            storyboard.Completed -= handler;
+            release();
+        };
+        storyboard.Completed += handler;
     }
 
     /// <summary>

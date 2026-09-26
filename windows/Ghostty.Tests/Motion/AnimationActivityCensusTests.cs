@@ -482,8 +482,44 @@ public sealed class Sample
     }
 
     [Fact]
-    public void TheScanner_FindsXamlThemeTransitions()
+    public void TheRegistrysCompletedSubscriptions_SelfRemove()
     {
+        // The registry's law is that it holds nothing alive. A Completed
+        // handler that stays subscribed after it fires breaks exactly that:
+        // the handler's closure holds the release, the release holds the
+        // target, and a REUSED board -- the switcher popup's two field
+        // boards run for the popup's whole life -- accumulates one rooted
+        // target per use. Every subscription must therefore be the
+        // self-removing shape: a named delegate whose first act is to
+        // unsubscribe itself. The behavioral proof lives in
+        // Ghostty.Tests.Windows (gated on a host that can create XAML
+        // objects); this pin is what runs everywhere.
+        var registry = ShellText("Services.AnimationActivityRegistry.cs");
+
+        var subscriptions = Regex.Matches(
+            registry, @"storyboard\.Completed \+= handler").Count;
+        Assert.True(
+            subscriptions > 0,
+            "expected Completed subscriptions in the registry; if the "
+            + "subscription shape changed, this guard must change with it "
+            + "deliberately, not silently");
+        var removals = Regex.Matches(
+            registry, @"storyboard\.Completed -= handler").Count;
+        Assert.True(
+            removals >= subscriptions,
+            $"only {removals} of {subscriptions} Completed subscriptions "
+            + "remove themselves; a subscription that outlives its fire "
+            + "roots its target for the storyboard's whole life");
+
+        // The old shape, spelled out: an anonymous handler that cannot
+        // unsubscribe because nothing holds its own name.
+        Assert.DoesNotContain(
+            "storyboard.Completed += (_, _) => release()",
+            registry, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheScanner_FindsXamlThemeTransitions()    {
         const string markup = @"<Grid
     xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"">
   <Border.Transitions>

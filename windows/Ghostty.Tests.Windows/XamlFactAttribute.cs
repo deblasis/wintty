@@ -36,3 +36,20 @@ public sealed class XamlCompositionFactAttribute : FactAttribute
             Skip = unavailable;
     }
 }
+
+/// <summary>
+/// XamlFact for tests that need only dependency objects -- a storyboard
+/// whose timeline drives a Brush -- and no element, visual, or composition.
+/// Its own facet: on hosts where UIElement CREATION hangs, this path can
+/// still come up, and the skip reason has to say what actually failed.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
+public sealed class XamlDependencyFactAttribute : FactAttribute
+{
+    public XamlDependencyFactAttribute()
+    {
+        var unavailable = XamlProbe.DependencyObjects.Unavailable;
+        if (unavailable is not null)
+            Skip = unavailable;
+    }
+}
