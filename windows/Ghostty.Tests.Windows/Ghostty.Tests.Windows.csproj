@@ -18,7 +18,19 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- The animation-activity registry's lifecycle tests run real XAML
+         objects (Storyboard Completed, FrameworkElement unload) under the
+         same runtime the app ships with, self-contained so the verdict
+         does not depend on what a host has installed system-wide. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
   </ItemGroup>
+
+  <PropertyGroup>
+    <!-- Unpackaged, like the app: no MSIX identity is needed to create XAML
+         objects and start animations on them. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+  </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Ghostty.Core\Ghostty.Core.csproj" />
@@ -27,5 +39,9 @@
   <ItemGroup>
     <!-- One shared file, linked: the four test hosts cannot drift. -->
     <Compile Include="..\build\TestHostArming.cs" Link="TestHostArming.cs" />
+    <!-- The registry under test, compiled from the same source the app
+         builds: the lifecycle tests exercise the exact file the shell
+         routes through, not a copy that can drift. -->
+    <Compile Include="..\Ghostty\Services\AnimationActivityRegistry.cs" Link="Motion\AnimationActivityRegistry.cs" />
   </ItemGroup>
 </Project>

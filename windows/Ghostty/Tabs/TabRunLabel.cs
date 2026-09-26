@@ -1,6 +1,7 @@
 using System;
 using Ghostty.Controls;
 using Ghostty.Core.Tabs;
+using Ghostty.Motion;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -180,6 +181,6 @@ internal sealed partial class TabRunLabel : Grid
             if (!toVisible) Visibility = Visibility.Collapsed;
             return;
         }
-        _fade.Begin();
+        AnimationActivityRegistry.BeginStoryboard(_fade, this, "Opacity");
     }
 }

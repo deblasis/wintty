@@ -9,6 +9,7 @@ using Ghostty.Dialogs;
 using Ghostty.Input;
 using Ghostty.Panes;
 using Ghostty.Services;
+using Ghostty.Motion;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.UI.Composition;
@@ -3606,7 +3607,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         scale.Period = TimeSpan.FromMilliseconds(TabStripMotion.LiftPeriodMs);
         scale.FinalValue = new Vector3(
             TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
-        visual.StartAnimation("Scale", scale);
+        AnimationActivityRegistry.StartCompositionAnimation(visual, item, "Scale", scale);
 
         // The shadow breathes with the grab: the same spring family,
         // scalar, so the depth arrives on the clock the height does.
@@ -3614,7 +3615,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         shadowIn.DampingRatio = TabStripMotion.LiftDampingRatio;
         shadowIn.Period = TimeSpan.FromMilliseconds(TabStripMotion.LiftPeriodMs);
         shadowIn.FinalValue = TabStripMotion.LiftShadowOpacity;
-        shadow.StartAnimation("Opacity", shadowIn);
+        // The shadow is a child sprite anchored to the tab; the activity is
+        // registered on the tab element the sprite rides.
+        AnimationActivityRegistry.StartCompositionAnimation(shadow, item, "Opacity", shadowIn);
 
         // The guard is the completion path's backstop, the pin flight's
         // rule: a batch that never fires must not leave the tab lifted
@@ -3671,8 +3674,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
         var fadeOut = compositor.CreateScalarKeyFrameAnimation();
         fadeOut.Duration = TimeSpan.FromMilliseconds(TabStripMotion.UnliftFadeMs);
         fadeOut.InsertKeyFrame(1f, 0f);
-        lift.Shadow.StartAnimation("Opacity", fadeOut);
-        visual.StartAnimation("Scale", settle);
+        AnimationActivityRegistry.StartCompositionAnimation(lift.Shadow, lift.Item, "Opacity", fadeOut);
+        AnimationActivityRegistry.StartCompositionAnimation(visual, lift.Item, "Scale", settle);
         settling.End();
     }
 
@@ -3719,7 +3722,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         fadeIn.InsertKeyFrame(1f, 1f);
         var batch = visual.Compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
         batch.Completed += (_, _) => visual.StopAnimation("Opacity");
-        visual.StartAnimation("Opacity", fadeIn);
+        AnimationActivityRegistry.StartCompositionAnimation(visual, appearing, "Opacity", fadeIn);
         batch.End();
     }
 

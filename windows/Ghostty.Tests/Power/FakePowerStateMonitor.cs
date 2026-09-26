@@ -12,6 +12,7 @@ internal sealed class FakePowerStateMonitor : IPowerStateMonitor
 {
     public bool IsLowPowerActive { get; set; }
     public PowerSaverTrigger ActiveTriggers { get; set; }
+    public bool IsRemoteSession { get; set; }
     public event EventHandler? LowPowerChanged;
 
     public int StartCalls { get; private set; }

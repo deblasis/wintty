@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using Ghostty.Controls;
 using Ghostty.Core.Tabs;
+using Ghostty.Motion;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -953,7 +954,17 @@ internal sealed partial class TabSwitcherPopup : UserControl
                 Animate(outgoing, selected: false, duration);
             if (PartsFor(target) is { } incoming && !ReferenceEquals(_activeCard, target))
                 Animate(incoming, selected: true, duration);
-            if (_highlightMove.Children.Count > 0) _highlightMove.Begin();
+            // The board drives the outgoing and the incoming card; the
+            // activity is registered on the card taking the selection --
+            // or, when that tab has no cell in the grid (mid-removal), on
+            // the board itself, whose Completed ends the entry.
+            if (_highlightMove.Children.Count > 0)
+            {
+                if (target is { } card)
+                    AnimationActivityRegistry.BeginStoryboard(_highlightMove, card, "Opacity");
+                else
+                    AnimationActivityRegistry.BeginStoryboard(_highlightMove, "Opacity");
+            }
         }
         _activeCard = target;
 
@@ -1045,7 +1056,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
         AddTrack(_enter, Card, "Opacity", 1, duration, easing);
         AddTrack(_enter, Card, "(UIElement.RenderTransform).(TranslateTransform.Y)",
             0, duration, easing);
-        _enter.Begin();
+        AnimationActivityRegistry.BeginStoryboard(_enter, Card, "Opacity");
     }
 
     private static void AddTrack(

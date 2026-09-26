@@ -12,6 +12,7 @@ namespace Ghostty.Tests.Motion;
 /// a registered observer receives the lifecycle notifications. Pure
 /// in-process state, no UI thread.
 /// </summary>
+[Collection("PaneMotionSerial")]
 public sealed class PaneMotionCoordinatorTests
 {
     private sealed class RecordingCoordinator : IPaneMotionCoordinator

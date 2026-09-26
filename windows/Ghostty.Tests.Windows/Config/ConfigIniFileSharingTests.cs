@@ -11,7 +11,7 @@ namespace Ghostty.Tests.Windows.Config;
 /// Windows-native: elsewhere .NET emulates FileShare with advisory locks and
 /// the guarantee is not the same.
 /// </summary>
-public sealed class ConfigIniFileSharingTests : IDisposable
+public sealed partial class ConfigIniFileSharingTests : IDisposable
 {
     private readonly string _dir = Path.Combine(
         Path.GetTempPath(), $"wintty-ini-share-{Guid.NewGuid():N}");

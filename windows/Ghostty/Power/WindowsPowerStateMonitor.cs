@@ -58,6 +58,10 @@ internal sealed partial class WindowsPowerStateMonitor : IPowerStateMonitor, IDi
     public bool IsLowPowerActive { get; private set; }
     public PowerSaverTrigger ActiveTriggers { get; private set; }
 
+    // The tracked bit, not a second read: IsLowPowerActive's resolution
+    // consumes the same value, so both answers can never disagree.
+    public bool IsRemoteSession => _remoteSession;
+
     public event EventHandler? LowPowerChanged;
 
     public WindowsPowerStateMonitor(

@@ -23,6 +23,7 @@ using Ghostty.Core.Shell;
 using Ghostty.Core.Windows;
 using Ghostty.Services;
 using Ghostty.Logging;
+using Ghostty.Motion;
 using Ghostty.Panes;
 using Ghostty.Settings;
 using Ghostty.Shell;
@@ -4986,9 +4987,22 @@ public sealed partial class MainWindow : Window
 
     private void FocusActiveLeaf()
     {
+        // The same deferred focus as before, reported to the pane motion
+        // surface where the focus is actually set -- inside the enqueued
+        // lambda, after the Focus call, so the report never precedes the
+        // move it describes. The outgoing side is not tracked at window
+        // scope (focus can arrive from a strip, an overlay or another
+        // window), so FromLeafId is null: focus arriving from nothing.
         DispatcherQueue.TryEnqueue(() =>
-            _tabManager.ActiveTab?.PaneHost?.ActiveLeaf?.Terminal()
-                .Focus(FocusState.Programmatic));
+        {
+            var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+            if (leaf is null) return;
+            leaf.Terminal().Focus(FocusState.Programmatic);
+            if (PaneMotion.Active)
+            {
+                PaneMotion.Current!.OnFocusTransfer(new FocusTransfer(FromLeafId: null, ToLeafId: PaneMotionIds.Of(leaf)));
+            }
+        });
     }
 
     /// <summary>

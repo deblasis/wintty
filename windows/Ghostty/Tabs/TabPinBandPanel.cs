@@ -1,5 +1,6 @@
 using System.Numerics;
 using Ghostty.Core.Tabs;
+using Ghostty.Motion;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -196,7 +197,7 @@ internal sealed partial class TabPinBandPanel : Panel
                     && ReferenceEquals(live, batch))
                     HandBack(child);
             };
-            visual.StartAnimation("Translation", glide);
+            AnimationActivityRegistry.StartCompositionAnimation(visual, child, "Translation", glide);
             batch.End();
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
