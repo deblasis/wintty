@@ -340,9 +340,14 @@ public sealed class ThemeResolutionTests
     /// <summary>
     /// The grounds the contrast oracle actually measured failing (#936): the
     /// mid greys and grey-greens a translucent strip renders on a light
-    /// desktop, where the shipped fixed-alpha rule left nine surfaces under
-    /// their floors. Every one of them is a ground the delivered ink has to
-    /// clear, not a corner case.
+    /// desktop, where the shipped fixed-alpha rule left surfaces under their
+    /// floors. Every one of them is a ground the delivered ink has to clear,
+    /// not a corner case. The last three carry their own reasons: 0x61705C is
+    /// the pinned row's measured ground (its surface rides this PR's ink via
+    /// the inactive arm), 0x516152 the retired boundary-stroke surface's, and
+    /// 0x757575 the one band of greys where the better pole FLIPS between
+    /// rungs - the only ground that can catch a ladder that walks the alpha
+    /// but freezes the pole.
     /// </summary>
     public static TheoryData<uint> MeasuredFailingGrounds => new()
     {
@@ -355,6 +360,9 @@ public sealed class ThemeResolutionTests
         0x586C56u, // stock-light, htab-title-inactive measured 2.63
         0x5B705Bu, // stock-light, htab-chip-count measured 3.55
         0x808080u, // the known mid grey that defeats any fixed alpha
+        0x61705Cu, // stock-light/vert-wide, vtab-pinned-title measured 3.41
+        0x516152u, // stock-dark/vert, vtab-boundary-stroke (surface retired)
+        0x757575u, // the pole-flip band: catches a frozen-pole ladder
     };
 
     [Theory]
@@ -449,6 +457,9 @@ public sealed class ThemeResolutionTests
     /// The pole at the delivered alpha is still the better pole there: a
     /// ladder that walks the alpha but freezes the pole can walk both poles
     /// into the wrong one on mid grounds, where higher alphas flip the answer.
+    /// The flip band is 0x72-0x75; 0x757575 sits in it, and on the other
+    /// grounds here the frozen-pole mutant returns the identical pair the
+    /// real ladder does - which is exactly why this theory needs that member.
     /// </summary>
     [Theory]
     [MemberData(nameof(MeasuredFailingGrounds))]
@@ -458,5 +469,34 @@ public sealed class ThemeResolutionTests
             ground, PreferredAlpha);
         var better = ThemeResolution.PreferLightForegroundAtAlpha(ground, alpha);
         Assert.Equal(better, pole == 0xFFFFFFu);
+    }
+
+    /// <summary>
+    /// A caller may name a floor up to the opaque better-pole's worst case
+    /// (~4.58:1, attained near #757575) and the delivered ink still clears
+    /// it everywhere: the walk simply steps to whichever rung first does.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(MeasuredFailingGrounds))]
+    public void AFloorAtTheOpaqueCeiling_IsStillCleared(uint ground)
+    {
+        var (pole, alpha) = ThemeResolution.ReadableMutedForeground(
+            ground, PreferredAlpha, minContrast: 4.58);
+        var ratio = DeliveredRatio(pole, alpha, ground);
+        Assert.True(ratio >= 4.58,
+            $"muted ink on {ground:X6} delivers {ratio:N2}:1, under the 4.58 floor it accepted");
+    }
+
+    /// <summary>
+    /// And above that ceiling the ask is impossible - no pole at any alpha
+    /// clears it on the worst ground - so the method refuses loudly rather
+    /// than handing back under-floor ink with a straight face. The silent
+    /// under-floor return is the failure mode #936 shipped in.
+    /// </summary>
+    [Fact]
+    public void AFloorAboveTheOpaqueCeiling_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ThemeResolution.ReadableMutedForeground(0x757575u, PreferredAlpha, 7.0));
     }
 }

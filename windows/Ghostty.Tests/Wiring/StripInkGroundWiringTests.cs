@@ -222,8 +222,13 @@ public sealed class StripInkGroundWiringTests
     /// theme's own foreground was the one arm that never heard of the strip,
     /// and it measured 2.63:1 on stock-light against a 4.5 floor (#936) --
     /// the vertical strip had no such arm, which is why the defect was one
-    /// layout wide. The census covers the count; this names the arm so the
-    /// failure reads as a sentence.
+    /// layout wide.
+    ///
+    /// The draw is bound to the INACTIVE arm, not merely present in the
+    /// method: the active title keeps its own full-strength brush, and a
+    /// refactor that moved the muted draw into the active arm (muting the
+    /// one title that must not mute, re-breaking the inactive ones) would
+    /// otherwise keep every count and argument here green.
     /// </summary>
     [Fact]
     public void TheDefaultPath_DrawsItsInactiveTitlesFromTheAnswer()
@@ -233,6 +238,28 @@ public sealed class StripInkGroundWiringTests
             .OfType<InvocationExpressionSyntax>()
             .Where(c => c.CalleeText().EndsWith("MutedInkBrush", StringComparison.Ordinal)));
         Assert.Equal("_stripBackdropPacked", draw.Arg(0));
+
+        // The draw's enclosing else clause is the chain's last, bare else:
+        // the inactive arm. (`else if` nests the if inside the clause's
+        // statement, so a bare else is a clause whose statement is not an
+        // if.) The active arm (`else if (active)`) holds no muted-ink draw
+        // at all.
+        var arm = draw.Ancestors().OfType<ElseClauseSyntax>().First();
+        Assert.IsNotType<IfStatementSyntax>(arm.Statement);
+        Assert.True(arm.Statement.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("MutedInkBrush", StringComparison.Ordinal))
+            .Count() == 1);
+        foreach (var other in recolor.DescendantNodes().OfType<ElseClauseSyntax>()
+            .Where(c => !c.Equals(arm))
+            // An `else if` clause's statement IS the nested if, so the
+            // clause transitively contains every later arm including the
+            // draw. Judge a clause by its own block: skip pure else-ifs,
+            // whose nested arms appear as clauses of their own.
+            .Where(c => c.Statement is not IfStatementSyntax))
+            Assert.Empty(other.DescendantNodes()
+                .OfType<InvocationExpressionSyntax>()
+                .Where(c => c.CalleeText().EndsWith("MutedInkBrush", StringComparison.Ordinal)));
     }
 
     /// <summary>
@@ -252,6 +279,16 @@ public sealed class StripInkGroundWiringTests
             applyInk.DescendantNodes().OfType<AssignmentExpressionSyntax>()
                 .Select(a => a.Left.ToString()).ToList());
 
+        // The null contract is the guard, and the guard is the point: a null
+        // ink means "no answer this pass", and the last calibrated one stands.
+        // An inverted or dropped guard (writing null into the Foreground, or
+        // keeping the stale brush when an answer DID arrive) must fail here.
+        var guard = Assert.IsType<IfStatementSyntax>(
+            applyInk.Body!.Statements.Single());
+        Assert.Equal("foreground is not null", guard.Condition.ToString());
+        Assert.Single(guard.Statement.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>());
+
         var recolor = ShellSource.Load(VerticalStrip).Method("RecolorNavItems");
         var feeds = recolor.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
@@ -267,9 +304,15 @@ public sealed class StripInkGroundWiringTests
     /// <summary>
     /// The chip is not muted twice. Its ink is chosen to clear its floor as
     /// drawn; an element opacity on top of that composites the ink down to
-    /// ~70% strength, which is the 2.73:1 member count of #936 and #884's
-    /// root cause B. 0.7 cannot clear AA on any ground, so the fix is
-    /// removing the second mute, not re-tuning it.
+    /// ~70% strength, which is the 3.55:1 member count of #936 (a single
+    /// mute of the opaque-pole ink - the vertical header's count was the
+    /// double-mute, #884's root cause B). 0.7 cannot clear AA on any ground,
+    /// so the fix is removing the mute, not re-tuning it.
+    ///
+    /// Matched on every spelling an opacity can take - an initializer name,
+    /// a member-access statement (`chip.Opacity = 0.7;`) and a SetValue of
+    /// the property - so the mute cannot come back one cast away from the
+    /// predicate.
     /// </summary>
     [Fact]
     public void TheChipCount_IsNotMutedByElementOpacity()
@@ -277,6 +320,13 @@ public sealed class StripInkGroundWiringTests
         var addChip = ShellSource.Load(HorizontalStrip).Method("AddGroupChip");
         Assert.DoesNotContain(
             addChip.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == "Opacity");
+            a => a.Left is IdentifierNameSyntax id && id.Identifier.ValueText == "Opacity"
+                || a.Left is MemberAccessExpressionSyntax member
+                && member.Name.Identifier.ValueText == "Opacity");
+        Assert.Empty(addChip.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("SetValue", StringComparison.Ordinal)
+                && c.ArgumentList.Arguments.Count > 0
+                && c.Arg(0).Contains("Opacity", StringComparison.Ordinal)));
     }
 }

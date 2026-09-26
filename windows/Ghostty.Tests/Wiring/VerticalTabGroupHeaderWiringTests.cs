@@ -275,10 +275,21 @@ public class VerticalTabGroupHeaderWiringTests
         // And the count is not muted twice: the ink arrives already
         // de-emphasised, and an element opacity on top of it is an effective
         // ~49% ink that clears no floor on any ground -- the measured 2.73:1
-        // (#936, and #884's root cause B).
+        // (#936, and #884's root cause B). Scoped to the count's own
+        // surfaces - its initializer and any `_count.Opacity` write - so a
+        // legitimate animation elsewhere in this file does not trip a
+        // contrast guard with a misleading message.
+        var source = Header();
+        var countInitializer = source.Root.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "_count").Right;
         Assert.DoesNotContain(
-            Header().Root.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            countInitializer.DescendantNodesAndSelf().OfType<AssignmentExpressionSyntax>(),
             a => a.Left.ToString() == "Opacity");
+        Assert.DoesNotContain(
+            source.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left is MemberAccessExpressionSyntax member
+                && member.ToString() == "_count.Opacity");
     }
 
     /// <summary>

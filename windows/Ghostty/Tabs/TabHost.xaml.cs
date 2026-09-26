@@ -4015,7 +4015,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// preferred alpha where that clears AA, else the muting ladder stepped
     /// up until it does (#936). Both the shell path and the default path
     /// draw their unselected titles from this one answer, so an under-floor
-    /// title is a wiring bug and not a second ink rule.
+    /// title is a wiring bug and not a second ink rule. The one known
+    /// exception is the idle dim: an idle title's element opacity re-mutes
+    /// this ink below the floor, an #884-class defect outside #936's
+    /// measured set.
     /// </summary>
     private static SolidColorBrush MutedInkBrush(uint ground)
     {

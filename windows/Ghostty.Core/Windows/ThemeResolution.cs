@@ -258,10 +258,23 @@ public static class ThemeResolution
     /// row part at one fixed alpha, and on the mid greys a translucent strip
     /// renders on a light desktop that ink tops out near 4.4:1 - under the AA
     /// floor whatever the pole (#936).
+    ///
+    /// The floor a caller can name has a ceiling: at full alpha the better
+    /// pole's worst case over all grounds is about 4.58:1 (attained near
+    /// #757575), so a <paramref name="minContrast"/> above that is ink no
+    /// rule can deliver. Naming one throws rather than quietly returning
+    /// under-floor ink - the silence is how #936 shipped.
     /// </summary>
     public static (uint Pole, byte Alpha) ReadableMutedForeground(
         uint ground, byte preferredAlpha, double minContrast = 4.5)
     {
+        const double OpaqueBetterPoleWorst = 4.58;
+        if (minContrast > OpaqueBetterPoleWorst)
+            throw new ArgumentOutOfRangeException(
+                nameof(minContrast), minContrast,
+                $"no ink clears {minContrast} on every ground; the opaque " +
+                "better pole's worst case is about 4.58:1");
+
         // Genuinely muted rungs between the preference and opaque. Evenly
         // spaced so no rung is a rounding nudge away from its neighbour: the
         // steps read as deliberate ink weights, not as dial twiddling.
@@ -278,9 +291,10 @@ public static class ThemeResolution
                 return (pole, alpha);
         }
 
-        // Unreachable while the ladder ends at 255: at full alpha the better
-        // pole clears any minContrast the caller can name. The explicit
-        // return keeps the compiler honest about that claim.
+        // The opaque rung is the ceiling: its better pole clears every
+        // accepted floor, so this return only restates the last rung's
+        // success. Kept explicit so the method's totality does not lean on
+        // that arithmetic staying true.
         return (PreferLightForegroundAtAlpha(ground, 255) ? 0xFFFFFFu : 0x000000u, 255);
     }
 

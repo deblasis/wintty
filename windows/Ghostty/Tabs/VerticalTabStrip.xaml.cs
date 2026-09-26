@@ -1436,7 +1436,9 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// up until it does (#936). Every row part that carries the muted ink -
     /// titles, group headers, close glyphs - is drawn from this one answer,
     /// so a part that cannot clear the floor is a wiring bug and not a
-    /// fourth ink rule.
+    /// fourth ink rule. The one known exception is the idle dim: an idle
+    /// title's element opacity re-mutes this ink below the floor, an
+    /// #884-class defect outside #936's measured set.
     /// </summary>
     private static SolidColorBrush MutedInkBrush(uint ground)
     {
