@@ -5467,7 +5467,7 @@ test "DefaultFiles.Result.mergeLayered adds the empty read counts" {
             .mergeLayered(.{ .result = .loaded, .found = 2, .empty_reads = 2 }),
     );
     try testing.expectEqual(
-        @as(u32, 0),
+        @as(u32, 1),
         (DefaultFiles.Result{ .result = .loaded, .found = 2, .empty_reads = 1 })
             .mergeLayered(.{ .result = .loaded, .found = 1, .empty_reads = 0 })
             .empty_reads,
