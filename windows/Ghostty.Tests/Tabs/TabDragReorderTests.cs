@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Ghostty.Core.Tabs;
+using Ghostty.Motion;
 using Xunit;
 
 namespace Ghostty.Tests.Tabs;
@@ -16,6 +17,11 @@ namespace Ghostty.Tests.Tabs;
 [Collection("PaneMotionSerial")]
 public class TabDragReorderTests
 {
+    // The gate rows below read the live registration through the strip
+    // gate's route; start every test from the default no-coordinator
+    // state rather than trusting another class's cleanup.
+    public TabDragReorderTests() => PaneMotion.ResetForTests();
+
     // Four rows of 40px: arranged centers 20, 60, 100, 140.
     private static TabDragReorder NewMachine(int grabIndex = 0, int rowCount = 4)
     {
