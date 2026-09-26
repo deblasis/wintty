@@ -413,6 +413,52 @@ public sealed class FirstPaneCommandWiringTests
             "the user's wait-after-command must be read before a host command forces it on");
     }
 
+    [Fact]
+    public void ConfigReload_KeepsAHostCommandPaneWaitAfterCommand()
+    {
+        // A reload re-derives every config field, wait-after-command
+        // included, from the file. A pane the host gave a command had the
+        // key forced on at creation; re-deriving takes the file's unset
+        // literally and flips the running pane to close on any exit, a
+        // failing command's status lost (#1176).
+
+        // Surface.zig: the force is a recorded field, and updateConfig
+        // re-applies it exactly where it replaces the derived config.
+        var surface = SurfaceZig();
+        Assert.Contains("wait_after_command_forced: bool = false,", surface);
+        var replaceAt = surface.IndexOf(
+            "self.config = derived;", System.StringComparison.Ordinal);
+        var reapply = "self.config.wait_after_command =\n" +
+            "        waitAfterCommandAfterReload(self.wait_after_command_forced, derived.wait_after_command);";
+        var reapplyAt = surface.IndexOf(reapply, System.StringComparison.Ordinal);
+        Assert.True(reapplyAt >= 0, "updateConfig no longer re-applies a host command's forced wait");
+        Assert.True(
+            replaceAt >= 0 && replaceAt < reapplyAt,
+            "the forced wait must be re-applied after the reload replaces the config, or the reload wins");
+
+        // apprt/embedded.zig: the force is recorded when the host hands the
+        // surface a command (or asks for the wait itself), in the same block
+        // that sets close_on_clean_exit, before any child exit can land.
+        var embedded = EmbeddedZig();
+        var recorded = "self.core_surface.wait_after_command_forced =\n" +
+            "            opts.command != null or opts.wait_after_command;";
+        Assert.Contains(recorded, embedded);
+        Assert.True(
+            embedded.IndexOf("self.core_surface.close_on_clean_exit =", System.StringComparison.Ordinal)
+                < embedded.IndexOf(recorded, System.StringComparison.Ordinal),
+            "the force must be recorded in the same pre-drain block as close_on_clean_exit");
+    }
+
+    private static string SurfaceZig()
+    {
+        var asm = typeof(FirstPaneCommandWiringTests).Assembly;
+        var name = asm.GetManifestResourceNames()
+            .Single(n => n.Replace('\\', '.').Replace('/', '.')
+                .EndsWith("Interop.Exports.Surface.zig", System.StringComparison.Ordinal));
+        using var reader = new System.IO.StreamReader(asm.GetManifestResourceStream(name)!);
+        return reader.ReadToEnd().Replace("\r\n", "\n");
+    }
+
     private static string EmbeddedZig()
     {
         var asm = typeof(FirstPaneCommandWiringTests).Assembly;

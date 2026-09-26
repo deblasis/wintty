@@ -849,6 +849,12 @@ pub const Surface = struct {
         self.core_surface.close_on_clean_exit =
             opts.close_on_clean_exit and !user_wait_after_command;
 
+        // Record the force so a config reload keeps it: the reloaded file
+        // usually leaves `wait-after-command` unset, and re-deriving from
+        // it alone would flip this pane to close on any exit (#1176).
+        self.core_surface.wait_after_command_forced =
+            opts.command != null or opts.wait_after_command;
+
         // If our options requested a specific font-size, set that.
         if (opts.font_size != 0) {
             var font_size = self.core_surface.font_size;

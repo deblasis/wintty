@@ -174,6 +174,15 @@ child_exited: bool = false,
 /// unless the user set `wait-after-command` themselves.
 close_on_clean_exit: bool = false,
 
+/// The embedding host gave this surface a command (or asked for the wait
+/// itself), which forced `wait-after-command` on at creation. A config
+/// reload re-derives the config from the file, where the key is usually
+/// unset, and taking that literally would flip the running pane to close
+/// on any exit, a failing command's status lost (deblasis/wintty#1176).
+/// `updateConfig` re-applies the force; see
+/// `waitAfterCommandAfterReload`.
+wait_after_command_forced: bool = false,
+
 /// We maintain our focus state and assume we're focused by default.
 /// If we're not initially focused then apprts can call focusCallback
 /// to let us know.
@@ -1502,6 +1511,24 @@ fn keepOpenAfterExit(
     return !(close_on_clean_exit and exit_code == 0);
 }
 
+/// The wait-after-command a surface runs on after a config reload: a wait
+/// the host forced at creation holds unless the reloaded config sets the
+/// key itself, in which case the file decides (deblasis/wintty#1176).
+fn waitAfterCommandAfterReload(forced_at_creation: bool, reloaded: bool) bool {
+    return forced_at_creation or reloaded;
+}
+
+test "waitAfterCommandAfterReload: a host-command pane keeps its wait" {
+    const testing = std.testing;
+    // Forced at creation, the reloaded file leaves the key unset: holds.
+    try testing.expect(waitAfterCommandAfterReload(true, false));
+    // No host command: the file decides, either way.
+    try testing.expect(!waitAfterCommandAfterReload(false, false));
+    try testing.expect(waitAfterCommandAfterReload(false, true));
+    // The file setting the key changes nothing for a forced pane.
+    try testing.expect(waitAfterCommandAfterReload(true, true));
+}
+
 test "keepOpenAfterExit: graceful close for a launch command" {
     const testing = std.testing;
     // Not waiting: always closes.
@@ -1951,6 +1978,15 @@ pub fn updateConfig(
     };
     self.config.deinit();
     self.config = derived;
+
+    // A pane the host gave a command keeps the wait-after-command that was
+    // forced on at its creation: the reloaded config usually leaves the
+    // key unset, and folding that into the derived config would flip a
+    // running command pane to close on any exit (#1176). The file setting
+    // the key itself still wins, the same rule the creation-time force
+    // followed.
+    self.config.wait_after_command =
+        waitAfterCommandAfterReload(self.wait_after_command_forced, derived.wait_after_command);
 
     // If our mouse is hidden but we disabled mouse hiding, then show it again.
     if (!self.config.mouse_hide_while_typing and self.mouse.hidden) {
