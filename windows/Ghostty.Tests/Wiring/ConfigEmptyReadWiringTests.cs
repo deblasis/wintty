@@ -59,14 +59,21 @@ public class ConfigEmptyReadWiringTests
         var gate = Assert.Single(reload.DescendantNodes()
             .OfType<IfStatementSyntax>()
             .Where(i => i.Condition.ToString().Contains(
-                "!ConfigReloadGate.ShouldApplyEmptyRead", StringComparison.Ordinal)));
+                "isEmptyRead &&", StringComparison.Ordinal)
+                && i.Condition.ToString().Contains(
+                    "!ConfigReloadGate.ShouldApplyEmptyRead", StringComparison.Ordinal)));
 
         var calls = gate.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Select(i => i.Expression.ToString())
             .ToArray();
         Assert.Contains("NativeMethods.ConfigFree", calls);
         Assert.Contains("StaticLoggers.ConfigService.LogReloadKeptRunningConfig", calls);
+        // The re-ask must stay the coalescing look-ask: the watcher-only
+        // ask returns false with no watcher and never reschedules, which
+        // is a lockout on this leg, and the loose "Ask" substring would
+        // read that swap as satisfied.
         Assert.Contains("_lookAgain.Ask", calls);
+        Assert.DoesNotContain("AskWatcher", calls);
 
         Assert.Contains(gate.DescendantNodes().OfType<ReturnStatementSyntax>(),
             r => r.Expression is LiteralExpressionSyntax literal
@@ -76,24 +83,28 @@ public class ConfigEmptyReadWiringTests
     /// <summary>
     /// The budget is consecutive looks, so every look answers the question
     /// and the applied path starts the next question from zero, next to
-    /// the other two budgets' resets. The move half is pinned too: delete
-    /// the increment and the count never climbs, so a file emptied on
-    /// purpose is declined forever, the exact lockout the budget exists to
-    /// prevent.
+    /// the other two budgets' resets. The counter's if is pinned by
+    /// structure, not by the presence of its statements: flipped branch
+    /// polarity or a swapped branch body resets on empty looks and climbs
+    /// on ordinary ones, which is the deliberate-empty lockout wearing a
+    /// different coat, and every statement still present.
     /// </summary>
     [Fact]
     public void The_look_budget_moves_on_every_look_and_resets_when_applied()
     {
         var reload = ConfigService().Method("Reload");
 
-        Assert.Contains(reload.DescendantNodes().OfType<IfStatementSyntax>(),
-            i => i.Condition.ToString().Contains("isEmptyRead", StringComparison.Ordinal));
+        var counter = Assert.Single(reload.DescendantNodes()
+            .OfType<IfStatementSyntax>(),
+            i => i.Condition.ToString() == "!isEmptyRead");
 
-        Assert.Contains(reload.DescendantNodes().OfType<ExpressionStatementSyntax>(),
-            s => s.ToString() == "_emptyReadLooks++;");
-
-        Assert.Contains(reload.DescendantNodes().OfType<ExpressionStatementSyntax>(),
+        Assert.Contains(counter.Statement.DescendantNodesAndSelf()
+            .OfType<ExpressionStatementSyntax>(),
             s => s.ToString().StartsWith("_emptyReadLooks = 0", StringComparison.Ordinal));
+
+        Assert.Contains(counter.Else!.Statement.DescendantNodesAndSelf()
+            .OfType<ExpressionStatementSyntax>(),
+            s => s.ToString() == "_emptyReadLooks++;");
     }
 
     /// <summary>
@@ -121,12 +132,16 @@ public class ConfigEmptyReadWiringTests
         Assert.NotEmpty(recordings);
         Assert.All(recordings, r => Assert.Equal(2, r.ArgumentList!.Arguments.Count));
 
-        // And the applied path records the load's own answer, not a
-        // hard-coded zero: a recorded 0 would make the hold re-pay its
-        // whole budget on every deliberate-empty stretch.
+        // Every site passes the load's own answer, constructor included: a
+        // hard-coded zero anywhere would make the hold re-pay its whole
+        // budget on every deliberate-empty stretch from that record on.
+        Assert.All(recordings, r => Assert.Equal("defaultFilesEmptyReads", r.Arg(1)));
+
+        // And the applied path records the count it applied, not a stale
+        // field: the shrink gate compares against this.
         var applied = Assert.Single(
             ConfigService().Method("Reload").Calls("RecordDefaultFiles"));
-        Assert.Equal("defaultFilesEmptyReads", applied.Arg(1));
+        Assert.Equal("defaultFilesFound", applied.Arg(0));
 
         // One writer, so the record and the question cannot drift apart.
         var assignment = Assert.Single(ConfigService().Root

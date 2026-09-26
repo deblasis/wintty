@@ -241,15 +241,24 @@ public static class ConfigReloadGate
     /// leaves behind, is not taxed with a hold on every reload it will ever
     /// do, because its steady looks read exactly what the record says.</para>
     ///
-    /// <para>What the counts see, and what they cannot: a truncate of a
-    /// layer that had content always raises the empty count past the record,
-    /// in every layered arrangement, and is held. An atomic save (write
+    /// <para>What the counts see, and the assumption under them. The count
+    /// is a total across every candidate the loader reads, and only one of
+    /// those layers is the one the watcher watches. A truncate of a layer
+    /// that had content raises the count past the record and is held,
+    /// wherever the layer sits, watched or not. An atomic save (write
     /// beside, rename over) reads the old bytes in its window, counts
-    /// unchanged, and is waved through for the same reason the steady state
-    /// is: what applies is the config already in force, and the completing
-    /// rename raises its own event. A layer the watcher does not watch is
-    /// picked up on the next look for any reason and held the same way, by
-    /// its raised count.</para>
+    /// unchanged, and is waved through: what applies is the config already
+    /// in force, and the completing rename raises its own event. The wave
+    /// trusts the record, and the record is a snapshot: a layer the watcher
+    /// does not watch can change between the record and the window, and a
+    /// fill of a recorded-empty layer cancels a watched truncate inside the
+    /// totals, so one mid-save look can present record-equal counts and
+    /// apply the save's own half-state. That takes an already-degraded
+    /// record, a second writer, and one look; the completing write re-fires
+    /// and the next look applies the true end state. A completed content
+    /// edit also matches the counts and applies by design. The counts
+    /// answer whether this emptiness is news, not whether the record is
+    /// still true.</para>
     /// </remarks>
     public static bool IsEmptyRead(
         ConfigFilesFound found,
