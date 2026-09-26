@@ -1265,10 +1265,14 @@ fn resizeSwapChain(self: *DirectX12, width: u32, height: u32) !void {
     // DXGI_ERROR_INVALID_CALL; the waitable object in particular must be
     // repeated on chains created with it). Rather than recomputing a
     // flag list here, Device carries the exact bits its chain was
-    // created with -- recomputing is how creation and resize drift
-    // apart, and on the panel path (created WITHOUT the waitable, whose
-    // entry point rejects it) a hardcoded waitable here would kill every
-    // resize after the first. ResizeBuffers lives on IDXGISwapChain1.
+    // created with -- recomputing a hardcoded list is how creation and
+    // resize drift apart, and any hardcoded waitable here would kill
+    // every resize-after-first on a chain deliberately created without
+    // it, which today is the panel path (unpaced by choice; see
+    // device.zig's compositionSwapChainDesc). No shipped tree ever had
+    // that bug -- creation and resize both passed 0 before this change
+    // -- but the recording is what makes introducing the waitable
+    // anywhere safe. ResizeBuffers lives on IDXGISwapChain1.
     // IDXGISwapChain3 inherits from IDXGISwapChain1 in COM, so the
     // v-table prefix is identical and a pointer reinterpret is safe; we
     // use it instead of QueryInterface to avoid an AddRef/Release pair on
