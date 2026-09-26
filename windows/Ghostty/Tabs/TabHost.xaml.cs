@@ -237,13 +237,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// is the template's own stroke-carrying element ("TabContainer"),
     /// NOT the TabViewItem: the item is padded well past the stroke, and a
     /// band taken off the item would sample that padding and score the
-    /// stroke against itself (#931's "the drawn band, not the row"). The
-    /// colour is the brush actually pushed into the item's
-    /// TabViewSelectedItemBorderBrush resource -- the template themes
-    /// TabContainer.BorderBrush from that key (XBF strings in
-    /// Microsoft.UI.Xaml.Controls.pri) -- and the thicknesses are that
-    /// element's live BorderThickness, the template's selected state read
-    /// back rather than re-derived.
+    /// stroke against itself (#931's "the drawn band, not the row").
+    /// TabContainer is a Grid; the template's Selected state themes its
+    /// BorderBrush from TabViewSelectedItemBorderBrush (the key the chrome
+    /// pass pushes) and its BorderThickness from
+    /// TabViewSelectedItemBorderThickness. Both are read back live: the
+    /// template's selected state, not a re-derivation. The thickness comes
+    /// off the element by property name -- the projection's Panel carries
+    /// no BorderThickness member, and the template reaches it through the
+    /// property engine, which is exactly how this reads it back.
     ///
     /// Read off the tree rather than kept in a field on purpose: a chrome
     /// pass that stops pushing the brush, or a template change that moves
@@ -262,16 +264,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
             || !item.Resources.TryGetValue(
                 "TabViewSelectedItemBorderBrush", out var pushed)
             || pushed is not SolidColorBrush ink
-            || FindDescendantByName(item, "TabContainer") is not Border band)
+            || FindDescendantByName(item, "TabContainer") is not FrameworkElement band)
+            return default;
+        var tProp = band.GetType().GetProperty("BorderThickness");
+        if (tProp is null
+            || tProp.GetValue(band) is not Microsoft.UI.Xaml.Thickness t)
             return default;
         var c = ink.Color;
         return new TabSelectionStroke(
             true,
             ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B,
-            band.BorderThickness.Left,
-            band.BorderThickness.Top,
-            band.BorderThickness.Right,
-            band.BorderThickness.Bottom,
+            t.Left,
+            t.Top,
+            t.Right,
+            t.Bottom,
             band);
     }
 

@@ -473,6 +473,26 @@ function New-Rect([double]$X, [double]$Y, [double]$W, [double]$H) {
 # right, bottom. The open side (the edge that meets the pane) carries no
 # stroke, so it is never in the order; the trim keeps the band clear of the
 # corners, where the stroke rounds into the perpendicular edges.
+# Localise a seam-reported screen-px rect into capture coordinates. Unlike
+# ConvertTo-Local there is no 2px minimum: the stroke band is a deliberate
+# 1px-wide rect (a 1-DIP stroke at scale 1), seam-placed rather than
+# UIA-guessed, so the anti-aliasing floor text rects need would refuse
+# every real band. Returns null only when nothing of the rect is inside.
+function ConvertTo-LocalExact($Cap, $Rect) {
+    if ($null -eq $Rect -or [double]::IsNaN($Rect.X)) { return $null }
+    $x = [int][Math]::Round([double]$Rect.X) - $Cap.L
+    $y = [int][Math]::Round([double]$Rect.Y) - $Cap.T
+    $w = [int][Math]::Round([double]$Rect.Width)
+    $h = [int][Math]::Round([double]$Rect.Height)
+    if ($w -le 0 -or $h -le 0) { return $null }
+    if ($x -lt 0) { $w += $x; $x = 0 }
+    if ($y -lt 0) { $h += $y; $y = 0 }
+    if ($x + $w -gt $Cap.W) { $w = $Cap.W - $x }
+    if ($y + $h -gt $Cap.H) { $h = $Cap.H - $y }
+    if ($w -le 0 -or $h -le 0) { return $null }
+    return @{ X = $x; Y = $y; W = $w; H = $h }
+}
+
 function Measure-SelectionStroke($Cap, [string]$Leg, [string]$Surface,
                                  [string]$Which) {
     $frame = Invoke-SeamCommand $script:SeamSession @{ op = 'layout-frame' }
@@ -529,10 +549,13 @@ function Measure-SelectionStroke($Cap, [string]$Leg, [string]$Surface,
             $skips.Add("${name}: ground band falls outside the capture")
             continue
         }
-        $gl = ConvertTo-Local $Cap $g 0
-        $bl = ConvertTo-Local $Cap $band 0
+        $gl = ConvertTo-LocalExact $Cap $g
+        $bl = ConvertTo-LocalExact $Cap $band
         if ($null -eq $gl -or $null -eq $bl) {
-            $skips.Add("${name}: band/ground rect degenerate after localising")
+            $skips.Add("${name}: band/ground rect degenerate after localising " +
+                "(band=($([Math]::Round($band.X)),$([Math]::Round($band.Y)),$([Math]::Round($band.Width)),$([Math]::Round($band.Height))) " +
+                "ground=($([Math]::Round($g.X)),$([Math]::Round($g.Y)),$([Math]::Round($g.Width)),$([Math]::Round($g.Height))) " +
+                "cap=($($Cap.L),$($Cap.T),$($Cap.W),$($Cap.H)))")
             continue
         }
         $si = [ContrastSampler]::Flat($Cap.Bmp, $bl.X, $bl.Y, $bl.W, $bl.H)

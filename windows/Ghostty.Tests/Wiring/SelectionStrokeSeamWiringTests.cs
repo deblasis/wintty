@@ -144,8 +144,14 @@ public class SelectionStrokeSeamWiringTests
         // element the template themes from the pushed key), not the item:
         // the item is padded well past the stroke, and a band taken off the
         // item samples that padding and scores the stroke against itself.
+        // TabContainer is a Grid, and the projection's Panel carries no
+        // BorderThickness member, so the live thickness comes off the
+        // element by property name -- an `is not Border` cast would refuse
+        // every real stroke, and a missing property must read as no stroke,
+        // not as a zero-width one.
         Assert.Contains("FindDescendantByName", getter);
         Assert.Contains("\"TabContainer\"", getter);
+        Assert.Contains("GetProperty(\"BorderThickness\")", getter);
     }
 
     /// <summary>
