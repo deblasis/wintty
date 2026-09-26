@@ -1018,4 +1018,75 @@ public class ConfigWatcherWiringTests
         Assert.Contains(ctor.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
             a => a.Left.ToString() == "_now" && a.Right.ToString() == "now ?? MonotonicNow");
     }
+
+    /// <summary>
+    /// The shrink stretch is measured on the same monotonic clock as the
+    /// vanish floor, and the confirmer's own pin does not reach it: the
+    /// stretch is computed in the service, from the one clock sample the
+    /// decline takes. A wall-clock sample stepped forward between two
+    /// shrink observations would read the floor as met and apply the
+    /// remaining layered file mid-save (#1146's shape through this door);
+    /// no behavioural test can step the system clock, so the source is
+    /// the only place this is visible.
+    /// </summary>
+    [Fact]
+    public void The_shrink_stretch_is_measured_on_a_monotonic_clock()
+    {
+        var reload = ConfigService().Method("Reload");
+
+        // One sample in the method, and it reads the Stopwatch at origin
+        // zero, which is the confirmer's own MonotonicNow shape.
+        var sample = Assert.Single(reload.Calls("Stopwatch.GetElapsedTime"));
+        Assert.Equal("(0)", sample.ArgumentList.ToString());
+
+        // The stretch answers from that sample and the open stretch alone,
+        // and a backwards clock reads young: never negative, so no step can
+        // push a young stretch past the floor.
+        var elapsed = Assert.Single(reload.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Identifier.ValueText == "shrinkElapsed"));
+        var stretch = Assert.IsType<ConditionalExpressionSyntax>(elapsed.Initializer!.Value);
+        Assert.Equal("_shrinkSince is { } since && now >= since", stretch.Condition.ToString());
+        Assert.Equal("now - since", stretch.WhenTrue.ToString());
+        Assert.Equal("TimeSpan.Zero", stretch.WhenFalse.ToString());
+
+        // The persistent decision consumes that stretch, after the sample.
+        // And no wall-clock type is named in the method the stretch lives
+        // in, which is the whole claim: there is no second clock.
+        var heal = Assert.Single(reload.Calls("ConfigReloadGate.IsPersistentShrink"));
+        Assert.True(heal.SpanStart > sample.SpanStart);
+        Assert.Empty(reload.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(i => i.Identifier.ValueText is "DateTime" or "DateTimeOffset"));
+    }
+
+    /// <summary>
+    /// The stretch has exactly three writes in the file, and the census is
+    /// over the whole file because the claim is over the whole decline: it
+    /// opens at the confirm branch's first look, and closes on an applied
+    /// reload and on the suppression lift, and nowhere else. A second open
+    /// anywhere else in the decline (the locked-file branch, "for
+    /// symmetry") would hand a real shrink an unreadable stretch's
+    /// accumulated time and confirm it before its own floor ran. The field
+    /// is born null: an initializer would make every stretch born old, and
+    /// the first shrink ever would apply the remaining layered file as a
+    /// deletion on sight.
+    /// </summary>
+    [Fact]
+    public void The_shrink_stretch_opens_once_and_is_born_null()
+    {
+        var service = ConfigService();
+
+        var writes = service.Root.AssignsTo("_shrinkSince").ToArray();
+        Assert.Equal(3, writes.Length);
+
+        var open = Assert.Single(writes, w => w.Right.ToString() != "null");
+        Assert.Equal("now", open.Right.ToString());
+        var guard = Assert.IsType<IfStatementSyntax>(open.Ancestors()
+            .OfType<IfStatementSyntax>().First());
+        Assert.Equal("_shrinkSince is null", guard.Condition.ToString());
+
+        // Born null, never born old.
+        var (variable, _) = service.Field("_shrinkSince");
+        Assert.Null(variable.Initializer);
+    }
 }
