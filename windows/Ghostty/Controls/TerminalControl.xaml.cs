@@ -1008,9 +1008,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// SwapChainPanel throws on the Background setter ("Setting
     /// 'Background' property is not supported on SwapChainPanel",
     /// COMException 0x80004005, measured as a startup crash 0xC000027B
-    /// during the rc.8 resize-flash work), so what the panel shows
-    /// beyond the presented chain content is addressed on the renderer
-    /// side, through the swap chain's own background color.
+    /// during the rc.8 resize-flash work). Film evidence ties the band
+    /// to the swap chain's own background color, set renderer-side:
+    /// adding that fill alone took the band from pure black to
+    /// near-background at the first filmed frame.
     /// </summary>
     internal void ApplyGutterBrush()
     {
@@ -1758,7 +1759,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // Fire-and-forget. ghostty_surface_set_size records the desired
         // dimensions in an atomic and wakes the renderer thread twice:
         // the coalescing wakeup drains the mailbox and renders, and the
-        // non-coalescing resize wake forces the frame that applies the
+        // dedicated resize wake forces the frame that applies the
         // resize (a pending resize is itself a redraw reason) while
         // arming a one-shot 8 ms backstop that re-checks it. We never
         // block here, never touch draw_mutex, and never do GPU work on

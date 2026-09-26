@@ -60,10 +60,13 @@ draw_now_c: xev.Completion = .{},
 
 /// Dedicated wake for a resize. `wakeup` coalesces, and the frame it
 /// forces may decide nothing needs drawing; a resize must ride neither
-/// of those. ghostty_surface_set_size notifies this alongside the
-/// wakeup: every notify forces one full render pass (the frame that
-/// applies the new swap chain size -- a pending resize is itself a
-/// redraw reason in drawFrameLocked), and arms the one-shot backstop
+/// of those. "Dedicated" is the operative property, not "non-
+/// coalescing": this is an xev.Async like `wakeup`, so a burst of
+/// notifies still collapses into one callback -- but the wake is not
+/// shared with any mailbox reason, and that one callback unconditionally
+/// forces the applying frame (a pending resize is itself a redraw
+/// reason in drawFrameLocked). ghostty_surface_set_size notifies this
+/// alongside the wakeup, and every callback arms the one-shot backstop
 /// below.
 resize_now: xev.Async,
 resize_now_c: xev.Completion = .{},

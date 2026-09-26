@@ -3018,7 +3018,7 @@ pub const CAPI = struct {
         // so the resize detection loop in beginFrame picks up the change.
         surface.core_surface.renderer.setTargetSize(w, h);
         // Two wakes, two classes. The coalescing `wakeup` drains the
-        // mailbox (the reflow round trip) and renders; the non-coalescing
+        // mailbox (the reflow round trip) and renders; the dedicated
         // `resize_now` forces the frame that applies the new swap chain
         // size (a pending resize is itself a redraw reason) and arms the
         // one-shot 8 ms backstop that re-checks it. Both are safe from

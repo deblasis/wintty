@@ -249,16 +249,19 @@ applied_scale_y_milli: u32 = 1000,
 
 /// The color the swap chain composites where its presentation area is
 /// not covered by back buffer content, premultiplied by the background
-/// opacity because the swap chain is PREMULTIPLIED. Composition chains
-/// (all of ours; see Device.compositionSwapChainDesc) ignore
-/// DXGI_SCALING, so this fill is best-effort there: what it can cover is
-/// the chain's own uncovered area, while the strip a resize exposes
-/// beyond the chain edge is SwapChainPanel territory the panel host
-/// paints. Stored so a TDR recovery's fresh swap chain gets it
-/// re-applied. Written by setBackgroundColor on the render thread
-/// (config change; unconditionally, on every reload -- there is no
-/// change detection here) or before the renderer thread starts (init);
-/// applied at every swap chain creation and resize.
+/// opacity because the swap chain is PREMULTIPLIED. On the
+/// SwapChainPanel path the resize-exposed strip is tied to this fill by
+/// film evidence, not by proven geometry: adding only SetBackgroundColor
+/// took the strip from pure black to near-background at the first filmed
+/// frame, and the host provably cannot paint the panel (the Background
+/// setter throws). Exact compositor geometry is unresolved at the
+/// harness camera cadence, and a small strip-specific tint (~22/255)
+/// decays over ~300ms, mechanism unknown. Stored so a TDR recovery's
+/// fresh swap chain gets it re-applied. Written by setBackgroundColor
+/// on the render thread (config change; unconditionally, on every
+/// reload -- there is no change detection here) or before the renderer
+/// thread starts (init); applied at every swap chain creation and
+/// resize.
 background_rgba: ?dxgi.DXGI_RGBA = null,
 
 /// True from a successful Present until the next beginFrame waits on
@@ -1085,9 +1088,9 @@ pub fn setContentScale(self: *DirectX12, x: f32, y: f32) void {
 /// (background or background-opacity reload), on the render thread or
 /// before it starts. Stores the value so TDR recovery re-applies it to
 /// the recreated swap chain; applying to a live swap chain is
-/// best-effort (a logged failure leaves the previous fill). On the
-/// SwapChainPanel path the resize-exposed strip sits beyond the chain
-/// edge and is painted by the panel host, not by this fill.
+/// best-effort (a logged failure leaves the previous fill). See
+/// background_rgba for why the resize-exposed strip is attributed to
+/// this fill on film evidence rather than proven geometry.
 pub fn setBackgroundColor(
     self: *DirectX12,
     background: terminal.color.RGB,
@@ -1208,9 +1211,11 @@ fn resizeSwapChain(self: *DirectX12, width: u32, height: u32) !void {
     }
 
     // UNKNOWN format preserves the creation format, but the flags must
-    // MATCH creation: DXGI validates the flag set (a mismatch returns
-    // DXGI_ERROR_INVALID_CALL; the waitable object in particular must be
-    // repeated on chains created with it). Rather than recomputing a
+    // MATCH creation: DXGI validates the flag set (a mismatch is
+    // rejected -- E_INVALIDARG, 0x80070057, measured on this machine's
+    // media chains; the waitable object in particular must be repeated
+    // on chains created with it, pinned in gpu_test's legality matrix).
+    // Rather than recomputing a
     // flag list here, Device carries the exact bits its chain was
     // created with -- recomputing a hardcoded list is how creation and
     // resize drift apart, and any hardcoded waitable here would kill

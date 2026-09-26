@@ -1766,6 +1766,11 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
     // both makes flipping the choice on a conscious diff, not a drift.
     try std.testing.expectEqual(@as(u32, 0), second.swap_chain_flags);
     try std.testing.expect(second.frame_latency_waitable == null);
+    // The unpaced panel chain still needs its SwapChain2: that is where
+    // the DPI counter-transform (SetMatrixTransform) lives. A regression
+    // that gated the QI on `paced` would silently kill the panel's
+    // matrix transform while these pins stayed green.
+    try std.testing.expect(second.swap_chain2 != null);
 
     // The proof is a Present into the reused surface from the new device.
     const sc = second.swap_chain orelse return error.NoSwapChain;
@@ -1784,13 +1789,16 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
     // behavior changed and the flag decisions in device.zig need
     // re-measuring, not just this test updating.
     if (!hasInteractiveDesktop()) return error.SkipZigTest;
-    var dev = createTestDevice() catch return;
-    defer dev.deinit();
-
+    // Above the device gate on purpose: the ABI literal is
+    // hardware-independent, and this test is the round-1 confound's
+    // guard -- a silent pass on a device-less host would hide it. A
+    // failed device creation skips visibly instead.
     try std.testing.expectEqual(
         @as(u32, 0x40),
         dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
     );
+    var dev = createTestDevice() catch return error.SkipZigTest;
+    defer dev.deinit();
 
     var factory: ?*dxgi.IDXGIFactory2 = null;
     {
@@ -1858,6 +1866,9 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
 
     // 1. The media entry point (production SwapChainPanel path) ACCEPTS
     //    the true waitable flag, and the paced follow-ups all work.
+    //    Includes the ResizeBuffers flag contract Device.swap_chain_flags
+    //    exists for, as measured: repeating the creation flags succeeds,
+    //    passing 0 on a waitable chain fails (E_INVALIDARG here).
     {
         const r = try mediaAttempt(media.?, dev.command_queue, .STRETCH, 0x40);
         defer _ = d3d12.CloseHandle(r.handle);
@@ -1875,6 +1886,8 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
         defer _ = c2.Release();
         try std.testing.expect(!com.FAILED(c2.SetMaximumFrameLatency(1)));
         try std.testing.expect(c2.GetFrameLatencyWaitableObject() != null);
+        try std.testing.expect(!com.FAILED(chain.ResizeBuffers(3, 128, 128, .UNKNOWN, 0x40)));
+        try std.testing.expect(com.FAILED(chain.ResizeBuffers(3, 128, 128, .UNKNOWN, 0)));
     }
 
     // 2. What the media entry point rejects is 0x10,
@@ -1898,7 +1911,8 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
         const r = try mediaAttempt(media.?, dev.command_queue, .NONE, 0x40);
         defer _ = d3d12.CloseHandle(r.handle);
         try std.testing.expect(!com.FAILED(r.hr));
-        if (r.chain) |chain| _ = chain.Release();
+        const chain = r.chain orelse return error.NoSwapChain;
+        defer _ = chain.Release();
     }
 
     // 4. Factory2 (bare-composition and hwnd-DComp paths) DOES reject

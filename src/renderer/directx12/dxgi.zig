@@ -64,10 +64,13 @@ pub const DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT: u32 = 0x00000040;
 /// The swap chain background color: what the chain composites over its
 /// own presentation area where back buffer content does not reach
 /// (flip-model chains). Every chain this renderer builds is a
-/// composition chain, where this fill is best-effort: the strip a
-/// resize exposes beyond the chain edge is SwapChainPanel area the
-/// panel host paints, not this. Components are straight float 0..1; the
-/// swap chain is PREMULTIPLIED, so an alpha below 1 wants color
+/// composition chain. On the SwapChainPanel path the resize-exposed
+/// strip is tied to this fill by film evidence (adding only
+/// SetBackgroundColor took the strip from pure black to near-background
+/// at the first filmed frame; the host cannot paint the panel at all),
+/// not by proven geometry -- the exact compositor layout is unresolved
+/// at the harness camera cadence. Components are straight float 0..1;
+/// the swap chain is PREMULTIPLIED, so an alpha below 1 wants color
 /// components scaled by it.
 pub const DXGI_RGBA = extern struct {
     r: f32,
