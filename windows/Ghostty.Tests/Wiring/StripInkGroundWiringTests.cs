@@ -285,8 +285,24 @@ public sealed class StripInkGroundWiringTests
         var guard = Assert.IsType<IfStatementSyntax>(
             applyInk.Body!.Statements.Single());
         Assert.Equal("foreground is not null", guard.Condition.ToString());
-        Assert.Single(guard.Statement.DescendantNodes()
+        var glyphInk = Assert.Single(guard.Statement.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>());
+
+        // The glyph takes the ink's POLE at full alpha, not the muted answer
+        // as painted. The close X is a hairline glyph whose sub-pixel stroke
+        // coverage cannot carry the muted alpha and still clear the 3.0
+        // control floor: the same muted answer that lets the title clear
+        // 8.31 rendered the X at 2.91 on nocfg (round-3 oracle). The pole is
+        // the ladder's own answer -- only the muting is skipped, so the
+        // glyph still flips with the ground and never picks a pole of its
+        // own.
+        var pole = Assert.Single(glyphInk.Right.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("FromArgb", StringComparison.Ordinal)));
+        Assert.Equal("0xFF", pole.Arg(0));
+        Assert.Equal("ink.Color.R", pole.Arg(1));
+        Assert.Equal("ink.Color.G", pole.Arg(2));
+        Assert.Equal("ink.Color.B", pole.Arg(3));
 
         var recolor = ShellSource.Load(VerticalStrip).Method("RecolorNavItems");
         var feeds = recolor.DescendantNodes()

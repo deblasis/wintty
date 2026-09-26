@@ -158,11 +158,23 @@ internal sealed partial class VerticalTabNavRow : Grid
     /// theme with the strip rendered mid-dark the glyph drew dark-on-mid at
     /// 2.02:1 against a 3.0 floor (#936). A null ink means this pass had no
     /// answer, and the last calibrated one stands.
+    ///
+    /// It takes the ink's pole at full alpha rather than the muted answer as
+    /// painted. The X is a hairline glyph: its sub-pixel stroke coverage
+    /// multiplies into the muted alpha and the stroke never reaches the
+    /// strength the ladder scored, which measured 2.91:1 on nocfg where the
+    /// title in the same brush cleared 8.31 (round-3 oracle). The pole is
+    /// still the ladder's own answer, so the glyph flips with the ground and
+    /// never picks a pole of its own; only the muting is skipped, and the
+    /// control floor the affordance answers to is the one that holds.
     /// </summary>
     internal void ApplyInk(Brush? foreground)
     {
         if (foreground is not null)
-            _closeGlyph.Foreground = foreground;
+            _closeGlyph.Foreground = foreground is SolidColorBrush ink
+                ? new SolidColorBrush(Windows.UI.Color.FromArgb(
+                    0xFF, ink.Color.R, ink.Color.G, ink.Color.B))
+                : foreground;
     }
 
     /// <summary>
