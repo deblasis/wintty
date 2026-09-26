@@ -446,24 +446,42 @@ public sealed class FirstPaneCommandWiringTests
         // sits in the same pre-drain block as close_on_clean_exit, before
         // any child exit can land, and still inside init.
         var embedded = EmbeddedZig();
+        // The guard that keeps an empty host command from forcing the wait:
+        // the Windows host passes a non-null empty-string command pointer
+        // for panes with no command, so the guard carries the rule, not
+        // the recording alone.
+        Assert.Equal(1, CountOf(embedded, "if (cmd.len > 0) {"));
         var commandSite = "config.@\"wait-after-command\" = true;\n" +
             "                wait_forced_by_host = true;";
+        var commandSiteAt = embedded.IndexOf(commandSite, System.StringComparison.Ordinal);
+        Assert.True(
+            commandSiteAt > embedded.IndexOf("if (cmd.len > 0) {", System.StringComparison.Ordinal),
+            "the command force must sit under the non-empty-command guard");
         Assert.Contains(commandSite, embedded);
         var waitSite = "config.@\"wait-after-command\" = true;\n" +
             "            wait_forced_by_host = true;";
         Assert.Contains(waitSite, embedded);
         Assert.Equal(2, CountOf(embedded, "wait_forced_by_host = true;"));
+        // Every force write must record itself: a third force site without
+        // a matching set line would tear the wait down on the first reload.
+        Assert.Equal(
+            CountOf(embedded, "config.@\"wait-after-command\" = true;"),
+            CountOf(embedded, "wait_forced_by_host = true;"));
         var recorded = "self.core_surface.wait_after_command_forced = wait_forced_by_host;";
+        Assert.Equal(1, CountOf(embedded, recorded));
         var recordedAt = embedded.IndexOf(recorded, System.StringComparison.Ordinal);
         Assert.True(recordedAt >= 0, "the force is no longer recorded for the reload");
         Assert.Equal(1, CountOf(embedded, "self.core_surface.close_on_clean_exit ="));
+        var closeAt = embedded.IndexOf(
+            "self.core_surface.close_on_clean_exit =", System.StringComparison.Ordinal);
         Assert.True(
-            embedded.IndexOf("self.core_surface.close_on_clean_exit =", System.StringComparison.Ordinal)
-                < recordedAt,
+            closeAt < recordedAt,
             "the force must be recorded in the same pre-drain block as close_on_clean_exit");
+        // The first pub fn deinit at or after the close line is Surface's,
+        // so this bounds the recording to inside init.
         Assert.True(
-            embedded.IndexOf("pub fn deinit", recordedAt, System.StringComparison.Ordinal) > 0,
-            "the recording must live inside init, before its first successor");
+            recordedAt < embedded.IndexOf("pub fn deinit", closeAt, System.StringComparison.Ordinal),
+            "the recording must live inside init, before Surface's deinit");
     }
 
     private static string SurfaceZig()
