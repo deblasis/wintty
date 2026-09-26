@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -25,8 +26,8 @@ public class VanishCountWiringTests
     {
         var creation = Assert.Single(ConfigService().Root
             .DescendantNodes()
-            .OfType<ObjectCreationExpressionSyntax>()
-            .Where(o => o.Type.ToString() == "ConfigVanishProtocol"));
+            .OfType<ObjectCreationExpressionSyntax>(),
+            o => o.Type.ToString() == "ConfigVanishProtocol");
 
         var onAccept = Assert.Single(creation.ArgumentList!.Arguments,
             a => a.NameColon?.Name.ToString() == "onAccept");
@@ -51,8 +52,13 @@ public class VanishCountWiringTests
     {
         // The constructor's seed and the applied reload: adding a site is
         // how a second writer arrives without touching the writer the
-        // one-writer census watches.
-        var recordings = ConfigService().Root.Calls("RecordDefaultFiles");
+        // one-writer census watches. Matched by the name the callee ends
+        // with, so a this.-spelled recorder is still counted.
+        var recordings = ConfigService().Root
+            .DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().EndsWith(
+                "RecordDefaultFiles", StringComparison.Ordinal))
+            .ToList();
         Assert.Equal(2, recordings.Count());
 
         // A recorded constant is an assumption, and the assumption is the
