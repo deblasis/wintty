@@ -189,61 +189,62 @@ public class ConfigReloadGateTests
 
     /// <summary>
     /// A shrunk count is either a save mid swap or a file gone for good,
-    /// and the confirm ask is how the two are told apart: the save's
-    /// completing rename answers it, so a shrink worth asking about stops
-    /// being asked about the moment the budget is spent. Only a Loaded
-    /// count takes it; an Unreadable one asks through ShouldRetry, and an
-    /// Absent one is the vanished callback's case, decided on its own
-    /// budget of asks.
+    /// and time is how the two are told apart: the save's completing
+    /// rename answers it, so a shrink younger than the floor keeps asking.
+    /// Only a Loaded count takes it; an Unreadable one asks through
+    /// ShouldRetry, and an Absent one is the vanished callback's case,
+    /// decided on its own protocol.
     /// </summary>
     [Theory]
-    [InlineData(ConfigFilesFound.Loaded, 1, 2, 0, 3, true)]
-    [InlineData(ConfigFilesFound.Loaded, 1, 2, 2, 3, true)]
-    [InlineData(ConfigFilesFound.Loaded, 1, 2, 3, 3, false)]
-    [InlineData(ConfigFilesFound.Loaded, 2, 1, 0, 3, false)]
-    [InlineData(ConfigFilesFound.Absent, 0, 1, 0, 3, false)]
-    [InlineData(ConfigFilesFound.Unreadable, 1, 2, 0, 3, false)]
-    public void A_shrunk_count_gets_one_more_look_while_the_budget_lasts(
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 0, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 899, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 900, false)]
+    [InlineData(ConfigFilesFound.Loaded, 2, 1, 0, false)]
+    [InlineData(ConfigFilesFound.Absent, 0, 1, 0, false)]
+    [InlineData(ConfigFilesFound.Unreadable, 1, 2, 0, false)]
+    public void A_shrunk_count_asks_for_another_look_while_younger_than_the_floor(
         ConfigFilesFound found,
         int filesFound,
         int sessionFilesFound,
-        int attemptsSoFar,
-        int maxAttempts,
+        int stretchMs,
         bool expected)
     {
         Assert.Equal(
             expected,
             ConfigReloadGate.ShouldConfirmShrink(
-                found, filesFound, sessionFilesFound, attemptsSoFar, maxAttempts));
+                found, filesFound, sessionFilesFound,
+                TimeSpan.FromMilliseconds(stretchMs), ConfigVanishConfirmer.DefaultFloor));
     }
 
     /// <summary>
-    /// A shrink that is still a shrink after the whole budget was spent on
-    /// looking again is a deletion, not a save: every ask waited out a full
-    /// quiet period, and a rename that slow lost its race with its own
-    /// editor. The deleted file is one the watcher does not watch - the
-    /// layered candidates it never sees - so nothing else would ever lower
-    /// the session count, and refusing here is the permanent lockout of
-    /// issue #676 again.
+    /// A shrink that is still a shrink after the floor has run is a
+    /// deletion, not a save: the widest absence window any save shape
+    /// leaves is 22ms against the 900ms floor, and no burst of deliveries
+    /// can compress the stretch, which is what a count of asks let a High
+    /// Contrast flip do (issue #1171). The deleted file is one the watcher
+    /// does not watch - the layered candidates it never sees - so nothing
+    /// else would ever lower the session count, and refusing here is the
+    /// permanent lockout of issue #676 again.
     /// </summary>
     [Theory]
-    [InlineData(ConfigFilesFound.Loaded, 1, 2, 3, 3, true)]
-    [InlineData(ConfigFilesFound.Loaded, 1, 2, 4, 3, true)]
-    [InlineData(ConfigFilesFound.Loaded, 1, 2, 2, 3, false)]
-    [InlineData(ConfigFilesFound.Loaded, 2, 1, 3, 3, false)]
-    [InlineData(ConfigFilesFound.Absent, 0, 1, 3, 3, false)]
-    public void A_shrink_that_outlives_the_whole_budget_is_a_deletion(
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 900, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 1200, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 899, false)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 0, false)]
+    [InlineData(ConfigFilesFound.Loaded, 2, 1, 900, false)]
+    [InlineData(ConfigFilesFound.Absent, 0, 1, 900, false)]
+    public void A_shrink_that_outlives_the_floor_is_a_deletion(
         ConfigFilesFound found,
         int filesFound,
         int sessionFilesFound,
-        int attemptsSoFar,
-        int maxAttempts,
+        int stretchMs,
         bool expected)
     {
         Assert.Equal(
             expected,
             ConfigReloadGate.IsPersistentShrink(
-                found, filesFound, sessionFilesFound, attemptsSoFar, maxAttempts));
+                found, filesFound, sessionFilesFound,
+                TimeSpan.FromMilliseconds(stretchMs), ConfigVanishConfirmer.DefaultFloor));
     }
 
     /// <summary>
