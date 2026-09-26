@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using Ghostty.Motion;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Hosting;
@@ -153,9 +154,21 @@ internal sealed class LayoutSwitchTimeline
 
     private void Register(
         List<Entry> phase, CompositionObject target, string property,
-        ExpressionAnimation animation, Action writeEnd)
+        ExpressionAnimation animation, Action writeEnd, UIElement? element = null)
     {
-        target.StartAnimation(property, animation);
+        // The start routes through the activity registry, keyed on the
+        // element when the caller has one and on the driven object when it
+        // does not. Either way the release below is what ends the entry:
+        // these are expressions, which never Complete on their own.
+        if (element is not null)
+        {
+            AnimationActivityRegistry.StartCompositionAnimation(target, element, property, animation);
+        }
+        else
+        {
+            AnimationActivityRegistry.StartCompositionAnimation(target, property, animation);
+        }
+
         phase.Add(new Entry(target, property, writeEnd));
     }
 
@@ -304,20 +317,22 @@ internal sealed class LayoutSwitchTimeline
         double spinOvershoot, double popMidpoint, double popDipScale, double popOvershoot)
     {
         var visual = VisualOf(element);
-        visual.StartAnimation(
-            nameof(Visual.CenterPoint),
+        AnimationActivityRegistry.StartCompositionAnimation(
+            visual, element, nameof(Visual.CenterPoint),
             Expr("Vector3(this.Target.Size.X / 2, this.Target.Size.Y / 2, 0)"));
-        // The centre expression is not registered: it is not a motion, it
-        // is the pivot definition, and it must survive until the rotation
-        // is released. Stopped alongside the rotation below.
+        // The centre expression is not registered as a motion: it is the
+        // pivot definition, and it must survive until the rotation is
+        // released. Stopped alongside the rotation below.
         var rot = Expr($"{F(degrees)} * {BackEaseOut(ClampT(""), spinOvershoot)}");
         Register(
             _switchEntries, visual, nameof(Visual.RotationAngleInDegrees), rot,
             () =>
             {
                 visual.StopAnimation(nameof(Visual.CenterPoint));
+                AnimationActivityRegistry.ReleaseCompositionAnimation(visual, nameof(Visual.CenterPoint));
                 visual.RotationAngleInDegrees = 0f;
-            });
+            },
+            element);
 
         // Dip partway through, then spring back past full inside the same
         // segment -- the pop the old key frames described, as one curve.
@@ -350,7 +365,8 @@ internal sealed class LayoutSwitchTimeline
             _switchEntries, TranslationVisualOf(ghost), "Translation",
             Expr($"Lerp(Vector3(0, 0, 0), Vector3({F(deltaX)}, {F(deltaY)}, 0), {EaseOutCubic(u)})"),
             () => TranslationVisualOf(ghost).Properties
-                .InsertVector3("Translation", new System.Numerics.Vector3((float)deltaX, (float)deltaY, 0)));
+                .InsertVector3("Translation", new System.Numerics.Vector3((float)deltaX, (float)deltaY, 0)),
+            ghost);
     }
 
     /// <summary>
@@ -423,7 +439,8 @@ internal sealed class LayoutSwitchTimeline
         Register(
             _switchEntries, visual, nameof(Visual.Opacity),
             Expr(formula),
-            () => visual.Opacity = shrinking ? 0f : 1f);
+            () => visual.Opacity = shrinking ? 0f : 1f,
+            label);
     }
 
     /// <summary>
@@ -460,8 +477,14 @@ internal sealed class LayoutSwitchTimeline
         tDriver.InsertKeyFrame(1f, 1f, linear);
         tDriver.Duration = _switchDuration;
         var landing = _compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
-        landing.Completed += (_, _) => landed();
-        _props.StartAnimation("T", tDriver);
+        landing.Completed += (_, _) =>
+        {
+            landed();
+            // The T driver is a finite animation that completes on its own;
+            // the batch that lands the switch is where its entry leaves.
+            AnimationActivityRegistry.ReleaseCompositionAnimation(_props, "T");
+        };
+        AnimationActivityRegistry.StartCompositionAnimation(_props, "T", tDriver);
         landing.End();
 
         var sDriver = _compositor.CreateScalarKeyFrameAnimation();
@@ -476,8 +499,12 @@ internal sealed class LayoutSwitchTimeline
         // The tail's cleanup needs no identity check: it stops only what
         // this timeline itself still holds, and a preempting switch has
         // already drained these entries by the time it could collide.
-        tail.Completed += (_, _) => ReleaseEntries(_tailEntries, writeEndValues: true);
-        _props.StartAnimation("S", sDriver);
+        tail.Completed += (_, _) =>
+        {
+            AnimationActivityRegistry.ReleaseCompositionAnimation(_props, "S");
+            ReleaseEntries(_tailEntries, writeEndValues: true);
+        };
+        AnimationActivityRegistry.StartCompositionAnimation(_props, "S", sDriver);
         tail.End();
 
         _clock = System.Diagnostics.Stopwatch.StartNew();
@@ -512,6 +539,9 @@ internal sealed class LayoutSwitchTimeline
         {
             try
             {
+                // The registry entry leaves here, not at Unloaded: these are
+                // expressions that only stop when this timeline stops them.
+                AnimationActivityRegistry.ReleaseCompositionAnimation(entry.Target, entry.Property);
                 entry.Target.StopAnimation(entry.Property);
                 if (writeEndValues) entry.WriteEnd();
             }

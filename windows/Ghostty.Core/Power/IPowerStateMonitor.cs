@@ -17,6 +17,13 @@ public interface IPowerStateMonitor
     /// When <see cref="IsLowPowerActive"/> is false, this is <see cref="PowerSaverTrigger.None"/>.</summary>
     PowerSaverTrigger ActiveTriggers { get; }
 
+    /// <summary>True when the app runs in a remote (RDP) session, per
+    /// GetSystemMetrics(SM_REMOTESESSION). Exposed separately from
+    /// <see cref="IsLowPowerActive"/>: that flag folds this signal in with
+    /// the others, and callers triaging power/transport state need the bit
+    /// on its own.</summary>
+    bool IsRemoteSession { get; }
+
     /// <summary>Raised on the monitor's synchronization context when
     /// <see cref="IsLowPowerActive"/> flips value. Not raised when only
     /// <see cref="ActiveTriggers"/> changes without flipping active.</summary>

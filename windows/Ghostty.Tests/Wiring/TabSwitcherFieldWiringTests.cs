@@ -249,8 +249,14 @@ public sealed class TabSwitcherFieldWiringTests
         // real failure: the destination becomes the value a To-only track
         // animates FROM, and every move turns into a cut.
         var land = highlight.Calls("LandHighlight").Single();
+        // The move begins at the routed start now: the BeginStoryboard that
+        // carries the highlight board (there are two, keyed on the card and
+        // on the board itself; both stand after the same LandHighlight).
         var begin = highlight.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Single(c => c.CalleeText() == "_highlightMove.Begin");
+            .Where(c => c.CalleeText() == "AnimationActivityRegistry.BeginStoryboard")
+            .Where(c => c.Arg(0) == "_highlightMove")
+            .OrderBy(c => c.SpanStart)
+            .First();
         Assert.True(land.SpanStart < begin.SpanStart,
             "LandHighlight must run before the next move begins, or it lands on top of it");
 

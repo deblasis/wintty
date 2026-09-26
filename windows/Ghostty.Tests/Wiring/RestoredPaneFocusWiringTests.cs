@@ -105,13 +105,21 @@ public class RestoredPaneFocusWiringTests
         // enqueued body is pinned, folded across its line breaks: it
         // resolves the pane at fire time from the manager (so a restore
         // that replaced leaves still finds the active one) and focuses it
-        // programmatically.
+        // programmatically. The body now also reports the focus transfer
+        // to the pane motion surface, inside the same body and behind the
+        // guard every motion report uses -- the pin stays exact, so any
+        // drift in the resolve, the focus or the report reds here.
         var enqueue = MainWindow().Method("FocusActiveLeaf")
             .Call("DispatcherQueue.TryEnqueue");
         var body = Assert.IsType<ParenthesizedLambdaExpressionSyntax>(enqueue.ArgExpression(0))
             .Body;
         Assert.Equal(
-            "_tabManager.ActiveTab?.PaneHost?.ActiveLeaf?.Terminal() .Focus(FocusState.Programmatic)",
+            "{ var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf; "
+            + "if (leaf is null) return; "
+            + "leaf.Terminal().Focus(FocusState.Programmatic); "
+            + "if (PaneMotion.Active) "
+            + "{ PaneMotion.Current!.OnFocusTransfer(new FocusTransfer(FromLeafId: null, "
+            + "ToLeafId: PaneMotionIds.Of(leaf))); } }",
             string.Join(" ", body.ToString().Split((char[])null,
                 StringSplitOptions.RemoveEmptyEntries)));
     }

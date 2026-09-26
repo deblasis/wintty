@@ -6,6 +6,7 @@ using Ghostty.Core.Panes;
 using Ghostty.Core.Profiles;
 using Ghostty.Controls;
 using Ghostty.Hosting;
+using Ghostty.Motion;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -797,6 +798,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         var newTerminal = CreateTerminal(snapshot);
         var newLeaf = new LeafPane { Tag = newTerminal };
         newLeaf.Snapshot = snapshot;
+        if (PaneMotion.Active)
+        {
+            PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(
+                PaneTreeChangeKind.Split, BeforeLeafId: PaneMotionIds.Of(oldActive)));
+        }
         _root = PaneTree.Split(_root, oldActive, newLeaf, orientation);
         _activeLeaf = newLeaf;
 
@@ -848,6 +854,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             Grid.SetColumn(subGrid, col);
             Grid.SetRow(subGrid, row);
             currentParent.Children.Add(subGrid);
+        }
+
+        if (PaneMotion.Active)
+        {
+            PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
+                PaneTreeChangeKind.Split,
+                BeforeLeafId: PaneMotionIds.Of(oldActive),
+                AfterLeafId: PaneMotionIds.Of(newLeaf)));
         }
 
         // Defer the highlight + focus until layout settles. The new
@@ -1144,6 +1158,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             return;
         }
 
+        if (PaneMotion.Active)
+        {
+            PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(
+                PaneTreeChangeKind.Close, BeforeLeafId: PaneMotionIds.Of(leaf)));
+        }
         _root = newRoot;
         // Clear zoom if the zoomed leaf was closed or if only one leaf
         // remains (zoom is meaningless on a single pane). Reset the whole
@@ -1173,6 +1192,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // full Rebuild for the root-replacement case where there is no
         // nested visual structure to confuse the framework.
         if (!TryIncrementalCloseRebuild(leafParentGrid)) Rebuild();
+        if (PaneMotion.Active)
+        {
+            PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
+                PaneTreeChangeKind.Close,
+                BeforeLeafId: PaneMotionIds.Of(leaf),
+                AfterLeafId: PaneMotionIds.Of(nextActive)));
+        }
         UpdateHighlightPosition();
 
         // A close while zoomed always force-unzooms (the structural rebuild
@@ -1490,7 +1516,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // leaf Equalize is a no-op, so capturing would push a useless entry
         // (and needlessly clear redo).
         if (_root is SplitPane) CaptureForUndo(Core.Panes.PaneOpKind.Equalize);
+        if (PaneMotion.Active)
+        {
+            PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(PaneTreeChangeKind.Equalize));
+        }
         PaneTree.Equalize(_root);
+        if (PaneMotion.Active)
+        {
+            PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(PaneTreeChangeKind.Equalize));
+        }
         RaiseLayoutChanged();
         // When zoomed, only update the model - unzoom re-applies every
         // ratio to the live tree when the user toggles back.
@@ -1516,6 +1550,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         if (Content is not Grid hostGrid) return;
 
+        // The leaf this toggle concerns: the zoomed one coming back down,
+        // or the active one about to float. The same id on both edges of
+        // the report -- the leaf survives the toggle.
+        var motionLeaf = _zoomedLeaf ?? _activeLeaf;
+        if (PaneMotion.Active)
+        {
+            PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(
+                PaneTreeChangeKind.Zoom,
+                BeforeLeafId: PaneMotionIds.Of(motionLeaf),
+                AfterLeafId: PaneMotionIds.Of(motionLeaf)));
+        }
+
         // Record the pre-toggle zoom state. No-op while restoring so the
         // re-zoom that RestoreFrom performs is not itself recorded.
         CaptureForUndo(Core.Panes.PaneOpKind.Zoom);
@@ -1533,6 +1579,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             if (_zoomRestoreParent is null)
             {
                 Rebuild();
+                if (PaneMotion.Active)
+                {
+                    PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
+                        PaneTreeChangeKind.Zoom,
+                        BeforeLeafId: PaneMotionIds.Of(motionLeaf),
+                        AfterLeafId: PaneMotionIds.Of(motionLeaf)));
+                }
                 UpdateHighlightPosition();
                 DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
                 return;
@@ -1559,6 +1612,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             UpdateLayout();
             _highlightOverlay.Visibility = Visibility.Visible;
             UpdateHighlightPosition();
+            if (PaneMotion.Active)
+            {
+                PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
+                    PaneTreeChangeKind.Zoom,
+                    BeforeLeafId: PaneMotionIds.Of(motionLeaf),
+                    AfterLeafId: PaneMotionIds.Of(motionLeaf)));
+            }
             DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
         }
         else
@@ -1587,6 +1647,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             // Surface the restore affordance over the now-full-size pane.
             _restoreZoomIcon.Glyph = RestoreZoomGlyphRest;
             _restoreZoomButton.Visibility = Visibility.Visible;
+            if (PaneMotion.Active)
+            {
+                PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
+                    PaneTreeChangeKind.Zoom,
+                    BeforeLeafId: PaneMotionIds.Of(motionLeaf),
+                    AfterLeafId: PaneMotionIds.Of(motionLeaf)));
+            }
             DispatcherQueue.TryEnqueue(() => leafCtl.Focus(FocusState.Programmatic));
         }
     }
@@ -1630,10 +1697,23 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         _restoring = true;
         try
         {
+            var outgoing = _activeLeaf;
+            if (PaneMotion.Active)
+            {
+                PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(
+                    PaneTreeChangeKind.Restore, BeforeLeafId: PaneMotionIds.Of(outgoing)));
+            }
             _root = snapshot.Root;
             _activeLeaf = snapshot.Active;
             _zoomedLeaf = null;        // Rebuild() clears zoom; re-enter below
             Rebuild();                 // full visual rebuild from the restored tree
+            if (PaneMotion.Active)
+            {
+                PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
+                    PaneTreeChangeKind.Restore,
+                    BeforeLeafId: PaneMotionIds.Of(outgoing),
+                    AfterLeafId: PaneMotionIds.Of(_activeLeaf)));
+            }
 
             if (snapshot.Zoomed is not null
                 && Core.Panes.PaneTree.Leaves(_root).Contains(snapshot.Zoomed))

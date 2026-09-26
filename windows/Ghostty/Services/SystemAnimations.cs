@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Motion;
 
 namespace Ghostty.Services;
 
@@ -10,9 +11,25 @@ namespace Ghostty.Services;
 /// checks (see <c>TabStripMotion</c>); these callers had no read at all,
 /// which is the gap this closes -- reduce-motion is a contract that a
 /// custom animation honours by cutting to its end state.
+///
+/// The gate answers through <see cref="MotionGating"/>, so a registered
+/// pane-motion coordinator decides per surface family; with none
+/// registered the answer is exactly what this gate always gave.
 /// </summary>
 internal static class SystemAnimations
 {
+    /// <summary>
+    /// Whether the custom motion paths may run. The surface class says
+    /// which family the caller belongs to: the quake slide is an overlay,
+    /// the bell fade and the pane glow are ambient effects, and the
+    /// default is ambient. This gate has never read high contrast, so its
+    /// high-contrast input is pinned false and its legacy answers are
+    /// unchanged.
+    /// </summary>
+    public static bool Enabled(MotionSurfaceClass surface = MotionSurfaceClass.Ambient)
+        => MotionGating.Effective(surface, animationsEnabled: ReadAnimationsEnabled(), highContrast: false)
+            != MotionPolicyLevel.Off;
+
     /// <summary>
     /// Whether system animation effects are on. A new UISettings per read,
     /// mirroring what each strip does per gesture: the reads are rare
@@ -20,7 +37,7 @@ internal static class SystemAnimations
     /// cached here would have to be created on a UI thread to be trusted
     /// anyway.
     /// </summary>
-    public static bool Enabled()
+    private static bool ReadAnimationsEnabled()
     {
         try { return new Windows.UI.ViewManagement.UISettings().AnimationsEnabled; }
         catch (Exception ex) when (ex is InvalidOperationException

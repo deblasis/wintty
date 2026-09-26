@@ -259,7 +259,9 @@ public class VerticalTabGroupDragWiringTests
 
         var rebind = strip.Method("RebindFollow");
         var rearm = rebind.Calls("AttachCoDrag").Single();
-        var restart = rebind.Calls("visual.StartAnimation").Single();
+        var restart = rebind
+            .Calls("AnimationActivityRegistry.StartCompositionAnimation")
+            .Single(c => c.Arg(0) == "visual" && c.Arg(3) == "drag.Follow");
         Assert.True(rearm.Span.Start > restart.Span.Start,
             "the stack re-arms after the follow restarts, on the fresh visual");
 

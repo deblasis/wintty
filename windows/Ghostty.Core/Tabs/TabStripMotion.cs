@@ -166,6 +166,17 @@ internal static class TabStripMotion
     public const float LiftShadowOpacity = 0.25f;
 
     /// <summary>
+    /// The route the shell installs over this gate. Core cannot see the
+    /// shell assembly, so the shell hands its gating down through this
+    /// slot: null, the Core-only default, leaves <see cref="Enabled"/>
+    /// answering <see cref="Legacy"/> directly, and the shell installs a
+    /// route once at module load that still lands on
+    /// <see cref="Legacy"/>'s truth whenever no pane-motion coordinator
+    /// is registered.
+    /// </summary>
+    internal static Func<bool, bool, bool>? Route { get; set; }
+
+    /// <summary>
     /// The motion gate: springs and glides run only when Windows
     /// animation effects are on and High Contrast is not. Disabled means
     /// every spring collapses to a cut; state correctness never waits on
@@ -179,8 +190,18 @@ internal static class TabStripMotion
     /// the chrome whenever the user has opted out of High Contrast
     /// themes. The plain preference read lives beside its callers in the
     /// shell (the hosts' own readers and Services.SystemAnimations); this
-    /// gate is the one place the two flags compose.
+    /// gate is the one place the two flags compose, and
+    /// <see cref="Legacy"/> is the one truth table it composes them by.
     /// </summary>
     public static bool Enabled(bool animationsEnabled, bool highContrast)
+        => Route?.Invoke(animationsEnabled, highContrast) ?? Legacy(animationsEnabled, highContrast);
+
+    /// <summary>
+    /// The legacy truth table, verbatim: on iff animations are enabled
+    /// and high contrast is not applied. The seam's fallback answers
+    /// through this method, so the gate and the seam cannot drift apart
+    /// on what "off" used to mean.
+    /// </summary>
+    internal static bool Legacy(bool animationsEnabled, bool highContrast)
         => animationsEnabled && !highContrast;
 }

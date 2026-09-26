@@ -587,19 +587,28 @@ public class TabLayoutSwitchWiringTests
     {
         var timeline = Timeline();
 
-        // Every StartAnimation lives in Register, Begin, or SpinIcon (whose
+        // Every animation start lives in Register, Begin, or SpinIcon (whose
         // extra start is the pivot definition its own WriteEnd stops --
-        // that exception is asserted below rather than waved through). A
-        // start anywhere else is an animation Release cannot reach: the
-        // leak the spring experiment measured, reachable again.
-        foreach (var call in timeline.Root.DescendantNodes()
+        // that exception is asserted below rather than waved through).
+        // Starts are routed through AnimationActivityRegistry, whose
+        // StartCompositionAnimation performs the StartAnimation itself, so
+        // a start can stand in the source in either shape; a start anywhere
+        // outside those three methods is an animation Release cannot
+        // reach: the leak the spring experiment measured, reachable again.
+        var starts = timeline.Root.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText().EndsWith(".StartAnimation", StringComparison.Ordinal)))
+            .Where(c => c.CalleeText().EndsWith(".StartAnimation", StringComparison.Ordinal)
+                        || c.CalleeText().EndsWith(".StartCompositionAnimation", StringComparison.Ordinal))
+            .ToList();
+        Assert.True(
+            starts.Count > 0,
+            "no animation start found at all: this guard must be able to fail");
+        foreach (var call in starts)
         {
             var method = call.Ancestors().OfType<MethodDeclarationSyntax>().First();
             Assert.True(
                 method.Identifier.ValueText is "Register" or "Begin" or "SpinIcon",
-                $"StartAnimation outside Register/Begin/SpinIcon, in {method.Identifier.ValueText}: "
+                $"animation start outside Register/Begin/SpinIcon, in {method.Identifier.ValueText}: "
                 + "unregistered animations outlive the switch");
         }
 
@@ -613,18 +622,21 @@ public class TabLayoutSwitchWiringTests
         // An expression started between CreateScopedBatch and End never
         // completes, so its batch never fires and neither the landing nor
         // the tail cleanup ever runs -- the exact shape of the spring
-        // failure. Two batches, two starts, and both starts are on the
-        // property set rather than on any visual.
+        // failure. Two batches, two routed starts, and both starts are on
+        // the property set rather than on any visual.
         var begin = timeline.Method("Begin");
         Assert.Equal(2, begin.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
             .Count(c => c.CalleeText() == "_compositor.CreateScopedBatch"));
-        var starts = begin.DescendantNodes()
+        var driverStarts = begin.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText().EndsWith(".StartAnimation", StringComparison.Ordinal))
+            .Where(c => c.CalleeText().EndsWith(".StartCompositionAnimation", StringComparison.Ordinal))
             .ToList();
-        Assert.Equal(2, starts.Count);
-        Assert.All(starts, s => Assert.Equal("_props.StartAnimation", s.CalleeText()));
+        Assert.Equal(2, driverStarts.Count);
+        Assert.All(driverStarts, s => Assert.Equal("_props", s.Arg(0)));
+        Assert.Equal(
+            new[] { "S", "T" },
+            driverStarts.Select(s => s.Arg(1).Trim('"')).OrderBy(x => x).ToArray());
 
         // The releases drain through one shape: stop, then optionally write
         // the end value. Release covers both phase lists.

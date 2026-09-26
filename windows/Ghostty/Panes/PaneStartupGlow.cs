@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using Ghostty.Motion;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Hosting;
@@ -133,8 +134,11 @@ internal sealed partial class PaneStartupGlow : IDisposable
         // stays, because it is the "pane is starting" signal and it does
         // not move.
         if (!Ghostty.Services.SystemAnimations.Enabled()) return;
-        _coreBrush.StartAnimation("EllipseCenter", _orbit);
-        _haloBrush.StartAnimation("EllipseCenter", _orbit);
+        // The orbit is IterationBehavior.Forever: it never Completes, so its
+        // registry entries leave only at the mount's Unload (or Dispose's
+        // explicit call below).
+        AnimationActivityRegistry.StartCompositionAnimation(_coreBrush, _mount, "EllipseCenter", _orbit);
+        AnimationActivityRegistry.StartCompositionAnimation(_haloBrush, _mount, "EllipseCenter", _orbit);
     }
 
     /// <summary>Fade the whole glow to transparent over <paramref name="duration"/>.
@@ -143,7 +147,7 @@ internal sealed partial class PaneStartupGlow : IDisposable
     {
         if (_disposed) return;
         _fade.Duration = duration;
-        _shapeVisual.StartAnimation("Opacity", _fade);
+        AnimationActivityRegistry.StartCompositionAnimation(_shapeVisual, _mount, "Opacity", _fade);
     }
 
     /// <summary>Resize the glow when the leaf bounds change.</summary>
@@ -174,6 +178,9 @@ internal sealed partial class PaneStartupGlow : IDisposable
         // Animations stop before the objects they drive, then owners go
         // before their dependents: the visual that holds both shapes, the
         // shapes, and the geometry they both stroke.
+        // The Forever orbit never Completes; this explicit unload is the
+        // registry entry's other exit.
+        AnimationActivityRegistry.OnElementUnloaded(_mount);
         _coreBrush.StopAnimation("EllipseCenter");
         _haloBrush.StopAnimation("EllipseCenter");
         _shapeVisual.StopAnimation("Opacity");
