@@ -2098,7 +2098,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _tabViewResourcesDirty = false;
         if (_tabViewRereadQueued) return;
         _tabViewRereadQueued = true;
-        DispatcherQueue.TryEnqueue(
+        // A refused enqueue never runs the callback, so the flag comes
+        // back here rather than latching and swallowing every later
+        // re-read for the life of the control.
+        var enqueued = DispatcherQueue.TryEnqueue(
             Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () =>
             {
@@ -2109,6 +2112,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     : ElementTheme.Light;
                 TabViewControl.RequestedTheme = theme;
             });
+        if (!enqueued) _tabViewRereadQueued = false;
     }
 
     private static readonly string[] TabViewItemHeaderNormalKeys =

@@ -130,6 +130,51 @@ public class ThemeFlipWiringTests
     }
 
     [Fact]
+    public void RefreshNavViewTheme_UnlatchesTheQueuedFlagWhenEnqueueRefuses()
+    {
+        // TryEnqueue answers false when the dispatcher queue is shutting
+        // down, and the callback then never runs. A queued flag left
+        // latched by that refusal would swallow every later re-read for
+        // the life of the control, so the refusal path must put it back.
+        var method = Strip().Method("RefreshNavViewTheme");
+        var (lambda, _) = SingleEnqueue(method);
+
+        var unlatch = method.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_navRereadQueued"
+                && a.Right.ToString() == "false"
+                && !lambda.Span.Contains(a.Span))
+            .ToList();
+        Assert.Single(unlatch);
+        var guard = unlatch[0].Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
+        Assert.NotNull(guard);
+        Assert.True(
+            guard!.Condition.ToString()
+                .Contains("enqueue", System.StringComparison.OrdinalIgnoreCase),
+            "the queued flag is reset outside a branch that tests the enqueue result");
+    }
+
+    [Fact]
+    public void RefreshTabViewTheme_UnlatchesTheQueuedFlagWhenEnqueueRefuses()
+    {
+        // The horizontal host's copy of the same refusal rule.
+        var method = Host().Method("RefreshTabViewTheme");
+        var (lambda, _) = SingleEnqueue(method);
+
+        var unlatch = method.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_tabViewRereadQueued"
+                && a.Right.ToString() == "false"
+                && !lambda.Span.Contains(a.Span))
+            .ToList();
+        Assert.Single(unlatch);
+        var guard = unlatch[0].Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
+        Assert.NotNull(guard);
+        Assert.True(
+            guard!.Condition.ToString()
+                .Contains("enqueue", System.StringComparison.OrdinalIgnoreCase),
+            "the queued flag is reset outside a branch that tests the enqueue result");
+    }
+
+    [Fact]
     public void RefreshTabViewTheme_TheFlipIsEnqueuedAndSkipsWhenIdle()
     {
         // The horizontal host's copy of the same flip, with the same two

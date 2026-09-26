@@ -1897,7 +1897,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         _navResourcesDirty = false;
         if (_navRereadQueued) return;
         _navRereadQueued = true;
-        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        // A refused enqueue never runs the callback, so the flag comes
+        // back here rather than latching and swallowing every later
+        // re-read for the life of the control.
+        var enqueued = DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
         {
             _navRereadQueued = false;
             var theme = NavView.RequestedTheme;
@@ -1906,6 +1909,7 @@ internal sealed partial class VerticalTabStrip : UserControl
                 : ElementTheme.Light;
             NavView.RequestedTheme = theme;
         });
+        if (!enqueued) _navRereadQueued = false;
     }
 
     private static uint PackColor(Color c)
