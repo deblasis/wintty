@@ -1,4 +1,3 @@
-using System;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -7,50 +6,63 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// A confirmed deletion once recorded the session's default-file count as
-/// zero (issue #1150), an assumption rather than a reading, and a wrong one
-/// for a user whose other layers still exist: it disarms the absent guard
-/// until the next applied reload re-establishes the count from disk. The
-/// confirmation now decides nothing about the count. It logs, and the one
-/// writer of the count stays the applied reload, which records the count
-/// the load read.
+/// The vanish shape issue #1150 was about is already pinned in
+/// <c>ConfigWatcherWiringTests</c>: the vanished handler reloads and records
+/// nothing of its own, and the protocol's accept records nothing either.
+/// What those pins read is the call text inside the accept lambda, so two
+/// walks past them live here: an accept that records through a helper of
+/// its own leaves no <c>RecordDefaultFiles</c> text inside the lambda to
+/// match, and a count write from anywhere new is a second writer the
+/// one-writer census never sees. Between the base pins and these two, the
+/// accept calls the logger and nothing else, and the count has exactly two
+/// recorders, neither of them handed an assumed constant.
 /// </summary>
 public class VanishCountWiringTests
 {
     private static ShellSource ConfigService() => ShellSource.Load("Services.ConfigService.cs");
 
-    [Fact]
-    public void The_vanish_confirmation_logs_and_records_nothing()
+    private static InvocationExpressionSyntax[] AcceptCalls()
     {
         var creation = Assert.Single(ConfigService().Root
             .DescendantNodes()
             .OfType<ObjectCreationExpressionSyntax>()
             .Where(o => o.Type.ToString() == "ConfigVanishProtocol"));
 
-        var onAccept = Assert.Single(creation.ArgumentList.Arguments,
+        var onAccept = Assert.Single(creation.ArgumentList!.Arguments,
             a => a.NameColon?.Name.ToString() == "onAccept");
 
-        var calls = onAccept.Expression.DescendantNodesAndSelf()
+        return onAccept.Expression.DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>()
-            .Select(i => i.Expression.ToString())
             .ToArray();
-        Assert.Contains("StaticLoggers.ConfigService.LogConfigFileVanished", calls);
-        Assert.DoesNotContain("RecordDefaultFiles", calls);
-
-        Assert.DoesNotContain(onAccept.Expression.DescendantNodes()
-            .OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString() == "_defaultFilesFound");
     }
 
     [Fact]
-    public void The_vanished_callback_just_reloads()
+    public void The_vanish_accept_calls_only_the_logger()
     {
-        var method = ConfigService().Method("OnConfigFileVanished");
+        var call = Assert.Single(AcceptCalls());
 
-        Assert.NotEmpty(method.Calls("Reload"));
-        Assert.Empty(method.Calls("RecordDefaultFiles"));
-        Assert.DoesNotContain(method.DescendantNodes()
-            .OfType<AssignmentExpressionSyntax>(),
-            a => a.Left.ToString().StartsWith("_defaultFiles", StringComparison.Ordinal));
+        Assert.Equal(
+            "StaticLoggers.ConfigService.LogConfigFileVanished",
+            call.Expression.ToString());
+    }
+
+    [Fact]
+    public void The_count_has_exactly_two_recorders_neither_an_assumed_constant()
+    {
+        // The constructor's seed and the applied reload: adding a site is
+        // how a second writer arrives without touching the writer the
+        // one-writer census watches.
+        var recordings = ConfigService().Root.Calls("RecordDefaultFiles");
+        Assert.Equal(2, recordings.Count());
+
+        // A recorded constant is an assumption, and the assumption is the
+        // defect: the count exists so the gate never guesses. Both sites
+        // pass the load's own reading, the seed through the
+        // created-if-absent arithmetic.
+        foreach (var record in recordings)
+        {
+            Assert.False(int.TryParse(record.Arg(0), out _),
+                "RecordDefaultFiles called with an assumed constant: " + record.Arg(0));
+        }
     }
 }

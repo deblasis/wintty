@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis.CSharp;
@@ -341,14 +342,17 @@ public class ConfigWatcherWiringTests
     /// <summary>
     /// The count the gate reads has exactly one writer, so the session and
     /// the gate cannot start disagreeing about what the session is running
-    /// on. Deriving it a second way is how that begins.
+    /// on. Deriving it a second way is how that begins. The match reads the
+    /// name the target ends with, so a write spelled through
+    /// <c>this.</c> does not walk past the census.
     /// </summary>
     [Fact]
     public void The_session_default_file_count_has_one_writer()
     {
         var assignment = Assert.Single(ConfigService().Root
             .DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "_defaultFilesFound"));
+            .Where(a => a.Left.ToString().EndsWith(
+                "_defaultFilesFound", StringComparison.Ordinal)));
 
         Assert.Equal(
             "RecordDefaultFiles",
@@ -457,7 +461,8 @@ public class ConfigWatcherWiringTests
     {
         var assignment = Assert.Single(ConfigService().Method("RecordDefaultFiles")
             .DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "_defaultFilesFound"));
+            .Where(a => a.Left.ToString().EndsWith(
+                "_defaultFilesFound", StringComparison.Ordinal)));
 
         var conditional = Assert.IsType<ConditionalExpressionSyntax>(assignment.Right);
         Assert.Equal("_noConfig", conditional.Condition.ToString());
