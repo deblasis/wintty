@@ -3031,11 +3031,14 @@ pub const CAPI = struct {
         // the window size via GetClientRect. Forward the desired dimensions
         // so the resize detection loop in beginFrame picks up the change.
         surface.core_surface.renderer.setTargetSize(w, h);
-        // Wake the renderer thread so it applies the new size in
-        // beginFrame without waiting for the ~8ms draw-timer tick.
-        // Single futex op, safe from any thread. The 120Hz draw timer
-        // is the backstop if the wakeup is coalesced.
+        // Two wakes, two classes. The coalescing `wakeup` drains the
+        // mailbox (the reflow round trip) and renders; the non-coalescing
+        // `resize_now` forces the frame that applies the new swap chain
+        // size (a pending resize is itself a redraw reason) and arms the
+        // one-shot 8 ms backstop that re-checks it. Both are safe from
+        // any thread.
         surface.core_surface.renderer_thread.wakeup.notify() catch {};
+        surface.core_surface.renderer_thread.resize_now.notify() catch {};
     }
 
     /// Return the size information a surface has.
