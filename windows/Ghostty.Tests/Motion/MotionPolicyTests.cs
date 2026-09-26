@@ -207,9 +207,11 @@ public class MotionPolicyTests
     [Fact]
     public void Energy_saver_and_disabled_animations_merge_to_off()
     {
-        // Both seats resolve off, so this row now pins the severity map
-        // itself: a seat-1 mapping back to Reduced (or anything short of
-        // Off) fails here even though the other seat fired.
+        // Merge-path coverage only: with both seats firing, seat 2's Off
+        // rescues the merge even if seat 1 regressed. The discriminating
+        // jobs live in Energy_saver_trigger_routes_resolve_off (seat-1
+        // severity) and The_essential_ceiling_and_the_lever_off_merge_to_off
+        // (merge vs first-hit).
         var resolved = MotionPolicy.Resolve(Inputs(
             powerMode: PowerSaverModeEx.Always,
             systemAnimationsEnabled: false));
