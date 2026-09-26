@@ -47,8 +47,13 @@ internal sealed partial class VerticalTabGroupHeaderRow : Grid
         {
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 4, 0),
-            Opacity = 0.7,
             Text = memberCount.ToString(),
+            // No element opacity on top of the muted ink. The ink arrives
+            // already de-emphasised at InactiveInkAlpha, and 0.7 of that is
+            // an effective ~49% ink, which clears no contrast floor on any
+            // ground - the count measured 2.73:1 on stock-light and 4.38:1
+            // against a 4.5 floor even on the dark half (#936, #884 root
+            // cause B). The de-emphasis lives in the ink alone.
         };
 
         _chevron = new FontIcon
@@ -120,12 +125,17 @@ internal sealed partial class VerticalTabGroupHeaderRow : Grid
         _chevron.Glyph = collapsed ? "\uE76C" : "\uE70D";
 
     /// <summary>
-    /// Title and count ink on the strip's text-contrast answer. The swatch
-    /// keeps its own palette fill: the group color is content, not chrome.
+    /// Title, count and chevron ink on the strip's text-contrast answer. The
+    /// chevron is chrome - it is the collapse affordance the strip drives -
+    /// and used to ride the element theme's header foreground instead, which
+    /// on a mid-rendered strip drew dark-on-mid at 2.58:1 against a 3.0 floor
+    /// (#936). The swatch keeps its own palette fill: the group color is
+    /// content, not chrome.
     /// </summary>
     internal void ApplyInk(Brush foreground)
     {
         _title.Foreground = foreground;
         _count.Foreground = foreground;
+        _chevron.Foreground = foreground;
     }
 }

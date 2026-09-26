@@ -275,17 +275,17 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// Scored by ThemeResolution at the ink's own alpha rather than by
     /// PreferLightForeground, because 70% ink is a blend of the pole and the
     /// ground and the pole that wins opaque is not always the pole that wins
-    /// blended.
+    /// blended. The alpha itself comes back from the same scoring: at a fixed
+    /// 70% the better pole tops out near 4.4:1 on the mid greys a translucent
+    /// strip renders on a light desktop, so the muting ladder steps up until
+    /// the floor is cleared (#936).
     /// </summary>
     private void RefreshShellInactiveInk()
     {
         if (!_shellThemeActive) return;
 
         _stripBackdropPacked = _chromeFillRgb ?? _chromeGroundPacked;
-        _shellInactiveTextBrush = new SolidColorBrush(
-            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
-                ? Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
-                : Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
+        _shellInactiveTextBrush = MutedInkBrush(_stripBackdropPacked);
         ApplyInactiveForegroundResources(_shellInactiveTextBrush);
         // The field's wash and its terminals are scored against the
         // same ground this just moved. A push that recalibrates the ink
@@ -1428,10 +1428,24 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         if (_shellInactiveTextBrush is not null)
             return _shellInactiveTextBrush;
-        return new SolidColorBrush(
-            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
-                ? Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
-                : Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
+        return MutedInkBrush(_stripBackdropPacked);
+    }
+
+    /// <summary>
+    /// The strip's muted-ink answer for a ground: the better pole at the
+    /// preferred alpha where that clears AA, else the muting ladder stepped
+    /// up until it does (#936). Every row part that carries the muted ink -
+    /// titles, group headers, close glyphs - is drawn from this one answer,
+    /// so a part that cannot clear the floor is a wiring bug and not a
+    /// fourth ink rule. The one known exception is the idle dim: an idle
+    /// title's element opacity re-mutes this ink below the floor, an
+    /// #884-class defect outside #936's measured set.
+    /// </summary>
+    private static SolidColorBrush MutedInkBrush(uint ground)
+    {
+        var ink = ThemeResolution.ReadableMutedForeground(ground, InactiveInkAlpha);
+        return new SolidColorBrush(Color.FromArgb(ink.Alpha,
+            (byte)(ink.Pole >> 16), (byte)(ink.Pole >> 8), (byte)ink.Pole));
     }
 
     private static readonly string[] NavItemForegroundKeys =
@@ -1458,13 +1472,22 @@ internal sealed partial class VerticalTabStrip : UserControl
                         model.Color, active, _stripBackdropPacked));
                 ApplyItemForeground(item, fg, active);
                 ApplyItemTabColor(item, model);
+                (item.Content as VerticalTabNavRow)?.ApplyInk(fg);
                 continue;
             }
 
             if (active)
-                ApplyItemForeground(item, ActiveRowChrome(model).Foreground, active: true);
+            {
+                var activeInk = ActiveRowChrome(model).Foreground;
+                ApplyItemForeground(item, activeInk, active: true);
+                (item.Content as VerticalTabNavRow)?.ApplyInk(activeInk);
+            }
             else
-                ApplyItemForeground(item, ResolveInactiveTextBrush(), active: false);
+            {
+                var inactiveInk = ResolveInactiveTextBrush();
+                ApplyItemForeground(item, inactiveInk, active: false);
+                (item.Content as VerticalTabNavRow)?.ApplyInk(inactiveInk);
+            }
 
             ApplyItemTabColor(item, model);
         }

@@ -323,4 +323,180 @@ public sealed class ThemeResolutionTests
             background, fg == 0xFFFFFFu ? 0x000000u : 0xFFFFFFu);
         Assert.True(chosen >= other);
     }
+
+    // ── ReadableMutedForeground: the muting ladder (#936) ────────────────
+
+    /// <summary>The strips' preferred de-emphasis (InactiveInkAlpha).</summary>
+    private const byte PreferredAlpha = 0xB3;
+
+    /// <summary>
+    /// What the reader sees for a delivered (pole, alpha) pair on a ground:
+    /// the pole composited at its alpha, scored against that ground.
+    /// </summary>
+    private static double DeliveredRatio(uint pole, byte alpha, uint ground)
+        => ThemeResolution.ContrastRatio(
+            ThemeResolution.CompositeOver(pole, alpha, ground), ground);
+
+    /// <summary>
+    /// The grounds the contrast oracle actually measured failing (#936): the
+    /// mid greys and grey-greens a translucent strip renders on a light
+    /// desktop, where the shipped fixed-alpha rule left surfaces under their
+    /// floors. Every one of them is a ground the delivered ink has to clear,
+    /// not a corner case. The last three carry their own reasons: 0x61705C is
+    /// the pinned row's measured ground (its surface rides this PR's ink via
+    /// the inactive arm), 0x516152 the retired boundary-stroke surface's, and
+    /// 0x757575 the one band of greys where the better pole FLIPS between
+    /// rungs - the only ground that can catch a ladder that walks the alpha
+    /// but freezes the pole.
+    /// </summary>
+    public static TheoryData<uint> MeasuredFailingGrounds => new()
+    {
+        0x2E3130u, // nocfg, vtab-group-count measured 4.38
+        0x303132u, // themed, vtab-group-count measured 4.34
+        0x585A59u, // stock-light, vtab-title-inactive measured 4.33
+        0x595A5Au, // stock-light, vtab-close-glyph measured 2.02
+        0x616263u, // stock-light, group title 3.97 / chevron 2.58
+        0x616363u, // stock-light, vtab-group-count measured 2.73
+        0x586C56u, // stock-light, htab-title-inactive measured 2.63
+        0x5B705Bu, // stock-light, htab-chip-count measured 3.55
+        0x808080u, // the known mid grey that defeats any fixed alpha
+        0x61705Cu, // stock-light/vert-wide, vtab-pinned-title measured 3.41
+        0x516152u, // stock-light/vert-compact, vtab-boundary-stroke (surface retired)
+        0x757575u, // the pole-flip band: catches a frozen-pole ladder
+    };
+
+    [Theory]
+    [MemberData(nameof(MeasuredFailingGrounds))]
+    public void TheDeliveredMutedInk_ClearsAA_OnTheMeasuredGrounds(uint ground)
+    {
+        var (pole, alpha) = ThemeResolution.ReadableMutedForeground(
+            ground, PreferredAlpha);
+        var ratio = DeliveredRatio(pole, alpha, ground);
+        Assert.True(ratio >= 4.5,
+            $"muted ink on {ground:X6} delivers {ratio:N2}:1, under the 4.5 floor");
+    }
+
+    [Theory]
+    [InlineData(0x0000)]
+    [InlineData(0x1111)]
+    [InlineData(0x2222)]
+    [InlineData(0x3333)]
+    [InlineData(0x4444)]
+    [InlineData(0x5555)]
+    [InlineData(0x6666)]
+    [InlineData(0x7777)]
+    [InlineData(0x8888)]
+    [InlineData(0x9999)]
+    [InlineData(0xAAAA)]
+    [InlineData(0xBBBB)]
+    [InlineData(0xCCCC)]
+    [InlineData(0xDDDD)]
+    [InlineData(0xEEEE)]
+    [InlineData(0xFFFF)]
+    public void TheDeliveredMutedInk_ClearsAA_OnEveryGreyLevel(int level)
+    {
+        var channel = (uint)level & 0xFF;
+        var ground = (channel << 16) | (channel << 8) | channel;
+        var (pole, alpha) = ThemeResolution.ReadableMutedForeground(
+            ground, PreferredAlpha);
+        Assert.True(DeliveredRatio(pole, alpha, ground) >= 4.5,
+            $"muted ink on {ground:X6} is under the floor");
+    }
+
+    /// <summary>
+    /// The ladder is a rescue, not a re-design: where the preferred alpha
+    /// already clears, it survives, so the strip keeps its de-emphasis on the
+    /// grounds it was tuned for.
+    /// </summary>
+    [Theory]
+    [InlineData(0x2E3130u)] // dark ground: white at 0xB3 is 7.35:1
+    [InlineData(0xE9EBF1u)] // wintty-light's tab-bar shade: black at 0xB3 clears
+    public void WhereThePreferredAlphaAlreadyClears_ItSurvives(uint ground)
+    {
+        var (_, alpha) = ThemeResolution.ReadableMutedForeground(
+            ground, PreferredAlpha);
+        Assert.Equal(PreferredAlpha, alpha);
+    }
+
+    /// <summary>
+    /// And where the preferred alpha does not clear, the ladder actually
+    /// moved: the delivered alpha is stronger than the preference. A ladder
+    /// that returns the preference everywhere is the fixed rule with a new
+    /// name, and this is the fact that fails when that happens.
+    /// </summary>
+    [Fact]
+    public void OnAMidGrey_TheLadderActuallyMoves()
+    {
+        var (_, alpha) = ThemeResolution.ReadableMutedForeground(
+            0x808080u, PreferredAlpha);
+        Assert.True(alpha > PreferredAlpha,
+            $"the ladder returned the preferred alpha {alpha:X2} on mid grey; it has stopped stepping");
+    }
+
+    /// <summary>
+    /// Stepping the alpha up never loses contrast: the composite moves
+    /// monotonically towards the pole as the alpha rises, so every rung
+    /// scores at least what the preference scored.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(MeasuredFailingGrounds))]
+    public void SteppingUp_NeverScoresWorseThanThePreference(uint ground)
+    {
+        var (pole, alpha) = ThemeResolution.ReadableMutedForeground(
+            ground, PreferredAlpha);
+        var preferredPole = ThemeResolution.PreferLightForegroundAtAlpha(
+            ground, PreferredAlpha) ? 0xFFFFFFu : 0x000000u;
+        Assert.True(
+            DeliveredRatio(pole, alpha, ground)
+                >= DeliveredRatio(preferredPole, PreferredAlpha, ground) - 1e-9,
+            $"the ladder delivered {DeliveredRatio(pole, alpha, ground):N2}:1 where the preference scored "
+            + $"{DeliveredRatio(preferredPole, PreferredAlpha, ground):N2}:1");
+    }
+
+    /// <summary>
+    /// The pole at the delivered alpha is still the better pole there: a
+    /// ladder that walks the alpha but freezes the pole can walk both poles
+    /// into the wrong one on mid grounds, where higher alphas flip the answer.
+    /// The flip band is 0x72-0x75; 0x757575 sits in it, and on the other
+    /// grounds here the frozen-pole mutant returns the identical pair the
+    /// real ladder does - which is exactly why this theory needs that member.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(MeasuredFailingGrounds))]
+    public void ThePole_AtTheDeliveredAlpha_IsStillTheBetterPole(uint ground)
+    {
+        var (pole, alpha) = ThemeResolution.ReadableMutedForeground(
+            ground, PreferredAlpha);
+        var better = ThemeResolution.PreferLightForegroundAtAlpha(ground, alpha);
+        Assert.Equal(better, pole == 0xFFFFFFu);
+    }
+
+    /// <summary>
+    /// A caller may name a floor up to the opaque better-pole's worst case
+    /// (~4.58:1, attained near #757575) and the delivered ink still clears
+    /// it everywhere: the walk simply steps to whichever rung first does.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(MeasuredFailingGrounds))]
+    public void AFloorAtTheOpaqueCeiling_IsStillCleared(uint ground)
+    {
+        var (pole, alpha) = ThemeResolution.ReadableMutedForeground(
+            ground, PreferredAlpha, minContrast: 4.58);
+        var ratio = DeliveredRatio(pole, alpha, ground);
+        Assert.True(ratio >= 4.58,
+            $"muted ink on {ground:X6} delivers {ratio:N2}:1, under the 4.58 floor it accepted");
+    }
+
+    /// <summary>
+    /// And above that ceiling the ask is impossible - no pole at any alpha
+    /// clears it on the worst ground - so the method refuses loudly rather
+    /// than handing back under-floor ink with a straight face. The silent
+    /// under-floor return is the failure mode #936 shipped in.
+    /// </summary>
+    [Fact]
+    public void AFloorAboveTheOpaqueCeiling_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ThemeResolution.ReadableMutedForeground(0x757575u, PreferredAlpha, 7.0));
+    }
 }

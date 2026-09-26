@@ -38,6 +38,18 @@ public sealed class RootGridBackgroundWiringTests
     /// <c>BackdropGround.Estimate</c> stays pure: it is told the polarity
     /// rather than reading the OS, so the ink and the ground it is chosen
     /// against cannot be resolved for two different desktop states.
+    ///
+    /// The polarity it is told is the window's resolved theme, not the raw
+    /// desktop read. <c>ApplyTheme</c> hands <c>_themeManager.ElementTheme</c>
+    /// to the root, and the chrome the ink is scored against paints from
+    /// that same answer: under an explicit <c>window-theme</c> the override
+    /// wins even when the OS desktop disagrees (the caption buttons went
+    /// over to the painted truth for the same reason, #235), and under the
+    /// default the manager resolves from the OS anyway, so the
+    /// system-tracking answer is unchanged. Feeding the estimate the raw OS
+    /// read was the dark-theme half of #936: the ladder picked the black
+    /// pole for ink on a window that was painting dark, and every muted row
+    /// measured near 1.1:1.
     /// </summary>
     [Fact]
     public void The_backdrop_ground_estimate_takes_the_polarity_as_an_argument()
@@ -45,16 +57,10 @@ public sealed class RootGridBackgroundWiringTests
         var source = ShellSource.Load("MainWindow.xaml.cs");
         var estimate = Assert.Single(
             source.Root.Calls("Core.Shell.BackdropGround.Estimate"));
-        // Same node-level assertion as above and for the same reason: told
-        // the negation of the desktop polarity, Estimate stays just as pure
-        // and answers for the wrong desktop.
-        var polarity = estimate.ArgExpression(1).AssertCallTo("OsTheme.IsDark");
 
-        // And the same UISettings the root grid asked. While this one
-        // activated a fresh instance, the two readers could answer for
-        // different moments of the same frame: the grid painted for the
-        // desktop it saw and the ink was scored against the other one.
-        Assert.Equal("_systemUiSettings", polarity.Arg(0));
+        // Node-level, as before: a negated polarity passes any IsDark-call
+        // assertion just as happily, so assert the exact expression read.
+        Assert.Equal("_themeManager.IsDarkMode", estimate.ArgExpression(1).ToString());
 
         var core = ShellSource.Load("Core.Shell.BackdropGround.cs");
         Assert.DoesNotContain(

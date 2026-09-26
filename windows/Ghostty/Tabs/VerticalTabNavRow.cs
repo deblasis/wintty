@@ -25,6 +25,7 @@ internal sealed partial class VerticalTabNavRow : Grid
     private readonly FontIcon _bell;
     private readonly FontIcon _idle;
     private readonly Button _close;
+    private readonly FontIcon _closeGlyph;
     private Border? _coDragAccent;
     private TabModel _tab;
 
@@ -98,7 +99,7 @@ internal sealed partial class VerticalTabNavRow : Grid
             BorderThickness = new Thickness(0),
             VerticalAlignment = VerticalAlignment.Center,
             Tag = tab,
-            Content = new FontIcon
+            Content = _closeGlyph = new FontIcon
             {
                 FontFamily = Application.Current.Resources.TryGetValue(
                     "SymbolThemeFontFamily", out var ff) && ff is FontFamily fam
@@ -147,6 +148,34 @@ internal sealed partial class VerticalTabNavRow : Grid
 
     /// <summary>The close glyph's button, for the seam's geometry readout.</summary>
     internal FrameworkElement TestSeamCloseButton => _close;
+
+    /// <summary>
+    /// The close affordance takes the row's ink - the same calibrated answer
+    /// the title carries, full strength when the row is the active one.
+    ///
+    /// It used to carry nothing: the glyph rode the element theme's button
+    /// foreground, which has never heard of the strip, so on a light element
+    /// theme with the strip rendered mid-dark the glyph drew dark-on-mid at
+    /// 2.02:1 against a 3.0 floor (#936). A null ink means this pass had no
+    /// answer, and the last calibrated one stands.
+    ///
+    /// It takes the ink's pole at full alpha rather than the muted answer as
+    /// painted. The X is a hairline glyph: its sub-pixel stroke coverage
+    /// multiplies into the muted alpha and the stroke never reaches the
+    /// strength the ladder scored, which measured 2.91:1 on nocfg where the
+    /// title in the same brush cleared 8.31 (round-3 oracle). The pole is
+    /// still the ladder's own answer, so the glyph flips with the ground and
+    /// never picks a pole of its own; only the muting is skipped, and the
+    /// control floor the affordance answers to is the one that holds.
+    /// </summary>
+    internal void ApplyInk(Brush? foreground)
+    {
+        if (foreground is not null)
+            _closeGlyph.Foreground = foreground is SolidColorBrush ink
+                ? new SolidColorBrush(Windows.UI.Color.FromArgb(
+                    0xFF, ink.Color.R, ink.Color.G, ink.Color.B))
+                : foreground;
+    }
 
     /// <summary>
     /// Whether the row carries its close button. The compact rail is

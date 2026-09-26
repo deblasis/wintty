@@ -242,6 +242,63 @@ public static class ThemeResolution
         => RelativeLuminance((uint)((r << 16) | (g << 8) | b));
 
     /// <summary>
+    /// The strip's muted-ink answer for a ground: the better white-or-black
+    /// pole at <paramref name="preferredAlpha"/> where that already clears
+    /// <paramref name="minContrast"/>, else the same pole-stepping walk up
+    /// the alpha ladder to the first rung that does.
+    ///
+    /// The pole is re-asked at every rung, because muting is part of the
+    /// question: on mid grounds a higher alpha can flip which pole wins
+    /// (<see cref="PreferLightForegroundAtAlpha"/>), so a rung inherits the
+    /// preference's pole only by luck. The walk always terminates at opaque,
+    /// where the better pole is never below about 4.58 on any ground.
+    ///
+    /// The answer is a pair so a caller paints the pole at the very alpha it
+    /// was scored at. The ladder exists because the strips used to draw every
+    /// row part at one fixed alpha, and on the mid greys a translucent strip
+    /// renders on a light desktop that ink tops out near 4.4:1 - under the AA
+    /// floor whatever the pole (#936).
+    ///
+    /// The floor a caller can name has a ceiling: at full alpha the better
+    /// pole's worst case over all grounds is about 4.58:1 (attained near
+    /// #757575), so a <paramref name="minContrast"/> above that is ink no
+    /// rule can deliver. Naming one throws rather than quietly returning
+    /// under-floor ink - the silence is how #936 shipped.
+    /// </summary>
+    public static (uint Pole, byte Alpha) ReadableMutedForeground(
+        uint ground, byte preferredAlpha, double minContrast = 4.5)
+    {
+        const double OpaqueBetterPoleWorst = 4.58;
+        if (minContrast > OpaqueBetterPoleWorst)
+            throw new ArgumentOutOfRangeException(
+                nameof(minContrast), minContrast,
+                $"no ink clears {minContrast} on every ground; the opaque " +
+                "better pole's worst case is about 4.58:1");
+
+        // Genuinely muted rungs between the preference and opaque. Evenly
+        // spaced so no rung is a rounding nudge away from its neighbour: the
+        // steps read as deliberate ink weights, not as dial twiddling.
+        byte[] ladder = [preferredAlpha, 0xCC, 0xE6, 0xFF];
+
+        foreach (var alpha in ladder)
+        {
+            if (alpha < preferredAlpha) continue;
+            var pole = PreferLightForegroundAtAlpha(ground, alpha)
+                ? 0xFFFFFFu
+                : 0x000000u;
+            if (ContrastRatio(ground, CompositeOver(pole, alpha, ground))
+                >= minContrast)
+                return (pole, alpha);
+        }
+
+        // The opaque rung is the ceiling: its better pole clears every
+        // accepted floor, so this return only restates the last rung's
+        // success. Kept explicit so the method's totality does not lean on
+        // that arithmetic staying true.
+        return (PreferLightForegroundAtAlpha(ground, 255) ? 0xFFFFFFu : 0x000000u, 255);
+    }
+
+    /// <summary>
     /// Pick a legible foreground for text drawn over
     /// <paramref name="background"/>. Keeps <paramref name="desired"/> when it
     /// already clears the WCAG AA contrast threshold (4.5:1); otherwise falls
