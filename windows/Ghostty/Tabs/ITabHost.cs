@@ -60,4 +60,35 @@ internal interface ITabHost
     /// </summary>
     System.Collections.Generic.IReadOnlyList<Testing.TestSeamStripRow>
         TestSeamRows(FrameworkElement root);
+
+    /// <summary>
+    /// The selected row's stroke, as this host is holding it right now.
+    /// The active tab's whole separation from the strip rests on this
+    /// 1-DIP line, and a 1-DIP line cannot be sampled reliably from a
+    /// rect guessed off UIA, so the seam reports the brush it pushed and
+    /// the element the stroke rides and lets a capture harness find the
+    /// band in a screenshot (#931). <see cref="TestSeamRows"/>'s rule
+    /// applies: a read, and honest about having nothing to report --
+    /// Shown false covers "no selection", "selection parked on a chip"
+    /// and "the stroke is not drawn" without the harness having to
+    /// guess which.
+    /// </summary>
+    TabSelectionStroke TestSeamSelectionStroke();
 }
+
+/// <summary>
+/// One strip's answer for its selection stroke: the brush colour actually
+/// pushed, the four thicknesses actually set, and the element whose bounds
+/// the stroke hugs. Argb is 0xAARRGGBB. Element is null whenever Shown is
+/// false; the thicknesses are the DIP values the strip set, which the
+/// harness scales by the window's rasterization scale the same way it
+/// scales the rect.
+/// </summary>
+internal readonly record struct TabSelectionStroke(
+    bool Shown,
+    uint Argb,
+    double Left,
+    double Top,
+    double Right,
+    double Bottom,
+    FrameworkElement? Element);

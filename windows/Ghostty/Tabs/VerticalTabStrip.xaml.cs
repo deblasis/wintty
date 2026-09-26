@@ -1201,6 +1201,33 @@ internal sealed partial class VerticalTabStrip : UserControl
     internal FrameworkElement SelectionRowElement => SelectionRow;
 
     /// <summary>
+    /// The selection stroke, read back off the same properties
+    /// <see cref="UpdateSelectionRow"/> writes. Reading the live Border
+    /// rather than keeping a copy of the assignment is the point: a change
+    /// to how the stroke is drawn that forgets this readout shows up as a
+    /// seam answer about a stroke that is no longer there, which is a
+    /// finding, not a stale report.
+    /// </summary>
+    internal TabSelectionStroke TestSeamSelectionStroke()
+    {
+        var shown = SelectionRow.Visibility == Visibility.Visible
+            && SelectionRow.ActualWidth > 0
+            && SelectionRow.ActualHeight > 0
+            && SelectionRow.BorderBrush is SolidColorBrush;
+        if (!shown) return default;
+        var ink = (SolidColorBrush)SelectionRow.BorderBrush;
+        var c = ink.Color;
+        return new TabSelectionStroke(
+            true,
+            ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B,
+            SelectionRow.BorderThickness.Left,
+            SelectionRow.BorderThickness.Top,
+            SelectionRow.BorderThickness.Right,
+            SelectionRow.BorderThickness.Bottom,
+            SelectionRow);
+    }
+
+    /// <summary>
     /// Whether the active row REACHES the pane border, which is the premise
     /// the seam cover rests on: the cover is placed from the row's right
     /// edge, and that edge is the border it is hiding.

@@ -233,6 +233,47 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 tab.Color, ReferenceEquals(tab, _manager.ActiveTab), _stripBackdropPacked);
 
     /// <summary>
+    /// The selection stroke as the strip is holding it right now. The band
+    /// is the template's own selected-border element ("SelectedBorder"),
+    /// NOT the TabViewItem: the item is padded well past the stroke, and a
+    /// band taken off the item would sample that padding and score the
+    /// stroke against itself (#931's "the drawn band, not the row"). The
+    /// colour is the brush actually pushed into the item's
+    /// TabViewSelectedItemBorderBrush resource, and the thicknesses are
+    /// that element's live BorderThickness -- the template's selected state
+    /// read back rather than re-derived.
+    ///
+    /// Read off the tree rather than kept in a field on purpose: a chrome
+    /// pass that stops pushing the brush, or a template change that moves
+    /// the band, has to show up here as "no stroke" or as a band that no
+    /// longer matches the pixels -- findings, not a stale report. Selection
+    /// parked on a chip reads as no stroke, which is what it draws: the
+    /// chip carries no selected border, and the tab it stands for is not
+    /// the one selected.
+    /// </summary>
+    public TabSelectionStroke TestSeamSelectionStroke()
+    {
+        var item = TabViewControl.SelectedItem as TabViewItem;
+        if (item is null
+            || item.ActualWidth <= 0
+            || item.ActualHeight <= 0
+            || !item.Resources.TryGetValue(
+                "TabViewSelectedItemBorderBrush", out var pushed)
+            || pushed is not SolidColorBrush ink
+            || FindDescendantByName(item, "SelectedBorder") is not Border band)
+            return default;
+        var c = ink.Color;
+        return new TabSelectionStroke(
+            true,
+            ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B,
+            band.BorderThickness.Left,
+            band.BorderThickness.Top,
+            band.BorderThickness.Right,
+            band.BorderThickness.Bottom,
+            band);
+    }
+
+    /// <summary>
     /// The wintty icon shown at the start of the tab strip. Exposed so
     /// the layout switch can spin it independently of the strip chrome.
     /// </summary>

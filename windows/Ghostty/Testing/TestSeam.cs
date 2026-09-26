@@ -2050,8 +2050,8 @@ internal static class TestSeam
             json.WriteNumber("morphLayer", window.TestSeamMorphLayerCount);
             var root = window.TestSeamRoot;
             var (horizontal, vertical) = window.TestSeamHosts;
-            WriteHost(json, "horizontal", root, horizontal);
-            WriteHost(json, "vertical", root, vertical);
+            WriteHost(json, "horizontal", window, root, horizontal);
+            WriteHost(json, "vertical", window, root, vertical);
 
             WriteChrome(json, "captionFill", root, window.TestSeamCaptionFill);
 
@@ -2093,7 +2093,7 @@ internal static class TestSeam
     }
 
     private static void WriteHost(
-        Utf8JsonWriter json, string name,
+        Utf8JsonWriter json, string name, MainWindow window,
         Microsoft.UI.Xaml.FrameworkElement? root, Ghostty.Tabs.ITabHost host)
     {
         json.WriteStartObject(name);
@@ -2135,6 +2135,55 @@ internal static class TestSeam
             }
         }
         json.WriteEndArray();
+        WriteSelectionStroke(json, window, host);
+        json.WriteEndObject();
+    }
+
+    /// <summary>
+    /// The host's selection stroke: the brush and thicknesses the strip is
+    /// holding, plus the stroke's band in physical screen pixels -- the
+    /// space a screen capture is taken in, so the harness subtracts the
+    /// capture origin and no more. The band comes from
+    /// <see cref="MainWindow.TestSeamToScreenPixels"/>, the same ClientToScreen
+    /// placement every other capture-facing rect uses; a 1-DIP line is
+    /// exactly the thing a harness must not have to re-derive from DIPs and
+    /// a guessed window origin (#931). Rect is null when the stroke is not
+    /// on screen; shown is the strip's own answer, not a placement verdict.
+    /// </summary>
+    private static void WriteSelectionStroke(
+        Utf8JsonWriter json, MainWindow window, Ghostty.Tabs.ITabHost host)
+    {
+        var stroke = host.TestSeamSelectionStroke();
+        json.WriteStartObject("selectionStroke");
+        json.WriteBoolean("shown", stroke.Shown);
+        json.WriteNumber("argb", stroke.Argb);
+        // The thicknesses are DIPs; the rect is pixels. The harness needs
+        // both on one scale to band the stroke, so the scale travels with
+        // them the way the panes' own rect reports it.
+        json.WriteNumber("scale", window.TestSeamRasterizationScale);
+        json.WriteStartObject("thickness");
+        json.WriteNumber("left", stroke.Left);
+        json.WriteNumber("top", stroke.Top);
+        json.WriteNumber("right", stroke.Right);
+        json.WriteNumber("bottom", stroke.Bottom);
+        json.WriteEndObject();
+        if (stroke.Shown && stroke.Element is { } element && element.XamlRoot is not null)
+        {
+            var dip = new Windows.Foundation.Rect(
+                0, 0, element.ActualWidth, element.ActualHeight);
+            var px = window.TestSeamToScreenPixels(dip, element);
+            if (px is { } band)
+            {
+                json.WriteStartObject("rect");
+                json.WriteNumber("x", band.X);
+                json.WriteNumber("y", band.Y);
+                json.WriteNumber("w", band.W);
+                json.WriteNumber("h", band.H);
+                json.WriteEndObject();
+            }
+            else json.WriteNull("rect");
+        }
+        else json.WriteNull("rect");
         json.WriteEndObject();
     }
 

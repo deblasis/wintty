@@ -90,6 +90,12 @@ param(
 . (Join-Path $PSScriptRoot 'lib/contrast.ps1')
 $ErrorActionPreference = 'Stop'
 
+# pwsh -File hands a comma-separated -Only through as one string; split it
+# so both spellings (real array, -File string) select the same legs.
+if ($Only.Count -eq 1 -and $Only[0] -match ',') {
+    $Only = @($Only[0] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
 Add-Type -AssemblyName System.Drawing
@@ -448,6 +454,92 @@ function New-Rect([double]$X, [double]$Y, [double]$W, [double]$H) {
     return New-Object System.Windows.Rect($X, $Y, $W, $H)
 }
 
+# The active tab's whole separation from the strip around it is one 1-DIP
+# accent stroke. The field design has the fill match the terminal, so the
+# stroke is the only thing left that says "this row is the selected one" --
+# and a 1-DIP line cannot be sampled from a rect guessed off UIA (#931): at
+# scale 1 the band is one pixel wide and a rounding error scores the fill
+# against itself. So the seam reports the stroke it is holding -- the band
+# in screen pixels, placed by the same ClientToScreen path every capture
+# rect uses, plus the brush it pushed -- and this scores the band's
+# RENDERED pixels against the strip ground just outside it, at the non-text
+# floor: the stroke is the affordance that marks the active tab, which is
+# precisely what 1.4.11 is for. The declared argb travels in the note so a
+# drift between what the strip says it pushed and what the pixels carry is
+# readable straight off the row.
+#
+# The ground band sits 3px outside the stroked edge, same span, and the
+# first stroked edge that has room for one is the one measured, left, top,
+# right, bottom. The open side (the edge that meets the pane) carries no
+# stroke, so it is never in the order; the trim keeps the band clear of the
+# corners, where the stroke rounds into the perpendicular edges.
+function Measure-SelectionStroke($Cap, [string]$Leg, [string]$Surface,
+                                 [string]$Which) {
+    $frame = Invoke-SeamCommand $script:SeamSession @{ op = 'layout-frame' }
+    $stroke = $frame.render.$Which.selectionStroke
+    if (-not $stroke.shown) {
+        Add-Unmeasured $Leg $Surface 'the strip reports no selection stroke (no selection, or the selection is parked on a chip)'
+        return
+    }
+    if ($null -eq $stroke.rect) {
+        Add-Unmeasured $Leg $Surface 'the seam could not place the stroke band on screen'
+        return
+    }
+    $r = $stroke.rect
+    $scale = [double]$stroke.scale
+    if ($scale -le 0) { $scale = 1.0 }
+    $thick = @{
+        left   = [Math]::Max(1, [int][Math]::Round(([double]$stroke.thickness.left) * $scale))
+        top    = [Math]::Max(1, [int][Math]::Round(([double]$stroke.thickness.top) * $scale))
+        right  = [Math]::Max(1, [int][Math]::Round(([double]$stroke.thickness.right) * $scale))
+        bottom = [Math]::Max(1, [int][Math]::Round(([double]$stroke.thickness.bottom) * $scale))
+    }
+    foreach ($name in 'left', 'top', 'right', 'bottom') {
+        $t = $thick[$name]
+        if ($stroke.thickness.$name -lt 0.5) { continue }
+        $trim = [Math]::Max(2, 2 * $t)
+        $bx = [double]$r.x; $by = [double]$r.y
+        $bw = [double]$r.w; $bh = [double]$r.h
+        # The band: the outermost $t pixels of the rect along this edge,
+        # ends trimmed clear of the corners, where the stroke rounds into
+        # the perpendicular edges. Same screen space the seam reported, so
+        # ConvertTo-Local only subtracts the capture origin.
+        switch ($name) {
+            'left'   { $band = New-Rect $bx ($by + $trim) $t ($bh - 2 * $trim) }
+            'right'  { $band = New-Rect ($bx + $bw - $t) ($by + $trim) $t ($bh - 2 * $trim) }
+            'top'    { $band = New-Rect ($bx + $trim) $by ($bw - 2 * $trim) $t }
+            'bottom' { $band = New-Rect ($bx + $trim) ($by + $bh - $t) ($bw - 2 * $trim) $t }
+        }
+        # The ground: a 3px band of strip just OUTSIDE the same edge. An
+        # edge against the capture's rim has no outside to read -- and
+        # ConvertTo-Local clamps a partially-off-capture rect rather than
+        # refusing it, which would sample the stroke's own inside as the
+        # ground -- so a rim edge is skipped for one that has room.
+        $gap = 3; $gw = 3
+        switch ($name) {
+            'left'   { $g = New-Rect ($bx - $gap - $gw) ($by + $trim) $gw ($bh - 2 * $trim) }
+            'right'  { $g = New-Rect ($bx + $bw + $gap) ($by + $trim) $gw ($bh - 2 * $trim) }
+            'top'    { $g = New-Rect ($bx + $trim) ($by - $gap - $gw) ($bw - 2 * $trim) $gw }
+            'bottom' { $g = New-Rect ($bx + $trim) ($by + $bh + $gap) ($bw - 2 * $trim) $gw }
+        }
+        if (([double]$g.X -lt $Cap.L) -or ([double]$g.Y -lt $Cap.T) -or
+            ([double]($g.X + $g.Width) -gt ($Cap.L + $Cap.W)) -or
+            ([double]($g.Y + $g.Height) -gt ($Cap.T + $Cap.H))) { continue }
+        $gl = ConvertTo-Local $Cap $g 0
+        $bl = ConvertTo-Local $Cap $band 0
+        if ($null -eq $gl -or $null -eq $bl) { continue }
+        $si = [ContrastSampler]::Flat($Cap.Bmp, $bl.X, $bl.Y, $bl.W, $bl.H)
+        $sg = [ContrastSampler]::Flat($Cap.Bmp, $gl.X, $gl.Y, $gl.W, $gl.H)
+        if (-not $si.Ok -or -not $sg.Ok) { continue }
+        $ratio = [ContrastMath]::Ratio($si.BgR, $si.BgG, $si.BgB, $sg.BgR, $sg.BgG, $sg.BgB)
+        $declared = '#{0:X6}' -f ([uint32]($stroke.argb -band 0xFFFFFF))
+        Add-Row $Leg $Surface 'glyph' $ratio $si.BgHex $sg.BgHex `
+            ("the {0} edge of the selection stroke against the strip beside it; the strip declares {1}" -f $name, $declared)
+        return
+    }
+    Add-Unmeasured $Leg $Surface 'every stroked edge sits against the capture rim, so no ground band had room'
+}
+
 # ---- the legs --------------------------------------------------------------
 
 # Every ink sample is taken from an element that is on screen AND wholly
@@ -650,6 +742,11 @@ function Measure-VerticalLeg($Cap, [string]$Leg, [bool]$Compact, [string]$GroupT
         }
     }
 
+    # What actually separates the selected row from the strip: the accent
+    # stroke on its three closed sides. Scored by the seam-reported band,
+    # not by a guessed rect (#931).
+    Measure-SelectionStroke $Cap $Leg 'vtab-selection-stroke' 'vertical'
+
     # The terminal starts past the strip's trailing edge. Derived from the
     # rows rather than from NavView, because a NavigationView's rect is the
     # whole window -- its content IS the terminal -- so anchoring on it put
@@ -762,6 +859,11 @@ function Measure-HorizontalLeg($Cap, [string]$Leg, [string]$GroupTitle) {
             Add-Unmeasured $Leg 'htab-chip-chevron' 'no chevron run and no count run to anchor a fallback on'
         }
     }
+
+    # What actually separates the selected tab from the strip: the accent
+    # stroke on the TabViewItem's three closed sides. Same seam-reported
+    # band as the vertical surface (#931).
+    Measure-SelectionStroke $Cap $Leg 'htab-selection-stroke' 'horizontal'
 
     # The terminal starts under the strip. Anchored on the tab items for
     # the same reason the vertical leg anchors on its rows.
@@ -1066,12 +1168,14 @@ $VerticalSurfaces = @(
     # separate.
     'vtab-close-glyph-inactive', 'vtab-pinned-icon',
     'vtab-group-title', 'vtab-group-count',
-    'vtab-group-chevron', 'vtab-selection-field', 'terminal-fg-on-bg'
+    'vtab-group-chevron', 'vtab-selection-field', 'vtab-selection-stroke',
+    'terminal-fg-on-bg'
 )
 $HorizontalSurfaces = @(
     'htab-title-active', 'htab-close-glyph', 'htab-title-inactive',
     'htab-close-glyph-inactive', 'htab-pinned-icon', 'htab-chip-title',
-    'htab-chip-count', 'htab-chip-chevron', 'terminal-fg-on-bg'
+    'htab-chip-count', 'htab-chip-chevron', 'htab-selection-stroke',
+    'terminal-fg-on-bg'
 )
 $script:LegVerdicts = [System.Collections.Generic.List[object]]::new()
 
@@ -1082,9 +1186,20 @@ foreach ($leg in (New-ConfigLegs)) {
     $s = $null
     $legErr = ''
     try {
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $leg.config -Arguments $leg.args
+        # -PrivateStateBase: state and logs under this run's temp root, so a
+        # leg can launch beside a Wintty the user has open (the coexistence
+        # guard requires WINTTY_STATE_BASE under temp). The plain nocfg leg
+        # stays launch-blocked beside a running instance by design: with
+        # --no-config the app ignores the staged windows-single-instance =
+        # false and would elect against the live window, and the guard is
+        # right to refuse that.
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $leg.config -Arguments $leg.args -PrivateStateBase
         $script:MainHwnd64 = $s.Hwnd64
         $script:ProcId = [uint32]$s.Proc.Id
+        # The selection-stroke surface asks the seam for a layout-frame
+        # from inside the leg functions, the same way New-Capture reads
+        # the window handle from here.
+        $script:SeamSession = $s
         $hwnd = [SeamWin]::P($script:MainHwnd64)
         [void][ContrastWin]::PlaceOnTop($hwnd, $WinX, $WinY, $WinW, $WinH)
         [void][ContrastWin]::TryActivate($hwnd)

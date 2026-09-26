@@ -422,6 +422,9 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// </summary>
     internal FrameworkElement SelectionRowElement => _strip.SelectionRowElement;
 
+    /// <summary>The selection stroke, straight off the strip's own readout.</summary>
+    public TabSelectionStroke TestSeamSelectionStroke() => _strip.TestSeamSelectionStroke();
+
     /// <summary>
     /// Whether the active row reaches the pane border, so MainWindow knows
     /// whether there is a seam to cover at all. See the strip's own member.
