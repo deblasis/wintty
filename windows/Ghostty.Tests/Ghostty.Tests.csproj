@@ -279,8 +279,11 @@
       drag the WinUI targets into a plain net10.0 test host), so the seam's
       source is linked in and compiles into the test assembly directly: the
       behavioural tests run the same text the app compiles, not a stub.
+      MotionGating joins it for the same reason: the gates' routing
+      static, plain C# over the seam and Core's strip gate.
     -->
     <Compile Include="..\Ghostty\Motion\*.cs" Link="Motion\%(Filename)%(Extension)" />
+    <Compile Include="..\Ghostty\Services\MotionGating.cs" Link="Motion\MotionGating.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- Every shell XAML the explicit items above do not already embed, for the consumed-close census (ConsumedCloseKeyWiringTests): a flyout declared in markup is found the same way one built in code is. Last, so the Exclude sees every earlier item. -->

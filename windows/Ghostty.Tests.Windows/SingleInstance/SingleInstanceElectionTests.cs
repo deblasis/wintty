@@ -10,7 +10,7 @@ namespace Ghostty.Tests.Windows.SingleInstance;
 /// Exercises the real named mutex, which is the whole point: the guarantee
 /// under test is one the OS provides and a fake would only restate.
 /// </summary>
-public sealed class SingleInstanceElectionTests
+public sealed partial class SingleInstanceElectionTests
 {
     /// <summary>
     /// A path no other test (or leftover process) can be holding. The names
@@ -285,7 +285,7 @@ public sealed class SingleInstanceElectionTests
     /// running collection, and these tests live in this class precisely so
     /// the swap is serialized against the elections above.
     /// </summary>
-    private sealed class FakeEnvironment : IDisposable
+    private sealed partial class FakeEnvironment : IDisposable
     {
         private readonly Func<string, string?> _previous =
             Ghostty.Core.Config.TestConfigGuard.ReadEnvironment;

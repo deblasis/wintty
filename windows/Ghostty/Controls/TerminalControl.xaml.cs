@@ -14,6 +14,7 @@ using Ghostty.Core.Settings;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Interop;
+using Ghostty.Motion;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
@@ -742,7 +743,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             // Only collapse if no new bell re-armed the border mid-fade.
             if (!_bellBorderActive) BellOverlay.Visibility = Visibility.Collapsed;
         };
-        sb.Begin();
+        AnimationActivityRegistry.BeginStoryboard(sb, BellOverlay, "Opacity");
     }
 
     /// <summary>

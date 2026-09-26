@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Core.Tabs;
+using Ghostty.Motion;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
@@ -138,6 +139,9 @@ internal sealed class ActiveFieldFill
             _running = null;
         };
         _running = board;
-        board.Begin();
+        // The settle drives the field's Brush, which has no element of its
+        // own: the registry keys the activity on the brush and drops it at
+        // Completed (WinUI raises Completed from the Stop above, too).
+        AnimationActivityRegistry.BeginStoryboard(board, Brush, "Color");
     }
 }

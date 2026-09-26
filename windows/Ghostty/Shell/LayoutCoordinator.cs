@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using Ghostty.Branding;
 using Ghostty.Core.Tabs;
+using Ghostty.Motion;
 using Ghostty.Tabs;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -145,6 +146,15 @@ internal sealed class LayoutCoordinator
     /// </summary>
     private readonly Func<bool>? _motionEnabled;
 
+    /// <summary>
+    /// What the pane motion surface answered for pane geometry when this
+    /// coordinator was built, or null when none was registered. Read once,
+    /// beside the motion-enabled read, so both seats sit in one place;
+    /// the switch itself still runs on <see cref="_motionEnabled"/> alone,
+    /// so an unregistered surface changes nothing here.
+    /// </summary>
+    internal MotionPolicyLevel? TestSeamPanePolicy { get; }
+
     // Children of the morph canvas that live there permanently (the run
     // label). Everything the switch parks must be gone by its end; these
     // never are, by design, so the ghosts oracle subtracts them.
@@ -189,6 +199,10 @@ internal sealed class LayoutCoordinator
         Func<int>? residentMorphChildren = null)
     {
         _motionEnabled = motionEnabled;
+        if (PaneMotion.Active)
+        {
+            TestSeamPanePolicy = PaneMotion.Current!.ResolvePolicy(MotionSurfaceClass.PaneGeometry);
+        }
         _residentMorphChildren = residentMorphChildren ?? (() => 0);
         _horizontalTabHost = horizontalTabHost;
         _morphLayer = morphLayer;
