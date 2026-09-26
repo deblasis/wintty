@@ -1802,6 +1802,11 @@ internal sealed partial class VerticalTabStrip : UserControl
                                 or NullReferenceException)
         {
         }
+        // Marked even when the write above threw: a spurious re-read costs
+        // one flip, while the reverse -- a write this method believes
+        // landed but the memo never heard of -- is a stale brush surviving
+        // every later flip, which is the failure this flag exists to stop.
+        _navResourcesDirty = true;
     }
 
     private void ClearNavResource(string key)
@@ -1815,6 +1820,8 @@ internal sealed partial class VerticalTabStrip : UserControl
                                 or NullReferenceException)
         {
         }
+        // Same contract as SetNavResource: the memo hears about the intent.
+        _navResourcesDirty = true;
     }
 
     private SolidColorBrush ResolveThemeBrush(string key)
@@ -1860,14 +1867,45 @@ internal sealed partial class VerticalTabStrip : UserControl
         return false;
     }
 
-    /// <summary>Force MUXC to re-read overridden pane/item resources.</summary>
+    // True when a NavView resource override was written since the last
+    // re-read completed. The flip below exists only to make MUXC re-read
+    // those overrides, so with nothing written it is a full theme walk of
+    // the strip for no reader -- and it used to run on every tab open.
+    private bool _navResourcesDirty;
+
+    // True while a re-read is queued. Callers can arrive in bursts (a
+    // config reload touches several resources in a row); one deferred
+    // flip at the end of the burst re-reads everything any of them wrote.
+    private bool _navRereadQueued;
+
+    /// <summary>
+    /// Force MUXC to re-read overridden pane/item resources, one dispatcher
+    /// turn later.
+    ///
+    /// Deferred because of where this used to run: synchronously inside
+    /// tab-open and flyout-click handlers. A click in the new-tab flyout
+    /// walked straight from the pointer-up handler into this flip, MUXC
+    /// walked the subtree re-resolving theme resources, and the walk
+    /// dereferenced a reference the framework had already freed -- a hard
+    /// crash with this method's write at the top of the stack. The flip
+    /// itself is legitimate; performing it inside input delivery is not.
+    /// Low priority, so pending layout and input work settles first.
+    /// </summary>
     internal void RefreshNavViewTheme()
     {
-        var theme = NavView.RequestedTheme;
-        NavView.RequestedTheme = theme == ElementTheme.Light
-            ? ElementTheme.Dark
-            : ElementTheme.Light;
-        NavView.RequestedTheme = theme;
+        if (!_navResourcesDirty) return;
+        _navResourcesDirty = false;
+        if (_navRereadQueued) return;
+        _navRereadQueued = true;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            _navRereadQueued = false;
+            var theme = NavView.RequestedTheme;
+            NavView.RequestedTheme = theme == ElementTheme.Light
+                ? ElementTheme.Dark
+                : ElementTheme.Light;
+            NavView.RequestedTheme = theme;
+        });
     }
 
     private static uint PackColor(Color c)

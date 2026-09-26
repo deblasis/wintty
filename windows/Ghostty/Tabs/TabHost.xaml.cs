@@ -2070,14 +2070,45 @@ internal sealed partial class TabHost : UserControl, ITabHost
         UpdateSelectedTabBridge();
     }
 
-    /// <summary>Force MUXC to re-read TabView/item header resources.</summary>
+    // True when a TabView resource override was written since the last
+    // re-read completed. The flip below exists only to make MUXC re-read
+    // those overrides, so with nothing written it is a full theme walk of
+    // the strip for no reader -- and it ran on every tab open, twice (once
+    // per host).
+    private bool _tabViewResourcesDirty;
+
+    // True while a re-read is queued, so a burst of resource writes ends
+    // in one deferred flip rather than one per write.
+    private bool _tabViewRereadQueued;
+
+    /// <summary>
+    /// Force MUXC to re-read TabView/item header resources, one dispatcher
+    /// turn later.
+    ///
+    /// Deferred because of where the re-read used to happen: synchronously
+    /// in tab-open and flyout-click handlers, where the theme walk it
+    /// forces ran inside input delivery on a subtree whose theme-resource
+    /// references the framework may already have freed -- the profile-menu
+    /// crash. The flip is legitimate; its timing was not. Low priority, so
+    /// pending layout and input work settles first.
+    /// </summary>
     private void RefreshTabViewTheme()
     {
-        var theme = TabViewControl.RequestedTheme;
-        TabViewControl.RequestedTheme = theme == ElementTheme.Light
-            ? ElementTheme.Dark
-            : ElementTheme.Light;
-        TabViewControl.RequestedTheme = theme;
+        if (!_tabViewResourcesDirty) return;
+        _tabViewResourcesDirty = false;
+        if (_tabViewRereadQueued) return;
+        _tabViewRereadQueued = true;
+        DispatcherQueue.TryEnqueue(
+            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () =>
+            {
+                _tabViewRereadQueued = false;
+                var theme = TabViewControl.RequestedTheme;
+                TabViewControl.RequestedTheme = theme == ElementTheme.Light
+                    ? ElementTheme.Dark
+                    : ElementTheme.Light;
+                TabViewControl.RequestedTheme = theme;
+            });
     }
 
     private static readonly string[] TabViewItemHeaderNormalKeys =
@@ -3774,10 +3805,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // Selected fill is painted on the header panel so preset tab colors
         // can replace the accent per tab.
         TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = TransparentHeaderSelected;
+        _tabViewResourcesDirty = true;
 
-        // Toggle theme to force WinUI to re-read background resources.
-        TabViewControl.RequestedTheme = ElementTheme.Light;
-        TabViewControl.RequestedTheme = _cachedTheme;
+        // The re-read this write needs is deferred a dispatcher turn by
+        // RefreshTabViewTheme; nothing below reads it back synchronously.
+        RefreshTabViewTheme();
 
         // Paint the Foreground of each tab's existing title TextBlock.
         // The previous implementation set TabViewItem.HeaderTemplate to
@@ -4037,19 +4069,26 @@ internal sealed partial class TabHost : UserControl, ITabHost
             _selectedTabFillBrush = null;
             TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
         }
+        _tabViewResourcesDirty = true;
 
         RefreshTabColors();
 
-        // Toggle theme to force WinUI to re-read the background resources.
-        // Foregrounds don't need this — RecolorTabText above is immediate.
-        TabViewControl.RequestedTheme = ElementTheme.Light;
-        TabViewControl.RequestedTheme = _cachedTheme;
+        // The re-read is deferred a dispatcher turn (RefreshTabViewTheme);
+        // foregrounds don't need it at all — RecolorTabText above is
+        // immediate.
+        RefreshTabViewTheme();
     }
 
     internal void SetRequestedTheme(ElementTheme theme)
     {
         _cachedTheme = theme;
         RequestedTheme = theme;
+        // The TabView carries its own XAML-level theme default (Dark), so
+        // it does not follow the host root automatically. The old inline
+        // re-read pairs used to align it to the cached theme as a side
+        // effect; with those gone this is the one place that owns it, and
+        // a plain set -- no forced walk, the value is genuinely changing.
+        TabViewControl.RequestedTheme = theme;
     }
 
     /// <summary>
@@ -4083,12 +4122,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
             TabViewControl.Resources["TabViewBackground"] = TabColorBrush.FromPackedRgb(rgb);
         else
             TabViewControl.Resources.Remove("TabViewBackground");
+        _tabViewResourcesDirty = true;
 
-        // Background resources are only re-read on a theme change; same toggle
-        // ApplyShellTheme needs, and the memoisation above is what keeps it off
-        // every chrome refresh.
-        TabViewControl.RequestedTheme = ElementTheme.Light;
-        TabViewControl.RequestedTheme = _cachedTheme;
+        // Background resources are only re-read on a theme change; the
+        // deferred toggle in RefreshTabViewTheme is that change, and the
+        // memoisation above is what keeps it off every chrome refresh.
+        RefreshTabViewTheme();
     }
 
     private uint? _chromeFillRgb;
@@ -4144,6 +4183,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _selectedTabFillBrush = _accentBrush;
         TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] =
             TransparentHeaderSelected;
+        _tabViewResourcesDirty = true;
         RefreshTabColors();
 
         // Force re-apply by toggling selection so the TabView picks
