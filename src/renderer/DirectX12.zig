@@ -13,6 +13,7 @@ const configpkg = @import("../config.zig");
 const font = @import("../font/main.zig");
 const global = @import("../global.zig");
 const rendererpkg = @import("../renderer.zig");
+const terminal = @import("../terminal/main.zig");
 const Renderer = rendererpkg.GenericRenderer(DirectX12);
 const shadertoy = @import("shadertoy.zig");
 const log = std.log.scoped(.directx12);
@@ -232,6 +233,44 @@ desired_size: std.atomic.Value(u64) = .init(0),
 applied_width: u32 = 0,
 applied_height: u32 = 0,
 
+/// Content scale (x1000, rounded) as last pushed by the apprt via
+/// setContentScale, and what the swap chain's matrix transform was last
+/// applied at. Same store-on-apprt / apply-on-render-thread shape as
+/// desired_size: XAML's SwapChainPanel always scales a handle-bound
+/// swap chain by the display scale, so the panel path pairs with
+/// a SetMatrixTransform of 1/scale on the diagonal (the Windows Terminal
+/// AtlasEngine pattern, where the same value is written 96/dpi because
+/// dpi = 96 * scale) so pixels map 1:1 at every scale. beginFrame
+/// re-applies the matrix when desired and applied differ.
+content_scale_x_milli: std.atomic.Value(u32) = .init(1000),
+content_scale_y_milli: std.atomic.Value(u32) = .init(1000),
+applied_scale_x_milli: u32 = 1000,
+applied_scale_y_milli: u32 = 1000,
+
+/// The color the swap chain composites where its presentation area is
+/// not covered by back buffer content, premultiplied by the background
+/// opacity because the swap chain is PREMULTIPLIED. On the
+/// SwapChainPanel path the resize-exposed strip is tied to this fill by
+/// film evidence, not by proven geometry: adding only SetBackgroundColor
+/// took the strip from pure black to near-background at the first filmed
+/// frame, and the host provably cannot paint the panel (the Background
+/// setter throws). Exact compositor geometry is unresolved at the
+/// harness camera cadence, and a small strip-specific tint (~22/255)
+/// decays over ~300ms, mechanism unknown. Stored so a TDR recovery's
+/// fresh swap chain gets it re-applied. Written by setBackgroundColor
+/// on the render thread (config change; unconditionally, on every
+/// reload -- there is no change detection here) or before the renderer
+/// thread starts (init); applied at every swap chain creation and
+/// resize.
+background_rgba: ?dxgi.DXGI_RGBA = null,
+
+/// True from a successful Present until the next beginFrame waits on
+/// the frame-latency waitable. The waitable is an auto-reset event:
+/// waiting twice per present blocks the second wait out to its timeout,
+/// so the wait runs exactly once per presented frame (WT's
+/// _waitUntilCanRender flag pattern).
+wait_for_presentation: bool = false,
+
 /// Width in the high 32 bits so a hexdump reads as WWWWWWWW_HHHHHHHH.
 inline fn packSize(width: u32, height: u32) u64 {
     return (@as(u64, width) << 32) | @as(u64, height);
@@ -290,8 +329,20 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
     const init_width = if (w.shared_texture.enabled) w.shared_texture.width else size.width;
     const init_height = if (w.shared_texture.enabled) w.shared_texture.height else size.height;
 
+    // Seed the content scale before the swap chain exists: initGpu
+    // applies the matrix transform at creation, and the apprt already
+    // knows its scale (the C# host passes CompositionScale at surface
+    // creation). Non-finite or absurd values clamp inside setContentScale.
+    if (opts.rt_surface.getContentScale()) |cs| {
+        result.setContentScale(cs.x, cs.y);
+    } else |_| {}
+
     try result.initGpu(surface, init_width, init_height);
     result.desired_size.store(packSize(init_width, init_height), .monotonic);
+
+    // The swap chain's background fill tracks the terminal background
+    // (config-derived; also re-pushed by changeConfig on every reload).
+    result.setBackgroundColor(opts.config.background, opts.config.background_opacity);
 
     return result;
 }
@@ -539,6 +590,16 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
 
     self.applied_width = width;
     self.applied_height = height;
+
+    // Fresh swap chain (first init and every TDR recovery): apply the
+    // presentation state -- matrix transform for the current content
+    // scale, background color for the uncovered area -- and clear the
+    // frame-latency wait bookkeeping, since nothing has been presented
+    // on this swap chain yet. SetMaximumFrameLatency(1) and the waitable
+    // were already handled in Device.init.
+    self.applySwapChainPresentationState();
+    self.wait_for_presentation = false;
+
     // Only now does the device own a reused surface handle.
     self.reserved_surface_handle = null;
 }
@@ -870,12 +931,15 @@ pub fn drawFrameEnd(self: *DirectX12) void {
 
     // Present the swap chain and check for device-removed errors.
     // Sync interval 1 paces to vblank without tearing against the
-    // compositor. Interactive resize relies on setTargetSize waking the
-    // renderer thread (see embedded.zig) plus the existing 120 Hz draw
-    // timer as a backstop -- both routes hit beginFrame, which compares
-    // desired_size against applied_width/height and calls ResizeBuffers
-    // before any new GPU work. The renderer thread owns Present
-    // exclusively; the apprt UI thread does no GPU work during resize.
+    // compositor. Interactive resize is carried by the dedicated resize
+    // wake (embedded.zig set_size) whose frame applies the resize inside
+    // beginFrame before any new GPU work, with a one-shot ~8 ms backstop
+    // timer (Thread.resizeBackstopCallback) self-healing a coalesced or
+    // lost wake; and the frame-latency waitable paced in beginFrame caps
+    // this present queue at one frame, so a new-size frame composes on
+    // the first vblank after this Present rather than behind stale ones.
+    // The renderer thread owns Present exclusively; the apprt UI thread
+    // does no GPU work during resize.
     if (self.swap_chain3) |sc3| {
         // Bracket the Present call itself: composition swap chains queue
         // frames for the compositor, and if nothing is consuming that
@@ -903,6 +967,12 @@ pub fn drawFrameEnd(self: *DirectX12) void {
         }
         if (com.FAILED(hr)) {
             log.err("Present failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+        } else {
+            // One waitable wait is now owed: beginFrame consumes this
+            // before recording the next frame, which is what keeps at
+            // most one present queued (auto-reset event, so exactly one
+            // wait per present; see the field's doc comment).
+            self.wait_for_presentation = true;
         }
     }
 
@@ -987,6 +1057,130 @@ pub fn setTargetSize(self: *DirectX12, width: u32, height: u32) void {
     self.desired_size.store(packSize(width, height), .monotonic);
 }
 
+/// Whether a setTargetSize has landed that beginFrame has not applied
+/// yet. A pending resize is itself a reason to draw: the render thread
+/// forces the applying frame (generic.zig's needs_redraw includes this)
+/// and the resize backstop timer re-checks it to decide whether one more
+/// draw is owed.
+pub fn hasPendingResize(self: *const DirectX12) bool {
+    const want = unpackSize(self.desired_size.load(.monotonic));
+    return want.width != 0 and want.height != 0 and
+        (want.width != self.applied_width or want.height != self.applied_height);
+}
+
+/// Record the apprt's content scale so the next beginFrame re-applies
+/// the swap chain's matrix counter-transform. Apprt thread: stores only,
+/// exactly like setTargetSize. Milli (scale * 1000, rounded) because the
+/// atomics must be integers; clamped to [0.01, 100] so the transform's
+/// divide cannot see zero and a garbage scale cannot overflow the u32.
+pub fn setContentScale(self: *DirectX12, x: f32, y: f32) void {
+    if (!std.math.isFinite(x) or !std.math.isFinite(y)) return;
+    const x_milli: u32 = @intFromFloat(@round(@min(@max(x, 0.01), 100.0) * 1000.0));
+    const y_milli: u32 = @intFromFloat(@round(@min(@max(y, 0.01), 100.0) * 1000.0));
+    self.content_scale_x_milli.store(x_milli, .monotonic);
+    self.content_scale_y_milli.store(y_milli, .monotonic);
+}
+
+/// Set the color the swap chain composites over its own uncovered
+/// presentation area: the terminal background, premultiplied by the
+/// background opacity because the swap chain is PREMULTIPLIED. Called
+/// by the generic renderer at init and on every config change
+/// (background or background-opacity reload), on the render thread or
+/// before it starts. Stores the value so TDR recovery re-applies it to
+/// the recreated swap chain; applying to a live swap chain is
+/// best-effort (a logged failure leaves the previous fill). See
+/// background_rgba for why the resize-exposed strip is attributed to
+/// this fill on film evidence rather than proven geometry.
+pub fn setBackgroundColor(
+    self: *DirectX12,
+    background: terminal.color.RGB,
+    opacity: f64,
+) void {
+    const a: f32 = @floatCast(@min(1.0, @max(0.0, opacity)));
+    const rgba = dxgi.DXGI_RGBA{
+        .r = @as(f32, @floatFromInt(background.r)) / 255.0 * a,
+        .g = @as(f32, @floatFromInt(background.g)) / 255.0 * a,
+        .b = @as(f32, @floatFromInt(background.b)) / 255.0 * a,
+        .a = a,
+    };
+    self.background_rgba = rgba;
+    if (self.dev) |*dev_ptr| {
+        if (dev_ptr.swap_chain) |sc| {
+            const hr = sc.SetBackgroundColor(&rgba);
+            if (com.FAILED(hr)) {
+                log.warn("SetBackgroundColor failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            }
+        }
+    }
+}
+
+/// Apply the swap chain presentation state: the matrix
+/// counter-transform for the current content scale (panel path only) and
+/// the background fill. Runs wherever a swap chain comes into existence
+/// (initGpu, which covers TDR recovery) or is resized (resizeSwapChain),
+/// and from beginFrame when the content scale moved. Everything here
+/// runs on the render thread or before it starts.
+fn applySwapChainPresentationState(self: *DirectX12) void {
+    const dev_ptr = self.dev orelse return;
+    const scale_x_milli = self.content_scale_x_milli.load(.monotonic);
+    const scale_y_milli = self.content_scale_y_milli.load(.monotonic);
+
+    // Advance the applied scale at the END, and only when the matrix
+    // transform was actually written (or the configuration has none to
+    // write: a non-panel surface, or no SwapChain2 because QI failed at
+    // device creation -- a pointer fixed for the device's lifetime, so a
+    // retry could never succeed there either): beginFrame re-runs this
+    // function while applied_* lags the content scale, so recording a
+    // scale whose transform never landed would permanently suppress that
+    // retry.
+    var matrix_applied = true;
+
+    if (dev_ptr.swap_chain2) |sc2| {
+        // 1/scale on the diagonal == the 96/dpi Windows Terminal writes.
+        // SwapChainPanel-only: XAML maps swap chain buffer pixels 1:1 into
+        // DIP space (WT's "worst of both worlds"), so a physical-pixel
+        // buffer needs 1/scale to land 1:1 on screen. The other modes get
+        // no automatic scale -- HWND fills the DComp visual 1:1 and the
+        // composition embedder owns its own transform -- so applying it
+        // there would misrender at any DPI above 96. WT gates the same
+        // way (its matrix runs only when the target has no hwnd).
+        // Measured only at identity (96 DPI) locally; no non-identity
+        // display was available to film.
+        const is_panel = if (self.surface) |s| s == .swap_chain_panel else false;
+        if (is_panel) {
+            const sx = @as(f32, @floatFromInt(scale_x_milli)) / 1000.0;
+            const sy = @as(f32, @floatFromInt(scale_y_milli)) / 1000.0;
+            const matrix = dxgi.DXGI_MATRIX_3X2_F{
+                ._11 = 1.0 / sx,
+                ._12 = 0,
+                ._21 = 0,
+                ._22 = 1.0 / sy,
+                ._31 = 0,
+                ._32 = 0,
+            };
+            const hr = sc2.SetMatrixTransform(&matrix);
+            if (com.FAILED(hr)) {
+                log.warn("SetMatrixTransform failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+                matrix_applied = false;
+            }
+        }
+    }
+
+    if (self.background_rgba) |rgba| {
+        if (dev_ptr.swap_chain) |sc| {
+            const hr = sc.SetBackgroundColor(&rgba);
+            if (com.FAILED(hr)) {
+                log.warn("SetBackgroundColor failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            }
+        }
+    }
+
+    if (matrix_applied) {
+        self.applied_scale_x_milli = scale_x_milli;
+        self.applied_scale_y_milli = scale_y_milli;
+    }
+}
+
 /// Resize the swap chain back buffers in place via IDXGISwapChain1::ResizeBuffers.
 ///
 /// DXGI requires every reference to the existing back buffers (including
@@ -1016,19 +1210,32 @@ fn resizeSwapChain(self: *DirectX12, width: u32, height: u32) !void {
         }
     }
 
-    // UNKNOWN format and 0 flags preserve whatever the swap chain was
-    // created with -- the same values device.zig used at creation time.
-    // ResizeBuffers lives on IDXGISwapChain1. IDXGISwapChain3 inherits
-    // from IDXGISwapChain1 in COM, so the v-table prefix is identical and
-    // a pointer reinterpret is safe; we use it instead of QueryInterface
-    // to avoid an AddRef/Release pair on every resize.
+    // UNKNOWN format preserves the creation format, but the flags must
+    // MATCH creation: DXGI validates the flag set (a mismatch is
+    // rejected -- E_INVALIDARG, 0x80070057, measured on this machine's
+    // media chains; the waitable object in particular must be repeated
+    // on chains created with it, pinned in gpu_test's legality matrix).
+    // Rather than recomputing a
+    // flag list here, Device carries the exact bits its chain was
+    // created with -- recomputing a hardcoded list is how creation and
+    // resize drift apart, and any hardcoded waitable here would kill
+    // every resize-after-first on a chain deliberately created without
+    // it, which today is the panel path (unpaced by choice; see
+    // device.zig's compositionSwapChainDesc). No shipped tree ever had
+    // that bug -- creation and resize both passed 0 before this change
+    // -- but the recording is what makes introducing the waitable
+    // anywhere safe. ResizeBuffers lives on IDXGISwapChain1.
+    // IDXGISwapChain3 inherits from IDXGISwapChain1 in COM, so the
+    // v-table prefix is identical and a pointer reinterpret is safe; we
+    // use it instead of QueryInterface to avoid an AddRef/Release pair on
+    // every resize.
     const sc1: *dxgi.IDXGISwapChain1 = @ptrCast(sc3);
     const hr = sc1.ResizeBuffers(
         device.Device.frame_count,
         width,
         height,
         .UNKNOWN,
-        0,
+        dev_ptr.swap_chain_flags,
     );
     if (hr == com.DXGI_ERROR_DEVICE_REMOVED or
         hr == com.DXGI_ERROR_DEVICE_HUNG or
@@ -1077,6 +1284,12 @@ fn resizeSwapChain(self: *DirectX12, width: u32, height: u32) !void {
     // it, so a plain field is fine (no atomic needed).
     self.applied_width = width;
     self.applied_height = height;
+
+    // WT relies on the matrix transform persisting across ResizeBuffers
+    // and never sets a background color at all; we re-apply both here for
+    // a deterministic post-resize state instead of depending on what
+    // DXGI carries over. Cheap (two COM calls) and idempotent.
+    self.applySwapChainPresentationState();
 }
 
 pub fn surfaceSize(self: *const DirectX12) !struct { width: u32, height: u32 } {
@@ -1135,6 +1348,28 @@ pub inline fn beginFrame(
         }
     }
 
+    // Pace on the frame-latency waitable before recording anything: the
+    // flag is set by the last successful Present and cleared here, so
+    // exactly one wait runs per presented frame (it is an auto-reset
+    // event -- a second wait would block out to its timeout). Waiting
+    // BEFORE the resize below also means the compositor has consumed the
+    // old-size presents by the time ResizeBuffers discards their
+    // buffers. The 100 ms timeout is a leak valve, never the normal
+    // path: with latency 1 the event signals as soon as the queued
+    // frame composes.
+    if (api.wait_for_presentation) {
+        api.wait_for_presentation = false;
+        if (dev_ptr.frame_latency_waitable) |waitable| {
+            const wait_hr = d3d12.WaitForSingleObject(waitable, 100);
+            if (wait_hr != 0) {
+                // WAIT_TIMEOUT (0x102) or WAIT_FAILED: the wait is
+                // advisory pacing, so log and draw anyway rather than
+                // stall the terminal on it.
+                log.warn("frame-latency wait returned 0x{x}", .{wait_hr});
+            }
+        }
+    }
+
     // If the apprt asked for a new surface size since the last frame,
     // resize now -- on the renderer thread, before any command list work.
     // setTargetSize only records the desired size; it cannot touch GPU
@@ -1184,6 +1419,21 @@ pub inline fn beginFrame(
             }
             api.applied_width = want.width;
             api.applied_height = want.height;
+        }
+    }
+
+    // A pure content-scale move (DPI change, no size change) never enters
+    // the resize block above, and the resize path re-applies the whole
+    // presentation state anyway -- so this check sits after it and only
+    // fires when the scale changed on its own. Swap-chain mode only; the
+    // shared-texture path has no presentation transform.
+    if (api.swap_chain3 != null) {
+        const scale_x_milli = api.content_scale_x_milli.load(.monotonic);
+        const scale_y_milli = api.content_scale_y_milli.load(.monotonic);
+        if (scale_x_milli != api.applied_scale_x_milli or
+            scale_y_milli != api.applied_scale_y_milli)
+        {
+            api.applySwapChainPresentationState();
         }
     }
 
@@ -1483,6 +1733,94 @@ test "device_lost flag is independent of device presence" {
     try std.testing.expect(api.dev == null);
     api.device_lost = true;
     try std.testing.expect(api.device_lost);
+}
+
+test "DirectX12 has presentation-state fields" {
+    try std.testing.expect(@hasField(DirectX12, "content_scale_x_milli"));
+    try std.testing.expect(@hasField(DirectX12, "content_scale_y_milli"));
+    try std.testing.expect(@hasField(DirectX12, "applied_scale_x_milli"));
+    try std.testing.expect(@hasField(DirectX12, "applied_scale_y_milli"));
+    try std.testing.expect(@hasField(DirectX12, "background_rgba"));
+    try std.testing.expect(@hasField(DirectX12, "wait_for_presentation"));
+}
+
+test "DirectX12 presentation-state defaults" {
+    const api: DirectX12 = .{};
+    try std.testing.expectEqual(@as(u32, 1000), api.content_scale_x_milli.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1000), api.content_scale_y_milli.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1000), api.applied_scale_x_milli);
+    try std.testing.expectEqual(@as(u32, 1000), api.applied_scale_y_milli);
+    try std.testing.expect(api.background_rgba == null);
+    try std.testing.expect(!api.wait_for_presentation);
+}
+
+test "hasPendingResize tracks desired vs applied" {
+    var api: DirectX12 = .{};
+    // No size recorded yet: nothing pending.
+    try std.testing.expect(!api.hasPendingResize());
+
+    // A landed target size with nothing applied: pending.
+    api.setTargetSize(640, 480);
+    try std.testing.expect(api.hasPendingResize());
+
+    // The renderer thread applied it: no longer pending.
+    api.applied_width = 640;
+    api.applied_height = 480;
+    try std.testing.expect(!api.hasPendingResize());
+
+    // A new size lands: pending again (the state the resize wake and the
+    // 8 ms backstop both key on).
+    api.setTargetSize(800, 600);
+    try std.testing.expect(api.hasPendingResize());
+
+    // Zero-dimensional layout passes must not mark a resize pending.
+    api.applied_width = 800;
+    api.applied_height = 600;
+    api.setTargetSize(0, 0);
+    try std.testing.expect(!api.hasPendingResize());
+}
+
+test "setContentScale converts to milli and clamps" {
+    var api: DirectX12 = .{};
+    api.setContentScale(1.25, 1.5);
+    try std.testing.expectEqual(@as(u32, 1250), api.content_scale_x_milli.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1500), api.content_scale_y_milli.load(.monotonic));
+
+    // Absurd values clamp instead of overflowing the u32 or letting the
+    // transform divide see zero.
+    api.setContentScale(0.0, 1e9);
+    try std.testing.expectEqual(@as(u32, 10), api.content_scale_x_milli.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 100_000), api.content_scale_y_milli.load(.monotonic));
+
+    // Non-finite input is dropped entirely, leaving the last good scale.
+    api.setContentScale(2.0, 2.0);
+    api.setContentScale(std.math.nan(f32), std.math.inf(f32));
+    try std.testing.expectEqual(@as(u32, 2000), api.content_scale_x_milli.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 2000), api.content_scale_y_milli.load(.monotonic));
+}
+
+test "setBackgroundColor stores a premultiplied color" {
+    var api: DirectX12 = .{};
+    // dev is null here, so this exercises the store half only; the
+    // SetBackgroundColor call itself needs a live swap chain.
+    api.setBackgroundColor(.{ .r = 255, .g = 128, .b = 0 }, 0.5);
+    const rgba = api.background_rgba.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0) * 0.5, rgba.r, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0) * 0.5, rgba.g, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), rgba.b, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), rgba.a, 1e-6);
+
+    // Opacity outside [0, 1] clamps to the endpoints rather than
+    // producing an unpremultiplied or inverted color.
+    api.setBackgroundColor(.{ .r = 10, .g = 10, .b = 10 }, 2.0);
+    const clamped_hi = api.background_rgba.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0 / 255.0), clamped_hi.r, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), clamped_hi.a, 1e-6);
+
+    api.setBackgroundColor(.{ .r = 10, .g = 10, .b = 10 }, -1.0);
+    const clamped_lo = api.background_rgba.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), clamped_lo.r, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), clamped_lo.a, 1e-6);
 }
 
 // Pull the directx12 integration test files into the test graph; without

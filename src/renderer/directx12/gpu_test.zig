@@ -11,6 +11,7 @@ const global = @import("../../global.zig");
 const com = @import("com.zig");
 const d3d12 = @import("d3d12.zig");
 const dxgi = @import("dxgi.zig");
+const dcomp = @import("dcomp.zig");
 const buffer_mod = @import("buffer.zig");
 const DescriptorHeap = @import("descriptor_heap.zig").DescriptorHeap;
 const Texture = @import("Texture.zig");
@@ -1052,6 +1053,18 @@ test "Device: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
     try std.testing.expect(!com.FAILED(hr));
     try std.testing.expectEqual(dxgi.DXGI_SCALING.STRETCH, desc.Scaling);
     try std.testing.expectEqual(dxgi.DXGI_ALPHA_MODE.PREMULTIPLIED, desc.AlphaMode);
+
+    // The factory2 creation path is the paced one: the TRUE waitable
+    // flag (0x40, dxgi.h; 16 is RESTRICT_SHARED_RESOURCE_DRIVER) must
+    // be accepted here and must yield a live waitable. This is the
+    // measured half of the legality split in Device.composition
+    // SwapChainDesc's doc; if the constant or the entry point ever
+    // regresses, this fails rather than letting pacing go silently
+    // dead behind warn-guarded calls.
+    try std.testing.expectEqual(@as(u32, 0x40), device.swap_chain_flags);
+    try std.testing.expectEqual(@as(u32, 0x40), desc.Flags);
+    try std.testing.expect(device.swap_chain2 != null);
+    try std.testing.expect(device.frame_latency_waitable != null);
 }
 
 test "Device: shared texture mode has no swap chain or dcomp" {
@@ -1744,9 +1757,179 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
     try std.testing.expectEqual(handle, second.swap_chain_surface_handle.?);
     try std.testing.expect(!com.FAILED(second.device.GetDeviceRemovedReason()));
 
+    // The panel path is the deliberately unpaced one: no creation flags,
+    // and therefore no frame-latency waitable. The entry point does NOT
+    // force this -- it accepts the waitable flag (the legality test below
+    // pins that with HRESULTs) -- the choice is that every filmed leg of
+    // the resize-flash fix ran unpaced, so the shipped panel chain must
+    // match what was filmed until pacing gets its own films. Pinning
+    // both makes flipping the choice on a conscious diff, not a drift.
+    try std.testing.expectEqual(@as(u32, 0), second.swap_chain_flags);
+    try std.testing.expect(second.frame_latency_waitable == null);
+    // The unpaced panel chain still needs its SwapChain2: that is where
+    // the DPI counter-transform (SetMatrixTransform) lives. A regression
+    // that gated the QI on `paced` would silently kill the panel's
+    // matrix transform while these pins stayed green.
+    try std.testing.expect(second.swap_chain2 != null);
+
     // The proof is a Present into the reused surface from the new device.
     const sc = second.swap_chain orelse return error.NoSwapChain;
     try std.testing.expect(!com.FAILED(sc.Present(0, 0)));
+}
+
+test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
+    // Pins the creation-legality matrix the renderer's flag decisions
+    // rest on, as measured on this machine's D3D12 queue with a raw
+    // probe and then here. The flags below are LITERALS on purpose: an
+    // earlier draft carried 16 (RESTRICT_SHARED_RESOURCE_DRIVER) in
+    // dxgi.zig under the waitable's name, every pacing call silently
+    // failed, and the resulting creation-failure matrix was
+    // mis-attributed to the waitable flag and to DXGI_SCALING_NONE for
+    // two sessions. If one of these pins goes red, the machine's DXGI
+    // behavior changed and the flag decisions in device.zig need
+    // re-measuring, not just this test updating.
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
+    // Above the device gate on purpose: the ABI literal is
+    // hardware-independent, and this test is the round-1 confound's
+    // guard -- a silent pass on a device-less host would hide it. A
+    // failed device creation skips visibly instead.
+    try std.testing.expectEqual(
+        @as(u32, 0x40),
+        dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+    );
+    var dev = createTestDevice() catch return error.SkipZigTest;
+    defer dev.deinit();
+
+    var factory: ?*dxgi.IDXGIFactory2 = null;
+    {
+        const hr = dxgi.CreateDXGIFactory2(0, &dxgi.IDXGIFactory2.IID, @ptrCast(&factory));
+        if (com.FAILED(hr)) return error.SkipZigTest;
+    }
+    defer _ = factory.?.Release();
+
+    var media: ?*dxgi.IDXGIFactoryMedia = null;
+    {
+        const hr = factory.?.vtable.QueryInterface(
+            factory.?,
+            &dxgi.IDXGIFactoryMedia.IID,
+            @ptrCast(&media),
+        );
+        if (com.FAILED(hr)) return error.SkipZigTest;
+    }
+    defer _ = media.?.Release();
+
+    const descFor = struct {
+        fn f(scaling: dxgi.DXGI_SCALING, flags: u32) dxgi.DXGI_SWAP_CHAIN_DESC1 {
+            return .{
+                .Width = 64,
+                .Height = 64,
+                .Format = .B8G8R8A8_UNORM,
+                .Stereo = 0,
+                .SampleDesc = .{ .Count = 1, .Quality = 0 },
+                .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                .BufferCount = 3,
+                .Scaling = scaling,
+                .SwapEffect = .FLIP_SEQUENTIAL,
+                .AlphaMode = .PREMULTIPLIED,
+                .Flags = flags,
+            };
+        }
+    }.f;
+
+    // One fresh composition surface handle per media attempt.
+    const mediaAttempt = struct {
+        fn f(
+            m: *dxgi.IDXGIFactoryMedia,
+            queue: *d3d12.ID3D12CommandQueue,
+            scaling: dxgi.DXGI_SCALING,
+            flags: u32,
+        ) !struct { hr: com.HRESULT, chain: ?*dxgi.IDXGISwapChain1, handle: std.os.windows.HANDLE } {
+            var handle: std.os.windows.HANDLE = undefined;
+            const hhr = dcomp.DCompositionCreateSurfaceHandle(
+                dcomp.COMPOSITIONOBJECT_ALL_ACCESS,
+                null,
+                &handle,
+            );
+            if (com.FAILED(hhr)) return error.SkipZigTest;
+            const d = descFor(scaling, flags);
+            var chain: ?*dxgi.IDXGISwapChain1 = null;
+            const hr = m.CreateSwapChainForCompositionSurfaceHandle(
+                @ptrCast(queue),
+                handle,
+                &d,
+                null,
+                &chain,
+            );
+            return .{ .hr = hr, .chain = chain, .handle = handle };
+        }
+    }.f;
+
+    // 1. The media entry point (production SwapChainPanel path) ACCEPTS
+    //    the true waitable flag, and the paced follow-ups all work.
+    //    Includes the ResizeBuffers flag contract Device.swap_chain_flags
+    //    exists for, as measured: repeating the creation flags succeeds,
+    //    passing 0 on a waitable chain fails (E_INVALIDARG here).
+    {
+        const r = try mediaAttempt(media.?, dev.command_queue, .STRETCH, 0x40);
+        defer _ = d3d12.CloseHandle(r.handle);
+        try std.testing.expect(!com.FAILED(r.hr));
+        const chain = r.chain orelse return error.NoSwapChain;
+        defer _ = chain.Release();
+        var sc2: ?*dxgi.IDXGISwapChain2 = null;
+        const qi = chain.vtable.QueryInterface(
+            @ptrCast(chain),
+            &dxgi.IDXGISwapChain2.IID,
+            @ptrCast(&sc2),
+        );
+        try std.testing.expect(!com.FAILED(qi));
+        const c2 = sc2 orelse return error.NoSwapChain2;
+        defer _ = c2.Release();
+        try std.testing.expect(!com.FAILED(c2.SetMaximumFrameLatency(1)));
+        try std.testing.expect(c2.GetFrameLatencyWaitableObject() != null);
+        try std.testing.expect(!com.FAILED(chain.ResizeBuffers(3, 128, 128, .UNKNOWN, 0x40)));
+        try std.testing.expect(com.FAILED(chain.ResizeBuffers(3, 128, 128, .UNKNOWN, 0)));
+    }
+
+    // 2. What the media entry point rejects is 0x10,
+    //    RESTRICT_SHARED_RESOURCE_DRIVER -- the value the confounded
+    //    investigation measured under the waitable's name. No chain
+    //    comes back, at any scaling.
+    {
+        const r = try mediaAttempt(media.?, dev.command_queue, .STRETCH, 0x10);
+        defer _ = d3d12.CloseHandle(r.handle);
+        try std.testing.expect(com.FAILED(r.hr));
+        try std.testing.expect(r.chain == null);
+    }
+
+    // 3. DXGI_SCALING_NONE is legal on the media entry point (the
+    //    Windows Terminal production combination); the "132 consecutive
+    //    creation failures" once attributed to NONE were the 0x10
+    //    confound above. wintty still ships STRETCH on the panel
+    //    (unfilmed otherwise), so this pin documents legality, not a
+    //    decision to switch.
+    {
+        const r = try mediaAttempt(media.?, dev.command_queue, .NONE, 0x40);
+        defer _ = d3d12.CloseHandle(r.handle);
+        try std.testing.expect(!com.FAILED(r.hr));
+        const chain = r.chain orelse return error.NoSwapChain;
+        defer _ = chain.Release();
+    }
+
+    // 4. Factory2 (bare-composition and hwnd-DComp paths) DOES reject
+    //    NONE -- why compositionSwapChainDesc keeps STRETCH for the
+    //    chains it builds through factory2.
+    {
+        const d = descFor(.NONE, 0x40);
+        var chain: ?*dxgi.IDXGISwapChain1 = null;
+        const hr = factory.?.CreateSwapChainForComposition(
+            @ptrCast(dev.command_queue),
+            &d,
+            null,
+            &chain,
+        );
+        try std.testing.expect(com.FAILED(hr));
+        try std.testing.expect(chain == null);
+    }
 }
 
 test "DirectX12: rebuilds every device-bound object after the device is removed" {

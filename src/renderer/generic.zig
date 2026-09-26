@@ -1140,6 +1140,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
+        /// Notify the graphics API of the current content scale. Used by
+        /// backends whose swap chain transform has to counter the host's
+        /// display scale (DX12 SwapChainPanel mode).
+        pub fn setContentScale(self: *Self, x: f32, y: f32) void {
+            if (@hasDecl(GraphicsAPI, "setContentScale")) {
+                self.api.setContentScale(x, y);
+            }
+        }
+
+        /// Whether the graphics API has a target size recorded but not
+        /// applied yet. Backends without an apply gap report false; those
+        /// with one make a pending resize a reason to draw (see
+        /// drawFrameLocked) so the applying frame is not skipped.
+        pub fn hasPendingResize(self: *const Self) bool {
+            if (@hasDecl(GraphicsAPI, "hasPendingResize")) {
+                return self.api.hasPendingResize();
+            }
+            return false;
+        }
+
         /// Callback called by renderer.Thread when it begins.
         pub fn threadEnter(self: *Self, surface: *apprt.Surface) !void {
             // If our API has to do things on thread enter, let it.
@@ -2342,6 +2362,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.size.screen.width != surface_size.width or
                 self.size.screen.height != surface_size.height;
 
+            // A swap chain resize the API has recorded but not applied is
+            // itself a reason to draw. The `.resize` mailbox message sets
+            // self.size.screen to the new size on the same wake that
+            // carries it, while surfaceSize() above already reports the
+            // new (desired) size -- so size_changed reads false at exactly
+            // the moment a resize lands, and without this term the swap
+            // chain resize would ride the next cells rebuild (the IO
+            // thread's reflow round trip) instead of this frame.
+            const swap_chain_resize_pending = if (comptime @hasDecl(GraphicsAPI, "hasPendingResize"))
+                self.api.hasPendingResize()
+            else
+                false;
+
             // Conditions under which we need to draw the frame, otherwise we
             // don't need to since the previous frame should be identical.
             //
@@ -2350,6 +2383,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const needs_redraw =
                 size_changed or
                 swap_chain_rebuilt or
+                swap_chain_resize_pending or
                 self.cells_rebuilt or
                 self.animationWake() != null or
                 sync;
@@ -3143,6 +3177,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.config.deinit();
             self.config = config.*;
+
+            // The swap chain's resize-gap fill tracks the terminal
+            // background: a background or background-opacity reload has
+            // to re-push it (DX12's chain background).
+            // This runs on the render thread under draw_mutex, the only
+            // thread allowed to touch the swap chain; init-time seeding
+            // happens inside GraphicsAPI.init, which sees the same
+            // config through its options.
+            if (@hasDecl(GraphicsAPI, "setBackgroundColor")) {
+                self.api.setBackgroundColor(config.background, config.background_opacity);
+            }
 
             // If our background image path changed, prepare the new bg image.
             if (bg_image_changed) try self.prepBackgroundImage();

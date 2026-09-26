@@ -45,6 +45,40 @@ pub const DXGI_ALPHA_MODE = enum(u32) {
 pub const DXGI_USAGE = u32;
 pub const DXGI_USAGE_RENDER_TARGET_OUTPUT: DXGI_USAGE = 0x00000020;
 
+/// Swap chain creation/resize flags. The frame-latency waitable is the
+/// one that matters here: it caps how many presents can queue in front
+/// of the compositor (paired with SetMaximumFrameLatency and a wait on
+/// the waitable before each frame) and MUST be repeated in every
+/// ResizeBuffers call or DXGI returns DXGI_ERROR_INVALID_CALL.
+///
+/// The value is ABI, not style: 64 per dxgi.h's DXGI_SWAP_CHAIN_FLAG
+/// (10.0.26100.0 line 284). An earlier draft carried 16 here, which the
+/// SDK calls DXGI_SWAP_CHAIN_FLAG_RESTRICT_SHARED_RESOURCE_DRIVER --
+/// with it, SetMaximumFrameLatency fails, GetFrameLatencyWaitableObject
+/// returns null, and the entire pacing half runs as dead code while
+/// every guard still passes, because the unit test compared the constant
+/// against itself. device.zig's desc test pins the literal 0x40 for
+/// exactly that reason.
+pub const DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT: u32 = 0x00000040;
+
+/// The swap chain background color: what the chain composites over its
+/// own presentation area where back buffer content does not reach
+/// (flip-model chains). Every chain this renderer builds is a
+/// composition chain. On the SwapChainPanel path the resize-exposed
+/// strip is tied to this fill by film evidence (adding only
+/// SetBackgroundColor took the strip from pure black to near-background
+/// at the first filmed frame; the host cannot paint the panel at all),
+/// not by proven geometry -- the exact compositor layout is unresolved
+/// at the harness camera cadence. Components are straight float 0..1;
+/// the swap chain is PREMULTIPLIED, so an alpha below 1 wants color
+/// components scaled by it.
+pub const DXGI_RGBA = extern struct {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+};
+
 /// Win32 HWND is a pointer-sized handle, same underlying type as HANDLE.
 pub const HWND = std.os.windows.HANDLE;
 
@@ -233,7 +267,7 @@ pub const IDXGISwapChain1 = extern struct {
         Present1: Reserved,
         IsTemporaryMonoSupported: Reserved,
         GetRestrictToOutput: Reserved,
-        SetBackgroundColor: Reserved,
+        SetBackgroundColor: *const fn (*IDXGISwapChain1, *const DXGI_RGBA) callconv(.winapi) HRESULT,
         GetBackgroundColor: Reserved,
         SetRotation: Reserved,
         GetRotation: Reserved,
@@ -249,6 +283,10 @@ pub const IDXGISwapChain1 = extern struct {
 
     pub inline fn GetDesc1(self: *IDXGISwapChain1, desc: *DXGI_SWAP_CHAIN_DESC1) HRESULT {
         return self.vtable.GetDesc1(self, desc);
+    }
+
+    pub inline fn SetBackgroundColor(self: *IDXGISwapChain1, color: *const DXGI_RGBA) HRESULT {
+        return self.vtable.SetBackgroundColor(self, color);
     }
 
     pub inline fn ResizeBuffers(self: *IDXGISwapChain1, buffer_count: u32, width: u32, height: u32, format: DXGI_FORMAT, flags: u32) HRESULT {
@@ -309,9 +347,9 @@ pub const IDXGISwapChain2 = extern struct {
         // IDXGISwapChain2
         SetSourceSize: Reserved,
         GetSourceSize: Reserved,
-        SetMaximumFrameLatency: Reserved,
+        SetMaximumFrameLatency: *const fn (*IDXGISwapChain2, u32) callconv(.winapi) HRESULT,
         GetMaximumFrameLatency: Reserved,
-        GetFrameLatencyWaitableObject: Reserved,
+        GetFrameLatencyWaitableObject: *const fn (*IDXGISwapChain2) callconv(.winapi) ?std.os.windows.HANDLE,
         SetMatrixTransform: *const fn (*IDXGISwapChain2, *const DXGI_MATRIX_3X2_F) callconv(.winapi) HRESULT,
         GetMatrixTransform: Reserved,
     };
@@ -322,6 +360,17 @@ pub const IDXGISwapChain2 = extern struct {
 
     pub inline fn GetBuffer(self: *IDXGISwapChain2, buffer: u32, riid: *const GUID, surface: *?*anyopaque) HRESULT {
         return self.vtable.GetBuffer(self, buffer, riid, surface);
+    }
+
+    pub inline fn SetMaximumFrameLatency(self: *IDXGISwapChain2, latency: u32) HRESULT {
+        return self.vtable.SetMaximumFrameLatency(self, latency);
+    }
+
+    /// The waitable is an auto-reset event owned by the swap chain: do
+    /// NOT CloseHandle it, and wait on it at most once per Present or
+    /// the second wait blocks out to its timeout.
+    pub inline fn GetFrameLatencyWaitableObject(self: *IDXGISwapChain2) ?std.os.windows.HANDLE {
+        return self.vtable.GetFrameLatencyWaitableObject(self);
     }
 
     pub inline fn SetMatrixTransform(self: *IDXGISwapChain2, matrix: *const DXGI_MATRIX_3X2_F) HRESULT {
