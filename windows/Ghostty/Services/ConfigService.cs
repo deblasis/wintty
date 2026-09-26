@@ -69,6 +69,21 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private int _shrinkConfirms;
     private const int MaxShrinkConfirms = 3;
 
+    // The empty-read looks' budget, a fourth counter for a fourth stretch.
+    // This one counts consecutive looks that read a default config file as
+    // empty: an in-place save (truncate, then write) passes through a moment
+    // where the file is there and zero bytes, and a load landing there is
+    // indistinguishable from a file emptied on purpose. The hold is what
+    // keeps the save's half-written state off the live surfaces; the budget
+    // is what lets a deliberate emptying take effect. Same count as the
+    // other two budgets, reset on any applied reload like them, and on any
+    // look that is not an empty read, which is every ordinary look, so
+    // SuppressWatcher's unsuppress reset needs no counterpart here.
+    // UI thread only, like everything Reload touches. See the decline in
+    // Reload.
+    private int _emptyReadLooks;
+    private const int MaxEmptyReadLooks = 3;
+
     // The vanish confirmations' budget, and a third counter for the reason
     // the second one exists. This counts asks about the WATCHED file being
     // gone, which the watcher raises; _shrinkConfirms counts asks about a
@@ -104,6 +119,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     // it describes. Written only by RecordDefaultFiles. See the guard in
     // Reload.
     private int _defaultFilesFound;
+
+    // How many of the reads behind the config in force answered empty: the
+    // file was there and zero bytes. The count above says the files were
+    // present; this one says how they read, which is the other half of the
+    // empty-read question (issue #1138): a look that reads empty is only
+    // held while the session is running on something, and "something"
+    // includes the emptiness it may already be running on. UI thread only,
+    // same as _defaultFilesFound, which it sits beside. Written only by
+    // RecordDefaultFiles.
+    private int _defaultFilesEmptyReads;
 
     // Set by BeginShutdown when the app is tearing down so a queued or
     // debounced reload can't call into a libghostty app that is about to
@@ -564,7 +589,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
         _config = NativeMethods.ConfigNew();
         var defaultFiles = NativeMethods.ConfigLoadDefaultFiles(
-            _config, out var defaultFilesFound);
+            _config, out var defaultFilesFound, out var defaultFilesEmptyReads);
 
         // Startup is the one place that may create a config file: this is a
         // first run exactly when the load above found none. Everything that
@@ -622,8 +647,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // load returned, plus the starter file if one was just written,
         // rather than from File.Exists, so the two cannot disagree about what
         // counts as a config file (an empty one does, and preferredXdgPath's
-        // resolution of ConfigFilePath does not think so).
-        RecordDefaultFiles(created ? defaultFilesFound + 1 : defaultFilesFound);
+        // resolution of ConfigFilePath does not think so). The empty count
+        // rides along: a created starter file is not empty, and a load that
+        // found no files at all read none as empty, so the pass-through is
+        // the record either way.
+        RecordDefaultFiles(
+            created ? defaultFilesFound + 1 : defaultFilesFound,
+            defaultFilesEmptyReads);
 
         CacheDiagnostics();
 
@@ -794,13 +824,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         GhosttyConfig newConfig;
         ConfigFilesFound defaultFiles;
         int defaultFilesFound;
+        int defaultFilesEmptyReads;
         try
         {
             // The same build a palette theme preview uses, without the
             // preview's overlay: see BuildLiveConfig for the layering.
             newConfig = BuildLiveConfig(
                 overlayPath: null, isOsDark, highContrastWanted,
-                out defaultFiles, out defaultFilesFound, out highContrastBuilt);
+                out defaultFiles, out defaultFilesFound, out defaultFilesEmptyReads,
+                out highContrastBuilt);
         }
         catch (Exception ex)
         {
@@ -822,6 +854,18 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         var vanishConfirmed = ConfigReloadGate.VerdictAndCountAgree(
             defaultFiles, defaultFilesFound)
             && _vanishProtocol.Observed(defaultFiles);
+
+        // An in-place save passes through a moment where the config file is
+        // there and zero bytes, and a load landing there reads a
+        // configuration that asks for nothing. That is one look's answer,
+        // not the file's: it is held until it has been seen empty enough
+        // looks running to be a decision (issue #1138). The budget counts
+        // consecutive looks, so every look answers the question and any
+        // non-empty look starts it over.
+        var isEmptyRead = ConfigReloadGate.IsEmptyRead(
+            defaultFiles, defaultFilesEmptyReads, _defaultFilesFound,
+            _defaultFilesEmptyReads);
+        if (!isEmptyRead) _emptyReadLooks = 0; else _emptyReadLooks++;
 
         // A reload only applies a config it could actually read. The rule and
         // its reasons are ConfigReloadGate's, in Ghostty.Core so they can be
@@ -918,6 +962,31 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             }
         }
 
+        // Past the gate but not necessarily the user's: a read that came
+        // back empty is held until it has been seen empty enough looks
+        // running to be a decision rather than the middle of an in-place
+        // save (issue #1138). Held exactly like a gate decline: free what
+        // was built, say why, ask for one more look, keep what is running.
+        // The budget itself is a deliberately short leash - three looks,
+        // like the other two - because the wrong answer here is not a
+        // transient: a file genuinely emptied on purpose stays applied
+        // nothing for as long as the hold lasts, and the completing write
+        // of a real save answers the question before the budget is spent.
+        if (isEmptyRead &&
+            !ConfigReloadGate.ShouldApplyEmptyRead(_emptyReadLooks, MaxEmptyReadLooks))
+        {
+            NativeMethods.ConfigFree(newConfig);
+            StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
+                ConfigFilePath,
+                "it read as empty, which a save rewriting the file in place passes through");
+
+            // The ask's return is deliberately unused: this budget counts
+            // looks observed, not asks taken, so unlike the unreadable and
+            // shrink declines there is no per-ask accounting to branch on.
+            _lookAgain.Ask();
+            return false;
+        }
+
         // Any applied reload ends the run: the next lock is a new one and
         // the next shrink is a fresh question. The vanish question is
         // answered by this load's verdict, above, not here: a file that
@@ -925,6 +994,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // reload.
         _declinedReloadRetries = 0;
         _shrinkConfirms = 0;
+        _emptyReadLooks = 0;
 
         var oldConfig = _config;
 
@@ -956,7 +1026,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // Moved with the config, not with the answer: a reload that bailed at
         // either fence above did not apply anything, so it must not change
         // what the next one compares against.
-        RecordDefaultFiles(defaultFilesFound);
+        RecordDefaultFiles(defaultFilesFound, defaultFilesEmptyReads);
         _highContrast.MarkApplied(highContrastBuilt, attempted: highContrastWanted);
         try
         {
@@ -1630,7 +1700,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             if (overlay is null) return false;
             preview = BuildLiveConfig(
                 overlay, isOsDark, _highContrast.Wanted,
-                out var previewFiles, out var previewFilesFound, out _);
+                out var previewFiles, out var previewFilesFound, out _, out _);
 
             // The same gate a reload takes, for a sharper reason: a preview
             // that could not read the user's config shows the theme over pure
@@ -1773,6 +1843,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// readable or not. The verdict alone cannot see one layered file
     /// disappearing while another still reads, which is what an atomic save
     /// of the newer one looks like; the count can.</param>
+    /// <param name="defaultFilesEmptyReads">How many of those reads answered
+    /// empty: the file is there and zero bytes. An in-place save passes
+    /// through a moment where its file is exactly that, and the empty-read
+    /// hold in <see cref="Reload"/> reads this beside the count
+    /// (issue #1138).</param>
     /// <param name="highContrast">The High Contrast palette to layer, or
     /// null for none: the caller's one read of the latch's Wanted, passed
     /// in so the palette built is the palette the caller records, never a
@@ -1789,6 +1864,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         HighContrastColors? highContrast,
         out ConfigFilesFound defaultFiles,
         out int defaultFilesFound,
+        out int defaultFilesEmptyReads,
         out HighContrastColors? highContrastLayered)
     {
         highContrastLayered = null;
@@ -1798,9 +1874,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // The answer is passed through rather than flattened to a bool:
             // "no config file exists" and "a config file is there and I could
             // not read it" are different situations and Reload treats them
-            // differently. libghostty logs the read failure itself.
+            // differently. libghostty logs the read failure itself. The
+            // empty-read count rides beside it for the same reason: how the
+            // reads went is a different question from what the config says,
+            // and Reload answers both.
             defaultFiles = NativeMethods.ConfigLoadDefaultFiles(
-                config, out defaultFilesFound);
+                config, out defaultFilesFound, out defaultFilesEmptyReads);
             NativeMethods.ConfigLoadCliArgs(config);
             NativeMethods.ConfigLoadRecursiveFiles(config);
             // A palette preview's theme sits above the user's files, which is
@@ -2554,8 +2633,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     }
 
     /// <summary>
-    /// The one writer of <c>_defaultFilesFound</c>: how many default config
-    /// files the config now in force was built from.
+    /// The one writer of <c>_defaultFilesFound</c> and
+    /// <c>_defaultFilesEmptyReads</c>: how many default config files the
+    /// config now in force was built from, and how many of the reads behind
+    /// it answered empty.
     /// </summary>
     /// <remarks>
     /// Pinned at zero under <c>--no-config</c>, where the config file is
@@ -2564,8 +2645,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// are the only reloads such a launch has: there is no watcher either,
     /// so nothing would ever ask again.
     /// </remarks>
-    private void RecordDefaultFiles(int found) =>
+    private void RecordDefaultFiles(int found, int emptyReads)
+    {
         _defaultFilesFound = _noConfig ? 0 : found;
+        _defaultFilesEmptyReads = _noConfig ? 0 : emptyReads;
+    }
 
     /// <summary>
     /// Stop applying config reloads ahead of app teardown. After this,

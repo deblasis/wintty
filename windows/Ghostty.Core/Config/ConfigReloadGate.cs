@@ -211,4 +211,71 @@ public static class ConfigReloadGate
         int maxAttempts) =>
         IsCountShrink(found, defaultFilesFound, sessionDefaultFilesFound)
             && attemptsSoFar >= maxAttempts;
+
+    /// <summary>
+    /// Whether this look read a default config file as empty in a way the
+    /// session has not seen before: the empty count grew past the one the
+    /// config in force was built from.
+    /// </summary>
+    /// <remarks>
+    /// <para>An in-place save passes through a moment where the file is
+    /// present and zero bytes, and a load landing there is indistinguishable
+    /// from a file emptied on purpose: both read as a configuration that
+    /// asks for nothing. The verdict folds the empty read into
+    /// <c>Loaded</c>, which is right about what the disk says; this asks the
+    /// other question, how the read went, from the count the loader reports
+    /// beside it (issue #1138).</para>
+    ///
+    /// <para>Only while the session is running on a config that had
+    /// something in it. A session with no config file has nothing to
+    /// protect, and its first save applies whatever it is, empty included.</para>
+    ///
+    /// <para>And only when the emptiness is news. A look whose counts match
+    /// the record behind the running config is the session's own steady
+    /// state, not a save in flight: applying it rebuilds the config already
+    /// in force. This is the release half of the rule, twice over. A file
+    /// emptied on purpose is held while the count climbs, and once the
+    /// all-empty read is what is in force, further empty looks match the
+    /// record and apply. And a session running one permanently empty layer
+    /// beside a content one, the state an interrupted pre-fix in-place save
+    /// leaves behind, is not taxed with a hold on every reload it will ever
+    /// do, because its steady looks read exactly what the record says.</para>
+    ///
+    /// <para>What the counts see, and the assumption under them. The count
+    /// is a total across every candidate the loader reads, and only one of
+    /// those layers is the one the watcher watches. A truncate of a layer
+    /// that had content raises the count past the record and is held,
+    /// wherever the layer sits, watched or not. An atomic save (write
+    /// beside, rename over) reads the old bytes in its window, counts
+    /// unchanged, and is waved through: what applies is the config already
+    /// in force, and the completing rename raises its own event. The wave
+    /// trusts the record, and the record is a snapshot: a layer the watcher
+    /// does not watch can change between the record and the window, and a
+    /// fill of a recorded-empty layer cancels a watched truncate inside the
+    /// totals, so one mid-save look can present record-equal counts and
+    /// apply the save's own half-state. That takes an already-degraded
+    /// record, a second writer, and one look; the completing write re-fires
+    /// and the next look applies the true end state. A completed content
+    /// edit also matches the counts and applies by design. The counts
+    /// answer whether this emptiness is news, not whether the record is
+    /// still true.</para>
+    /// </remarks>
+    public static bool IsEmptyRead(
+        ConfigFilesFound found,
+        int emptyReads,
+        int sessionDefaultFilesFound,
+        int sessionEmptyReads) =>
+        found == ConfigFilesFound.Loaded
+            && emptyReads > sessionEmptyReads
+            && sessionDefaultFilesFound > 0;
+
+    /// <summary>
+    /// Whether an empty read has been seen enough times running to apply.
+    /// A count of consecutive looks, and every look answers the question,
+    /// scheduled or not: an empty load is cheap, unlike the unreadable path
+    /// whose loader retries are the reason the other two budgets count only
+    /// scheduled asks.
+    /// </summary>
+    public static bool ShouldApplyEmptyRead(int looksSoFar, int maxLooks) =>
+        looksSoFar >= maxLooks;
 }

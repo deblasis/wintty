@@ -84,16 +84,26 @@ export fn ghostty_config_load_cli_args(self: *Config) void {
 /// being saved disappear while another one still reads: that load reports
 /// a perfectly good LOADED with one file fewer, and only the count says so.
 /// Zero on an error.
+///
+/// `empty_reads_out`, when given, receives how many of those reads answered
+/// empty: the file is there and zero bytes. An in-place save passes through
+/// a moment where its file is exactly that, and a caller rebuilding a
+/// running app's config holds such a load for a bit instead of applying a
+/// configuration that asks for nothing over the one in force
+/// (deblasis/wintty#1138). Zero on an error.
 export fn ghostty_config_load_default_files(
     self: *Config,
     found_out: ?*c_int,
+    empty_reads_out: ?*c_int,
 ) Config.DefaultFiles {
     const answer = self.loadDefaultFiles(global.alloc()) catch |err| {
         log.err("error loading config err={}", .{err});
         if (found_out) |out| out.* = 0;
+        if (empty_reads_out) |out| out.* = 0;
         return .unreadable;
     };
     if (found_out) |out| out.* = @intCast(answer.found);
+    if (empty_reads_out) |out| out.* = @intCast(answer.empty_reads);
     return answer.result;
 }
 
@@ -407,11 +417,13 @@ test "ghostty_config_load_default_files reports and counts, and creates nothing"
         defer cfg.deinit();
 
         var found: c_int = -7;
+        var empty: c_int = -7;
         try testing.expectEqual(
             Config.DefaultFiles.absent,
-            ghostty_config_load_default_files(&cfg, &found),
+            ghostty_config_load_default_files(&cfg, &found, &empty),
         );
         try testing.expectEqual(@as(c_int, 0), found);
+        try testing.expectEqual(@as(c_int, 0), empty);
     }
 
     // Reading answered "nothing here" and wrote nothing: that write is the
@@ -432,22 +444,48 @@ test "ghostty_config_load_default_files reports and counts, and creates nothing"
         defer cfg.deinit();
 
         var found: c_int = -7;
+        var empty: c_int = -7;
         try testing.expectEqual(
             Config.DefaultFiles.loaded,
-            ghostty_config_load_default_files(&cfg, &found),
+            ghostty_config_load_default_files(&cfg, &found, &empty),
         );
         try testing.expectEqual(@as(c_int, 1), found);
+        try testing.expectEqual(@as(c_int, 0), empty);
         // Not just the verdict: the settings really are in the config.
         try testing.expectEqual(20, cfg.@"font-size");
     }
 
-    // The out parameter is optional, for callers that do not want it.
+    // The truncate shape of an in-place save: the file is there and zero
+    // bytes. The verdict is still `loaded` -- a configuration that asks
+    // for nothing is still what is on disk -- but the new out says the
+    // read was empty, which is the half a caller rebuilding a running
+    // app's config holds it on (deblasis/wintty#1138).
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "wintty" ++ std.fs.path.sep_str ++ "config.wintty",
+        .data = "",
+    });
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+
+        var found: c_int = -7;
+        var empty: c_int = -7;
+        try testing.expectEqual(
+            Config.DefaultFiles.loaded,
+            ghostty_config_load_default_files(&cfg, &found, &empty),
+        );
+        try testing.expectEqual(@as(c_int, 1), found);
+        try testing.expectEqual(@as(c_int, 1), empty);
+    }
+
+    // The out parameters are optional, for callers that do not want them.
     {
         var cfg = try Config.default(alloc);
         defer cfg.deinit();
         try testing.expectEqual(
             Config.DefaultFiles.loaded,
-            ghostty_config_load_default_files(&cfg, null),
+            ghostty_config_load_default_files(&cfg, null, null),
         );
     }
 }

@@ -270,4 +270,74 @@ public class ConfigReloadGateTests
         Assert.Equal(0, (int)ConfigFilesFound.Absent);
         Assert.Equal(1, (int)ConfigFilesFound.Loaded);
     }
+
+    /// <summary>
+    /// An in-place save passes through a moment where the config file is
+    /// present and zero bytes, and a load landing there reads as a
+    /// configuration that asks for nothing. The verdict cannot tell that
+    /// from a file emptied on purpose, but the empty count beside it can,
+    /// while the session is running on a config that had something in it:
+    /// that look is a half-written file, not a decision, and gets its own
+    /// answer (issue #1138).
+    /// </summary>
+    /// <remarks>
+    /// The equal-count rows are the deliberate-empty case coming back
+    /// around: the session's own config was built from an empty read, so
+    /// another empty read changes nothing and is not held. It is what keeps
+    /// a user who really did empty their config out of a permanent decline.
+    /// The same release covers the steady mixed state (one permanently empty
+    /// layer beside a content one, the state an interrupted pre-fix in-place
+    /// save leaves behind): its looks match the record, so holding them
+    /// would tax every future reload of that session for nothing.
+    /// A row whose look reads fewer files than the session records is also a
+    /// count shrink, which the gate declines before the empty hold is ever
+    /// reached; this table judges the predicate in isolation.
+    /// </remarks>
+    [Theory]
+    [InlineData(ConfigFilesFound.Loaded, 1, 1, 0, true)]
+    [InlineData(ConfigFilesFound.Loaded, 2, 2, 0, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 0, true)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 1, 1, false)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 2, false)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 2, 1, false)]
+    [InlineData(ConfigFilesFound.Loaded, 2, 2, 1, true)]
+    [InlineData(ConfigFilesFound.Loaded, 0, 1, 0, false)]
+    [InlineData(ConfigFilesFound.Loaded, 1, 0, 0, false)]
+    [InlineData(ConfigFilesFound.Unreadable, 1, 1, 0, false)]
+    [InlineData(ConfigFilesFound.Absent, 0, 0, 0, false)]
+    public void An_empty_read_of_a_config_the_session_is_running_on_is_its_own_answer(
+        ConfigFilesFound found,
+        int emptyReads,
+        int sessionFilesFound,
+        int sessionEmptyReads,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ConfigReloadGate.IsEmptyRead(
+                found, emptyReads, sessionFilesFound, sessionEmptyReads));
+    }
+
+    /// <summary>
+    /// The hold on an empty read is bounded, so a file emptied on purpose
+    /// still takes effect: after N looks running it applies. N counted
+    /// looks, not N retries of an ask nobody took - the looks are the
+    /// observation, and the ask only schedules the next one.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 3, false)]
+    [InlineData(1, 3, false)]
+    [InlineData(2, 3, false)]
+    [InlineData(3, 3, true)]
+    [InlineData(4, 3, true)]
+    // The budget itself has to be read: a gate that ignores maxLooks and
+    // hard-codes three passes every row above.
+    [InlineData(1, 1, true)]
+    public void An_empty_read_applies_once_it_has_been_seen_enough_times_running(
+        int looksSoFar, int maxLooks, bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ConfigReloadGate.ShouldApplyEmptyRead(looksSoFar, maxLooks));
+    }
 }

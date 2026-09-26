@@ -1275,8 +1275,16 @@ GHOSTTY_API void ghostty_config_load_file(ghostty_config_t, const char*);
 // config is the user's: the file being saved can be the one that is missing
 // while another still reads. Comparing this count with the one from the load
 // a caller last applied is what sees that.
+//
+// The third argument, when not NULL, receives how many of those reads
+// answered empty: the file is there and zero bytes. An editor saving the
+// file in place passes through a moment where it is exactly that, and a
+// load landing there describes a configuration that asks for nothing. A
+// caller rebuilding a running app's config holds such a load for a bit and
+// applies it only once it has been seen empty several looks running, so a
+// file emptied on purpose still takes its effect.
 GHOSTTY_API ghostty_config_default_files_e
-ghostty_config_load_default_files(ghostty_config_t, int*);
+ghostty_config_load_default_files(ghostty_config_t, int*, int*);
 // Write the starter config file, for a first run only: a caller that just
 // got ABSENT from a load at startup. Returns true if it was written. It
 // refuses to overwrite, because an editor's atomic save leaves the config
