@@ -1122,6 +1122,16 @@ fn applySwapChainPresentationState(self: *DirectX12) void {
     const scale_x_milli = self.content_scale_x_milli.load(.monotonic);
     const scale_y_milli = self.content_scale_y_milli.load(.monotonic);
 
+    // Advance the applied scale at the END, and only when the matrix
+    // transform was actually written (or the configuration has none to
+    // write: a non-panel surface, or no SwapChain2 because QI failed at
+    // device creation -- a pointer fixed for the device's lifetime, so a
+    // retry could never succeed there either): beginFrame re-runs this
+    // function while applied_* lags the content scale, so recording a
+    // scale whose transform never landed would permanently suppress that
+    // retry.
+    var matrix_applied = true;
+
     if (dev_ptr.swap_chain2) |sc2| {
         // 1/scale on the diagonal == the 96/dpi Windows Terminal writes.
         // SwapChainPanel-only: XAML maps swap chain buffer pixels 1:1 into
@@ -1131,6 +1141,8 @@ fn applySwapChainPresentationState(self: *DirectX12) void {
         // composition embedder owns its own transform -- so applying it
         // there would misrender at any DPI above 96. WT gates the same
         // way (its matrix runs only when the target has no hwnd).
+        // Measured only at identity (96 DPI) locally; no non-identity
+        // display was available to film.
         const is_panel = if (self.surface) |s| s == .swap_chain_panel else false;
         if (is_panel) {
             const sx = @as(f32, @floatFromInt(scale_x_milli)) / 1000.0;
@@ -1146,6 +1158,7 @@ fn applySwapChainPresentationState(self: *DirectX12) void {
             const hr = sc2.SetMatrixTransform(&matrix);
             if (com.FAILED(hr)) {
                 log.warn("SetMatrixTransform failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+                matrix_applied = false;
             }
         }
     }
@@ -1159,8 +1172,10 @@ fn applySwapChainPresentationState(self: *DirectX12) void {
         }
     }
 
-    self.applied_scale_x_milli = scale_x_milli;
-    self.applied_scale_y_milli = scale_y_milli;
+    if (matrix_applied) {
+        self.applied_scale_x_milli = scale_x_milli;
+        self.applied_scale_y_milli = scale_y_milli;
+    }
 }
 
 /// Resize the swap chain back buffers in place via IDXGISwapChain1::ResizeBuffers.
@@ -1197,10 +1212,14 @@ fn resizeSwapChain(self: *DirectX12, width: u32, height: u32) !void {
     // DXGI_ERROR_INVALID_CALL; the waitable object in particular must be
     // repeated on chains created with it). Rather than recomputing a
     // flag list here, Device carries the exact bits its chain was
-    // created with -- recomputing is how creation and resize drift
-    // apart, and on the panel path (created WITHOUT the waitable, whose
-    // entry point rejects it) a hardcoded waitable here would kill every
-    // resize after the first. ResizeBuffers lives on IDXGISwapChain1.
+    // created with -- recomputing a hardcoded list is how creation and
+    // resize drift apart, and any hardcoded waitable here would kill
+    // every resize-after-first on a chain deliberately created without
+    // it, which today is the panel path (unpaced by choice; see
+    // device.zig's compositionSwapChainDesc). No shipped tree ever had
+    // that bug -- creation and resize both passed 0 before this change
+    // -- but the recording is what makes introducing the waitable
+    // anywhere safe. ResizeBuffers lives on IDXGISwapChain1.
     // IDXGISwapChain3 inherits from IDXGISwapChain1 in COM, so the
     // v-table prefix is identical and a pointer reinterpret is safe; we
     // use it instead of QueryInterface to avoid an AddRef/Release pair on

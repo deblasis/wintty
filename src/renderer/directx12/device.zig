@@ -607,8 +607,9 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     // transform), cap the queue at one in-flight frame, and take the
     // waitable the renderer waits before each frame. Only chains created
     // with the waitable flag accept SetMaximumFrameLatency and expose a
-    // waitable; the panel path's chain is created unpaced (its creation
-    // entry point rejects the flag -- see compositionSwapChainDesc), so
+    // waitable; the panel path's chain is created unpaced by choice (its
+    // creation entry point does accept the flag -- see
+    // compositionSwapChainDesc -- but every filmed leg ran unpaced), so
     // there pacing is Present(1,0)'s own vblank block and this block
     // only supplies the swap_chain2 pointer. The waitable is re-read on
     // every swap chain creation, which is what makes the TDR-recovery
@@ -633,7 +634,6 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
                 .{@as(u32, @bitCast(hr))},
             );
         } else {
-            errdefer _ = swap_chain2.?.Release();
             if (paced) {
                 const latency_hr = swap_chain2.?.SetMaximumFrameLatency(1);
                 if (FAILED(latency_hr)) {
@@ -649,6 +649,13 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
             }
         }
     }
+    // Scope note: this QI'd pointer is an AddRef on the swap chain, and
+    // the remaining fallible steps below (the retirement allocation) run
+    // AFTER the block above, so a block-scoped errdefer there stopped
+    // protecting them. Release from function scope instead.
+    errdefer if (swap_chain2) |sc2| {
+        _ = sc2.Release();
+    };
 
     // Deferred-release queue. Backed by the C allocator because Device.init
     // takes no allocator and the buffers/textures that retire into it also
@@ -870,22 +877,21 @@ fn enableDebugLayer() void {
 /// Build the swap-chain description shared by every composition path
 /// (HWND, SwapChainPanel via surface handle, and bare composition).
 ///
-/// `paced` selects the frame-latency waitable flag, and legality decides
-/// it, not preference: IDXGIFactoryMedia::CreateSwapChainForComposition
-/// SurfaceHandle -- the only entry point that can target a DComposition
-/// surface handle, i.e. the app's production SwapChainPanel binding --
-/// was measured rejecting a nonzero Flags value with
-/// DXGI_ERROR_INVALID_CALL (0x887a0001): every creation retry failed
-/// under both scaling values until Flags went to 0, an app that never
-/// rendered and an empty window. Honesty note on that measurement: it
-/// was taken while the flag constant in dxgi.zig carried 16, which the
-/// SDK calls RESTRICT_SHARED_RESOURCE_DRIVER, not the waitable 64 -- so
-/// what is directly measured is "this entry point rejects that nonzero
-/// flag", and the panel path staying unpaced (Flags = 0) is the
-/// conservative reading that holds under either value.
-/// IDXGIFactory2::CreateSwapChainForComposition accepting the true
-/// waitable flag rests on the Windows Terminal precedent and the DXGI
-/// docs, not on a run in this tree. Callers must pass the
+/// `paced` selects the frame-latency waitable flag. Both creation entry
+/// points accept it on this machine's D3D12 queue (measured 2026-09-26,
+/// probe + gpu tests): IDXGIFactoryMedia::CreateSwapChainForComposition
+/// SurfaceHandle -- the production SwapChainPanel binding -- returns S_OK
+/// with Flags = 0x40 and then SetMaximumFrameLatency(1) succeeds and
+/// GetFrameLatencyWaitableObject is non-null, and so does
+/// IDXGIFactory2::CreateSwapChainForComposition. What the media entry
+/// point rejects is 0x10 -- RESTRICT_SHARED_RESOURCE_DRIVER, which a
+/// confounded earlier investigation carried in dxgi.zig under the
+/// waitable's name and measured failing 0x887a0001 under every scaling;
+/// that rejection is real (re-measured) but was never about pacing. The
+/// panel path is therefore created unpaced by CHOICE, not legality:
+/// every filmed leg of the resize-flash fix ran with an unpaced panel
+/// chain, and flipping pacing on there is a follow-up with its own
+/// films, not a silent rider on this change. Callers must pass the
 /// same flag decision to every ResizeBuffers on the chain they built
 /// (Device carries it in swap_chain_flags for exactly that).
 fn compositionSwapChainDesc(width: u32, height: u32, paced: bool) dxgi.DXGI_SWAP_CHAIN_DESC1 {
@@ -901,21 +907,23 @@ fn compositionSwapChainDesc(width: u32, height: u32, paced: bool) dxgi.DXGI_SWAP
         .SampleDesc = .{ .Count = 1, .Quality = 0 },
         .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
         .BufferCount = frame_count,
-        // STRETCH, and it must stay STRETCH: DXGI_SCALING_NONE is valid
-        // only for CreateSwapChainForHwnd swap chains. Every chain this
-        // desc builds is a composition chain (panel via surface handle,
-        // bare composition, hwnd-hosted-via-DComp), and DXGI rejects
-        // NONE at creation with DXGI_ERROR_INVALID_CALL (0x887a0001) --
-        // measured: 132 consecutive creation failures, an app that never
-        // rendered, and an empty window on screen. The preceding
-        // investigation's Phase A attribution (STRETCH magnifying stale
-        // content during a resize) is wrong at this layer: filmed
-        // resizes show the stale frame 1:1 top-left with the exposed
-        // strip BLACK, never stretched. The strip is the SwapChainPanel
-        // area the chain content does not cover; what fills it is
-        // addressed by the swap chain background color
-        // (DirectX12.setBackgroundColor) and the panel host, not by
-        // this field. XAML's panel applies its own display scale to a
+        // STRETCH. Both creation entry points used here accept it, and
+        // IDXGIFactory2 (the bare-composition and hwnd-DComp paths)
+        // rejects DXGI_SCALING_NONE at creation with
+        // DXGI_ERROR_INVALID_CALL (0x887a0001), re-measured 2026-09-26.
+        // The media entry point does accept NONE (measured; Windows
+        // Terminal ships NONE there) -- an earlier investigation's "132
+        // consecutive creation failures" was attributed to NONE but was
+        // in fact the 0x10 flag constant described in the function
+        // comment, which fails creation under every scaling. NONE on
+        // the panel is untested in this tree, so STRETCH stays: legal
+        // everywhere this desc is used, and every filmed resize ran
+        // with it. Those films show the stale frame 1:1 top-left with
+        // the exposed strip BLACK, never stretched, so this field is
+        // not what made the flash; the strip is the SwapChainPanel
+        // area the chain content does not cover, filled by the swap
+        // chain background color (DirectX12.setBackgroundColor) and the
+        // panel host. XAML's panel applies its own display scale to a
         // handle-bound swap chain; the counter-transform that undoes it
         // (SetMatrixTransform 1/scale, the Windows Terminal
         // AtlasEngine pattern) is applied by DirectX12 alongside the
@@ -929,10 +937,11 @@ fn compositionSwapChainDesc(width: u32, height: u32, paced: bool) dxgi.DXGI_SWAP
         .AlphaMode = .PREMULTIPLIED,
         // The frame-latency waitable caps the present queue (paired
         // with SetMaximumFrameLatency(1) and a wait before each frame)
-        // on the paths whose creation entry point accepts the flag, so
-        // a new-size frame composes on the first vblank after its
-        // Present instead of behind up to two stale frames. Only legal
-        // with the factory2 creation path -- see the function comment.
+        // so a new-size frame composes on the first vblank after its
+        // Present instead of behind up to two stale frames. Both
+        // creation entry points accept the flag (measured; see the
+        // function comment); the panel path passes paced=false by
+        // choice, not legality.
         .Flags = if (paced)
             dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
         else
@@ -1031,10 +1040,16 @@ fn createSurfaceHandleSwapChain(
         _ = d3d12.CloseHandle(handle);
     };
 
-    // Unpaced, and it must stay that way: this entry point rejects the
-    // frame-latency waitable flag (see compositionSwapChainDesc). Every
-    // FAILED(hr) here used to be preceded by two full sessions of
-    // 0x887a0001 retried every 500ms before the flag was isolated.
+    // Unpaced by choice, not legality: this entry point accepts the
+    // frame-latency waitable flag (measured 2026-09-26 -- creation with
+    // 0x40 succeeds, SetMaximumFrameLatency(1) succeeds, the waitable
+    // is non-null; see compositionSwapChainDesc). The panel chain stays
+    // unpaced here because every filmed leg of the resize-flash fix ran
+    // unpaced, and pacing it on is a follow-up with its own films. What
+    // this entry point genuinely rejects is 0x10
+    // (RESTRICT_SHARED_RESOURCE_DRIVER): two full sessions of 0x887a0001
+    // retried every 500ms traced to that constant sitting in dxgi.zig
+    // under the waitable's name.
     const desc = compositionSwapChainDesc(width, height, false);
 
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
@@ -1119,17 +1134,18 @@ test "Device struct fields" {
     try std.testing.expect(@hasField(Device, "frame_latency_waitable"));
 }
 
-test "composition swap chain desc: STRETCH scaling, flag legality" {
-    // Pinned where they are set. STRETCH is not a style choice: every
-    // chain this desc builds is a composition chain, and DXGI rejects
-    // DXGI_SCALING_NONE at creation with DXGI_ERROR_INVALID_CALL
-    // (0x887a0001, measured on this app's panel path: the surface never
-    // initialized). The waitable flag is decided by the CREATION ENTRY
-    // POINT, not preference: legal on CreateSwapChainForComposition,
-    // rejected (same 0x887a0001, also measured) by the
-    // CreateSwapChainForCompositionSurfaceHandle path the SwapChainPanel
-    // binding must use. If either half regresses, the app either fails
-    // to create its swap chain or paces a chain that has no waitable.
+test "composition swap chain desc: STRETCH scaling, waitable only when paced" {
+    // Pinned where they are set. STRETCH is accepted by both creation
+    // entry points in use (re-measured 2026-09-26), while factory2
+    // rejects DXGI_SCALING_NONE (0x887a0001); NONE on the media entry
+    // point is measured-legal but unfilmed in this tree, so STRETCH
+    // stays everywhere this desc is used. The waitable flag is a CHOICE
+    // here, not a legality split: both entry points accept it (the
+    // measured matrix, with pinned HRESULTs, lives in gpu_test's
+    // legality test), and the panel path passes paced=false so the
+    // shipped binary matches the filmed one. If either half regresses,
+    // the app either fails to create its swap chain or paces a chain
+    // whose entry point rejects its flags.
     const paced = compositionSwapChainDesc(640, 480, true);
     try std.testing.expectEqual(dxgi.DXGI_SCALING.STRETCH, paced.Scaling);
     try std.testing.expectEqual(
