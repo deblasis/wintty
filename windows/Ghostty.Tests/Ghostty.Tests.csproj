@@ -106,6 +106,15 @@
                       Link="Interop\Exports\main_c.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.main_c.zig" />
     <!--
+      src/Surface.zig, for FirstPaneCommandWiringTests' reload-side pin of
+      the host-command wait-after-command rule. Deliberately NOT under the
+      Interop.Exports prefix: the file declares no exports, and
+      EntryPointParityTests selects its corpus by that prefix.
+    -->
+    <EmbeddedResource Include="..\..\src\Surface.zig"
+                      Link="Interop\Surface.zig"
+                      LogicalName="Ghostty.Tests.Interop.Surface.zig" />
+    <!--
       The C header, for GhosttyActionTagHeaderParityTests. The managed FFI
       enums pin ordinals of C enums nothing here compiles, so the header is
       the only thing that can contradict them.
