@@ -352,7 +352,9 @@ function Invoke-Refresh([string]$Path, [string]$Text) {
 # so are windows of the query-error state's neighbours that begin inside a
 # state-3 stretch, because a query error splits one true stretch into
 # pieces; those pieces are re-joined across state-3 stretches for the
-# state the caller asked about.
+# state the caller asked about. Returns an object with Windows (the list)
+# and Harness (the excluded count) - a list returned bare would unroll to
+# nothing when empty and take the caller's .Count down with it.
 function Get-Windows([long[]]$Events, [int]$State, [long[]]$Harness) {
     $found = [System.Collections.Generic.List[double]]::new()
     $harnessCount = 0
@@ -392,13 +394,14 @@ function Get-Windows([long[]]$Events, [int]$State, [long[]]$Harness) {
         }
         if (-not $inHarness) { $found.Add(($last - $start) / 10000.0) }
     }
-    return , @($found, $harnessCount)
+    return [pscustomobject]@{ Windows = $found; Harness = $harnessCount }
 }
 
 # The longest stretch of one state CLIPPED to a single iteration, per
-# iteration. Returns one entry per measured iteration (the worst stretch
-# inside it, 0 if the state never showed), plus how many iterations had
-# any query-error time inside them.
+# iteration. Returns an object with Worst (one entry per measured
+# iteration: the longest stretch inside it, 0 if the state never showed)
+# and ErrorIters (iterations containing query-error time, whose entries
+# are lower bounds).
 function Get-PerSaveWorst([long[]]$Events, [int]$State, [long[]]$Marks, [long]$End) {
     $worsts = [System.Collections.Generic.List[double]]::new()
     $errorIters = 0
@@ -429,7 +432,7 @@ function Get-PerSaveWorst([long[]]$Events, [int]$State, [long[]]$Marks, [long]$E
         if ($hadError) { $errorIters++ }
         $worsts.Add($worst / 10000.0)
     }
-    return , @($worsts, $errorIters)
+    return [pscustomobject]@{ Worst = $worsts; ErrorIters = $errorIters }
 }
 
 function Show-Stats([string]$Label, [System.Collections.Generic.List[double]]$Windows, [int]$FloorMs) {
@@ -517,8 +520,12 @@ foreach ($one in $shapes) {
 
         foreach ($state in 0, 2) {
             $name = if ($state -eq 0) { 'absent' } else { 'present empty' }
-            $raw, $harnessWindows = Get-Windows $events $state $harness
-            $perSave, $errorIters = Get-PerSaveWorst $events $state $marks $end
+            $rawResult = Get-Windows $events $state $harness
+            $raw = $rawResult.Windows
+            $harnessWindows = $rawResult.Harness
+            $psResult = Get-PerSaveWorst $events $state $marks $end
+            $perSave = $psResult.Worst
+            $errorIters = $psResult.ErrorIters
             $spanning = 0
             if ($perSave.Count -gt 0) {
                 # Raw streaks longer than the longest per-save worst are
