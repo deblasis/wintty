@@ -773,12 +773,17 @@ pub const Surface = struct {
             }
         }
 
-        // If we have a command from the options then we set it.
+        // If we have a command from the options then we set it. An empty
+        // command forces nothing: the Windows host passes a non-null
+        // empty-string command pointer for panes with no command, so a
+        // bare non-null check would force every shell pane.
+        var wait_forced_by_host = false;
         if (opts.command) |c_command| {
             const cmd = std.mem.sliceTo(c_command, 0);
             if (cmd.len > 0) {
                 config.command = try configpkg.Command.fromHost(config.arenaAlloc(), cmd);
                 config.@"wait-after-command" = true;
+                wait_forced_by_host = true;
             }
         }
 
@@ -831,6 +836,7 @@ pub const Surface = struct {
         // Wait after command
         if (opts.wait_after_command) {
             config.@"wait-after-command" = true;
+            wait_forced_by_host = true;
         }
 
         // Initialize our surface right away. We're given a view that is
@@ -849,11 +855,12 @@ pub const Surface = struct {
         self.core_surface.close_on_clean_exit =
             opts.close_on_clean_exit and !user_wait_after_command;
 
-        // Record the force so a config reload keeps it: the reloaded file
-        // usually leaves `wait-after-command` unset, and re-deriving from
-        // it alone would flip this pane to close on any exit (#1176).
-        self.core_surface.wait_after_command_forced =
-            opts.command != null or opts.wait_after_command;
+        // Record the forces that fired above so a config reload keeps
+        // them: the reloaded file usually leaves `wait-after-command`
+        // unset, and re-deriving from it alone would flip this pane to
+        // close on any exit (#1176). The record comes from the force
+        // sites themselves, so it cannot drift from what creation did.
+        self.core_surface.wait_after_command_forced = wait_forced_by_host;
 
         // If our options requested a specific font-size, set that.
         if (opts.font_size != 0) {

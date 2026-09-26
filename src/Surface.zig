@@ -1512,8 +1512,11 @@ fn keepOpenAfterExit(
 }
 
 /// The wait-after-command a surface runs on after a config reload: a wait
-/// the host forced at creation holds unless the reloaded config sets the
-/// key itself, in which case the file decides (deblasis/wintty#1176).
+/// the host forced at creation holds whatever the reloaded file says. The
+/// key is a plain bool and cannot express unset-versus-false, so an
+/// explicit false cannot retract the force, the same rule the
+/// creation-time force follows; unforced panes follow the file
+/// (deblasis/wintty#1176).
 fn waitAfterCommandAfterReload(forced_at_creation: bool, reloaded: bool) bool {
     return forced_at_creation or reloaded;
 }
@@ -1982,9 +1985,10 @@ pub fn updateConfig(
     // A pane the host gave a command keeps the wait-after-command that was
     // forced on at its creation: the reloaded config usually leaves the
     // key unset, and folding that into the derived config would flip a
-    // running command pane to close on any exit (#1176). The file setting
-    // the key itself still wins, the same rule the creation-time force
-    // followed.
+    // running command pane to close on any exit (#1176). A forced pane
+    // keeps its wait even against an explicit false, the same rule the
+    // creation-time force follows; the key is a plain bool and cannot
+    // express unset-versus-false. Unforced panes follow the file.
     self.config.wait_after_command =
         waitAfterCommandAfterReload(self.wait_after_command_forced, derived.wait_after_command);
 
