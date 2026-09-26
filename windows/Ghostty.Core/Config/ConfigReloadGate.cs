@@ -211,4 +211,47 @@ public static class ConfigReloadGate
         int maxAttempts) =>
         IsCountShrink(found, defaultFilesFound, sessionDefaultFilesFound)
             && attemptsSoFar >= maxAttempts;
+
+    /// <summary>
+    /// Whether this look read a default config file as empty while the
+    /// session is running on a config that had something in it.
+    /// </summary>
+    /// <remarks>
+    /// <para>An in-place save passes through a moment where the file is
+    /// present and zero bytes, and a load landing there is indistinguishable
+    /// from a file emptied on purpose: both read as a configuration that
+    /// asks for nothing. The verdict folds the empty read into
+    /// <c>Loaded</c>, which is right about what the disk says; this asks the
+    /// other question, how the read went, from the count the loader reports
+    /// beside it (issue #1138).</para>
+    ///
+    /// <para>Only while the session's own config had something in it. A
+    /// session with no config file has nothing to protect, and its first
+    /// save applies whatever it is, empty included. And not while the
+    /// session's config was itself built from an empty read: applying the
+    /// same emptiness again is what the file says, and the hold must
+    /// release or a deliberately emptied file would never take effect.</para>
+    ///
+    /// <para>A bound worth naming: a session already running one empty
+    /// layer cannot see a later truncate of a sibling layer. The counts come
+    /// out identical (one empty read then, one now), and no rule over these
+    /// numbers can tell a steady state from a save in flight. It self-heals
+    /// on the save's completing write, which raises its own event.</para>
+    /// </remarks>
+    public static bool IsEmptyRead(
+        ConfigFilesFound found,
+        int emptyReads,
+        int sessionDefaultFilesFound,
+        int sessionEmptyReads) =>
+        found == ConfigFilesFound.Loaded
+            && emptyReads > 0
+            && sessionEmptyReads < sessionDefaultFilesFound;
+
+    /// <summary>
+    /// Whether an empty read has been seen enough times running to apply.
+    /// A count of consecutive looks, not of asks: the looks are the
+    /// observation, and one that nobody scheduled is not evidence.
+    /// </summary>
+    public static bool ShouldApplyEmptyRead(int looksSoFar, int maxLooks) =>
+        looksSoFar >= maxLooks;
 }

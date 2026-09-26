@@ -4553,10 +4553,27 @@ pub const DefaultFiles = enum(c_int) {
         /// there now (deblasis/wintty#676).
         found: u32,
 
+        /// How many of the reads answered `empty`: the file is there and
+        /// zero bytes, so nothing in it was applied.
+        ///
+        /// The verdict folds an empty read into `loaded`, which is right
+        /// about what the disk says and blind to how it got that way: an
+        /// in-place save passes through a moment where the file is present
+        /// and truncated, and a load landing there reads a configuration
+        /// that asks for nothing. The caller rebuilding a running app's
+        /// config holds that one for a bit and applies it only once it has
+        /// been seen empty several looks running, so a file emptied on
+        /// purpose still takes its effect
+        /// (deblasis/wintty#1138). Beside the count, not folded into the
+        /// verdict, because the two questions are different: the verdict
+        /// says what the config is, this says how the read went.
+        empty_reads: u32 = 0,
+
         pub fn mergeLayered(self: Result, other: Result) Result {
             return .{
                 .result = self.result.mergeLayered(other.result),
                 .found = self.found + other.found,
+                .empty_reads = self.empty_reads + other.empty_reads,
             };
         }
     };
@@ -4622,11 +4639,13 @@ fn loadDefaultFilesFrom(
     candidates: []const []const u8,
 ) DefaultFiles.Result {
     var found: u32 = 0;
+    var empty_reads: u32 = 0;
     var result: DefaultFiles = .absent;
     for (candidates) |path| {
         const action = self.loadOptionalFile(alloc, path);
         result = result.mergeLayered(.fromFileAction(action));
         if (action != .not_found) found += 1;
+        if (action == .empty) empty_reads += 1;
     }
 
     // Which file won is surprising when there is more than one, so the
@@ -4641,7 +4660,7 @@ fn loadDefaultFilesFrom(
         log.warn("loading the ones that exist, oldest first", .{});
     }
 
-    return .{ .result = result, .found = found };
+    return .{ .result = result, .found = found, .empty_reads = empty_reads };
 }
 
 /// The candidate paths as `` `a`, `b`, `c` ``, for the one message that
@@ -5453,10 +5472,46 @@ test "loadDefaultFilesFrom counts an empty config file as read" {
     defer cfg.deinit();
 
     // On disk, not just through fromFileAction: this is the path an
-    // emptied config file actually takes.
+    // emptied config file actually takes. The read still answers `loaded`
+    // -- an empty file is a configuration that asks for nothing -- but the
+    // answer now says it was empty, so a caller rebuilding a running app's
+    // config can hold it for a moment instead of applying pure defaults
+    // halfway through an editor's in-place save (deblasis/wintty#1138).
     try testing.expectEqual(
-        Config.DefaultFiles.Result{ .result = .loaded, .found = 1 },
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 1, .empty_reads = 1 },
         cfg.loadDefaultFilesFrom(alloc, &.{path}),
+    );
+}
+
+test "loadDefaultFilesFrom counts a zero-byte layer beside a read one" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // The layered shape of the same moment: one file with content, one
+    // present and empty. Both are found, the verdict is `loaded`, and one
+    // of the reads was empty.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.ghostty",
+        .data = "font-size = 10\n",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.wintty",
+        .data = "",
+    });
+    const older = try testTmpPath(alloc, &tmp, "config.ghostty");
+    defer alloc.free(older);
+    const newer = try testTmpPath(alloc, &tmp, "config.wintty");
+    defer alloc.free(newer);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    try testing.expectEqual(
+        Config.DefaultFiles.Result{ .result = .loaded, .found = 2, .empty_reads = 1 },
+        cfg.loadDefaultFilesFrom(alloc, &.{ older, newer }),
     );
 }
 

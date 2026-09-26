@@ -371,10 +371,16 @@ internal static partial class NativeMethods
     /// wintty/config.wintty from one migrated from Ghostty whose
     /// ghostty/config.ghostty still reads while the other is mid save: both
     /// report <c>Loaded</c>. The count is what tells them apart.</param>
+    /// <param name="emptyReads">Receives how many of those reads answered
+    /// empty: the file is there and zero bytes. An editor saving the file
+    /// in place passes through a moment where it is exactly that, and a
+    /// load landing there describes a configuration that asks for nothing,
+    /// which <see cref="ConfigReloadGate"/> holds for a bit rather than
+    /// applying over the config in force.</param>
     [LibraryImport(Dll, EntryPoint = "ghostty_config_load_default_files")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial Ghostty.Core.Config.ConfigFilesFound ConfigLoadDefaultFiles(
-        GhosttyConfig config, out int found);
+        GhosttyConfig config, out int found, out int emptyReads);
 
     /// <summary>
     /// Write the starter config file. Returns true if it was written.
