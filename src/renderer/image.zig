@@ -145,6 +145,12 @@ pub const State = struct {
             }
         }
 
+        // Pass 1.5: drop cached kitty images no current placement draws.
+        // This runs on every backend (the cache is rebuildable everywhere);
+        // the fixed SRV-slot pool that motivates it is DX12's. See
+        // evictUnreferencedKittyImages.
+        self.evictUnreferencedKittyImages(alloc);
+
         // Pass 2: upload pending images, gating on DX12's budget.
         var success: bool = true;
         var image_it = self.images.iterator();
@@ -187,6 +193,56 @@ pub const State = struct {
         }
 
         return success;
+    }
+
+    /// Remove every cached kitty image that no current placement draws.
+    ///
+    /// The DX12 renderer allocates every kitty texture from one fixed pool
+    /// of shader-visible SRV slots (srv_heap_capacity, shared with the font
+    /// atlases and custom shader textures). Cached textures for images whose
+    /// placements have scrolled out of the viewport hold slots nothing draws
+    /// from: a burst that pushes more images through the cache than the pool
+    /// has slots exhausts it, and every upload after that fails for the rest
+    /// of the session. The cache is rebuildable (prepImage re-adds an image
+    /// the next time a placement references it), so removing the
+    /// unreferenced entries every pass keeps the resident set bounded by
+    /// what the viewport can show.
+    ///
+    /// Removal is immediate rather than an unload mark: a marked entry that
+    /// a placement re-references before the sweep would trip prepImage's
+    /// generation short-circuit and be swept anyway, leaving the placement
+    /// drawing against nothing until the next terminal-side change. A
+    /// removed entry just re-preps cleanly. This is the same direct teardown
+    /// trimAll uses.
+    fn evictUnreferencedKittyImages(self: *State, alloc: Allocator) void {
+        // Nothing cached means nothing to sweep; skip the referenced-map
+        // allocation too.
+        if (self.images.count() == 0) return;
+
+        evict: {
+            var referenced: std.AutoHashMapUnmanaged(Id, void) = .empty;
+            defer referenced.deinit(alloc);
+            referenced.ensureTotalCapacity(
+                alloc,
+                @intCast(self.kitty_placements.items.len),
+            ) catch break :evict;
+
+            for (self.kitty_placements.items) |p| {
+                referenced.putAssumeCapacity(p.image_id, {});
+            }
+
+            var evict_it = self.images.iterator();
+            while (evict_it.next()) |kv| {
+                switch (kv.key_ptr.*) {
+                    .kitty => {},
+                    // The overlay is a single always-current image.
+                    .overlay => continue,
+                }
+                if (referenced.contains(kv.key_ptr.*)) continue;
+                kv.value_ptr.image.deinit(alloc);
+                self.images.removeByPtr(kv.key_ptr);
+            }
+        }
     }
 
     /// Deep-idle trim: free every image copy now, in place. A deep-idle
@@ -1446,6 +1502,112 @@ test "kitty renderer uses the intersected source rectangle" {
     try testing.expectEqual(@as(u32, 1), placement.source_y);
     try testing.expectEqual(@as(u32, 1), placement.source_width);
     try testing.expectEqual(@as(u32, 2), placement.source_height);
+}
+
+test "kitty renderer evicts cached images with no live placement" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try terminal.Terminal.init(io, alloc, .{ .rows = 10, .cols = 10 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 100;
+
+    var state: State = .empty;
+    defer state.deinit(alloc);
+
+    const storage = &t.screens.active.kitty_images;
+
+    // Two images, each with a placement in the viewport.
+    for (1..3) |id| {
+        const pixels = try alloc.alloc(u8, 4);
+        @memset(pixels, 0);
+        try storage.addImage(io, alloc, t.screens.active, .{
+            .id = @intCast(id),
+            .width = 1,
+            .height = 1,
+            .format = .rgba,
+            .data = .{ .complete = pixels },
+        });
+        const pin = try t.screens.active.pages.trackPin(
+            t.screens.active.pages.pin(.{ .active = .{
+                .x = 1,
+                .y = @intCast(id),
+            } }).?,
+        );
+        try storage.addPlacement(io, alloc, t.screens.active, @intCast(id), @intCast(id), .{
+            .location = .{ .pin = pin },
+        });
+    }
+
+    state.kittyUpdate(alloc, &t, .{ .width = 10, .height = 10 });
+    try testing.expectEqual(@as(usize, 2), state.kitty_placements.items.len);
+    try testing.expect(state.images.get(.{ .kitty = 1 }) != null);
+    try testing.expect(state.images.get(.{ .kitty = 2 }) != null);
+
+    // Image 1 keeps its data but its placement is deleted terminal-side.
+    // Any path that leaves no live placement for an id (delete, or a
+    // placement scrolled out of the renderer's visible set) reaches the
+    // same state. Image 2 stays placed.
+    storage.delete(io, alloc, &t, .{ .id = .{
+        .image_id = 1,
+        .placement_id = 0,
+        .delete = false,
+    } });
+    state.kittyUpdate(alloc, &t, .{ .width = 10, .height = 10 });
+    try testing.expectEqual(@as(usize, 1), state.kitty_placements.items.len);
+
+    // An overlay is a single always-current image and is never
+    // placement-referenced; it must survive the sweep.
+    const overlay_size: @import("size.zig").Size = .{
+        .screen = .{ .width = 20, .height = 20 },
+        .cell = .{ .width = 10, .height = 10 },
+        .padding = .{},
+    };
+    var overlay: Overlay = try .init(alloc, overlay_size);
+    defer overlay.deinit(alloc);
+    _ = try state.overlayUpdate(alloc, overlay);
+    try testing.expect(state.images.get(.overlay) != null);
+
+    // Called directly: State.upload needs a live GraphicsAPI, so this
+    // pins the eviction rules but not the upload-pass call site that
+    // wires them (that line's oracle is the seam rapid-print leg on a
+    // real renderer, plus the textual pin test below).
+    state.evictUnreferencedKittyImages(alloc);
+    try testing.expect(state.images.get(.{ .kitty = 1 }) == null);
+    try testing.expect(state.images.get(.{ .kitty = 2 }) != null);
+    try testing.expect(state.images.get(.overlay) != null);
+
+    // The cache is rebuildable: a new placement for image 1 re-adds it
+    // with its current generation, ready to upload again.
+    const pin = try t.screens.active.pages.trackPin(
+        t.screens.active.pages.pin(.{ .active = .{ .x = 1, .y = 5 } }).?,
+    );
+    try storage.addPlacement(io, alloc, t.screens.active, 1, 3, .{
+        .location = .{ .pin = pin },
+    });
+    state.kittyUpdate(alloc, &t, .{ .width = 10, .height = 10 });
+    try testing.expectEqual(@as(usize, 2), state.kitty_placements.items.len);
+    const revived = state.images.get(.{ .kitty = 1 }).?;
+    try testing.expect(!revived.image.isUnloading());
+    try testing.expectEqual(
+        storage.images.get(1).?.generation,
+        revived.generation,
+    );
+}
+
+test "kitty eviction is wired into the upload pass" {
+    // State.upload needs a live GraphicsAPI, so its body cannot run under
+    // the host test runner; pin the wiring textually instead. The needle
+    // is concatenated from halves so its literal does not appear in this
+    // file: a plain literal would match the test's own source and stay
+    // green when the real call is deleted. Anchoring on the newline plus
+    // indentation also rejects a commented-out call, whose text is still
+    // present in the file.
+    const src = @embedFile("image.zig");
+    const needle = "\n        self." ++ "evictUnreferencedKitty" ++ "Images(alloc);";
+    try std.testing.expect(std.mem.indexOf(u8, src, needle) != null);
 }
 
 test "kitty renderer positions relative placements from the parent pin" {
