@@ -204,8 +204,22 @@ public class TabTitleWiringTests
         Assert.Equal("title", store.Right.ToString());
         Assert.NotEmpty(section.DescendantNodes().OfType<IdentifierNameSyntax>()
             .Where(i => i.Identifier.ValueText == "FlushPendingTitles"));
-        Assert.NotEmpty(section.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.CalleeText().EndsWith("Interlocked.Exchange", StringComparison.Ordinal)));
+
+        // The arm: exactly one Exchange carries 1, and the enqueue is
+        // gated on it winning the 0->1 transition.
+        var arm = Assert.Single(section.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText().EndsWith("Interlocked.Exchange", StringComparison.Ordinal) && i.Arg(1) == "1");
+        var armIf = Assert.IsType<IfStatementSyntax>(arm.Ancestors().OfType<IfStatementSyntax>().First());
+        Assert.True(armIf.Condition.ToString().Contains("== 0"), "the arm must gate on winning 0->1");
+        // The store precedes the arm, or a flush can swap before the title lands.
+        Assert.True(store.SpanStart < armIf.SpanStart, "store before arming");
+
+        // The unarm: a failed enqueue resets the flag inside that same
+        // if's body, so nothing strands with flag set and no flush coming.
+        var unarm = Assert.Single(section.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText().EndsWith("Interlocked.Exchange", StringComparison.Ordinal) && i.Arg(1) == "0");
+        Assert.Same(armIf, unarm.Ancestors().OfType<IfStatementSyntax>().First());
+        Assert.Contains(unarm, armIf.Statement.DescendantNodes());
 
         var flush = host.Method("FlushPendingTitles");
         var statements = flush.Body!.Statements;
@@ -213,13 +227,19 @@ public class TabTitleWiringTests
         // Disarm precedes the swap: the invariant the flush exists for.
         var disarm = statements.IndexOf(Assert.Single(statements
             .Where(s => s.ToString().Contains("_titleFlushQueued"))));
-        var swap = statements.IndexOf(Assert.Single(statements
-            .Where(s => s.ToString().Contains("batch = _pendingTitles"))));
-        Assert.True(disarm >= 0 && disarm < swap,
+        var swap = Assert.Single(statements
+            .Where(s => s.ToString().Contains("batch = _pendingTitles")));
+        Assert.True(disarm >= 0 && disarm < statements.IndexOf(swap),
             "the flush must disarm before it takes the batch");
 
-        // One raise per queued surface, resolved through the guard, with
-        // the stored title.
+        // The swap takes the batch AND leaves a fresh map behind, inside
+        // the lock, so no flush re-raises a surface it already raised.
+        Assert.Single(swap.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "_pendingTitles" && a.Right.ToString().StartsWith("new Dictionary"));
+
+        // One raise per queued surface, resolved through the guard
+        // (TryResolveControl, the UI-thread walk), with the stored title.
+        flush.Call("TryResolveControl");
         var raise = flush.Call("c.RaiseTitleChanged");
         Assert.Equal("pair.Value", raise.Arg(0));
     }

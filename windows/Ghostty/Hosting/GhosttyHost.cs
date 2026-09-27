@@ -159,6 +159,10 @@ internal sealed partial class GhosttyHost : IDisposable
     // the flush resolves the control on the UI thread, like every other
     // action does. _titleFlushQueued is 1 while a flush task is queued or
     // running, so a burst of SetTitle actions queues exactly one flush.
+    // Only the bootstrap host delivers actions, so per-window hosts never
+    // touch this state. The arming enqueue is DispatcherQueue.TryEnqueue,
+    // which reports refusal as false (queue shut down) instead of throwing,
+    // so on a live queue no failure path exists between arm and unarm.
     private readonly object _titleGate = new();
     private Dictionary<IntPtr, string> _pendingTitles = new();
     private int _titleFlushQueued;
