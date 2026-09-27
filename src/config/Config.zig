@@ -6078,13 +6078,17 @@ pub fn finalize(self: *Config) !void {
         // it so all memory from self prior to this point will be freed.
         try self.loadTheme(theme.*);
 
-        // If we have different light vs dark mode themes, disable
-        // window-theme = auto since that breaks it.
-        if (different) {
-            // This setting doesn't make sense with different light/dark themes
-            // because it'll force the theme based on the Ghostty theme.
-            if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
+        // window-theme = auto derives the element theme from the terminal
+        // background's luminance. Under an explicit theme that background is
+        // the theme's - fixed - while the Mica backdrop follows the desktop,
+        // so auto can put dark chrome on a light desktop or the reverse:
+        // #754's chrome/terminal split. The builtin path below has always
+        // resolved auto to system for the same reason, and a light:dark pair
+        // has had it since the beginning, so every themed install gets it
+        // now; an explicit window-theme still wins.
+        if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
 
+        if (different) {
             // Mark that we use a conditional theme
             self._conditional_set.insert(.theme);
         }
@@ -12948,6 +12952,42 @@ test "theme specifying light/dark sets theme usage in conditional state" {
 
         try testing.expect(cfg.@"window-theme" == .system);
         try testing.expect(cfg._conditional_set.contains(.theme));
+    }
+}
+
+test "single-variant theme changes window-theme from auto" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{
+            "--theme=foo",
+            "--window-theme=auto",
+        } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+
+        // A single named theme is one palette in both conditional states,
+        // so auto cannot track it and the desktop at the same time: it
+        // resolves to system like every other themed install (#754).
+        try testing.expect(cfg.@"window-theme" == .system);
+        try testing.expect(!cfg._conditional_set.contains(.theme));
+    }
+
+    // An explicit window-theme is the user's decision and survives.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{
+            "--theme=foo",
+            "--window-theme=dark",
+        } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+
+        try testing.expect(cfg.@"window-theme" == .dark);
     }
 }
 
