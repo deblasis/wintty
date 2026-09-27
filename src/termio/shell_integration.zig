@@ -1065,8 +1065,9 @@ test "xdg elvish: keeps the Windows path on Windows" {
 /// shell resource directory to the `XDG_DATA_DIRS` environment variable,
 /// which Nushell will use to load `nushell/vendor/autoload/ghostty.nu`.
 ///
-/// We then add `--execute 'use ghostty ...'` to the nu command line to
-/// automatically enable our shelll features.
+/// We then add `--execute` with `use ghostty *` to the nu command line to
+/// automatically enable our shell features; the quoting is per-platform
+/// (see the call site below).
 fn setupNushell(
     alloc: Allocator,
     command: config.Command,
@@ -1098,7 +1099,17 @@ fn setupNushell(
     // We can consider making this more specific based on the set of
     // enabled shell features (e.g. `use ghostty sudo`). At the moment,
     // shell features are all runtime-guarded in the nushell script.
-    try cmd.appendArg("--execute 'use ghostty *'");
+    if (comptime builtin.os.tag == .windows) {
+        // On Windows the .shell command string is re-parsed by
+        // ArgIteratorGeneral (single_quotes = false), which does not strip
+        // single quotes: the POSIX form would reach nu as three arguments
+        // ("'use", "ghostty", "*'") and nu exits immediately, leaving the
+        // pane showing a launch failure. Double quotes re-parse as a single
+        // argument, the same trick setupFish uses for its `-C` value.
+        try cmd.appendArg("--execute \"use ghostty *\"");
+    } else {
+        try cmd.appendArg("--execute 'use ghostty *'");
+    }
 
     // Walk through the rest of the given arguments. If we see an option that
     // would require complex or unsupported integration behavior, we bail out
@@ -1146,7 +1157,13 @@ test "nushell" {
     defer env.deinit();
 
     const command = try setupNushell(alloc, .{ .shell = "nu" }, res.path, &env);
-    try testing.expectEqualStrings("nu --execute 'use ghostty *'", command.?.shell);
+    // Windows re-parses the command string without single-quote support, so
+    // the integration argument is double-quoted there (see setupNushell).
+    const expected = if (builtin.os.tag == .windows)
+        "nu --execute \"use ghostty *\""
+    else
+        "nu --execute 'use ghostty *'";
+    try testing.expectEqualStrings(expected, command.?.shell);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
