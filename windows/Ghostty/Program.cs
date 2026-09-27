@@ -909,7 +909,9 @@ public static partial class Program
             (args[0] == "+version" || args[0] == "--version" ||
              args[0] == "-v" || args[0] == "version"))
         {
-            Environment.Exit(Cli.CliActions.PrintVersion());
+            var versionExit = Cli.CliActions.PrintVersion();
+            ExitReason.Log(versionExit, "version printed");
+            Environment.Exit(versionExit);
         }
 
         // +crash <kind> is the probe behind the crash coverage matrix
@@ -933,7 +935,10 @@ public static partial class Program
                 Cli.CrashTrigger.ArmCrashReporting(TimeSpan.FromSeconds(10));
             }
 
-            Environment.Exit(Cli.CrashTrigger.Run(args.Length > 1 ? args[1] : ""));
+            var crashKind = args.Length > 1 ? args[1] : "";
+            var crashExit = Cli.CrashTrigger.Run(crashKind);
+            ExitReason.Log(crashExit, $"crash trigger '{crashKind}' finished");
+            Environment.Exit(crashExit);
         }
 
         // Does the command line lead with a bare Windows subcommand, e.g.
@@ -953,6 +958,7 @@ public static partial class Program
                 Console.Out,
                 Ghostty.Core.Cli.CliAliases.RenderHelp(ProgramName()),
                 appendNewLine: false);
+            ExitReason.Log(0, "help rendered");
             Environment.Exit(0);
         }
 
@@ -1010,6 +1016,7 @@ public static partial class Program
                 (args[0] == "+list-themes" || args[0] == "list-themes") &&
                 TrySendListThemesMessage())
             {
+                ExitReason.Log(0, "list-themes forwarded to the running app");
                 Environment.Exit(0);
             }
 
@@ -1018,7 +1025,10 @@ public static partial class Program
             var exitCode = NativeMethods.CliRunAction();
             CleanupThemeCallback();
             if (exitCode >= 0)
+            {
+                ExitReason.Log(exitCode, $"cli action '{args[0]}' finished");
                 Environment.Exit(exitCode);
+            }
         }
 
         // A bare word that is not a command is a typo, not a config key.

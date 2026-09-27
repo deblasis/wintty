@@ -9,6 +9,7 @@ using Ghostty.Controls;
 using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
+using Ghostty.Core.Logging;
 using Ghostty.Core.Power;
 using Ghostty.Core.Version;
 using Ghostty.Hosting;
@@ -1370,6 +1371,7 @@ public partial class App : Application
         // Dispose rather than leaving it to teardown, so the config file
         // watcher and the native config handle go now.
         _configService?.Dispose();
+        ExitReason.Log(0, "launch forwarded to the running instance");
         Environment.Exit(0);
     }
 
