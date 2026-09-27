@@ -94,9 +94,13 @@ public class HarnessConfigIsolationScanTests
         // bare alias form rejects a hyphen continuation so Start-Job and
         // friends are not launches by mere word shape.
         new(@"Start-Process", RegexOptions.Compiled | RegexOptions.IgnoreCase),
-        // The bare alias, never a method call: (?<!\.) keeps $timer.Start()
-        // out, and (?!-) keeps Start-Job and friends out.
-        new(@"(?<!\.)\b(?:saps|start)\b(?!-)",
+        // The bare alias, never a method call, static call or variable:
+        // the lookbehind keeps $timer.Start() and [Foo]::Start() out
+        // (Process]::Start( is its own verb below), the $ keeps $start
+        // timing variables out ($ is a word boundary, so the bare word
+        // after the sigil would otherwise match), and (?!-) keeps
+        // Start-Job and friends out.
+        new(@"(?<![$:.])\b(?:saps|start)\b(?!-)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"ProcessStartInfo", RegexOptions.Compiled | RegexOptions.IgnoreCase),
         new(@"Process\]::Start\(", RegexOptions.Compiled | RegexOptions.IgnoreCase),
@@ -1104,6 +1108,8 @@ public class HarnessConfigIsolationScanTests
             "clean-splatting-armed.ps1",
             "clean-splat-composed-armed.ps1",
             "clean-splat-no-cross-hashtable.ps1",
+            "clean-dollar-start-variable.ps1",
+            "clean-static-class-start.ps1",
         };
 
         var flagged = new HashSet<string>(StringComparer.Ordinal);
