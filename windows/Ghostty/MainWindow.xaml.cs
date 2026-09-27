@@ -1536,9 +1536,12 @@ public sealed partial class MainWindow : Window
         {
             // The surface names its OWN tab, wherever it lives: a set_tab_title
             // from a background pane renames that pane's tab, not the selected
-            // one. An empty title still clears.
+            // one. An empty title still clears. The title is remote text at
+            // the top title tier, so it gets the same refusal the reported
+            // tier gets: a title that is not plain leaves the override
+            // untouched rather than clearing or replacing it.
             if (TabContaining(control) is not { } tab) return;
-            tab.UserOverrideTitle = string.IsNullOrWhiteSpace(title) ? null : title;
+            tab.UserOverrideTitle = string.IsNullOrWhiteSpace(title) ? null : TabLabel.IsPlain(title) ? title : tab.UserOverrideTitle;
         };
         // The host already raises these on the UI thread (OnAction dispatches
         // before invoking), so no extra hop is needed here. The dialog helper
@@ -5280,10 +5283,6 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Bring this window to the front and focus the target surface, switching
-    /// to its tab if it lives in a background tab (present_terminal).
-    /// </summary>
-    /// <summary>
     /// The tab whose pane tree holds this surface, or null when no tab here
     /// does. PresentSurface and the set_tab_title handler both need the same
     /// answer, so the walk lives once: two copies of it would drift the way
@@ -5303,6 +5302,10 @@ public sealed partial class MainWindow : Window
         return null;
     }
 
+    /// <summary>
+    /// Bring this window to the front and focus the target surface, switching
+    /// to its tab if it lives in a background tab (present_terminal).
+    /// </summary>
     private void PresentSurface(Controls.TerminalControl target)
     {
         Activate();

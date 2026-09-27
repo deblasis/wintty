@@ -100,7 +100,9 @@ public class TabTitleWiringTests
     /// <summary>
     /// The handler names the tab that owns the sending surface, never the
     /// selected one: a set_tab_title from a background pane used to rename
-    /// whichever tab was active (wintty#1169). Empty still clears, and the
+    /// whichever tab was active (wintty#1169). The title is remote text at
+    /// the top tier, so it is refused unless it is plain; empty still
+    /// clears, and a hostile title leaves the override untouched. The
     /// surface-to-tab walk lives once, shared with PresentSurface, so the
     /// two answers about which tab a surface belongs to cannot drift.
     /// </summary>
@@ -121,6 +123,19 @@ public class TabTitleWiringTests
         Assert.Empty(subscribe.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Where(a => a.Left.ToString() == "_tabManager.ActiveTab.UserOverrideTitle"));
 
+        // And that dialog's write is the only one in the window at all.
+        Assert.Single(window.Root.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_tabManager.ActiveTab.UserOverrideTitle"));
+
+        // One subscription in the whole corpus: a second subscriber would
+        // route titles somewhere this file cannot see.
+        Assert.Single(ShellSource.AllFiles()
+            .SelectMany(f => f.Root.DescendantNodes()
+                .OfType<AssignmentExpressionSyntax>()
+                .Where(a => a.IsKind(SyntaxKind.AddAssignmentExpression)
+                            && a.Left.ToString() == "_host.SetTabTitleRequested")));
+
         // The override is written through the walk, on the tab it returns
         // for the carried surface, and an empty title still clears.
         var walk = Assert.Single(subscribe.DescendantNodes()
@@ -131,7 +146,10 @@ public class TabTitleWiringTests
         var write = Assert.Single(subscribe.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>()
             .Where(a => a != subscribe && a.Left.ToString() == "tab.UserOverrideTitle"));
-        Assert.Equal("string.IsNullOrWhiteSpace(title) ? null : title",
+        // Remote text at the top tier: the gate travels with the write,
+        // and a hostile title leaves the override untouched.
+        Assert.Equal(
+            "string.IsNullOrWhiteSpace(title) ? null : TabLabel.IsPlain(title) ? title : tab.UserOverrideTitle",
             write.Right.ToString());
 
         // One walk, two callers: PresentSurface resolves the same way.
@@ -144,5 +162,15 @@ public class TabTitleWiringTests
         Assert.Single(window.Method("PresentSurface").DescendantNodes()
             .OfType<InvocationExpressionSyntax>(),
             i => i.CalleeText() == "TabContaining");
+
+        // The walk is the real walk: every tab, its leaves, the tab it
+        // matches, null on miss. A walk over only the active tab would
+        // quietly reintroduce the defect this test exists for.
+        Assert.NotEmpty(helper.DescendantNodes().OfType<ForEachStatementSyntax>()
+            .Where(f => f.Expression.ToString() == "_tabManager.Tabs"));
+        Assert.NotEmpty(helper.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().EndsWith("PaneTree.Leaves", System.StringComparison.Ordinal)));
+        Assert.NotEmpty(helper.DescendantNodes().OfType<ReturnStatementSyntax>()
+            .Where(r => r.Expression?.ToString() == "tab"));
     }
 }
