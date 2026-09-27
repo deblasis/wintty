@@ -113,9 +113,11 @@ internal sealed partial class GhosttyHost : IDisposable
     /// (pixels; 0 = no limit). Surface-targeted; raised on the owning host.</summary>
     public event EventHandler<SizeLimitRequest>? SizeLimitRequested;
 
-    /// <summary>Raised for set_tab_title: set the active tab's title
-    /// override directly. Empty string clears the override.</summary>
-    public event EventHandler<string>? SetTabTitleRequested;
+    /// <summary>Raised for set_tab_title: set the sending surface's tab
+    /// title override directly. Carries the surface that sent it, so the
+    /// title lands on the tab that surface belongs to, never on whichever
+    /// tab happens to be selected. Empty string clears the override.</summary>
+    public event Action<TerminalControl, string>? SetTabTitleRequested;
 
     /// <summary>Raised for prompt_title: prompt the user to rename either
     /// the surface (pane) or its tab. Carries (isTab, surface control).</summary>
@@ -707,11 +709,14 @@ internal sealed partial class GhosttyHost : IDisposable
 
                 case GhosttyActionTag.SetTabTitle:
                 {
-                    // char* title at +8, same shape as SetTitle. Empty -> clear.
+                    // char* title at +8, same shape as SetTitle. Empty ->
+                    // clear. The sending surface goes with it: a title is
+                    // the surface's request about its own tab, and the tab
+                    // it belongs to is not necessarily the selected one.
                     var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
                     var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
                     _dispatcher.TryEnqueue(() =>
-                        owner.SetTabTitleRequested?.Invoke(owner, title));
+                        owner.SetTabTitleRequested?.Invoke(control, title));
                     return 1;
                 }
 
