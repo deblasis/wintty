@@ -5,7 +5,9 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Ghostty.Core;
 using Ghostty.Core.Config;
+using Ghostty.Core.Logging;
 using Ghostty.Core.SingleInstance;
+using Ghostty.Core.Version;
 using Ghostty.Interop;
 
 namespace Ghostty;
@@ -129,7 +131,7 @@ public static partial class Program
     /// </summary>
     private const uint FILE_APPEND_DATA = 0x00000004;
     private const uint FILE_SHARE_READ = 0x00000001;
-    private const uint CREATE_ALWAYS = 2;
+    private const uint OPEN_ALWAYS = 4;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
 
     private const int ATTACH_PARENT_PROCESS = -1;
@@ -302,20 +304,38 @@ public static partial class Program
     /// persisted to disk.  Called before any native GPU code runs.
     ///
     /// Idempotent: the GUI path and the <see cref="GpuLogEnvVar"/> opt-in can
-    /// both reach it, and re-opening would truncate the log we just wrote.
+    /// both reach it, and re-opening would append a second header block to
+    /// the log we just started.
     /// </summary>
     private static void RedirectStderrToFile()
     {
         if (_stderrRedirected) return;
 
         // Set before the attempt, not after: a redirect that failed once is
-        // not going to succeed on a retry, and reopening would truncate.
+        // not going to succeed on a retry, and reopening would append a
+        // second header block.
         _stderrRedirected = true;
 
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(GpuLogPath)!);
 
+            // Carry the previous launch's log aside before opening. With the
+            // OPEN_ALWAYS open below nothing truncates any more, so without
+            // this move the file would grow across launches forever; with
+            // it, exactly one previous launch survives at gpu.prev.log - the
+            // one support would ask about (#968). Best-effort: a rotation
+            // that fails (the old log held by a tailer) leaves both files in
+            // place, and the open below then appends rather than destroys.
+            GpuLogRotation.Rotate(GpuLogPath);
+
+            // OPEN_ALWAYS, not CREATE_ALWAYS: CREATE_ALWAYS truncated the
+            // log on every launch, so the relaunch a support round-trip asks
+            // for destroyed the previous launch's evidence (#968). After a
+            // successful rotation this creates the file fresh; when rotation
+            // failed it appends to what is there. FILE_APPEND_DATA writes at
+            // EOF regardless, which is what the two-writers sharing below
+            // rely on.
             // AutoFlush on the writer below pushes every line to the OS, so a
             // GPU driver crash loses at most a partial line. This is not
             // write-through (no FILE_FLAG_WRITE_THROUGH), so the OS cache can
@@ -325,7 +345,7 @@ public static partial class Program
                 FILE_APPEND_DATA,
                 FILE_SHARE_READ,
                 IntPtr.Zero,
-                CREATE_ALWAYS,
+                OPEN_ALWAYS,
                 FILE_ATTRIBUTE_NORMAL,
                 IntPtr.Zero);
 
@@ -380,6 +400,12 @@ public static partial class Program
             WriteStderr(
                 $"=== {AppIdentity.ProductName} GPU log started {DateTime.UtcNow:O} ===");
             WriteStderr($"Log file: {GpuLogPath}");
+            // The identity, so a gpu.log pasted alone answers "what was
+            // running" without a separate +version (#968). Computed once
+            // and cached here, on every path that reaches this file; the
+            // crash entry below reuses the cached value rather than calling
+            // back into libghostty at crash time.
+            WriteStderr(VersionBanner.Header());
         }
         catch
         {
@@ -661,6 +687,12 @@ public static partial class Program
                     $"=== {AppIdentity.ProductName} crash {DateTimeOffset.UtcNow:O} " +
                     $"(pid {Environment.ProcessId}, " +
                     $"managed thread {Environment.CurrentManagedThreadId}) ==={Environment.NewLine}" +
+                    // The identity under the delimiter, for the same reason
+                    // as the gpu.log header (#968): a crash log pasted alone
+                    // has to say what was running. Cached from startup, so
+                    // this reads a string - it does not call into
+                    // libghostty, which may be the thing that crashed.
+                    $"{VersionBanner.Header()}{Environment.NewLine}" +
                     $"{detail}{Environment.NewLine}{Environment.NewLine}";
 
                 // AppContext.BaseDirectory first, and it stays the default:

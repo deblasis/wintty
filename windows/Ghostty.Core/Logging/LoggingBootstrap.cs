@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Ghostty.Core.Version;
 using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Core.Logging;
@@ -98,6 +99,20 @@ internal static class LoggingBootstrap
         {
             Directory = fileLogDirectory,
         });
+
+        // The version header is the first record in every rolling log,
+        // written straight to the sink rather than through the factory:
+        // the factory's filter would silence it at log-level=off, and a
+        // header that only exists at chattier levels is not a header (#968).
+        // VersionBanner.Header() is one line by contract, so the record
+        // keeps the pipe-line shape every reader of this file anchors on.
+        fileSink.TryWrite(new LogRecord(
+            Timestamp: DateTime.UtcNow,
+            Level: LogLevel.Information,
+            EventId: new EventId(0, "VersionHeader"),
+            Category: "Ghostty.Core.Logging",
+            Message: VersionBanner.Header(),
+            Exception: null));
 
         var factory = LoggerFactory.Create(builder =>
         {

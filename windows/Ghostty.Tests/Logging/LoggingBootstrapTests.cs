@@ -1,14 +1,25 @@
 using System;
+using System.IO;
 using System.Linq;
 using Ghostty.Core.Logging;
 using Ghostty.Core.Logging.Testing;
+using Ghostty.Core.Version;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace Ghostty.Tests.Logging;
 
-public class LoggingBootstrapTests
+public class LoggingBootstrapTests : IDisposable
 {
+    private readonly string _tempDir = Path.Combine(
+        Path.GetTempPath(), "LoggingBootstrapTests_" + Guid.NewGuid().ToString("N"));
+
+    public LoggingBootstrapTests() => Directory.CreateDirectory(_tempDir);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_tempDir, recursive: true); } catch { /* best-effort */ }
+    }
     [Fact]
     public void ParseFilterOptions_DefaultsToInformation_WhenLevelEmpty()
     {
@@ -163,5 +174,48 @@ public class LoggingBootstrapTests
         otherLogger.LogDebug(new EventId(101, "Other"), "other-debug");
         Assert.DoesNotContain(capture.Entries, e =>
             e.Category == "Ghostty.Core.Config.SomeOtherType" && e.Level == LogLevel.Debug);
+    }
+
+    [Fact]
+    public async Task Build_opens_the_rolling_log_with_a_version_header_record()
+    {
+        // The sink is returned precisely so its owner can dispose it (the
+        // await-able teardown App uses): DisposeAsync drains the writer
+        // queue and closes the file, so everything the header write
+        // enqueued is on disk by the first read, with no polling.
+        var (factory, fileSink, _) = LoggingBootstrap.Build(null, null, _tempDir);
+        await fileSink.DisposeAsync();
+        factory.Dispose();
+
+        var body = ReadSingleLog();
+        // The whole record shape, not a prefix that would survive a field
+        // being dropped: header lands as an Information record from the
+        // logging category, carrying the one-line banner as its message.
+        Assert.Contains(
+            "| Info  | " + Environment.ProcessId + " | 0 | Ghostty.Core.Logging | "
+                + VersionBanner.Header(),
+            body);
+    }
+
+    [Fact]
+    public async Task The_version_header_survives_log_level_off()
+    {
+        // The reason the header is written to the sink directly, not
+        // through the factory's filter: a header that disappears at
+        // log-level=off is exactly not a header - off is the configuration
+        // a support round-trip most wants it in.
+        var (factory, fileSink, _) = LoggingBootstrap.Build("off", null, _tempDir);
+        await fileSink.DisposeAsync();
+        factory.Dispose();
+
+        Assert.Contains(
+            "| Ghostty.Core.Logging | " + VersionBanner.Header(),
+            ReadSingleLog());
+    }
+
+    private string ReadSingleLog()
+    {
+        var file = Assert.Single(Directory.EnumerateFiles(_tempDir, "ghostty-*.log"));
+        return File.ReadAllText(file);
     }
 }
