@@ -424,11 +424,12 @@ function Get-Windows([long[]]$Events, [int]$State, [long[]]$Harness) {
         $t = $Events[$i]
         $st = [int]$Events[$i + 1]
         $last = $t
-        $obsCount++
         # A state-3 stretch is unobserved time, not a transition: bridge it.
+        # It is not a sighting either, so it does not count for Obs.
         if ($st -eq 3) {
             if ($start -ge 0) { continue }
         }
+        $obsCount++
         if ($st -eq $State -and $start -lt 0) { $start = $t; $obsCount = 0 }
         elseif ($st -ne $State -and $start -ge 0) {
             $inHarness = $false
@@ -495,8 +496,8 @@ function Get-PerSaveWorst([long[]]$Events, [int]$State, [long[]]$Marks, [long]$E
             $t = $Events[$i]
             if ($t -ge $to) { break }
             $st = [int]$Events[$i + 1]
-            if ($st -eq 3) { $hadError = $true; continue }
             if ($t -lt $from) { continue }
+            if ($st -eq 3) { $hadError = $true; continue }
             if ($st -eq $State -and $start -lt 0) { $start = $t }
             elseif ($st -ne $State -and $start -ge 0) {
                 $len = $t - $start
