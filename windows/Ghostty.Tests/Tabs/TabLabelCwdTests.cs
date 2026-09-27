@@ -77,6 +77,7 @@ public class TabLabelCwdTests
     [InlineData("safe\u2069")]        // pop directional isolate
     [InlineData("a\u061Cb")]          // Arabic letter mark (the twelfth bidi control)
     [InlineData("a\u2060b")]          // word joiner (invisible format)
+    [InlineData("a\u200Bb")]          // zero width space (invisible, encodes data)
     [InlineData("a\uFEFFb")]          // zero width no-break space
     [InlineData("a\u00ADb")]          // soft hyphen
     [InlineData("a\U000E0020b")]      // tag character (invisible ASCII channel)
