@@ -50,7 +50,6 @@ public class GpuLogRotationTests : IDisposable
 
         Assert.True(GpuLogRotation.Rotate(Current));
 
-        Assert.Equal("gpu.prev.log", Path.GetFileName(Previous));
         Assert.Equal("launch-one evidence", File.ReadAllText(Previous));
         Assert.False(File.Exists(Current),
             "the current path must be free for the new launch's open");

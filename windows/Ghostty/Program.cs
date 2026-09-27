@@ -333,7 +333,7 @@ public static partial class Program
             // log on every launch, so the relaunch a support round-trip asks
             // for destroyed the previous launch's evidence (#968). After a
             // successful rotation this creates the file fresh; when the
-            // rotation rolled back because the stored previous was held
+            // rotation failed because the stored previous was held
             // (a tailer), it appends to what is there. When the current log
             // itself is held by another instance, this open fails outright
             // and the launch keeps its terminal stderr. Nothing is ever
