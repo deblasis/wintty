@@ -1,10 +1,11 @@
 using System.Linq;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// That every exit names its reason (#967, tracker row D13).
+/// That every exit names its reason (#967).
 ///
 /// The shell assembly cannot be loaded into a test host, so the exit
 /// sites are only visible to source. The guards pair each clean
@@ -112,7 +113,12 @@ public class ExitReasonWiringTests
     public void The_forwarded_launch_exit_names_its_reason()
     {
         // The one GUI exit: a second launch forwarded to the running
-        // instance used to vanish with an exit 0 and nothing in any log.
+        // instance used to vanish with an exit 0 and nothing anywhere.
+        // Where the line lands is narrower here than on the CLI paths -
+        // the forwarded launch's own redirect has normally already failed
+        // (the live primary holds gpu.log against writers), so the line
+        // reaches a terminal when the launch has one - and ExitReason.cs's
+        // doc comment states that rather than hiding it.
         var forward = ShellSource.Load("App.xaml.cs").Method("ForwardLaunchToPrimary");
         var exit = Assert.Single(forward.Calls(Bare));
         var log = Assert.Single(forward.Calls(Wired));
@@ -120,6 +126,33 @@ public class ExitReasonWiringTests
             "the reason line must be written before the forwarded launch exits");
         Assert.Equal("0", log.Arg(0));
         Assert.Contains("forwarded", log.Arg(1));
+
+        // File census: the forward is App.xaml.cs's ONLY exit, wired 1:1.
+        // A bare exit anywhere else in this file would pass every other
+        // guard and reintroduce the silence on the GUI side, where nothing
+        // else would name it.
+        var appRoot = ShellSource.Load("App.xaml.cs").Root;
+        Assert.True(appRoot.Calls(Bare).Count == 1,
+            $"expected 1 '{Bare}' in App.xaml.cs, found a different count; " +
+            "a new GUI exit needs an ExitReason.Log beside it");
+        Assert.True(appRoot.Calls(Wired).Count == 1,
+            $"expected 1 '{Wired}' in App.xaml.cs, found a different count; " +
+            "a wired GUI exit lost its reason line");
+    }
+
+    [Fact]
+    public void The_reason_line_goes_to_stderr_and_never_throws()
+    {
+        // The two contract clauses the behaviour tests cannot see, read on
+        // the source: the write targets Console.Error - stdout on the WinExe
+        // GUI path goes nowhere, so a sink drift would silence exactly the
+        // diagnostics this class exists for - and the write sits inside the
+        // best-effort catch, because the reason must never change the exit.
+        var log = ShellSource.Load("ExitReason.cs").Method("Log");
+        var write = Assert.Single(log.Calls("Console.Error.WriteLine"));
+        var guard = Assert.Single(log.DescendantNodes().OfType<TryStatementSyntax>().ToList());
+        Assert.True(guard.Span.Contains(write.Span),
+            "the stderr write must sit inside the best-effort catch");
     }
 
     [Fact]

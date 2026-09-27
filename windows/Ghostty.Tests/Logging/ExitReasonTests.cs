@@ -5,13 +5,13 @@ using Xunit;
 namespace Ghostty.Tests.Logging;
 
 /// <summary>
-/// The exit-reason line's format is the contract (#967, tracker row D13):
-/// support asks for a grep of the log, and the grep only lands if the
-/// line is exactly tag, code and reason in one shape. Tested through the
+/// The exit-reason line's format is the contract (#967): support asks
+/// for a grep of the log, and the grep only lands if the line is exactly
+/// tag, code and reason in one shape. Tested through the
 /// <see cref="ExitReason.Line"/> seam rather than by swapping the
 /// process-global Console.Error under a parallel test host; the wiring
-/// guards prove the call sites, and the verification pass runs the built
-/// exe to prove the write.
+/// guards prove the call sites, and Log's single write is thin enough to
+/// read - the live-exe runs outside this suite cover the write itself.
 /// </summary>
 public class ExitReasonTests
 {
@@ -30,4 +30,11 @@ public class ExitReasonTests
     [Fact]
     public void Negative_codes_format_as_themselves() =>
         Assert.EndsWith(" exit -1: dropped", ExitReason.Line(-1, "dropped"));
+
+    [Fact]
+    public void Newlines_in_a_reason_cannot_forge_lines()
+    {
+        Assert.EndsWith(" exit 0: a b", ExitReason.Line(0, "a\nb"));
+        Assert.EndsWith(" exit 0: a  b", ExitReason.Line(0, "a\r\nb"));
+    }
 }
