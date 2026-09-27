@@ -30,17 +30,25 @@
       rename-create  Move the file away, then create a new file at the
                      path and delete the away copy. The local worst case
                      (22ms): libghostty's own starter write is the create.
+                     The create also truncates before it writes, so this
+                     shape's present-empty row is the create call's own
+                     sliver: expect one near-zero window per save,
+                     stall-inflated on a slow target.
 
-      replacefile    Atomically swap a new file over the live one with
-                     File.Replace (MoveFileTransacted-era editors, some
-                     sync clients' conflict resolution).
+      replacefile    Swap a new file over the live one with File.Replace
+                     (MoveFileTransacted-era editors, some sync clients'
+                     conflict resolution). Atomic where ReplaceFile is -
+                     which the certified SMB run showed is not everywhere:
+                     it measured multi-second absences on this shape.
 
       delete-rename  Delete the file, then move the away copy back onto
                      the path. 8.4ms locally.
 
       movefileex     Write a temp file, then move it over the live name
                      with overwrite. VS Code's atomic write. Left no
-                     absence window at all locally.
+                     absence window at all locally - and none is possible:
+                     a rename-over never unlinks the live name, so this
+                     row cannot come out any other way on any target.
 
       truncate       Truncate the live file to zero, hold, write the
                      content back. Not an absence: the window measured is
@@ -49,40 +57,49 @@
 
     A sampler thread records the probe file's state in a tight loop while
     the main thread performs the saves. States: 0 absent, 1 present with
-    content, 2 present and empty, 3 QUERY ERROR. A query error is not an
-    absence: a transient share failure reads as state 3 and is reported
-    per shape, never as a window of the shape. Every sample's probe-call
-    latency is recorded; the shape's report carries the sampler's max and
-    mean call latency, because a slow sampler cannot see short windows
-    and lags long ones, and a number without its cadence is not a number.
+    content, 2 present and empty, 3 QUERY ERROR. The probe asks
+    File.GetAttributes, which throws where FileInfo.Exists would silently
+    answer false: not-found maps to absence, any other failure maps to
+    state 3, and state 3 is bridged as unobserved time rather than read
+    as a transition, so a dead share cannot masquerade as absence. Every
+    sample's probe-call latency is recorded; the shape's report carries
+    the sampler's max and mean call latency and the loop-gap percentiles,
+    because a slow sampler cannot see short windows and lags long ones,
+    and a number without its cadence is not a number.
 
     Each iteration is bracketed (an iteration mark before each save), so
     the analysis can tell one save's window from two saves' windows that
     merged across the inter-save beat. Two views are reported:
 
       per-save worst  the longest absent (or empty) stretch CLIPPED to a
-                      single iteration. This is the number the floor
-                      question needs: did one save leave the path in this
-                      state for at least the floor.
+                      single iteration, counted over MEASURED iterations
+                      only (a dropped save's debris is not a save). This
+                      is the number the floor question needs: did one
+                      save leave the path in this state for at least the
+                      floor. At-floor entries name their iteration.
 
       raw streaks     uncut stretches across the whole shape run, with
-                      the count of streaks spanning more than one
-                      iteration (those merge saves; their length is not
-                      one save's window).
+                      the count of streaks crossing an iteration mark
+                      (those merge saves; their length is not one save's
+                      window). At-floor streaks carry their observation
+                      count, because a 900ms window seen twice is not the
+                      same evidence as one seen two hundred times.
 
-    Windows the harness itself creates (the per-iteration refresh write,
-    the recovery after a dropped save) are bracketed as harness
-    intervals and excluded from both views; the exclusion count is
-    printed.
+    Windows BEGINNING inside a harness interval (the per-iteration
+    refresh write, the recovery of a dropped save's away copy) are
+    excluded and the exclusion count is printed. A window that instead
+    ENDS at the harness refresh - the recovery absence a dropped save
+    leaves - is counted: the path really was absent, and a loader would
+    have seen it.
 
     Per shape the run reports: saves attempted/measured/dropped, sampler
     cadence, per-save worst and raw-streak stats for absent and for
-    present-empty, query-error stretches, and how many per-save worsts
-    reached the deletion floor. Exit code 0 for a complete measurement;
-    nonzero if any shape could not be measured (a shape whose saves all
-    dropped counts as failed, and its stats are not a result). This
-    script measures; it does not gate behaviour. config-save-race.ps1 is
-    the one that gates.
+    present-empty, query-error stretches, and how many entries reached
+    the deletion floor. Exit code 0 for a complete measurement; nonzero
+    if any shape could not be measured (a shape whose saves all dropped
+    counts as failed, and its stats are not a result). This script
+    measures; it does not gate behaviour. config-save-race.ps1 is the
+    one that gates.
 
 .EXAMPLE
     pwsh -NoProfile -File windows/scripts/config-gap-measure.ps1
@@ -114,7 +131,9 @@ param(
     # How long the middle of the save is held. 0 measures the natural
     # visibility window of the transition alone; larger values study a
     # stalled writer. Only a run at 0 (or well under the floor) says
-    # anything about the floor.
+    # anything about the floor. Analysis cost grows with the event count
+    # a hold produces, so a -HoldMs-heavy run's per-shape analysis phase
+    # can take minutes of CPU after the saves finish.
     [int]$HoldMs = 0,
 
     # The deletion floor, for the reached-floor count in the report.
@@ -124,8 +143,15 @@ param(
     [ValidatePattern('^[^\\/]+$')]
     [string]$ProbeName = 'config-gap-probe.tmp',
 
-    # Optional path prefix for per-shape CSV dumps of the raw sampler
-    # events (ticks,state pairs). Off unless given.
+    # Optional path prefix for per-shape CSV dumps: the raw sampler
+    # events (ticks,state pairs, headed by a line naming the shape and
+    # target), the iteration marks (-marks.csv: iteration,tick,dropped),
+    # and the harness intervals (-harness.csv: start,end). The marks and
+    # intervals are what the per-save clipping and the harness exclusion
+    # are computed from; with them in the dump, every number in the
+    # report is re-derivable offline. Off unless given. The dump is the
+    # one output this script overwrites without asking, and its
+    # directory has to exist.
     [string]$DumpCsv = ''
 )
 
@@ -139,9 +165,11 @@ if ($ProbeName -in '.', '..' -or $ProbeName -match '[\\/]') {
 
 $createdDir = $false
 if ($TargetPath -eq '') {
+    # PID in the name: two runs started in the same second must not
+    # adopt each other's directory. $createdDir is set only when this
+    # run actually creates the folder below.
     $TargetPath = Join-Path ([System.IO.Path]::GetTempPath()) `
-        ("wintty-gap-measure-" + (Get-Date -Format 'HHmmss'))
-    $createdDir = $true
+        ("wintty-gap-measure-$PID-" + (Get-Date -Format 'HHmmss'))
 }
 if (-not (Test-Path -LiteralPath $TargetPath)) {
     New-Item -ItemType Directory -Force -Path $TargetPath | Out-Null
@@ -181,6 +209,7 @@ namespace Wintty
         public static readonly List<long> Events = new List<long>(8192);
         public static readonly List<long> Harness = new List<long>(64);
         public static readonly List<long> IterationMarks = new List<long>(512);
+        public static readonly List<long> Gaps = new List<long>(65536);
         public static volatile bool Stop;
         public static long MaxLatency;
         public static long TotalLatency;
@@ -197,6 +226,7 @@ namespace Wintty
             Events.Clear();
             Harness.Clear();
             IterationMarks.Clear();
+            Gaps.Clear();
             MaxLatency = 0;
             TotalLatency = 0;
             Samples = 0;
@@ -224,6 +254,7 @@ namespace Wintty
         {
             var last = -1;
             var lastBeat = 0L;
+            var lastT = 0L;
             var latency = Stopwatch.StartNew();
             while (!Stop)
             {
@@ -231,11 +262,26 @@ namespace Wintty
                 latency.Restart();
                 try
                 {
+                    // Ask with a primitive that THROWS on failure.
+                    // FileInfo.Exists swallows I/O errors and answers
+                    // false, which would record a dead share - the exact
+                    // failure class this state exists for - as absence.
+                    // Not-found maps to absence in the catches; any
+                    // other throw is a query error.
+                    var attrs = System.IO.File.GetAttributes(path);
                     var fi = new System.IO.FileInfo(path);
                     if (fi.Exists)
                     {
                         st = (withSize && fi.Length == 0) ? 2 : 1;
                     }
+                }
+                catch (System.IO.FileNotFoundException)
+                {
+                    st = 0;
+                }
+                catch (System.IO.DirectoryNotFoundException)
+                {
+                    st = 0;
                 }
                 catch
                 {
@@ -250,6 +296,8 @@ namespace Wintty
                 Samples++;
 
                 var t = _clock.Elapsed.Ticks;
+                if (lastT != 0) { Gaps.Add(t - lastT); }
+                lastT = t;
                 if (st != last)
                 {
                     Events.Add(t);
@@ -278,6 +326,11 @@ function Invoke-SaveShape([string]$Name, [string]$Path, [int]$Hold, [string]$Tex
     switch ($Name) {
         'rename-create' {
             $away = "$Path.away"
+            # A stale away copy here is this run's own debris from a
+            # dropped iteration (the run-start guard proved the name
+            # absent); if it survived, every later Move would throw and
+            # collapse the shape into drops.
+            if ([System.IO.File]::Exists($away)) { [System.IO.File]::Delete($away) }
             [System.IO.File]::Move($Path, $away)
             if ($Hold -gt 0) { Start-Sleep -Milliseconds $Hold }
             [System.IO.File]::WriteAllText($Path, $Text)
@@ -352,23 +405,31 @@ function Invoke-Refresh([string]$Path, [string]$Text) {
 # so are windows of the query-error state's neighbours that begin inside a
 # state-3 stretch, because a query error splits one true stretch into
 # pieces; those pieces are re-joined across state-3 stretches for the
-# state the caller asked about. Returns an object with Windows (the list)
-# and Harness (the excluded count) - a list returned bare would unroll to
-# nothing when empty and take the caller's .Count down with it.
+# state the caller asked about. Returns an object with Windows (the
+# lengths), Starts and Closes (the window boundaries, for the merge
+# check), Obs (observation counts per window - a window resting on two
+# samples is weaker evidence than one resting on two hundred), and
+# Harness (the excluded count) - lists returned bare would unroll to
+# nothing when empty and take the caller's .Count down with them.
 function Get-Windows([long[]]$Events, [int]$State, [long[]]$Harness) {
     $found = [System.Collections.Generic.List[double]]::new()
+    $starts = [System.Collections.Generic.List[long]]::new()
+    $closes = [System.Collections.Generic.List[long]]::new()
+    $obs = [System.Collections.Generic.List[int]]::new()
     $harnessCount = 0
     $start = -1L
     $last = -1L
+    $obsCount = 0
     for ($i = 0; $i -lt $Events.Count; $i += 2) {
         $t = $Events[$i]
         $st = [int]$Events[$i + 1]
         $last = $t
+        $obsCount++
         # A state-3 stretch is unobserved time, not a transition: bridge it.
         if ($st -eq 3) {
             if ($start -ge 0) { continue }
         }
-        if ($st -eq $State -and $start -lt 0) { $start = $t }
+        if ($st -eq $State -and $start -lt 0) { $start = $t; $obsCount = 0 }
         elseif ($st -ne $State -and $start -ge 0) {
             $inHarness = $false
             for ($h = 0; $h -lt $Harness.Count; $h += 2) {
@@ -378,7 +439,12 @@ function Get-Windows([long[]]$Events, [int]$State, [long[]]$Harness) {
                     break
                 }
             }
-            if (-not $inHarness) { $found.Add(($t - $start) / 10000.0) }
+            if (-not $inHarness) {
+                $found.Add(($t - $start) / 10000.0)
+                $starts.Add($start)
+                $closes.Add($t)
+                $obs.Add($obsCount)
+            }
             $start = -1L
         }
     }
@@ -392,20 +458,34 @@ function Get-Windows([long[]]$Events, [int]$State, [long[]]$Harness) {
                 break
             }
         }
-        if (-not $inHarness) { $found.Add(($last - $start) / 10000.0) }
+        if (-not $inHarness) {
+            $found.Add(($last - $start) / 10000.0)
+            $starts.Add($start)
+            $closes.Add($last)
+            $obs.Add($obsCount)
+        }
     }
-    return [pscustomobject]@{ Windows = $found; Harness = $harnessCount }
+    return [pscustomobject]@{
+        Windows = $found; Starts = $starts; Closes = $closes
+        Obs = $obs; Harness = $harnessCount
+    }
 }
 
 # The longest stretch of one state CLIPPED to a single iteration, per
-# iteration. Returns an object with Worst (one entry per measured
-# iteration: the longest stretch inside it, 0 if the state never showed)
-# and ErrorIters (iterations containing query-error time, whose entries
-# are lower bounds).
-function Get-PerSaveWorst([long[]]$Events, [int]$State, [long[]]$Marks, [long]$End) {
+# MEASURED iteration (a dropped save's debris is not a save; its mark
+# still brackets the timeline, but it contributes no entry). Returns an
+# object with Worst (one entry per measured iteration: the longest
+# stretch inside it, 0 if the state never showed), Iter (the 1-based
+# iteration numbers of those entries, so an at-floor entry can be traced
+# to its save), and ErrorIters (measured iterations containing
+# query-error time; their entries span unobserved time).
+function Get-PerSaveWorst([long[]]$Events, [int]$State, [long[]]$Marks, [long]$End, [int[]]$DroppedIters) {
     $worsts = [System.Collections.Generic.List[double]]::new()
+    $iters = [System.Collections.Generic.List[int]]::new()
     $errorIters = 0
     for ($m = 0; $m -lt $Marks.Count; $m++) {
+        $iterNum = $m + 1
+        if ($DroppedIters -contains $iterNum) { continue }
         $from = $Marks[$m]
         $to = if ($m -lt $Marks.Count - 1) { $Marks[$m + 1] } else { $End }
         $worst = 0L
@@ -431,8 +511,11 @@ function Get-PerSaveWorst([long[]]$Events, [int]$State, [long[]]$Marks, [long]$E
         }
         if ($hadError) { $errorIters++ }
         $worsts.Add($worst / 10000.0)
+        $iters.Add($iterNum)
     }
-    return [pscustomobject]@{ Worst = $worsts; ErrorIters = $errorIters }
+    return [pscustomobject]@{
+        Worst = $worsts; Iter = $iters; ErrorIters = $errorIters
+    }
 }
 
 function Show-Stats([string]$Label, [System.Collections.Generic.List[double]]$Windows, [int]$FloorMs) {
@@ -440,12 +523,20 @@ function Show-Stats([string]$Label, [System.Collections.Generic.List[double]]$Wi
         Write-Host ('    {0,-16}: none' -f $Label)
         return
     }
-    $sorted = $Windows | Sort-Object
+    # @(): with exactly one window, Sort-Object's output unrolls to a
+    # bare scalar and .Count dies under StrictMode.
+    $sorted = @($Windows | Sort-Object)
+    # Median of an even count is the mean of the two middle elements.
     $mid = [int][Math]::Floor(($sorted.Count - 1) / 2)
+    $median = if ($sorted.Count % 2 -eq 1) {
+        $sorted[$mid]
+    } else {
+        ($sorted[$mid] + $sorted[$mid + 1]) / 2.0
+    }
     $p95 = $sorted[[Math]::Min($sorted.Count - 1, [int][Math]::Ceiling($sorted.Count * 0.95) - 1)]
     $atFloor = @($Windows | Where-Object { $_ -ge $FloorMs }).Count
     Write-Host ('    {0,-16}: {1,4}  min {2,9:N3}  med {3,9:N3}  p95 {4,9:N3}  max {5,9:N3}  ms  (at/over the {6}ms floor: {7})' -f
-        $Label, $Windows.Count, $sorted[0], $sorted[$mid], $p95, $sorted[$sorted.Count - 1], $FloorMs, $atFloor)
+        $Label, $Windows.Count, $sorted[0], $median, $p95, $sorted[$sorted.Count - 1], $FloorMs, $atFloor)
 }
 
 $shapes = if ($Shape -eq 'all') {
@@ -457,6 +548,10 @@ Write-Host "target=$TargetPath"
 Write-Host "iterations=$Iterations hold=${HoldMs}ms floor=${FloorMs}ms probe=$ProbeName"
 $failedShapes = @()
 
+# Everything from here to the cleanup below is inside one try/finally: a
+# shape failure is caught per shape, but a failure anywhere else must
+# still release the sampler thread and the probe litter.
+try {
 foreach ($one in $shapes) {
     try {
         # The probe starts present with content. delete-rename keeps its
@@ -471,6 +566,7 @@ foreach ($one in $shapes) {
         Start-Sleep -Milliseconds 200
 
         $dropped = 0
+        $droppedIters = [System.Collections.Generic.List[int]]::new()
         for ($i = 1; $i -le $Iterations; $i++) {
             # Present with content at the top of every iteration - but
             # only rewritten when actually missing or empty (usually a
@@ -482,6 +578,18 @@ foreach ($one in $shapes) {
             if (-not $probeInfo.Exists -or $probeInfo.Length -eq 0) {
                 Invoke-Refresh -Path $probe -Text $body
             }
+            # delete-rename's away copy is the shape's fuel: one failed
+            # restore copy would leave every later iteration throwing
+            # before it touches the probe. Re-create it, as harness time,
+            # if a drop consumed it.
+            if ($one -eq 'delete-rename' -and
+                -not [System.IO.File]::Exists("$probe.away")) {
+                $t0 = [Wintty.GapSampler]::Now()
+                [System.IO.File]::Copy($probe, "$probe.away")
+                $t1 = [Wintty.GapSampler]::Now()
+                [Wintty.GapSampler]::Harness.Add($t0)
+                [Wintty.GapSampler]::Harness.Add($t1)
+            }
             Start-Sleep -Milliseconds 40
             [Wintty.GapSampler]::IterationMarks.Add([Wintty.GapSampler]::Now())
             try {
@@ -491,6 +599,7 @@ foreach ($one in $shapes) {
                 # One dropped save is a dropped measurement, not a
                 # finding; the next iteration's refresh repairs the probe.
                 $dropped++
+                $droppedIters.Add($i)
             }
         }
 
@@ -517,25 +626,55 @@ foreach ($one in $shapes) {
         } else { 0.0 }
         Write-Host ('  sampler: max call {0:N3} ms, mean {1:N3} ms over {2} samples ({3} query errors)' -f
             $maxMs, $meanMs, [Wintty.GapSampler]::Samples, [Wintty.GapSampler]::Errors)
+        $gaps = [Wintty.GapSampler]::Gaps.ToArray()
+        if ($gaps.Count -gt 0) {
+            $sortedGaps = @($gaps | Sort-Object)
+            $gapP95 = $sortedGaps[[Math]::Min($sortedGaps.Count - 1, [int][Math]::Ceiling($sortedGaps.Count * 0.95) - 1)] / 10000.0
+            $gapP99 = $sortedGaps[[Math]::Min($sortedGaps.Count - 1, [int][Math]::Ceiling($sortedGaps.Count * 0.99) - 1)] / 10000.0
+            $gapMax = $sortedGaps[$sortedGaps.Count - 1] / 10000.0
+            Write-Host ('  loop gaps (sample to sample): p95 {0:N3}  p99 {1:N3}  max {2:N3}  ms - a stalled sampler cannot see short windows and lags long ones' -f
+                $gapP95, $gapP99, $gapMax)
+        }
 
         foreach ($state in 0, 2) {
             $name = if ($state -eq 0) { 'absent' } else { 'present empty' }
             $rawResult = Get-Windows $events $state $harness
             $raw = $rawResult.Windows
             $harnessWindows = $rawResult.Harness
-            $psResult = Get-PerSaveWorst $events $state $marks $end
+            $psResult = Get-PerSaveWorst $events $state $marks $end $droppedIters.ToArray()
             $perSave = $psResult.Worst
             $errorIters = $psResult.ErrorIters
+            # A raw streak is a merged one when the stretch it spans
+            # crosses an iteration mark: two saves' windows fused into
+            # one streak. (A streak merely LONGER than the longest
+            # clipped entry is not the test - merged streaks can sit
+            # below an unmerged max.)
             $spanning = 0
-            if ($perSave.Count -gt 0) {
-                # Raw streaks longer than the longest per-save worst are
-                # the merged ones (or open-ended); count them honestly.
-                $worstMax = ($perSave | Measure-Object -Maximum).Maximum
-                $spanning = @($raw | Where-Object { $_ -gt $worstMax }).Count
+            for ($w = 0; $w -lt $rawResult.Windows.Count; $w++) {
+                foreach ($mk in $marks) {
+                    if ($mk -gt $rawResult.Starts[$w] -and $mk -lt $rawResult.Closes[$w]) {
+                        $spanning++
+                        break
+                    }
+                }
             }
             Write-Host "  $name"
             Show-Stats -Label 'per-save worst' -Windows $perSave -FloorMs $FloorMs
+            $floorAt = [System.Collections.Generic.List[int]]::new()
+            for ($w = 0; $w -lt $perSave.Count; $w++) {
+                if ($perSave[$w] -ge $FloorMs) { $floorAt.Add($psResult.Iter[$w]) }
+            }
+            if ($floorAt.Count -gt 0) {
+                Write-Host ('    {0,-16}: iterations {1}' -f 'at the floor', ($floorAt -join ', '))
+            }
             Show-Stats -Label 'raw streaks' -Windows $raw -FloorMs $FloorMs
+            $floorObs = [System.Collections.Generic.List[int]]::new()
+            for ($w = 0; $w -lt $raw.Count; $w++) {
+                if ($raw[$w] -ge $FloorMs) { $floorObs.Add($rawResult.Obs[$w]) }
+            }
+            if ($floorObs.Count -gt 0) {
+                Write-Host ('    {0,-16}: {1} (sampler observations backing each at-floor streak)' -f 'floor obs', ($floorObs -join ', '))
+            }
             if ($spanning -gt 0) {
                 Write-Host ('    {0,-16}: {1} raw streaks span iterations (merged saves; not one save''s window)' -f 'merged', $spanning)
             }
@@ -543,37 +682,55 @@ foreach ($one in $shapes) {
                 Write-Host ('    {0,-16}: {1} windows began in harness intervals (excluded)' -f 'harness', $harnessWindows)
             }
             if ($errorIters -gt 0) {
-                Write-Host ('    {0,-16}: {1} iterations contain query-error time (their worst is a lower bound)' -f 'unobserved', $errorIters)
+                Write-Host ('    {0,-16}: {1} measured iterations span unobserved time (query errors); their worst is a lower bound' -f 'unobserved', $errorIters)
             }
         }
 
         if ($DumpCsv -ne '') {
-            $dump = "$DumpCsv-$one.csv"
-            $lines = [System.Collections.Generic.List[string]]::new()
+            $evLines = [System.Collections.Generic.List[string]]::new()
+            $evLines.Add("shape=$one target=$TargetPath")
             for ($i = 0; $i -lt $events.Count; $i += 2) {
-                $lines.Add("$($events[$i]),$($events[$i + 1])")
+                $evLines.Add("$($events[$i]),$($events[$i + 1])")
             }
-            [System.IO.File]::WriteAllLines($dump, $lines)
+            [System.IO.File]::WriteAllLines("$DumpCsv-$one-events.csv", $evLines)
+            $mkDropped = [System.Collections.Generic.HashSet[int]]::new([int[]]$droppedIters.ToArray())
+            $mkLines = [System.Collections.Generic.List[string]]::new()
+            $mkLines.Add('iteration,tick,dropped')
+            for ($m = 0; $m -lt $marks.Count; $m++) {
+                $isDropped = if ($mkDropped.Contains($m + 1)) { 1 } else { 0 }
+                $mkLines.Add("$($m + 1),$($marks[$m]),$isDropped")
+            }
+            [System.IO.File]::WriteAllLines("$DumpCsv-$one-marks.csv", $mkLines)
+            $hnLines = [System.Collections.Generic.List[string]]::new()
+            $hnLines.Add('start,end')
+            for ($h = 0; $h -lt $harness.Count; $h += 2) {
+                $hnLines.Add("$($harness[$h]),$($harness[$h + 1])")
+            }
+            [System.IO.File]::WriteAllLines("$DumpCsv-$one-harness.csv", $hnLines)
         }
     }
     catch {
         Write-Host "shape ${one}: FAILED: $($_.Exception.Message)"
+        Write-Host $_.InvocationInfo.PositionMessage
         $failedShapes += $one
     }
     finally {
         if ('Wintty.GapSampler' -as [type]) { [Wintty.GapSampler]::Finish() }
     }
 }
-
-# Cleanup: the probe and its shape litter, and the directory if this run
-# created it. Everything present under these names was created by this
-# run, because the pre-existence guard refused the litter names up front.
-foreach ($suffix in '', '.away', '.tmp', '.rep', '.bak') {
-    $p = $probe + $suffix
-    if (Test-Path -LiteralPath $p) { [System.IO.File]::Delete($p) }
-}
-if ($createdDir -and (Test-Path -LiteralPath $TargetPath)) {
-    Remove-Item -LiteralPath $TargetPath -Force
+} finally {
+    # Cleanup: the probe and its shape litter, and the directory if this
+    # run created it. Everything present under these names was created by
+    # this run, because the pre-existence guard refused the litter names
+    # up front. Best-effort: one removal failing must not skip the rest,
+    # and a cleanup failure must not mask the error that got us here.
+    foreach ($suffix in '', '.away', '.tmp', '.rep', '.bak') {
+        $p = $probe + $suffix
+        try { if (Test-Path -LiteralPath $p) { [System.IO.File]::Delete($p) } } catch { }
+    }
+    if ($createdDir -and (Test-Path -LiteralPath $TargetPath)) {
+        try { Remove-Item -LiteralPath $TargetPath -Force } catch { }
+    }
 }
 
 if ($failedShapes.Count -gt 0) {
