@@ -122,6 +122,14 @@ internal sealed class TabModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// What the shell reported for this pane (OSC 0/2). Raw remote text:
+    /// the protocol admits any UTF-8, so this can carry control or bidi
+    /// characters no matter what it looks like here. Never render it or
+    /// hand it on as text; every surface reads it through
+    /// <see cref="TabLabel.Meaningful"/> (NamedTitle), which refuses
+    /// what <see cref="TabLabel.IsPlain"/> refuses.
+    /// </summary>
     public string? ShellReportedTitle
     {
         get;

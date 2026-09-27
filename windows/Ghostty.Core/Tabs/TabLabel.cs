@@ -104,8 +104,14 @@ internal static class TabLabel
     /// The VT parser drops C0 bytes, but an OSC 7 URL is percent-decoded
     /// after that, and OSC 9;9 admits any UTF-8, so a program in the pane
     /// can put a newline or a right-to-left override into what it reports.
-    /// Only the bidi controls are refused among the format characters,
-    /// since joiners appear in legitimate emoji folder names.
+    /// Among the format characters the bidi controls are refused (all
+    /// twelve, U+061C included) and so is the rest of the invisible
+    /// family: soft hyphen, the word joiner group, the zero width
+    /// no-break space, and the tag block, which renders as nothing
+    /// everywhere while encoding arbitrary ASCII. Still allowed, as a
+    /// deliberate trade: the zero width joiner family (U+200B-U+200D)
+    /// and the variation selectors, which legitimate emoji in titles
+    /// and folder names use.
     ///
     /// This is not free, and the cost used to be stated here as nothing.
     /// NTFS refuses C0, but a directory named with a C1 character, U+2028
@@ -125,7 +131,8 @@ internal static class TabLabel
                 case UnicodeCategory.ParagraphSeparator:
                     return false;
                 case UnicodeCategory.Format
-                    when rune.Value is 0x200E or 0x200F or (>= 0x202A and <= 0x202E) or (>= 0x2066 and <= 0x2069):
+                    when rune.Value is 0x200E or 0x200F or (>= 0x202A and <= 0x202E) or (>= 0x2066 and <= 0x2069)
+                        or 0x00AD or 0x061C or (>= 0x2060 and <= 0x2064) or 0xFEFF or (>= 0xE0001 and <= 0xE007F):
                     return false;
             }
         }

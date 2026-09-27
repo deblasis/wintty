@@ -62,6 +62,9 @@ public class TabLabelCwdTests
         => Assert.Equal(title, TabLabel.Meaningful(title));
 
     [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
     [InlineData("a\u0007b")]          // C0 control (BEL)
     [InlineData("line1\nline2")]      // a second line
     [InlineData("a\u2028b")]          // line separator
@@ -69,7 +72,15 @@ public class TabLabelCwdTests
     [InlineData("safe\u202Eevil")]    // right-to-left override
     [InlineData("a\u200Fb")]          // right-to-left mark
     [InlineData("a\u2066b")]          // left-to-right isolate
-    public void Meaningful_DropsATitleCarryingControlOrBidiCharacters(string title)
+    [InlineData("a\u200Eb")]          // left-to-right mark
+    [InlineData("\u202Asafe")]        // left-to-right embedding
+    [InlineData("safe\u2069")]        // pop directional isolate
+    [InlineData("a\u061Cb")]          // Arabic letter mark (the twelfth bidi control)
+    [InlineData("a\u2060b")]          // word joiner (invisible format)
+    [InlineData("a\uFEFFb")]          // zero width no-break space
+    [InlineData("a\u00ADb")]          // soft hyphen
+    [InlineData("a\U000E0020b")]      // tag character (invisible ASCII channel)
+    public void Meaningful_DropsATitleCarryingControlOrBidiCharacters(string? title)
         => Assert.Null(TabLabel.Meaningful(title));
 
     [Fact]
