@@ -483,10 +483,13 @@ const WindowsPty = struct {
             return;
         }
 
+        // FARPROC's pointee is align-1; fn pointers are align-4 on
+        // aarch64, so @alignCast asserts what the loader already
+        // guarantees.
         pseudo_console_api = .{
-            .create = @ptrCast(create_ptr.?),
-            .resize = @ptrCast(resize_ptr.?),
-            .close = @ptrCast(close_ptr.?),
+            .create = @ptrCast(@alignCast(create_ptr.?)),
+            .resize = @ptrCast(@alignCast(resize_ptr.?)),
+            .close = @ptrCast(@alignCast(close_ptr.?)),
         };
         log.info("pty: using bundled conpty.dll", .{});
     }

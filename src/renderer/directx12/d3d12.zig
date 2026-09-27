@@ -1778,9 +1778,12 @@ pub const DxcLibrary = struct {
             return null;
         };
 
+        // FARPROC's pointee is align-1; a fn pointer is align-4 on
+        // aarch64, so @alignCast asserts what the loader already
+        // guarantees.
         return DxcLibrary{
             .dll = dll,
-            .create_instance = @ptrCast(proc),
+            .create_instance = @ptrCast(@alignCast(proc)),
         };
     }
 

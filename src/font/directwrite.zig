@@ -814,7 +814,9 @@ pub fn loadDWriteCreateFactory() !DWriteCreateFactoryFn {
         "DWriteCreateFactory",
     ) orelse return error.DWriteCreateFactoryNotFound;
 
-    return @ptrCast(proc);
+    // FARPROC's pointee is align-1; a fn pointer is align-4 on aarch64,
+    // so @alignCast asserts what the loader already guarantees.
+    return @ptrCast(@alignCast(proc));
 }
 
 /// Read the string at index 0 from an IDWriteLocalizedStrings into a
