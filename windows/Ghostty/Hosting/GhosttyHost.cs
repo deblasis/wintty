@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Ghostty.Clipboard;
 using Ghostty.Controls;
 using Ghostty.Core.Clipboard;
@@ -150,6 +152,16 @@ internal sealed partial class GhosttyHost : IDisposable
     // dictionary; nothing is passed in.
     private readonly ConcurrentDictionary<IntPtr, TerminalControl> _surfaces = new();
     private readonly DispatcherQueue _dispatcher;
+
+    // Title updates coalesce here until the queued flush runs: a program
+    // rewriting its title continuously used to queue one UI-thread task per
+    // OSC and flood the dispatcher (wintty#1166). Keyed by surface handle;
+    // the flush resolves the control on the UI thread, like every other
+    // action does. _titleFlushQueued is 1 while a flush task is queued or
+    // running, so a burst of SetTitle actions queues exactly one flush.
+    private readonly object _titleGate = new();
+    private Dictionary<IntPtr, string> _pendingTitles = new();
+    private int _titleFlushQueued;
 
     // Process-wide toast sink. Constructed in both ctors (stateless;
     // AppNotificationManager.Default is itself a singleton). The bootstrap
@@ -699,11 +711,19 @@ internal sealed partial class GhosttyHost : IDisposable
                 {
                     var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
                     var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
-                    _dispatcher.TryEnqueue(() =>
+                    // Coalesced, not delivered: the latest title per surface
+                    // waits for the one flush already queued, or arms the
+                    // next one, so a burst of titles costs the UI thread one
+                    // hop instead of one hop each (wintty#1166).
+                    lock (_titleGate) _pendingTitles[surfaceHandle] = title;
+                    if (Interlocked.Exchange(ref _titleFlushQueued, 1) == 0 &&
+                        !_dispatcher.TryEnqueue(FlushPendingTitles))
                     {
-                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                            c.RaiseTitleChanged(title);
-                    });
+                        // No queue took the flush: unarm, so a later title
+                        // tries again rather than coalescing into a flush
+                        // that never runs.
+                        Interlocked.Exchange(ref _titleFlushQueued, 0);
+                    }
                     return 1;
                 }
 
@@ -1214,6 +1234,29 @@ internal sealed partial class GhosttyHost : IDisposable
         {
             _logger.LogError(ex, "OnAction threw while handling {Tag}", tag);
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// The one title-flush task: raises each surface's latest queued title,
+    /// on the UI thread. The armed flag is cleared BEFORE the pending map is
+    /// swapped out, so a title that lands during the flush either rides the
+    /// batch being raised or has armed the next flush itself; it can never
+    /// sit in the map with no flush coming.
+    /// </summary>
+    private void FlushPendingTitles()
+    {
+        Interlocked.Exchange(ref _titleFlushQueued, 0);
+        Dictionary<IntPtr, string> batch;
+        lock (_titleGate)
+        {
+            batch = _pendingTitles;
+            _pendingTitles = new Dictionary<IntPtr, string>();
+        }
+        foreach (var pair in batch)
+        {
+            if (TryResolveControl(pair.Key, out var c) && c is not null)
+                c.RaiseTitleChanged(pair.Value);
         }
     }
 
