@@ -21,6 +21,13 @@ public class VersionBannerTests
         // Product name, then the w-prefixed version the release tags use.
         Assert.StartsWith(AppIdentity.ProductName + " w", header);
         Assert.Contains(BuildInfo.WinttyVersion, header);
+
+        // The edition rides on the banner line (and only there - the
+        // shared VersionHeader.Compose is left to the +version header and
+        // the dialog title). The overlay's channel-aware labels land the
+        // same way, so the assert pins the formatter's own output rather
+        // than a spelled-out tier name.
+        Assert.EndsWith("(" + EditionLabel.Format(BuildInfo.Edition) + ")", header);
     }
 
     [Fact]

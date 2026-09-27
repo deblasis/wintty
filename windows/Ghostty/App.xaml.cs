@@ -10,6 +10,7 @@ using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
 using Ghostty.Core.Power;
+using Ghostty.Core.Version;
 using Ghostty.Hosting;
 using Ghostty.Power;
 using Ghostty.Services;
@@ -455,9 +456,14 @@ public partial class App : Application
             var path = Path.Combine(dir, "crash.log");
             lock (_crashLogLock)
             {
+                // The identity under the timestamp, same reason as
+                // gpu.log and ghostty-crash.log (#968): this is the crash
+                // log the GUI's own handlers write, and a file pasted
+                // alone has to say what was running. The banner was seeded
+                // on MainImpl's frame, so this reads a cached string.
                 File.AppendAllText(
                     path,
-                    $"{DateTimeOffset.UtcNow:O} [{tag}]\n{detail}\n\n");
+                    $"{DateTimeOffset.UtcNow:O} [{tag}]\n{VersionBanner.Header()}\n{detail}\n\n");
             }
         }
         catch { /* logging must not throw */ }

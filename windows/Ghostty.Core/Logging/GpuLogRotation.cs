@@ -9,11 +9,12 @@ namespace Ghostty.Core.Logging;
 /// no longer destroys the evidence it is asked about (#968). Exactly one
 /// previous launch is kept - the one support would ask about.
 ///
-/// Best-effort throughout, reporting success as a bool: a rotation that
-/// fails (the previous log held open by a tailer, revoked ACLs) leaves both
-/// files where they are. The caller opens the new log with OPEN_ALWAYS for
-/// exactly this case, so a failed rotation degrades to appending instead of
-/// to the CREATE_ALWAYS truncation this rotation replaces.
+/// Best-effort throughout, reporting success as a bool. The caller opens
+/// the new log with OPEN_ALWAYS for exactly the failure cases, so a failed
+/// rotation degrades to appending instead of to the CREATE_ALWAYS
+/// truncation this rotation replaces. Failure itself deletes nothing: the
+/// replace is a single File.Move with overwrite, which either lands or
+/// leaves both files exactly as they were.
 /// </summary>
 internal static class GpuLogRotation
 {
@@ -39,21 +40,17 @@ internal static class GpuLogRotation
             if (!File.Exists(currentPath))
                 return true;
 
-            var previous = PreviousPathFor(currentPath);
-            try
-            {
-                if (File.Exists(previous))
-                    File.Delete(previous);
-            }
-            catch (Exception)
-            {
-                // A previous log we cannot delete is one the move below
-                // cannot replace; report the failure and leave both files
-                // alone rather than deleting our way to a gap.
-                return false;
-            }
-
-            File.Move(currentPath, previous);
+            // One replace-move, no delete of our own. The current log may
+            // be held by another Wintty instance (RedirectStderrToFile runs
+            // before the single-instance election, so a second launch
+            // reaches this while the primary still holds gpu.log open with
+            // no FILE_SHARE_DELETE) and the stored previous may be held by
+            // a tailer. Both shapes fail the move outright, which is the
+            // property everything here is built on: a failed move leaves
+            // the source and the destination exactly as they were, so the
+            // stored previous can never be lost to a rotation that did not
+            // complete. Replacing, when it happens, is the move itself.
+            File.Move(currentPath, PreviousPathFor(currentPath), overwrite: true);
             return true;
         }
         catch (Exception)

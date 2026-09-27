@@ -332,10 +332,13 @@ public static partial class Program
             // OPEN_ALWAYS, not CREATE_ALWAYS: CREATE_ALWAYS truncated the
             // log on every launch, so the relaunch a support round-trip asks
             // for destroyed the previous launch's evidence (#968). After a
-            // successful rotation this creates the file fresh; when rotation
-            // failed it appends to what is there. FILE_APPEND_DATA writes at
-            // EOF regardless, which is what the two-writers sharing below
-            // rely on.
+            // successful rotation this creates the file fresh; when the
+            // rotation rolled back because the stored previous was held
+            // (a tailer), it appends to what is there. When the current log
+            // itself is held by another instance, this open fails outright
+            // and the launch keeps its terminal stderr. Nothing is ever
+            // destroyed. FILE_APPEND_DATA writes at EOF regardless, which
+            // is what the two-writers sharing below rely on.
             // AutoFlush on the writer below pushes every line to the OS, so a
             // GPU driver crash loses at most a partial line. This is not
             // write-through (no FILE_FLAG_WRITE_THROUGH), so the OS cache can
@@ -689,9 +692,12 @@ public static partial class Program
                     $"managed thread {Environment.CurrentManagedThreadId}) ==={Environment.NewLine}" +
                     // The identity under the delimiter, for the same reason
                     // as the gpu.log header (#968): a crash log pasted alone
-                    // has to say what was running. Cached from startup, so
-                    // this reads a string - it does not call into
-                    // libghostty, which may be the thing that crashed.
+                    // has to say what was running. The cache is seeded on
+                    // MainImpl's frame before anything that can crash, and
+                    // ReportFatal/FatalHandler only ever see managed
+                    // exceptions (native crashes belong to sentry), so this
+                    // reads a cached string. A cold call would still only
+                    // ever hit the wrapped constants-only fallback.
                     $"{VersionBanner.Header()}{Environment.NewLine}" +
                     $"{detail}{Environment.NewLine}{Environment.NewLine}";
 
@@ -865,6 +871,16 @@ public static partial class Program
         _terminalStderr = Console.Error;
 
         RegisterNativeResolver();
+
+        // Cache the version banner while everything is healthy. ReportFatal
+        // reads this cached string, and its docs promise a crash log on
+        // every managed path - a promise the plain CLI path would break,
+        // because with no WINTTY_GPU_LOG there is no redirect and the crash
+        // entry would have been the first caller: an FFI call into a broken
+        // ghostty.dll at crash time, exactly where the process can least
+        // afford one (#968). On a broken install the read inside throws and
+        // Header() falls back to the constants-only line.
+        VersionBanner.Header();
 
         // `just run-win` launches from the repo root; WinAppSDK self-contained
         // PRI/resource DLLs resolve relative to the process cwd. Pin cwd to

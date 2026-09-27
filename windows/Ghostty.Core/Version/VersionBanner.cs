@@ -45,7 +45,8 @@ public static class VersionBanner
     {
         try
         {
-            return VersionHeader.Compose(VersionRenderer.Build());
+            var info = VersionRenderer.Build();
+            return WithEdition(VersionHeader.Compose(info), info);
         }
         catch (Exception)
         {
@@ -53,7 +54,32 @@ public static class VersionBanner
             // loaded it): render from the managed constants alone. The only
             // thing lost is the libghostty half, which VersionHeader omits
             // by itself when the library reports no version.
-            return VersionHeader.Compose(ConstantsOnly());
+            var info = ConstantsOnly();
+            return WithEdition(VersionHeader.Compose(info), info);
+        }
+    }
+
+    /// <summary>
+    /// The edition rides on the banner and deliberately not on the shared
+    /// <see cref="VersionHeader.Compose"/> (the +version header and the
+    /// dialog title share that line's shape, and the dialog already names
+    /// the edition in its body). Four flavours append to the same log
+    /// directories; a header that answers "what was running" without
+    /// saying which flavour is half an answer (#968). The overlay's
+    /// channel-aware labels (Sponsor Stable, Pro Tip) land here the same
+    /// way they land in the +version body.
+    /// </summary>
+    private static string WithEdition(string header, VersionInfo info)
+    {
+        try
+        {
+            return $"{header} ({EditionLabel.Format(info.Edition)})";
+        }
+        catch (Exception)
+        {
+            // An edition the formatter does not know must not cost the
+            // whole banner; the bare identity is still true.
+            return header;
         }
     }
 
