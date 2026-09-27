@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -172,5 +173,54 @@ public class TabTitleWiringTests
             .Where(i => i.CalleeText().EndsWith("PaneTree.Leaves", System.StringComparison.Ordinal)));
         Assert.NotEmpty(helper.DescendantNodes().OfType<ReturnStatementSyntax>()
             .Where(r => r.Expression?.ToString() == "tab"));
+    }
+
+    /// <summary>
+    /// Title updates coalesce into one flush task per burst: a program that
+    /// retitles continuously used to queue one UI-thread task per title and
+    /// flood the dispatcher (wintty#1166). The SetTitle case stores the
+    /// latest title and arms the flush; it never raises directly. The flush
+    /// resolves the surface on the UI thread, the way every other action
+    /// does, and disarms BEFORE swapping the pending map, so a title that
+    /// lands mid-flush is raised by exactly one flush and none waits in the
+    /// map forever.
+    /// </summary>
+    [Fact]
+    public void TitleUpdates_CoalesceIntoOneFlush()
+    {
+        var host = ShellSource.Load("Hosting.GhosttyHost.cs");
+
+        var section = host.Case("OnAction", "SetTitle");
+
+        // No per-title delivery out of the case itself.
+        Assert.Empty(section.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().EndsWith("RaiseTitleChanged", StringComparison.Ordinal)));
+
+        // The latest title per surface is stored, and the flush is armed
+        // once (a failed enqueue unarms rather than stranding the store).
+        var store = Assert.Single(section.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "_pendingTitles[surfaceHandle]");
+        Assert.Equal("title", store.Right.ToString());
+        Assert.NotEmpty(section.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(i => i.Identifier.ValueText == "FlushPendingTitles"));
+        Assert.NotEmpty(section.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().EndsWith("Interlocked.Exchange", StringComparison.Ordinal)));
+
+        var flush = host.Method("FlushPendingTitles");
+        var statements = flush.Body!.Statements;
+
+        // Disarm precedes the swap: the invariant the flush exists for.
+        var disarm = statements.IndexOf(Assert.Single(statements
+            .Where(s => s.ToString().Contains("_titleFlushQueued"))));
+        var swap = statements.IndexOf(Assert.Single(statements
+            .Where(s => s.ToString().Contains("batch = _pendingTitles"))));
+        Assert.True(disarm >= 0 && disarm < swap,
+            "the flush must disarm before it takes the batch");
+
+        // One raise per queued surface, resolved through the guard, with
+        // the stored title.
+        var raise = flush.Call("c.RaiseTitleChanged");
+        Assert.Equal("pair.Value", raise.Arg(0));
     }
 }
