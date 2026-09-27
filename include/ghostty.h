@@ -1441,6 +1441,45 @@ GHOSTTY_API bool ghostty_surface_shared_texture(
     ghostty_surface_t,
     ghostty_surface_shared_texture_s* out);
 
+// Diagnostics/testing hook: a snapshot of the frame the surface's
+// renderer most recently presented. The texture is a COPY of the
+// presented back buffer, never the presented buffer itself.
+//
+// Ownership: the CALLER owns both NT HANDLEs in this struct and must
+// CloseHandle each of them when done. Closing both releases the
+// underlying ID3D12Resource and ID3D12Fence.
+typedef struct {
+  // NT HANDLE to a B8G8R8A8_UNORM texture, surface-sized, in D3D12
+  // resource state COMMON with D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_
+  // ACCESS. Open it with ID3D12Device::OpenSharedHandle on the
+  // renderer's device (see ghostty_surface_get_d3d12_device) or with
+  // ID3D11Device1::OpenSharedResource1 on any D3D11 device over the
+  // same adapter, including a D3D11On12 wrapper.
+  void* resource_handle;
+
+  // NT HANDLE to a D3D12 fence signaled at `fence_value` once the GPU
+  // has finished the copy into `resource_handle`. Wait for it before
+  // reading the texture.
+  void* fence_handle;
+
+  // The value `fence_handle` is signaled with. Each snapshot carries a
+  // fresh fence, so this is always 1.
+  uint64_t fence_value;
+
+  // Pixel dimensions of `resource_handle`.
+  uint32_t width;
+  uint32_t height;
+} ghostty_surface_last_frame_texture_s;
+
+// Fill `out` with a last-presented-frame snapshot. Returns true on
+// success; returns false and leaves `out` untouched on non-DX12
+// renderers, non-swap-chain modes, and allocation or submission
+// failure. Submits GPU work: the call waits for the renderer's draw
+// lock and can block for the length of a frame.
+GHOSTTY_API bool ghostty_surface_get_last_frame_texture(
+    ghostty_surface_t,
+    ghostty_surface_last_frame_texture_s* out);
+
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);

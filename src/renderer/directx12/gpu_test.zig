@@ -1793,3 +1793,309 @@ test "DirectX12: rebuilds every device-bound object after the device is removed"
     try std.testing.expect(api.init_command_list == null);
     try dev.waitForGpu();
 }
+
+// ---- Last-frame snapshot (diagnostics export) ----
+
+const snapshot_test = struct {
+    const SIZE: u32 = 64;
+
+    fn waitForFenceValue(
+        dev: *Device,
+        fence: *d3d12.ID3D12Fence,
+        value: u64,
+    ) !void {
+        if (fence.GetCompletedValue() < value) {
+            const hr = fence.SetEventOnCompletion(value, dev.fence_event);
+            if (com.FAILED(hr)) return error.FenceSetEventFailed;
+            const wait_result = d3d12.WaitForSingleObject(dev.fence_event, d3d12.INFINITE);
+            if (wait_result != 0) return error.WaitFailed;
+        }
+    }
+
+    /// Clear `target` to `color` through the device's command queue.
+    fn clearTarget(
+        dev: *Device,
+        target: *d3d12.ID3D12Resource,
+        color: *const [4]f32,
+    ) !void {
+        var heap = try DescriptorHeap.init(dev.device, .RTV, 1, false);
+        defer heap.deinit();
+        dev.device.CreateRenderTargetView(target, null, heap.cpuHandle(0));
+
+        var allocator: ?*d3d12.ID3D12CommandAllocator = null;
+        var hr = dev.device.CreateCommandAllocator(
+            .DIRECT,
+            &d3d12.ID3D12CommandAllocator.IID,
+            @ptrCast(&allocator),
+        );
+        if (com.FAILED(hr)) return error.AllocatorCreationFailed;
+        defer if (allocator) |a| { _ = a.Release(); };
+
+        var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
+        hr = dev.device.CreateCommandList(
+            0,
+            .DIRECT,
+            allocator.?,
+            null,
+            &d3d12.ID3D12GraphicsCommandList.IID,
+            @ptrCast(&cl),
+        );
+        if (com.FAILED(hr)) return error.CommandListCreationFailed;
+        defer if (cl) |c| { _ = c.Release(); };
+
+        cl.?.OMSetRenderTargets(1, @ptrCast(&heap.cpuHandle(0)), .FALSE, null);
+        cl.?.ClearRenderTargetView(heap.cpuHandle(0), color, 0, null);
+        {
+            const close_hr = cl.?.Close();
+            if (com.FAILED(close_hr)) return error.CommandListCloseFailed;
+        }
+
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl.?};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+        try waitForFenceSignal(dev);
+    }
+
+    /// Signal + wait for everything submitted so far on the queue.
+    fn waitForFenceSignal(dev: *Device) !void {
+        const value = dev.fence_value.fetchAdd(1, .monotonic) + 1;
+        var hr = dev.command_queue.Signal(dev.fence, value);
+        if (com.FAILED(hr)) return error.FenceSignalFailed;
+        if (dev.fence.GetCompletedValue() < value) {
+            hr = dev.fence.SetEventOnCompletion(value, dev.fence_event);
+            if (com.FAILED(hr)) return error.FenceSetEventFailed;
+            const wait_result = d3d12.WaitForSingleObject(dev.fence_event, d3d12.INFINITE);
+            if (wait_result != 0) return error.WaitFailed;
+        }
+    }
+
+    /// Expect an HRESULT succeeded, naming the call on failure so a
+    /// device-removal cascade identifies its first victim.
+    fn snapExpect(hr: com.HRESULT, tag: []const u8) !void {
+        if (com.FAILED(hr))
+            std.debug.print("[snapdbg] {s}: FAILED hr=0x{x}\n", .{ tag, @as(u32, @bitCast(hr)) });
+        try std.testing.expect(!com.FAILED(hr));
+    }
+
+    /// Open a snapshot's handles on the same device, copy the texture
+    /// into a readback staging texture, and Map it.
+    fn readbackSnapshot(
+        dev: *Device,
+        snap: Device.LastFrameSnapshot,
+        out_rows: []u8,
+    ) !void {
+        var opened: ?*anyopaque = null;
+        var hr = dev.device.OpenSharedHandle(
+            snap.resource_handle,
+            &d3d12.ID3D12Resource.IID,
+            &opened,
+        );
+        try snapExpect(hr, "open resource");
+        const tex: *d3d12.ID3D12Resource = @ptrCast(@alignCast(opened.?));
+        defer _ = tex.Release();
+
+        var fence_opened: ?*anyopaque = null;
+        hr = dev.device.OpenSharedHandle(
+            snap.fence_handle,
+            &d3d12.ID3D12Fence.IID,
+            &fence_opened,
+        );
+        try snapExpect(hr, "open fence");
+        const fence: *d3d12.ID3D12Fence = @ptrCast(@alignCast(fence_opened.?));
+        defer _ = fence.Release();
+        try waitForFenceValue(dev, fence, snap.fence_value);
+
+        // Readback staging BUFFER -- the pattern the renderer's own
+        // readback tests use, because this driver rejects TEXTURE2D on a
+        // READBACK heap with E_INVALIDARG. The copy footprint carries the
+        // texture shape; the row pitch is the 256-aligned bytes-per-row.
+        const row_pitch: u32 = (SIZE * 4 + 255) / 256 * 256;
+        const rb_props = d3d12.D3D12_HEAP_PROPERTIES{
+            .Type = .READBACK,
+            .CPUPageProperty = 0,
+            .MemoryPoolPreference = 0,
+            .CreationNodeMask = 0,
+            .VisibleNodeMask = 0,
+        };
+        const rb_desc = d3d12.D3D12_RESOURCE_DESC{
+            .Dimension = .BUFFER,
+            .Alignment = 0,
+            .Width = row_pitch * SIZE,
+            .Height = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = .UNKNOWN,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Layout = .ROW_MAJOR,
+            .Flags = .NONE,
+        };
+        var rb: ?*d3d12.ID3D12Resource = null;
+        hr = dev.device.CreateCommittedResource(
+            &rb_props,
+            0,
+            &rb_desc,
+            .COPY_DEST,
+            null,
+            &d3d12.ID3D12Resource.IID,
+            @ptrCast(&rb),
+        );
+        try snapExpect(hr, "staging create");
+        defer _ = rb.?.Release();
+
+        var allocator: ?*d3d12.ID3D12CommandAllocator = null;
+        hr = dev.device.CreateCommandAllocator(
+            .DIRECT,
+            &d3d12.ID3D12CommandAllocator.IID,
+            @ptrCast(&allocator),
+        );
+        try snapExpect(hr, "staging allocator");
+        defer if (allocator) |a| { _ = a.Release(); };
+
+        var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
+        hr = dev.device.CreateCommandList(
+            0,
+            .DIRECT,
+            allocator.?,
+            null,
+            &d3d12.ID3D12GraphicsCommandList.IID,
+            @ptrCast(&cl),
+        );
+        try snapExpect(hr, "staging command list");
+        defer if (cl) |c| { _ = c.Release(); };
+
+        const dst_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
+            .pResource = rb.?,
+            .Type = .PLACED_FOOTPRINT,
+            .u = .{ .PlacedFootprint = .{
+                .Offset = 0,
+                .Footprint = .{
+                    .Format = .B8G8R8A8_UNORM,
+                    .Width = SIZE,
+                    .Height = SIZE,
+                    .Depth = 1,
+                    .RowPitch = row_pitch,
+                },
+            } },
+        };
+        const src_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
+            .pResource = tex,
+            .Type = .SUBRESOURCE_INDEX,
+            .u = .{ .SubresourceIndex = 0 },
+        };
+        cl.?.CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, null);
+        try snapExpect(cl.?.Close(), "staging list close");
+
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl.?};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+        try waitForFenceSignal(dev);
+
+        var data: ?*anyopaque = null;
+        hr = rb.?.Map(0, null, &data);
+        try snapExpect(hr, "staging map");
+        defer rb.?.Unmap(0, null);
+        const src_bytes: [*]const u8 = @ptrCast(data.?);
+        for (0..SIZE) |y| {
+            @memcpy(
+                out_rows[y * SIZE * 4 ..][0 .. SIZE * 4],
+                src_bytes[y * row_pitch ..][0 .. SIZE * 4],
+            );
+        }
+    }
+};
+
+test "Device: last-frame snapshot copies the presented frame" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
+
+    var dev = Device.init(.swap_chain_panel, .{
+        .width = snapshot_test.SIZE,
+        .height = snapshot_test.SIZE,
+    }) catch return error.SkipZigTest;
+    defer dev.deinit();
+    const sc = dev.swap_chain orelse return error.NoSwapChain;
+
+    // Render a known pattern into back buffer 0 and present it, the way
+    // a frame does, so buffer 0 is the just-presented frame.
+    var bb0: ?*anyopaque = null;
+    const hr = sc.GetBuffer(0, &d3d12.ID3D12Resource.IID, &bb0);
+    try std.testing.expect(!com.FAILED(hr));
+    const back_buffer: *d3d12.ID3D12Resource = @ptrCast(@alignCast(bb0.?));
+
+    try snapshot_test.clearTarget(&dev, back_buffer, &.{ 1.0, 0.0, 1.0, 1.0 });
+    const present_hr = sc.Present(0, 0);
+    if (com.FAILED(present_hr))
+        std.debug.print("snapshot test: Present hr=0x{x}\n", .{@as(u32, @bitCast(present_hr))});
+    try std.testing.expect(!com.FAILED(present_hr));
+    try snapshot_test.waitForFenceSignal(&dev);
+
+    const snap = try dev.snapshotLastFrame(back_buffer, snapshot_test.SIZE, snapshot_test.SIZE);
+    defer {
+        _ = d3d12.CloseHandle(snap.resource_handle);
+        _ = d3d12.CloseHandle(snap.fence_handle);
+    }
+    try std.testing.expectEqual(@as(u64, 1), snap.fence_value);
+    try std.testing.expectEqual(@as(u32, snapshot_test.SIZE), snap.width);
+    try std.testing.expectEqual(@as(u32, snapshot_test.SIZE), snap.height);
+
+    var rows: [snapshot_test.SIZE * snapshot_test.SIZE * 4]u8 = undefined;
+    try snapshot_test.readbackSnapshot(&dev, snap, &rows);
+
+    // B8G8R8A8 bytes for the RGBA clear color (1,0,1,1): magenta.
+    const expected = [4]u8{ 0xff, 0x00, 0xff, 0xff };
+    for (0..snapshot_test.SIZE) |y| {
+        for (0..snapshot_test.SIZE) |x| {
+            const px = rows[(y * snapshot_test.SIZE + x) * 4 ..][0..4];
+            try std.testing.expectEqualSlices(u8, &expected, px);
+        }
+    }
+}
+
+test "DirectX12: last-frame snapshot tracks the presented slot" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
+
+    const DirectX12 = @import("../DirectX12.zig");
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.swap_chain_panel, snapshot_test.SIZE, snapshot_test.SIZE) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+    api.flushInitCommands();
+    const dev = &(api.dev orelse return error.NoDevice);
+    const sc3 = api.swap_chain3 orelse return error.NoSwapChain;
+
+    // Advance the flip queue once so the current slot moves off 0 --
+    // production cycles all three buffers, and flip-model rendering is
+    // expected on the slot GetCurrentBackBufferIndex names.
+    try std.testing.expect(!com.FAILED(sc3.Present(0, 0)));
+    const cur = sc3.GetCurrentBackBufferIndex();
+
+    // Paint that slot green, mark it the presented slot, and present it.
+    // The snapshot must follow the tracking, not slot 0.
+    const target = api.back_buffers[cur] orelse return error.NoBackBuffer;
+    try snapshot_test.clearTarget(dev, target, &.{ 0.0, 1.0, 0.0, 1.0 });
+    api.pending_frame_index = cur;
+    const present_hr = sc3.Present(0, 0);
+    if (com.FAILED(present_hr))
+        std.debug.print("snapshot slot test: Present hr=0x{x}\n", .{@as(u32, @bitCast(present_hr))});
+    try std.testing.expect(!com.FAILED(present_hr));
+    try snapshot_test.waitForFenceSignal(dev);
+
+    const snap = try api.snapshotLastFrame();
+    defer {
+        _ = d3d12.CloseHandle(snap.resource_handle);
+        _ = d3d12.CloseHandle(snap.fence_handle);
+    }
+    try std.testing.expectEqual(@as(u32, snapshot_test.SIZE), snap.width);
+    try std.testing.expectEqual(@as(u32, snapshot_test.SIZE), snap.height);
+
+    var rows: [snapshot_test.SIZE * snapshot_test.SIZE * 4]u8 = undefined;
+    try snapshot_test.readbackSnapshot(dev, snap, &rows);
+
+    // B8G8R8A8 bytes for the RGBA clear color (0,1,0,1): green.
+    const expected = [4]u8{ 0x00, 0xff, 0x00, 0xff };
+    for (0..snapshot_test.SIZE) |y| {
+        for (0..snapshot_test.SIZE) |x| {
+            const px = rows[(y * snapshot_test.SIZE + x) * 4 ..][0..4];
+            try std.testing.expectEqualSlices(u8, &expected, px);
+        }
+    }
+}
