@@ -2296,10 +2296,13 @@ keybind: Keybinds = .{},
 
 /// The theme to use for the windows. Valid values:
 ///
-///   * `auto` - Determine the theme based on the configured terminal
-///      background color. This has no effect if the "theme" configuration
-///      has separate light and dark themes. In that case, the behavior
-///      of "auto" is equivalent to "system".
+///   * `auto` - Resolve to the system theme. Every theme resolution path
+///      (the builtin default and explicit themes alike) rewrites `auto`
+///      to `system`: the terminal background comes from the theme while
+///      the desktop can be either polarity, so deriving the theme from
+///      the background's luminance would split the window chrome from
+///      the desktop. An explicit `system`, `light` or `dark` always
+///      wins.
 ///   * `system` - Use the system theme.
 ///   * `light` - Use the light theme regardless of system theme.
 ///   * `dark` - Use the dark theme regardless of system theme.
@@ -6085,7 +6088,7 @@ pub fn finalize(self: *Config) !void {
         // #754's chrome/terminal split. The builtin path below has always
         // resolved auto to system for the same reason, and a light:dark pair
         // has had it since the beginning, so every themed install gets it
-        // now; an explicit window-theme still wins.
+        // now; an explicit non-auto window-theme still wins.
         if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
 
         if (different) {
