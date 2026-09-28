@@ -900,6 +900,34 @@ public partial class App : Application
             logger: factory.CreateLogger<WindowsPowerStateMonitor>());
         PowerStateMonitor = _powerStateMonitor;
 
+        // The user's Animations lever (Appearance). Read fresh per ask,
+        // like the power mode above: a config edit lands on the next gate
+        // read without a restart.
+        Ghostty.Services.MotionGating.SetUserLeverSource(() =>
+            Ghostty.Core.Motion.UserMotionLeverValues.Parse(
+                _configService?.GetRawFileValue("animations")));
+
+        // The energy-saver seat for the same fallback: the mode from the
+        // config key (the same parse the monitor's readMode runs) and the
+        // monitor's trigger composite, mapped by name. The composite goes
+        // over raw, remote-session bit included; the truth table masks it
+        // out of the level test itself.
+        Ghostty.Services.MotionGating.SetPowerSeatSource(() =>
+        {
+            var raw = _configService?.GetRawFileValue("power-saver-mode") ?? "auto";
+            var mode = raw.Trim().ToLowerInvariant() switch
+            {
+                "always" => Ghostty.Core.Power.PowerSaverMode.Always,
+                "never"  => Ghostty.Core.Power.PowerSaverMode.Never,
+                _        => Ghostty.Core.Power.PowerSaverMode.Auto,
+            };
+            return (
+                PowerPolicyAdapter.Mode(mode),
+                PowerPolicyAdapter.Triggers(
+                    PowerStateMonitor?.ActiveTriggers
+                    ?? Ghostty.Core.Power.PowerSaverTrigger.None));
+        });
+
         // Re-resolve whenever the user edits power-saver-mode (or any
         // other key -- cheap, and keeps this out of the reload path's
         // critical section). Named handler so we can detach symmetrically

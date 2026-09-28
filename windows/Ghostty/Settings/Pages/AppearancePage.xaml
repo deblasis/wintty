@@ -301,6 +301,20 @@
                     </ComboBox>
                 </ctrl:SettingsCard>
             </ctrl:SettingsGroup>
+
+            <ctrl:SettingsGroup Header="Animations"
+                                Description="How much the app animates, matching Windows' animation setting.">
+                <ctrl:SettingsCard Header="Animations"
+                                   Description="Follow system honors the Windows animation setting. Reduced keeps fades and removes movement. Off turns animations off."
+                                   ctrl:SettingsCard.ConfigKey="animations">
+                    <ComboBox x:Name="AnimationsCombo" MinWidth="180"
+                              SelectionChanged="Animations_SelectionChanged">
+                        <ComboBoxItem Content="Follow system" Tag="system" />
+                        <ComboBoxItem Content="Reduced" Tag="reduced" />
+                        <ComboBoxItem Content="Off" Tag="off" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
         </StackPanel>
     </ScrollViewer>
 </Page>

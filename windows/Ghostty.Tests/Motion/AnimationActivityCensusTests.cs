@@ -97,6 +97,7 @@ public class AnimationActivityCensusTests
         ("Tabs.TabPinBandPanel.cs", KindRegistryStart, 1),            // square glide
         ("Shell.LayoutSwitchTimeline.cs", KindRegistryStart, 5),      // Register's two branches, the pivot, the T and S drivers
         ("Panes.PaneStartupGlow.cs", KindRegistryStart, 3),           // orbit on two brushes + the fade; the orbit is Forever
+        ("Panes.PaneHost.cs", KindRegistryStart, 1),                  // the pane fades (split fade-in, soft-close fade-out share one start)
         ("Tabs.TabOverviewControl.xaml", KindXamlTransition, 2),      // EntranceThemeTransition + ContentThemeTransition
     };
 

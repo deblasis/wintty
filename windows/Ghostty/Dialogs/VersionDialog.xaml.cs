@@ -21,7 +21,7 @@ internal sealed partial class VersionDialog : ContentDialog
     {
         InitializeComponent();
 
-        var info = VersionRenderer.Build();
+        var info = VersionRenderer.Build(Ghostty.Services.AnimationsState.Code());
         // Clipboard payload is the full text (with header + URL line) so the
         // bug-report use case still has everything when pasted elsewhere.
         _output = VersionRenderer.RenderPlain(info);

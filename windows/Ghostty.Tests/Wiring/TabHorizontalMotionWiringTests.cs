@@ -50,13 +50,24 @@ public class TabHorizontalMotionWiringTests
     public void TheGate_IsTheFirstStatement_AndTheCutIsTotal()
     {
         var host = Host();
-        foreach (var name in new[] { "StartLift", "FadeInAppearing" })
+
+        // Each animated hand is gated first, and the cut is total, but the
+        // two hands ask different gates by law: the lift is movement, so
+        // it asks the strip's movement route (Full only); the appear-hand
+        // is an opacity fade, so it asks the fade-bearing gate, which
+        // reduced keeps alive.
+        var liftGate = Assert.IsType<IfStatementSyntax>(
+            host.Method("StartLift").Body!.Statements.First());
+        Assert.Equal(
+            "!TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast)",
+            liftGate.Condition.ToString());
+        var fadeGate = Assert.IsType<IfStatementSyntax>(
+            host.Method("FadeInAppearing").Body!.Statements.First());
+        Assert.Equal(
+            "!SystemAnimations.Enabled(MotionSurfaceClass.Chrome)",
+            fadeGate.Condition.ToString());
+        foreach (var first in new[] { liftGate, fadeGate })
         {
-            var first = Assert.IsType<IfStatementSyntax>(
-                host.Method(name).Body!.Statements.First());
-            Assert.Equal(
-                "!TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast)",
-                first.Condition.ToString());
             Assert.Contains(
                 first.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>(),
                 r => true);

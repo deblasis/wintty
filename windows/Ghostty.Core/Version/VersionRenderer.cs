@@ -21,7 +21,11 @@ public static class VersionRenderer
     /// MSBuild-generated <see cref="BuildInfo"/> constants, the libghostty
     /// FFI, the .NET runtime, and the OS.
     /// </summary>
-    public static VersionInfo Build()
+    /// <param name="animations">The resolved animation state, coded
+    /// ("full"/"reduced"/"off"). Callers that cannot resolve it (the
+    /// +version CLI never reads config) pass nothing and the field is
+    /// omitted from the dump entirely.</param>
+    public static VersionInfo Build(string? animations = null)
     {
         var lib = LibGhosttyBuildInfoBridge.Read();
         return new VersionInfo(
@@ -37,7 +41,8 @@ public static class VersionRenderer
             Renderer:            "DX12",
             FontEngine:          "DirectWrite",
             WindowsVersion:      Environment.OSVersion.Version.ToString(3),
-            Architecture:        RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant());
+            Architecture:        RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(),
+            Animations:          animations);
     }
 
     /// <summary>Plain rendering with header. No escape sequences. Used by
@@ -129,6 +134,10 @@ public static class VersionRenderer
         Field(sb, "libghostty",   FormatLibghosttyVersion(info.LibGhostty));
         Field(sb, "windows",      info.WindowsVersion);
         Field(sb, "arch",         info.Architecture);
+        // The resolved animation state, coded in public vocabulary and
+        // omitted entirely when the caller could not resolve one.
+        if (!string.IsNullOrEmpty(info.Animations))
+            Field(sb, "animations",   info.Animations);
         Field(sb, "build mode",   info.MsbuildConfig);
     }
 

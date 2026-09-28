@@ -178,24 +178,30 @@ public class LifecycleHookWiringTests
     [Fact]
     public void CloseLeaf_ReportsChangingBeforeTheTreeSwap_AndChangedAfterTheRebuild()
     {
+        // The close's notifications ride the deferred tail: both close
+        // paths (hard and gate-off soft inline, gated soft from the fade's
+        // Completed) run FinishClose, and the hooks live there. The link is
+        // pinned first, so these hooks cannot detach from the close.
         var close = Method("Panes.PaneHost.cs", "CloseLeaf", 2);
+        Assert.Single(close.Calls("FinishClose"));
 
-        var changing = Hook(close.Body!, Changing, "CloseLeaf");
-        var changed = Hook(close.Body, Changed, "CloseLeaf");
-        AssertGuardedWithRecordInside(changing, "CloseLeaf");
-        AssertGuardedWithRecordInside(changed, "CloseLeaf");
+        var tail = Method("Panes.PaneHost.cs", "FinishClose", 1);
+        var changing = Hook(tail.Body!, Changing, "the close tail (FinishClose)");
+        var changed = Hook(tail.Body, Changed, "the close tail (FinishClose)");
+        AssertGuardedWithRecordInside(changing, "the close tail (FinishClose)");
+        AssertGuardedWithRecordInside(changed, "the close tail (FinishClose)");
         AssertChangeKind(changing, "Close");
         AssertChangeKind(changed, "Close");
 
         // Before: `_root = newRoot;` is the model commit of the close.
-        var rootSwap = close.Body.DescendantNodes()
+        var rootSwap = tail.Body.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left.ToString() == "_root" && a.Right.ToString() == "newRoot");
         AssertBefore(changing, rootSwap, "the Close pre-state");
 
         // After: the incremental splice, falling back to a full Rebuild(),
         // is the visual commit.
-        var rebuild = close.Body.Calls("TryIncrementalCloseRebuild").Single();
+        var rebuild = tail.Body.Calls("TryIncrementalCloseRebuild").Single();
         AssertAfter(changed, rebuild, "the Close post-state");
     }
 

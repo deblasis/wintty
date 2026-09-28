@@ -7,12 +7,14 @@ using Ghostty.Core.Profiles;
 using Ghostty.Controls;
 using Ghostty.Hosting;
 using Ghostty.Motion;
+using Ghostty.Services;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
 
@@ -114,6 +116,27 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private readonly Dictionary<TerminalControl, Core.Panes.PaneStartupGlowState> _glowStates = new();
     private readonly Dictionary<TerminalControl, PaneStartupGlow> _glows = new();
     private readonly Dictionary<TerminalControl, Canvas> _glowMounts = new();
+
+    // Pane fades. The tracker (plain C#, Motion/) holds the flights; this
+    // holds the boards a settle has to stop, added and removed in lockstep
+    // with those flights (one row per fading leaf; each board is
+    // single-use, built at the cap and dropped when its fade ends).
+    private readonly Dictionary<LeafPane, (Storyboard Board, PaneFadeKind Kind)> _paneFadeBoards = new();
+
+    // The soft close waiting for its fade to finish: the model has decided
+    // (the undo entry is captured, the glow is closed) but the visual cut
+    // -- the detach, the sibling splice, the notifications -- waits for
+    // the fade's Completed, or for the next tree operation to settle it.
+    // Null when no soft close is mid-fade.
+    private PendingClose? _pendingSoftClose;
+
+    /// <summary>
+    /// One deferred soft close: everything the visual cut needs. Held
+    /// while the closing pane fades, run by <see cref="FinishClose"/> when
+    /// the fade ends however it ends.
+    /// </summary>
+    private sealed record PendingClose(
+        LeafPane Leaf, Core.Panes.PaneNode? NewRoot, LeafPane? ZoomedBefore, Grid? LeafParentGrid);
 
     // Panes smaller than this in either dimension (DIPs) skip the glow.
     private const double MinGlowDimension = 80.0;
@@ -781,6 +804,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void Split(PaneOrientation orientation, ProfileSnapshot? snapshot)
     {
+        // No fade outlives a tree operation: a fade standing (a split's
+        // fade-in, a soft close's fade-away) is settled -- and the soft
+        // cut it was holding runs -- before this split reads the tree.
+        SettlePaneFades();
+
         // Capture BEFORE the implicit unzoom below so undo restores the
         // pre-split zoom state too.
         CaptureForUndo(Core.Panes.PaneOpKind.Split);
@@ -856,6 +884,17 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             currentParent.Children.Add(subGrid);
         }
 
+        // The split's fade: the geometry snapped above (the splice is in
+        // place), and the new pane fades in over the cap while its surface
+        // spawns. Off is the plain cut: no board is built and the pane
+        // mounts at full strength. Nothing else animates -- no movement,
+        // no reflow.
+        StartPaneFade(
+            newLeaf,
+            SystemAnimations.Enabled(MotionSurfaceClass.PaneGeometry)
+                ? PaneFadeKind.SplitIn
+                : PaneFadeKind.None);
+
         if (PaneMotion.Active)
         {
             PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
@@ -906,6 +945,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     internal void RehostTo(GhosttyHost newHost)
     {
+        // A rehost is a tree operation on every leaf at once: no fade
+        // outlives it (the settle write puts each control back at full
+        // strength, and the soft cut a fade was holding runs first).
+        SettlePaneFades();
+
         foreach (var leaf in PaneTree.Leaves(_root))
         {
             var terminal = leaf.Terminal();
@@ -1028,6 +1072,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void DisposeAllLeaves()
     {
+        // Settle the fades, but drop the pending close: the host is going
+        // away, and a deferred soft cut must not run against it. Every
+        // control is restored to full strength before the walk disposes
+        // surfaces.
+        SettlePaneFades(runPendingClose: false);
+
         // Tear down any in-flight startup glows first so their timers stop
         // and their composition visuals are released promptly. Glows are
         // keyed by TerminalControl independent of tree state, so this runs
@@ -1091,6 +1141,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// false (a dead shell is not worth resurrecting).</param>
     public void CloseLeaf(LeafPane leaf, bool undoable)
     {
+        // No fade outlives a tree operation: a fade standing (a split's
+        // fade-in, an earlier close's fade-away) is settled -- and the
+        // soft cut it was holding runs -- before this close reads the
+        // tree. Settling can complete a pending close of THIS leaf (its
+        // shell exited inside the fade's life and re-fired
+        // CloseRequested), so the retained-leaf guard runs after the
+        // settle, against the tree as it now stands.
+        SettlePaneFades();
+
         // A retained (already soft-closed) leaf is no longer in the live
         // tree; if its lingering shell exits and fires CloseRequested,
         // ignore it — eviction will dispose it.
@@ -1110,6 +1169,16 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // shell immediately, matching upstream: a disabled undo timeout means
         // closed surfaces don't linger in the background.
         var softClose = undoable && newRoot is not null && _undoEnabled;
+
+        // Capture the leaf's visual parent BEFORE anything detaches it.
+        // This is the Grid that visualizes the PaneTree split about to
+        // collapse; the tail reuses it as the in-place splice point for
+        // the surviving sibling visual instead of rebuilding the whole
+        // tree (see the incremental-close branch below). Captured up
+        // front so the immediate cut and the deferred one hold the same
+        // splice point.
+        var leafParentGrid = leaf.Terminal().Parent as Grid;
+
         if (softClose)
         {
             // Snapshot the tree WITH the leaf still present (and its shell
@@ -1125,6 +1194,22 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             // that stops the animation and lifts the mount off the overlay.
             if (_glowStates.TryGetValue(leaf.Terminal(), out var closingGlow))
                 closingGlow.Close();
+
+            // The soft path fades the pane away before the cut: the model
+            // has decided (the undo snapshot above) and the shell is
+            // retained, but the visual cut -- the detach, the sibling
+            // splice, the notifications -- waits for the fade's Completed
+            // so the pane is gone from the eye before it is gone from the
+            // tree. Gate off is the plain cut: FinishClose runs inline, in
+            // this frame, exactly as the hard path runs it.
+            if (SystemAnimations.Enabled(MotionSurfaceClass.PaneGeometry))
+            {
+                var pending = new PendingClose(leaf, newRoot, zoomedBefore, leafParentGrid);
+                leaf.Terminal().IsHitTestVisible = false;
+                StartPaneFade(leaf, PaneFadeKind.SoftCloseOut);
+                _pendingSoftClose = pending;
+                return;
+            }
         }
         else
         {
@@ -1132,19 +1217,34 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             TeardownLeaf(leaf);
         }
 
-        // Capture the leaf's visual parent BEFORE detaching. This is
-        // the Grid that visualizes the PaneTree split about to collapse;
-        // we reuse it as the in-place splice point for the surviving
-        // sibling visual instead of rebuilding the whole tree. See the
-        // incremental-close branch below.
-        var leafParentGrid = leaf.Terminal().Parent as Grid;
+        FinishClose(new PendingClose(leaf, newRoot, zoomedBefore, leafParentGrid));
+    }
 
-        // Detach the closed terminal from its visual parent Grid so the
-        // old split Grid does not hold a reference that keeps the WinUI
-        // compositor rendering a ghost DXGI swap chain surface. A
+    /// <summary>
+    /// The close's visual half -- everything after the model decision:
+    /// detach the leaf, collapse the split, splice the surviving sibling,
+    /// run the notifications. The hard path and a gate-off soft close run
+    /// it inline; a gated-on soft close holds it behind the fade and gets
+    /// here from the fade's Completed (or from the settle that ends the
+    /// fade early because another tree operation arrived first). The
+    /// body is the pre-fade CloseLeaf tail, verbatim, against the
+    /// pending's captured values.
+    /// </summary>
+    private void FinishClose(PendingClose pending)
+    {
+        // The visual cut leads: the leaf leaves the visual tree before
+        // anything else in the tail runs, exactly where it sat before the
+        // deferral. Detach the closed terminal from its visual parent Grid
+        // so the old split Grid does not hold a reference that keeps the
+        // WinUI compositor rendering a ghost DXGI swap chain surface. A
         // soft-closed leaf must leave the visual tree too; its surface
         // keeps compositing into nothing until restored or evicted.
-        DetachFromParent(leaf.Terminal());
+        DetachFromParent(pending.Leaf.Terminal());
+
+        var leaf = pending.Leaf;
+        var newRoot = pending.NewRoot;
+        var zoomedBefore = pending.ZoomedBefore;
+        var leafParentGrid = pending.LeafParentGrid;
 
         if (newRoot is null)
         {
@@ -1256,6 +1356,123 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // is coming off the tree.
         TeardownGlow(t);
         t.DisposeSurface();
+    }
+
+    // Pane fades -----------------------------------------------------------
+
+    /// <summary>
+    /// The pane fades' bookkeeping. The tracker (plain C#, in
+    /// Motion) owns when a fade ends; the shell owns what ending does.
+    /// The settle write is installed once for the type: it is the same
+    /// restore however a fade ends, and a board a settle stops has its
+    /// Completed stand down -- the settle removes the entry before Stop
+    /// runs, so the handler's identity guard finds nothing stored.
+    /// </summary>
+    static PaneHost()
+    {
+        PaneFadeTracker.Settle = RestoreFadeTarget;
+    }
+
+    /// <summary>
+    /// Put a fading control back the way it rests: opacity 1 -- full
+    /// strength, never the mid-fade value a rebuild would inherit -- and,
+    /// for a soft close's pane, hit-testing again. This is the settle
+    /// write the tracker drives AND the restore the board's own Completed
+    /// performs: however a fade ends, the control reads opacity 1 when no
+    /// flight stands on it, so undo can never resurrect an invisible pane.
+    /// </summary>
+    private static void RestoreFadeTarget(LeafPane leaf, PaneFadeKind kind)
+    {
+        if (leaf.Tag is not TerminalControl t) return;
+        t.Opacity = 1;
+        if (kind == PaneFadeKind.SoftCloseOut) t.IsHitTestVisible = true;
+    }
+
+    /// <summary>
+    /// Arm a pane fade. None arms nothing -- the plain cut: no board is
+    /// built and the registry is not asked. A leaf whose fade already
+    /// stands is left to finish it. Everything else builds its board at
+    /// the cap and starts it through the registry.
+    /// </summary>
+    private void StartPaneFade(LeafPane leaf, PaneFadeKind kind)
+    {
+        if (kind == PaneFadeKind.None) return;
+        if (!PaneFadeTracker.Begin(leaf, kind)) return;
+
+        var board = PaneFades.BuildBoard(kind, leaf.Terminal());
+        _paneFadeBoards[leaf] = (board, kind);
+        // Single-use board: one flight, one run. The handler is handed
+        // its own board so it can prove it is the one still stored --
+        // WinUI raises Completed from Stop, and a stale arrival must
+        // stand down rather than unwind its replacement.
+        board.Completed += (_, _) => OnPaneFadeCompleted(leaf, kind, board);
+        AnimationActivityRegistry.BeginStoryboard(board, leaf.Terminal(), "Opacity");
+    }
+
+    /// <summary>
+    /// A pane fade's Completed, natural or stopped. Only the board still
+    /// stored for the leaf runs the bookkeeping: the flight leaves the
+    /// tracker, the control is restored, and a soft close's fade runs
+    /// the cut it was holding. WinUI 3 raises Completed from Stop, so a
+    /// board a settle stopped can deliver its Completed after a
+    /// replacement fade has been armed on the same leaf; that arrival
+    /// proves itself stale against the stored board and leaves -- the
+    /// settle already did the writes, and the replacement's own
+    /// Completed owns the rest.
+    /// </summary>
+    private void OnPaneFadeCompleted(LeafPane leaf, PaneFadeKind kind, Storyboard board)
+    {
+        // Only the fade that is still the CURRENT one may retire the
+        // entry. WinUI 3 raises Completed from Stop (unlike WPF), so an
+        // abandoned board's handler runs after its replacement has
+        // already been stored: it would delete the replacement's entry
+        // and clear its flight, and the deferred soft close would never
+        // run its cut. VerticalTabStrip's field glides guard the same
+        // arrival the same way.
+        if (!_paneFadeBoards.TryGetValue(leaf, out var current)
+            || !ReferenceEquals(current.Board, board)) return;
+        _paneFadeBoards.Remove(leaf);
+        if (!PaneFadeTracker.IsFading(leaf)) return;
+        PaneFadeTracker.Settled(leaf);
+        RestoreFadeTarget(leaf, kind);
+
+        if (kind != PaneFadeKind.SoftCloseOut) return;
+        var pending = _pendingSoftClose;
+        _pendingSoftClose = null;
+        if (pending is not null) FinishClose(pending);
+    }
+
+    /// <summary>
+    /// The rebuild law's body: every fade standing is settled before a
+    /// tree operation proceeds, and the soft close a fade was holding
+    /// runs now (or is dropped first, when the caller is tearing the host
+    /// down). The completed fade's law is the same statement earlier:
+    /// the control reads opacity 1 before anything rebuilds it.
+    /// </summary>
+    private void SettlePaneFades(bool runPendingClose = true)
+    {
+        if (!runPendingClose)
+        {
+            // The host is going away; a deferred soft cut must not run
+            // against it. Spent before anything else touches the fades.
+            _pendingSoftClose = null;
+        }
+
+        if (PaneFadeTracker.Standing == 0 && _pendingSoftClose is null) return;
+
+        // End every flight first: the settle write restores each control,
+        // and any board Completed the Stop below raises from finds no
+        // flight and stands down.
+        foreach (var (leaf, _) in PaneFadeTracker.SettleAll())
+        {
+            if (_paneFadeBoards.Remove(leaf, out var entry)) entry.Board.Stop();
+        }
+
+        // The soft close a fade was holding runs now: its pane is back at
+        // full strength, and the tree is about to move under it.
+        var pending = _pendingSoftClose;
+        _pendingSoftClose = null;
+        if (pending is not null) FinishClose(pending);
     }
 
     // Startup glow -------------------------------------------------------
@@ -1512,6 +1729,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void EqualizeSplits()
     {
+        // Equalize asks the gate, the way every pane fade site asks it.
+        // The instant re-apply below is the answer at every level -- the
+        // end state is fully legible and no equalize fade exists -- so
+        // the Full and Reduced answers change nothing here. The Off
+        // answer still cuts what an Off gate cuts anywhere: a fade
+        // standing on a pane is settled before the ratios move.
+        if (!SystemAnimations.Enabled(MotionSurfaceClass.PaneGeometry)) SettlePaneFades();
+
         // Only record undo when there is a split to equalize; on a single
         // leaf Equalize is a no-op, so capturing would push a useless entry
         // (and needlessly clear redo).
@@ -1546,6 +1771,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void ToggleSplitZoom()
     {
+        // No fade outlives a tree operation: the zoom re-splices visuals,
+        // which must never inherit a control's mid-fade opacity.
+        SettlePaneFades();
+
         if (PaneCount <= 1) return;
 
         if (Content is not Grid hostGrid) return;
@@ -1693,6 +1922,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void RestoreFrom(Core.Panes.PaneSnapshot? snapshot)
     {
         if (snapshot is null) return;
+
+        // An undo of a close whose fade is still standing completes that
+        // close first -- settle, restore writes and all -- BEFORE the
+        // snapshot below reassigns the tree it is about to close against.
+        // After it, the leaf the snapshot resurrects reads opacity 1.
+        SettlePaneFades();
 
         _restoring = true;
         try
@@ -2137,6 +2372,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     private void Rebuild()
     {
+        // The rebuild law, stated at Rebuild itself because every restore
+        // and fallback inherits it: any rebuild of a mid-fade pane
+        // completes the fade first, so nothing is ever remounted mid-fade
+        // and every control here reads opacity 1 before the tree moves.
+        SettlePaneFades();
+
         // Swap the tree visual inside the existing host Grid so the
         // overlay Canvas (the second child) stays on top across
         // rebuilds. Only used for the root-replacement case in

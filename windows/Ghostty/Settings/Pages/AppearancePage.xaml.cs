@@ -81,6 +81,9 @@ internal sealed partial class AppearancePage : Page
             if (string.IsNullOrWhiteSpace(powerMode)) powerMode = "auto";
             SelectComboByTag(PowerSaverModeCombo, powerMode.Trim().ToLowerInvariant());
 
+            // Seed the Animations lever from config, defaulting to "system".
+            SeedAnimationsCombo(cs);
+
             // NoColorOverride is already normalized to one of notify/strip/keep.
             SelectComboByTag(NoColorOverrideCombo, cs.NoColorOverride);
 
@@ -596,6 +599,23 @@ internal sealed partial class AppearancePage : Page
     {
         if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
             OnValueChanged("power-saver-mode", item.Tag?.ToString() ?? "auto");
+    }
+
+    // Read from the file like the power-saver seed above: the card edits
+    // what is written down, and an absent key is the card's default,
+    // "system" (follow the Windows animation setting), not a value to
+    // write back.
+    private void SeedAnimationsCombo(ConfigService cs)
+    {
+        var animations = cs.GetRawFileValue("animations");
+        if (string.IsNullOrWhiteSpace(animations)) animations = "system";
+        SelectComboByTag(AnimationsCombo, animations.Trim().ToLowerInvariant());
+    }
+
+    private void Animations_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
+            OnValueChanged("animations", item.Tag?.ToString() ?? "system");
     }
 
     private void BlurFollowsOpacity_Toggled(object sender, RoutedEventArgs e)
