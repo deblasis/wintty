@@ -33,8 +33,11 @@ pub fn create(b: *std.Build, opts: Options) ?*HlslStep {
 
     const self = b.allocator.create(HlslStep) catch @panic("OOM");
 
-    // Find dxc.exe from the Windows SDK or PATH.
-    const dxc_path = findDxc(b, opts.target.result.cpu.arch) orelse {
+    // Find dxc.exe from the Windows SDK or PATH. dxc runs on the build
+    // host and its DXIL output is arch-independent, so resolve the host
+    // arch: the target arch can pick an exe the host cannot run
+    // (InvalidExe when cross-compiling for aarch64).
+    const dxc_path = findDxc(b, b.graph.host.result.cpu.arch) orelse {
         std.log.warn("dxc.exe not found; HLSL shaders will not be compiled", .{});
         return null;
     };
