@@ -186,6 +186,24 @@ public sealed class PaneFadeTrackerTests : IDisposable
         Assert.Equal(0, PaneFadeTracker.Standing);
     }
 
+    [Fact]
+    public void SettleAll_clears_each_flight_before_its_write_runs()
+    {
+        // The shell's settle write stops a Storyboard, and WinUI 3
+        // raises Completed from Stop: the write can re-enter this class
+        // before SettleAll has returned. The flights must already be
+        // gone when the write runs, so such a re-entrant arrival stands
+        // down instead of finding the flight it is settling still
+        // standing.
+        var leaf = Fading(PaneFadeKind.SoftCloseOut);
+        var standingAtWrite = -1;
+        PaneFadeTracker.Settle = (_, _) => standingAtWrite = PaneFadeTracker.Standing;
+
+        PaneFadeTracker.SettleAll();
+
+        Assert.Equal(0, standingAtWrite);
+    }
+
     // -- The cap ------------------------------------------------------------
 
     [Fact]
@@ -243,7 +261,7 @@ public sealed class PaneFadeTrackerTests : IDisposable
     /// (Off is the answer, and a plain cut with it). The route helper the
     /// fades ask passes high contrast as false -- its own documented
     /// pre-existing law, the bell fade's law, pinned where that helper is
-    /// wired; this row exists so the difference is a stated fact, not a
+    /// wired; this test exists so the difference is a stated fact, not a
     /// silently different gate.
     /// </summary>
     [Fact]

@@ -1364,9 +1364,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// The pane fades' bookkeeping. The tracker (plain C#, in
     /// Motion) owns when a fade ends; the shell owns what ending does.
     /// The settle write is installed once for the type: it is the same
-    /// restore however a fade ends, and a board a settle stops lands in
-    /// <see cref="OnPaneFadeCompleted"/>, which stands down because the
-    /// settle already took the flight.
+    /// restore however a fade ends, and a board a settle stops has its
+    /// Completed stand down -- the settle removes the entry before Stop
+    /// runs, so the handler's identity guard finds nothing stored.
     /// </summary>
     static PaneHost()
     {
@@ -1401,23 +1401,36 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         var board = PaneFades.BuildBoard(kind, leaf.Terminal());
         _paneFadeBoards[leaf] = (board, kind);
-        // Single-use board: one flight, one run, dropped from the
-        // dictionary when this fires -- so the closure lives no longer
-        // than the fade it drives.
-        board.Completed += (_, _) => OnPaneFadeCompleted(leaf, kind);
+        // Single-use board: one flight, one run. The handler is handed
+        // its own board so it can prove it is the one still stored --
+        // WinUI raises Completed from Stop, and a stale arrival must
+        // stand down rather than unwind its replacement.
+        board.Completed += (_, _) => OnPaneFadeCompleted(leaf, kind, board);
         AnimationActivityRegistry.BeginStoryboard(board, leaf.Terminal(), "Opacity");
     }
 
     /// <summary>
-    /// A pane fade's Completed, natural or stopped. The first arrival
-    /// does the bookkeeping: the flight leaves the tracker, the control
-    /// is restored, and a soft close's fade runs the cut it was holding.
-    /// A second arrival (a settle stopped this board, or its Completed
-    /// was queued behind one) stands down: the settle took the flight and
-    /// did the writes.
+    /// A pane fade's Completed, natural or stopped. Only the board still
+    /// stored for the leaf runs the bookkeeping: the flight leaves the
+    /// tracker, the control is restored, and a soft close's fade runs
+    /// the cut it was holding. WinUI 3 raises Completed from Stop, so a
+    /// board a settle stopped can deliver its Completed after a
+    /// replacement fade has been armed on the same leaf; that arrival
+    /// proves itself stale against the stored board and leaves -- the
+    /// settle already did the writes, and the replacement's own
+    /// Completed owns the rest.
     /// </summary>
-    private void OnPaneFadeCompleted(LeafPane leaf, PaneFadeKind kind)
+    private void OnPaneFadeCompleted(LeafPane leaf, PaneFadeKind kind, Storyboard board)
     {
+        // Only the fade that is still the CURRENT one may retire the
+        // entry. WinUI 3 raises Completed from Stop (unlike WPF), so an
+        // abandoned board's handler runs after its replacement has
+        // already been stored: it would delete the replacement's entry
+        // and clear its flight, and the deferred soft close would never
+        // run its cut. VerticalTabStrip's field glides guard the same
+        // arrival the same way.
+        if (!_paneFadeBoards.TryGetValue(leaf, out var current)
+            || !ReferenceEquals(current.Board, board)) return;
         _paneFadeBoards.Remove(leaf);
         if (!PaneFadeTracker.IsFading(leaf)) return;
         PaneFadeTracker.Settled(leaf);

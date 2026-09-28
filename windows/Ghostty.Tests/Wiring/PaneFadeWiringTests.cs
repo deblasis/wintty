@@ -173,6 +173,66 @@ public class PaneFadeWiringTests
         Assert.Empty(finish.Calls("AnimationActivityRegistry.BeginStoryboard"));
     }
 
+    // -- The stale Completed -----------------------------------------------------
+
+    /// <summary>
+    /// A Completed is only ever its own board's. WinUI 3 raises Completed
+    /// from Stop, so a settle that stops a board can deliver its
+    /// Completed after a replacement fade has already been armed on the
+    /// same leaf -- a split, then a soft close of that split's new pane
+    /// inside the fade window. The handler the split armed must stand
+    /// down on the board's identity: an arrival that cannot prove it IS
+    /// the board currently stored returns before it touches the
+    /// dictionary, the tracker or the pending close. Without that guard
+    /// the stale arrival deletes the replacement's entry, clears its
+    /// flight, and the deferred cut is never run -- the same shape
+    /// VerticalTabStrip's field glides guard their handler against. The
+    /// subscription therefore hands the board to the handler.
+    /// </summary>
+    [Fact]
+    public void A_stale_completed_cannot_touch_a_replacement_fade()
+    {
+        var host = Host();
+
+        // The subscription passes its own board in: the handler has
+        // something to prove its identity against.
+        var start = host.Method("StartPaneFade");
+        var raise = Assert.Single(start.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "OnPaneFadeCompleted");
+        Assert.True(raise.ArgumentList.Arguments.Count == 3,
+            "StartPaneFade must hand its board to OnPaneFadeCompleted: without " +
+            "it a stale Completed from a settle-stopped board cannot be told " +
+            "apart from the replacement's own");
+        Assert.Equal("board", raise.Arg(2));
+
+        // The handler opens with the identity guard, before ANY state
+        // changes: a board that is not the one standing returns here.
+        var handler = host.Method("OnPaneFadeCompleted");
+        var guard = Assert.IsType<IfStatementSyntax>(
+            handler.Body!.Statements.First());
+        // The condition is written across two source lines; compare its
+        // words, not the wrap.
+        var condition = string.Join(" ",
+            guard.Condition.ToString().Split((char[]?)null,
+                StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal(
+            "!_paneFadeBoards.TryGetValue(leaf, out var current) " +
+            "|| !ReferenceEquals(current.Board, board)",
+            condition);
+        Assert.Contains(
+            guard.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>(),
+            r => r.Expression is null);
+
+        // The guard is not a replacement for the bookkeeping: the live
+        // board's arrival still retires the entry and still runs the
+        // soft close's cut.
+        Assert.Single(handler.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "_paneFadeBoards.Remove");
+        Assert.Contains(handler.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "FinishClose");
+    }
+
     // -- The rebuild law -------------------------------------------------------
 
     /// <summary>
@@ -315,11 +375,12 @@ public class PaneFadeWiringTests
             i => i.CalleeText() == "SettlePaneFades");
 
         // Instant behavior is untouched: the model equalizes and the
-        // ratios re-apply in place, exactly as before the row.
+        // ratios re-apply in place, exactly as before this wiring.
         Assert.Single(equalize.Calls("PaneTree.Equalize"));
         Assert.Single(equalize.Calls("ApplyAllRatios"));
 
-        // And the row arms nothing: no fade starts, no board is built.
+        // And the equalize path arms nothing: no fade starts, no board
+        // is built.
         Assert.Empty(equalize.Calls("StartPaneFade"));
         Assert.Empty(equalize.Calls("AnimationActivityRegistry.BeginStoryboard"));
     }
@@ -327,7 +388,7 @@ public class PaneFadeWiringTests
     // -- The cap -----------------------------------------------------------------
 
     /// <summary>
-    /// Every pane fade runs no longer than the cap the rows promise
+    /// Every pane fade runs no longer than the fades' cap
     /// (120ms), and the boards take their duration from that one
     /// constant: there is no second duration a refactor could grow.
     /// </summary>
