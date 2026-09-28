@@ -859,6 +859,217 @@ pub fn recreateSharedTexture(self: *Device, width: u32, height: u32) !void {
     };
 }
 
+/// One last-presented-frame snapshot. The caller owns both NT handles
+/// and must close them (CloseHandle) when done; closing them releases
+/// the underlying D3D12 objects. The texture is a COPY of the given
+/// back buffer -- never the presented buffer itself.
+pub const LastFrameSnapshot = struct {
+    /// NT HANDLE to a B8G8R8A8_UNORM texture, same dimensions as the
+    /// source, in COMMON state with ALLOW_SIMULTANEOUS_ACCESS. Open it
+    /// with ID3D12Device::OpenSharedHandle on this device or with
+    /// ID3D11Device1::OpenSharedResource1 on any D3D11 device over the
+    /// same adapter, including a D3D11On12 wrapper.
+    resource_handle: std.os.windows.HANDLE,
+    /// NT HANDLE to a D3D12 fence signaled at `fence_value` once the
+    /// GPU has finished the copy. Wait on it (WaitForSingleObject, or
+    /// SetEventOnCompletion after OpenSharedHandle) before reading the
+    /// texture.
+    fence_handle: std.os.windows.HANDLE,
+    fence_value: u64,
+    width: u32,
+    height: u32,
+};
+
+/// Copy `src` (the back buffer the last completed frame presented into)
+/// into a fresh shared texture and hand its NT handle to the caller.
+/// Diagnostics/testing hook: the intended consumer opens the handle on
+/// another device (typically D3D11On12 over the same adapter) and reads
+/// or composes the pixels without touching the live swap chain.
+///
+/// Synchronization: queue order makes the copy correct. The snapshot's
+/// command list is submitted to the same direct queue the renderer
+/// draws on, so it executes after everything submitted before it --
+/// including the frame that wrote the source buffer -- and before
+/// anything submitted after it. The call then blocks until the copy has
+/// completed: the one-shot allocator and command list backing it cannot
+/// be released while the GPU may still be executing them, and the
+/// deferred-release queue only takes resources, so the snapshot drains
+/// its own copy instead. Consumers still get the dedicated shared fence
+/// (fresh namespace per snapshot, value 1) so the read path is the same
+/// wait whichever process opened the handles; by the time this returns
+/// it is already at `fence_value`. Both objects stay alive on their NT
+/// handles alone after this releases its own references.
+///
+/// Threading: submits GPU work, so callers must hold the renderer draw
+/// mutex (the apprt exports do). Against the renderer thread the lock
+/// serializes the snapshot between whole frames, so the source back
+/// buffer is never mid-write; against the compositor, a flip-model
+/// buffer DWM still reads is safe to read again (reads do not
+/// conflict), and the measured copy start may defer to the buffer's
+/// release -- which is exactly the latency this hook exists to measure.
+pub fn snapshotLastFrame(
+    self: *Device,
+    src: *d3d12.ID3D12Resource,
+    width: u32,
+    height: u32,
+) !LastFrameSnapshot {
+    const w: u32 = @max(width, 1);
+    const h: u32 = @max(height, 1);
+
+    // Dedicated shared fence. A fresh namespace per snapshot keeps the
+    // consumer's wait independent of the render loop's fence arithmetic.
+    var fence: ?*d3d12.ID3D12Fence = null;
+    {
+        const hr = self.device.CreateFence(
+            0,
+            .SHARED,
+            &d3d12.ID3D12Fence.IID,
+            @ptrCast(&fence),
+        );
+        if (FAILED(hr)) {
+            log.err("snapshot CreateFence failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return error.SnapshotFenceFailed;
+        }
+    }
+    defer if (fence) |f| { _ = f.Release(); };
+
+    var fence_handle: std.os.windows.HANDLE = undefined;
+    {
+        const hr = self.device.CreateSharedHandle(
+            @ptrCast(fence.?),
+            d3d12.GENERIC_ALL,
+            &fence_handle,
+        );
+        if (FAILED(hr)) {
+            log.err("snapshot CreateSharedHandle (fence) failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return error.SnapshotHandleFailed;
+        }
+    }
+    errdefer _ = d3d12.CloseHandle(fence_handle);
+
+    // The copy destination: same shape as SharedTextureState.init's
+    // resource. ALLOW_SIMULTANEOUS_ACCESS keeps it in COMMON on both
+    // sides of the execute, which is what cross-device open requires;
+    // the source is a flip-model back buffer, which decays to COMMON
+    // after the frame's command lists complete, so no barriers anywhere.
+    const heap_props = d3d12.D3D12_HEAP_PROPERTIES{
+        .Type = .DEFAULT,
+        .CPUPageProperty = 0,
+        .MemoryPoolPreference = 0,
+        .CreationNodeMask = 0,
+        .VisibleNodeMask = 0,
+    };
+    const desc = d3d12.D3D12_RESOURCE_DESC{
+        .Dimension = .TEXTURE2D,
+        .Alignment = 0,
+        .Width = @as(u64, w),
+        .Height = h,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .Format = .B8G8R8A8_UNORM,
+        .SampleDesc = .{ .Count = 1, .Quality = 0 },
+        .Layout = .UNKNOWN,
+        .Flags = @enumFromInt(
+            @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_RENDER_TARGET) |
+                @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_SIMULTANEOUS_ACCESS),
+        ),
+    };
+    var dst: ?*d3d12.ID3D12Resource = null;
+    {
+        const hr = self.device.CreateCommittedResource(
+            &heap_props,
+            @intFromEnum(d3d12.D3D12_HEAP_FLAGS.SHARED),
+            &desc,
+            .COMMON,
+            null,
+            &d3d12.ID3D12Resource.IID,
+            @ptrCast(&dst),
+        );
+        if (FAILED(hr)) {
+            log.err("snapshot CreateCommittedResource failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return error.SnapshotTextureFailed;
+        }
+    }
+    defer if (dst) |d| { _ = d.Release(); };
+
+    var resource_handle: std.os.windows.HANDLE = undefined;
+    {
+        const hr = self.device.CreateSharedHandle(
+            @ptrCast(dst.?),
+            d3d12.GENERIC_ALL,
+            &resource_handle,
+        );
+        if (FAILED(hr)) {
+            log.err("snapshot CreateSharedHandle (resource) failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return error.SnapshotHandleFailed;
+        }
+    }
+    errdefer _ = d3d12.CloseHandle(resource_handle);
+
+    // One-shot command list for the copy. The allocator and list are
+    // released here; the queue retains them until the GPU is done.
+    var allocator: ?*d3d12.ID3D12CommandAllocator = null;
+    {
+        const hr = self.device.CreateCommandAllocator(
+            .DIRECT,
+            &d3d12.ID3D12CommandAllocator.IID,
+            @ptrCast(&allocator),
+        );
+        if (FAILED(hr)) return error.SnapshotAllocatorFailed;
+    }
+    defer if (allocator) |a| { _ = a.Release(); };
+
+    var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
+    {
+        const hr = self.device.CreateCommandList(
+            0,
+            .DIRECT,
+            allocator.?,
+            null,
+            &d3d12.ID3D12GraphicsCommandList.IID,
+            @ptrCast(&cl),
+        );
+        if (FAILED(hr)) return error.SnapshotCommandListFailed;
+    }
+    defer if (cl) |c| { _ = c.Release(); };
+
+    cl.?.CopyResource(dst.?, src);
+    {
+        const hr = cl.?.Close();
+        if (FAILED(hr)) return error.SnapshotCommandListFailed;
+    }
+    const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl.?};
+    self.command_queue.ExecuteCommandLists(1, &lists);
+    {
+        const hr = self.command_queue.Signal(fence.?, 1);
+        if (FAILED(hr)) return error.SnapshotSignalFailed;
+    }
+
+    // Block until the copy is complete. Queue execution is in order, so
+    // reaching the snapshot fence proves everything ahead of it -- the
+    // frame that wrote the source included -- is done too, which is what
+    // makes the allocator/list releases below safe. The deferred-release
+    // queue cannot take them (resources only), so the snapshot drains
+    // itself rather than freeing command memory under a live GPU.
+    if (self.removed()) return error.SnapshotDeviceRemoved;
+    {
+        const evt = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse
+            return error.SnapshotWaitFailed;
+        defer _ = d3d12.CloseHandle(evt);
+        const wait_hr = fence.?.SetEventOnCompletion(1, evt);
+        if (FAILED(wait_hr)) return error.SnapshotWaitFailed;
+        _ = d3d12.WaitForSingleObject(evt, d3d12.INFINITE);
+    }
+
+    return .{
+        .resource_handle = resource_handle,
+        .fence_handle = fence_handle,
+        .fence_value = 1,
+        .width = w,
+        .height = h,
+    };
+}
+
 // ---- Private helpers ----
 
 fn enableDebugLayer() void {

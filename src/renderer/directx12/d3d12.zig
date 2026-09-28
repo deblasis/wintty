@@ -1203,7 +1203,7 @@ pub const ID3D12GraphicsCommandList = extern struct {
         Dispatch: Reserved,
         CopyBufferRegion: *const fn (*ID3D12GraphicsCommandList, pDstBuffer: *ID3D12Resource, DstOffset: u64, pSrcBuffer: *ID3D12Resource, SrcOffset: u64, NumBytes: u64) callconv(.winapi) void,
         CopyTextureRegion: *const fn (*ID3D12GraphicsCommandList, pDst: *const D3D12_TEXTURE_COPY_LOCATION, DstX: u32, DstY: u32, DstZ: u32, pSrc: *const D3D12_TEXTURE_COPY_LOCATION, pSrcBox: ?*const D3D12_BOX) callconv(.winapi) void,
-        CopyResource: Reserved,
+        CopyResource: *const fn (*ID3D12GraphicsCommandList, pDstResource: *ID3D12Resource, pSrcResource: *ID3D12Resource) callconv(.winapi) void,
         CopyTiles: Reserved,
         ResolveSubresource: Reserved,
         IASetPrimitiveTopology: *const fn (*ID3D12GraphicsCommandList, PrimitiveTopology: D3D_PRIMITIVE_TOPOLOGY) callconv(.winapi) void,
@@ -1325,6 +1325,10 @@ pub const ID3D12GraphicsCommandList = extern struct {
         self.vtable.CopyTextureRegion(self, dst, dst_x, dst_y, dst_z, src_loc, src_box);
     }
 
+    pub inline fn CopyResource(self: *ID3D12GraphicsCommandList, dst: *ID3D12Resource, src: *ID3D12Resource) void {
+        self.vtable.CopyResource(self, dst, src);
+    }
+
     pub inline fn Release(self: *ID3D12GraphicsCommandList) u32 {
         return self.vtable.Release(self);
     }
@@ -1380,7 +1384,7 @@ pub const ID3D12Device = extern struct {
         CreatePlacedResource: Reserved,
         CreateReservedResource: Reserved,
         CreateSharedHandle: *const fn (*ID3D12Device, *IUnknown, ?*const anyopaque, u32, ?[*:0]const u16, *HANDLE) callconv(.winapi) HRESULT,
-        OpenSharedHandle: Reserved,
+        OpenSharedHandle: *const fn (*ID3D12Device, NTHandle: HANDLE, riid: *const GUID, ppvObj: *?*anyopaque) callconv(.winapi) HRESULT,
         OpenSharedHandleByName: Reserved,
         MakeResident: Reserved,
         Evict: Reserved,
@@ -1456,6 +1460,10 @@ pub const ID3D12Device = extern struct {
 
     pub inline fn CreateFence(self: *ID3D12Device, initial_value: u64, flags: D3D12_FENCE_FLAGS, riid: *const GUID, pp: *?*anyopaque) HRESULT {
         return self.vtable.CreateFence(self, initial_value, flags, riid, pp);
+    }
+
+    pub inline fn OpenSharedHandle(self: *ID3D12Device, nt_handle: HANDLE, riid: *const GUID, obj_out: *?*anyopaque) HRESULT {
+        return self.vtable.OpenSharedHandle(self, nt_handle, riid, obj_out);
     }
 
     pub inline fn GetDeviceRemovedReason(self: *ID3D12Device) HRESULT {

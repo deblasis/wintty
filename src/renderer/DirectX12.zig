@@ -1044,6 +1044,30 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     }
 }
 
+/// One last-presented-frame snapshot of this surface's swap chain.
+/// The caller owns both NT handles and must close them (CloseHandle)
+/// when done; closing them releases the underlying D3D12 objects. The
+/// texture is a COPY of the swap chain back buffer the last completed
+/// frame presented into -- never the presented buffer itself.
+///
+/// The tracked source is `back_buffers[pending_frame_index]`, the slot
+/// drawFrameEnd just presented, and the dimensions are the applied
+/// swap-chain size. Swap-chain mode only: shared-texture mode already IS
+/// a shared texture (ghostty_surface_shared_texture) and has no
+/// presented frame to copy.
+pub fn snapshotLastFrame(self: *DirectX12) !device.Device.LastFrameSnapshot {
+    if (comptime builtin.os.tag != .windows) return error.NotWindows;
+    if (self.swap_chain3 == null) return error.NoSwapChain;
+    const dev_ptr = &(self.dev orelse return error.NoDevice);
+    const src = self.back_buffers[self.pending_frame_index] orelse
+        return error.NoBackBuffer;
+    return dev_ptr.snapshotLastFrame(
+        src,
+        @max(self.applied_width, 1),
+        @max(self.applied_height, 1),
+    );
+}
+
 pub fn initShaders(
     self: *const DirectX12,
     alloc: Allocator,

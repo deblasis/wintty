@@ -3023,6 +3023,47 @@ pub const CAPI = struct {
         return true;
     }
 
+    /// Mirrors ghostty_surface_last_frame_texture_s in include/ghostty.h.
+    const LastFrameTextureC = extern struct {
+        resource_handle: ?*anyopaque,
+        fence_handle: ?*anyopaque,
+        fence_value: u64,
+        width: u32,
+        height: u32,
+    };
+
+    /// Fill `out` with an NT handle to a shared texture holding a COPY of
+    /// the back buffer the surface's last completed frame presented into,
+    /// plus the NT handle of a fence signaled once the copy is done. The
+    /// caller owns both handles and closes them when done; the texture is
+    /// never the presented buffer itself. Diagnostics/testing hook for
+    /// frame-content consumers. Returns false on non-DX12 renderers,
+    /// non-swap-chain modes, and allocation or submission failure (in
+    /// which case `out` is untouched).
+    export fn ghostty_surface_get_last_frame_texture(
+        surface: *Surface,
+        out: *LastFrameTextureC,
+    ) bool {
+        if (comptime builtin.os.tag != .windows) return false;
+        const r = &surface.core_surface.renderer;
+        if (comptime @TypeOf(r.api) != renderer.DirectX12) return false;
+        // The snapshot submits GPU work, so it runs under the same lock
+        // the other cross-thread exports take (see
+        // ghostty_surface_get_d3d12_device): against the renderer thread
+        // it serializes between whole frames.
+        r.draw_mutex.lockUncancelable(global.io());
+        defer r.draw_mutex.unlock(global.io());
+        const snap = r.api.snapshotLastFrame() catch return false;
+        out.* = .{
+            .resource_handle = @ptrCast(snap.resource_handle),
+            .fence_handle = @ptrCast(snap.fence_handle),
+            .fence_value = snap.fence_value,
+            .width = snap.width,
+            .height = snap.height,
+        };
+        return true;
+    }
+
     /// Update the size of a surface. This will trigger resize notifications
     /// to the pty and the renderer.
     export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
