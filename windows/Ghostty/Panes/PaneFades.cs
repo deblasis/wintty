@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Motion;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media.Animation;
 
 namespace Ghostty.Panes;
