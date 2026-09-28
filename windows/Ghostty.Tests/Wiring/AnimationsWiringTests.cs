@@ -8,9 +8,12 @@ namespace Ghostty.Tests.Wiring;
 /// <summary>
 /// Wiring guards for the Animations setting: the app installs the user
 /// lever's config source once, the in-app support dump carries the
-/// resolved state, and the CLI dump does not invent one. Wiring, not
-/// behaviour: the level arithmetic lives in Motion.MotionGatingLeverTests
-/// and the renderer's emission in Version.VersionRendererAnimationsTests.
+/// resolved state at open AND re-resolves it at copy, and the CLI dump
+/// does not invent one. Wiring, not behaviour: the level arithmetic lives
+/// in Motion.MotionGatingLeverTests, the renderer's emission in
+/// Version.VersionRendererAnimationsTests, and the state read's freshness
+/// (the thing copy time depends on) in the Windows suite's
+/// AnimationsStateTests, which runs the same source the app compiles.
 /// </summary>
 public class AnimationsWiringTests
 {
@@ -51,6 +54,62 @@ public class AnimationsWiringTests
             $"VersionRenderer.Build must be called with the resolved state, " +
             $"found {build.ArgumentList.Arguments.Count} arguments");
         build.ArgumentList.Arguments[0].Expression.AssertCallTo("AnimationsState.Code");
+    }
+
+    [Fact]
+    public void The_copy_handler_re_resolves_the_state_at_copy_time()
+    {
+        var dialog = ShellSource.Load("Dialogs.VersionDialog.xaml.cs");
+
+        // The paste asks fresh, inside the handler: the resolved state can
+        // change while the dialog sits open (the Animations lever in another
+        // window, battery saver), and the dump is the bug-report use case
+        // that must state what holds now. A stored payload field is the
+        // freeze this replaces, so its absence is pinned too: a copy that
+        // reads a field instead of the seam has nowhere to read from.
+        var onCopy = dialog.Method("OnCopy");
+        Assert.Single(onCopy.Calls("Ghostty.Services.AnimationsState.ComposeDump"));
+
+        // The clipboard gets the fresh payload...
+        var setText = Assert.Single(onCopy.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().EndsWith(".SetText", System.StringComparison.Ordinal)));
+        Assert.Equal("dump.Payload", setText.Arg(0));
+
+        // ...and the display body refreshes from the same ask, so the
+        // dialog on screen and the text on the clipboard cannot disagree.
+        var refresh = Assert.Single(onCopy.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "VersionText.Text"));
+        Assert.Equal("dump.Body", refresh.Right.ToString());
+
+        Assert.DoesNotContain(
+            dialog.Root.DescendantNodes()
+                .OfType<FieldDeclarationSyntax>()
+                .SelectMany(f => f.Declaration.Variables)
+                .Select(v => v.Identifier.ValueText),
+            name => name == "_output");
+    }
+
+    [Fact]
+    public void The_payload_seam_passes_the_resolved_state_to_the_renderer()
+    {
+        // The payload is composed in one place, and the state reaches the
+        // renderer there: a Build the refactor left argument-less would drop
+        // the animations line from every paste while every other guard
+        // stays green.
+        var compose = ShellSource.Load("Services.AnimationsState.cs").Method("ComposeDump");
+
+        var build = compose.Call("VersionRenderer.Build");
+        Assert.True(build.ArgumentList.Arguments.Count == 1,
+            $"the dump's Build must be called with the resolved state, " +
+            $"found {build.ArgumentList.Arguments.Count} arguments");
+        build.ArgumentList.Arguments[0].Expression.AssertCallTo("Code");
+
+        // One ask, both renders: the full clipboard payload (header + URL
+        // line + body) and the body the dialog displays.
+        Assert.Single(compose.Calls("VersionRenderer.RenderPlain"));
+        Assert.Single(compose.Calls("VersionRenderer.RenderPlainBody"));
     }
 
     [Fact]

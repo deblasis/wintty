@@ -13,7 +13,6 @@ namespace Ghostty.Dialogs;
 
 internal sealed partial class VersionDialog : ContentDialog
 {
-    private readonly string _output;
     private readonly string _copyButtonRest;
     private bool _copyInProgress;
 
@@ -22,12 +21,12 @@ internal sealed partial class VersionDialog : ContentDialog
         InitializeComponent();
 
         var info = VersionRenderer.Build(Ghostty.Services.AnimationsState.Code());
-        // Clipboard payload is the full text (with header + URL line) so the
-        // bug-report use case still has everything when pasted elsewhere.
-        _output = VersionRenderer.RenderPlain(info);
         // The dialog itself shows the body without the header/URL line --
         // the title bar carries the one-line header and the URL is rendered
-        // as a clickable HyperlinkButton above the body.
+        // as a clickable HyperlinkButton above the body. The clipboard
+        // payload is NOT taken from this open-time build: identity and
+        // commit cannot change while the dialog is open, but the resolved
+        // animation state can, so the copy handler composes it fresh.
         VersionText.Text = VersionRenderer.RenderPlainBody(info);
 
         // Title bar: app icon + the same one-line identity `+version` prints
@@ -62,8 +61,14 @@ internal sealed partial class VersionDialog : ContentDialog
         if (_copyInProgress) return;
         _copyInProgress = true;
 
+        // Re-resolve at copy time: the payload is the bug-report use case
+        // that must state what holds NOW, not what held when the dialog
+        // opened. One ask feeds both the paste and the refreshed body, so
+        // the display cannot disagree with what lands on the clipboard.
+        var dump = Ghostty.Services.AnimationsState.ComposeDump();
         var data = new DataPackage();
-        data.SetText(_output);
+        data.SetText(dump.Payload);
+        VersionText.Text = dump.Body;
         try
         {
             // SetContent races WinUI startup and can throw CO_E_NOTINITIALIZED /

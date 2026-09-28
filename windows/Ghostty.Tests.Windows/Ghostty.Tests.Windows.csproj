@@ -43,5 +43,21 @@
          builds: the lifecycle tests exercise the exact file the shell
          routes through, not a copy that can drift. -->
     <Compile Include="..\Ghostty\Services\AnimationActivityRegistry.cs" Link="Motion\AnimationActivityRegistry.cs" />
+    <!--
+      The support dump's state read and its compose, for
+      Motion.AnimationsStateTests: AnimationsState is plain C# over
+      MotionGating and the OS animations read (which this TFM can compile,
+      unlike the plain Ghostty.Tests host), and the copy-time freshness its
+      payload depends on is behavioural. MotionGating links as it does into
+      Ghostty.Tests; the two Motion files are the seam it routes through,
+      named rather than globbed because the folder also carries
+      PaneFadeTracker, whose CS0649 noise this project never carried and
+      whose tracker the dump never reads.
+    -->
+    <Compile Include="..\Ghostty\Motion\IPaneMotionCoordinator.cs" Link="Motion\IPaneMotionCoordinator.cs" />
+    <Compile Include="..\Ghostty\Motion\MotionRegistration.cs" Link="Motion\MotionRegistration.cs" />
+    <Compile Include="..\Ghostty\Services\MotionGating.cs" Link="Motion\MotionGating.cs" />
+    <Compile Include="..\Ghostty\Services\SystemAnimations.cs" Link="Motion\SystemAnimations.cs" />
+    <Compile Include="..\Ghostty\Services\AnimationsState.cs" Link="Motion\AnimationsState.cs" />
   </ItemGroup>
 </Project>
