@@ -7,24 +7,25 @@ namespace Ghostty.Tests.Wiring;
 /// <summary>
 /// Closing a pane hands the tab the surviving pane's title and directory.
 ///
-/// CloseLeaf reassigns the active leaf before focus lands on it, so the
-/// GotFocus handler sees a leaf that is already active and raises no
-/// LeafFocused. Everything that follows the active leaf -- the tab's
-/// title, its directory, progress and bell -- rebinds on that event, so
-/// the tab went on naming the pane that had just closed until the survivor's
-/// next prompt. CloseLeaf raises the event itself, after the last
-/// reassignment.
+/// The close's tail (FinishClose, which both close paths run and a
+/// gated-on soft close defers behind its fade) reassigns the active leaf
+/// before focus lands on it, so the GotFocus handler sees a leaf that is
+/// already active and raises no LeafFocused. Everything that follows the
+/// active leaf -- the tab's title, its directory, progress and bell --
+/// rebinds on that event, so the tab went on naming the pane that had
+/// just closed until the survivor's next prompt. The tail raises the
+/// event itself, after the last reassignment.
 /// </summary>
 public class PaneCloseFocusWiringTests
 {
     [Fact]
     public void CloseLeaf_RaisesLeafFocused_AfterItsLastActiveLeafAssignment()
     {
-        // Two overloads; the one-arg form forwards to this one.
-        var close = ShellSource.Load("Panes.PaneHost.cs").Root.DescendantNodes()
-            .OfType<MethodDeclarationSyntax>()
-            .Single(m => m.Identifier.ValueText == "CloseLeaf" && m.ParameterList.Parameters.Count == 2);
-        var statements = close.Body!.DescendantNodes().OfType<StatementSyntax>().ToList();
+        // The close's tail lives in FinishClose: both close paths run it,
+        // and the gated soft close defers it behind its fade. The raise
+        // and the reassignment ordering are pinned there.
+        var finish = ShellSource.Load("Panes.PaneHost.cs").Method("FinishClose");
+        var statements = finish.Body!.DescendantNodes().OfType<StatementSyntax>().ToList();
 
         // `LeafFocused?.Invoke(this, _activeLeaf)`: a conditional access whose
         // invocation binds `.Invoke` and hands over the live field, not a
@@ -43,7 +44,7 @@ public class PaneCloseFocusWiringTests
         Assert.NotNull(raise);
         // A top-level statement of the method, not one branch's: a raise
         // inside the zoom re-entry block would fire on that path alone.
-        Assert.Same(close.Body, raise!.Parent);
+        Assert.Same(finish.Body, raise!.Parent);
 
         var lastAssign = statements.Last(s =>
             s is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax { Left: IdentifierNameSyntax { Identifier.Text: "_activeLeaf" } } });
@@ -66,10 +67,11 @@ public class PaneCloseFocusWiringTests
     [Fact]
     public void CloseLeaf_EnqueuesOneFocus_AfterTheZoomDecision()
     {
-        var close = ShellSource.Load("Panes.PaneHost.cs").Root.DescendantNodes()
-            .OfType<MethodDeclarationSyntax>()
-            .Single(m => m.Identifier.ValueText == "CloseLeaf" && m.ParameterList.Parameters.Count == 2);
-        var statements = close.Body!.DescendantNodes().OfType<StatementSyntax>().ToList();
+        // The close's tail lives in FinishClose (both close paths run it;
+        // the gated soft close defers it behind its fade) -- the enqueue
+        // and the zoom decision ordering are pinned there.
+        var finish = ShellSource.Load("Panes.PaneHost.cs").Method("FinishClose");
+        var statements = finish.Body!.DescendantNodes().OfType<StatementSyntax>().ToList();
 
         // One enqueued focus call in THIS method. The zoom re-entry's own
         // ToggleSplitZoom enqueues a second, but that one targets the leaf
@@ -84,7 +86,7 @@ public class PaneCloseFocusWiringTests
         // inside the zoom re-entry it would still sort after every
         // assignment below while leaving the ordinary close -- no zoom in
         // play at all -- focusing nothing.
-        Assert.Same(close.Body, focusEnqueues[0].Parent);
+        Assert.Same(finish.Body, focusEnqueues[0].Parent);
 
         // It comes after the last thing that can move the active leaf --
         // which is the zoom re-entry's assignment.
@@ -100,7 +102,7 @@ public class PaneCloseFocusWiringTests
         var captured = statements.OfType<LocalDeclarationStatementSyntax>()
             .Last(s => s.Declaration.Variables.Count == 1
                        && s.Declaration.Variables[0].Initializer?.Value.ToString() == "_activeLeaf");
-        Assert.Same(close.Body, captured.Parent);
+        Assert.Same(finish.Body, captured.Parent);
         Assert.True(
             statements.IndexOf(captured) > statements.IndexOf(lastAssign),
             "the focus target is captured before the zoom re-entry, so it is the pre-zoom leaf");
