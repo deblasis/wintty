@@ -810,6 +810,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         // one per field would put the cost back that keeping this pass off
         // LayoutUpdated exists to avoid.
         var motion = TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
+        // The fades answer rides beside the movement answer, from its own
+        // gate: the movement route runs only on Full, and an arriving
+        // field's fade is exactly what reduced keeps - cut it there and
+        // the container pops at full strength.
+        var fades = SystemAnimations.Enabled(MotionSurfaceClass.Chrome);
         var width = Math.Max(0, ActualWidth - RowInsetLeft);
         var placed = new HashSet<TabGroup>();
         // Once, not per run: the answer is the same for all of them and it
@@ -858,7 +863,7 @@ internal sealed partial class VerticalTabStrip : UserControl
 
             if (bottom - top <= 0) continue;
             placed.Add(run.Group);
-            PlaceGroupField(run.Group, top, width, bottom - top, motion, capVisible, endVisible);
+            PlaceGroupField(run.Group, top, width, bottom - top, motion, fades, capVisible, endVisible);
         }
 
         // A field the manager still holds is only HIDDEN when it could not be
@@ -907,7 +912,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         };
 
     private void PlaceGroupField(
-        TabGroup group, double top, double width, double height, bool motion,
+        TabGroup group, double top, double width, double height, bool motion, bool fades,
         bool capVisible, bool endVisible)
     {
         var appearing = false;
@@ -944,7 +949,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             Canvas.SetTop(field, top);
             field.Height = height;
             field.Opacity = 1;
-            if (appearing && motion) FadeInGroupField(group, field);
+            if (appearing && fades) FadeInGroupField(group, field);
             return;
         }
 

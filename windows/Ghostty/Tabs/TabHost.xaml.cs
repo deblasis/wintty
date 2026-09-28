@@ -3739,11 +3739,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// swap just revealed fades in on the fade token. What the swap
     /// removed does not linger -- TabView has no item exit, and the
     /// removals stay immediate. Gate off is a cut: the element simply
-    /// appears, and no animation is built at all.
+    /// appears, and no animation is built at all. The read is the
+    /// fade-bearing gate, not the strip's movement route: an opacity
+    /// fade is exactly what reduced keeps, and the movement route (Full
+    /// only) would make the revealed element pop at full strength.
     /// </summary>
     private void FadeInAppearing(FrameworkElement appearing)
     {
-        if (!TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast)) return;
+        if (!SystemAnimations.Enabled(MotionSurfaceClass.Chrome)) return;
         Visual visual;
         try
         {
