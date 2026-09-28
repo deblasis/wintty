@@ -1,3 +1,4 @@
+using Ghostty.Core.Version;
 using Ghostty.Motion;
 
 namespace Ghostty.Services;
@@ -23,4 +24,23 @@ internal static class AnimationsState
                MotionPolicyLevel.Off => "off",
                _ => "full",
            };
+
+    /// <summary>
+    /// The version dialog's dump, composed fresh on every ask: the full
+    /// clipboard payload (header + URL line + body, the bug-report use
+    /// case) and the body alone the dialog displays, both over the state
+    /// resolved at the moment of the ask. The copy handler asks per click,
+    /// so a dump pasted after the resolved state changed -- the Animations
+    /// lever moved in another window, battery saver engaged -- reports the
+    /// state as it holds now, not as the dialog found it; and one ask
+    /// feeds both the paste and the refreshed display, so the two cannot
+    /// disagree.
+    /// </summary>
+    internal static (string Payload, string Body) ComposeDump()
+    {
+        var info = VersionRenderer.Build(Code());
+        return (
+            Payload: VersionRenderer.RenderPlain(info),
+            Body: VersionRenderer.RenderPlainBody(info));
+    }
 }
