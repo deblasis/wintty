@@ -900,6 +900,13 @@ public partial class App : Application
             logger: factory.CreateLogger<WindowsPowerStateMonitor>());
         PowerStateMonitor = _powerStateMonitor;
 
+        // The user's Animations lever (Appearance). Read fresh per ask,
+        // like the power mode above: a config edit lands on the next gate
+        // read without a restart.
+        Ghostty.Services.MotionGating.SetUserLeverSource(() =>
+            Ghostty.Core.Motion.UserMotionLeverValues.Parse(
+                _configService?.GetRawFileValue("animations")));
+
         // Re-resolve whenever the user edits power-saver-mode (or any
         // other key -- cheap, and keeps this out of the reload path's
         // critical section). Named handler so we can detach symmetrically

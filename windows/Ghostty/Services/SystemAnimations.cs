@@ -37,7 +37,7 @@ internal static class SystemAnimations
     /// cached here would have to be created on a UI thread to be trusted
     /// anyway.
     /// </summary>
-    private static bool ReadAnimationsEnabled()
+    internal static bool ReadAnimationsEnabled()
     {
         try { return new Windows.UI.ViewManagement.UISettings().AnimationsEnabled; }
         catch (Exception ex) when (ex is InvalidOperationException

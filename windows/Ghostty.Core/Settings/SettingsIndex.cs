@@ -165,6 +165,14 @@ public static class SettingsIndex
             new[] { "power", "battery", "saver", "energy", "performance", "low", "rdp" },
             SettingType.Combo),
 
+        // ----- Appearance / Animations -----
+        new("animations", "Animations",
+            "How much the app animates. Follow system honors the Windows setting; " +
+            "Reduced keeps fades and removes movement; Off turns animations off.",
+            "Appearance", "Animations",
+            new[] { "animations", "motion", "reduced", "fade", "movement" },
+            SettingType.Combo),
+
         // ----- Colors / Theme -----
         new("theme", "Color theme",
             "Named theme file loaded from the themes directory. Supports light:X,dark:Y pairs.",

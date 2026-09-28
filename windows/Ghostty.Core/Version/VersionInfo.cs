@@ -26,4 +26,8 @@ public sealed record VersionInfo(
     string FontEngine,
     // Runtime probes
     string WindowsVersion,
-    string Architecture);
+    string Architecture,
+    // The resolved animation state, coded ("full"/"reduced"/"off"). Null
+    // when the caller could not resolve it (the +version CLI never reads
+    // config), in which case the line is omitted rather than blanked.
+    string? Animations = null);

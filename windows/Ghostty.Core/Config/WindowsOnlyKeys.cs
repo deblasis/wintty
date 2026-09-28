@@ -59,6 +59,8 @@ public static class WindowsOnlyKeys
             "Backdrop material for the command palette (acrylic / mica / opaque)."),
         new("power-saver-mode",
             "How the app reacts to Windows power-saving signals (auto, always, never)."),
+        new("animations",
+            "How much the app animates: system (follow the Windows setting, default), reduced (fades only), or off."),
         new("default-profile",
             "Id of the profile every new pane runs when you do not pick one. When set, it takes precedence over `command`; when unset, `command` (if set) runs in new panes instead."),
         new("profile-order",

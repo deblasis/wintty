@@ -23,6 +23,7 @@ public class WindowsOnlyKeysTests
     [InlineData("command-palette-group-commands")]
     [InlineData("command-palette-background")]
     [InlineData("power-saver-mode")]
+    [InlineData("animations")]
     [InlineData("default-profile")]
     [InlineData("profile-order")]
     [InlineData("no-color-override")]

@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Ghostty.Core.Motion;
 using Ghostty.Core.Tabs;
 using Ghostty.Motion;
 
@@ -39,10 +40,37 @@ internal static class MotionGating
             return coordinator.ResolvePolicy(surface);
         }
 
-        return TabStripMotion.Legacy(animationsEnabled, highContrast)
+        return ApplyLever(TabStripMotion.Legacy(animationsEnabled, highContrast)
             ? MotionPolicyLevel.Full
-            : MotionPolicyLevel.Off;
+            : MotionPolicyLevel.Off);
     }
+
+    /// <summary>
+    /// The user's own Animations lever, read fresh on every ask. Defaults
+    /// to FollowSystem so an unset source changes no answer; App installs
+    /// a source over the persisted <c>animations</c> setting at startup.
+    /// Applies on the legacy fallback only: a registered coordinator owns
+    /// its own answers.
+    /// </summary>
+    private static Func<UserMotionLever> _userLever = DefaultLever;
+
+    internal static void SetUserLeverSource(Func<UserMotionLever>? source)
+        => _userLever = source ?? DefaultLever;
+
+    private static UserMotionLever DefaultLever() => UserMotionLever.FollowSystem;
+
+    /// <summary>
+    /// Most-severe-wins between the seats' answer and the lever: Off
+    /// forces Off outright, Reduced ceilings Full at Reduced, FollowSystem
+    /// passes through.
+    /// </summary>
+    private static MotionPolicyLevel ApplyLever(MotionPolicyLevel level)
+        => _userLever() switch
+        {
+            UserMotionLever.Off => MotionPolicyLevel.Off,
+            UserMotionLever.Reduced when level == MotionPolicyLevel.Full => MotionPolicyLevel.Reduced,
+            _ => level,
+        };
 
     /// <summary>
     /// Wires the strip gate to this seam, once, at module load. The strip
