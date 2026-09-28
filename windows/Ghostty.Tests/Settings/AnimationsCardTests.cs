@@ -6,6 +6,8 @@ using System.Xml.Linq;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
 using Ghostty.Tests.Wiring;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -133,8 +135,13 @@ public class AnimationsCardTests
 
         // A blank or absent key falls back to Follow system, spelled as
         // the combo's tag: the card's default is pinned in code, not in
-        // the XAML's item order alone.
-        Assert.Contains("\"system\"", seed.ToString(), StringComparison.Ordinal);
+        // the XAML's item order alone. Pinned by parsed structure - a
+        // string literal in the tree - so a comment mention cannot
+        // satisfy it, and exactly one literal, so a second stray would
+        // not slip by either.
+        Assert.Single(seed.DescendantNodes().OfType<LiteralExpressionSyntax>()
+            .Where(l => l.IsKind(SyntaxKind.StringLiteralExpression)
+                        && l.Token.ValueText == "system"));
 
         // And the method is actually wired: exactly one call site in the page.
         Assert.Single(page.Root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>()

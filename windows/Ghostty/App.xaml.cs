@@ -907,6 +907,27 @@ public partial class App : Application
             Ghostty.Core.Motion.UserMotionLeverValues.Parse(
                 _configService?.GetRawFileValue("animations")));
 
+        // The energy-saver seat for the same fallback: the mode from the
+        // config key (the same parse the monitor's readMode runs) and the
+        // monitor's trigger composite, mapped by name. The composite goes
+        // over raw, remote-session bit included; the truth table masks it
+        // out of the level test itself.
+        Ghostty.Services.MotionGating.SetPowerSeatSource(() =>
+        {
+            var raw = _configService?.GetRawFileValue("power-saver-mode") ?? "auto";
+            var mode = raw.Trim().ToLowerInvariant() switch
+            {
+                "always" => Ghostty.Core.Power.PowerSaverMode.Always,
+                "never"  => Ghostty.Core.Power.PowerSaverMode.Never,
+                _        => Ghostty.Core.Power.PowerSaverMode.Auto,
+            };
+            return (
+                PowerPolicyAdapter.Mode(mode),
+                PowerPolicyAdapter.Triggers(
+                    PowerStateMonitor?.ActiveTriggers
+                    ?? Ghostty.Core.Power.PowerSaverTrigger.None));
+        });
+
         // Re-resolve whenever the user edits power-saver-mode (or any
         // other key -- cheap, and keeps this out of the reload path's
         // critical section). Named handler so we can detach symmetrically

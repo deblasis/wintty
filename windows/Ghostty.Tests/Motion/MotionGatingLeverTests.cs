@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Core.Motion;
+using Ghostty.Core.Tabs;
 using Ghostty.Motion;
 using Ghostty.Services;
 using Xunit;
@@ -25,12 +26,20 @@ public class MotionGatingLeverTests : IDisposable
     {
         PaneMotion.ResetForTests();
         MotionGating.SetUserLeverSource(null);
+        MotionGating.SetPowerSeatSource(null);
     }
 
-    public void Dispose() => MotionGating.SetUserLeverSource(null);
+    public void Dispose()
+    {
+        MotionGating.SetUserLeverSource(null);
+        MotionGating.SetPowerSeatSource(null);
+    }
 
     private static void UseLever(UserMotionLever lever)
         => MotionGating.SetUserLeverSource(() => lever);
+
+    private static void UsePower(PowerSaverModeEx mode, PowerTriggersEx triggers)
+        => MotionGating.SetPowerSeatSource(() => (mode, triggers));
 
     private static MotionPolicyLevel Level(string name) => name switch
     {
@@ -117,5 +126,57 @@ public class MotionGatingLeverTests : IDisposable
         UseLever(lever);
         Assert.Equal(Level(expected), MotionGating.Effective(
             MotionSurfaceClass.Ambient, animationsEnabled, highContrast));
+    }
+
+    /// <summary>
+    /// The energy-saver seat fires the fallback's answer off: the mode
+    /// can force it, any level trigger can fire it, and the remote-session
+    /// bit rides in the composite but is masked OUT of the test - a
+    /// transport state never moves the level.
+    /// </summary>
+    [Theory]
+    [InlineData(PowerSaverModeEx.Always, PowerTriggersEx.None, "Off")]
+    [InlineData(PowerSaverModeEx.Auto, PowerTriggersEx.BatterySaverOn, "Off")]
+    [InlineData(PowerSaverModeEx.Auto, PowerTriggersEx.TransparencyEffectsOff, "Off")]
+    [InlineData(PowerSaverModeEx.Never, PowerTriggersEx.TransparencyEffectsOff, "Off")]
+    [InlineData(PowerSaverModeEx.Always, PowerTriggersEx.RemoteSession, "Off")]
+    [InlineData(PowerSaverModeEx.Auto, PowerTriggersEx.RemoteSession, "Full")]
+    [InlineData(PowerSaverModeEx.Never, PowerTriggersEx.None, "Full")]
+    public void The_power_seat_fires_the_fallback(
+        PowerSaverModeEx mode, PowerTriggersEx triggers, string expected)
+    {
+        UsePower(mode, triggers);
+        Assert.Equal(Level(expected), MotionGating.Effective(
+            MotionSurfaceClass.Ambient, animationsEnabled: true, highContrast: false));
+    }
+
+    /// <summary>Power saving is off, not reduced: a lever ceiling cannot
+    /// raise what the seat has cut.</summary>
+    [Theory]
+    [InlineData(UserMotionLever.Reduced)]
+    [InlineData(UserMotionLever.Off)]
+    public void The_power_seat_beats_the_levers_ceiling(UserMotionLever lever)
+    {
+        UsePower(PowerSaverModeEx.Always, PowerTriggersEx.None);
+        UseLever(lever);
+        Assert.Equal(MotionPolicyLevel.Off, MotionGating.Effective(
+            MotionSurfaceClass.Ambient, animationsEnabled: true, highContrast: false));
+    }
+
+    /// <summary>
+    /// The strip is a movement-bearing surface: its route runs only when
+    /// the resolved level is Full. Reduced keeps fades, not slides, so
+    /// Reduced cuts the strip too; Off cuts it outright.
+    /// </summary>
+    [Theory]
+    [InlineData(UserMotionLever.FollowSystem, true)]
+    [InlineData(UserMotionLever.Reduced, false)]
+    [InlineData(UserMotionLever.Off, false)]
+    public void The_strip_route_runs_only_when_the_level_is_full(
+        UserMotionLever lever, bool expected)
+    {
+        UseLever(lever);
+        Assert.Equal(expected, TabStripMotion.Enabled(
+            animationsEnabled: true, highContrast: false));
     }
 }

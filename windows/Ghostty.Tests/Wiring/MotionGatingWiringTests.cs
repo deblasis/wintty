@@ -141,6 +141,12 @@ public class MotionGatingWiringTests
         Assert.Contains(lambda.DescendantNodes().OfType<MemberAccessExpressionSyntax>(),
             m => m.Expression.ToString() == "MotionSurfaceClass"
                  && m.Name.Identifier.ValueText == "Chrome");
+
+        // The strip is movement-bearing: its route runs only on a Full
+        // answer. Reduced keeps fades, not slides.
+        var equals = Assert.Single(lambda.DescendantNodes().OfType<BinaryExpressionSyntax>(),
+            b => b.IsKind(SyntaxKind.EqualsExpression));
+        Assert.Equal("MotionPolicyLevel.Full", equals.Right.ToString());
     }
 
     [Fact]
@@ -167,11 +173,48 @@ public class MotionGatingWiringTests
 
         // The fallback: exactly one statement besides the guard, and it
         // consults nothing from the PaneMotion namespace - only the
-        // legacy truth.
+        // truth table.
         var fallback = Assert.Single(effective.Body!.Statements,
             s => !ReferenceEquals(s, guard));
         Assert.DoesNotContain(fallback.DescendantNodes().OfType<MemberAccessExpressionSyntax>(),
             m => (m.Expression as IdentifierNameSyntax)?.Identifier.ValueText == "PaneMotion");
-        Assert.Single(fallback.Calls("TabStripMotion.Legacy"));
+        Assert.Single(fallback.Calls("MotionPolicy.Resolve"));
+    }
+
+    [Fact]
+    public void The_fallback_feeds_the_truth_table_the_real_seats()
+    {
+        var inputs = ShellSource.Load("Ghostty.Services.MotionGating.cs").Method("FallbackInputs");
+
+        // One construction, every seat named at its argument.
+        var creation = Assert.Single(inputs.DescendantNodes()
+            .OfType<ObjectCreationExpressionSyntax>());
+        var arguments = creation.ArgumentList!.Arguments;
+        Assert.Equal(
+            new[]
+            {
+                "PowerMode", "PowerTriggers", "IsRemoteSession",
+                "SystemAnimationsEnabled", "HighContrastApplied", "Hardware", "Lever",
+            },
+            arguments.Select(a => a.NameColon?.Name.Identifier.ValueText).ToList());
+
+        // The two reads the gates have always carried, named as the
+        // parameters they arrive on.
+        Assert.Equal("animationsEnabled",
+            arguments[3].Expression.ToString());
+        Assert.Equal("highContrast",
+            arguments[4].Expression.ToString());
+
+        // The transport input is false - the fallback reports no
+        // pane-scale allowance - and there is no hardware read on this
+        // side: the ceiling is pro-side by architecture.
+        Assert.True(arguments[2].Expression.IsKind(SyntaxKind.FalseLiteralExpression),
+            $"the transport input must stay the literal false, found '{arguments[2].Expression}'");
+        Assert.Equal("HardwareCeiling.Unspecified", arguments[5].Expression.ToString());
+
+        // And the seats that arrive from installed sources: the composite
+        // from the power seat, the rung from the lever.
+        Assert.Contains("triggers", arguments[1].Expression.ToString(), StringComparison.Ordinal);
+        Assert.EndsWith("_userLever()", arguments[6].Expression.ToString(), StringComparison.Ordinal);
     }
 }

@@ -163,7 +163,7 @@ public sealed class MotionGatingTests
     }
 
     [Fact]
-    public void Reduced_still_counts_as_on_for_the_boolean_gates()
+    public void Reduced_cuts_the_strip_route()
     {
         var coordinator = new PerSurfaceCoordinator(
             new Dictionary<MotionSurfaceClass, MotionPolicyLevel>
@@ -172,11 +172,11 @@ public sealed class MotionGatingTests
             });
         PaneMotion.Register(coordinator);
 
-        // Chrome is Reduced: reduced still counts as on for the boolean
-        // gates. Off is the only cut, so a coordinator that wants the
-        // strip silent says Off, and this row is the pin that says the
-        // route's mapping is != Off rather than == Full.
-        Assert.True(TabStripMotion.Enabled(animationsEnabled: true, highContrast: false));
+        // Chrome is Reduced: the strip is a movement-bearing surface, and
+        // reduced keeps fades, not slides. Its route runs only on Full,
+        // so a Reduced level cuts it too, and this row is the pin that
+        // says the route's mapping is == Full rather than != Off.
+        Assert.False(TabStripMotion.Enabled(animationsEnabled: true, highContrast: false));
         Assert.Equal(new[] { MotionSurfaceClass.Chrome }, coordinator.PolicyRequests);
     }
 }
