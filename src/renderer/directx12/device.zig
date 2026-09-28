@@ -603,21 +603,25 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     };
 
     // Frame-latency pacing, where the swap chain was created paced: QI
-    // the IDXGISwapChain2 surface (also wanted unpaced, for the matrix
-    // transform), cap the queue at one in-flight frame, and take the
-    // waitable the renderer waits before each frame. Only chains created
-    // with the waitable flag accept SetMaximumFrameLatency and expose a
-    // waitable; the panel path's chain is created unpaced by choice (its
-    // creation entry point does accept the flag -- see
-    // compositionSwapChainDesc -- but every filmed leg ran unpaced), so
-    // there pacing is Present(1,0)'s own vblank block and this block
-    // only supplies the swap_chain2 pointer. The waitable is re-read on
-    // every swap chain creation, which is what makes the TDR-recovery
-    // path (deinitGpu + initGpu) get a live one instead of the dead
-    // swap chain's handle. A QI failure logs and degrades to the
-    // previous behavior rather than failing surface creation:
-    // IDXGISwapChain2 has shipped since Windows 8.1, so this is
-    // belt-and-braces, not an expected path.
+    // the IDXGISwapChain2 interface, cap the queue at one in-flight
+    // frame, and take the waitable the renderer waits before each frame.
+    // The QI itself runs on every chain, paced or not, so the pointer is
+    // uniformly available and a future pacing flip needs no device-side
+    // change; only the calls below it are paced-gated. (The DPI matrix
+    // counter-transform no longer rides this pointer -- the renderer's
+    // applySwapChainScale reaches IDXGISwapChain2 through its own
+    // swap_chain3.) Only chains created with the waitable flag accept
+    // SetMaximumFrameLatency and expose a waitable; the panel path's
+    // chain is created unpaced by choice (its creation entry point does
+    // accept the flag -- see compositionSwapChainDesc -- but every
+    // filmed leg ran unpaced), so there pacing is Present(1,0)'s own
+    // vblank block and this block only supplies the swap_chain2 pointer.
+    // The waitable is re-read on every swap chain creation, which is
+    // what makes the TDR-recovery path (deinitGpu + initGpu) get a live
+    // one instead of the dead swap chain's handle. A QI failure logs and
+    // degrades to the previous behavior rather than failing surface
+    // creation: IDXGISwapChain2 has shipped since Windows 8.1, so this
+    // is belt-and-braces, not an expected path.
     const paced = (swap_chain_flags &
         dxgi.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) != 0;
     var swap_chain2: ?*dxgi.IDXGISwapChain2 = null;
@@ -630,7 +634,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         );
         if (FAILED(hr)) {
             log.warn(
-                "QueryInterface for IDXGISwapChain2 failed: 0x{x}; no matrix transform or pacing",
+                "QueryInterface for IDXGISwapChain2 failed: 0x{x}; no frame-latency pacing",
                 .{@as(u32, @bitCast(hr))},
             );
         } else {

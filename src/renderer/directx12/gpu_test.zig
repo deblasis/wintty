@@ -1766,10 +1766,13 @@ test "Device: SwapChainPanel surface handle outlives the device that presented i
     // both makes flipping the choice on a conscious diff, not a drift.
     try std.testing.expectEqual(@as(u32, 0), second.swap_chain_flags);
     try std.testing.expect(second.frame_latency_waitable == null);
-    // The unpaced panel chain still needs its SwapChain2: that is where
-    // the DPI counter-transform (SetMatrixTransform) lives. A regression
-    // that gated the QI on `paced` would silently kill the panel's
-    // matrix transform while these pins stayed green.
+    // The unpaced panel chain still QIs its SwapChain2: the QI is
+    // deliberately unconditional, and only the calls through it are
+    // paced-gated. A regression that gated the QI on `paced` would break
+    // a future panel-pacing flip with no device-side signal while these
+    // pins stayed green. (The DPI counter-transform itself no longer
+    // rides this pointer: the renderer's applySwapChainScale reaches
+    // IDXGISwapChain2 through its own swap_chain3.)
     try std.testing.expect(second.swap_chain2 != null);
 
     // The proof is a Present into the reused surface from the new device.
