@@ -3303,6 +3303,39 @@ pub const CAPI = struct {
     /// Windows there is a pending key event from ghostty_surface_key,
     /// in which case the text attaches to that key and dispatches
     /// through key encoding (WM_CHAR after WM_KEYDOWN).
+    ///
+    /// The shift a Windows layout consumed to translate a key into the
+    /// text its WM_CHAR delivered, for the pending-key path below.
+    ///
+    /// Windows reports no consumed-modifier set the way GTK reads xkb's
+    /// (the GDK key event's consumed modifiers) or macOS derives one
+    /// (NSEvent+Extension.swift subtracts control and command from the
+    /// translation modifiers). The equivalent fact arrives with the text:
+    /// a printable character the key produced is the translation, and the
+    /// shift the KeyDown carried was part of producing it, so it is not a
+    /// binding modifier for the encoders (input.KeyEvent.effectiveMods
+    /// negates exactly this set).
+    ///
+    /// Without it, effectiveMods keeps shift, binding mods stay
+    /// non-empty, and the kitty keyboard encoder sends CSI u for a key
+    /// whose text is unambiguous under flags without report-all.
+    /// Applications decode that as the unshifted key: Neovim renders
+    /// Shift+; as ';' and ignores the shifted-alternate field (#1253).
+    ///
+    /// Only shift is ever marked consumed. Control and super never
+    /// translate text (the same subtraction macOS makes), and marking alt
+    /// would strip AltGr's ctrl+alt half from encodings on layouts that
+    /// need it.
+    fn consumedShiftForText(
+        mods: input.Mods,
+        consumed: input.Mods,
+    ) input.Mods {
+        if (!mods.shift) return consumed;
+        var out = consumed;
+        out.shift = true;
+        return out;
+    }
+
     export fn ghostty_surface_text(
         surface: *Surface,
         ptr: [*]const u8,
@@ -3335,6 +3368,18 @@ pub const CAPI = struct {
                     surface.pending_key_text[copy_len] = 0;
 
                     event.text = surface.pending_key_text[0..copy_len :0];
+
+                    // The text is the translation of this key, so the
+                    // shift the KeyDown carried was consumed producing
+                    // it rather than held as a binding modifier. Windows
+                    // reports no consumed-modifier set to read (GTK reads
+                    // xkb's, macOS derives one from the translation
+                    // modifiers), so it is derived here, where the text
+                    // proves it: see consumedShiftForText.
+                    event.consumed_mods = consumedShiftForText(
+                        event.mods,
+                        event.consumed_mods,
+                    );
                 }
 
                 surface.pending_key = null;
