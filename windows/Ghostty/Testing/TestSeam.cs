@@ -1420,6 +1420,54 @@ internal static class TestSeam
                 });
             }
 
+            case "terminal-key":
+            {
+                // The KeyDown half of a key press, in process: the same
+                // retire OnKeyDown runs first and the same
+                // ghostty_surface_key forward SendKey makes, with the
+                // scancode derived the same way from the virtual key (a
+                // KeyRoutedEventArgs cannot be constructed in process).
+                // char= delivers the WM_CHAR half right after, the order a
+                // real press delivers them in, through the same
+                // HandleCharacter the terminal-character op drives. A key
+                // that reaches a live shell is send-text's power, so this
+                // shares its opt-in. Non-extended keys only.
+                if (!_inputAllowed)
+                    return Error(op, $"terminal-key is off; set {InputEnvVar}=1 to arm it");
+                var vk = ArgInt(args, "vk", -1);
+                if (vk is < 0 or > 0xFF)
+                    return Error(op, "vk must be a virtual-key code 0..255");
+                var mods = Ghostty.Core.Interop.GhosttyMods.None;
+                if (ArgBool(args, "shift", false))
+                    mods |= Ghostty.Core.Interop.GhosttyMods.Shift;
+                if (ArgBool(args, "ctrl", false))
+                    mods |= Ghostty.Core.Interop.GhosttyMods.Ctrl;
+                if (ArgBool(args, "alt", false))
+                    mods |= Ghostty.Core.Interop.GhosttyMods.Alt;
+                if (ArgBool(args, "win", false))
+                    mods |= Ghostty.Core.Interop.GhosttyMods.Super;
+                var action = ArgString(args, "action") == "release"
+                    ? Ghostty.Core.Interop.GhosttyInputAction.Release
+                    : Ghostty.Core.Interop.GhosttyInputAction.Press;
+                if (LeafTerminal(manager, args) is not { } terminal)
+                    return Error(op, "no such tab or leaf");
+                var handled = terminal.TestSeamKeyDown(
+                    (Windows.System.VirtualKey)vk, mods, action);
+                bool? suppressed = null;
+                if (ArgString(args, "char") is { Length: > 0 } ch)
+                    suppressed = terminal.TestSeamCharacter(ch[0]);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("vk", vk);
+                    json.WriteBoolean("handled", handled);
+                    if (suppressed is { } s) json.WriteBoolean("suppressed", s);
+                    json.WriteEndObject();
+                });
+            }
+
             case "terminal-retire":
             {
                 // The retire a real key press performs as OnKeyDown's first
