@@ -2476,18 +2476,56 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             scancode |= 0xE000;
         }
 
+        if (SendKeyCore(scancode, action, CurrentMods())) e.Handled = true;
+    }
+
+    /// <summary>
+    /// The forward half below the event: one ghostty_surface_key carrying
+    /// the scancode, action and modifiers a press or release holds. Split
+    /// out of <see cref="SendKey"/> so the test seam drives the same call
+    /// without constructing a <see cref="KeyRoutedEventArgs"/> (which
+    /// cannot be built in process). Returns whether libghostty marked the
+    /// key handled.
+    /// </summary>
+    private bool SendKeyCore(uint scancode, GhosttyInputAction action, GhosttyMods mods)
+    {
+        if (_surface.Handle == IntPtr.Zero) return false;
+
         var key = new GhosttyInputKey
         {
             Action = action,
-            Mods = CurrentMods(),
+            Mods = mods,
+            // The Windows embedder does not know yet which modifiers the
+            // layout consumed to produce this key's text: WM_CHAR has not
+            // arrived. embedded.zig derives the consumed set when the text
+            // attaches (see ghostty_surface_text).
             ConsumedMods = GhosttyMods.None,
             Keycode = scancode,
             Text = IntPtr.Zero,
             UnshiftedCodepoint = 0,
             Composing = (byte)(_imeComposing ? 1 : 0),
         };
-        var handled = NativeMethods.SurfaceKey(_surface, key);
-        if (handled) e.Handled = true;
+        return NativeMethods.SurfaceKey(_surface, key);
+    }
+
+    /// <summary>
+    /// The test seam's key press: the same retire a real OnKeyDown runs
+    /// first, then the same ghostty_surface_key forward SendKey makes,
+    /// with the scancode derived the same way from the virtual key (a
+    /// seam press has no KeyStatus, so the MapVirtualKey fallback is the
+    /// only path, as it is for keys WinUI 3 strips a scancode from).
+    /// Non-extended keys only: the seam cannot know IsExtendedKey.
+    /// </summary>
+    internal bool TestSeamKeyDown(Windows.System.VirtualKey key, GhosttyMods mods, GhosttyInputAction action)
+    {
+        // OnKeyDown's first statement: an arm left over from a consumed
+        // close elsewhere must not decide this key's character's fate.
+        RetireStaleCharacterSuppress();
+
+        uint scancode = PInvoke.MapVirtualKey(
+            (uint)key,
+            MAP_VIRTUAL_KEY_TYPE.MAPVK_VK_TO_VSC);
+        return SendKeyCore(scancode, action, mods);
     }
 
     private void OnCharacterReceived(UIElement sender, CharacterReceivedRoutedEventArgs e)

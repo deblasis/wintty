@@ -323,21 +323,28 @@ public class TestSeamWiringTests
         Assert.Equal("Environment.GetEnvironmentVariable", read.CalleeText());
         Assert.Equal("InputEnvVar", read.Arg(0));
 
-        // terminal-character is the one other op that can put bytes into a
-        // shell (a character the consumed-close arm does not drop is
-        // forwarded like typing), so it sits behind the same gate, first.
+        // terminal-character and terminal-key are the two other ops that
+        // can put bytes into a shell (a character the consumed-close arm
+        // does not drop is forwarded like typing, and terminal-key pairs
+        // the KeyDown half of a press with that same character path), so
+        // they sit behind the same gate, first.
         var character = source.Case("ExecuteOnUiThreadAsync", "terminal-character");
         var characterFirst = Assert.IsType<IfStatementSyntax>(character.Statements
             .OfType<BlockSyntax>().SelectMany(b => b.Statements).First());
         Assert.Equal("!_inputAllowed", characterFirst.Condition.ToString());
 
+        var key = source.Case("ExecuteOnUiThreadAsync", "terminal-key");
+        var keyFirst = Assert.IsType<IfStatementSyntax>(key.Statements
+            .OfType<BlockSyntax>().SelectMany(b => b.Statements).First());
+        Assert.Equal("!_inputAllowed", keyFirst.Condition.ToString());
+
         // And nothing else in the seam consults it, so the gate is exactly
-        // those two ops wide and cannot have quietly become the gate for
+        // those three ops wide and cannot have quietly become the gate for
         // everything.
         var mentions = source.Root.DescendantNodes()
             .OfType<IdentifierNameSyntax>()
             .Count(i => i.Identifier.ValueText == "_inputAllowed");
-        Assert.Equal(3, mentions); // the one write, the two reads
+        Assert.Equal(4, mentions); // the one write, the three reads
     }
 
     /// <summary>
