@@ -27,7 +27,10 @@ namespace Ghostty.Tests.Config;
 /// operation, never by the file system: waiting for real events made every
 /// step here a race the machine could lose, and under load it did (issue
 /// #1161). The seam runs the exact path a real event runs, suppression
-/// consult included. What real events add is covered in
+/// consult included. To keep that guarantee honest the real
+/// FileSystemWatcher is built but never enabled here, so no real event
+/// can land beside the seam and re-arm the debounce after an assertion
+/// has already run. What real events add is covered in
 /// ConfigFileWatcherTests, which keeps the real FileSystemWatcher running.
 /// </remarks>
 public sealed class ConfigVanishProtocolTests : IDisposable
@@ -83,7 +86,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     /// the protocol back: a host with no watcher still reloads, and a test
     /// needs to be able to deliver that verdict without a delivery.
     /// </summary>
-    private ConfigVanishProtocol Start(Func<bool>? ask = null)
+    private ConfigVanishProtocol Start(Func<bool>? ask = null, bool realEvents = false)
     {
         // The service's own wiring, verbatim. The protocol is driven by what
         // a LOAD found and not by the delivery that prompted it, so each
@@ -117,6 +120,15 @@ public sealed class ConfigVanishProtocolTests : IDisposable
                 Interlocked.Increment(ref _vanished);
                 protocol.Observed(ConfigFilesFound.Absent);
             });
+        // The real FileSystemWatcher is built but never enabled: every
+        // event here is raised by hand through TestRaiseFileEvent, and a
+        // real event landing beside the seam would re-arm the debounce
+        // behind the test's back, the exact race the seam exists to remove
+        // (issue #1161). TestEnable is the watcher's own test-only
+        // replacement for EnableRaisingEvents = true. The one member that
+        // needs the real stream, the deleted-directory rebuild, passes
+        // realEvents: true.
+        if (!realEvents) _watcher.TestEnable = _ => { };
         Assert.True(_watcher.Start());
         return protocol;
     }
@@ -652,7 +664,11 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     [Fact]
     public void A_deleted_directory_concludes_through_its_rebuild_ticks()
     {
-        Start();
+        // This member needs the real FileSystemWatcher: the Error event a
+        // deleted watched directory raises is what schedules the rebuild,
+        // so it is the one construction here that keeps the real stream
+        // enabled.
+        Start(realEvents: true);
 
         Retry(() => Directory.Delete(_dir, recursive: true));
         WaitUntil(() => _timer.Armed,
