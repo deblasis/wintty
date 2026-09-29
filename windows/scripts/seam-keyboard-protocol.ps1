@@ -370,52 +370,80 @@ if ($Tuios -ne '' -and 'tuios-nested-shift' -like $Only) {
         else {
             # TuiOS is modal: n opens a window (window-management mode),
             # i enters terminal mode, then the command line reaches the
-            # pane's shell.
+            # pane's shell. Both mode keys are waited through, not
+            # sleep-timed: under load TuiOS's daemon cold start can eat
+            # a key pressed too early, the pane stays in window mode,
+            # and every bound letter in the command opens another window
+            # instead of typing.
             [void](Seam $s @{ op = 'terminal-key'; vk = 0x4E; char = 'n' })
-            Start-Sleep -Milliseconds 2000
-            [void](Seam $s @{ op = 'terminal-key'; vk = 0x49; char = 'i' })
-            Start-Sleep -Milliseconds 1000
-            # Virtual-key codes, not ASCII: 0x6E is VK_DECIMAL and 0x76 is
-            # VK_F17, so lowercase ASCII values here would name other
-            # keys entirely. Letters take their uppercase VK with the
-            # lowercase WM_CHAR text, the pair a shifted-off key press
-            # produces.
-            foreach ($pair in @(
-                    @{ vk = 0x4E; char = 'n' }, @{ vk = 0x56; char = 'v' }, @{ vk = 0x49; char = 'i' }, @{ vk = 0x4D; char = 'm' },
-                    @{ vk = 0x20; char = ' ' }, @{ vk = 0xBD; char = '-' }, @{ vk = 0xBD; char = '-' },
-                    @{ vk = 0x43; char = 'c' }, @{ vk = 0x4C; char = 'l' }, @{ vk = 0x45; char = 'e' },
-                    @{ vk = 0x41; char = 'a' }, @{ vk = 0x4E; char = 'n' },
-                    @{ vk = 0x0D; char = "`r" }
-                )) {
-                [void](Seam $s @{ op = 'terminal-key'; vk = $pair.vk; char = $pair.char })
-                Start-Sleep -Milliseconds 120
-            }
-            if (-not (Wait-Screen $s '[No Name]' 40)) {
-                Add-Result 'tuios-nested-shift' $false 'harness' ('nvim never appeared inside tuios; screen: ' +
-                    (((Get-Screen $s) -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -First 4) -join ' | '))
+            if (-not (Wait-Screen $s '1:1' 20)) {
+                Add-Result 'tuios-nested-shift' $false 'harness' 'the window never appeared'
             }
             else {
-                Start-Sleep -Milliseconds 1500
                 [void](Seam $s @{ op = 'terminal-key'; vk = 0x49; char = 'i' })
-                Start-Sleep -Milliseconds 500
-                [void](Seam $s @{ op = 'terminal-key'; vk = 0x5A; char = 'z' })
-                Start-Sleep -Milliseconds 300
-                [void](Seam $s @{ op = 'terminal-key'; vk = 0xBA; shift = $true; char = ':' })
-                Start-Sleep -Milliseconds 300
-                [void](Seam $s @{ op = 'terminal-key'; vk = 0x58; char = 'x' })
-                Start-Sleep -Milliseconds 300
-                [void](Seam $s @{ op = 'terminal-key'; vk = 0x41; shift = $true; char = 'A' })
-                Start-Sleep -Milliseconds 800
-                $text = Get-Screen $s
-                if ($text -clike '*z:xA*') {
-                    Add-Result 'tuios-nested-shift' $true 'product' 'rendered z:xA through wintty->tuios->nvim'
-                }
-                elseif ($text -clike '*z;x*') {
-                    Add-Result 'tuios-nested-shift' $false 'product' "rendered z;x (Shift+; lost through the intermediary)"
+                # The pane's shell draws its banner once terminal mode
+                # has it: PowerShell under the harness environment
+                # (TuiOS's default), MINGW64 when a SHELL leaked through.
+                $banner = Wait-Screen $s 'PowerShell' 20
+                if (-not $banner) { $banner = Wait-Screen $s 'MINGW64' 10 }
+                if (-not $banner) {
+                    Add-Result 'tuios-nested-shift' $false 'harness' ('terminal mode never showed a shell; screen: ' +
+                        ((Get-Screen $s) -replace "`n", ' | '))
                 }
                 else {
-                    Add-Result 'tuios-nested-shift' $false 'product' ('the buffer row shows neither z:xA nor z;x: ' +
-                        ((($text -split "`n") | Where-Object { $_ -match '\S' } | Select-Object -First 4) -join ' | '))
+                    Start-Sleep -Milliseconds 500
+                    # Virtual-key codes, not ASCII: 0x6E is VK_DECIMAL and
+                    # 0x76 is VK_F17, so lowercase ASCII values here would
+                    # name other keys entirely. Letters take their
+                    # uppercase VK with the lowercase WM_CHAR text, the
+                    # pair an unshifted key press produces.
+                    foreach ($pair in @(
+                            @{ vk = 0x4E; char = 'n' }, @{ vk = 0x56; char = 'v' }, @{ vk = 0x49; char = 'i' }, @{ vk = 0x4D; char = 'm' },
+                            @{ vk = 0x20; char = ' ' }, @{ vk = 0xBD; char = '-' }, @{ vk = 0xBD; char = '-' },
+                            @{ vk = 0x43; char = 'c' }, @{ vk = 0x4C; char = 'l' }, @{ vk = 0x45; char = 'e' },
+                            @{ vk = 0x41; char = 'a' }, @{ vk = 0x4E; char = 'n' },
+                            @{ vk = 0x0D; char = "`r" }
+                        )) {
+                        [void](Seam $s @{ op = 'terminal-key'; vk = $pair.vk; char = $pair.char })
+                        Start-Sleep -Milliseconds 150
+                    }
+                    if (-not (Wait-Screen $s '[No Name]' 40)) {
+                        Add-Result 'tuios-nested-shift' $false 'harness' ('nvim never appeared inside tuios; screen: ' +
+                            (((Get-Screen $s) -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -First 4) -join ' | '))
+                    }
+                    else {
+                        # One window is the whole point: a key that fell
+                        # into window mode multiplies them and the insert
+                        # phase below would assert against the wrong pane.
+                        $dock = (Get-Screen $s) -split "`n" | Select-Object -First 1
+                        if ($dock -match '1:[2-9]') {
+                            Add-Result 'tuios-nested-shift' $false 'harness' ("windows multiplied (dockbar $dock): a key fell into window mode")
+                        }
+                        else {
+                            Start-Sleep -Milliseconds 2000
+                            [void](Seam $s @{ op = 'terminal-key'; vk = 0x49; char = 'i' })
+                            Start-Sleep -Milliseconds 800
+                            [void](Seam $s @{ op = 'terminal-key'; vk = 0x5A; char = 'z' })
+                            Start-Sleep -Milliseconds 400
+                            [void](Seam $s @{ op = 'terminal-key'; vk = 0xBA; shift = $true; char = ':' })
+                            Start-Sleep -Milliseconds 400
+                            [void](Seam $s @{ op = 'terminal-key'; vk = 0x58; char = 'x' })
+                            Start-Sleep -Milliseconds 400
+                            [void](Seam $s @{ op = 'terminal-key'; vk = 0x41; shift = $true; char = 'A' })
+                            Start-Sleep -Milliseconds 1000
+                            $text = Get-Screen $s
+                            if ($text -clike '*z:xA*') {
+                                Add-Result 'tuios-nested-shift' $true 'product' 'rendered z:xA through wintty->tuios->nvim'
+                            }
+                            elseif ($text -clike '*z;x*') {
+                                Add-Result 'tuios-nested-shift' $false 'product' "rendered z;x (Shift+; lost through the intermediary)"
+                            }
+                            else {
+                                Add-Result 'tuios-nested-shift' $false 'product' ('the buffer row shows neither z:xA nor z;x: ' +
+                                    ((($text -split "`n") | Where-Object { $_ -match '\S' } | Select-Object -First 4) -join ' | '))
+                            }
+                        }
+                    }
                 }
             }
         }
