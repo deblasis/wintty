@@ -273,9 +273,10 @@ Invoke-EchoScenario 'mok2-shift-text' '\x1b[>4;2m' @($ShiftSemi, $ShiftA) @(
     '1b 5b 32 37 3b 32 3b 36 35 7e'
 )
 
-# kitty flags 7 (disambiguate + event types + alternates), the set a
-# clean Neovim pushes when its CSI ? u query is answered: shift-only
-# text keys still produce text; CSI 59;2u is what Neovim decodes as ';'.
+# kitty flags 7 (disambiguate + event types + alternates): everything
+# but report-all. A consumer that wants sequences for text keys asks for
+# report-all; without it, a shift-only text key's text is unambiguous
+# and CSI 59;2u is decoded back as the unshifted key.
 Invoke-EchoScenario 'kitty7-shift-text' '\x1b[>7u' @($ShiftSemi, $ShiftA) @('3a', '41')
 
 # kitty "report all keys as escape codes" (flag 8): everything is CSI u
@@ -315,13 +316,15 @@ if ($Nvim -ne '' -and 'nvim-real-shift' -like $Only) {
             [void](Seam $s @{ op = 'terminal-key'; vk = 0x41; shift = $true; char = 'A' })
             Start-Sleep -Milliseconds 500
             $text = Get-Screen $s
-            if ($text -like '*z:xA*') {
+            # -clike: case-sensitive, so a lowercase 'a' from a broken
+            # Shift+A cannot pass as the capital the fix must produce.
+            if ($text -clike '*z:xA*') {
                 Add-Result 'nvim-real-shift' $true 'product' 'rendered z:xA'
             }
-            elseif ($text -like '*z;x*') {
+            elseif ($text -clike '*z;x*') {
                 Add-Result 'nvim-real-shift' $false 'product' "rendered z;x (Shift+; decoded as ';')"
             }
-            elseif ($text -like '*z:xa*') {
+            elseif ($text -clike '*z:xa*') {
                 Add-Result 'nvim-real-shift' $false 'product' 'rendered z:xa (Shift+A decoded as lowercase)'
             }
             else {
@@ -372,11 +375,16 @@ if ($Tuios -ne '' -and 'tuios-nested-shift' -like $Only) {
             Start-Sleep -Milliseconds 2000
             [void](Seam $s @{ op = 'terminal-key'; vk = 0x49; char = 'i' })
             Start-Sleep -Milliseconds 1000
+            # Virtual-key codes, not ASCII: 0x6E is VK_DECIMAL and 0x76 is
+            # VK_F17, so lowercase ASCII values here would name other
+            # keys entirely. Letters take their uppercase VK with the
+            # lowercase WM_CHAR text, the pair a shifted-off key press
+            # produces.
             foreach ($pair in @(
-                    @{ vk = 0x6E; char = 'n' }, @{ vk = 0x76; char = 'v' }, @{ vk = 0x69; char = 'i' }, @{ vk = 0x6D; char = 'm' },
+                    @{ vk = 0x4E; char = 'n' }, @{ vk = 0x56; char = 'v' }, @{ vk = 0x49; char = 'i' }, @{ vk = 0x4D; char = 'm' },
                     @{ vk = 0x20; char = ' ' }, @{ vk = 0xBD; char = '-' }, @{ vk = 0xBD; char = '-' },
-                    @{ vk = 0x63; char = 'c' }, @{ vk = 0x6C; char = 'l' }, @{ vk = 0x65; char = 'e' },
-                    @{ vk = 0x61; char = 'a' }, @{ vk = 0x6E; char = 'n' },
+                    @{ vk = 0x43; char = 'c' }, @{ vk = 0x4C; char = 'l' }, @{ vk = 0x45; char = 'e' },
+                    @{ vk = 0x41; char = 'a' }, @{ vk = 0x4E; char = 'n' },
                     @{ vk = 0x0D; char = "`r" }
                 )) {
                 [void](Seam $s @{ op = 'terminal-key'; vk = $pair.vk; char = $pair.char })
@@ -399,10 +407,10 @@ if ($Tuios -ne '' -and 'tuios-nested-shift' -like $Only) {
                 [void](Seam $s @{ op = 'terminal-key'; vk = 0x41; shift = $true; char = 'A' })
                 Start-Sleep -Milliseconds 800
                 $text = Get-Screen $s
-                if ($text -like '*z:xA*') {
+                if ($text -clike '*z:xA*') {
                     Add-Result 'tuios-nested-shift' $true 'product' 'rendered z:xA through wintty->tuios->nvim'
                 }
-                elseif ($text -like '*z;x*') {
+                elseif ($text -clike '*z;x*') {
                     Add-Result 'tuios-nested-shift' $false 'product' "rendered z;x (Shift+; lost through the intermediary)"
                 }
                 else {

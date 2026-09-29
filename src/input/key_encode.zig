@@ -1655,16 +1655,17 @@ test "kitty: report alternates colon (shift+';')" {
     try testing.expectEqualStrings("\x1b[59:58;2;58u", writer.buffered());
 }
 
-test "kitty: consumed shift sends the text under nvim's flags" {
+test "kitty: consumed shift sends the text without report-all" {
     // The apprt contract for a shifted text key: the shift the layout
     // consumed producing the text is reported in consumed_mods (GTK
     // reads it from xkb, macOS derives it from the translation
     // modifiers, the Windows embedded runtime derives it when the text
-    // attaches). Under the flags a clean Neovim negotiates - without
-    // report-all - the key's text is unambiguous, so it must go out as
-    // text. A CSI u carrying the unshifted base is decoded back as the
-    // unshifted key by applications that ignore the shifted alternate
-    // (Neovim reads Shift+; as ';', #1253).
+    // attaches). Under flags carrying everything but report-all -
+    // disambiguate, event types, alternates - the key's text is
+    // unambiguous, so it must go out as text. A CSI u carrying the
+    // unshifted base is decoded back as the unshifted key by
+    // applications that ignore the shifted alternate (Neovim reads
+    // Shift+; as ';', #1253).
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try kitty(&writer, .{
