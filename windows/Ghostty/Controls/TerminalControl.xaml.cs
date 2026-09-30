@@ -2081,6 +2081,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 DefaultButton = ContentDialogButton.Close, // Safety default: Cancel
                 XamlRoot = XamlRoot,
             };
+            // Enter or Escape closes it back onto this pane; the key's
+            // character must not follow into the shell.
+            Ghostty.Input.ConsumedCloseKey.Watch(dialog);
             return await dialog.ShowAsync() == ContentDialogResult.Primary;
         }
         catch (Exception)
