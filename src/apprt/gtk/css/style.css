@@ -137,7 +137,10 @@ label.resize-overlay {
 .surface .readonly_overlay {
   /* Should be the equivalent of the following SwiftUI color: */
   /* Color(hue: 0.08, saturation: 0.5, brightness: 0.8) */
-  color: hsl(25 50 75);
+  /* Comma form: GTK's CSS parser (pre-4.16 at least) rejects the
+     space-separated CSS Color 4 spelling outright, and a rejected rule
+     applies nothing. Found at runtime, where CSS is only ever read. */
+  color: hsl(25, 50%, 75%);
   padding: 8px 8px 8px 8px;
   margin: 8px 8px 8px 8px;
   border-radius: 6px 6px 6px 6px;
@@ -157,41 +160,37 @@ label.resize-overlay {
 }
 .drop-overlay.drop-left {
   /* after GTK 4.16 is a requirement, switch to the following: */
-  /* background: linear-gradient(to left, transparent, 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
+  /* background: linear-gradient(to left, transparent 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
   background: linear-gradient(
     to left,
-    transparent,
-    50%,
+    transparent 50%,
     rgba(53, 132, 228, 0.2) 50%
   );
 }
 .drop-overlay.drop-right {
   /* after GTK 4.16 is a requirement, switch to the following: */
-  /* background: linear-gradient(to right, transparent, 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
+  /* background: linear-gradient(to right, transparent 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
   background: linear-gradient(
     to right,
-    transparent,
-    50%,
+    transparent 50%,
     rgba(53, 132, 228, 0.2) 50%
   );
 }
 .drop-overlay.drop-top {
   /* after GTK 4.16 is a requirement, switch to the following: */
-  /* background: linear-gradient(to top, transparent, 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
+  /* background: linear-gradient(to top, transparent 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
   background: linear-gradient(
     to top,
-    transparent,
-    50%,
+    transparent 50%,
     rgba(53, 132, 228, 0.2) 50%
   );
 }
 .drop-overlay.drop-bottom {
   /* after GTK 4.16 is a requirement, switch to the following: */
-  /* background: linear-gradient(to bottom, transparent, 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
+  /* background: linear-gradient(to bottom, transparent 50%, color-mix(in srgb, var(--accent-color), transparent 50%) 50%); */
   background: linear-gradient(
     to bottom,
-    transparent,
-    50%,
+    transparent 50%,
     rgba(53, 132, 228, 0.2) 50%
   );
 }
