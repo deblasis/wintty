@@ -17,6 +17,7 @@ pub const Message = apprt.surface.Message;
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_config = @import("build_config.zig");
 const assert = @import("quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -7138,6 +7139,15 @@ fn testSurface(alloc: Allocator, rt_app: *apprt.App) !*Surface {
 }
 
 test "endKeySequenceBeforeClose: a closing action drops the queued sequence" {
+    // testSurface's doc states this file's standing assumption: the unit
+    // tests are built with -Dapp-runtime=none, whose App is an empty
+    // struct, so forwarding real actions into the apprt is safe. Under a
+    // real apprt it is not - gtk's keySequence dereferences the stand-in
+    // surface (`rt_surface.gobj()`), so running this there is a
+    // guaranteed crash, not a result. Same guard as App.zig's tests.
+    // Found by the first `zig build test` of the GTK artifact: 4396
+    // passing, this one crashing.
+    if (comptime build_config.app_runtime != .none) return error.SkipZigTest;
     const testing = std.testing;
     const alloc = testing.allocator;
 
