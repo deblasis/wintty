@@ -795,6 +795,29 @@ pub const Application = extern struct {
             .search_total => Action.searchTotal(target, value),
             .search_selected => Action.searchSelected(target, value),
 
+            // Actions this apprt has no consumer for. Named explicitly,
+            // never left to a default arm, because a default arm is
+            // precisely what let the six below be missed: they were added
+            // to Action.Key and the GTK apprt was never revisited, so the
+            // GTK build stopped compiling with "switch must handle all
+            // possibilities" here. Found by the first Linux GTK build of
+            // this tree, which nothing had ever run.
+            //
+            // pin_tab/unpin_tab/move_group: the Windows apprt's tab shell.
+            // GTK has no pinned tabs and no tab groups, so there is
+            // nothing to perform.
+            //
+            // first_render/custom_shader_failed: one-shot renderer
+            // notifications the core Surface consumes itself, so they
+            // never reach an apprt. prompt_ready is declared on the
+            // surface channel but dispatched by nothing today.
+            .pin_tab,
+            .unpin_tab,
+            .move_group,
+            .prompt_ready,
+            .first_render,
+            .custom_shader_failed,
+
             // Unimplemented
             .secure_input,
             .close_all_windows,
