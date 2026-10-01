@@ -2477,7 +2477,15 @@ const TestHandler = struct {
         // takes.
         self.renderer_visible = .init(true);
         self.write_limit = .{};
-        self.rt_app = .{};
+        // `undefined` for the same reason `.surface = undefined` gets it
+        // below: the app mailbox only carries this pointer through to the
+        // app thread, which these tests stand in for, so it is never
+        // dereferenced. An empty struct literal was doing the same job,
+        // but only where the apprt App type happens to have no required
+        // fields: the GTK App carries `app: *Application`, so the literal
+        // stopped the whole test build compiling there. Found by the
+        // first `zig build test` of the GTK artifact.
+        self.rt_app = undefined;
 
         self.handler = .{
             .alloc = alloc,
