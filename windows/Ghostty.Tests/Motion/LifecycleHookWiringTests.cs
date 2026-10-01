@@ -207,7 +207,7 @@ public class LifecycleHookWiringTests
 
     /// <summary>One named argument of the record the hook hands over,
     /// read out of the call's own construction: the facts a site reports
-    /// must be spelled at the site, so the census reads them there.</summary>
+    /// must be spelled at the site, so this pin reads them there.</summary>
     private static ExpressionSyntax NamedArg(InvocationExpressionSyntax hook, string name)
     {
         var creation = Assert.IsType<ObjectCreationExpressionSyntax>(hook.ArgExpression(0));
@@ -304,8 +304,8 @@ public class LifecycleHookWiringTests
                 .Where(c => c.Type.ToString() == "PaneTreeChange"))
             .ToList();
 
-        // The census sweeps the raisers that exist: a new or removed one
-        // has to come through here, not slip past a stale count.
+        // The sweep enumerates the raisers that exist: a new or removed
+        // one has to come through here, not slip past a stale count.
         Assert.True(
             all.Count == 13,
             $"expected 13 PaneTreeChange constructions in the shell (the close's "
@@ -326,6 +326,33 @@ public class LifecycleHookWiringTests
                 kind == "PaneTreeChangeKind.Close",
                 $"a {kind} record names a close fact; the facts describe a "
                 + "close, and no other transition carries them");
+        }
+    }
+
+    [Fact]
+    public void TheDeferredClose_CarriesWhetherThePreVisualReportRan()
+    {
+        var close = Method("Panes.PaneHost.cs", "CloseLeaf", 2);
+
+        // Both PendingClose constructions carry the local that answers
+        // "did this close report". The fade route is reached only while no
+        // observer stands -- where the pre-visual report provably did not
+        // run -- so a literal there would strand the pair the moment a
+        // coordinator registered inside the fade's life: the tail would
+        // skip its Changing and deliver Changed alone.
+        var pendings = close.Body!.DescendantNodes()
+            .OfType<ObjectCreationExpressionSyntax>()
+            .Where(c => c.Type.ToString() == "PendingClose")
+            .ToList();
+        Assert.True(
+            pendings.Count == 2,
+            $"expected both close paths' PendingClose constructions, found {pendings.Count}");
+        foreach (var pending in pendings)
+        {
+            var flag = pending.ArgumentList!.Arguments
+                .Single(a => a.NameColon?.Name.Identifier.ValueText == "ChangingRaised")
+                .Expression;
+            Assert.Equal("changingRaised", flag.ToString());
         }
     }
 

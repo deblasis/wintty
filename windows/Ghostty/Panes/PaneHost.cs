@@ -134,9 +134,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// One deferred soft close: everything the visual cut needs. Held
     /// while the closing pane fades, run by <see cref="FinishClose"/> when
     /// the fade ends however it ends. The close's own classification rides
-    /// along -- it is what the seam records report -- and so does whether
-    /// the pre-visual report already ran: a soft close reports before its
+    /// along -- it is what these records report -- and so does whether the
+    /// pre-visual report already ran: a soft close reports before its
     /// fade, and the tail must not report the same close twice.
+    ///
+    /// One bound: a host torn down mid-fade drops the pending
+    /// (DisposeAllLeaves settles with runPendingClose: false), so a close
+    /// that reported before its fade can leave that report uncommitted.
+    /// The drop happens only on teardown; every tree operation runs the
+    /// pending and commits the pair.
     /// </summary>
     private sealed record PendingClose(
         LeafPane Leaf,
@@ -1243,7 +1249,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             {
                 var pending = new PendingClose(
                     leaf, newRoot, zoomedBefore, leafParentGrid,
-                    Undoable: undoable, SoftClose: softClose, ChangingRaised: true);
+                    Undoable: undoable, SoftClose: softClose, ChangingRaised: changingRaised);
                 leaf.Terminal().IsHitTestVisible = false;
                 StartPaneFade(leaf, PaneFadeKind.SoftCloseOut);
                 _pendingSoftClose = pending;
