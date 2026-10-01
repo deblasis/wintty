@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -131,6 +132,52 @@ public class PaneFadeWiringTests
         // And the hard path stays bare: the one fade in CloseLeaf is the
         // soft branch's.
         Assert.Single(close.Calls("StartPaneFade"));
+    }
+
+    /// <summary>
+    /// The soft close's fade-away is the one shell fade a registered
+    /// observer can take over. When a coordinator stands, the gate the
+    /// fade arms behind answers off: no board is built, nothing reaches
+    /// the activity registry for the close, and the cut runs inline from
+    /// the pre-visual report. With no observer the clause reads false and
+    /// the fade runs exactly as it did. The claim is narrow: the split's
+    /// fade-in arms behind the same dial and does not read the observer
+    /// at all -- the observer owns only what it explicitly takes.
+    /// </summary>
+    [Fact]
+    public void The_soft_fade_stands_down_for_a_registered_observer_and_the_split_fade_does_not()
+    {
+        var close = CloseOverload();
+        var soft = SoftCloseBranch(close);
+        var retained = Assert.IsType<BlockSyntax>(soft.Statement);
+
+        // The gate is a conjunction: the motion dial AND the observer's
+        // absence. Either answer off takes the plain cut.
+        var gateIf = Assert.Single(retained.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Condition.ToString().Contains("SystemAnimations.Enabled"));
+        var conjunction = Assert.IsType<BinaryExpressionSyntax>(gateIf.Condition);
+        Assert.Equal(SyntaxKind.LogicalAndExpression, conjunction.Kind());
+        var observer = Assert.IsType<PrefixUnaryExpressionSyntax>(conjunction.Right);
+        Assert.Equal(SyntaxKind.LogicalNotExpression, observer.Kind());
+        Assert.Equal("PaneMotion.Active", observer.Operand.ToString());
+
+        // The fade arms inside that gate: a stood-down gate never reaches
+        // StartPaneFade, so no SoftCloseOut board exists for the registry
+        // to count while an observer owns the exit; with none registered
+        // the arm is exactly the one the fade test above pins.
+        var fade = Assert.Single(retained.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "StartPaneFade");
+        Assert.True(
+            gateIf.Statement.Span.Contains(fade.Span),
+            "the soft close's fade must arm inside the gate that reads the observer");
+
+        // The narrow claim: the split's fade-in consults the dial only.
+        var splitKind = Assert.IsType<ConditionalExpressionSyntax>(
+            Assert.Single(SplitOverload().Calls("StartPaneFade")).ArgExpression(1));
+        Assert.DoesNotContain(
+            "PaneMotion.Active",
+            splitKind.Condition.ToString(),
+            StringComparison.Ordinal);
     }
 
     /// <summary>
