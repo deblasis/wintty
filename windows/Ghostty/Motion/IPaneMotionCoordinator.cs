@@ -46,17 +46,31 @@ internal enum OverlayKind { CommandPalette, ResizeOverlay, SearchBar, QuickTermi
 /// Null means "nothing there": no leaf held the role before, or none
 /// holds it after. <see cref="OriginEdge"/> is the divider or dock side
 /// the change came from when one applies, <see cref="PaneEdge.None"/>
-/// otherwise.
+/// otherwise. A close also carries the classification its own call site
+/// computed -- <see cref="Undoable"/> and <see cref="SoftClose"/> -- so
+/// the observer can tell the two closes apart and present the exit only
+/// where one is coming. Every other transition leaves both facts at
+/// their defaults and reads exactly as it did before they existed.
 /// </summary>
 /// <param name="Kind">The structural operation that is about to run.</param>
 /// <param name="BeforeLeafId">The leaf the transition starts from, if any.</param>
 /// <param name="AfterLeafId">The leaf the transition lands on, if any.</param>
 /// <param name="OriginEdge">The divider or dock edge the change is anchored to, if any.</param>
+/// <param name="Undoable">On a close: whether it asked to be recorded for
+/// undo -- what the close's call site passed, before the undo setting or
+/// the survival question is applied. False everywhere else.</param>
+/// <param name="SoftClose">On a close: the classifier's answer, carried
+/// as computed. True means the shell kept the surface alive and the
+/// visual cut was deferred -- behind the shell's own fade, or not at all
+/// when a registered observer owns the exit's visual. Implies
+/// <see cref="Undoable"/>. False everywhere else.</param>
 internal sealed record PaneTreeChange(
     PaneTreeChangeKind Kind,
     int? BeforeLeafId = null,
     int? AfterLeafId = null,
-    PaneEdge OriginEdge = PaneEdge.None);
+    PaneEdge OriginEdge = PaneEdge.None,
+    bool Undoable = false,
+    bool SoftClose = false);
 
 /// <summary>
 /// One focus move between leaves. Null means the edge of the window:

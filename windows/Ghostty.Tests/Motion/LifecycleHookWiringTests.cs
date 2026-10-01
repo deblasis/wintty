@@ -205,6 +205,130 @@ public class LifecycleHookWiringTests
         AssertAfter(changed, rebuild, "the Close post-state");
     }
 
+    /// <summary>One named argument of the record the hook hands over,
+    /// read out of the call's own construction: the facts a site reports
+    /// must be spelled at the site, so the census reads them there.</summary>
+    private static ExpressionSyntax NamedArg(InvocationExpressionSyntax hook, string name)
+    {
+        var creation = Assert.IsType<ObjectCreationExpressionSyntax>(hook.ArgExpression(0));
+        var found = creation.ArgumentList!.Arguments
+            .Where(a => a.NameColon?.Name.Identifier.ValueText == name)
+            .ToList();
+        Assert.True(
+            found.Count == 1,
+            $"'{hook.CalleeText()}' must name '{name}' on the record it builds, "
+            + $"found {found.Count}");
+        return found[0].Expression;
+    }
+
+    [Fact]
+    public void SoftClose_ReportsChangingAtThePreVisualPoint_BeforeItsFadeArms()
+    {
+        var close = Method("Panes.PaneHost.cs", "CloseLeaf", 2);
+        var changing = Hook(close.Body!, Changing, "CloseLeaf");
+        AssertGuardedWithRecordInside(changing, "CloseLeaf");
+        AssertChangeKind(changing, "Close");
+
+        // The report carries what the close's own classifier computed,
+        // not a re-derivation: the two named facts are the locals the
+        // method holds.
+        Assert.Equal("undoable", NamedArg(changing, "Undoable").ToString());
+        Assert.Equal("softClose", NamedArg(changing, "SoftClose").ToString());
+
+        // Before the fade arms: this is the pre-visual point. The pane
+        // still shows content when the observer is called, and everything
+        // that takes it away -- the fade, or the inline cut that replaces
+        // the fade when an observer owns the exit -- starts after the
+        // report.
+        var fade = Assert.Single(close.Calls("StartPaneFade"));
+        Assert.True(
+            changing.Span.Start < fade.Span.Start,
+            "the soft close's Changing must be reported before its fade arms");
+
+        // After the model decision: the classifier's values exist by then.
+        // Reporting before PaneTree.Close would name facts nobody computed.
+        var modelClose = close.Call("PaneTree.Close");
+        Assert.True(
+            modelClose.Span.End < changing.Span.Start,
+            "the soft close's Changing must be reported after the close is classified");
+
+        // And before the tail: the tree moves in FinishClose, so the
+        // pre-visual point cannot be inside it.
+        var finish = close.Call("FinishClose");
+        Assert.True(
+            changing.Span.Start < finish.Span.Start,
+            "the soft close's Changing must be reported before the cut runs");
+    }
+
+    [Fact]
+    public void FinishClose_ReportsTheHardCloseOnly_AndCarriesTheFactsOnBothRecords()
+    {
+        var tail = Method("Panes.PaneHost.cs", "FinishClose", 1);
+        var changing = Hook(tail.Body!, Changing, "FinishClose");
+        AssertGuardedWithRecordInside(changing, "FinishClose");
+        AssertChangeKind(changing, "Close");
+
+        // The tail's report is the hard close's alone: a soft close
+        // reported at its pre-visual point, so the tail's report stands
+        // down for a close that already reported. The skip sits around the
+        // guarded report, not inside it -- an inner gate would still
+        // re-report every soft close.
+        var suppression = changing.Ancestors().OfType<IfStatementSyntax>()
+            .FirstOrDefault(i => i.Condition.ToString() == "!pending.ChangingRaised");
+        Assert.True(
+            suppression is not null,
+            "the close tail's Changing must be skipped for a close that "
+            + "already reported at its pre-visual point");
+
+        // Both records carry the facts the pending held -- the tail reads
+        // the classification the close captured, it does not re-derive it.
+        var changed = Hook(tail.Body, Changed, "FinishClose");
+        AssertChangeKind(changed, "Close");
+        Assert.Equal("pending.Undoable", NamedArg(changing, "Undoable").ToString());
+        Assert.Equal("pending.SoftClose", NamedArg(changing, "SoftClose").ToString());
+        Assert.Equal("pending.Undoable", NamedArg(changed, "Undoable").ToString());
+        Assert.Equal("pending.SoftClose", NamedArg(changed, "SoftClose").ToString());
+    }
+
+    [Fact]
+    public void TheOtherTransitions_NameNeitherCloseFact_OnTheRecord()
+    {
+        // Every PaneTreeChange construction in the shell names the close
+        // facts only on a Close record: the facts describe a close, and a
+        // Split or Zoom carrying them tells the observer a close happened
+        // that did not. The defaults are half of that: a raiser that does
+        // not name them keeps building the record exactly as before.
+        var all = ShellSource.AllShellSources()
+            .SelectMany(f => f.Root.DescendantNodes()
+                .OfType<ObjectCreationExpressionSyntax>()
+                .Where(c => c.Type.ToString() == "PaneTreeChange"))
+            .ToList();
+
+        // The census sweeps the raisers that exist: a new or removed one
+        // has to come through here, not slip past a stale count.
+        Assert.True(
+            all.Count == 13,
+            $"expected 13 PaneTreeChange constructions in the shell (the close's "
+            + "pre-visual report, the close tail's pair, and the other "
+            + $"transitions' pair), found {all.Count}");
+
+        var namingFacts = all.Where(c => c.ArgumentList!.Arguments.Any(
+                a => a.NameColon?.Name.Identifier.ValueText is "Undoable" or "SoftClose"))
+            .ToList();
+        Assert.True(
+            namingFacts.Count == 3,
+            $"expected exactly 3 constructions naming the close facts (the "
+            + $"close's three records), found {namingFacts.Count}");
+        foreach (var creation in namingFacts)
+        {
+            var kind = creation.ArgumentList!.Arguments.FirstOrDefault()?.ToString();
+            Assert.True(
+                kind == "PaneTreeChangeKind.Close",
+                $"a {kind} record names a close fact; the facts describe a "
+                + "close, and no other transition carries them");
+        }
+    }
+
     [Fact]
     public void EqualizeSplits_ReportsThePair_AroundTheRatioReset()
     {

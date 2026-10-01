@@ -133,10 +133,19 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <summary>
     /// One deferred soft close: everything the visual cut needs. Held
     /// while the closing pane fades, run by <see cref="FinishClose"/> when
-    /// the fade ends however it ends.
+    /// the fade ends however it ends. The close's own classification rides
+    /// along -- it is what the seam records report -- and so does whether
+    /// the pre-visual report already ran: a soft close reports before its
+    /// fade, and the tail must not report the same close twice.
     /// </summary>
     private sealed record PendingClose(
-        LeafPane Leaf, Core.Panes.PaneNode? NewRoot, LeafPane? ZoomedBefore, Grid? LeafParentGrid);
+        LeafPane Leaf,
+        Core.Panes.PaneNode? NewRoot,
+        LeafPane? ZoomedBefore,
+        Grid? LeafParentGrid,
+        bool Undoable,
+        bool SoftClose,
+        bool ChangingRaised);
 
     // Panes smaller than this in either dimension (DIPs) skip the glow.
     private const double MinGlowDimension = 80.0;
@@ -1169,6 +1178,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // shell immediately, matching upstream: a disabled undo timeout means
         // closed surfaces don't linger in the background.
         var softClose = undoable && newRoot is not null && _undoEnabled;
+        // Whether this close's Changing already ran. The soft path reports
+        // before anything visual starts; the hard path reports in the
+        // tail, where it always has.
+        var changingRaised = false;
 
         // Capture the leaf's visual parent BEFORE anything detaches it.
         // This is the Grid that visualizes the PaneTree split about to
@@ -1195,6 +1208,21 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             if (_glowStates.TryGetValue(leaf.Terminal(), out var closingGlow))
                 closingGlow.Close();
 
+            // The close's pre-visual report. Nothing has touched the pane
+            // yet -- no fade has started, nothing is detached -- so this is
+            // the point the pane still shows content and an observer can
+            // present the exit from. The facts are the classifier's own
+            // values; FinishClose does not repeat this report.
+            if (PaneMotion.Active)
+            {
+                PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(
+                    PaneTreeChangeKind.Close,
+                    BeforeLeafId: PaneMotionIds.Of(leaf),
+                    Undoable: undoable,
+                    SoftClose: softClose));
+                changingRaised = true;
+            }
+
             // The soft path fades the pane away before the cut: the model
             // has decided (the undo snapshot above) and the shell is
             // retained, but the visual cut -- the detach, the sibling
@@ -1202,9 +1230,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             // so the pane is gone from the eye before it is gone from the
             // tree. Gate off is the plain cut: FinishClose runs inline, in
             // this frame, exactly as the hard path runs it.
-            if (SystemAnimations.Enabled(MotionSurfaceClass.PaneGeometry))
+            //
+            // A registered observer owns the soft close's exit visual, so
+            // the fade-bearing route answers off for it: no board is
+            // built, the activity registry never counts one for the close,
+            // and the cut runs inline from the report above. With no
+            // observer the clause reads false and the fade runs exactly as
+            // it did. The claim is this fade only -- the split's fade-in
+            // and every other shell fade do not read the observer here and
+            // run as before.
+            if (SystemAnimations.Enabled(MotionSurfaceClass.PaneGeometry) && !PaneMotion.Active)
             {
-                var pending = new PendingClose(leaf, newRoot, zoomedBefore, leafParentGrid);
+                var pending = new PendingClose(
+                    leaf, newRoot, zoomedBefore, leafParentGrid,
+                    Undoable: undoable, SoftClose: softClose, ChangingRaised: true);
                 leaf.Terminal().IsHitTestVisible = false;
                 StartPaneFade(leaf, PaneFadeKind.SoftCloseOut);
                 _pendingSoftClose = pending;
@@ -1217,7 +1256,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             TeardownLeaf(leaf);
         }
 
-        FinishClose(new PendingClose(leaf, newRoot, zoomedBefore, leafParentGrid));
+        FinishClose(new PendingClose(
+            leaf, newRoot, zoomedBefore, leafParentGrid,
+            Undoable: undoable, SoftClose: softClose, ChangingRaised: changingRaised));
     }
 
     /// <summary>
@@ -1258,10 +1299,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             return;
         }
 
-        if (PaneMotion.Active)
+        // The close's Changing. The hard path reports here, before the
+        // model commits, exactly where it always has. A soft close already
+        // reported at its pre-visual point -- before its fade, or in place
+        // of it when an observer owns the exit -- and reports once.
+        if (!pending.ChangingRaised)
         {
-            PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(
-                PaneTreeChangeKind.Close, BeforeLeafId: PaneMotionIds.Of(leaf)));
+            if (PaneMotion.Active)
+            {
+                PaneMotion.Current!.OnPaneTreeChanging(new PaneTreeChange(
+                    PaneTreeChangeKind.Close,
+                    BeforeLeafId: PaneMotionIds.Of(leaf),
+                    Undoable: pending.Undoable,
+                    SoftClose: pending.SoftClose));
+            }
         }
         _root = newRoot;
         // Clear zoom if the zoomed leaf was closed or if only one leaf
@@ -1297,7 +1348,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             PaneMotion.Current!.OnPaneTreeChanged(new PaneTreeChange(
                 PaneTreeChangeKind.Close,
                 BeforeLeafId: PaneMotionIds.Of(leaf),
-                AfterLeafId: PaneMotionIds.Of(nextActive)));
+                AfterLeafId: PaneMotionIds.Of(nextActive),
+                Undoable: pending.Undoable,
+                SoftClose: pending.SoftClose));
         }
         UpdateHighlightPosition();
 
