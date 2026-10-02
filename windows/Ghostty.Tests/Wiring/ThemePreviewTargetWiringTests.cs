@@ -20,9 +20,17 @@ public class ThemePreviewTargetWiringTests
 
         var find = connect.Call("Ghostty.Core.Themes.ThemePreviewTarget.FindTarget");
         var open = connect.Call("pipe.Connect");
-        var check = connect.Call("Ghostty.Core.Themes.ThemePreviewTarget.ServerPid");
-        Assert.True(find.SpanStart < open.SpanStart && open.SpanStart < check.SpanStart,
-            "the server pid can only be read once connected, and must be checked before the pipe is returned");
+        var pid = connect.Call("Ghostty.Core.Themes.ThemePreviewTarget.ServerPid");
+        var peer = connect.Call("Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable");
+        var ack = connect.Call("Ghostty.Core.Themes.ThemePreviewTarget.AwaitAck");
+        Assert.True(
+            find.SpanStart < open.SpanStart && open.SpanStart < pid.SpanStart
+                && pid.SpanStart < peer.SpanStart && peer.SpanStart < ack.SpanStart,
+            "once connected, the server's pid and then the process behind it are checked, and the "
+                + "server's acceptance is awaited, all before the pipe is handed to a caller that writes");
+        // A reused pid passes a pid comparison; the identity check must be
+        // applied to the server pid read from the pipe, not to the target.
+        Assert.Equal("server", peer.Arg(0));
         Assert.Empty(connect.Calls("System.Diagnostics.Process.GetProcessesByName"));
         Assert.Empty(connect.Calls("Process.GetProcessesByName"));
     }
@@ -46,10 +54,14 @@ public class ThemePreviewTargetWiringTests
         var accept = session.Call("server.WaitForConnectionAsync");
         var peer = session.Call("Ghostty.Core.Themes.ThemePreviewTarget.ClientPid");
         var same = session.Call("Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable");
+        var ack = session.Call("server.WriteAsync");
         var read = session.Call("reader.ReadLineAsync");
         Assert.True(
-            accept.SpanStart < peer.SpanStart && peer.SpanStart < same.SpanStart && same.SpanStart < read.SpanStart,
-            "the client must be identified after it connects and before anything it sent is acted on");
+            accept.SpanStart < peer.SpanStart && peer.SpanStart < same.SpanStart
+                && same.SpanStart < ack.SpanStart && ack.SpanStart < read.SpanStart,
+            "the client must be identified after it connects, and acknowledged only then, before "
+                + "anything it sent is acted on");
+        Assert.Contains("ThemePreviewTarget.Ack", ack.Arg(0));
     }
 
     [Fact]

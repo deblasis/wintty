@@ -1459,7 +1459,7 @@ public static partial class Program
         }
     }
 
-    // Only a Wintty running this same executable file: a dev build and an
+    // Only a Wintty running from this same image path: a dev build and an
     // installed app side by side must not drive each other's window. Null
     // means "no running instance", and the caller falls back to the TUI.
     private static System.IO.Pipes.NamedPipeClientStream? ConnectThemePreviewPipe()
@@ -1475,15 +1475,32 @@ public static partial class Program
             if (Ghostty.Core.Themes.ThemePreviewTarget.FindTarget(onForeign) is not int target)
                 return null;
 
+            // InOut to read the server's acceptance byte; asynchronous so an
+            // ack read abandoned at the timeout cannot hold up the dispose.
             pipe = new System.IO.Pipes.NamedPipeClientStream(
                 ".", Ghostty.Core.Themes.ThemePreviewTarget.PipeNameFor(target),
-                System.IO.Pipes.PipeDirection.Out);
+                System.IO.Pipes.PipeDirection.InOut,
+                System.IO.Pipes.PipeOptions.Asynchronous);
             pipe.Connect(1000); // 1s timeout
 
-            // The pipe is opened by name after the pid was checked; if that
+            // The pipe is opened by name after the pid was checked. If that
             // process exited and its pid now belongs to another install's
-            // server, the name would reach the wrong window.
-            if (Ghostty.Core.Themes.ThemePreviewTarget.ServerPid(pipe.SafePipeHandle) != target)
+            // Wintty, that server's pipe carries the same name and the same
+            // pid, so the peer itself is checked again, not just its pid.
+            if (Ghostty.Core.Themes.ThemePreviewTarget.ServerPid(pipe.SafePipeHandle) is not int server
+                || server != target
+                || !Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable(server))
+            {
+                pipe.Dispose();
+                return null;
+            }
+
+            // Nothing is sent before the server accepts: it reads this
+            // process's identity first, which needs this process alive, and a
+            // refusal must reach here as a fallback to the TUI, not as a
+            // write that looked delivered.
+            if (!Ghostty.Core.Themes.ThemePreviewTarget.AwaitAck(
+                    pipe, Ghostty.Core.Themes.ThemePreviewTarget.AckTimeout))
             {
                 pipe.Dispose();
                 return null;

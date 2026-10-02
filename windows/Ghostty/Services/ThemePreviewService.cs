@@ -176,7 +176,8 @@ internal sealed partial class ThemePreviewService : IDisposable
             // SecureNamedPipe adds CurrentUserOnly for the same reason the
             // single-instance server does: the name is deterministic, and
             // the default pipe DACL is broader than this IPC needs.
-            server = SecureNamedPipe.CreateServer(PipeName);
+            // InOut for the one acknowledgement byte to an accepted client.
+            server = SecureNamedPipe.CreateServer(PipeName, PipeDirection.InOut);
         }
         catch (IOException ex)
         {
@@ -207,7 +208,7 @@ internal sealed partial class ThemePreviewService : IDisposable
                 await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
                 _logger.LogClientConnected();
 
-                // Only a CLI running this same executable file may drive the
+                // Only a CLI running from this same image path may drive the
                 // window. The client side checks the server too, but a CLI
                 // from a build without that check (any older install) picks
                 // the first pipe it finds, so the server has to refuse it.
@@ -219,6 +220,21 @@ internal sealed partial class ThemePreviewService : IDisposable
                     || !Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable(peer))
                 {
                     _logger.LogForeignClientRejected(clientPid ?? 0);
+                    return PipeLoopOutcome.SessionEnded;
+                }
+
+                // The client sends nothing until it reads this, so it is still
+                // alive for the identity read above and learns it was
+                // accepted. A client already gone (the CLI's File.Exists
+                // probe opens and closes the pipe) is an ordinary end of
+                // session, not a fault.
+                try
+                {
+                    await server.WriteAsync(
+                        new[] { Ghostty.Core.Themes.ThemePreviewTarget.Ack }, ct).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
                     return PipeLoopOutcome.SessionEnded;
                 }
 
@@ -426,7 +442,7 @@ internal static partial class ThemePreviewServiceLogExtensions
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.ForeignClientRejected,
                    Level = LogLevel.Information,
-                   Message = "[theme-preview] dropped client pid {ClientPid}: not this executable")]
+                   Message = "[theme-preview] dropped client pid {ClientPid}: not this image path")]
     internal static partial void LogForeignClientRejected(
         this ILogger<ThemePreviewService> logger, int clientPid);
 

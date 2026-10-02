@@ -6,7 +6,7 @@ using Xunit;
 namespace Ghostty.Tests.Themes;
 
 /// <summary>
-/// The theme CLI reaches the Wintty running its own executable file and no
+/// The theme CLI reaches the Wintty running from its own image path and no
 /// other: with a dev build and an installed app both running, the first
 /// process with a preview pipe used to win whichever install it belonged to.
 /// The readers are injected here; Ghostty.Tests.Windows runs the real ones.
@@ -163,6 +163,67 @@ public class ThemePreviewTargetTests
     public void SameIdentityNeedsBothSidesReadable(string? a, string? b, bool expected)
     {
         Assert.Equal(expected, ThemePreviewTarget.SameIdentity(a, b));
+    }
+
+    private static bool FakeIsRemote(string path) =>
+        ThemePreviewTarget.IsRemoteImagePath(path, root => root.StartsWith("Z:", StringComparison.OrdinalIgnoreCase));
+
+    [Theory]
+    [InlineData(@"\\srv\share\Wintty.exe", true)]
+    [InlineData(@"\\?\UNC\srv\share\Wintty.exe", true)]
+    [InlineData(@"Z:\Wintty\Wintty.exe", true)]
+    [InlineData(@"C:\Program Files\Wintty\Wintty.exe", false)]
+    [InlineData(@"\\?\C:\Program Files\Wintty\Wintty.exe", false)]
+    [InlineData(@"Wintty.exe", true)]
+    public void RemoteImagePathsAreRecognized(string path, bool remote)
+    {
+        Assert.Equal(remote, FakeIsRemote(path));
+    }
+
+    [Theory]
+    [InlineData(@"\\srv\share\Wintty\Wintty.exe")]
+    [InlineData(@"Z:\Wintty\Wintty.exe")]
+    public void ARemoteCandidateOfALocalImageIsNeverOpened(string candidate)
+    {
+        var opened = new List<string>();
+
+        var identity = ThemePreviewTarget.ReadCandidateIdentity(
+            Installed, candidate, p => { opened.Add(p); return p; }, FakeIsRemote);
+
+        Assert.Null(identity);
+        Assert.Empty(opened);
+    }
+
+    [Fact]
+    public void ALocalCandidateIsOpened()
+    {
+        var identity = ThemePreviewTarget.ReadCandidateIdentity(
+            Installed, Dev, p => "resolved:" + p, FakeIsRemote);
+
+        Assert.Equal("resolved:" + Dev, identity);
+    }
+
+    [Fact]
+    public void ARemoteImageStillReadsRemoteCandidates()
+    {
+        // Running from a share, the same share is the only place a match
+        // can be, so its candidates are opened.
+        const string share = @"\\srv\share\Wintty\Wintty.exe";
+
+        var identity = ThemePreviewTarget.ReadCandidateIdentity(
+            share, share, p => "resolved:" + p, FakeIsRemote);
+
+        Assert.Equal("resolved:" + share, identity);
+    }
+
+    [Fact]
+    public void AnUnreadableCandidateImageIsNeverOpened()
+    {
+        var opened = false;
+
+        Assert.Null(ThemePreviewTarget.ReadCandidateIdentity(
+            Installed, null, p => { opened = true; return p; }, FakeIsRemote));
+        Assert.False(opened);
     }
 
     [Fact]

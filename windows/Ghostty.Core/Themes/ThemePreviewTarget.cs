@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 using Windows.Win32;
 using Windows.Win32.System.Threading;
@@ -14,16 +15,31 @@ namespace Ghostty.Core.Themes;
 /// Which running Wintty a theme CLI (<c>+list-themes</c>, the TUI preview
 /// client) talks to, and which clients a preview server accepts. The server
 /// listens on <c>ghostty-theme-preview-{pid}</c>; both ends require the
-/// other to run the SAME executable file, so a dev build and an installed
-/// app running side by side never drive each other's window.
+/// other to run from the same resolved image path, so a dev build and an
+/// installed app running side by side never drive each other's window.
 /// </summary>
 /// <remarks>
-/// "Same executable" is file identity, not path spelling: each side's image
-/// path is read from the kernel and resolved through
-/// <c>GetFinalPathNameByHandle</c>, so a junction, a subst drive, a mapped
-/// drive or an 8.3 spelling of the same file all collapse to one value, and
-/// both sides are read the same way. A side whose identity cannot be read
-/// matches nothing.
+/// The value compared (called the identity below) is the final path of the
+/// file at a process's image path, not the path as spelled: each side's
+/// image path is read from the kernel, the file now at that path is opened,
+/// and <c>GetFinalPathNameByHandle</c> resolves it. A junction, a subst
+/// drive, a mapped drive or an 8.3 spelling of the same path all collapse
+/// to one value, and both sides are read the same way. It is not a file id:
+/// two hard links of one file compare unequal, and a process whose image
+/// was replaced in place compares as whatever file now sits at its path.
+/// A side whose identity cannot be read matches nothing.
+///
+/// When this process's image is local, a candidate whose image is on a
+/// network share is skipped without opening it: it cannot be the same
+/// path, and opening a file on an unreachable share blocks for the
+/// redirector's timeout.
+///
+/// The server answers an accepted client with one <see cref="Ack"/> byte
+/// before it reads anything, and the client sends nothing until it has
+/// that byte. The client therefore stays alive while the server reads its
+/// identity (a client that wrote and exited could no longer be identified,
+/// and would be dropped as foreign), and a client the server drops knows
+/// it, so it falls back to the TUI instead of reporting success.
 ///
 /// No same-executable process means no target, even when a Wintty from
 /// another path is serving: the CLI then takes its "no running instance"
@@ -42,14 +58,52 @@ public static partial class ThemePreviewTarget
 
     public static string PipeNameFor(int pid) => $"{PipePrefix}{pid}";
 
+    /// <summary>The byte the server writes to a client it accepted.</summary>
+    public const byte Ack = 0x06; // ASCII ACK
+
+    /// <summary>
+    /// How long a client waits for <see cref="Ack"/>. Covers the server's
+    /// thread-pool hop and its two image reads on a busy machine; past it
+    /// the client runs the TUI on its own, which is the safe direction.
+    /// </summary>
+    public static readonly TimeSpan AckTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Wait for the server's <see cref="Ack"/> on a connected client pipe.
+    /// False on a dropped connection, any other byte, or no answer within
+    /// <paramref name="budget"/>. The pipe must be opened asynchronous so
+    /// an abandoned read does not hold the handle's close.
+    /// </summary>
+    public static bool AwaitAck(Stream pipe, TimeSpan budget)
+    {
+        ArgumentNullException.ThrowIfNull(pipe);
+        var buffer = new byte[1];
+        var read = pipe.ReadAsync(buffer, 0, 1);
+        try
+        {
+            if (!read.Wait(budget))
+            {
+                // Observe the eventual fault of the read the caller's
+                // dispose is about to abandon.
+                _ = read.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                return false;
+            }
+            return read.Result == 1 && buffer[0] == Ack;
+        }
+        catch (AggregateException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// The first pid in <paramref name="pids"/>, other than
-    /// <paramref name="ownPid"/>, whose executable identity equals
+    /// <paramref name="ownPid"/>, whose identity equals
     /// <paramref name="ownPid"/>'s and which has a live pipe, or null.
     /// Pure apart from the two readers, which tests replace.
     /// </summary>
     /// <param name="readIdentity">
-    /// The executable identity of a pid, or null when it cannot be read
+    /// The identity of a pid, or null when it cannot be read
     /// (access denied, exited). Null never matches, on either side: a
     /// process whose file cannot be confirmed is not known to be ours.
     /// </param>
@@ -87,7 +141,7 @@ public static partial class ThemePreviewTarget
     }
 
     /// <summary>
-    /// True when both identities are readable and name the same file.
+    /// True when both identities are readable and equal.
     /// </summary>
     public static bool SameIdentity(string? a, string? b)
     {
@@ -123,7 +177,7 @@ public static partial class ThemePreviewTarget
     /// <summary>
     /// The pid of the Wintty this process should drive, or null.
     /// Candidates are the processes sharing this executable's file name,
-    /// since a process running the same file necessarily shares it.
+    /// since a process with the same resolved image path necessarily shares it.
     /// </summary>
     [SupportedOSPlatform("windows6.0.6000")]
     public static int? FindTarget(Action<int, string>? onForeign = null)
@@ -149,7 +203,7 @@ public static partial class ThemePreviewTarget
             return Select(
                 Environment.ProcessId,
                 pids,
-                p => TryReadIdentity((uint)p),
+                p => TryReadIdentity((uint)p, ownImage),
                 p => File.Exists($@"\\.\pipe\{PipeNameFor(p)}"),
                 onForeign);
         }
@@ -160,14 +214,20 @@ public static partial class ThemePreviewTarget
     }
 
     /// <summary>
-    /// True when <paramref name="pid"/> runs the same executable file as
-    /// this process. For the server's check of a connected client.
+    /// True when <paramref name="pid"/> runs from the same resolved image
+    /// path as this process. For the server's check of a connected client
+    /// and the client's check of the server it reached.
     /// </summary>
     [SupportedOSPlatform("windows6.0.6000")]
-    public static bool RunsOwnExecutable(int pid) =>
-        pid > 0 && SameIdentity(
-            TryReadIdentity((uint)Environment.ProcessId),
-            TryReadIdentity((uint)pid));
+    public static bool RunsOwnExecutable(int pid)
+    {
+        if (pid <= 0) return false;
+        var ownImage = TryReadImagePath((uint)Environment.ProcessId);
+        if (ownImage is null) return false;
+        return SameIdentity(
+            TryReadIdentity((uint)Environment.ProcessId, ownImage),
+            TryReadIdentity((uint)pid, ownImage));
+    }
 
     /// <summary>The pid of the client connected to a server pipe, or null.</summary>
     public static int? ClientPid(SafePipeHandle pipe) =>
@@ -178,12 +238,71 @@ public static partial class ThemePreviewTarget
         GetNamedPipeServerProcessId(pipe, out var pid) && pid != 0 ? (int)pid : null;
 
     /// <summary>
-    /// The executable identity of <paramref name="pid"/>: its kernel image
-    /// path resolved to a final path, or null.
+    /// The identity of <paramref name="pid"/>: the final path of the file at
+    /// its kernel image path, or null.
     /// </summary>
     [SupportedOSPlatform("windows6.0.6000")]
-    internal static string? TryReadIdentity(uint pid) =>
-        TryReadImagePath(pid) is { } image ? TryReadFileIdentity(image) : null;
+    internal static string? TryReadIdentity(uint pid) => TryReadIdentity(pid, ownImage: null);
+
+    /// <summary>
+    /// As <see cref="TryReadIdentity(uint)"/>, but null without opening the
+    /// file when <paramref name="ownImage"/> is local and the pid's image is
+    /// remote (see <see cref="ReadCandidateIdentity"/>).
+    /// </summary>
+    [SupportedOSPlatform("windows6.0.6000")]
+    internal static string? TryReadIdentity(uint pid, string? ownImage) =>
+        ReadCandidateIdentity(
+            ownImage,
+            TryReadImagePath(pid),
+            TryReadFileIdentity,
+            image => IsRemoteImagePath(image, IsNetworkDrive));
+
+    /// <summary>
+    /// The identity of <paramref name="candidateImage"/>, or null. A
+    /// remote candidate of a local <paramref name="ownImage"/> is null
+    /// without calling <paramref name="readFileIdentity"/>: a local and a
+    /// remote path cannot resolve to the same final path, and opening a
+    /// file on an unreachable share stalls for the redirector's timeout,
+    /// in the CLI before it connects and in the server's accept loop.
+    /// </summary>
+    internal static string? ReadCandidateIdentity(
+        string? ownImage,
+        string? candidateImage,
+        Func<string, string?> readFileIdentity,
+        Func<string, bool> isRemote)
+    {
+        if (candidateImage is null) return null;
+        if (ownImage is not null && !isRemote(ownImage) && isRemote(candidateImage)) return null;
+        return readFileIdentity(candidateImage);
+    }
+
+    /// <summary>
+    /// True for a UNC path, a path on a drive <paramref name="isNetworkDrive"/>
+    /// reports as remote, or a spelling this cannot classify (which is then
+    /// not opened either).
+    /// </summary>
+    internal static bool IsRemoteImagePath(string path, Func<string, bool> isNetworkDrive)
+    {
+        var p = NormalizeIdentity(path);
+        if (p is null) return true;
+        if (p.StartsWith(@"\\", StringComparison.Ordinal)) return true;
+        var root = Path.GetPathRoot(p);
+        return string.IsNullOrEmpty(root) || isNetworkDrive(root);
+    }
+
+    // GetDriveType answers from the drive letter's mapping and does not
+    // contact the share, so it is safe on a disconnected mapped drive.
+    private static bool IsNetworkDrive(string root)
+    {
+        try
+        {
+            return new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
 
     // Same buffer reasoning as PaneLaunchImage: the NT path limit once, no
     // grow-and-retry branch that no test reaches.

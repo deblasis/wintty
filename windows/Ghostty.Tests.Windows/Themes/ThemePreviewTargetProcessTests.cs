@@ -126,4 +126,72 @@ public class ThemePreviewTargetProcessTests
         Assert.Equal(Environment.ProcessId, ThemePreviewTarget.ClientPid(server.SafePipeHandle));
         Assert.Equal(Environment.ProcessId, ThemePreviewTarget.ServerPid(client.SafePipeHandle));
     }
+
+    private static (NamedPipeServerStream Server, NamedPipeClientStream Client) ConnectedPair()
+    {
+        // The shapes production uses: an InOut asynchronous server and an
+        // InOut asynchronous client.
+        var name = "wintty-preview-ack-" + Guid.NewGuid().ToString("N");
+        var server = new NamedPipeServerStream(
+            name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var client = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
+        var accept = server.WaitForConnectionAsync();
+        client.Connect(5000);
+        accept.GetAwaiter().GetResult();
+        return (server, client);
+    }
+
+    [Fact]
+    public void AnAckFromTheServerIsAcceptance()
+    {
+        var (server, client) = ConnectedPair();
+        using (server)
+        using (client)
+        {
+            server.Write(new[] { ThemePreviewTarget.Ack }, 0, 1);
+
+            Assert.True(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromSeconds(5)));
+        }
+    }
+
+    [Fact]
+    public void AServerThatDropsTheClientIsNotAcceptance()
+    {
+        var (server, client) = ConnectedPair();
+        using (client)
+        {
+            server.Dispose();
+
+            Assert.False(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromSeconds(5)));
+        }
+    }
+
+    [Fact]
+    public void AnyOtherByteIsNotAcceptance()
+    {
+        var (server, client) = ConnectedPair();
+        using (server)
+        using (client)
+        {
+            server.Write(new byte[] { (byte)'P' }, 0, 1);
+
+            Assert.False(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromSeconds(5)));
+        }
+    }
+
+    [Fact]
+    public void ASilentServerTimesOutWithinTheBudget()
+    {
+        var (server, client) = ConnectedPair();
+        using (server)
+        using (client)
+        {
+            var clock = Stopwatch.StartNew();
+
+            Assert.False(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromMilliseconds(200)));
+            // Generous ceiling: this pins that the wait is bounded, not its
+            // precision on a loaded runner.
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10));
+        }
+    }
 }
