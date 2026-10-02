@@ -489,7 +489,7 @@ function Invoke-GateScanCases(
     $exeVar = '(?i)^\(?\$(\w+[:.])?\w*exe\w*'
     $sessionSecondary = '(?i)^\$\w+\.ExePath$'
     $writers = @('Set-SpiUint', 'Set-SpiHoverTime', 'Set-HighContrastFlags', 'Set-DesktopWallpaper',
-        'Set-DesktopPolarity', 'Set-Clipboard', 'Clear-Desktop')
+        'Set-DesktopPolarity', 'Set-Clipboard', 'scb', 'Clear-Desktop')
     $regWriters = @('Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'New-Item', 'Remove-Item')
     $libKeys = '(?i)\$script:(Personalize|Themes|Desktop|Dwm|Accent|BackdropDesktop)Key'
 
@@ -608,13 +608,22 @@ function Invoke-GateScanCases(
         }
 
         # ---- session-wide state, judged one write at a time ----
-        $hasHelper = @($commands | Where-Object { $_.GetCommandName() -in 'Assert-WinttySessionStateFree', 'Invoke-WinttySessionStateChange' }).Count -gt 0
+        $cuVars = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($as in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+            if ($as.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $as.Right.Extent.Text -match '(?i)CurrentUser|HKEY_CURRENT_USER') { [void]$cuVars.Add($as.Left.VariablePath.UserPath) }
+        }
         $writes = [System.Collections.Generic.List[object]]::new()
         foreach ($c in $commands) {
             $name = $c.GetCommandName()
             $text = $c.Extent.Text
             if ($writers -contains $name) { $writes.Add($c); continue }
             if ($name -eq 'Set-BackdropScene' -and $text -match '(?i)-Wallpaper\b') { $writes.Add($c); continue }
+            # clip.exe writes the clipboard; reg.exe add/delete/import/copy/
+            # restore under HKCU writes the user's registry.
+            if ($name -match '(?i)^clip(\.exe)?$') { $writes.Add($c); continue }
+            if ($name -match '(?i)^reg(\.exe)?$' -and $text -match '(?i)\s(add|delete|import|copy|restore|load)\s' -and
+                $text -match '(?i)HKCU|HKEY_CURRENT_USER') { $writes.Add($c); continue }
             if ($regWriters -contains $name) {
                 $hk = $text -match '(?i)HKCU:|HKEY_CURRENT_USER' -or $text -match $libKeys
                 if (-not $hk) {
@@ -628,15 +637,41 @@ function Invoke-GateScanCases(
         foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
             $member = $m.Member.Extent.Text
             $args0 = if ($m.Arguments.Count -gt 0) { $m.Arguments[0].Extent.Text } else { '' }
-            if ($member -eq 'SystemParametersInfo' -and $args0 -match '(?i)SET') { $writes.Add($m) }
+            # Any wrapper named after SystemParametersInfo, with any action
+            # that does not name itself a GET: a numeric 0x1043 is a set.
+            if ($member -match '(?i)SystemParametersInfo' -and $args0 -notmatch '(?i)GET') { $writes.Add($m) }
             elseif ($member -eq 'ShowWindow' -and $m.Arguments.Count -gt 1 -and $m.Arguments[1].Extent.Text -match '(?i)MINIMIZE') { $writes.Add($m) }
             elseif ($member -match '^Set(Text|Data|Image|Clipboard\w*)$' -and $m.Expression.Extent.Text -match '(?i)Clipboard\]$') { $writes.Add($m) }
+            elseif ($member -match '^(SetValue|CreateSubKey|DeleteValue|DeleteSubKey|DeleteSubKeyTree)$') {
+                # The user's registry, reached through Microsoft.Win32.Registry.
+                $chain = $m.Extent.Text
+                $viaVar = $false
+                foreach ($v in $m.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+                    if ($cuVars.Contains($v.VariablePath.UserPath)) { $viaVar = $true; break }
+                }
+                if ($viaVar -or $chain -match '(?i)CurrentUser|HKEY_CURRENT_USER') { $writes.Add($m) }
+            }
+        }
+        # A write is covered when it sits inside a helper's scriptblock, when
+        # Assert-WinttySessionStateFree precedes it in the same function (or
+        # the same top level), or, inside a function, when that function is
+        # called at least once and every call is itself covered. A helper
+        # called somewhere else in the file covers nothing.
+        $functions = @{}
+        foreach ($fd in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $functions[$fd.Name] = $fd }
+        function Covered($node, [int]$Depth) {
+            if (InsideHelperBlock $node) { return $true }
+            if (PrecededBy $node 'Assert-WinttySessionStateFree' $commands) { return $true }
+            $fn = EnclosingFunction $node
+            if ($null -eq $fn -or $Depth -ge 4) { return $false }
+            $calls = @($commands | Where-Object { $_.GetCommandName() -eq $fn.Name })
+            if ($calls.Count -eq 0) { return $false }
+            foreach ($call in $calls) { if (-not (Covered $call ($Depth + 1))) { return $false } }
+            return $true
         }
         foreach ($w in $writes) {
             if ($reasoned) { continue }
-            if (InsideHelperBlock $w) { continue }
-            if ($null -ne (EnclosingFunction $w) -and $hasHelper) { continue }
-            if (PrecededBy $w 'Assert-WinttySessionStateFree' $commands) { continue }
+            if (Covered $w 0) { continue }
             $failed.Add("$($file.Name):$($w.Extent.StartLineNumber) changes session-wide state without the session-state helpers (Assert-WinttySessionStateFree / Invoke-WinttySessionStateChange)")
         }
 
@@ -660,29 +695,44 @@ function Invoke-GateScanCases(
 # The scan's own teeth: a copy of the scripts with one harness changed must
 # turn that harness red. Each row names the file and the change.
 function Invoke-GateScanMutations {
+    $launch = 'launches the exe'; $crash = 'reads the per-user crash.log'; $state = 'changes session-wide state'
     $rows = @(
-        @{ Name = 'the splash race launches without its blanket refusal'; File = 'splash-single-instance-race.ps1'
+        @{ Name = 'the splash race launches without its blanket refusal'; File = 'splash-single-instance-race.ps1'; Expect = $launch
            From = "Assert-NoWintty -Context 'The splash race' -Reason ("; To = '$null = (' },
-        @{ Name = 'the cdb capture launches through a debugger without its refusal'; File = 'seam-cdb.ps1'
+        @{ Name = 'the cdb capture launches through a debugger without its refusal'; File = 'seam-cdb.ps1'; Expect = $launch
            From = "Assert-NoWintty -Context 'The cdb capture' -Reason ("; To = '$null = (' },
-        @{ Name = 'the shader fuzz launches without the guard'; File = 'shader-notice-fuzz.ps1'
+        @{ Name = 'the shader fuzz launches without the guard'; File = 'shader-notice-fuzz.ps1'; Expect = $launch
            From = 'Assert-WinttyCoexistence'; To = 'Write-Output' },
-        @{ Name = 'a new unguarded launch in a file that guards its other one'; File = 'shader-notice-fuzz.ps1'
+        @{ Name = 'a new unguarded launch in a file that guards its other one'; File = 'shader-notice-fuzz.ps1'; Expect = $launch
            Add = 'Start-Process -FilePath $ExePath' },
-        @{ Name = 'a call-operator launch of the exe'; File = 'mouse-fuzz-probe.ps1'
+        @{ Name = 'a call-operator launch of the exe'; File = 'mouse-fuzz-probe.ps1'; Expect = $launch
            Add = '& $ExePath' },
-        @{ Name = 'a harness reads the per-user crash.log again'; File = 'mouse-fuzz-probe.ps1'
+        @{ Name = 'a harness reads the per-user crash.log again'; File = 'mouse-fuzz-probe.ps1'; Expect = $crash
            Add = '$crashPath = "$env:LOCALAPPDATA\Wintty\crash.log"' },
-        @{ Name = 'a harness reads the per-user crash.log through nested Join-Path'; File = 'mouse-fuzz-probe.ps1'
+        @{ Name = 'a harness reads the per-user crash.log through nested Join-Path'; File = 'mouse-fuzz-probe.ps1'; Expect = $crash
            Add = '$crashPath = Join-Path (Join-Path $env:LOCALAPPDATA ''Wintty'') ''crash.log''' },
-        @{ Name = 'a harness turns animations off outside the helpers'; File = 'mouse-fuzz-probe.ps1'
+        @{ Name = 'a harness turns animations off outside the helpers'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
            Add = 'Set-SpiUint ([uint32]0x1043) ([uint32]0)' },
-        @{ Name = 'a harness writes the HKCU theme key outside the helpers'; File = 'mouse-fuzz-probe.ps1'
+        @{ Name = 'a harness writes the HKCU theme key outside the helpers'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
            Add = "Set-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -Value 0" },
-        @{ Name = 'the theme matrix flips the desktop without its refusal'; File = 'theme-matrix.ps1'
+        @{ Name = 'reg.exe adds an HKCU value'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
+           Add = 'reg.exe add "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v AppsUseLightTheme /t REG_DWORD /d 0 /f' },
+        @{ Name = 'Microsoft.Win32.Registry sets an HKCU value'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
+           Add = "[Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Software\x', 'v', 1)" },
+        @{ Name = 'a RegistryKey from CurrentUser sets a value'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
+           Add = "`$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\x', `$true)`n`$k.SetValue('v', 1)" },
+        @{ Name = 'clip.exe writes the clipboard'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
+           Add = "'x' | clip.exe" },
+        @{ Name = 'the scb alias writes the clipboard'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
+           Add = "scb 'x'" },
+        @{ Name = 'a numeric SPI set through a P/Invoke wrapper'; File = 'mouse-fuzz-probe.ps1'; Expect = $state
+           Add = '[void][Foo.Native]::SystemParametersInfo(0x1043, 0, [IntPtr]::Zero, 3)' },
+        @{ Name = 'a write in a function nothing covers, in a file that uses a helper elsewhere'; File = 'mouse-fuzz-paste-payloads.ps1'; Expect = $state
+           Add = 'function Turn-AnimationsOff { Set-SpiUint ([uint32]0x1043) ([uint32]0) }' },
+        @{ Name = 'the theme matrix flips the desktop without its refusal'; File = 'theme-matrix.ps1'; Expect = $state
            From = 'Assert-WinttySessionStateFree -ExePath'; To = 'Write-Output -InputObject' },
-        @{ Name = 'the fuzz suite clears the desktop outside the helper'; File = 'fuzz-suite.ps1'
-           From = '[void](Invoke-WinttySessionStateChange'; To = '[void](Write-Output' }
+        @{ Name = 'the fuzz suite clears the desktop outside the helper'; File = 'fuzz-suite.ps1'; Expect = $state
+           From = 'if (Invoke-WinttySessionStateChange'; To = 'if (Write-Output' }
     )
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-gatescan-" + [guid]::NewGuid().ToString('N'))
     try {
@@ -701,7 +751,7 @@ function Invoke-GateScanMutations {
             if ($row.Add) { $text = $text + "`n" + $row.Add + "`n" }
             [System.IO.File]::WriteAllText($target, $text)
             $red = Invoke-GateScanCases -ScriptDir $dir -JustfilePath (Join-Path $PSScriptRoot '..\..\justfile')
-            Assert-True (@($red | Where-Object { $_ -like "$($row.File)*" }).Count -gt 0) "gate-scan mutation went red: $($row.Name)"
+            Assert-True (@($red | Where-Object { $_ -like "$($row.File)*" -and $_ -like "*$($row.Expect)*" }).Count -gt 0) "gate-scan mutation went red for its own rule: $($row.Name)"
         }
     }
     finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }

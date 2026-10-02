@@ -251,6 +251,7 @@ function Shot([string]$name) {
 function Measure-HighlightPixels([int]$r, [int]$g, [int]$b, [int]$tol = 24) {
     $rc = [SeamWin]::RectOf($script:Hwnd64)
     if ($null -eq $rc) { return -1 }
+    Assert-WinttyCaptureClear -Hwnd64 $script:Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What 'the highlight capture' -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $gfx = [System.Drawing.Graphics]::FromImage($bmp)
     $gfx.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)

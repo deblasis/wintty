@@ -765,3 +765,72 @@ function Invoke-WinttySessionStateChange {
     finally { if ($Restore) { $null = & $Restore } }
     return $true
 }
+
+# ---- screen captures ---------------------------------------------------------------
+
+if (-not ('WinttyCaptureCheck' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class WinttyCaptureCheck {
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    public static long RootAt(int x, int y) {
+        var p = new POINT { X = x, Y = y };
+        var h = WindowFromPoint(p);
+        return h == IntPtr.Zero ? 0 : GetAncestor(h, 2).ToInt64();
+    }
+    public static uint PidOf(long hwnd) { uint pid; GetWindowThreadProcessId(new IntPtr(hwnd), out pid); return pid; }
+    public static string TitleOf(long hwnd) { var sb = new StringBuilder(256); GetWindowText(new IntPtr(hwnd), sb, 256); return sb.ToString(); }
+    // Topmost without activation: above whatever the desktop parks over it,
+    // without taking the keyboard from anybody.
+    public static void Raise(long hwnd) {
+        SetWindowPos(new IntPtr(hwnd), new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+    }
+}
+'@
+}
+
+# The gate in front of every screen-pixel oracle. A capture of the screen
+# reads whatever is on top, and beside another Wintty the fuzz suite no
+# longer minimizes the developer's windows, so a window of theirs over the
+# app under test would be measured as the app. -Raise first puts the
+# harness window topmost without activating it; then the four corners and
+# the centre of the sampled rect (screen coordinates) must all belong to a
+# window of its process (the app's own popups and quick terminal count).
+# One that does not throws a HARVEST_MISS: the sample is not taken, and the
+# harness reports could-not-run, never a finding or a pass.
+function Assert-WinttyCaptureClear {
+    param(
+        [Parameter(Mandatory)][int64]$Hwnd64,
+        [Parameter(Mandatory)][int]$X,
+        [Parameter(Mandatory)][int]$Y,
+        [Parameter(Mandatory)][int]$Width,
+        [Parameter(Mandatory)][int]$Height,
+        [string]$What = 'the capture',
+        [switch]$Raise,
+        # Where a point's root window is read; the live desktop when omitted.
+        # A seam for the tests.
+        [scriptblock]$RootAt = { param($px, $py) [WinttyCaptureCheck]::RootAt($px, $py) }
+    )
+    if ($Raise) { [WinttyCaptureCheck]::Raise($Hwnd64) }
+    if ($Width -lt 1 -or $Height -lt 1) { throw "HARVEST_MISS: ${What}: the sample rect is empty" }
+    $right = $X + [Math]::Max(0, $Width - 2)
+    $bottom = $Y + [Math]::Max(0, $Height - 2)
+    $points = @(@(($X + 1), ($Y + 1)), @($right, ($Y + 1)), @(($X + 1), $bottom), @($right, $bottom),
+        @(($X + [int]($Width / 2)), ($Y + [int]($Height / 2))))
+    $ownPid = [WinttyCaptureCheck]::PidOf($Hwnd64)
+    foreach ($pt in $points) {
+        $root = [int64](& $RootAt $pt[0] $pt[1])
+        if ($root -ne $Hwnd64 -and ($root -eq 0 -or $ownPid -eq 0 -or [WinttyCaptureCheck]::PidOf($root) -ne $ownPid)) {
+            $who = if ($root -ne 0) { "pid $([WinttyCaptureCheck]::PidOf($root)), '$([WinttyCaptureCheck]::TitleOf($root))'" } else { 'nothing' }
+            throw ("HARVEST_MISS: ${What}: the point $($pt[0]),$($pt[1]) of the sampled rect belongs to another window ($who), " +
+                'so the sample would measure that window; it is not taken')
+        }
+    }
+}

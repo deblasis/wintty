@@ -295,12 +295,34 @@ markdown is what gets pasted into #937, one comment per run.
   the user's Wintty reads them live, so both refuse beside another Wintty;
   the second also runs the change and always runs its restore in a finally,
   and with `-SkipBeside` skips an optional change instead of refusing. The
-  callers: `theme-matrix.ps1` (light/dark and wallpaper, restored in its own
-  finally), the motion-off leg of `mouse-fuzz-tab-drag.ps1` (animations),
-  `mouse-fuzz-paste-payloads.ps1` and `mouse-fuzz-ime-cjk.ps1` (the
-  clipboard), and `fuzz-suite.ps1`, whose minimize-every-window step is skipped
-  beside another Wintty. The gate scan fails any harness that writes such
-  state outside them.
+  callers: `theme-matrix.ps1` (light/dark and wallpaper, checked again before
+  every cell and scene, restored in its own finally), the motion-off leg of
+  `mouse-fuzz-tab-drag.ps1` (animations), `mouse-fuzz-paste-payloads.ps1` and
+  `mouse-fuzz-ime-cjk.ps1` (the clipboard), and `fuzz-suite.ps1`, whose
+  minimize-every-window step is skipped beside another Wintty and recorded as
+  `desktopClear` in its summary.json. The gate scan recognises these writes:
+  the env-guard and backdrop-stage setters, `Set-Clipboard`/`scb`,
+  `clip.exe`, the `*-ItemProperty` and `New-Item`/`Remove-Item` cmdlets on an
+  HKCU path, `reg.exe` add/delete/import under HKCU, `Microsoft.Win32.Registry`
+  writes on CurrentUser, any `*SystemParametersInfo*` call whose action does
+  not name a GET, ShowWindow minimize and the .NET clipboard setters. Each one
+  must sit in a helper's scriptblock, after `Assert-WinttySessionStateFree` in
+  the same function, or in a function whose every call is so covered. A
+  write it does not recognise (an arbitrary P/Invoke wrapper, say) it does
+  not see.
+- `Assert-WinttyCaptureClear` - in front of every screen-pixel oracle. It
+  raises the harness window topmost without activating it and hit-tests the
+  corners and centre of the sampled rect; a point owned by another process's
+  window throws a HARVEST_MISS, so a covered sample is a could-not-run, never
+  a finding or a pass. The callers: `frame-style-fuzz.ps1`,
+  `vtabs-drag-filmstrip.ps1` (before every film frame), `search-fuzz.ps1`,
+  `seam-palette-theme.ps1`, `idle-badge-check.ps1`, `mouse-fuzz-inspector.ps1`,
+  `mouse-fuzz-paste-payloads.ps1`, `mouse-fuzz-tab-close-selection.ps1` and
+  `pane-focus-tab-switch.ps1`. `contrast-oracle.ps1`, `tab-tag-ink.ps1`,
+  `switcher-groups.ps1`, `switcher-preview-theme.ps1`, `theme-matrix.ps1` and
+  `mouse-fuzz-tab-colors.ps1` already hit-test their own sample points.
+  Screenshots saved for a human only, and `layout-switch-filmstrip.ps1`'s
+  compositor capture, which films the window itself, do not need it.
 - `Write-WinttyTimingNeighbourWarning` - for a harness whose verdict is a
   wall-clock budget or a frame count (`layout-switch-filmstrip.ps1`,
   `vtabs-drag-filmstrip.ps1`): another Wintty rendering beside it can push a
@@ -358,9 +380,9 @@ it (a NativeAOT publish has no `Ghostty.Core.dll`); `aot-fuzz.ps1` and
 `release-smoke.ps1` read it off the sibling Release build and take a
 `Test-WinttyCoexistencePreflight` verdict before they build, so a refusal
 costs seconds. `aot-fuzz.ps1` reads it again after its publish refresh,
-and under `-SkipPublish` hands it on only when the sibling and the publish
-carry the same product version, and only to a harness that declares the
-parameter. The crash oracle reads the session's own tree:
+and hands it on only when the publish image carries that AUMID's UTF-16
+bytes and the sibling is not newer than the publish, and only to a harness
+that declares the parameter. The crash oracle reads the session's own tree:
 `Test-SeamCrashLogWritten -Since (Get-SeamSessionMark)` is true when a
 session started after the mark wrote a crash.log, including one that
 failed to start, because `Stop-SeamSession` reads the tree out before it

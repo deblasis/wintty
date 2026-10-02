@@ -62,6 +62,8 @@ $session = $null
 function Shot([int64]$Hwnd64, [string]$name) {
     $rc = [SeamWin]::RectOf($Hwnd64)
     if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
+    # The shot is the pixel oracle's input, so it is raised and hit-tested.
+    Assert-WinttyCaptureClear -Hwnd64 $Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What "the shot '$name'" -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)

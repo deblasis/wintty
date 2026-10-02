@@ -413,6 +413,7 @@ function Find-ByName($root, [string]$Name) {
 function Get-Shot([int64]$Hwnd64) {
     $rc = [FSz]::RectOf($Hwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: degenerate window rect' }
+    Assert-WinttyCaptureClear -Hwnd64 $Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What 'the frame-style capture' -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh, ([System.Drawing.Imaging.PixelFormat]::Format32bppRgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)

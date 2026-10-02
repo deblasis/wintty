@@ -93,6 +93,8 @@ $conptyPresent = $false
 function Shot($Session, [string]$Name) {
     $rc = [SeamWin]::RectOf($Session.Hwnd64)
     if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $Name" }
+    # The kitty oracle counts pixels in this shot, so it is hit-tested.
+    Assert-WinttyCaptureClear -Hwnd64 $Session.Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What "the shot '$Name'" -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
@@ -215,8 +217,8 @@ try {
     # whole window must sit inside the virtual screen, and it is raised
     # topmost without activation - focus is XAML-logical only, and the
     # desktop parked over the rect would otherwise be counted instead of
-    # the app. Another TOPMOST window can still cover it; that is the one
-    # overlap this oracle cannot see and the run does not pretend to.
+    # the app. Another TOPMOST window can still cover it, so each shot is
+    # also hit-tested and a covered one is a harness miss, not a count.
     $rc = [SeamWin]::RectOf($hwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: no rect for the kitty leg' }
     $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen

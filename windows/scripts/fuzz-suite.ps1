@@ -1744,10 +1744,15 @@ if ($useFixtures) {
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The fuzz suite'
     Write-Host "exe:  $ExePath"
     # Minimizing every other window reaches the user's own Wintty windows
-    # too, so beside another Wintty the desktop is left as it is and a
-    # harness whose click point is covered says so itself.
-    [void](Invoke-WinttySessionStateChange -ExePath $ExePath -What 'every other window on the desktop (it minimizes them)' `
-        -Context 'The fuzz suite' -SkipBeside -Change { Clear-Desktop })
+    # too, so beside another Wintty the desktop is left as it is. Then a
+    # window left over the app under test is each harness's to detect: the
+    # clicking ones hit-test their point, the pixel ones raise their window
+    # and hit-test the sampled rect, and both report could-not-run when it
+    # is covered, so a covered run cannot come out green. The summary says
+    # which way it went.
+    $script:DesktopClear = if (Invoke-WinttySessionStateChange -ExePath $ExePath -What 'every other window on the desktop (it minimizes them)' `
+            -Context 'The fuzz suite' -SkipBeside -Change { Clear-Desktop }) { 'cleared' }
+        else { 'skipped: another Wintty is running, so no window was minimized' }
 }
 
 # ---- run ------------------------------------------------------------------
@@ -3059,6 +3064,7 @@ $summary = [ordered]@{
     findings         = @($findings | ForEach-Object { $_.name })
     couldNotRun      = @($broken | ForEach-Object { $_.name })
     skippedAfterStop = $notRun
+    desktopClear     = $(if ($script:DesktopClear) { $script:DesktopClear } else { 'not attempted' })
     results          = $rows
 }
 # -LiteralPath, like every other path this file writes. Positionally the path

@@ -202,6 +202,9 @@ function Same($a, $b) {
 }
 
 function Capture([int]$X, [int]$Y, [int]$W, [int]$H) {
+    # Every caller samples the live session's window ($s).
+    if ($null -eq $s -or -not $s.Hwnd64) { throw 'HARVEST_MISS: a capture with no session window to check it against' }
+    Assert-WinttyCaptureClear -Hwnd64 $s.Hwnd64 -X $X -Y $Y -Width ([Math]::Max(1, $W)) -Height ([Math]::Max(1, $H)) -What 'the palette capture' -Raise
     $bmp = New-Object System.Drawing.Bitmap ([Math]::Max(1, $W)), ([Math]::Max(1, $H))
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try { $g.CopyFromScreen($X, $Y, 0, 0, $bmp.Size) } finally { $g.Dispose() }

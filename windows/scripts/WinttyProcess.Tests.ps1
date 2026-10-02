@@ -56,7 +56,7 @@ function Invoke-DecisionCases([string]$LibPath) {
         . $lib
         $failed = [System.Collections.Generic.List[string]]::new()
         foreach ($name in 'New-WinttyOwnedStateBase', 'Test-WinttyOwnedStateBase', 'Test-WinttyCoexistencePreflight', 'Write-WinttyTimingNeighbourWarning',
-                'Assert-WinttySessionStateFree', 'Invoke-WinttySessionStateChange') {
+                'Assert-WinttySessionStateFree', 'Invoke-WinttySessionStateChange', 'Assert-WinttyCaptureClear') {
             if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
                 $failed.Add("$name does not exist")
                 return , $failed
@@ -144,6 +144,19 @@ function Invoke-DecisionCases([string]$LibPath) {
             $failed.Add('a segment that does not exist yet stops a path counting as under temp')
         }
 
+        # The capture gate: every probed point of the sampled rect must be the
+        # harness window's, and one that is not refuses the sample.
+        $fakeHwnd = [int64]0x7F00AA
+        $threw = $false
+        try { Assert-WinttyCaptureClear -Hwnd64 $fakeHwnd -X 10 -Y 20 -Width 300 -Height 200 -RootAt { param($x, $y) $fakeHwnd } } catch { $threw = $true }
+        if ($threw) { $failed.Add('the capture gate refuses a rect its own window covers entirely') }
+        $threw = $false
+        try {
+            Assert-WinttyCaptureClear -Hwnd64 $fakeHwnd -X 10 -Y 20 -Width 300 -Height 200 `
+                -RootAt { param($x, $y) if ($x -eq 160 -and $y -eq 120) { [int64]0x7F00BB } else { $fakeHwnd } }
+        }
+        catch { $threw = "$_" -match '^HARVEST_MISS' }
+        if (-not $threw) { $failed.Add('the capture gate takes a sample whose centre another window covers') }
         # The session-state helpers: refuse beside another Wintty before
         # anything changes, skip when asked, and always restore once the
         # change ran.
@@ -160,7 +173,8 @@ function Invoke-DecisionCases([string]$LibPath) {
         $r = Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @($user) -SkipBeside -Change { $ran.change++ } -Restore { $ran.restore++ }
         if ($r -ne $false -or $ran.change -ne 0) { $failed.Add('-SkipBeside did not skip the change beside another Wintty') }
         try { [void](Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @() -Change { $ran.change++; throw 'mid-change' } -Restore { $ran.restore++ }) } catch { }
-        if ($ran.change -ne 1 -or $ran.restore -ne 1) { $failed.Add('Invoke-WinttySessionStateChange did not restore after a change that threw') }        Case 'an instance of this exe is running' $false @{
+        if ($ran.change -ne 1 -or $ran.restore -ne 1) { $failed.Add('Invoke-WinttySessionStateChange did not restore after a change that threw') }
+        Case 'an instance of this exe is running' $false @{
             Instances = @([pscustomobject]@{ Id = 7; Path = $exe }) }
         Case 'an instance of this exe, other spelling' $false @{
             Instances = @($user, [pscustomobject]@{ Id = 7; Path = 'c:/BUILDS/mine/out/wintty.exe' }) }
@@ -576,6 +590,8 @@ $mutations = @(
        Find = "`$stateBase = & `$read 'WINTTY_STATE_BASE'"; Replace = "`$stateBase = & `$read 'XDG_CONFIG_HOME'" },
     @{ Name = 'state base may sit outside temp'
        Find = 'elseif (-not (Test-WinttyPathUnder $stateBase $TempRoot))'; Replace = 'elseif ($false)' },
+    @{ Name = 'the capture gate does not hit-test'
+       Find = '        if ($root -ne $Hwnd64 -and'; Replace = '        if ($false -and' },
     @{ Name = 'a passed AUMID overrides the build''s own'
        Find = '            if ($AumId -and $AumId -ine $ownAumId) {'; Replace = '            if ($false) {' },
     @{ Name = 'an unreadable path segment is skipped'
@@ -584,7 +600,8 @@ $mutations = @(
        Find = '    if ($others.Count -eq 0) { return }' + "`n" + '    throw ("HARNESS: skipped:'; Replace = '    return' + "`n" + '    throw ("HARNESS: skipped:' },
     @{ Name = 'the session-state restore is not in a finally'
        Find = '    try { $null = & $Change }' + "`n" + '    finally { if ($Restore) { $null = & $Restore } }'
-       Replace = '    $null = & $Change' + "`n" + '    if ($Restore) { $null = & $Restore }' },    @{ Name = 'native state dirs not checked'
+       Replace = '    $null = & $Change' + "`n" + '    if ($Restore) { $null = & $Restore }' },
+    @{ Name = 'native state dirs not checked'
        Find = "foreach (`$name in 'XDG_STATE_HOME', 'XDG_CACHE_HOME') {"; Replace = 'foreach ($name in @()) {' },
     @{ Name = 'a junction under temp counts as under temp'
        Find = 'if ($null -ne $attrs -and ($attrs -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }'; Replace = '' },

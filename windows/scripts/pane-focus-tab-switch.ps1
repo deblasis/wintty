@@ -115,6 +115,7 @@ $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 function Get-WindowShot([int64]$Hwnd64, [string]$SavePath) {
     $rc = [SeamWin]::RectOf($Hwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: the window has no usable rect' }
+    Assert-WinttyCaptureClear -Hwnd64 $Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What 'the window shot' -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)

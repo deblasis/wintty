@@ -282,6 +282,9 @@ try {
             [void](Invoke-SeamCommand $session @{ op = 'select'; index = 2 })
             Start-Sleep -Milliseconds 500
         }
+        # The band is measured in screen pixels, so the window is raised and
+        # the crop hit-tested before every grab: a covered frame is a miss.
+        Assert-WinttyCaptureClear -Hwnd64 $script:MainHwnd64 -X $cropX -Y $cropY -Width $cropW -Height $cropH -What 'the calibration crop' -Raise
         $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
         $g = [System.Drawing.Graphics]::FromImage($full)
         $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
@@ -325,6 +328,7 @@ try {
     $sendAt = $sw.ElapsedMilliseconds
     Send-SeamCommand $session @{ op = 'drag-paced'; from = 1; to = 2; tickMs = $TickMs }
     for ($i = 0; $i -lt $MaxFrames; $i++) {
+        Assert-WinttyCaptureClear -Hwnd64 $script:MainHwnd64 -X $cropX -Y $cropY -Width $cropW -Height $cropH -What "film frame $i"
         $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
         $g = [System.Drawing.Graphics]::FromImage($full)
         $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
