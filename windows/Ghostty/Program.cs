@@ -1393,20 +1393,16 @@ public static partial class Program
         // Find the running Ghostty app's pipe. The pipe name includes
         // the PID, so we scan for ghostty-theme-preview-* pipes.
         // If no running app is found, the callback is a no-op.
-        var pipeName = FindThemePreviewPipe();
-        if (pipeName is not null)
+        _themePipe = ConnectThemePreviewPipe();
+        if (_themePipe is not null)
         {
             try
             {
-                _themePipe = new System.IO.Pipes.NamedPipeClientStream(
-                    ".", pipeName,
-                    System.IO.Pipes.PipeDirection.Out);
-                _themePipe.Connect(1000); // 1s timeout
                 _themePipeWriter = new StreamWriter(_themePipe) { AutoFlush = true };
             }
             catch
             {
-                _themePipe?.Dispose();
+                _themePipe.Dispose();
                 _themePipe = null;
                 _themePipeWriter = null;
             }
@@ -1448,14 +1444,11 @@ public static partial class Program
     /// </summary>
     private static bool TrySendListThemesMessage()
     {
-        var pipeName = FindThemePreviewPipe();
-        if (pipeName is null) return false;
+        using var pipe = ConnectThemePreviewPipe();
+        if (pipe is null) return false;
 
         try
         {
-            using var pipe = new System.IO.Pipes.NamedPipeClientStream(
-                ".", pipeName, System.IO.Pipes.PipeDirection.Out);
-            pipe.Connect(1000);
             using var writer = new StreamWriter(pipe) { AutoFlush = true };
             writer.WriteLine("LIST_THEMES");
             return true;
@@ -1466,16 +1459,42 @@ public static partial class Program
         }
     }
 
-    // Only a Wintty started from this same executable: a dev build and an
-    // installed app running side by side must not drive each other's window.
-    private static string? FindThemePreviewPipe()
+    // Only a Wintty running this same executable file: a dev build and an
+    // installed app side by side must not drive each other's window. Null
+    // means "no running instance", and the caller falls back to the TUI.
+    private static System.IO.Pipes.NamedPipeClientStream? ConnectThemePreviewPipe()
     {
+        System.IO.Pipes.NamedPipeClientStream? pipe = null;
         try
         {
-            return Ghostty.Core.Themes.ThemePreviewTarget.FindPipe();
+            Action<int, string>? onForeign =
+                Environment.GetEnvironmentVariable(GpuLogEnvVar) is not null
+                    ? (pid, exe) => WriteStartupDiagnostic(
+                        $"theme preview: skipped pid {pid}, it runs {exe}")
+                    : null;
+            if (Ghostty.Core.Themes.ThemePreviewTarget.FindTarget(onForeign) is not int target)
+                return null;
+
+            pipe = new System.IO.Pipes.NamedPipeClientStream(
+                ".", Ghostty.Core.Themes.ThemePreviewTarget.PipeNameFor(target),
+                System.IO.Pipes.PipeDirection.Out);
+            pipe.Connect(1000); // 1s timeout
+
+            // The pipe is opened by name after the pid was checked; if that
+            // process exited and its pid now belongs to another install's
+            // server, the name would reach the wrong window.
+            if (Ghostty.Core.Themes.ThemePreviewTarget.ServerPid(pipe.SafePipeHandle) != target)
+            {
+                pipe.Dispose();
+                return null;
+            }
+            return pipe;
         }
-        catch { }
-        return null;
+        catch
+        {
+            pipe?.Dispose();
+            return null;
+        }
     }
 
     /// <summary>

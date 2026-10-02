@@ -6,9 +6,10 @@ using Xunit;
 namespace Ghostty.Tests.Themes;
 
 /// <summary>
-/// The theme CLI reaches the Wintty started from its own executable and no
+/// The theme CLI reaches the Wintty running its own executable file and no
 /// other: with a dev build and an installed app both running, the first
 /// process with a preview pipe used to win whichever install it belonged to.
+/// The readers are injected here; Ghostty.Tests.Windows runs the real ones.
 /// </summary>
 public class ThemePreviewTargetTests
 {
@@ -17,28 +18,29 @@ public class ThemePreviewTargetTests
     private const int OwnPid = 100;
 
     private static int? Select(
-        string? ownPath,
-        IReadOnlyDictionary<int, string?> paths,
+        string? ownIdentity,
+        IReadOnlyDictionary<int, string?> identities,
         ISet<int> piped,
-        IList<int>? probed = null) =>
+        IList<int>? probed = null,
+        IList<int>? foreign = null) =>
         ThemePreviewTarget.Select(
-            ownPath,
             OwnPid,
-            paths.Keys,
-            pid => paths[pid],
+            identities.Keys,
+            pid => pid == OwnPid ? ownIdentity : identities[pid],
             pid =>
             {
                 probed?.Add(pid);
                 return piped.Contains(pid);
-            });
+            },
+            (pid, _) => foreign?.Add(pid));
 
     [Fact]
-    public void PicksTheSamePathProcessOverAForeignOneListedFirst()
+    public void PicksTheSameExecutableOverAForeignOneListedFirst()
     {
-        var paths = new Dictionary<int, string?> { [1] = Installed, [2] = Dev };
+        var ids = new Dictionary<int, string?> { [1] = Installed, [2] = Dev };
 
-        Assert.Equal(2, Select(Dev, paths, new HashSet<int> { 1, 2 }));
-        Assert.Equal(1, Select(Installed, paths, new HashSet<int> { 1, 2 }));
+        Assert.Equal(2, Select(Dev, ids, new HashSet<int> { 1, 2 }));
+        Assert.Equal(1, Select(Installed, ids, new HashSet<int> { 1, 2 }));
     }
 
     [Fact]
@@ -46,87 +48,121 @@ public class ThemePreviewTargetTests
     {
         // The CLI then runs as if no app were running, rather than
         // previewing into another install's window.
-        var paths = new Dictionary<int, string?> { [1] = Installed };
+        var ids = new Dictionary<int, string?> { [1] = Installed };
 
-        Assert.Null(Select(Dev, paths, new HashSet<int> { 1 }));
+        Assert.Null(Select(Dev, ids, new HashSet<int> { 1 }));
     }
 
     [Fact]
-    public void AForeignProcessPipeIsNeverProbed()
+    public void AForeignProcessPipeIsNeverProbedAndIsReported()
     {
-        var paths = new Dictionary<int, string?> { [1] = Installed, [2] = Dev };
+        var ids = new Dictionary<int, string?> { [1] = Installed, [2] = Dev };
         var probed = new List<int>();
+        var foreign = new List<int>();
 
-        Select(Dev, paths, new HashSet<int> { 1, 2 }, probed);
+        Select(Dev, ids, new HashSet<int> { 1, 2 }, probed, foreign);
 
         Assert.Equal(new[] { 2 }, probed);
+        Assert.Equal(new[] { 1 }, foreign);
     }
 
     [Theory]
+    [InlineData(@"\\?\C:\Program Files\Wintty\Wintty.exe")]
     [InlineData(@"c:\program files\wintty\WINTTY.EXE")]
     [InlineData("C:/Program Files/Wintty/Wintty.exe")]
-    [InlineData(@"\\?\C:\Program Files\Wintty\Wintty.exe")]
     [InlineData(@"C:\Program Files\Wintty\Wintty.exe\")]
-    [InlineData(@"C:\Program Files\Other\..\Wintty\Wintty.exe")]
-    public void SpellingsOfTheSamePathMatch(string spelling)
+    public void SpellingsOfTheSameFinalPathMatch(string spelling)
     {
-        var paths = new Dictionary<int, string?> { [1] = spelling };
+        var ids = new Dictionary<int, string?> { [1] = spelling };
 
-        Assert.Equal(1, Select(Installed, paths, new HashSet<int> { 1 }));
+        Assert.Equal(1, Select(Installed, ids, new HashSet<int> { 1 }));
+    }
+
+    [Theory]
+    [InlineData(@"\\?\UNC\srv\share\Wintty\Wintty.exe")]
+    [InlineData(@"\\.\UNC\srv\share\Wintty\Wintty.exe")]
+    [InlineData(@"\\srv\share\Wintty\Wintty.exe")]
+    public void ExtendedUncSpellingsMapToThePlainShare(string spelling)
+    {
+        // Stripping only the four-character prefix would leave
+        // "UNC\srv\...", a relative path that names nothing.
+        Assert.Equal(@"\\srv\share\Wintty\Wintty.exe", ThemePreviewTarget.NormalizeIdentity(spelling));
+    }
+
+    [Theory]
+    [InlineData(@"UNC\srv\share\Wintty.exe")]
+    [InlineData(@"Wintty.exe")]
+    [InlineData(@"\\?\")]
+    public void ARelativeIdentityIsUnreadable(string spelling)
+    {
+        Assert.Null(ThemePreviewTarget.NormalizeIdentity(spelling));
     }
 
     [Fact]
     public void ASiblingDirectoryWithACommonPrefixDoesNotMatch()
     {
-        var paths = new Dictionary<int, string?> { [1] = @"C:\Program Files\Wintty2\Wintty.exe" };
+        var ids = new Dictionary<int, string?> { [1] = @"C:\Program Files\Wintty2\Wintty.exe" };
 
-        Assert.Null(Select(Installed, paths, new HashSet<int> { 1 }));
+        Assert.Null(Select(Installed, ids, new HashSet<int> { 1 }));
     }
 
     [Fact]
-    public void AnUnreadablePathIsSkippedNotTrusted()
+    public void AnUnreadableCandidateIsSkippedNotTrusted()
     {
         // Access denied or an exited process reads as null: it cannot be
-        // shown to be ours, so a readable same-path process later wins.
-        var paths = new Dictionary<int, string?> { [1] = null, [2] = Installed };
+        // shown to be ours, so a readable same-executable process later wins.
+        var ids = new Dictionary<int, string?> { [1] = null, [2] = Installed };
 
-        Assert.Equal(2, Select(Installed, paths, new HashSet<int> { 1, 2 }));
+        Assert.Equal(2, Select(Installed, ids, new HashSet<int> { 1, 2 }));
         Assert.Null(Select(Installed, new Dictionary<int, string?> { [1] = null }, new HashSet<int> { 1 }));
-    }
-
-    [Fact]
-    public void OwnProcessIsNeverATarget()
-    {
-        var paths = new Dictionary<int, string?> { [OwnPid] = Installed };
-
-        Assert.Null(Select(Installed, paths, new HashSet<int> { OwnPid }));
-    }
-
-    [Fact]
-    public void ASamePathProcessWithoutAPipeIsPassedOver()
-    {
-        var paths = new Dictionary<int, string?> { [1] = Installed, [2] = Installed };
-
-        Assert.Equal(2, Select(Installed, paths, new HashSet<int> { 2 }));
-    }
-
-    [Fact]
-    public void SeveralSamePathProcessesResolveToTheFirstWithAPipe()
-    {
-        var paths = new Dictionary<int, string?> { [1] = Installed, [2] = Installed };
-
-        Assert.Equal(1, Select(Installed, paths, new HashSet<int> { 1, 2 }));
     }
 
     [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
-    public void NoOwnPathIsNoTarget(string? ownPath)
+    public void AnUnreadableOwnIdentityIsNoTarget(string? own)
     {
-        var paths = new Dictionary<int, string?> { [1] = Installed };
+        // No fallback to the launch spelling: comparing a spelling with a
+        // resolved identity is exactly what misses a junctioned install.
+        var ids = new Dictionary<int, string?> { [1] = Installed };
 
-        Assert.Null(Select(ownPath, paths, new HashSet<int> { 1 }));
+        Assert.Null(Select(own, ids, new HashSet<int> { 1 }));
+    }
+
+    [Fact]
+    public void OwnProcessIsNeverATarget()
+    {
+        var ids = new Dictionary<int, string?> { [OwnPid] = Installed };
+
+        Assert.Null(Select(Installed, ids, new HashSet<int> { OwnPid }));
+    }
+
+    [Fact]
+    public void ASameExecutableProcessWithoutAPipeIsPassedOver()
+    {
+        var ids = new Dictionary<int, string?> { [1] = Installed, [2] = Installed };
+
+        Assert.Equal(2, Select(Installed, ids, new HashSet<int> { 2 }));
+    }
+
+    [Fact]
+    public void SeveralSameExecutableProcessesResolveToTheFirstWithAPipe()
+    {
+        var ids = new Dictionary<int, string?> { [1] = Installed, [2] = Installed };
+
+        Assert.Equal(1, Select(Installed, ids, new HashSet<int> { 1, 2 }));
+    }
+
+    [Theory]
+    [InlineData(Installed, Installed, true)]
+    [InlineData(Installed, @"\\?\c:\program files\wintty\wintty.exe", true)]
+    [InlineData(Installed, Dev, false)]
+    [InlineData(Installed, null, false)]
+    [InlineData(null, null, false)]
+    public void SameIdentityNeedsBothSidesReadable(string? a, string? b, bool expected)
+    {
+        Assert.Equal(expected, ThemePreviewTarget.SameIdentity(a, b));
     }
 
     [Fact]

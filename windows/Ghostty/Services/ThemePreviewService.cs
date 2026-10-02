@@ -207,6 +207,21 @@ internal sealed partial class ThemePreviewService : IDisposable
                 await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
                 _logger.LogClientConnected();
 
+                // Only a CLI running this same executable file may drive the
+                // window. The client side checks the server too, but a CLI
+                // from a build without that check (any older install) picks
+                // the first pipe it finds, so the server has to refuse it.
+                // The console shim is never the peer: it spawns Wintty.exe,
+                // and that child is what connects. Nothing was read, so
+                // there is nothing to revert.
+                var clientPid = Ghostty.Core.Themes.ThemePreviewTarget.ClientPid(server.SafePipeHandle);
+                if (clientPid is not int peer
+                    || !Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable(peer))
+                {
+                    _logger.LogForeignClientRejected(clientPid ?? 0);
+                    return PipeLoopOutcome.SessionEnded;
+                }
+
                 // No snapshot on connect. The session takes one before the
                 // first preview and not before, so a client that connects and
                 // sends nothing but LIST_THEMES leaves the slot alone -- and,
@@ -408,6 +423,12 @@ internal static partial class ThemePreviewServiceLogExtensions
                    Message = "[theme-preview] client connected")]
     internal static partial void LogClientConnected(
         this ILogger<ThemePreviewService> logger);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.ForeignClientRejected,
+                   Level = LogLevel.Information,
+                   Message = "[theme-preview] dropped client pid {ClientPid}: not this executable")]
+    internal static partial void LogForeignClientRejected(
+        this ILogger<ThemePreviewService> logger, int clientPid);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.PreviewCancelled,
                    Level = LogLevel.Debug,

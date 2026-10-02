@@ -5,21 +5,51 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// The theme CLI's pipe lookup goes through the same-executable selection
-/// that ThemePreviewTargetTests pins. A lookup by process name alone still
-/// compiles and still finds a window, it is just the wrong install's window
-/// whenever a dev build runs beside an installed app.
+/// Both ends of the theme preview pipe go through the same-executable checks
+/// that ThemePreviewTargetTests pins. A lookup by process name alone, or a
+/// server that serves whoever connects, still compiles and still finds a
+/// window; it is just the wrong install's window whenever a dev build runs
+/// beside an installed app.
 /// </summary>
 public class ThemePreviewTargetWiringTests
 {
     [Fact]
-    public void Cli_pipe_lookup_selects_by_own_executable()
+    public void Cli_selects_by_own_executable_and_checks_the_server_it_reached()
     {
-        var find = ShellSource.Load("Program.cs").Method("FindThemePreviewPipe");
+        var connect = ShellSource.Load("Program.cs").Method("ConnectThemePreviewPipe");
 
-        find.Call("Ghostty.Core.Themes.ThemePreviewTarget.FindPipe");
-        Assert.Empty(find.Calls("System.Diagnostics.Process.GetProcessesByName"));
-        Assert.Empty(find.Calls("Process.GetProcessesByName"));
+        var find = connect.Call("Ghostty.Core.Themes.ThemePreviewTarget.FindTarget");
+        var open = connect.Call("pipe.Connect");
+        var check = connect.Call("Ghostty.Core.Themes.ThemePreviewTarget.ServerPid");
+        Assert.True(find.SpanStart < open.SpanStart && open.SpanStart < check.SpanStart,
+            "the server pid can only be read once connected, and must be checked before the pipe is returned");
+        Assert.Empty(connect.Calls("System.Diagnostics.Process.GetProcessesByName"));
+        Assert.Empty(connect.Calls("Process.GetProcessesByName"));
+    }
+
+    [Fact]
+    public void Both_cli_connect_paths_share_the_checked_connect()
+    {
+        var program = ShellSource.Load("Program.cs");
+
+        program.Method("RegisterThemeCallback").Call("ConnectThemePreviewPipe");
+        program.Method("TrySendListThemesMessage").Call("ConnectThemePreviewPipe");
+        Assert.Empty(program.Method("RegisterThemeCallback").Calls("_themePipe.Connect"));
+        Assert.Empty(program.Method("TrySendListThemesMessage").Calls("pipe.Connect"));
+    }
+
+    [Fact]
+    public void Server_rejects_a_client_running_another_executable_before_reading()
+    {
+        var session = ShellSource.Load("Services.ThemePreviewService.cs").Method("RunOneServerSession");
+
+        var accept = session.Call("server.WaitForConnectionAsync");
+        var peer = session.Call("Ghostty.Core.Themes.ThemePreviewTarget.ClientPid");
+        var same = session.Call("Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable");
+        var read = session.Call("reader.ReadLineAsync");
+        Assert.True(
+            accept.SpanStart < peer.SpanStart && peer.SpanStart < same.SpanStart && same.SpanStart < read.SpanStart,
+            "the client must be identified after it connects and before anything it sent is acted on");
     }
 
     [Fact]
