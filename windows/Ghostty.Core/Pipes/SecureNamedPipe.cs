@@ -37,8 +37,9 @@ public static class SecureNamedPipe
     /// <summary>
     /// Same server with the direction chosen by the caller: the
     /// single-instance forwarding server answers its client with an
-    /// acknowledgement byte once it has served the launch, so it needs
-    /// <see cref="PipeDirection.InOut"/> while the write-only feeds stay
+    /// acknowledgement byte once it has served the launch, and the theme
+    /// preview server answers one once it has accepted the client, so both
+    /// need <see cref="PipeDirection.InOut"/> while a write-only feed stays
     /// <see cref="PipeDirection.In"/>.
     /// </summary>
     public static NamedPipeServerStream CreateServer(

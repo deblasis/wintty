@@ -1386,6 +1386,7 @@ public static partial class Program
     }
 
     private static System.IO.Pipes.NamedPipeClientStream? _themePipe;
+    private static bool _themeAckTimedOut;
     private static StreamWriter? _themePipeWriter;
 
     private static unsafe void RegisterThemeCallback()
@@ -1393,20 +1394,16 @@ public static partial class Program
         // Find the running Ghostty app's pipe. The pipe name includes
         // the PID, so we scan for ghostty-theme-preview-* pipes.
         // If no running app is found, the callback is a no-op.
-        var pipeName = FindThemePreviewPipe();
-        if (pipeName is not null)
+        _themePipe = ConnectThemePreviewPipe();
+        if (_themePipe is not null)
         {
             try
             {
-                _themePipe = new System.IO.Pipes.NamedPipeClientStream(
-                    ".", pipeName,
-                    System.IO.Pipes.PipeDirection.Out);
-                _themePipe.Connect(1000); // 1s timeout
                 _themePipeWriter = new StreamWriter(_themePipe) { AutoFlush = true };
             }
             catch
             {
-                _themePipe?.Dispose();
+                _themePipe.Dispose();
                 _themePipe = null;
                 _themePipeWriter = null;
             }
@@ -1448,14 +1445,11 @@ public static partial class Program
     /// </summary>
     private static bool TrySendListThemesMessage()
     {
-        var pipeName = FindThemePreviewPipe();
-        if (pipeName is null) return false;
+        using var pipe = ConnectThemePreviewPipe();
+        if (pipe is null) return false;
 
         try
         {
-            using var pipe = new System.IO.Pipes.NamedPipeClientStream(
-                ".", pipeName, System.IO.Pipes.PipeDirection.Out);
-            pipe.Connect(1000);
             using var writer = new StreamWriter(pipe) { AutoFlush = true };
             writer.WriteLine("LIST_THEMES");
             return true;
@@ -1466,29 +1460,67 @@ public static partial class Program
         }
     }
 
-    private static string? FindThemePreviewPipe()
+    // Only a Wintty running from this same image path: a dev build and an
+    // installed app side by side must not drive each other's window. Null
+    // means "no running instance", and the caller falls back to the TUI.
+    private static System.IO.Pipes.NamedPipeClientStream? ConnectThemePreviewPipe()
     {
-        // Look for a running Wintty process and try its pipe name.
-        // The pipe is named ghostty-theme-preview-{PID}.
-        // Match the assembly name from windows/Ghostty/Ghostty.csproj
-        // so this stays in sync if the binary is ever renamed again.
+        // A server that let the ack wait run out once is most likely an older
+        // build at the same path, which never acknowledges; +list-themes
+        // would otherwise pay the wait again before its TUI. If it was only a
+        // slow current server, this run loses its live preview, which is the
+        // safe direction.
+        if (_themeAckTimedOut) return null;
+
+        System.IO.Pipes.NamedPipeClientStream? pipe = null;
         try
         {
-            var procs = System.Diagnostics.Process.GetProcessesByName("Wintty");
-            foreach (var proc in procs)
+            Action<int, string>? onForeign =
+                Environment.GetEnvironmentVariable(GpuLogEnvVar) is not null
+                    ? (pid, exe) => WriteStartupDiagnostic(
+                        $"theme preview: skipped pid {pid}, it runs {exe}")
+                    : null;
+            if (Ghostty.Core.Themes.ThemePreviewTarget.FindTarget(onForeign) is not int target)
+                return null;
+
+            // InOut to read the server's acceptance byte; asynchronous so an
+            // ack read abandoned at the timeout cannot hold up the dispose.
+            pipe = new System.IO.Pipes.NamedPipeClientStream(
+                ".", Ghostty.Core.Themes.ThemePreviewTarget.PipeNameFor(target),
+                System.IO.Pipes.PipeDirection.InOut,
+                System.IO.Pipes.PipeOptions.Asynchronous);
+            pipe.Connect(1000); // 1s timeout
+
+            // The pipe is opened by name after the pid was checked. If that
+            // process exited and its pid now belongs to another install's
+            // Wintty, that server's pipe carries the same name and the same
+            // pid, so the peer itself is checked again, not just its pid.
+            if (Ghostty.Core.Themes.ThemePreviewTarget.ServerPid(pipe.SafePipeHandle) is not int server
+                || server != target
+                || !Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable(server))
             {
-                using (proc)
-                {
-                    if (proc.Id == Environment.ProcessId) continue;
-                    var candidate = $"ghostty-theme-preview-{proc.Id}";
-                    // Check if the pipe exists by trying the well-known path.
-                    if (File.Exists($@"\\.\pipe\{candidate}"))
-                        return candidate;
-                }
+                pipe.Dispose();
+                return null;
             }
+
+            // Nothing is sent before the server accepts: it reads this
+            // process's identity first, which needs this process alive, and a
+            // refusal must reach here as a fallback to the TUI, not as a
+            // write that looked delivered.
+            if (!Ghostty.Core.Themes.ThemePreviewTarget.AwaitAck(
+                    pipe, Ghostty.Core.Themes.ThemePreviewTarget.AckTimeout, out var timedOut))
+            {
+                _themeAckTimedOut = timedOut;
+                pipe.Dispose();
+                return null;
+            }
+            return pipe;
         }
-        catch { }
-        return null;
+        catch
+        {
+            pipe?.Dispose();
+            return null;
+        }
     }
 
     /// <summary>
