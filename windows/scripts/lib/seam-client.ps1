@@ -35,6 +35,20 @@ function Get-SeamPipeName([Parameter(Mandatory)][string]$Token) {
     return "wintty-test-seam-$Token"
 }
 
+# The session daemon's pipe, minted per launch for builds that carry one.
+# In test mode (WINTTY_TEST_CONFIG, armed below) the app refuses to resolve
+# the real per-user daemon's name and the daemon refuses to start with its
+# state under the real per-edition base, so a seam launch that wants session
+# legs has to name a private pipe and give the daemon somewhere private to
+# put its files. The spelling is the private test shape the daemon's own
+# test suite uses (`winttyd-test-<hex>`); a name carrying a user SID is a
+# per-user name, which is exactly what the coexistence guard's pipe rule
+# exists to refuse. New-SeamToken supplies the 128 bits, so the name is as
+# unguessable as the seam's own.
+function New-SeamSessionPipeName {
+    return "\\.\pipe\winttyd-test-$(New-SeamToken)"
+}
+
 # Wait for the armed app to publish its pipe. Enumerating \\.\pipe\ rather than
 # just attempting the connect keeps the failure legible: "never appeared" and
 # "appeared but refused us" are different findings.
@@ -77,6 +91,10 @@ function Connect-SeamPipe(
     return $pipe
 }
 
+# The type guard, not just -ErrorAction, because a second dot-source of this
+# file (the tests' mutation rows dot-source copies) finds SeamWin compiled
+# and Add-Type's recompile failure is terminating under Stop.
+if (-not ('SeamWin' -as [type])) {
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -122,6 +140,7 @@ public static class SeamWin {
     }
 }
 '@ -ErrorAction SilentlyContinue
+}
 
 function Get-SeamWinUiWindows([uint32]$ProcId) {
     $hits = [System.Collections.Generic.List[object]]::new()
@@ -258,7 +277,12 @@ function Start-SeamSession(
         OrigTrace = if (Test-Path Env:WINTTY_TABDRAG_TRACE) { $env:WINTTY_TABDRAG_TRACE } else { $null }
         OrigNoColor = if (Test-Path Env:NO_COLOR) { $env:NO_COLOR } else { $null }
         OrigStateBase = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
+        OrigSessionPipe = if (Test-Path Env:WINTTY_SESSIOND_PIPE) { $env:WINTTY_SESSIOND_PIPE } else { $null }
+        OrigSessiondDataDir = if (Test-Path Env:WINTTY_SESSIOND_DATA_DIR) { $env:WINTTY_SESSIOND_DATA_DIR } else { $null }
+        OrigSessiondLogFile = if (Test-Path Env:WINTTY_SESSIOND_LOG_FILE) { $env:WINTTY_SESSIOND_LOG_FILE } else { $null }
+        OrigSessiondBinDir = if (Test-Path Env:WINTTY_SESSIOND_BIN_DIR) { $env:WINTTY_SESSIOND_BIN_DIR } else { $null }
         StateBase = $null
+        SessionPipe = New-SeamSessionPipeName
     }
     if ($PrivateStateBase) {
         $session.StateBase = Join-Path $tempXdg 'state'
@@ -278,6 +302,25 @@ function Start-SeamSession(
     # The token travels in the environment block the child inherits, which is
     # readable only by something that could already open this process anyway.
     $env:WINTTY_TEST_SEAM = $session.Token
+    # The session daemon the app auto-spawns inherits this block too, so the
+    # private pipe and the daemon's own data, log and bin dirs are named here,
+    # before anything launches: in test mode the app refuses to resolve a
+    # daemon pipe the environment does not name (its PipeName), and the daemon
+    # refuses to start armed with a state path under the real per-edition base
+    # (its test guard). Both refusals leave the session legs unable to attach,
+    # and both are answered by one mint: a fresh private pipe, and the
+    # daemon's whole state tree inside this session's temp root, which dies
+    # with the run. The log file's parent is created up front because an
+    # explicit log override the daemon cannot open is a startup error, not a
+    # fallback.
+    $session.SessiondRoot = Join-Path $tempXdg 'sessiond'
+    foreach ($leaf in 'data', 'logs', 'bin') {
+        New-Item -ItemType Directory -Force -Path (Join-Path $session.SessiondRoot $leaf) | Out-Null
+    }
+    $env:WINTTY_SESSIOND_PIPE = $session.SessionPipe
+    $env:WINTTY_SESSIOND_DATA_DIR = Join-Path $session.SessiondRoot 'data'
+    $env:WINTTY_SESSIOND_LOG_FILE = Join-Path $session.SessiondRoot 'logs\sessiond.log'
+    $env:WINTTY_SESSIOND_BIN_DIR = Join-Path $session.SessiondRoot 'bin'
     if ($AllowInput) { $env:WINTTY_TEST_SEAM_INPUT = '1' }
     else { Remove-Item Env:WINTTY_TEST_SEAM_INPUT -ErrorAction SilentlyContinue }
     # The child inherits this shell's environment block, and NO_COLOR in it is
@@ -424,5 +467,13 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigStateBase) { $env:WINTTY_STATE_BASE = $Session.OrigStateBase }
     else { Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigSessionPipe) { $env:WINTTY_SESSIOND_PIPE = $Session.OrigSessionPipe }
+    else { Remove-Item Env:WINTTY_SESSIOND_PIPE -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigSessiondDataDir) { $env:WINTTY_SESSIOND_DATA_DIR = $Session.OrigSessiondDataDir }
+    else { Remove-Item Env:WINTTY_SESSIOND_DATA_DIR -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigSessiondLogFile) { $env:WINTTY_SESSIOND_LOG_FILE = $Session.OrigSessiondLogFile }
+    else { Remove-Item Env:WINTTY_SESSIOND_LOG_FILE -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigSessiondBinDir) { $env:WINTTY_SESSIOND_BIN_DIR = $Session.OrigSessiondBinDir }
+    else { Remove-Item Env:WINTTY_SESSIOND_BIN_DIR -ErrorAction SilentlyContinue }
     Remove-Item $Session.TempXdg -Recurse -Force -ErrorAction SilentlyContinue
 }
