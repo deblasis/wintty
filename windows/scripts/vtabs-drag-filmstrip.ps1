@@ -156,11 +156,10 @@ function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0, [i
 
 # ---- run -------------------------------------------------------------------
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 windows-settings-ui = true
 vertical-tabs = true
@@ -175,7 +174,10 @@ $script:FatalWasProduct = $null
 
 # Above the try, so the refusal survives a finally that would otherwise bind
 # a null stamp to a mandatory parameter.
-Assert-NoWintty -Context 'The drag filmstrip'
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The drag filmstrip'
+# Its oracles are frame counts and a 500ms window, so a neighbour's load is
+# worth a line.
+Write-WinttyTimingNeighbourWarning -ExePath $ExePath -Context 'The drag filmstrip'
 
 # The machine's animation gate, read directly: this oracle measures the
 # glide, and a machine running with animations off would make every timing
@@ -472,7 +474,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 if ($crashGrew) {
     Write-Host 'PRODUCT_FAIL: crash.log grew during the run' -ForegroundColor Red
     exit 2

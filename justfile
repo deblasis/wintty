@@ -205,8 +205,9 @@ build-win-release:
 # Build the DLL and the shell under the build lane, then launch it. The
 # launch itself is outside any lane on purpose: pwsh returns as soon as a
 # GUI process is up, so a lane held here would be released while the
-# window is still open. The harnesses' own Assert-NoWintty is what guards
-# the desktop against that window.
+# window is still open. The harnesses' own Assert-NoWinttyFrom is what
+# guards their runs against that window, which runs from the Debug exe they
+# launch.
 #
 # run-win is the USER launcher: a human terminal gets the real config by
 # default, unchanged. Set ISOLATED_CONFIG=1 in the environment (e.g.
@@ -341,10 +342,11 @@ _build-in-lane reason +recipes:
 
 # Launch two instances a few hundred ms apart and watch for a launch splash
 # owned by the one that should be forwarding itself to the other. Opens real
-# windows, so it needs an interactive desktop and no Wintty already running.
+# windows, so it needs an interactive desktop and no Wintty already running
+# from the Debug exe.
 # Pass extra args through, e.g. `just splash-race "-SecondaryFeatureOff"`.
 [windows]
-splash-race args="": _no-wintty-running (_build-in-lane "splash-race" "build-win")
+splash-race args="": _no-wintty-from (_build-in-lane "splash-race" "build-win")
     $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("splash-race {{replace(args, '"', '""')}}".Trim()) -- just _splash-race-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just splash-race`, inside the lane it took.
@@ -352,27 +354,26 @@ splash-race args="": _no-wintty-running (_build-in-lane "splash-race" "build-win
 _splash-race-in-lane args="":
     pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}; exit ($LASTEXITCODE ?? 1)
 
-# Checked before the builds, not after: the harnesses refuse to run while a
-# Wintty is open, and dotnet build cannot overwrite a locked Wintty.exe, so
-# without this the developer pays a full zig + dotnet build only to be told
-# to close a window -- or gets an MSB file-in-use error that hides the real
-# reason. Prerequisites run in the order listed.
+# Checked before the builds, not after: dotnet build cannot overwrite a
+# Wintty.exe that is running, and the harnesses refuse to start beside an
+# instance of the exe they launch, so without this the developer pays a full
+# zig + dotnet build only to be told to close a window -- or gets an MSB
+# file-in-use error that hides the real reason. Only an instance of EXE
+# counts: an installed Wintty or another worktree's build runs from another
+# path and locks nothing here, and whether a harness may launch beside it is
+# the coexistence guard's call at launch time. Prerequisites run in the order
+# listed.
 #
-# The trailing `exit 0` is load-bearing, and the reason is narrower than it
-# looks: `pwsh -Command` returns the success of the LAST STATEMENT EXECUTED.
-# `Get-Process Wintty` finding no match leaves $? false even under
-# -ErrorAction SilentlyContinue or Ignore, and an `if` that is not taken does
-# not reset it - so the recipe fell off its end in the failed state, on a clear
-# desktop, with no message, because the pid list only prints on the branch that
-# was not taken.
+# The trailing `exit 0` is load-bearing: `pwsh -Command` returns the success
+# of the LAST STATEMENT EXECUTED, and a process lookup that matched nothing
+# can leave $? false, so the recipe would fall off its end failed, on a clear
+# desktop, with no message.
 #
-# It does not mask a `throw`, which never reaches the exit, but it does mask a
-# trailing non-terminating error. Treat this as a convenience gate only: the
-# authority is Assert-NoWintty in lib/wintty-process.ps1, which every harness
-# calls for itself.
+# Treat this as a convenience gate only: the authority is Assert-NoWinttyFrom
+# in lib/wintty-process.ps1, which every harness calls for itself.
 [windows]
-_no-wintty-running:
-    $p = @(Get-Process Wintty -ErrorAction SilentlyContinue); if ($p.Count -gt 0) { Write-Host ("close the running Wintty first (pid: " + ($p.Id -join ', ') + ")") -ForegroundColor Red; exit 1 }; exit 0
+_no-wintty-from exe="windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe":
+    . ./windows/scripts/lib/wintty-process.ps1; try { Assert-NoWinttyFrom -ExePath (Join-Path $PWD '{{exe}}') -Context 'This recipe' } catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }; exit 0
 
 # Fuzz in-pane scrollback search against a real oracle: the harness reads the
 # terminal's own UIA text document, counts matches itself, and compares every
@@ -385,7 +386,7 @@ _no-wintty-running:
 #
 # Pass extra args through, e.g. `just search-fuzz "-Seed 99 -Iterations 40"`.
 [windows]
-search-fuzz args="": _no-wintty-running (_build-in-lane "search-fuzz" "build-dll" "build-win")
+search-fuzz args="": _no-wintty-from (_build-in-lane "search-fuzz" "build-dll" "build-win")
     $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("search-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _search-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just search-fuzz`, inside the lane it took.
@@ -409,7 +410,7 @@ _search-fuzz-in-lane args="":
 #
 # Pass extra args through, e.g. `just shader-notice-fuzz "-Seed 99"`.
 [windows]
-shader-notice-fuzz args="": _no-wintty-running (_build-in-lane "shader-notice-fuzz" "build-dll" "build-win")
+shader-notice-fuzz args="": _no-wintty-from (_build-in-lane "shader-notice-fuzz" "build-dll" "build-win")
     $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("shader-notice-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _shader-notice-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just shader-notice-fuzz`, inside the lane it took.
@@ -437,7 +438,7 @@ _shader-notice-fuzz-in-lane args="":
 #
 # Pass extra args through, e.g. `just frame-style-fuzz "-Seed 99 -Random 3"`.
 [windows]
-frame-style-fuzz args="": _no-wintty-running (_build-in-lane "frame-style-fuzz" "build-dll" "build-win")
+frame-style-fuzz args="": _no-wintty-from (_build-in-lane "frame-style-fuzz" "build-dll" "build-win")
     $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("frame-style-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _frame-style-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just frame-style-fuzz`, inside the lane it took.
@@ -471,15 +472,15 @@ _frame-style-fuzz-in-lane args="":
 # as two arguments, the second of which lands on -Polarity, and a `\"` is
 # not an escape at all. The args cross the lane inside double quotes with
 # any double quote doubled, so a `$` or a backtick is what cannot be passed.
-# The no-Wintty check runs before the build lane rather than inside the
-# desktop lane, like every other harness: the window check that matters is
-# the harness's own Assert-NoWintty once it holds the desktop.
+# The same-exe check runs before the build lane rather than inside the
+# desktop lane, like every other harness: the check that matters is the
+# coexistence guard Start-SeamSession runs before each launch.
 #
 # Exit codes: 0 clean, 2 findings, 1 could not run or a surface went unmeasured.
 #
 # Run the theme matrix (#937) under the incoda lanes against the Debug build.
 [windows]
-theme-matrix args="": _no-wintty-running (_build-in-lane "theme matrix (#937)" "build-dll" "build-win")
+theme-matrix args="": _no-wintty-from (_build-in-lane "theme matrix (#937)" "build-dll" "build-win")
     $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("theme matrix (#937) {{replace(args, '"', '""')}}".Trim()) -- just _theme-matrix-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just theme-matrix`, inside the lane it took.
@@ -526,7 +527,7 @@ theme-matrix-report run="windows/scripts/theme-matrix":
 #
 # Run every GUI fuzz harness against the Debug build.
 [windows]
-fuzz args="": _no-wintty-running (_build-in-lane "fuzz" "build-dll" "build-win")
+fuzz args="": _no-wintty-from (_build-in-lane "fuzz" "build-dll" "build-win")
     $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("fuzz {{replace(args, '"', '""')}}".Trim()) -- just _fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just fuzz`, inside the lane it took.

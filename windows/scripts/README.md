@@ -273,8 +273,23 @@ markdown is what gets pasted into #937, one comment per run.
 
 `lib/wintty-process.ps1` holds the rule:
 
-- `Assert-NoWintty` - refuse to start while any Wintty is running, naming the
-  pids. Call it once, before the first launch.
+- `Assert-NoWinttyFrom -ExePath` - the gate every harness takes once, before
+  the first launch: refuse while a Wintty is running from the exe under
+  test, naming the pids. That instance locks the exe against the build and
+  cannot be told apart from the run's own launches by a sweep. A Wintty
+  from any other path (the installed app, another worktree's build) is not
+  refused here; whether a launch may run beside it is the coexistence
+  guard's call below.
+- `Assert-NoWintty -Reason` - the old blanket refusal of any running Wintty,
+  kept for a harness that no isolation can separate from other instances.
+  It quotes its reason. `seam-crash-dump.ps1` is the one caller here: it
+  arms WER LocalDumps for the image name `Wintty.exe`, which covers every
+  running Wintty.
+- `Write-WinttyTimingNeighbourWarning` - for a harness whose verdict is a
+  wall-clock budget or a frame count (`layout-switch-filmstrip.ps1`,
+  `vtabs-drag-filmstrip.ps1`): another Wintty rendering beside it can push a
+  figure over budget without sharing any state, so it warns with the pids
+  rather than refusing.
 - `Get-WinttyLaunchStamp` / `Stop-WinttyStartedAfter` - clean up only what the
   run started, matched on start time and, where the caller knows it, image
   path. Anything that cannot be positively identified is skipped: an
@@ -305,15 +320,30 @@ markdown is what gets pasted into #937, one comment per run.
   seen. With the rules above the only thing such an instance can share with
   the run is the toast registration and jump list of a same-edition AUMID,
   which the next launch refuses again.
-- `Assert-NoWinttyFrom` - the narrow up-front gate for a harness that isolates
-  itself: it refuses only an instance of the exe under test.
 
-To make a seam harness coexist: call `Assert-NoWinttyFrom -ExePath` instead of
-`Assert-NoWintty`, stage `windows-single-instance = false`, pass
-`Start-SeamSession -PrivateStateBase`, and read crash.log from
-`$session.StateBase` rather than the per-user path. `seam-acceptance.ps1` and
-`seam-initial-size.ps1` are converted; the rest keep `Assert-NoWintty` until each is converted and its
-scenario checked against single-instance being off.
+Every seam session is isolated by default. `Start-SeamSession` stages a
+random temp config root with `WINTTY_TEST_CONFIG=1`, a private
+`WINTTY_STATE_BASE` inside it (or adopts one the caller set under temp),
+a private session daemon pipe and daemon dirs, and the harness
+quick-terminal chord when the config binds none. `-SharedStateBase` opts
+out of the private state tree, and the guard then refuses beside any other
+Wintty. The crash oracle reads the session's own tree:
+`Test-SeamCrashLogWritten -Since (Get-SeamSessionMark)` is true when a
+session started after the mark wrote a crash.log, including one that
+failed to start, because `Stop-SeamSession` reads the tree out before it
+removes it. A harness that launches with `Start-Process` gets the same
+state tree from `Enter-WinttyTestConfig -PrivateStateBase`, stages the
+chord with `Add-WinttyHarnessConfigDefaults`, calls
+`Assert-WinttyCoexistence` before each launch, and reads crashes with
+`Get-WinttyTestConfigCrashLogs`.
+
+What a harness still has to bring itself is `windows-single-instance =
+false` in its config. Every harness here stages it except
+`mouse-fuzz-jumplist.ps1`, whose scenario is the single-instance handoff:
+the guard refuses that one beside any other Wintty, and says why.
+Harnesses that synthesize OS input check that their own window holds the
+foreground right before each gesture (`frame-keybind-live-key.ps1`), which
+is what keeps the input out of somebody else's window.
 
 Most scripts here used to open with `Get-Process Wintty | Stop-Process -Force`,
 which takes down builds from other worktrees and the window the developer is
@@ -328,7 +358,7 @@ Every script here that launches Wintty uses the helper except two:
 
 | script | why |
 |---|---|
-| `splash-single-instance-race.ps1` | its gate is deliberately *narrower* than `Assert-NoWintty`: it refuses only over instances running from the exe under test, because the mutex it is measuring is keyed on that path, and it needs to be able to launch a second instance itself |
+| `splash-single-instance-race.ps1` | it keeps its own copy of the same-exe gate, refusing only over instances running from the exe under test, because the mutex it is measuring is keyed on that path, and it needs to be able to launch a second instance itself |
 | `mouse-smoke-run.ps1` | the operator drives it by hand and quits the app themselves |
 | `contrast-oracle.ps1`, `tab-tag-ink.ps1`, `switcher-preview-theme.ps1` | they are meant to be runnable beside a Wintty somebody else is using: they read crash.log not at all, launch with `windows-single-instance` off against an isolated `XDG_CONFIG_HOME`, move only their own window and reap only what they started. Each session now names its pipe after its own token, so two runs no longer collide on the name; what still makes them exit 1 rather than measure the wrong window is that each waits for the pipe belonging to the app it launched |
 
@@ -336,7 +366,8 @@ Every script here that launches Wintty uses the helper except two:
 reaps its own, including `layout-switch-filmstrip.ps1`, which it runs
 first.
 
-`justfile` also has its own copy of the gate, so `just fuzz`, `just
+`justfile` also has its own copy of the same-exe gate (`_no-wintty-from`,
+scoped to the Debug exe the recipes build), so `just fuzz`, `just
 search-fuzz` and `just splash-race` can refuse before paying for a build.
 
 One script needs care beyond a single gate. `mouse-fuzz-jumplist.ps1`
@@ -344,7 +375,7 @@ launches secondaries against a running primary, so its sweep rather than a
 per-process kill is what reaps them.
 
 Kill the tree, not the process. `Stop-Process -Id` leaves the ConPTY shell
-running as an orphan, and an orphan does not trip `Assert-NoWintty` because
+running as an orphan, and an orphan does not trip `Assert-NoWinttyFrom` because
 its image name is not Wintty - so it is invisible to the gate and simply
 accumulates. Use `$proc.Kill($true)`.
 
@@ -365,14 +396,13 @@ exactly this reason.
 
 ## Before you run search-fuzz
 
-- It **refuses to start while any Wintty is running**, and names the pids so
-  you can close them. That includes a Wintty you launched it from, so run it
-  from another terminal. The reason is not single-instance - that mutex is
-  keyed on a hash of the exe path, so another worktree's build would not
-  absorb the launch. It is that `crash.log` is shared: it lives under
-  `%LOCALAPPDATA%` per user rather than per exe path, `XDG_CONFIG_HOME` does
-  not move it, and the harness reports everything the file gains during a
-  run as a defect in the build under test.
+- It **refuses to start while a Wintty from the exe under test is
+  running**, and names the pids so you can close them. Run it from a
+  terminal that is not that build. Any other Wintty, the installed app
+  included, may stay open: the session's `crash.log` is in its own state
+  tree, so nothing another instance writes is read as a defect in the build
+  under test, and the coexistence guard proves the rest of the isolation
+  before the launch.
 - It runs on a random temp config root from `Start-SeamSession`, never your
   real config, and there is no switch to change that.
 - It synthesizes no input and never takes the foreground: the bar opens

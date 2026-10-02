@@ -52,7 +52,8 @@
       2  product findings - see run-<seed>.json and shots/ under -OutDir
       1  the harness could not run; the product was never exercised, so do
          not file a bug. It will not help to retry when the run was refused
-         because a Wintty is already open - close it first
+         because a Wintty from the exe under test is already open - close
+         it first
 
     A seed replays the op sequence, but not the corpus-slice needles drawn
     from live terminal text: those depend on the shell prompt and the window
@@ -437,25 +438,24 @@ $result = [ordered]@{
     actuation = 'seam (WINTTY_TEST_SEAM=<session token>, send-text armed); bar by chord and UIA; no synthesized OS input'
 }
 
-$script:CrashBaseline = 0
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-if (Test-Path $crashPath) { $script:CrashBaseline = (Get-Item $crashPath).Length }
+$crashMark = Get-SeamSessionMark
 
 try {
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
 
     # Never kill by name: developers keep builds from several worktrees open
     # at once, and force-killing every Wintty takes down work this run has
-    # nothing to do with. Refuse instead. lib/wintty-process.ps1 carries the
-    # rule and the reasoning; the short version is that crash.log is shared
-    # per user rather than per exe path, and this harness reports every byte
-    # the file gains during a run as a defect in the build under test.
+    # nothing to do with. Refuse only an instance of this exe, which the
+    # run's own sweep could not tell apart; anything else may run beside it,
+    # because the session's crash.log, like the rest of its state, is its own
+    # (lib/wintty-process.ps1 carries the rule, and Start-SeamSession's guard
+    # proves the isolation before it launches).
     #
     # The gate sits inside the try, unlike the other harnesses, because the
     # catch below records the refusal as a harness finding and prints it in
     # the harness's own voice. The finally only tears down a session that
     # exists, so a refusal cannot be replaced by a teardown error.
-    Assert-NoWintty -Context 'The search fuzz'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The search fuzz'
 
     $script:Session = Start-SeamSession -ExePath $ExePath -ConfigText $configText -AllowInput
     $script:Proc = $script:Session.Proc
@@ -910,20 +910,14 @@ catch {
 }
 finally {
 
-    # crash.log is append-only across every run on this machine, so only the
-    # bytes this run added are evidence about this run. Slice as bytes: the
-    # baseline is a file length, and using it as a character index reads the
-    # wrong text and throws outright once the log contains any non-ASCII.
+    # The session's state tree is its own, so every crash.log in it was
+    # written by this run's app.
     try {
-        if (Test-Path $crashPath) {
-            $now = (Get-Item $crashPath).Length
-            if ($now -gt $script:CrashBaseline) {
-                $bytes = [System.IO.File]::ReadAllBytes($crashPath)
-                $fresh = [System.Text.Encoding]::UTF8.GetString(
-                    $bytes, $script:CrashBaseline, $bytes.Length - $script:CrashBaseline)
-                $fresh | Set-Content (Join-Path $OutDir "crash-$Seed.log") -Encoding utf8
-                Add-Finding 'crash' "crash.log grew by $($now - $script:CrashBaseline) bytes during this run" @{}
-            }
+        $crashes = Get-SeamRunCrashLogs -Since $crashMark
+        if ($crashes.Count -gt 0) {
+            ($crashes | ForEach-Object { $_.Text }) -join "`n" |
+                Set-Content (Join-Path $OutDir "crash-$Seed.log") -Encoding utf8
+            Add-Finding 'crash' "crash.log written during this run: $(($crashes | ForEach-Object { $_.Path }) -join ', ')" @{}
         }
     } catch {
         Add-Finding 'harness' "could not read crash.log: $($_.Exception.Message)" @{}

@@ -15,9 +15,10 @@
 # so a harness pointed at a public build finds no pipe at all. Point them at a
 # Debug build, or a Release built with -p:TestSeam=true.
 #
-# Dot-source after lib/wintty-process.ps1 (Assert-NoWintty and the stamp
-# helpers live there and are the caller's own preamble; Start-SeamSession
-# also calls its coexistence guard right before every launch).
+# Dot-source after lib/wintty-process.ps1 (Assert-NoWinttyFrom and the
+# stamp helpers live there and are the caller's own preamble;
+# Start-SeamSession also calls its coexistence guard right before every
+# launch).
 
 # 128 bits of hex: the shape TestSeam.IsSessionToken accepts, and the reason
 # the pipe name is unguessable. RandomNumberGenerator rather than Get-Random,
@@ -218,15 +219,20 @@ function Start-SeamSession(
     # drags tabs should not be launching an app that can be told to run
     # commands. Only a harness asserting on shell output needs this.
     [switch]$AllowInput,
-    # Give the app a state tree of its own: WINTTY_STATE_BASE at a fresh
-    # directory inside this session's temp root, so logs, crash.log, session
-    # and window state are the run's, and $session.StateBase names it for
-    # the harness's crash oracle. Off by default because a harness that
-    # reads crash.log from the per-user path would otherwise go blind. A
-    # WINTTY_STATE_BASE the caller already set under the temp directory is
-    # adopted as it is (and left for the caller to remove). Either one is
-    # what the coexistence guard asks for before it lets a launch run beside
-    # somebody else's Wintty.
+    # Every session gets a state tree of its own by default: WINTTY_STATE_BASE
+    # at a fresh directory inside this session's temp root, so logs,
+    # crash.log, session and window state are the run's, and
+    # $session.StateBase names it for the crash oracle (Test-SeamCrashLogWritten
+    # below). A WINTTY_STATE_BASE the caller already set under the temp
+    # directory is adopted as it is (and left for the caller to remove).
+    # Either one is what the coexistence guard asks for before it lets a
+    # launch run beside somebody else's Wintty.
+    #
+    # -SharedStateBase opts out and leaves the per-user tree, which the guard
+    # then refuses beside any other Wintty. -PrivateStateBase was the opt-in
+    # before the private tree became the default; it still binds, and still
+    # mints a fresh tree even over one the caller set.
+    [switch]$SharedStateBase,
     [switch]$PrivateStateBase,
     # Files to stage under the config root before launch, keyed by a path
     # relative to it ('wintty/themes/Name' = text). Written as exact UTF-8
@@ -284,14 +290,22 @@ function Start-SeamSession(
         StateBase = $null
         SessionPipe = New-SeamSessionPipeName
     }
-    if ($PrivateStateBase) {
+    if ($PrivateStateBase -and $SharedStateBase) {
+        Remove-Item $tempXdg -Recurse -Force -ErrorAction SilentlyContinue
+        throw 'HARNESS: -PrivateStateBase and -SharedStateBase ask for opposite state trees'
+    }
+    # Recorded before anything can throw, so a crash during startup still
+    # reaches the run's crash oracle through Stop-SeamSession.
+    (Get-SeamRunSessions).Add($session)
+    $adoptable = $session.OrigStateBase -and
+        (Test-WinttyPathUnder $session.OrigStateBase ([System.IO.Path]::GetTempPath()))
+    if ($adoptable -and -not $PrivateStateBase) {
+        $session.StateBase = $session.OrigStateBase
+    }
+    elseif (-not $SharedStateBase) {
         $session.StateBase = Join-Path $tempXdg 'state'
         New-Item -ItemType Directory -Force -Path $session.StateBase | Out-Null
         $env:WINTTY_STATE_BASE = $session.StateBase
-    }
-    elseif ($session.OrigStateBase -and
-            (Test-WinttyPathUnder $session.OrigStateBase ([System.IO.Path]::GetTempPath()))) {
-        $session.StateBase = $session.OrigStateBase
     }
     $env:XDG_CONFIG_HOME = $tempXdg
     # The guard that makes a lost XDG root loud: armed, an app resolving a
@@ -365,9 +379,10 @@ function Start-SeamSession(
     # appears or a splash that never drops, Wait-SeamPipe on a Release build
     # with the seam compiled out, Connect-SeamPipe on a timeout -- and the
     # caller does not hold the session yet, so ITS finally cannot clean up.
-    # Left alone that strands a running Wintty, and Assert-NoWintty refuses to
-    # kill instances it did not start, so one orphan blocks every seam harness
-    # on the machine until a human intervenes. Tear down here and rethrow.
+    # Left alone that strands a running Wintty, and Assert-NoWinttyFrom
+    # refuses beside it without stopping it, so one orphan blocks every seam
+    # harness on this build until a human intervenes. Tear down here and
+    # rethrow.
     try {
         $main = Wait-SeamReady $proc
         $session.Hwnd64 = [int64]$main.Hwnd64
@@ -475,5 +490,70 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     else { Remove-Item Env:WINTTY_SESSIOND_LOG_FILE -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigSessiondBinDir) { $env:WINTTY_SESSIOND_BIN_DIR = $Session.OrigSessiondBinDir }
     else { Remove-Item Env:WINTTY_SESSIOND_BIN_DIR -ErrorAction SilentlyContinue }
+    # The private state tree dies with the temp root below, so its crash.log
+    # is read out first: a harness that checks for crashes after teardown
+    # still has the evidence. Once only, so a second Stop on a removed tree
+    # cannot overwrite what the first one read.
+    if (-not $Session.ContainsKey('CrashLogs')) {
+        $Session.CrashLogs = @(Get-SeamCrashLogs $Session)
+        foreach ($c in $Session.CrashLogs) {
+            Write-Host ("Stop-SeamSession: the app wrote {0}" -f $c.Path) -ForegroundColor Yellow
+        }
+    }
     Remove-Item $Session.TempXdg -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Every session Start-SeamSession created in this run, in order. Kept in the
+# caller's script scope (this file is dot-sourced), so the crash oracle below
+# can see sessions that failed to start and were never handed back.
+function Get-SeamRunSessions {
+    $v = Get-Variable -Name SeamRunSessions -Scope Script -ErrorAction Ignore
+    if (-not $v) {
+        $script:SeamRunSessions = [System.Collections.Generic.List[object]]::new()
+        return , $script:SeamRunSessions
+    }
+    return , $v.Value
+}
+
+# A mark to hand to Test-SeamCrashLogWritten -Since: the sessions started
+# after it are the ones a scenario owns.
+function Get-SeamSessionMark { return (Get-SeamRunSessions).Count }
+
+# The crash.log files the app of $Session wrote after the session started,
+# as { Path, Text }. A stopped session answers with what Stop-SeamSession
+# read before removing its tree. A private state tree is searched rather
+# than spelled, because the directory under it is named after the edition.
+# A session that shares the per-user tree (-SharedStateBase) reads the
+# per-user crash.log, where only a write after its own stamp counts.
+function Get-SeamCrashLogs([Parameter(Mandatory)]$Session) {
+    if ($Session.ContainsKey('CrashLogs')) { return @($Session.CrashLogs) }
+    $since = ([datetime]$Session.Stamp).ToUniversalTime()
+    $files = if ($Session.StateBase) {
+        @(Get-ChildItem -LiteralPath $Session.StateBase -Recurse -File -Filter crash.log -ErrorAction SilentlyContinue)
+    }
+    else {
+        @(Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wintty\crash.log') -ErrorAction SilentlyContinue)
+    }
+    return @($files | Where-Object { $_.Length -gt 0 -and $_.LastWriteTimeUtc -ge $since } | ForEach-Object {
+        $text = try { [System.IO.File]::ReadAllText($_.FullName) } catch { '' }
+        [pscustomobject]@{ Path = $_.FullName; Text = $text }
+    })
+}
+
+# Every crash.log written by the sessions started since $Since (a
+# Get-SeamSessionMark; 0, the default, is the whole run).
+function Get-SeamRunCrashLogs([int]$Since = 0) {
+    $sessions = Get-SeamRunSessions
+    $found = [System.Collections.Generic.List[object]]::new()
+    for ($i = [Math]::Max(0, $Since); $i -lt $sessions.Count; $i++) {
+        foreach ($c in @(Get-SeamCrashLogs $sessions[$i])) { $found.Add($c) }
+    }
+    return , $found
+}
+
+# Whether any session started since $Since wrote a crash.log: the oracle
+# that replaced watching the shared per-user file, which every other Wintty
+# on the machine writes to as well.
+function Test-SeamCrashLogWritten([int]$Since = 0) {
+    return (Get-SeamRunCrashLogs -Since $Since).Count -gt 0
 }

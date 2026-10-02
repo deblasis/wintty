@@ -55,7 +55,7 @@ trap {
 $ErrorActionPreference = 'Stop'
 
 $Config = @"
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 "@
 
@@ -133,7 +133,7 @@ try {
         $ownLock = Enter-SeamLock -Owner 'surface-create-fault-check'
     }
 
-    Assert-NoWintty -Context 'the surface-create fault check'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'the surface-create fault check'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -PrivateStateBase
 
     # --- 1. ONE-SHOT FAULT, then RECOVERY --------------------------------

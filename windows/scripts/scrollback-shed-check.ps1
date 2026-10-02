@@ -50,7 +50,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 # 100MB of scrollback so the page count is unambiguous; compression is
 # on by default, it was simply compiled out on Windows before.
 $Config = @"
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 scrollback-limit = 100000000
 profile.pwsh.name = PowerShell
@@ -80,7 +80,7 @@ try {
     . C:\temp\seam-lock.ps1
     $ownLock = Enter-SeamLock -Owner 'scrollback-shed-check'
 
-    Assert-NoWintty -Context 'the scrollback shed check'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'the scrollback shed check'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
     if (-not (Wait-SeamReady $session.Proc)) { throw 'SEAM_REFUSED: app never announced the pipe' }
 

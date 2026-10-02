@@ -69,7 +69,7 @@ Add-Type -AssemblyName System.Windows.Forms
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 clipboard-paste-protection = false
 profile.pwsh.name = PowerShell
@@ -78,8 +78,7 @@ default-profile = pwsh
 '@
 
 $oscMarker = 'PASTE-OSC-FUZZ'
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -150,7 +149,7 @@ function Invoke-PastePayload($Session, [string]$Payload, [string]$What) {
 }
 
 try {
-    Assert-NoWintty -Context 'The paste-payloads harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The paste-payloads harness'
     $conptyPresent = Test-Path (Join-Path (Split-Path $ExePath) 'conpty.dll')
     Write-Host "conptyPresent=$conptyPresent"
     if (-not $conptyPresent) {
@@ -279,7 +278,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

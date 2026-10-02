@@ -44,13 +44,12 @@ Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 keybind = ctrl+t=new_tab
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -133,7 +132,7 @@ function Invoke-Chord($Session, [int]$Key, [switch]$Plain) {
 }
 
 try {
-    Assert-NoWintty -Context 'The inspector harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The inspector harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
     $proc = $session.Proc
     $pid32 = [uint32]$proc.Id
@@ -213,7 +212,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

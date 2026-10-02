@@ -9,16 +9,25 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $repo
+$releaseExe = Join-Path $repo 'windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/Wintty.exe'
+$pubExeDefault = Join-Path $repo 'windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/win-x64/publish/Wintty.exe'
+
 # Before the builds, not after: a ReleaseFast libghostty plus a Release shell
 # is minutes of work to then be told to close a window, and dotnet cannot
-# overwrite a locked Wintty.exe anyway.
-Assert-NoWintty -Context 'The release smoke'
+# overwrite a locked Wintty.exe anyway. Only the two exes this run builds
+# are locked by it; any other Wintty is the coexistence guard's call at
+# launch time.
+Assert-NoWinttyFrom -ExePath $releaseExe -Context 'The release smoke'
+if (-not $SkipAot) { Assert-NoWinttyFrom -ExePath $pubExeDefault -Context 'The release smoke' }
 
 # Both launch smokes run against a per-run random temp config root with the
 # WINTTY_TEST_CONFIG guard armed: a Release/AOT launch used to read and
 # write the user's real config. Entered before the builds so the finally
-# below always pairs it; nothing in the build reads XDG_CONFIG_HOME.
-$testConfig = Enter-WinttyTestConfig
+# below always pairs it; nothing in the build reads XDG_CONFIG_HOME. The
+# private state tree and the staged single-instance and quick-terminal
+# lines are what let a launch run beside another Wintty.
+$smokeConfig = Add-WinttyHarnessConfigDefaults "windows-single-instance = false`nwindow-save-state = never`n"
+$testConfig = Enter-WinttyTestConfig -ConfigText $smokeConfig -PrivateStateBase
 
 # One entry per launch, each with its own stamp. A single stamp taken at
 # script start would be minutes stale by the time anything launches, and
@@ -50,6 +59,7 @@ function Invoke-LaunchSmoke {
                    "extracts it from the Windows App SDK runtime package did not run.")
         }
     }
+    [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText $smokeConfig -Context "The $Label smoke")
     $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
     $insightsLoaded = $false
     $deadline = (Get-Date).AddSeconds(10)
@@ -90,7 +100,6 @@ try {
     just build-win-release
     if ($LASTEXITCODE -ne 0) { throw "build-win-release failed exit=$LASTEXITCODE" }
 
-    $releaseExe = Join-Path $repo 'windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/Wintty.exe'
     if (-not (Test-Path $releaseExe)) { throw "missing $releaseExe" }
     Write-Host "release exe ok: $releaseExe"
 
@@ -106,7 +115,7 @@ try {
             -c Release -r win-x64 /p:Platform=x64 `
             --no-restore 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0) { throw "NativeAOT publish failed exit=$LASTEXITCODE" }
-        $pubExe = Join-Path $repo 'windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/win-x64/publish/Wintty.exe'
+        $pubExe = $pubExeDefault
         if (-not (Test-Path $pubExe)) {
             # SDK may place publish under a slightly different RID folder.
             $pubExe = Get-ChildItem -Path (Join-Path $repo 'windows/Ghostty/bin') -Recurse -Filter Wintty.exe |

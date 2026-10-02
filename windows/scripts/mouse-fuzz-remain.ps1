@@ -37,12 +37,12 @@ Add-Type -AssemblyName UIAutomationTypes
 
 # The tab menu is the horizontal strip's; the vertical one builds its own.
 $Config = @'
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = false
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -154,7 +154,7 @@ function Dismiss-Menus($Session) {
 }
 
 try {
-    Assert-NoWintty -Context 'The remain harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The remain harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     $pid32 = [uint32]$session.Proc.Id
     $hwnd64 = [int64]$session.Hwnd64
@@ -277,7 +277,7 @@ finally {
 
 # A dead process or a grown crash.log is evidence about the build whatever
 # else happened, so it is filed even when the run could not finish.
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
 if (-not $harnessError) {
     if (-not $overview) { $script:Findings.Add('Show all tabs did not open the overview') }

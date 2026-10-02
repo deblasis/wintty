@@ -40,7 +40,7 @@ Add-Type -AssemblyName System.Drawing
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = false
 profile.pwsh.name = PowerShell
@@ -141,7 +141,7 @@ if (-not $env:WINTTY_SEAM_LOCK_HELD) {
 }
 
 try {
-    Assert-NoWintty -Context 'the idle badge check'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'the idle badge check'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     if (-not (Wait-SeamReady $session.Proc)) { throw 'SEAM_REFUSED: app never announced the pipe' }
 

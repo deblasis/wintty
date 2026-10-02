@@ -27,7 +27,7 @@ param([Parameter(Mandatory)][string]$ExePath)
 $ErrorActionPreference = 'Stop'
 
 $Config = @"
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 "@
 
@@ -64,7 +64,7 @@ try {
     . C:\temp\seam-lock.ps1
     $ownLock = Enter-SeamLock -Owner 'dormant-check'
 
-    Assert-NoWintty -Context 'the dormant check'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'the dormant check'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
     if (-not (Wait-SeamReady $session.Proc)) { throw 'SEAM_REFUSED: app never announced the pipe' }
 

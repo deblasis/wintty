@@ -35,7 +35,7 @@ Add-Type -AssemblyName System.Drawing
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 confirm-close-surface = false
 profile.pwsh.name = PowerShell
@@ -44,8 +44,7 @@ default-profile = pwsh
 '@
 
 $titles = @('undo-a', 'undo-b')
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -87,7 +86,7 @@ function Invoke-Chord($Session, [int]$Key) {
 }
 
 try {
-    Assert-NoWintty -Context 'The undo-osc harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The undo-osc harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
     $hwnd64 = [int64]$session.Hwnd64
     Write-Host "hwnd=$hwnd64 pid=$($session.Proc.Id)"
@@ -190,7 +189,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

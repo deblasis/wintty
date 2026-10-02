@@ -32,6 +32,11 @@ if (-not $PublishExe -or -not (Test-Path $PublishExe)) {
     throw 'NativeAOT publish Wintty.exe not found; run release-smoke.ps1 first'
 }
 
+# Before the publish, which cannot overwrite the exe while it runs. Only that
+# exe is refused here: whether each harness below may run beside any other
+# Wintty is its own coexistence guard's call.
+Assert-NoWinttyFrom -ExePath $PublishExe -Context 'The AOT fuzz'
+
 if (-not $SkipPublish) {
     Write-Host '== refresh NativeAOT publish =='
     & (Join-Path $PSScriptRoot 'release-smoke.ps1') -SkipLaunch | Write-Host
@@ -58,7 +63,6 @@ function Stop-Wintty {
 }
 
 $script:PublishExe = $PublishExe
-Assert-NoWintty -Context 'The AOT fuzz'
 $script:WinttyStamp = Get-WinttyLaunchStamp
 $idx = 0
 foreach ($s in $Scripts) {

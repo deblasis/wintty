@@ -57,7 +57,7 @@ $VK = @{
 }
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = true
 window-theme = wintty
@@ -67,7 +67,6 @@ keybind = space=new_tab
 '@
 
 $names = @('frame-1', 'frame-2', 'frame-3')
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 
 function Invoke-Focus($s, [string]$Target) {
@@ -113,12 +112,12 @@ function Invoke-Seed($s) {
 }
 
 function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
-    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $crashMark = Get-SeamSessionMark
     $s = $null
     $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = '' }
     Write-Host "=== scenario $Name ==="
     try {
-        Assert-NoWintty -Context "The frame keybind scenario '$Name'"
+        Assert-NoWinttyFrom -ExePath $ExePath -Context "The frame keybind scenario '$Name'"
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $Config
         & $Body $s
         if ($s.Proc.HasExited) {
@@ -134,7 +133,7 @@ function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
     } finally {
         if ($null -ne $s) { Stop-SeamSession $s }
     }
-    if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    if ((Test-SeamCrashLogWritten -Since $crashMark)) {
         $entry.ok = $false
         $entry.class = 'product'
         $entry.error = ($entry.error + ' crash.log grew during the scenario').Trim()

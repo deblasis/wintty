@@ -43,7 +43,7 @@ Add-Type -AssemblyName System.Drawing
 
 # One profile, so its name is the only title any pane can produce.
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 confirm-close-surface = false
 profile.pwsh.name = PowerShell
@@ -52,8 +52,7 @@ default-profile = pwsh
 '@
 
 $titles = @('remain-a', 'remain-b')
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -70,7 +69,7 @@ function Shot($Session, [string]$Name) {
 }
 
 try {
-    Assert-NoWintty -Context 'The remain-title harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The remain-title harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
 
     [void](Invoke-SeamCommand $session @{ op = 'seed-tabs'; count = 2; titles = $titles })
@@ -146,7 +145,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

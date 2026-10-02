@@ -33,6 +33,13 @@
     only a real click reproduces "the user clicked there". It is a single
     left click on this app's own window, after raising it.
 
+    Both kinds of synthesized input check that this app's window holds the
+    foreground right before they go out, and the leg fails as a harness
+    miss when it does not. That focus guard, not a refusal of every other
+    Wintty, is what keeps the input out of somebody else's window: any app
+    can take the foreground, and a Wintty from another exe shares nothing
+    else with the run.
+
     The oracle is twofold, both halves from the product: routedKeyDowns (a
     counter the window bumps on every KeyDown reaching its content, so the
     hop is visible even when nothing acts on the key) and the manager state
@@ -131,7 +138,21 @@ public static class LiveKey {
         PostMessage(h, WM_KEYUP,   (IntPtr)vk, up);
     }
 
+    // The window the run raised. SendInput goes to whatever is foreground,
+    // and beside somebody else's windows (another Wintty included) that may
+    // not be ours: a click or chord then lands in their window. So every
+    // synthesized gesture checks first and refuses rather than misdeliver.
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    public static IntPtr Target = IntPtr.Zero;
+    static void RequireForeground() {
+        if (Target == IntPtr.Zero || GetForegroundWindow() != Target) {
+            throw new InvalidOperationException(
+                "HARNESS: the window under test is not in the foreground, so synthesized input would land elsewhere");
+        }
+    }
+
     public static void Click(int x, int y) {
+        RequireForeground();
         SetCursorPos(x, y);
         var a = new INPUT[2];
         a[0].type = INPUT_MOUSE; a[0].u.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
@@ -147,6 +168,7 @@ public static class LiveKey {
     }
 
     public static void CtrlShift(ushort vk) {
+        RequireForeground();
         var a = new INPUT[6];
         a[0] = Key(VK_CONTROL, false); a[1] = Key(VK_SHIFT, false);
         a[2] = Key(vk, false);         a[3] = Key(vk, true);
@@ -164,7 +186,7 @@ $VK_COMMA = 0xBC
 # state shows plainly, so a posted message (which carries no modifiers) can
 # still exercise a real binding.
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = true
 window-theme = wintty
@@ -172,7 +194,6 @@ vertical-tabs-hover-expand = false
 keybind = f9=new_tab
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Legs = [System.Collections.Generic.List[object]]::new()
 
 function Assert-Hop($Before, $After, [string]$What) {
@@ -198,18 +219,19 @@ function Assert-Toggled($Before, $After, [string]$What) {
 }
 
 function Invoke-Leg([string]$Name, [scriptblock]$Body) {
-    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $crashMark = Get-SeamSessionMark
     $s = $null
     $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = '' }
     Write-Host "=== leg $Name ==="
     try {
-        Assert-NoWintty -Context "The live-key leg '$Name'"
+        Assert-NoWinttyFrom -ExePath $ExePath -Context "The live-key leg '$Name'"
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $Config
         [void](Invoke-SeamCommand $s @{ op = 'seed-tabs'; count = 2; titles = @('live-1', 'live-2') })
         $rect = [SeamWin]::RectOf($s.Hwnd64)
         if ($null -eq $rect) { throw 'HARVEST_MISS: the window has no usable rect' }
         $site = [LiveKey]::FindInputSite([IntPtr]$s.Hwnd64)
         if ($site -eq [IntPtr]::Zero) { throw 'HARVEST_MISS: no InputSiteWindowClass under the window' }
+        [LiveKey]::Target = [IntPtr]$s.Hwnd64
         [void][LiveKey]::SetForegroundWindow([IntPtr]$s.Hwnd64)
         Start-Sleep -Milliseconds 400
         & $Body $s $rect $site
@@ -226,7 +248,7 @@ function Invoke-Leg([string]$Name, [scriptblock]$Body) {
     } finally {
         if ($null -ne $s) { Stop-SeamSession $s }
     }
-    if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    if ((Test-SeamCrashLogWritten -Since $crashMark)) {
         $entry.ok = $false
         $entry.class = 'product'
         $entry.error = ($entry.error + ' crash.log grew during the leg').Trim()

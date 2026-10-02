@@ -31,7 +31,14 @@ function Enter-WinttyTestConfig {
         # Staged as wintty\config.wintty inside the root. Empty stages
         # nothing: the app creates its own config under the root, which is
         # the honest "unconfigured" baseline.
-        [string]$ConfigText = ''
+        [string]$ConfigText = '',
+        # Also give every launch a state tree of its own, WINTTY_STATE_BASE
+        # at <root>\state, so logs, crash.log, session and window state are
+        # the run's: what the coexistence guard asks for before a launch may
+        # run beside another Wintty. Opt-in here, where Start-SeamSession
+        # makes it the default, because run-win-launch.ps1 shares this
+        # helper for a developer's own isolated launch.
+        [switch]$PrivateStateBase
     )
     # Opportunistic, bounded: a crashed run leaks its root, and a leak left
     # forever is indistinguishable from a fixture. Anything older than a day
@@ -54,10 +61,33 @@ function Enter-WinttyTestConfig {
         Dir    = $dir
         OrigXdg        = if (Test-Path Env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $null }
         OrigTestConfig = if (Test-Path Env:WINTTY_TEST_CONFIG) { $env:WINTTY_TEST_CONFIG } else { $null }
+        OrigStateBase  = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
+        StateBase      = $null
     }
     $env:XDG_CONFIG_HOME = $dir
     $env:WINTTY_TEST_CONFIG = '1'
+    if ($PrivateStateBase) {
+        $session.StateBase = Join-Path $dir 'state'
+        New-Item -ItemType Directory -Force -Path $session.StateBase | Out-Null
+        $env:WINTTY_STATE_BASE = $session.StateBase
+    }
     return $session
+}
+
+# The crash.log files the launches wrote under the session's private state
+# tree, as { Path, Text }; empty without one. The tree is searched rather
+# than spelled, because the directory under it is named after the edition.
+# After Exit-WinttyTestConfig it answers with what Exit read before removing
+# the root.
+function Get-WinttyTestConfigCrashLogs {
+    param([Parameter(Mandatory)]$Session)
+    if ($Session.ContainsKey('CrashLogs')) { return @($Session.CrashLogs) }
+    if (-not $Session.StateBase) { return @() }
+    return @(Get-ChildItem -LiteralPath $Session.StateBase -Recurse -File -Filter crash.log -ErrorAction SilentlyContinue |
+        Where-Object { $_.Length -gt 0 } | ForEach-Object {
+            $text = try { [System.IO.File]::ReadAllText($_.FullName) } catch { '' }
+            [pscustomobject]@{ Path = $_.FullName; Text = $text }
+        })
 }
 
 function Exit-WinttyTestConfig {
@@ -66,5 +96,12 @@ function Exit-WinttyTestConfig {
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigTestConfig) { $env:WINTTY_TEST_CONFIG = $Session.OrigTestConfig }
     else { Remove-Item Env:WINTTY_TEST_CONFIG -ErrorAction SilentlyContinue }
+    if ($Session.StateBase) {
+        if ($null -ne $Session.OrigStateBase) { $env:WINTTY_STATE_BASE = $Session.OrigStateBase }
+        else { Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue }
+        # Read out before the root goes, so a crash check after Exit still
+        # has the evidence.
+        if (-not $Session.ContainsKey('CrashLogs')) { $Session.CrashLogs = @(Get-WinttyTestConfigCrashLogs $Session) }
+    }
     Remove-Item $Session.Dir -Recurse -Force -ErrorAction SilentlyContinue
 }

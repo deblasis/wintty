@@ -25,10 +25,16 @@
 #      before the guard and before anything launches, the daemon's dirs sit
 #      under the session's temp root, and every variable is restored;
 #   4. mutation rows: the layers again, against a copy of the library with
-#      one rule broken. Every row must turn something red.
+#      one rule broken. Every row must turn something red;
+#   5. the private state tree every session gets by default, the opt-out,
+#      and the crash oracle over that tree, driven through Start-SeamSession
+#      up to a stand-in for its guard;
+#   6. a scan of the harnesses: each gates on the exe under test rather than
+#      on any running Wintty, and none reads the per-user crash.log.
 #
 # Nothing here launches Wintty: the guard cases inject stand-in instances,
-# and the wiring cases read the library's text.
+# the wiring cases read the library's text, and the state-base cases stop
+# at a stand-in guard that refuses before anything starts.
 param(
     # The library under test. Overridable so the mutation rows (and a red
     # proof against an earlier copy) can point at a file that is not the
@@ -252,6 +258,156 @@ function Invoke-WiringCases([string]$LibPath) {
     return , $failed
 }
 
+# ---- layer 5: the private state tree and the crash oracle ---------------------
+
+# Start-SeamSession for real, up to its coexistence guard, which is replaced
+# by a stand-in that records the environment the launch would inherit (and,
+# for one case, writes the crash.log a dying app would) and then refuses.
+# A refusal launches nothing: Start-SeamSession tears the session down and
+# rethrows. The exe is an empty file in temp, so the teardown's sweep
+# matches no real process.
+function Invoke-StateBaseCases([string]$LibPath) {
+    return & {
+        param($processLib, $lib)
+        . $processLib
+        try { . $lib } catch {
+            $failed = [System.Collections.Generic.List[string]]::new()
+            $failed.Add("the library cannot be dot-sourced here: $($_.Exception.Message)")
+            return , $failed
+        }
+        $failed = [System.Collections.Generic.List[string]]::new()
+        foreach ($name in 'Get-SeamSessionMark', 'Test-SeamCrashLogWritten', 'Get-SeamRunCrashLogs') {
+            if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+                $failed.Add("$name does not exist: there is no crash oracle over the session's own state tree")
+                return , $failed
+            }
+        }
+        $temp = [System.IO.Path]::GetTempPath()
+        $root = Join-Path $temp ("wintty-seam-statecase-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        $exe = Join-Path $root 'Wintty.exe'
+        [System.IO.File]::WriteAllBytes($exe, [byte[]]@())
+        $cap = @{}
+        function Assert-WinttyCoexistence {
+            $cap.StateBase = $env:WINTTY_STATE_BASE
+            $cap.TempXdg = $env:XDG_CONFIG_HOME
+            if ($cap.Crash -and $env:WINTTY_STATE_BASE) {
+                $dir = Join-Path $env:WINTTY_STATE_BASE 'Wintty'
+                New-Item -ItemType Directory -Force -Path $dir | Out-Null
+                [System.IO.File]::WriteAllText((Join-Path $dir 'crash.log'), 'state-case crash')
+            }
+            throw 'state-case refusal'
+        }
+        function Start-Refused([hashtable]$Extra = @{}) {
+            $cap.Clear()
+            $cap.Crash = [bool]$Extra['Crash']
+            $Extra.Remove('Crash')
+            try { Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' @Extra | Out-Null }
+            catch { if ("$_" -notmatch 'state-case refusal') { $failed.Add("Start-SeamSession threw something else: $_") } }
+        }
+        $orig = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
+        try {
+            Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue
+
+            # The default: a fresh tree inside the session's own temp root.
+            Start-Refused
+            if (-not $cap.StateBase) {
+                $failed.Add('by default the launch inherits no WINTTY_STATE_BASE, so it shares the per-user state tree')
+            }
+            elseif (-not (Test-WinttyPathUnder $cap.StateBase $cap.TempXdg)) {
+                $failed.Add("by default WINTTY_STATE_BASE '$($cap.StateBase)' is not inside the session's temp root")
+            }
+            if (Test-Path Env:WINTTY_STATE_BASE) {
+                $failed.Add('Stop-SeamSession left WINTTY_STATE_BASE set although the caller had none')
+            }
+
+            # The opt-out leaves the per-user tree.
+            Start-Refused @{ SharedStateBase = $true }
+            if ($cap.StateBase) { $failed.Add("-SharedStateBase still set WINTTY_STATE_BASE '$($cap.StateBase)'") }
+
+            # A caller's tree under temp is adopted; -PrivateStateBase mints
+            # over it, as it did when it was the opt-in.
+            $callers = Join-Path $root 'callers-state'
+            $env:WINTTY_STATE_BASE = $callers
+            Start-Refused
+            if ($cap.StateBase -ne $callers) { $failed.Add("a caller's WINTTY_STATE_BASE under temp was not adopted (saw '$($cap.StateBase)')") }
+            Start-Refused @{ PrivateStateBase = $true }
+            if ($cap.StateBase -eq $callers -or -not $cap.StateBase) {
+                $failed.Add("-PrivateStateBase did not mint a fresh tree over the caller's (saw '$($cap.StateBase)')")
+            }
+            if ($env:WINTTY_STATE_BASE -ne $callers) { $failed.Add("Stop-SeamSession did not restore the caller's WINTTY_STATE_BASE") }
+            Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue
+
+            # The crash oracle: a crash written into the private tree during
+            # a start that never handed a session back still counts, after
+            # the tree itself is gone, and only for the sessions after the mark.
+            $mark = Get-SeamSessionMark
+            Start-Refused @{ Crash = $true }
+            if (Test-Path -LiteralPath $cap.TempXdg) { $failed.Add('the refused session left its temp root behind') }
+            if (-not (Test-SeamCrashLogWritten -Since $mark)) {
+                $failed.Add('a crash.log written in the private tree during a failed start is not reported after teardown')
+            }
+            elseif (@(Get-SeamRunCrashLogs -Since $mark)[0].Text -ne 'state-case crash') {
+                $failed.Add('the reported crash.log does not carry the text the app wrote')
+            }
+            $after = Get-SeamSessionMark
+            Start-Refused
+            if (Test-SeamCrashLogWritten -Since $after) {
+                $failed.Add('a session that wrote no crash.log is reported as crashing (the mark does not scope the oracle)')
+            }
+        }
+        finally {
+            if ($null -ne $orig) { $env:WINTTY_STATE_BASE = $orig } else { Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        return , $failed
+    } $script:processLib $LibPath
+}
+
+# ---- layer 6: the harness gates, scanned ---------------------------------------
+
+# Every harness here gates on the exe under test, never on any running
+# Wintty: the blanket check is left for a harness with a reason no isolation
+# removes, which has to say it. And no harness reads the per-user crash.log,
+# which every other Wintty on the machine writes too.
+function Invoke-GateScanCases {
+    $failed = [System.Collections.Generic.List[string]]::new()
+    # The one sanctioned blanket refusal, and why: WER LocalDumps is keyed on
+    # the image name, so it covers every running Wintty.
+    $blanketAllowed = @('seam-crash-dump.ps1')
+    foreach ($file in Get-ChildItem -LiteralPath $PSScriptRoot -Filter *.ps1 -File) {
+        if ($file.Name -like '*.Tests.ps1') { continue }
+        $tokens = $null; $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+        $calls = $ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.CommandAst] -and
+                $n.GetCommandName() -eq 'Assert-NoWintty' }, $true)
+        foreach ($call in $calls) {
+            if ($blanketAllowed -notcontains $file.Name) {
+                $failed.Add("$($file.Name):$($call.Extent.StartLineNumber) refuses any running Wintty; gate on the exe under test (Assert-NoWinttyFrom)")
+            }
+            elseif ($call.Extent.Text -notmatch '-Reason\b') {
+                $failed.Add("$($file.Name):$($call.Extent.StartLineNumber) refuses any running Wintty without saying why (-Reason)")
+            }
+        }
+        $code = ($tokens | Where-Object { $_.Kind -ne 'Comment' } | ForEach-Object { $_.Text }) -join ' '
+        if ($code -match "LOCALAPPDATA\s+'Wintty\\crash\.log'") {
+            $failed.Add("$($file.Name) reads the per-user crash.log; read the session's own (Test-SeamCrashLogWritten)")
+        }
+    }
+    $just = Join-Path $PSScriptRoot '..\..\justfile'
+    if (Test-Path -LiteralPath $just) {
+        $text = [System.IO.File]::ReadAllText($just)
+        if ($text -match '(?m)^\s+\$p = @\(Get-Process Wintty') {
+            $failed.Add('the justfile pre-build gate refuses any running Wintty')
+        }
+        if ($text -notmatch '(?m)^_no-wintty-from exe=.*:\r?\n\s+.*Assert-NoWinttyFrom') {
+            $failed.Add('the justfile pre-build gate does not gate on the exe the recipes build')
+        }
+    }
+    return , $failed
+}
+
 # ---- run the layers -----------------------------------------------------------
 
 $minterFailures = Invoke-MinterCases $SeamClientPath
@@ -265,6 +421,14 @@ Assert-True ($guardFailures.Count -eq 0) 'every guard case holds against the rea
 $wiringFailures = Invoke-WiringCases $SeamClientPath
 foreach ($f in $wiringFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
 Assert-True ($wiringFailures.Count -eq 0) 'every wiring case holds against the real library'
+
+$stateFailures = Invoke-StateBaseCases $SeamClientPath
+foreach ($f in $stateFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
+Assert-True ($stateFailures.Count -eq 0) 'every state-base and crash-oracle case holds against the real library'
+
+$gateFailures = Invoke-GateScanCases
+foreach ($f in $gateFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
+Assert-True ($gateFailures.Count -eq 0) 'every harness gates on the exe under test and reads its own crash.log'
 
 # ---- layer 4: mutation rows ---------------------------------------------------
 
@@ -291,6 +455,26 @@ try {
             Layer   = 'wiring'
         },
         @{
+            Name    = 'the private state tree is opt-in again'
+            Break   = { param($lines) @($lines | ForEach-Object { $_.Replace('elseif (-not $SharedStateBase) {', 'elseif ($PrivateStateBase) {') }) }
+            Layer   = 'state'
+        },
+        @{
+            Name    = 'the crash.log is not read out before teardown'
+            Break   = { param($lines) @($lines | ForEach-Object { $_.Replace('$Session.CrashLogs = @(Get-SeamCrashLogs $Session)', '$Session.CrashLogs = @()') }) }
+            Layer   = 'state'
+        },
+        @{
+            Name    = 'a session is not recorded for the run'
+            Break   = { param($lines) @($lines | Where-Object { $_ -notmatch '^\s*\(Get-SeamRunSessions\)\.Add\(\$session\)' }) }
+            Layer   = 'state'
+        },
+        @{
+            Name    = 'the mark does not scope the oracle'
+            Break   = { param($lines) @($lines | ForEach-Object { $_.Replace('for ($i = [Math]::Max(0, $Since);', 'for ($i = 0;') }) }
+            Layer   = 'state'
+        },
+        @{
             Name    = 'the daemon log file is not named'
             Break   = { param($lines) @($lines | Where-Object { $_ -notmatch '^\s*\$env:WINTTY_SESSIOND_LOG_FILE\s*=' }) }
             Layer   = 'wiring'
@@ -302,7 +486,8 @@ try {
         $wentRed =
             (Invoke-MinterCases $mutant).Count -gt 0 -or
             (Invoke-GuardCases $mutant).Count -gt 0 -or
-            (Invoke-WiringCases $mutant).Count -gt 0
+            (Invoke-WiringCases $mutant).Count -gt 0 -or
+            (Invoke-StateBaseCases $mutant).Count -gt 0
         Assert-True $wentRed ("mutation went red: $($row.Name)")
     }
 }

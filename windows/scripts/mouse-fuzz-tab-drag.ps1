@@ -312,7 +312,7 @@ function Get-ScenarioTrace([string]$Name) {
 # ---- scenario runner -------------------------------------------------------
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 windows-settings-ui = true
 vertical-tabs = true
@@ -324,7 +324,6 @@ vertical-tabs-hover-expand = false
 $names = @('fuzzdrag-1', 'fuzzdrag-2', 'fuzzdrag-3', 'fuzzdrag-4', 'fuzzdrag-5')
 $V = $true
 $H = $false
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 $script:MainHwnd64 = 0
 $script:OrderMotionOn = $null
@@ -347,12 +346,12 @@ function Invoke-Seed($s) {
 function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
     $tracePath = Join-Path $OutDir "trace-$Name.trace"
     Remove-Item $tracePath -ErrorAction SilentlyContinue
-    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $crashMark = Get-SeamSessionMark
     $s = $null
     $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = '' }
     Write-Host "=== scenario $Name ==="
     try {
-        Assert-NoWintty -Context "The tab drag scenario '$Name'"
+        Assert-NoWinttyFrom -ExePath $ExePath -Context "The tab drag scenario '$Name'"
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $Config -TraceFile $tracePath
         $script:MainHwnd64 = $s.Hwnd64
         & $Body $s
@@ -381,7 +380,7 @@ function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
     } finally {
         if ($null -ne $s) { Stop-SeamSession $s }
     }
-    if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    if ((Test-SeamCrashLogWritten -Since $crashMark)) {
         $entry.ok = $false
         $entry.class = 'product'
         $entry.error = ($entry.error + ' crash.log grew during the scenario').Trim()

@@ -788,9 +788,6 @@ function Get-DesktopPolarity {
 
 # ---- config staging -------------------------------------------------------
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-
 $originalNoColorSet = Test-Path Env:NO_COLOR
 $originalNoColor = if ($originalNoColorSet) { $env:NO_COLOR } else { $null }
 
@@ -804,8 +801,10 @@ Write-Host "desktop=$polarity highContrast=$highContrast (both read, neither set
 
 # A per-run randomly named root from the shared helper (the old name was
 # HHmmss-keyed, so two runs inside a minute shared a stage). Entered
-# without a paired Exit here: the finally below pairs it.
-$script:TestConfig = Enter-WinttyTestConfig
+# without a paired Exit here: the finally below pairs it. A private state
+# tree too, so crash.log and the rest of the app's state are this run's and
+# the launches may run beside another Wintty.
+$script:TestConfig = Enter-WinttyTestConfig -PrivateStateBase
 $tempXdg = $script:TestConfig.Dir
 New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
 $configPath = Join-Path $tempXdg 'wintty\config.wintty'
@@ -933,8 +932,10 @@ foreach ($must in @('wintty-light', 'wintty-dark')) {
 
 # ---- the gate -------------------------------------------------------------
 # Above the top-level try and above the staged config and every case launch:
-# refusing over an open Wintty is the most common way this run ends.
-Assert-NoWintty
+# refusing over an open Wintty from this exe is the most common way this run
+# ends. Any other Wintty is the coexistence guard's call, made before each
+# case launch.
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The frame-style fuzz'
 
 <#
     One case is one config plus what this harness expects of it.
@@ -983,7 +984,8 @@ function Write-CaseConfig($Case) {
                    'material layer estimates against; teach Get-BackdropGround about it before staging it')
         }
     }
-    [IO.File]::WriteAllText($configPath, ($body -join "`r`n") + "`r`n")
+    # The harness quick-terminal chord: the default hotkey is session-global.
+    [IO.File]::WriteAllText($configPath, (Add-WinttyHarnessConfigDefaults (($body -join "`r`n") + "`r`n")))
 }
 
 # How long a translucent frame is given to stop being a transition. The
@@ -1050,7 +1052,7 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
     # return value, and a throw never assigns it there, so an un-set flag means
     # nobody owns the window and this function is the last one that can take
     # it down. Otherwise one flaky splash drop strands a Wintty that blocks
-    # every later harness's Assert-NoWintty.
+    # every later harness's Assert-NoWinttyFrom.
     $handedOff = $false
     $stamp = Get-WinttyLaunchStamp
     try {
@@ -1060,6 +1062,7 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
         # what got measured that nothing in the report would explain. Cleared
         # for the children and restored in the outer finally, same as XDG.
         Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+        [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText ([IO.File]::ReadAllText($configPath)) -Context 'The frame-style fuzz')
         # --config-file hands libghostty the staged config by name (#787; long
         # `=` form only), on top of the XDG discovery below it. Started through
         # ProcessStartInfo rather than Start-Process because ArgumentList
@@ -1937,7 +1940,8 @@ finally {
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     Exit-WinttyTestConfig $script:TestConfig
 
-    $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+    # Exit read the private tree's crash.log before removing the root.
+    $crashGrew = @(Get-WinttyTestConfigCrashLogs $script:TestConfig).Count -gt 0
     if ($crashGrew) { $findings.Add('crash.log grew during the run') }
 
     # Written from the finally so the report survives a throw from anywhere

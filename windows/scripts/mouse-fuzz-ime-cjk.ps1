@@ -49,7 +49,7 @@ Add-Type -AssemblyName System.Drawing
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 clipboard-paste-protection = false
 profile.pwsh.name = PowerShell
@@ -60,8 +60,7 @@ default-profile = pwsh
 # The marker carries BMP CJK and a supplementary-plane emoji: the two
 # halves of the UTF-16 encoding path.
 $marker = 'CJK-FUZZ-日中文🚀'
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -80,7 +79,7 @@ function Shot($Session, [string]$Name) {
 }
 
 try {
-    Assert-NoWintty -Context 'The ime-cjk harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The ime-cjk harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     $hwnd64 = [int64]$session.Hwnd64
     Write-Host "hwnd=$hwnd64 pid=$($session.Proc.Id)"
@@ -182,7 +181,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

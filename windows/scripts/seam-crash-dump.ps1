@@ -22,7 +22,12 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 
-Assert-NoWintty -Context 'The seam crash-dump capture'
+# The one harness that still refuses beside ANY Wintty, and no isolation
+# changes that: WER LocalDumps is keyed on the image name, so while it is
+# armed below every Wintty.exe on the machine dumps into this run's folder,
+# and the newest dump there could be somebody else's crash.
+Assert-NoWintty -Context 'The seam crash-dump capture' -Reason ('it arms WER LocalDumps for the image name ' +
+    'Wintty.exe, which covers every running Wintty, so the dump it picks up could be theirs')
 $stamp = Get-WinttyLaunchStamp
 
 # ---- WER LocalDumps, snapshot / set / verify / restore -------------------

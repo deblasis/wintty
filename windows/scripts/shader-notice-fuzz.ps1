@@ -245,9 +245,11 @@ function Get-NoticeReason([string]$Text) {
 $shaderNoticeId = 'Notice_custom-shader'
 
 # ---- staging --------------------------------------------------------------
-# The gate goes above the staging, not below it. Refusing over an open Wintty
-# is the most common way this run ends, and everything under it writes to disk.
-Assert-NoWintty
+# The gate goes above the staging, not below it. Refusing over an open
+# Wintty from this exe is the most common way this run ends, and everything
+# under it writes to disk. Any other Wintty is the coexistence guard's call,
+# made before each launch below.
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The shader notice fuzz'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $validSrc = Join-Path $repoRoot 'src\renderer\shaders\test_passthrough.glsl'
@@ -256,7 +258,9 @@ foreach ($f in @($validSrc, $invalidSrc)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "HARVEST_MISS: fixture shader missing: $f" }
 }
 
-$script:TestConfig = Enter-WinttyTestConfig
+# A private state tree too, so crash.log and the rest of the app's state are
+# this run's and the launches may run beside another Wintty.
+$script:TestConfig = Enter-WinttyTestConfig -PrivateStateBase
 $stage = $script:TestConfig.Dir
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -LiteralPath $validSrc -Destination (Join-Path $stage 'valid.glsl')
@@ -300,9 +304,6 @@ $rest = @($cases | Where-Object { $_.id -ne $lead.id } | Sort-Object { $rng.Next
 $order = @($lead) + $rest
 Write-Host ("order=" + (($order | ForEach-Object { $_.id }) -join ','))
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-
 # XDG_CONFIG_HOME and WINTTY_TEST_CONFIG are owned by the test-config
 # session entered above; only NO_COLOR still needs save/restore here.
 
@@ -335,12 +336,15 @@ function Invoke-Case($Case, [int]$ExtraTabs, [string]$Exe) {
         'window-save-state = never'
     )
     if ($Case.line) { $body += $Case.line }
-    [IO.File]::WriteAllText($configPath, ($body -join "`r`n") + "`r`n")
+    # The harness quick-terminal chord: the default hotkey is session-global.
+    $text = Add-WinttyHarnessConfigDefaults (($body -join "`r`n") + "`r`n")
+    [IO.File]::WriteAllText($configPath, $text)
 
     $proc = $null
     $stamp = Get-WinttyLaunchStamp
     try {
         Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+        [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText $text -Context 'The shader notice fuzz')
         $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
         $pid32 = [uint32]$proc.Id
         [void](Wait-Ready $proc)
@@ -507,7 +511,8 @@ finally {
     # Written from the finally, so the report survives a throw from outside the
     # per-case catch above. The exit code is still decided below, on the paths
     # where there is one to decide.
-    $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+    # Exit read the private tree's crash.log before removing the root.
+    $crashGrew = @(Get-WinttyTestConfigCrashLogs $script:TestConfig).Count -gt 0
     if ($crashGrew) { $findings.Add('crash.log grew during the run') }
 
     [ordered]@{

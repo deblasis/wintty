@@ -7,43 +7,53 @@
     builds from other worktrees and the window the developer is working in,
     which is not a harness's call to make.
 
-    The replacement is two rules:
+    The replacement is three rules:
 
-      1. Refuse to start while any Wintty is running. Say which pids, so the
-         developer can close them. This is not about the single-instance
-         mutex - that is keyed on a hash of the exe path, so another
-         worktree's build would not collide. It is that state is shared:
-         crash.log lives under %LOCALAPPDATA% per user rather than per exe
-         path, and a harness that reads it cannot tell whose crash it saw.
+      1. Refuse to start while a Wintty is running from the exe under test
+         (Assert-NoWinttyFrom). Say which pids, so the developer can close
+         them. Such an instance is the one thing a run cannot work around:
+         dotnet build cannot overwrite its locked exe, and a sweep by exe
+         path cannot tell it from the run's own launches.
 
-      2. Clean up only what the run started, identified by start time and,
+      2. Run beside any other Wintty only through the coexistence guard
+         below (Test-WinttyCoexistence / Assert-WinttyCoexistence): a launch
+         may run beside instances somebody else started when, and only
+         when, it proves before launching that it can neither reach them
+         nor share any state with them. See the guard's own header for the
+         list. Start-SeamSession runs it before every launch.
+
+      3. Clean up only what the run started, identified by start time and,
          where the caller knows it, image path. Anything that cannot be
          positively identified is left alone: an unreadable path or start
          time is a reason to skip a process, never a reason to kill it.
 
-    Rule 1 has one sanctioned exception, the coexistence guard below
-    (Test-WinttyCoexistence / Assert-WinttyCoexistence): a launch may run
-    beside Wintty instances somebody else started when, and only when, it
-    proves before launching that it can neither reach them nor share any
-    state with them. See the guard's own header for the list.
+    Assert-NoWintty, the old blanket refusal, is left for a harness that
+    cannot share the machine with any Wintty however it isolates itself,
+    and it says why.
 
     Dot-source it:
 
         . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 #>
 
-# Throws if any Wintty is running. Call once, before the first launch.
+# Throws if any Wintty is running. Only for a harness with a reason no
+# isolation removes; -Reason says it, and the refusal quotes it. The default
+# is the reason that holds for a launch that does not isolate its state.
+# Call once, before the first launch.
 function Assert-NoWintty {
-    param([string]$Context = 'This harness')
+    param(
+        [string]$Context = 'This harness',
+        [string]$Reason = ('it shares crash.log and the state directory with them, so their ' +
+                           'crashes would be read as belonging to this run')
+    )
 
     $running = @(Get-Process Wintty -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return }
 
     $pids = ($running | ForEach-Object { $_.Id }) -join ', '
     throw ("close the running Wintty first (pid: $pids). " +
-           "$Context shares crash.log and the state directory with it, so " +
-           'its crashes would be read as belonging to this run, and this ' +
-           'harness will not kill instances it did not start.')
+           "$Context cannot run beside any Wintty: $Reason. " +
+           'It will not stop instances it did not start.')
 }
 
 # The timestamp to hand to Stop-WinttyStartedAfter. Take it immediately
@@ -498,19 +508,41 @@ function Assert-WinttyCoexistence {
         'Nothing was launched and nothing was stopped.')
 }
 
-# The narrow up-front check for a harness that isolates itself: refuse only
-# an instance of THIS build, which shares the exe with the run and which a
-# sweep by exe path could not tell apart from the run's own. Whether the
-# launch may go ahead beside anything else is Start-SeamSession's call,
-# through the guard above.
+# The up-front check every harness takes: refuse only an instance of THIS
+# build, which shares the exe with the run and which a sweep by exe path
+# could not tell apart from the run's own. Whether the launch may go ahead
+# beside anything else is the guard's call, made right before the launch
+# (Start-SeamSession does it).
 function Assert-NoWinttyFrom {
     param(
         [Parameter(Mandatory)][string]$ExePath,
         [string]$Context = 'This harness'
     )
+    # Resolved against the PowerShell location, as Start-SeamSession's
+    # Resolve-Path does: GetFullPath alone would use the process directory,
+    # which a harness that changed location no longer shares.
+    $ExePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExePath)
     $mine = Get-WinttyExeSpellings $ExePath
     $own = @(Get-WinttyInstances | Where-Object { $_.Path -and $mine -contains (ConvertTo-WinttyPathKey $_.Path) })
     if ($own.Count -eq 0) { return }
     throw ("close the Wintty running from $ExePath first (pid: $(($own | ForEach-Object { $_.Id }) -join ', ')). " +
         "$Context launches that exe itself, and only ever stops what it started.")
+}
+
+# For a harness whose verdict rests on wall-clock budgets or frame timing.
+# Another Wintty rendering beside the run competes for the same CPU, GPU and
+# compositor and can push a figure over its budget. That skews a number
+# without crossing any state, so it warns rather than refuses, and names
+# the pids so a missed budget can be read against them.
+function Write-WinttyTimingNeighbourWarning {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [string]$Context = 'This harness'
+    )
+    $ExePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExePath)
+    $mine = Get-WinttyExeSpellings $ExePath
+    $others =@(Get-WinttyInstances | Where-Object { -not ($_.Path -and $mine -contains (ConvertTo-WinttyPathKey $_.Path)) })
+    if ($others.Count -eq 0) { return }
+    Write-Warning ("$Context measures timings, and Wintty pid(s) $(($others | ForEach-Object { $_.Id }) -join ', ') " +
+        'run beside it: a budget missed here may be their load rather than the build''s. Close them for a clean figure.')
 }

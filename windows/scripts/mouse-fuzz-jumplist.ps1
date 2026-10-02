@@ -51,8 +51,7 @@ profile.pwsh.command = pwsh.exe
 default-profile = pwsh
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $session = $null
 $harnessError = ''
@@ -170,7 +169,10 @@ function Wait-WindowCount([uint32]$ProcId, [int]$AtLeast) {
 }
 
 try {
-    Assert-NoWintty -Context 'The jump-list harness'
+    # The scenario IS the single-instance handoff, so the config keeps it on,
+    # and Start-SeamSession's coexistence guard refuses that beside any other
+    # Wintty, saying so. Only this exe is refused up front.
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The jump-list harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     $pid32 = [uint32]$session.Proc.Id
     $hwnd64 = [int64]$session.Hwnd64
@@ -247,7 +249,7 @@ finally {
 # A grown crash.log is evidence about the build even when the run could not
 # finish, so it is recorded whatever else happened; the checks below judge
 # only a run that reached them.
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
 if (-not $harnessError) {
     if ($secondaryAlive) { $script:Findings.Add('a secondary stayed up instead of handing its arguments to the primary') }

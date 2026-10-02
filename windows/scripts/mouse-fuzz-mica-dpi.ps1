@@ -323,7 +323,7 @@ function Wait-SettingsWindow([uint32]$ProcId, [int64]$MainHwnd) {
 
 function New-ConfigText {
     return @"
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 windows-settings-ui = true
 background-style = solid
@@ -335,8 +335,7 @@ default-profile = pwsh
 "@
 }
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $session = $null
 $proc = $null
@@ -348,7 +347,7 @@ $styleAfterFrosted = $null
 $styleAfterCrystal = $null
 $paletteBackdropAfter = $null
 
-Assert-NoWintty -Context 'The mica-dpi harness'
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The mica-dpi harness'
 try {
     $session = Start-SeamSession -ExePath $ExePath -ConfigText (New-ConfigText)
     $proc = $session.Proc
@@ -422,7 +421,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 $result = @{
     crashGrew = $crashGrew
     dpi = $dpi
