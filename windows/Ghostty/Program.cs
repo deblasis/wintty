@@ -1466,26 +1466,13 @@ public static partial class Program
         }
     }
 
+    // Only a Wintty started from this same executable: a dev build and an
+    // installed app running side by side must not drive each other's window.
     private static string? FindThemePreviewPipe()
     {
-        // Look for a running Wintty process and try its pipe name.
-        // The pipe is named ghostty-theme-preview-{PID}.
-        // Match the assembly name from windows/Ghostty/Ghostty.csproj
-        // so this stays in sync if the binary is ever renamed again.
         try
         {
-            var procs = System.Diagnostics.Process.GetProcessesByName("Wintty");
-            foreach (var proc in procs)
-            {
-                using (proc)
-                {
-                    if (proc.Id == Environment.ProcessId) continue;
-                    var candidate = $"ghostty-theme-preview-{proc.Id}";
-                    // Check if the pipe exists by trying the well-known path.
-                    if (File.Exists($@"\\.\pipe\{candidate}"))
-                        return candidate;
-                }
-            }
+            return Ghostty.Core.Themes.ThemePreviewTarget.FindPipe();
         }
         catch { }
         return null;

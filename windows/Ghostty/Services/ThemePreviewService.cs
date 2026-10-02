@@ -45,7 +45,7 @@ internal sealed partial class ThemePreviewService : IDisposable
     public event EventHandler? ListThemesRequested;
 
     public static string PipeName { get; } =
-        $"ghostty-theme-preview-{Environment.ProcessId}";
+        Ghostty.Core.Themes.ThemePreviewTarget.PipeNameFor(Environment.ProcessId);
 
     /// <param name="session">
     /// The process's theme browse, shared with the inline picker. This
