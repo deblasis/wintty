@@ -348,6 +348,60 @@ public class TestSeamWiringTests
     }
 
     /// <summary>
+    /// The profiles op is the enumeration half of a per-profile sweep: a
+    /// harness asks what this machine's registry resolved and opens each
+    /// answer through open-profile, so "every profile" stops being a
+    /// hardcoded id list that quietly misses the shells a given box has.
+    /// What must stay true for that to be safe: the op only READS the
+    /// registry (an enumeration that opens anything would run a shell the
+    /// driver never named), it reads the registry's own visible set rather
+    /// than a reimplementation (a second discovery is a second thing to
+    /// drift), and none of it reaches a shipping build.
+    /// </summary>
+    /// <remarks>
+    /// Red-first record, taken 2026-10-02 with the op stashed out of the
+    /// dispatch (the test green against it in the same session):
+    /// <code>
+    /// Failed Ghostty.Tests.Wiring.TestSeamWiringTests.TheProfilesOpListsTheRegistry_WithoutOpeningAnything [587 ms]
+    ///   Error Message:
+    ///    expected one '"profiles"' case in ExecuteOnUiThreadAsync, found 0
+    ///   Stack Trace:
+    ///      at Ghostty.Tests.Wiring.ShellSource.Case(String method, String label) in ShellSource.cs:line 319
+    /// </code>
+    /// </remarks>
+    [Fact]
+    public void TheProfilesOpListsTheRegistry_WithoutOpeningAnything()
+    {
+        var source = ShellSource.Load("Testing.TestSeam.cs");
+        var profiles = source.Case("ExecuteOnUiThreadAsync", "\"profiles\"");
+        AssertInsideTheBuildGate(source.Root, profiles.Span, "the profiles op");
+
+        // The registry's own enumeration, not a reimplementation: the case
+        // reads App.ProfileRegistry and iterates its Profiles list.
+        Assert.Contains("App.ProfileRegistry", profiles.ToString(), StringComparison.Ordinal);
+        Assert.Contains(".Profiles", profiles.ToString(), StringComparison.Ordinal);
+
+        // Read-only. An op named "profiles" that opened a tab, routed an
+        // action or resolved-then-launched would run shells the driver
+        // never asked for; the sweep opens what it wants through
+        // open-profile, by id, where the driver can see it.
+        Assert.Empty(profiles.Calls("window.OpenProfile"));
+        Assert.Empty(profiles.Calls("window.TestSeamRouter.Invoke"));
+        Assert.DoesNotContain(
+            profiles.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax
+                .MemberAccessExpressionSyntax>(),
+            m => m.Name.Identifier.ValueText == "Resolve");
+
+        // And the answer is the enumeration itself: one array whose rows
+        // carry the id a driver can hand straight back to open-profile,
+        // and the command, so a driver can classify a profile (a cold
+        // WSL launch and a cmd launch are not the same wait).
+        Assert.Contains("\"profiles\"", profiles.ToString(), StringComparison.Ordinal);
+        Assert.Contains("\"id\"", profiles.ToString(), StringComparison.Ordinal);
+        Assert.Contains("\"command\"", profiles.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The request reader has a ceiling.
     ///
     /// StreamReader.ReadLineAsync does not: it buffers until a newline

@@ -1073,6 +1073,41 @@ internal static class TestSeam
                 });
             }
 
+            case "profiles":
+            {
+                // Read-only: the registry's resolved visible set, so a
+                // driver can sweep every profile this machine has rather
+                // than hardcode ids out of band. Discovery composes
+                // asynchronously at startup, so a driver that needs the
+                // full set polls until two answers agree. Hidden profiles
+                // are deliberately absent: they are not openable from the
+                // UI either.
+                var registry = App.ProfileRegistry;
+                if (registry is null) return Error(op, "no profile registry");
+                var profiles = registry.Profiles;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("count", profiles.Count);
+                    if (registry.DefaultProfileId is { } def) json.WriteString("default", def);
+                    else json.WriteNull("default");
+                    json.WriteStartArray("profiles");
+                    foreach (var p in profiles)
+                    {
+                        json.WriteStartObject();
+                        json.WriteString("id", p.Id);
+                        json.WriteString("name", p.Name);
+                        json.WriteString("command", p.Command);
+                        json.WriteBoolean("default", p.IsDefault);
+                        json.WriteEndObject();
+                    }
+                    json.WriteEndArray();
+                    json.WriteEndObject();
+                });
+            }
+
             case "open-profile":
             {
                 // A new tab on a named profile, through the window's own

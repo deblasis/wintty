@@ -84,3 +84,6 @@ tools/gallery/previews/
 # Harness camera build output (see scripts/README.md, "Filming motion").
 windows/scripts/lib/WindowCapture/bin/
 windows/scripts/lib/WindowCapture/obj/
+
+# The initial-size harness writes its sampling coverage ledger beside itself
+windows/scripts/seam-initial-size.coverage.json
