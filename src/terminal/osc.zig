@@ -19,6 +19,7 @@ const encoding = @import("osc/encoding.zig");
 
 pub const color = parsers.color;
 pub const semantic_prompt = parsers.semantic_prompt;
+pub const program_status = parsers.program_status;
 
 const log = std.log.scoped(.osc);
 
@@ -193,6 +194,11 @@ pub const Command = union(Key) {
     /// record is wider than this union's size budget.
     prompt_report: *const parsers.prompt_report.Report,
 
+    /// Program status protocol (OSC 7501). A program reports what it is
+    /// doing, such as working or waiting on the user, or asks whether the
+    /// terminal supports the protocol. See `ProgramStatus`.
+    program_status: ProgramStatus,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     /// iTerm2 OSC 1337 File= inline image payload + parsed geometry hints.
@@ -322,6 +328,8 @@ pub const Command = union(Key) {
 
     pub const KittyDesktopNotification = parsers.kitty_desktop_notification.OSC;
 
+    pub const ProgramStatus = parsers.program_status.Command;
+
     // NOTE: `GhosttyOscCommandType` in include/ghostty/vt/osc.h is this list,
     // and has to be updated in lockstep. Nothing checks that today:
     // lib.checkGhosttyHEnum only covers include/ghostty.h, so a value added
@@ -362,6 +370,7 @@ pub const Command = union(Key) {
             "iterm2_multipart_image",
             "iterm2_report_cell_size",
             "prompt_report",
+            "program_status",
         },
     );
 
@@ -529,6 +538,9 @@ pub const Parser = struct {
         @"55",
         @"66",
         @"72",
+        @"75",
+        @"750",
+        @"7501",
         @"77",
         @"99",
         @"104",
@@ -618,6 +630,7 @@ pub const Parser = struct {
             .iterm2_multipart_image,
             .iterm2_report_cell_size,
             .prompt_report,
+            .program_status,
             => {},
         }
 
@@ -1112,7 +1125,23 @@ pub const Parser = struct {
             .@"7" => switch (c) {
                 ';' => self.captureTrailing(.fixed),
                 '2' => self.state = .@"72",
+                '5' => self.state = .@"75",
                 '7' => self.state = .@"77",
+                else => self.state = .invalid,
+            },
+
+            .@"75" => switch (c) {
+                '0' => self.state = .@"750",
+                else => self.state = .invalid,
+            },
+
+            .@"750" => switch (c) {
+                '1' => self.state = .@"7501",
+                else => self.state = .invalid,
+            },
+
+            .@"7501" => switch (c) {
+                ';' => self.captureTrailing(.allocating),
                 else => self.state = .invalid,
             },
 
@@ -1297,7 +1326,14 @@ pub const Parser = struct {
 
             .@"77" => null,
 
+            // Prefixes of 7501, not OSCs themselves.
+            .@"75",
+            .@"750",
+            => null,
+
             .@"99" => parsers.kitty_desktop_notification.parse(self, terminator_ch),
+
+            .@"7501" => parsers.program_status.parse(self, terminator_ch),
 
             .@"133" => parsers.semantic_prompt.parse(self, terminator_ch),
 
