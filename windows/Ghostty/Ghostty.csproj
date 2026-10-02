@@ -213,11 +213,20 @@
       there is no MSIX install-time signature check — we rely on
       shipping the binaries unmodified.
 
-      Pinned to 1.25.260427001-preview: the transport spike on
-      2026-06-02 empirically confirmed this build's conpty.dll
-      forwards both Kitty graphics (APC) and Sixel (DCS), while the
-      in-box conhost strips them (proven by a bundled-vs-inbox
-      differential with an iTerm2 OSC-1337 control). See
+      Pinned to 1.25.260710002-preview (= Terminal Preview v1.25.1912.0,
+      2026-07-16): the transport spike on 2026-06-02 empirically
+      confirmed the bundled build's conpty.dll forwards both Kitty
+      graphics (APC) and Sixel (DCS), while the in-box conhost strips
+      them (proven by a bundled-vs-inbox differential with an iTerm2
+      OSC-1337 control). The bump from 1.25.260427001-preview re-ran
+      the matrix's three probes green on both pins, each as its own
+      launch with a beacon-gated, pixel-counted capture (probe-all.ps1
+      names the matrix; the probes, not that driver script, are what
+      ran), and the in-box control still strips. It gains two engine
+      crash fixes the old pin lacks, both merged upstream as
+      microsoft/terminal PRs (#20213 Sixel crafted-image AV, #20409
+      DRCS corruption); export table, conpty.h and props are identical
+      between the two. See
       docs/superpowers/plans/2026-06-02-conpty-bypass-stabilization.md.
       Bumping the pin REQUIRES re-running the protocol-smoke matrix in
       wintty-smoke (probe-all.ps1) to confirm passthrough survives.
@@ -229,7 +238,7 @@
       below.
     -->
     <PackageReference Include="Microsoft.Windows.Console.ConPTY"
-                      Version="1.25.260427001-preview"
+                      Version="1.25.260710002-preview"
                       GeneratePathProperty="true"
                       ExcludeAssets="all" />
 

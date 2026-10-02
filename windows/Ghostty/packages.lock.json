@@ -22,9 +22,9 @@
       },
       "Microsoft.Windows.Console.ConPTY": {
         "type": "Direct",
-        "requested": "[1.25.260427001-preview, )",
-        "resolved": "1.25.260427001-preview",
-        "contentHash": "v3K7WFlRDHUvHoVesg1kDT1yAVqk5dNUnGcA93EZBf1xnQ6TNXEfiMgE9oogxsohdI2T+I6S6Mk5JQ1bR9mSVg=="
+        "requested": "[1.25.260710002-preview, )",
+        "resolved": "1.25.260710002-preview",
+        "contentHash": "zmIfLf/DTVVGD4GGyPW+oXXIsFByCes4DCmpohq+yFXIAwtLkuN+gEf18fk83zeDpjn8tOYwBt56ojqwmtTQ7w=="
       },
       "Microsoft.Windows.CsWin32": {
         "type": "Direct",
@@ -365,9 +365,9 @@
       },
       "Microsoft.Windows.Console.ConPTY": {
         "type": "Direct",
-        "requested": "[1.25.260427001-preview, )",
-        "resolved": "1.25.260427001-preview",
-        "contentHash": "v3K7WFlRDHUvHoVesg1kDT1yAVqk5dNUnGcA93EZBf1xnQ6TNXEfiMgE9oogxsohdI2T+I6S6Mk5JQ1bR9mSVg=="
+        "requested": "[1.25.260710002-preview, )",
+        "resolved": "1.25.260710002-preview",
+        "contentHash": "zmIfLf/DTVVGD4GGyPW+oXXIsFByCes4DCmpohq+yFXIAwtLkuN+gEf18fk83zeDpjn8tOYwBt56ojqwmtTQ7w=="
       },
       "HarfBuzzSharp.NativeAssets.Win32": {
         "type": "Transitive",
