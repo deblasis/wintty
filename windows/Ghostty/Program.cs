@@ -1386,6 +1386,7 @@ public static partial class Program
     }
 
     private static System.IO.Pipes.NamedPipeClientStream? _themePipe;
+    private static bool _themeAckTimedOut;
     private static StreamWriter? _themePipeWriter;
 
     private static unsafe void RegisterThemeCallback()
@@ -1464,6 +1465,12 @@ public static partial class Program
     // means "no running instance", and the caller falls back to the TUI.
     private static System.IO.Pipes.NamedPipeClientStream? ConnectThemePreviewPipe()
     {
+        // A server that let the ack wait run out once (an older build at the
+        // same path, which never acknowledges) will not answer a second
+        // attempt from this process either; +list-themes would otherwise pay
+        // the wait again before its TUI.
+        if (_themeAckTimedOut) return null;
+
         System.IO.Pipes.NamedPipeClientStream? pipe = null;
         try
         {
@@ -1500,8 +1507,9 @@ public static partial class Program
             // refusal must reach here as a fallback to the TUI, not as a
             // write that looked delivered.
             if (!Ghostty.Core.Themes.ThemePreviewTarget.AwaitAck(
-                    pipe, Ghostty.Core.Themes.ThemePreviewTarget.AckTimeout))
+                    pipe, Ghostty.Core.Themes.ThemePreviewTarget.AckTimeout, out var timedOut))
             {
+                _themeAckTimedOut = timedOut;
                 pipe.Dispose();
                 return null;
             }

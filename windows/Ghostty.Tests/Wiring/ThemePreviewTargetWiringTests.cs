@@ -65,6 +65,22 @@ public class ThemePreviewTargetWiringTests
     }
 
     [Fact]
+    public void Server_ack_to_a_client_that_left_ends_the_session_without_a_fault()
+    {
+        // Every CLI run probes the pipe with File.Exists, which connects and
+        // closes. If that surfaced as a fault, the loop's fault bound would
+        // stand the preview server down for the rest of the session.
+        var session = ShellSource.Load("Services.ThemePreviewService.cs").Method("RunOneServerSession");
+        var ack = session.Call("server.WriteAsync");
+
+        var guard = ack.Ancestors().OfType<TryStatementSyntax>().First();
+        var onGone = Assert.Single(guard.Catches, c => c.Declaration?.Type.ToString() == "IOException");
+        Assert.Null(onGone.Filter);
+        var exit = Assert.Single(onGone.Block.Statements.OfType<ReturnStatementSyntax>());
+        Assert.Equal("PipeLoopOutcome.SessionEnded", exit.Expression?.ToString());
+    }
+
+    [Fact]
     public void Server_pipe_name_comes_from_the_shape_the_client_probes()
     {
         // A hand-spelled name on either side drifts silently: the client

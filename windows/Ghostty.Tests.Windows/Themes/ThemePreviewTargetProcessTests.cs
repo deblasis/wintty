@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using Ghostty.Core.Pipes;
 using Ghostty.Core.Themes;
 using Xunit;
 
@@ -129,11 +130,13 @@ public class ThemePreviewTargetProcessTests
 
     private static (NamedPipeServerStream Server, NamedPipeClientStream Client) ConnectedPair()
     {
-        // The shapes production uses: an InOut asynchronous server and an
-        // InOut asynchronous client.
+        // The shapes production uses: the server from the same factory and
+        // overload ThemePreviewService calls, and the client Program.cs
+        // opens. The factory's non-zero buffers are load-bearing: with the
+        // zero default a synchronous write of the ack waits for a reader,
+        // and these tests read only after writing.
         var name = "wintty-preview-ack-" + Guid.NewGuid().ToString("N");
-        var server = new NamedPipeServerStream(
-            name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var server = SecureNamedPipe.CreateServer(name, PipeDirection.InOut);
         var client = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
         var accept = server.WaitForConnectionAsync();
         client.Connect(5000);
@@ -162,7 +165,9 @@ public class ThemePreviewTargetProcessTests
         {
             server.Dispose();
 
-            Assert.False(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromSeconds(5)));
+            Assert.False(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromSeconds(5), out var timedOut));
+            // A refusal is not a timeout, so the CLI may still try again.
+            Assert.False(timedOut);
         }
     }
 
@@ -180,6 +185,22 @@ public class ThemePreviewTargetProcessTests
     }
 
     [Fact]
+    public void AnAckToAClientThatAlreadyLeftFailsAsIOException()
+    {
+        // The server maps exactly this exception to an ordinary end of
+        // session: the CLI's File.Exists probe connects and closes, and a
+        // fault there would count toward the loop's stand-down bound.
+        var (server, client) = ConnectedPair();
+        using (server)
+        {
+            client.Dispose();
+
+            Assert.ThrowsAny<IOException>(() =>
+                server.WriteAsync(new[] { ThemePreviewTarget.Ack }).AsTask().GetAwaiter().GetResult());
+        }
+    }
+
+    [Fact]
     public void ASilentServerTimesOutWithinTheBudget()
     {
         var (server, client) = ConnectedPair();
@@ -188,7 +209,8 @@ public class ThemePreviewTargetProcessTests
         {
             var clock = Stopwatch.StartNew();
 
-            Assert.False(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromMilliseconds(200)));
+            Assert.False(ThemePreviewTarget.AwaitAck(client, TimeSpan.FromMilliseconds(200), out var timedOut));
+            Assert.True(timedOut);
             // Generous ceiling: this pins that the wait is bounded, not its
             // precision on a loaded runner.
             Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10));

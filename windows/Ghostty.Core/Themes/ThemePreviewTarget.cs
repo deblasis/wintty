@@ -74,9 +74,18 @@ public static partial class ThemePreviewTarget
     /// <paramref name="budget"/>. The pipe must be opened asynchronous so
     /// an abandoned read does not hold the handle's close.
     /// </summary>
-    public static bool AwaitAck(Stream pipe, TimeSpan budget)
+    public static bool AwaitAck(Stream pipe, TimeSpan budget) =>
+        AwaitAck(pipe, budget, out _);
+
+    /// <summary>
+    /// As <see cref="AwaitAck(Stream, TimeSpan)"/>, and says whether the
+    /// answer was a timeout (a server that never acknowledges, such as an
+    /// older build at the same path) rather than a refusal.
+    /// </summary>
+    public static bool AwaitAck(Stream pipe, TimeSpan budget, out bool timedOut)
     {
         ArgumentNullException.ThrowIfNull(pipe);
+        timedOut = false;
         var buffer = new byte[1];
         var read = pipe.ReadAsync(buffer, 0, 1);
         try
@@ -86,6 +95,7 @@ public static partial class ThemePreviewTarget
                 // Observe the eventual fault of the read the caller's
                 // dispose is about to abandon.
                 _ = read.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                timedOut = true;
                 return false;
             }
             return read.Result == 1 && buffer[0] == Ack;
