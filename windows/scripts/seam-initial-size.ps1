@@ -500,7 +500,10 @@ function Wait-PaneOutput($s, [int]$Index, [int]$Leaf, [string]$Marker, [int]$Sec
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
         $screen = Read-Screen $s $Index $Leaf
-        if ($screen.text -like "*$Marker*") { return $screen }
+        # Whitespace stripped before the match: a marker wrapped across
+        # lines at the pane's own width (or one char per line in the
+        # degenerate case) is still the marker's bytes on screen.
+        if ((("$($screen.text)" -replace '\s', '') -like "*$Marker*")) { return $screen }
         if ((Count-OneCharRun $screen.text) -ge 8) { return $screen }
         Start-Sleep -Milliseconds 250
     }
@@ -550,6 +553,11 @@ function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
         $msg = "$($_.Exception.Message)"
         if ($_.InvocationInfo) { $msg += " [at $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.PositionMessage -replace '\s+', ' ')]" }
         $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+        if ($msg -like "*unknown op 'profiles'*") {
+            # The enumeration op is fork-side; a tree whose seam lacks it
+            # is a pin gap, not a product defect of that build.
+            $class = 'harness'
+        }
         Add-Result $Name $false $class $msg
     }
 }
@@ -1008,8 +1016,16 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
             }
 
             $stagedIds = @('idle', 'sizeprobe', 'splitprobe')
-            $listed = Invoke-SeamCommand $s @{ op = 'profiles' }
-            foreach ($p in @($listed.profiles)) {
+            $listed = $null
+            try {
+                $listed = Invoke-SeamCommand $s @{ op = 'profiles' }
+            }
+            catch {
+                # A seam without the profiles op is a pin that predates
+                # it: the sweep cannot run, loudly, as a harness gap.
+                Add-Result "profile-sweep$suffix" $false 'harness' "the seam does not serve the profiles op ($_); the fork pin predates the enumeration op, so the every-profile sweep cannot run"
+            }
+            foreach ($p in (@($listed) | Where-Object { $null -ne $_ } | ForEach-Object { @($_.profiles) } | ForEach-Object { $_ })) {
                 if ($stagedIds -contains $p.id) { continue } # covered above, every run
                 $profileId = "$($p.id)"
                 if ($profileId -like 'wsl-docker*') {
