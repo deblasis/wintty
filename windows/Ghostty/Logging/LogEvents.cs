@@ -47,6 +47,7 @@ internal static class LogEvents
         public const int InvalidThemeName  = 2205;
         public const int PipeServerUnavailable = 2206;
         public const int NoWindowForThemePicker = 2207;
+        public const int ForeignClientRejected = 2208;
     }
 
     // 2300-2399: WindowState + migration

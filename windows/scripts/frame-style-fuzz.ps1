@@ -1294,15 +1294,17 @@ $detectorProven = $false
 
 # ---- named pipe theme preview --------------------------------------------
 #
-# ThemePreviewService listens on ghostty-theme-preview-<pid> and accepts
-# PREVIEW:<name> and CONFIRM:<name>. It updates ShellThemeService, which is not
-# necessarily every surface this harness samples - so what it does is MEASURED
-# here and reported, and nothing is asserted on it. If it does not move the
-# sampled surfaces, a fresh launch per case is the only honest way to change
-# theme, which is what the cases above already do.
+# ThemePreviewService listens on ghostty-theme-preview-<pid>, but serves only a
+# client running the same Wintty.exe as the window: any other process,
+# including this pwsh, is dropped after it connects and before anything it
+# wrote is read. So this probe is expected to report moved=false (or a write
+# error) and says nothing about whether PREVIEW reaches the sampled surfaces;
+# the report marks that with expectedDrop. It is kept, unasserted, so a seed
+# draws the same random sequence as before. A fresh launch per case is how
+# the cases above change theme.
 function Test-ThemePipe([int]$ProcId, [string]$ThemeName, $Before, $Surfaces, [int64]$Hwnd64) {
     $result = [ordered]@{
-        attempted = $true; theme = $ThemeName; connected = $false
+        attempted = $true; expectedDrop = $true; theme = $ThemeName; connected = $false
         wrote = $false; error = $null; moved = $null; deltas = [ordered]@{}
     }
     $pipe = $null
@@ -1543,14 +1545,15 @@ try {
         Write-Host ("    ink textGap=$($textStat.LumGap) bareGap=$($bareStat.LumGap) bareContrast=$($bareStat.Contrast)")
 
         # The pipe probe rides on the control window, which is already up and
-        # already measured. Nothing is asserted on the result.
+        # already measured. Nothing is asserted on the result, and the server
+        # is expected to drop this non-Wintty client (see Test-ThemePipe).
         if ($catalogue.Count -gt 0) {
             $other = @($catalogue | Where-Object { $_ -ne $spanTheme })
             if ($other.Count -gt 0) {
                 $pick = $other[$rng.Next(0, $other.Count)]
                 Write-Host "    pipe: PREVIEW:$pick"
                 $pipeReport = Test-ThemePipe $control.Proc.Id $pick $control.Measured $control.Surfaces $control.Hwnd
-                Write-Host ("    pipe connected=$($pipeReport.connected) moved=$($pipeReport.moved) " +
+                Write-Host ("    pipe (expected drop: not a Wintty client) connected=$($pipeReport.connected) moved=$($pipeReport.moved) " +
                             "deltas=" + (($pipeReport.deltas.Keys | ForEach-Object { "$_=$($pipeReport.deltas[$_])" }) -join ','))
             }
         }

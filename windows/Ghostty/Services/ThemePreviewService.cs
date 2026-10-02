@@ -45,7 +45,7 @@ internal sealed partial class ThemePreviewService : IDisposable
     public event EventHandler? ListThemesRequested;
 
     public static string PipeName { get; } =
-        $"ghostty-theme-preview-{Environment.ProcessId}";
+        Ghostty.Core.Themes.ThemePreviewTarget.PipeNameFor(Environment.ProcessId);
 
     /// <param name="session">
     /// The process's theme browse, shared with the inline picker. This
@@ -176,7 +176,8 @@ internal sealed partial class ThemePreviewService : IDisposable
             // SecureNamedPipe adds CurrentUserOnly for the same reason the
             // single-instance server does: the name is deterministic, and
             // the default pipe DACL is broader than this IPC needs.
-            server = SecureNamedPipe.CreateServer(PipeName);
+            // InOut for the one acknowledgement byte to an accepted client.
+            server = SecureNamedPipe.CreateServer(PipeName, PipeDirection.InOut);
         }
         catch (IOException ex)
         {
@@ -206,6 +207,36 @@ internal sealed partial class ThemePreviewService : IDisposable
                 _logger.LogPipeWaiting(PipeName);
                 await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
                 _logger.LogClientConnected();
+
+                // Only a CLI running from this same image path may drive the
+                // window. The client side checks the server too, but a CLI
+                // from a build without that check (any older install) picks
+                // the first pipe it finds, so the server has to refuse it.
+                // The console shim is never the peer: it spawns Wintty.exe,
+                // and that child is what connects. Nothing was read, so
+                // there is nothing to revert.
+                var clientPid = Ghostty.Core.Themes.ThemePreviewTarget.ClientPid(server.SafePipeHandle);
+                if (clientPid is not int peer
+                    || !Ghostty.Core.Themes.ThemePreviewTarget.RunsOwnExecutable(peer))
+                {
+                    _logger.LogForeignClientRejected(clientPid ?? 0);
+                    return PipeLoopOutcome.SessionEnded;
+                }
+
+                // The client sends nothing until it reads this, so it is still
+                // alive for the identity read above and learns it was
+                // accepted. A client already gone (the CLI's File.Exists
+                // probe opens and closes the pipe) is an ordinary end of
+                // session, not a fault.
+                try
+                {
+                    await server.WriteAsync(
+                        new[] { Ghostty.Core.Themes.ThemePreviewTarget.Ack }, ct).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    return PipeLoopOutcome.SessionEnded;
+                }
 
                 // No snapshot on connect. The session takes one before the
                 // first preview and not before, so a client that connects and
@@ -408,6 +439,12 @@ internal static partial class ThemePreviewServiceLogExtensions
                    Message = "[theme-preview] client connected")]
     internal static partial void LogClientConnected(
         this ILogger<ThemePreviewService> logger);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.ForeignClientRejected,
+                   Level = LogLevel.Information,
+                   Message = "[theme-preview] dropped client pid {ClientPid}: not this image path")]
+    internal static partial void LogForeignClientRejected(
+        this ILogger<ThemePreviewService> logger, int clientPid);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.PreviewCancelled,
                    Level = LogLevel.Debug,
