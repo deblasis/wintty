@@ -139,10 +139,14 @@ if ($mine.Count -gt 0) {
     exit 1
 }
 
-$stateBase = Join-Path $env:TEMP "wintty-theme-state-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force -Path $stateBase | Out-Null
+# One owned tree for every launch of the run: Start-SeamSession adopts it
+# only because the token below matches its marker.
+$ownedState = New-WinttyOwnedStateBase -Prefix 'wintty-theme-state-'
+$stateBase = $ownedState.Path
 $origStateBase = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
+$origStateToken = if (Test-Path Env:WINTTY_STATE_BASE_TOKEN) { $env:WINTTY_STATE_BASE_TOKEN } else { $null }
 $env:WINTTY_STATE_BASE = $stateBase
+$env:WINTTY_STATE_BASE_TOKEN = $ownedState.Token
 
 # The themes this run browses are picked from the shipped set further down,
 # once the helpers they need are defined (see "The theme set").
@@ -1089,6 +1093,8 @@ try {
     if ($crashes.Count -gt $crashBefore.Count) { Check 'no-crash-log' $false ($crashes.FullName -join ', ') }
     if ($null -ne $origStateBase) { $env:WINTTY_STATE_BASE = $origStateBase }
     else { Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue }
+    if ($null -ne $origStateToken) { $env:WINTTY_STATE_BASE_TOKEN = $origStateToken }
+    else { Remove-Item Env:WINTTY_STATE_BASE_TOKEN -ErrorAction SilentlyContinue }
     Remove-Item $stateBase -Recurse -Force -ErrorAction SilentlyContinue
 }
 

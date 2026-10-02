@@ -38,7 +38,11 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [Parameter(Mandatory)][string]$OutDir
+    [Parameter(Mandatory)][string]$OutDir,
+    # The build's AUMID, for the coexistence guard, when it cannot read it
+    # itself (a NativeAOT publish has no Ghostty.Core.dll; aot-fuzz.ps1
+    # passes the sibling Release build's).
+    [string]$AumId = ''
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -80,7 +84,7 @@ function Shot($Session, [string]$Name) {
 
 try {
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The ime-cjk harness'
-    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    $session = Start-SeamSession -ExePath $ExePath -AumId $AumId -ConfigText $Config
     $hwnd64 = [int64]$session.Hwnd64
     Write-Host "hwnd=$hwnd64 pid=$($session.Proc.Id)"
     Shot $session '00-launch'

@@ -46,6 +46,9 @@ param(
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/test-config.ps1')
 $ErrorActionPreference = 'Stop'
+# Resolved once against the PowerShell location, so the same-exe gate, the
+# guard and the launches all name one file.
+$ExePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExePath)
 
 # Same convention as the other harnesses here: a PRODUCT_FAIL throw is a
 # defect in the build and has to leave with 2, and anything else is a run that

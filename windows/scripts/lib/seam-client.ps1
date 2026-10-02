@@ -223,17 +223,27 @@ function Start-SeamSession(
     # at a fresh directory inside this session's temp root, so logs,
     # crash.log, session and window state are the run's, and
     # $session.StateBase names it for the crash oracle (Test-SeamCrashLogWritten
-    # below). A WINTTY_STATE_BASE the caller already set under the temp
-    # directory is adopted as it is (and left for the caller to remove).
-    # Either one is what the coexistence guard asks for before it lets a
-    # launch run beside somebody else's Wintty.
+    # below). libghostty's native state follows it: XDG_STATE_HOME and
+    # XDG_CACHE_HOME point inside the same tree. A tree the caller set is
+    # adopted (and left for the caller to remove) only when it is an owned
+    # one, its marker matching WINTTY_STATE_BASE_TOKEN
+    # (New-WinttyOwnedStateBase); any other inherited WINTTY_STATE_BASE is
+    # ignored and a fresh tree minted. Either one is what the coexistence
+    # guard asks for before it lets a launch run beside somebody else's
+    # Wintty.
     #
-    # -SharedStateBase opts out and leaves the per-user tree, which the guard
-    # then refuses beside any other Wintty. -PrivateStateBase was the opt-in
-    # before the private tree became the default; it still binds, and still
-    # mints a fresh tree even over one the caller set.
+    # -SharedStateBase opts out: the launch gets the real per-user tree,
+    # with WINTTY_STATE_BASE, XDG_STATE_HOME and XDG_CACHE_HOME removed from
+    # its environment whatever the caller had, and the guard then refuses
+    # it beside any other Wintty. -PrivateStateBase was the opt-in before
+    # the private tree became the default; it still binds, and mints a fresh
+    # tree even over an owned one the caller set.
     [switch]$SharedStateBase,
     [switch]$PrivateStateBase,
+    # The AUMID the build runs as, for the guard. Only needed where the
+    # guard cannot read it: a NativeAOT publish has no Ghostty.Core.dll
+    # beside the exe, so its caller reads it off the sibling Release build.
+    [string]$AumId = '',
     # Files to stage under the config root before launch, keyed by a path
     # relative to it ('wintty/themes/Name' = text). Written as exact UTF-8
     # bytes with nothing appended, after the config text, so a key naming
@@ -283,6 +293,9 @@ function Start-SeamSession(
         OrigTrace = if (Test-Path Env:WINTTY_TABDRAG_TRACE) { $env:WINTTY_TABDRAG_TRACE } else { $null }
         OrigNoColor = if (Test-Path Env:NO_COLOR) { $env:NO_COLOR } else { $null }
         OrigStateBase = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
+        OrigStateToken = if (Test-Path Env:WINTTY_STATE_BASE_TOKEN) { $env:WINTTY_STATE_BASE_TOKEN } else { $null }
+        OrigXdgState = if (Test-Path Env:XDG_STATE_HOME) { $env:XDG_STATE_HOME } else { $null }
+        OrigXdgCache = if (Test-Path Env:XDG_CACHE_HOME) { $env:XDG_CACHE_HOME } else { $null }
         OrigSessionPipe = if (Test-Path Env:WINTTY_SESSIOND_PIPE) { $env:WINTTY_SESSIOND_PIPE } else { $null }
         OrigSessiondDataDir = if (Test-Path Env:WINTTY_SESSIOND_DATA_DIR) { $env:WINTTY_SESSIOND_DATA_DIR } else { $null }
         OrigSessiondLogFile = if (Test-Path Env:WINTTY_SESSIOND_LOG_FILE) { $env:WINTTY_SESSIOND_LOG_FILE } else { $null }
@@ -297,16 +310,31 @@ function Start-SeamSession(
     # Recorded before anything can throw, so a crash during startup still
     # reaches the run's crash oracle through Stop-SeamSession.
     (Get-SeamRunSessions).Add($session)
-    $adoptable = $session.OrigStateBase -and
-        (Test-WinttyPathUnder $session.OrigStateBase ([System.IO.Path]::GetTempPath()))
-    if ($adoptable -and -not $PrivateStateBase) {
-        $session.StateBase = $session.OrigStateBase
+    $owned = Test-WinttyOwnedStateBase $session.OrigStateBase $session.OrigStateToken
+    if ($SharedStateBase) {
+        Remove-Item Env:WINTTY_STATE_BASE, Env:XDG_STATE_HOME, Env:XDG_CACHE_HOME -ErrorAction SilentlyContinue
     }
-    elseif (-not $SharedStateBase) {
-        $session.StateBase = Join-Path $tempXdg 'state'
-        New-Item -ItemType Directory -Force -Path $session.StateBase | Out-Null
+    else {
+        if ($owned -and -not $PrivateStateBase) {
+            $session.StateBase = $session.OrigStateBase
+        }
+        else {
+            if ($session.OrigStateBase -and -not $PrivateStateBase) {
+                Write-Host ("Start-SeamSession: ignoring the inherited WINTTY_STATE_BASE '{0}': it is not a tree this run owns" -f
+                    $session.OrigStateBase)
+            }
+            $session.StateBase = Join-Path $tempXdg 'state'
+            New-Item -ItemType Directory -Force -Path $session.StateBase | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $session.StateBase (Get-WinttyStateOwnerMarkerName)), (New-SeamToken))
+        }
         $env:WINTTY_STATE_BASE = $session.StateBase
+        $env:XDG_STATE_HOME = Join-Path $session.StateBase 'xdg-state'
+        $env:XDG_CACHE_HOME = Join-Path $session.StateBase 'xdg-cache'
     }
+    # The ownership token never reaches the app: its panes inherit its
+    # environment, and a harness started from one must not prove ownership
+    # of this session's tree.
+    Remove-Item Env:WINTTY_STATE_BASE_TOKEN -ErrorAction SilentlyContinue
     $env:XDG_CONFIG_HOME = $tempXdg
     # The guard that makes a lost XDG root loud: armed, an app resolving a
     # non-temp config refuses to start (exit code 4, both paths on stderr)
@@ -355,7 +383,7 @@ function Start-SeamSession(
     # running this always passes. A refusal starts and stops nothing, and
     # puts the environment back as the caller had it.
     try {
-        $coexist = Assert-WinttyCoexistence -ExePath $session.ExePath -ConfigText $ConfigText -Context 'Start-SeamSession'
+        $coexist = Assert-WinttyCoexistence -ExePath $session.ExePath -ConfigText $ConfigText -AumId $AumId -Context 'Start-SeamSession'
         if (@($coexist.Running).Count -gt 0) {
             Write-Host ("Start-SeamSession: launching beside Wintty pid(s) {0}; isolation and a different edition proven" -f
                 ((@($coexist.Running) | ForEach-Object { $_.Id }) -join ', '))
@@ -482,6 +510,12 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigStateBase) { $env:WINTTY_STATE_BASE = $Session.OrigStateBase }
     else { Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigStateToken) { $env:WINTTY_STATE_BASE_TOKEN = $Session.OrigStateToken }
+    else { Remove-Item Env:WINTTY_STATE_BASE_TOKEN -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigXdgState) { $env:XDG_STATE_HOME = $Session.OrigXdgState }
+    else { Remove-Item Env:XDG_STATE_HOME -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigXdgCache) { $env:XDG_CACHE_HOME = $Session.OrigXdgCache }
+    else { Remove-Item Env:XDG_CACHE_HOME -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigSessionPipe) { $env:WINTTY_SESSIOND_PIPE = $Session.OrigSessionPipe }
     else { Remove-Item Env:WINTTY_SESSIOND_PIPE -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigSessiondDataDir) { $env:WINTTY_SESSIOND_DATA_DIR = $Session.OrigSessiondDataDir }
@@ -532,7 +566,17 @@ function Get-SeamCrashLogs([Parameter(Mandatory)]$Session) {
         @(Get-ChildItem -LiteralPath $Session.StateBase -Recurse -File -Filter crash.log -ErrorAction SilentlyContinue)
     }
     else {
-        @(Get-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Wintty\crash.log') -ErrorAction SilentlyContinue)
+        # The per-user tree is named after the edition, read off the build.
+        # A name that cannot be read makes the oracle report rather than go
+        # quiet: a crash it could not look for is not a clean run.
+        $dirName = Get-WinttyBuildStateDirName $Session.ExePath
+        if (-not $dirName) {
+            return @([pscustomobject]@{
+                Path = '(unknown)'
+                Text = "HARNESS: the state dir name of $($Session.ExePath) cannot be read (no Ghostty.Core.dll beside it), so its per-user crash.log could not be checked"
+            })
+        }
+        @(Get-Item -LiteralPath (Join-Path (Join-Path $env:LOCALAPPDATA $dirName) 'crash.log') -ErrorAction SilentlyContinue)
     }
     return @($files | Where-Object { $_.Length -gt 0 -and $_.LastWriteTimeUtc -ge $since } | ForEach-Object {
         $text = try { [System.IO.File]::ReadAllText($_.FullName) } catch { '' }

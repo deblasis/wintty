@@ -20,13 +20,46 @@ $pubExeDefault = Join-Path $repo 'windows/Ghostty/bin/x64/Release/net10.0-window
 Assert-NoWinttyFrom -ExePath $releaseExe -Context 'The release smoke'
 if (-not $SkipAot) { Assert-NoWinttyFrom -ExePath $pubExeDefault -Context 'The release smoke' }
 
+# Single-instance stays at the shipped default (on) whenever it can, so the
+# trimmed and AOT builds still run the election and the forwarding server.
+# Only beside another Wintty is it turned off, because the guard refuses a
+# launch that could forward to or take forwards from somebody else's
+# instance. The mode is printed so a run says which path it covered.
+$others = @(Get-WinttyOtherInstances -ExePath $releaseExe -Instances (Get-WinttyInstances))
+$singleInstance = if ($others.Count -gt 0) { 'false' } else { 'true' }
+Write-Host ("single-instance: {0} ({1})" -f $singleInstance,
+    $(if ($others.Count -gt 0) { "Wintty pid(s) $(($others | ForEach-Object { $_.Id }) -join ', ') running beside the smoke" } else { 'no other Wintty running, the shipped default' }))
+
 # Both launch smokes run against a per-run random temp config root with the
 # WINTTY_TEST_CONFIG guard armed: a Release/AOT launch used to read and
 # write the user's real config. Entered before the builds so the finally
 # below always pairs it; nothing in the build reads XDG_CONFIG_HOME. The
-# private state tree and the staged single-instance and quick-terminal
-# lines are what let a launch run beside another Wintty.
-$smokeConfig = Add-WinttyHarnessConfigDefaults "windows-single-instance = false`nwindow-save-state = never`n"
+# private state tree and the staged quick-terminal line are what let a
+# launch run beside another Wintty.
+$smokeConfig = Add-WinttyHarnessConfigDefaults "windows-single-instance = $singleInstance`nwindow-save-state = never`n"
+
+# The AUMID the launches run as, for the guard: a NativeAOT publish has no
+# Ghostty.Core.dll beside it to read one from, and the constant is the
+# Release build's. Read off an earlier Release build when there is one, so
+# the verdict can be taken now, before minutes of building; read again
+# after the build below either way.
+$script:SmokeAumId = if (Test-Path -LiteralPath $releaseExe) { Get-WinttyBuildAumid $releaseExe } else { $null }
+if ($others.Count -gt 0) {
+    if ($script:SmokeAumId) {
+        $legs = @($releaseExe) + $(if (-not $SkipAot) { @($pubExeDefault) } else { @() })
+        foreach ($leg in $legs) {
+            $v = Test-WinttyCoexistencePreflight -ExePath $leg -AumId $script:SmokeAumId -ConfigText $smokeConfig
+            if (-not $v.Allowed) {
+                throw ("The release smoke will not launch $leg beside the running Wintty:`n  - " +
+                    ($v.Reasons -join "`n  - ") + "`nNothing was built and nothing was launched.")
+            }
+        }
+    }
+    else {
+        Write-Host 'coexistence: no earlier Release build to read the AUMID from, so the guard decides after the build'
+    }
+}
+
 $testConfig = Enter-WinttyTestConfig -ConfigText $smokeConfig -PrivateStateBase
 
 # One entry per launch, each with its own stamp. A single stamp taken at
@@ -59,7 +92,7 @@ function Invoke-LaunchSmoke {
                    "extracts it from the Windows App SDK runtime package did not run.")
         }
     }
-    [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText $smokeConfig -Context "The $Label smoke")
+    [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText $smokeConfig -AumId "$script:SmokeAumId" -Context "The $Label smoke")
     $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
     $insightsLoaded = $false
     $deadline = (Get-Date).AddSeconds(10)
@@ -101,6 +134,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "build-win-release failed exit=$LASTEXITCODE" }
 
     if (-not (Test-Path $releaseExe)) { throw "missing $releaseExe" }
+    $script:SmokeAumId = Get-WinttyBuildAumid $releaseExe
     Write-Host "release exe ok: $releaseExe"
 
     if (-not $SkipLaunch) {

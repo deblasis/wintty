@@ -34,8 +34,9 @@
     left click on this app's own window, after raising it.
 
     Both kinds of synthesized input check that this app's window holds the
-    foreground right before they go out, and the leg fails as a harness
-    miss when it does not. That focus guard, not a refusal of every other
+    foreground right before they go out, and a click also checks that the
+    window under its point belongs to this app's window; the leg fails as a
+    harness miss when either does not hold. That guard, not a refusal of every other
     Wintty, is what keeps the input out of somebody else's window: any app
     can take the foreground, and a Wintty from another exe shares nothing
     else with the run.
@@ -151,8 +152,26 @@ public static class LiveKey {
         }
     }
 
+    // A click goes to the window under the point, not to the foreground
+    // one: a topmost window over the point, or a point that falls outside a
+    // short or clipped window, sends it to somebody else while ours still
+    // holds the foreground. So the point is hit-tested against our root.
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    const uint GA_ROOT = 2;
+    static void RequireHit(int x, int y) {
+        var p = new POINT { X = x, Y = y };
+        var hit = WindowFromPoint(p);
+        if (hit == IntPtr.Zero || GetAncestor(hit, GA_ROOT) != Target) {
+            throw new InvalidOperationException(
+                "HARNESS: the click point is not over the window under test, so the click would land elsewhere");
+        }
+    }
+
     public static void Click(int x, int y) {
         RequireForeground();
+        RequireHit(x, y);
         SetCursorPos(x, y);
         var a = new INPUT[2];
         a[0].type = INPUT_MOUSE; a[0].u.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;

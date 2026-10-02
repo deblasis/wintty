@@ -423,14 +423,24 @@ Invoke-Scenario 'vertical-reorder-motion-on' {
 Invoke-Scenario 'vertical-reorder-motion-off' {
     param($s)
     if ($null -eq $script:OrderMotionOn) { throw 'HARVEST_MISS: the motion-on scenario did not record its order' }
+    # This leg turns client-area animation off, a session-wide setting every
+    # running app reads, the user's Wintty included. Beside one it refuses
+    # rather than change that under them; the restore below runs either way.
+    $neighbours = @(Get-WinttyOtherInstances -ExePath $ExePath -Instances (Get-WinttyInstances))
+    if ($neighbours.Count -gt 0) {
+        throw ("HARNESS: skipped: this leg turns animations off machine-wide, and Wintty pid(s) {0} run beside it; close them to run it" -f
+            (($neighbours | ForEach-Object { $_.Id }) -join ', '))
+    }
     $guardSnapshot = Join-Path $OutDir 'env-snapshot.json'
     if (-not (Save-EnvSnapshot -Path $guardSnapshot)) { throw 'HARVEST_MISS: env guard snapshot failed' }
     $before = Get-SpiUint ([uint32]0x1042)
-    Set-SpiUint ([uint32]0x1043) ([uint32]0)
-    $after = Get-SpiUint ([uint32]0x1042)
-    if ($after -ne 0) { throw "HARVEST_MISS: animation toggle read back $after, not 0" }
-    Write-Host "animations: $before -> 0 (read back)"
+    # The set sits inside the try, so even a read-back that fails puts the
+    # setting back.
     try {
+        Set-SpiUint ([uint32]0x1043) ([uint32]0)
+        $after = Get-SpiUint ([uint32]0x1042)
+        if ($after -ne 0) { throw "HARVEST_MISS: animation toggle read back $after, not 0" }
+        Write-Host "animations: $before -> 0 (read back)"
         [void](Invoke-Seed $s)
         $drag = Invoke-SeamCommand $s @{ op = 'drag'; from = 1; to = 2 }
         [void](Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5'))

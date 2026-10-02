@@ -117,6 +117,8 @@ function Invoke-GuardCases([string]$LibPath) {
             WINTTY_TEST_CONFIG    = '1'
             XDG_CONFIG_HOME       = (Join-Path $temp 'wintty-seam-case')
             WINTTY_STATE_BASE     = (Join-Path $temp 'wintty-seam-case\state')
+            XDG_STATE_HOME        = (Join-Path $temp 'wintty-seam-case\state\xdg-state')
+            XDG_CACHE_HOME        = (Join-Path $temp 'wintty-seam-case\state\xdg-cache')
             WINTTY_SESSIOND_PIPE  = New-SeamSessionPipeName
             WINTTY_SESSIOND_DATA_DIR  = (Join-Path $sessiondRoot 'data')
             WINTTY_SESSIOND_LOG_FILE  = (Join-Path $sessiondRoot 'logs\sessiond.log')
@@ -276,7 +278,7 @@ function Invoke-StateBaseCases([string]$LibPath) {
             return , $failed
         }
         $failed = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in 'Get-SeamSessionMark', 'Test-SeamCrashLogWritten', 'Get-SeamRunCrashLogs') {
+        foreach ($name in 'Get-SeamSessionMark', 'Test-SeamCrashLogWritten', 'Get-SeamRunCrashLogs', 'New-WinttyOwnedStateBase') {
             if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
                 $failed.Add("$name does not exist: there is no crash oracle over the session's own state tree")
                 return , $failed
@@ -289,7 +291,12 @@ function Invoke-StateBaseCases([string]$LibPath) {
         [System.IO.File]::WriteAllBytes($exe, [byte[]]@())
         $cap = @{}
         function Assert-WinttyCoexistence {
+            param($ExePath, $ConfigText, $AumId, $Context)
             $cap.StateBase = $env:WINTTY_STATE_BASE
+            $cap.XdgState = $env:XDG_STATE_HOME
+            $cap.XdgCache = $env:XDG_CACHE_HOME
+            $cap.Token = $env:WINTTY_STATE_BASE_TOKEN
+            $cap.AumId = $AumId
             $cap.TempXdg = $env:XDG_CONFIG_HOME
             if ($cap.Crash -and $env:WINTTY_STATE_BASE) {
                 $dir = Join-Path $env:WINTTY_STATE_BASE 'Wintty'
@@ -305,11 +312,15 @@ function Invoke-StateBaseCases([string]$LibPath) {
             try { Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' @Extra | Out-Null }
             catch { if ("$_" -notmatch 'state-case refusal') { $failed.Add("Start-SeamSession threw something else: $_") } }
         }
-        $orig = if (Test-Path Env:WINTTY_STATE_BASE) { $env:WINTTY_STATE_BASE } else { $null }
+        $saved = @{}
+        foreach ($n in 'WINTTY_STATE_BASE', 'WINTTY_STATE_BASE_TOKEN', 'XDG_STATE_HOME', 'XDG_CACHE_HOME') {
+            $saved[$n] = [System.Environment]::GetEnvironmentVariable($n)
+        }
         try {
-            Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue
+            foreach ($n in @($saved.Keys)) { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
 
-            # The default: a fresh tree inside the session's own temp root.
+            # The default: a fresh tree inside the session's own temp root,
+            # with libghostty's native state inside that tree too.
             Start-Refused
             if (-not $cap.StateBase) {
                 $failed.Add('by default the launch inherits no WINTTY_STATE_BASE, so it shares the per-user state tree')
@@ -317,26 +328,63 @@ function Invoke-StateBaseCases([string]$LibPath) {
             elseif (-not (Test-WinttyPathUnder $cap.StateBase $cap.TempXdg)) {
                 $failed.Add("by default WINTTY_STATE_BASE '$($cap.StateBase)' is not inside the session's temp root")
             }
-            if (Test-Path Env:WINTTY_STATE_BASE) {
-                $failed.Add('Stop-SeamSession left WINTTY_STATE_BASE set although the caller had none')
+            foreach ($n in 'XdgState', 'XdgCache') {
+                if (-not $cap[$n] -or -not $cap.StateBase -or -not (Test-WinttyPathUnder $cap[$n] $cap.StateBase)) {
+                    $failed.Add("by default the native $n dir '$($cap[$n])' is not inside the session's state tree")
+                }
+            }
+            foreach ($n in $saved.Keys) {
+                if (Test-Path "Env:$n") { $failed.Add("Stop-SeamSession left $n set although the caller had none") }
             }
 
-            # The opt-out leaves the per-user tree.
+            # The opt-out is the real per-user tree, whatever the caller had.
+            $env:WINTTY_STATE_BASE = Join-Path $root 'callers-anything'
+            $env:XDG_STATE_HOME = Join-Path $root 'callers-xdg-state'
             Start-Refused @{ SharedStateBase = $true }
-            if ($cap.StateBase) { $failed.Add("-SharedStateBase still set WINTTY_STATE_BASE '$($cap.StateBase)'") }
+            if ($cap.StateBase -or $cap.XdgState -or $cap.XdgCache) {
+                $failed.Add("-SharedStateBase did not hand the launch the per-user tree (state '$($cap.StateBase)', native '$($cap.XdgState)')")
+            }
+            if ($env:WINTTY_STATE_BASE -ne (Join-Path $root 'callers-anything') -or $env:XDG_STATE_HOME -ne (Join-Path $root 'callers-xdg-state')) {
+                $failed.Add('Stop-SeamSession did not restore the caller''s variables after -SharedStateBase')
+            }
+            Remove-Item Env:WINTTY_STATE_BASE, Env:XDG_STATE_HOME -ErrorAction SilentlyContinue
 
-            # A caller's tree under temp is adopted; -PrivateStateBase mints
-            # over it, as it did when it was the opt-in.
-            $callers = Join-Path $root 'callers-state'
-            $env:WINTTY_STATE_BASE = $callers
+            # A tree under temp the run does not own is NOT adopted: a pane
+            # of a harness-launched Wintty inherits its app's tree, and a
+            # harness started there would otherwise share it.
+            $stray = Join-Path $root 'stray-state'
+            New-Item -ItemType Directory -Force -Path $stray | Out-Null
+            $env:WINTTY_STATE_BASE = $stray
             Start-Refused
-            if ($cap.StateBase -ne $callers) { $failed.Add("a caller's WINTTY_STATE_BASE under temp was not adopted (saw '$($cap.StateBase)')") }
+            if ($cap.StateBase -eq $stray -or -not $cap.StateBase) {
+                $failed.Add("an inherited WINTTY_STATE_BASE this run does not own was adopted (saw '$($cap.StateBase)')")
+            }
+
+            # An owned tree is adopted with its token, and the token is kept
+            # out of the app's environment; -PrivateStateBase mints over it,
+            # as it did when it was the opt-in.
+            $ownedTree = New-WinttyOwnedStateBase -Under $root
+            $env:WINTTY_STATE_BASE = $ownedTree.Path
+            $env:WINTTY_STATE_BASE_TOKEN = $ownedTree.Token
+            Start-Refused
+            if ($cap.StateBase -ne $ownedTree.Path) { $failed.Add("an owned tree with its token was not adopted (saw '$($cap.StateBase)')") }
+            if ($cap.Token) { $failed.Add('the ownership token reached the launch environment') }
+            $env:WINTTY_STATE_BASE_TOKEN = ('0' * 32)
+            Start-Refused
+            if ($cap.StateBase -eq $ownedTree.Path) { $failed.Add('an owned tree was adopted with the wrong token') }
+            $env:WINTTY_STATE_BASE_TOKEN = $ownedTree.Token
             Start-Refused @{ PrivateStateBase = $true }
-            if ($cap.StateBase -eq $callers -or -not $cap.StateBase) {
+            if ($cap.StateBase -eq $ownedTree.Path -or -not $cap.StateBase) {
                 $failed.Add("-PrivateStateBase did not mint a fresh tree over the caller's (saw '$($cap.StateBase)')")
             }
-            if ($env:WINTTY_STATE_BASE -ne $callers) { $failed.Add("Stop-SeamSession did not restore the caller's WINTTY_STATE_BASE") }
-            Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue
+            if ($env:WINTTY_STATE_BASE -ne $ownedTree.Path -or $env:WINTTY_STATE_BASE_TOKEN -ne $ownedTree.Token) {
+                $failed.Add("Stop-SeamSession did not restore the caller's WINTTY_STATE_BASE and token")
+            }
+            Remove-Item Env:WINTTY_STATE_BASE, Env:WINTTY_STATE_BASE_TOKEN -ErrorAction SilentlyContinue
+
+            # -AumId reaches the guard (a NativeAOT publish cannot be read).
+            Start-Refused @{ AumId = 'com.example.aot' }
+            if ($cap.AumId -ne 'com.example.aot') { $failed.Add("-AumId did not reach the guard (saw '$($cap.AumId)')") }
 
             # The crash oracle: a crash written into the private tree during
             # a start that never handed a session back still counts, after
@@ -355,9 +403,17 @@ function Invoke-StateBaseCases([string]$LibPath) {
             if (Test-SeamCrashLogWritten -Since $after) {
                 $failed.Add('a session that wrote no crash.log is reported as crashing (the mark does not scope the oracle)')
             }
+
+            # A shared session reads the per-user crash.log under the
+            # edition's own dir name; one it cannot read reports instead of
+            # going quiet.
+            $sharedLogs = @(Get-SeamCrashLogs @{ StateBase = $null; ExePath = $exe; Stamp = (Get-Date) })
+            if ($sharedLogs.Count -ne 1 -or $sharedLogs[0].Text -notmatch 'cannot be read') {
+                $failed.Add('a shared session whose state dir name cannot be read reports a clean crash oracle')
+            }
         }
         finally {
-            if ($null -ne $orig) { $env:WINTTY_STATE_BASE = $orig } else { Remove-Item Env:WINTTY_STATE_BASE -ErrorAction SilentlyContinue }
+            foreach ($n in @($saved.Keys)) { if ($null -ne $saved[$n]) { Set-Item "Env:$n" $saved[$n] } else { Remove-Item "Env:$n" -ErrorAction SilentlyContinue } }
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
         }
         return , $failed
@@ -370,18 +426,70 @@ function Invoke-StateBaseCases([string]$LibPath) {
 # Wintty: the blanket check is left for a harness with a reason no isolation
 # removes, which has to say it. And no harness reads the per-user crash.log,
 # which every other Wintty on the machine writes too.
-function Invoke-GateScanCases {
+function Invoke-GateScanCases(
+    [string]$ScriptDir = $PSScriptRoot,
+    [string]$JustfilePath = (Join-Path $PSScriptRoot '..\..\justfile')
+) {
     $failed = [System.Collections.Generic.List[string]]::new()
-    # The one sanctioned blanket refusal, and why: WER LocalDumps is keyed on
-    # the image name, so it covers every running Wintty.
-    $blanketAllowed = @('seam-crash-dump.ps1')
-    foreach ($file in Get-ChildItem -LiteralPath $PSScriptRoot -Filter *.ps1 -File) {
+    # The sanctioned blanket refusals, each with a reason no isolation
+    # removes: WER LocalDumps is keyed on the image name, so it covers every
+    # running Wintty; the splash race measures the single-instance election
+    # itself, so its launches keep it on and share the per-user tree.
+    $blanketAllowed = @('seam-crash-dump.ps1', 'splash-single-instance-race.ps1')
+    # Scripts that launch the exe themselves without the guard or a blanket
+    # refusal. None is run by a just recipe, the fuzz suite or the AOT fuzz,
+    # and none ever had a gate this conversion loosened; each is listed so a
+    # new one cannot join them silently, and listing is refused once a
+    # recipe or a suite runs it.
+    # The developer's own launcher (just run-win) is not a harness: it opens
+    # the app the way a user does, on purpose.
+    $notHarness = @('run-win-launch.ps1')
+    $unguardedAllowed = @{
+        'mouse-smoke-run.ps1' = 'the operator drives it by hand and quits the app themselves'
+        'config-save-race.ps1' = 'a standalone repro, run by hand'
+        'crash-canary.ps1'    = 'a standalone crash repro against a NativeAOT publish, run by hand'
+        'crash-matrix.ps1'    = 'a standalone crash repro against a NativeAOT publish, run by hand'
+        'seam-bisect.ps1'     = 'a bisect driver, run by hand'
+        'seam-probe.ps1'      = 'a one-off probe, run by hand'
+    }
+
+    # What a recipe or an orchestrator runs: every script the justfile
+    # names, the fuzz suite's manifest, and the AOT fuzz's harness list.
+    $reachable = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if (Test-Path -LiteralPath $JustfilePath) {
+        foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($JustfilePath), 'windows/scripts/([\w.-]+\.ps1)')) {
+            [void]$reachable.Add($m.Groups[1].Value)
+        }
+    }
+    $suite = Join-Path $ScriptDir 'fuzz-suite.ps1'
+    if (Test-Path -LiteralPath $suite) {
+        foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($suite), "script = '([\w.-]+\.ps1)'")) {
+            [void]$reachable.Add($m.Groups[1].Value)
+        }
+    }
+    $aot = Join-Path $ScriptDir 'aot-fuzz.ps1'
+    if (Test-Path -LiteralPath $aot) {
+        foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($aot), "'([\w.-]+\.ps1)'")) {
+            [void]$reachable.Add($m.Groups[1].Value)
+        }
+    }
+
+    # A launch of the exe under test: Start-Process or a ProcessStartInfo
+    # whose file is an exe variable, which is how every launcher here names
+    # the app (pwsh, rundll32 and wsl go in as literals or other names).
+    $exeArg = '(?i)^\(?\$(\w+[:.])?\w*exe\w*'
+    # A secondary launched from a session's own exe runs inside the
+    # environment that session's guard approved.
+    $sessionSecondary = '(?i)^\$\w+\.ExePath$'
+
+    foreach ($file in Get-ChildItem -LiteralPath $ScriptDir -Filter *.ps1 -File) {
         if ($file.Name -like '*.Tests.ps1') { continue }
         $tokens = $null; $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
-        $calls = $ast.FindAll({ param($n)
+        $calls = @($ast.FindAll({ param($n)
                 $n -is [System.Management.Automation.Language.CommandAst] -and
-                $n.GetCommandName() -eq 'Assert-NoWintty' }, $true)
+                $n.GetCommandName() -eq 'Assert-NoWintty' }, $true))
+        $reasoned = $false
         foreach ($call in $calls) {
             if ($blanketAllowed -notcontains $file.Name) {
                 $failed.Add("$($file.Name):$($call.Extent.StartLineNumber) refuses any running Wintty; gate on the exe under test (Assert-NoWinttyFrom)")
@@ -389,15 +497,61 @@ function Invoke-GateScanCases {
             elseif ($call.Extent.Text -notmatch '-Reason\b') {
                 $failed.Add("$($file.Name):$($call.Extent.StartLineNumber) refuses any running Wintty without saying why (-Reason)")
             }
+            else { $reasoned = $true }
         }
+        $guarded = @($ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.CommandAst] -and
+                $n.GetCommandName() -eq 'Assert-WinttyCoexistence' }, $true)).Count -gt 0
+        $usesSession = @($ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.CommandAst] -and
+                $n.GetCommandName() -eq 'Start-SeamSession' }, $true)).Count -gt 0
+
+        $launches = [System.Collections.Generic.List[string]]::new()
+        foreach ($c in $ast.FindAll({ param($n)
+                    $n -is [System.Management.Automation.Language.CommandAst] -and
+                    $n.GetCommandName() -eq 'Start-Process' }, $true)) {
+            $els = $c.CommandElements
+            # -FilePath by name, else the first positional element.
+            $target = $null
+            for ($i = 1; $i -lt $els.Count; $i++) {
+                if ($els[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    ($els[$i].ParameterName -like 'FilePath*' -or $els[$i].ParameterName -eq 'Path')) {
+                    $target = if ($els[$i].Argument) { $els[$i].Argument } elseif ($i + 1 -lt $els.Count) { $els[$i + 1] }
+                    break
+                }
+            }
+            if (-not $target -and $els.Count -gt 1 -and
+                $els[1] -isnot [System.Management.Automation.Language.CommandParameterAst]) { $target = $els[1] }
+            if ($target -and $target.Extent.Text -match $exeArg) {
+                $launches.Add("$($c.Extent.StartLineNumber):$($target.Extent.Text)")
+            }
+        }
+        foreach ($m in $ast.FindAll({ param($n)
+                    $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                    $n.Member.Extent.Text -eq 'new' -and $n.Expression.Extent.Text -match 'ProcessStartInfo\]$' }, $true)) {
+            if ($m.Arguments.Count -gt 0 -and $m.Arguments[0].Extent.Text -match $exeArg) {
+                $launches.Add("$($m.Extent.StartLineNumber):$($m.Arguments[0].Extent.Text)")
+            }
+        }
+        $open = @($launches | Where-Object { -not ($usesSession -and ($_ -split ':', 2)[1] -match $sessionSecondary) })
+        if ($open.Count -gt 0 -and -not $guarded -and -not $reasoned -and $notHarness -notcontains $file.Name) {
+            if ($unguardedAllowed.ContainsKey($file.Name)) {
+                if ($reachable.Contains($file.Name)) {
+                    $failed.Add("$($file.Name) launches the exe without the coexistence guard and is run by a recipe or a suite now; it can no longer be listed as hand-run")
+                }
+            }
+            else {
+                $failed.Add("$($file.Name) launches the exe (line $($open -join ', line ')) without the coexistence guard and without a reasoned Assert-NoWintty")
+            }
+        }
+
         $code = ($tokens | Where-Object { $_.Kind -ne 'Comment' } | ForEach-Object { $_.Text }) -join ' '
-        if ($code -match "LOCALAPPDATA\s+'Wintty\\crash\.log'") {
+        if ($code -match '(?i)LOCALAPPDATA[^\r\n]{0,40}Wintty[\\/]+crash\.log') {
             $failed.Add("$($file.Name) reads the per-user crash.log; read the session's own (Test-SeamCrashLogWritten)")
         }
     }
-    $just = Join-Path $PSScriptRoot '..\..\justfile'
-    if (Test-Path -LiteralPath $just) {
-        $text = [System.IO.File]::ReadAllText($just)
+    if (Test-Path -LiteralPath $JustfilePath) {
+        $text = [System.IO.File]::ReadAllText($JustfilePath)
         if ($text -match '(?m)^\s+\$p = @\(Get-Process Wintty') {
             $failed.Add('the justfile pre-build gate refuses any running Wintty')
         }
@@ -406,6 +560,101 @@ function Invoke-GateScanCases {
         }
     }
     return , $failed
+}
+
+# The scan's own teeth: a copy of the scripts with one harness's guard taken
+# out must turn it red. Each row names the file and what to remove.
+function Invoke-GateScanMutations {
+    $rows = @(
+        @{ Name = 'the splash race launches without its blanket refusal'; File = 'splash-single-instance-race.ps1'
+           From = "Assert-NoWintty -Context 'The splash race' -Reason ("; To = '$null = (' },
+        @{ Name = 'the shader fuzz launches without the guard'; File = 'shader-notice-fuzz.ps1'
+           From = 'Assert-WinttyCoexistence'; To = 'Write-Output' },
+        @{ Name = 'a harness reads the per-user crash.log again'; File = 'mouse-fuzz-probe.ps1'
+           Add = '$crashPath = "$env:LOCALAPPDATA\Wintty\crash.log"' }
+    )
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-gatescan-" + [guid]::NewGuid().ToString('N'))
+    try {
+        foreach ($row in $rows) {
+            $dir = Join-Path $root ($row.File -replace '\W', '-')
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Copy-Item -Path (Join-Path $PSScriptRoot '*.ps1') -Destination $dir
+            $target = Join-Path $dir $row.File
+            $text = [System.IO.File]::ReadAllText($target)
+            if ($row.From) {
+                if (-not $text.Contains($row.From)) { Assert-True $false "gate-scan mutation '$($row.Name)': its anchor is gone"; continue }
+                $text = $text.Replace($row.From, $row.To)
+            }
+            if ($row.Add) { $text = $text + "`n" + $row.Add + "`n" }
+            [System.IO.File]::WriteAllText($target, $text)
+            $red = Invoke-GateScanCases -ScriptDir $dir -JustfilePath (Join-Path $PSScriptRoot '..\..\justfile')
+            Assert-True (@($red | Where-Object { $_ -like "$($row.File)*" }).Count -gt 0) "gate-scan mutation went red: $($row.Name)"
+        }
+    }
+    finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# ---- layer 7: the Start-Process harnesses' state tree (lib/test-config.ps1) -----
+
+# Enter-WinttyTestConfig -PrivateStateBase for real: the tree and the
+# native-state dirs land under the random root, a crash.log written there is
+# still reported after Exit removed the root, and every variable is back as
+# the caller had it. Nothing is launched.
+function Invoke-TestConfigCases([string]$TestConfigPath) {
+    return & {
+        param($processLib, $lib)
+        . $processLib
+        $failed = [System.Collections.Generic.List[string]]::new()
+        try { . $lib } catch {
+            $failed.Add("the library cannot be dot-sourced here: $($_.Exception.Message)")
+            return , $failed
+        }
+        $names = 'XDG_CONFIG_HOME', 'WINTTY_TEST_CONFIG', 'WINTTY_STATE_BASE', 'XDG_STATE_HOME', 'XDG_CACHE_HOME'
+        $saved = @{}
+        foreach ($n in $names) { $saved[$n] = if (Test-Path "Env:$n") { (Get-Item "Env:$n").Value } else { $null } }
+        try {
+            # A caller value for each, so the restore is visible.
+            foreach ($n in $names) { Set-Item "Env:$n" "caller-$n" }
+            $s = Enter-WinttyTestConfig -PrivateStateBase
+            if (-not $s.StateBase -or -not (Test-WinttyPathUnder $s.StateBase $s.Dir)) {
+                $failed.Add("-PrivateStateBase did not put the state tree under the random root (saw '$($s.StateBase)')")
+            }
+            if ($env:WINTTY_STATE_BASE -ne $s.StateBase) { $failed.Add('-PrivateStateBase did not export WINTTY_STATE_BASE') }
+            foreach ($n in 'XDG_STATE_HOME', 'XDG_CACHE_HOME') {
+                $v = (Get-Item "Env:$n" -ErrorAction SilentlyContinue).Value
+                if (-not $v -or -not $s.StateBase -or -not (Test-WinttyPathUnder $v $s.StateBase)) {
+                    $failed.Add("-PrivateStateBase did not put $n inside the state tree (saw '$v')")
+                }
+            }
+            $dir = Join-Path $s.StateBase 'Wintty'
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $dir 'crash.log'), 'test-config crash')
+            if (@(Get-WinttyTestConfigCrashLogs $s).Count -ne 1) { $failed.Add('a crash.log in the live tree is not reported') }
+            Exit-WinttyTestConfig $s
+            if (Test-Path -LiteralPath $s.Dir) { $failed.Add('Exit did not remove the random root') }
+            $after = @(Get-WinttyTestConfigCrashLogs $s)
+            if ($after.Count -ne 1 -or $after[0].Text -ne 'test-config crash') {
+                $failed.Add('a crash.log written before Exit is not reported after Exit removed the tree')
+            }
+            foreach ($n in $names) {
+                $v = (Get-Item "Env:$n" -ErrorAction SilentlyContinue).Value
+                if ($v -ne "caller-$n") { $failed.Add("Exit did not restore $n (saw '$v')") }
+            }
+
+            # Without -PrivateStateBase the state variables are not touched.
+            $s = Enter-WinttyTestConfig
+            if ($env:WINTTY_STATE_BASE -ne 'caller-WINTTY_STATE_BASE' -or $s.StateBase) {
+                $failed.Add('Enter without -PrivateStateBase moved the state tree')
+            }
+            Exit-WinttyTestConfig $s
+        }
+        finally {
+            foreach ($n in $names) {
+                if ($null -ne $saved[$n]) { Set-Item "Env:$n" $saved[$n] } else { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
+            }
+        }
+        return , $failed
+    } $script:processLib $TestConfigPath
 }
 
 # ---- run the layers -----------------------------------------------------------
@@ -429,6 +678,24 @@ Assert-True ($stateFailures.Count -eq 0) 'every state-base and crash-oracle case
 $gateFailures = Invoke-GateScanCases
 foreach ($f in $gateFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
 Assert-True ($gateFailures.Count -eq 0) 'every harness gates on the exe under test and reads its own crash.log'
+Invoke-GateScanMutations
+
+$script:testConfigLib = Join-Path $PSScriptRoot 'lib/test-config.ps1'
+$testConfigFailures = Invoke-TestConfigCases $script:testConfigLib
+foreach ($f in $testConfigFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
+Assert-True ($testConfigFailures.Count -eq 0) 'every test-config state-tree case holds against the real library'
+
+# The one rule of that library whose loss would blind three harnesses at
+# once: Exit reads the crash.log out before it removes the root.
+$tcMutant = Join-Path ([System.IO.Path]::GetTempPath()) ('wintty-testconfig-mutant-' + [guid]::NewGuid().ToString('N') + '.ps1')
+try {
+    $src = [System.IO.File]::ReadAllText($script:testConfigLib)
+    $anchor = 'if (-not $Session.ContainsKey(''CrashLogs'')) { $Session.CrashLogs = @(Get-WinttyTestConfigCrashLogs $Session) }'
+    Assert-True $src.Contains($anchor) 'test-config mutation anchor (Exit''s crash read-out) is present'
+    [System.IO.File]::WriteAllText($tcMutant, $src.Replace($anchor, ''))
+    Assert-True ((Invoke-TestConfigCases $tcMutant).Count -gt 0) 'mutation went red: Exit no longer reads the crash.log out before removing the root'
+}
+finally { Remove-Item -LiteralPath $tcMutant -Force -ErrorAction SilentlyContinue }
 
 # ---- layer 4: mutation rows ---------------------------------------------------
 
@@ -456,7 +723,7 @@ try {
         },
         @{
             Name    = 'the private state tree is opt-in again'
-            Break   = { param($lines) @($lines | ForEach-Object { $_.Replace('elseif (-not $SharedStateBase) {', 'elseif ($PrivateStateBase) {') }) }
+            Break   = { param($lines) @($lines | ForEach-Object { $_.Replace('if ($SharedStateBase) {', 'if (-not $PrivateStateBase) {') }) }
             Layer   = 'state'
         },
         @{

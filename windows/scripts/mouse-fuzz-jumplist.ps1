@@ -143,6 +143,9 @@ function Invoke-Secondary([string]$Cli) {
         throw 'HARNESS: a secondary must launch inside the seam session''s config root'
     }
     $env:WINTTY_TEST_CONFIG = '1'
+    # No second coexistence check here: the guard refuses beside an
+    # instance of this very exe, which the session's own primary is. The
+    # secondary runs inside the environment the session's guard approved.
     $p = Start-Process -FilePath $session.ExePath -ArgumentList $Cli -PassThru `
         -WorkingDirectory (Split-Path $session.ExePath)
     $dl = (Get-Date).AddSeconds(12)

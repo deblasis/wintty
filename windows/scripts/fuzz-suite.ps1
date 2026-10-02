@@ -1729,10 +1729,17 @@ if ($useFixtures) {
     $ExePath = (Resolve-Path -LiteralPath $ExePath).Path
     # Once, up front. Each harness gates itself too, but paying for that at
     # the start of a 40-minute run rather than 30 minutes in is the point.
-    # Only this exe is refused: whether a harness may launch beside any
-    # other Wintty is its own coexistence guard's call, and the few that
-    # cannot (the jump-list handoff needs single-instance on) report it as
-    # could-not-run.
+    # Only this exe is refused here: whether a harness may launch beside
+    # another Wintty is its own call, and the ones that cannot report it as
+    # could-not-run. Beside a Wintty of the SAME edition (the same AUMID,
+    # which an unstamped build shares with the installed app of its
+    # edition) every launching harness refuses, because a launch re-points
+    # that AUMID's toast registration and jump list. Beside another edition
+    # the refusals are: the splash race (it measures the single-instance
+    # election), the jump-list handoff (single-instance on), the tab-drag
+    # motion-off leg (it turns animations off machine-wide), and any build
+    # whose AUMID cannot be read (a NativeAOT publish, unless its caller
+    # passes it).
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The fuzz suite'
     Write-Host "exe:  $ExePath"
     Clear-Desktop

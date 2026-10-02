@@ -31,7 +31,11 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [Parameter(Mandatory)][string]$OutDir
+    [Parameter(Mandatory)][string]$OutDir,
+    # The build's AUMID, for the coexistence guard, when it cannot read it
+    # itself (a NativeAOT publish has no Ghostty.Core.dll; aot-fuzz.ps1
+    # passes the sibling Release build's).
+    [string]$AumId = ''
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -133,7 +137,7 @@ function Invoke-Chord($Session, [int]$Key, [switch]$Plain) {
 
 try {
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The inspector harness'
-    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
+    $session = Start-SeamSession -ExePath $ExePath -AumId $AumId -ConfigText $Config -AllowInput
     $proc = $session.Proc
     $pid32 = [uint32]$proc.Id
     $hwnd64 = [int64]$session.Hwnd64

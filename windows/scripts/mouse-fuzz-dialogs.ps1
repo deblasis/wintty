@@ -21,7 +21,11 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [Parameter(Mandatory)][string]$OutDir
+    [Parameter(Mandatory)][string]$OutDir,
+    # The build's AUMID, for the coexistence guard, when it cannot read it
+    # itself (a NativeAOT publish has no Ghostty.Core.dll; aot-fuzz.ps1
+    # passes the sibling Release build's).
+    [string]$AumId = ''
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -192,7 +196,7 @@ function Close-Extras([uint32]$ProcId, [int64]$MainHwnd) {
 
 try {
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The dialogs harness'
-    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    $session = Start-SeamSession -ExePath $ExePath -AumId $AumId -ConfigText $Config
     $pid32 = [uint32]$session.Proc.Id
     $hwnd64 = [int64]$session.Hwnd64
     [SeamWin]::PlaceOnTop($hwnd64)

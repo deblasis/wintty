@@ -282,9 +282,11 @@ markdown is what gets pasted into #937, one comment per run.
   guard's call below.
 - `Assert-NoWintty -Reason` - the old blanket refusal of any running Wintty,
   kept for a harness that no isolation can separate from other instances.
-  It quotes its reason. `seam-crash-dump.ps1` is the one caller here: it
-  arms WER LocalDumps for the image name `Wintty.exe`, which covers every
-  running Wintty.
+  It quotes its reason. Two callers here: `seam-crash-dump.ps1` arms WER
+  LocalDumps for the image name `Wintty.exe`, which covers every running
+  Wintty, and `splash-single-instance-race.ps1` measures the single-instance
+  election, so its launches keep single-instance on and run on the per-user
+  state tree and hotkey.
 - `Write-WinttyTimingNeighbourWarning` - for a harness whose verdict is a
   wall-clock budget or a frame count (`layout-switch-filmstrip.ps1`,
   `vtabs-drag-filmstrip.ps1`): another Wintty rendering beside it can push a
@@ -301,7 +303,10 @@ markdown is what gets pasted into #937, one comment per run.
   running from it, and no installed app, running or not: not inside a running
   install, not under Program Files, not in a Velopack install with `Update.exe`
   above it), `XDG_CONFIG_HOME` under temp with `WINTTY_TEST_CONFIG=1`,
-  `WINTTY_STATE_BASE` under temp, every `windows-single-instance` line of the
+  `WINTTY_STATE_BASE`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` under temp (the
+  last two are where libghostty keeps its crash envelopes, sentry bookkeeping
+  and caches; "under temp" means no segment below temp is a junction or
+  symlink), every `windows-single-instance` line of the
   staged config `false` (the app reads the first one), every
   `quick-terminal-key` line the harness chord `ctrl+alt+shift+f24` (the quick
   terminal's hotkey is session-global; `Start-SeamSession` stages it when the
@@ -323,11 +328,21 @@ markdown is what gets pasted into #937, one comment per run.
 
 Every seam session is isolated by default. `Start-SeamSession` stages a
 random temp config root with `WINTTY_TEST_CONFIG=1`, a private
-`WINTTY_STATE_BASE` inside it (or adopts one the caller set under temp),
-a private session daemon pipe and daemon dirs, and the harness
-quick-terminal chord when the config binds none. `-SharedStateBase` opts
-out of the private state tree, and the guard then refuses beside any other
-Wintty. The crash oracle reads the session's own tree:
+`WINTTY_STATE_BASE` inside it with `XDG_STATE_HOME` and `XDG_CACHE_HOME`
+under it, a private session daemon pipe and daemon dirs, and the harness
+quick-terminal chord when the config binds none. A tree the caller set is
+adopted only when it is an owned one: `New-WinttyOwnedStateBase` writes a
+marker holding a random token, and the caller exports the token as
+`WINTTY_STATE_BASE_TOKEN`. Any other inherited `WINTTY_STATE_BASE` (a pane
+of a harness-launched Wintty inherits its app's) is ignored and a fresh
+tree minted, and the token itself is kept out of the app's environment.
+`-SharedStateBase` opts out: the launch gets the real per-user tree, with
+those three variables removed, and the guard then refuses beside any other
+Wintty. `-AumId` hands the guard the build's AUMID where it cannot read
+it (a NativeAOT publish has no `Ghostty.Core.dll`); `aot-fuzz.ps1` and
+`release-smoke.ps1` read it off the sibling Release build and take a
+`Test-WinttyCoexistencePreflight` verdict before they build, so a refusal
+costs seconds. The crash oracle reads the session's own tree:
 `Test-SeamCrashLogWritten -Since (Get-SeamSessionMark)` is true when a
 session started after the mark wrote a crash.log, including one that
 failed to start, because `Stop-SeamSession` reads the tree out before it
@@ -338,12 +353,25 @@ chord with `Add-WinttyHarnessConfigDefaults`, calls
 `Get-WinttyTestConfigCrashLogs`.
 
 What a harness still has to bring itself is `windows-single-instance =
-false` in its config. Every harness here stages it except
-`mouse-fuzz-jumplist.ps1`, whose scenario is the single-instance handoff:
-the guard refuses that one beside any other Wintty, and says why.
-Harnesses that synthesize OS input check that their own window holds the
-foreground right before each gesture (`frame-keybind-live-key.ps1`), which
-is what keeps the input out of somebody else's window.
+false` in its config. Every harness that goes through the guard stages it,
+with three exceptions: `mouse-fuzz-jumplist.ps1`, whose scenario is the
+single-instance handoff (the guard refuses it beside any other Wintty and
+says why); `release-smoke.ps1`, which keeps the shipped default (on) when
+nothing else runs, so the trimmed builds still run the election, and turns
+it off only beside another Wintty, printing which; and a config a harness
+copies from the developer (`mouse-fuzz-settings.ps1`), whose own lines the
+guard checks too. `mouse-fuzz-tab-drag.ps1`'s motion-off leg turns
+animations off machine-wide, so it refuses beside any other Wintty.
+`frame-keybind-live-key.ps1` synthesizes OS input: it checks that its own
+window holds the foreground before each gesture and that the window under a
+click point is its own, which is what keeps the input out of somebody
+else's window.
+
+Some refusals no harness can stage its way out of. Beside a Wintty of the
+same edition (the same AUMID, which an unstamped build shares with the
+installed app of its edition) every launch refuses, because it would
+re-point that AUMID's toast registration and jump list, and so does a
+build whose AUMID cannot be read.
 
 Most scripts here used to open with `Get-Process Wintty | Stop-Process -Force`,
 which takes down builds from other worktrees and the window the developer is
@@ -358,7 +386,7 @@ Every script here that launches Wintty uses the helper except two:
 
 | script | why |
 |---|---|
-| `splash-single-instance-race.ps1` | it keeps its own copy of the same-exe gate, refusing only over instances running from the exe under test, because the mutex it is measuring is keyed on that path, and it needs to be able to launch a second instance itself |
+| `splash-single-instance-race.ps1` | it launches both instances itself with single-instance on, so it refuses beside any Wintty (`Assert-NoWintty -Reason`) and keeps its own same-exe check with the mutex-specific message |
 | `mouse-smoke-run.ps1` | the operator drives it by hand and quits the app themselves |
 | `contrast-oracle.ps1`, `tab-tag-ink.ps1`, `switcher-preview-theme.ps1` | they are meant to be runnable beside a Wintty somebody else is using: they read crash.log not at all, launch with `windows-single-instance` off against an isolated `XDG_CONFIG_HOME`, move only their own window and reap only what they started. Each session now names its pipe after its own token, so two runs no longer collide on the name; what still makes them exit 1 rather than measure the wrong window is that each waits for the pipe belonging to the app it launched |
 
@@ -398,11 +426,14 @@ exactly this reason.
 
 - It **refuses to start while a Wintty from the exe under test is
   running**, and names the pids so you can close them. Run it from a
-  terminal that is not that build. Any other Wintty, the installed app
-  included, may stay open: the session's `crash.log` is in its own state
-  tree, so nothing another instance writes is read as a defect in the build
-  under test, and the coexistence guard proves the rest of the isolation
-  before the launch.
+  terminal that is not that build. A Wintty of another edition may stay
+  open: the session's `crash.log` is in its own state tree, so nothing
+  another instance writes is read as a defect in the build under test, and
+  the coexistence guard proves the rest of the isolation before the launch.
+  Beside a Wintty of the same edition (the same AUMID; an unstamped build
+  shares it with the installed app of its edition) the guard refuses, as it
+  does for a build whose AUMID it cannot read, such as a NativeAOT publish
+  launched without `-AumId`.
 - It runs on a random temp config root from `Start-SeamSession`, never your
   real config, and there is no switch to change that.
 - It synthesizes no input and never takes the foreground: the bar opens

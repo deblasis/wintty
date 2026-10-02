@@ -37,6 +37,21 @@ if (-not $PublishExe -or -not (Test-Path $PublishExe)) {
 # Wintty is its own coexistence guard's call.
 Assert-NoWinttyFrom -ExePath $PublishExe -Context 'The AOT fuzz'
 
+# A NativeAOT publish has no Ghostty.Core.dll beside it, so the guard cannot
+# read the AUMID it runs as and would refuse it beside any Wintty. The
+# constant is the same one the sibling Release build carries (publish/ sits
+# two levels under that build's output), so it is read there and handed to
+# every harness. Then the verdict is taken once, before the publish, so a
+# launch the guard will refuse costs seconds rather than a build.
+$releaseSibling = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PublishExe))) 'Wintty.exe'
+$aotAumId = Get-WinttyBuildAumid $releaseSibling
+if (-not $aotAumId) { Write-Host "AUMID: not readable beside $releaseSibling; the harnesses will refuse beside any other Wintty" }
+$preflight = Test-WinttyCoexistencePreflight -ExePath $PublishExe -AumId "$aotAumId"
+if (-not $preflight.Allowed) {
+    throw ("The AOT fuzz will not launch beside the running Wintty:`n  - " + ($preflight.Reasons -join "`n  - ") +
+        "`nNothing was built and nothing was launched.")
+}
+
 if (-not $SkipPublish) {
     Write-Host '== refresh NativeAOT publish =='
     & (Join-Path $PSScriptRoot 'release-smoke.ps1') -SkipLaunch | Write-Host
@@ -84,7 +99,8 @@ foreach ($s in $Scripts) {
             Stop-Wintty
             Start-Sleep -Seconds 2
         }
-        & pwsh -NoProfile -File (Join-Path $PSScriptRoot $s) -ExePath $PublishExe -OutDir $out
+        $aumArgs = if ($aotAumId) { @('-AumId', $aotAumId) } else { @() }
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot $s) -ExePath $PublishExe -OutDir $out @aumArgs
         $code = $LASTEXITCODE
         if ($code -ne 1) { break }
     }
