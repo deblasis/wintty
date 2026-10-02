@@ -231,7 +231,11 @@ pub fn threadEnter(
     // wakes the reader the same way threadExit does, so it cannot block
     // on a read that nothing will interrupt.
     errdefer {
-        self.stopReadThread(pipe[1], pty_fds.read);
+        self.stopReadThread(
+            pipe[1],
+            pty_fds.read,
+            &io.terminal_stream.handler.teardown,
+        );
         read_thread.join();
     }
 
@@ -244,6 +248,7 @@ pub fn threadEnter(
         .read_thread = read_thread,
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
+        .read_teardown = &io.terminal_stream.handler.teardown,
         .termios_timer = termios_timer,
     } };
 
@@ -311,7 +316,20 @@ pub fn threadEnter(
 ///
 /// This never waits for the reader to exit, only for it to be wakeable.
 /// The caller joins.
-fn stopReadThread(self: *Exec, quit_pipe: posix.fd_t, read_fd: posix.fd_t) void {
+///
+/// `read_teardown` is the reader's own abort token (#1266), latched here
+/// first so that every path that joins the reader latches it: a reader
+/// parked on a full app mailbox then gives up within one attempt window
+/// instead of its whole budget, which the joining thread -- the UI
+/// thread, on a real close -- would otherwise wait out with it.
+fn stopReadThread(
+    self: *Exec,
+    quit_pipe: posix.fd_t,
+    read_fd: posix.fd_t,
+    read_teardown: *std.atomic.Value(bool),
+) void {
+    read_teardown.store(true, .release);
+
     // Windows cannot poll the pty handle and this pipe together, so the
     // reader there watches the quit flag below instead and never reads
     // the pipe. A write would wake nobody.
@@ -372,7 +390,11 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    self.stopReadThread(exec.read_thread_pipe, exec.read_thread_fd);
+    self.stopReadThread(
+        exec.read_thread_pipe,
+        exec.read_thread_fd,
+        exec.read_teardown,
+    );
 
     exec.read_thread.join();
 
@@ -827,6 +849,10 @@ pub const ThreadData = struct {
     read_thread: std.Thread,
     read_thread_pipe: posix.fd_t,
     read_thread_fd: posix.fd_t,
+
+    /// The reader's abort token, `StreamHandler.teardown` on the Termio
+    /// that owns this run. `stopReadThread` latches it before any join.
+    read_teardown: *std.atomic.Value(bool),
 
     /// Dedicated Windows process-exit watcher thread. Null on POSIX.
     /// Must be joined in threadExit before td is freed. Only valid when
