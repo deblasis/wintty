@@ -32,9 +32,63 @@ if (-not $PublishExe -or -not (Test-Path $PublishExe)) {
     throw 'NativeAOT publish Wintty.exe not found; run release-smoke.ps1 first'
 }
 
+# Before the publish, which cannot overwrite the exe while it runs. Only that
+# exe is refused here: whether each harness below may run beside any other
+# Wintty is its own coexistence guard's call.
+Assert-NoWinttyFrom -ExePath $PublishExe -Context 'The AOT fuzz'
+
+# A NativeAOT publish has no Ghostty.Core.dll beside it, so the guard cannot
+# read the AUMID it runs as and would refuse it beside any Wintty. The
+# constant is the one the sibling Release build carries (publish/ sits two
+# levels under that build's output), and the sibling is only a stand-in for
+# the publish when it is the publish's own: the refresh below rebuilds both,
+# so the AUMID is read again after it, and in either mode it is handed on
+# only when the publish image carries that AUMID's UTF-16 bytes (a NativeAOT
+# image holds the string literal) and the sibling is not newer than the
+# publish. A product version proves neither: it carries no identity.
+$releaseSibling = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PublishExe))) 'Wintty.exe'
+function Test-ScriptTakesAumId([string]$Path) {
+    $tk = $null; $er = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tk, [ref]$er)
+    return $null -ne $ast.ParamBlock -and @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'AumId' }).Count -gt 0
+}
+function Test-ImageCarriesString([string]$Exe, [string]$Text) {
+    if (-not $Text -or -not (Test-Path -LiteralPath $Exe)) { return $false }
+    # Latin-1 maps every byte to one char, so a byte search is a string search.
+    $latin1 = [System.Text.Encoding]::Latin1
+    $image = $latin1.GetString([System.IO.File]::ReadAllBytes($Exe))
+    $needle = $latin1.GetString([System.Text.Encoding]::Unicode.GetBytes($Text))
+    return $image.IndexOf($needle, [StringComparison]::Ordinal) -ge 0
+}
+
+# The verdict is taken once before the publish, so a launch the guard will
+# refuse costs seconds rather than a build. It uses the sibling's AUMID as it
+# stands; the launches use the one read after the refresh, and the guard
+# refuses one that the build's own Ghostty.Core.dll contradicts.
+$preAumId = Get-WinttyBuildAumid $releaseSibling
+$preflight = Test-WinttyCoexistencePreflight -ExePath $PublishExe -AumId "$preAumId"
+if (-not $preflight.Allowed) {
+    throw ("The AOT fuzz will not launch beside the running Wintty:`n  - " + ($preflight.Reasons -join "`n  - ") +
+        "`nNothing was built and nothing was launched.")
+}
+
 if (-not $SkipPublish) {
     Write-Host '== refresh NativeAOT publish =='
     & (Join-Path $PSScriptRoot 'release-smoke.ps1') -SkipLaunch | Write-Host
+}
+
+$aotAumId = $null
+$candidate = Get-WinttyBuildAumid $releaseSibling
+$why = if (-not $candidate) { 'no AUMID readable off the sibling' }
+    elseif ((Get-Item -LiteralPath $releaseSibling).LastWriteTimeUtc -gt (Get-Item -LiteralPath $PublishExe).LastWriteTimeUtc) { 'the sibling is newer than the publish' }
+    elseif (-not (Test-ImageCarriesString $PublishExe $candidate)) { "the publish image does not carry '$candidate'" }
+    else { $null }
+if (-not $why) {
+    $aotAumId = $candidate
+    Write-Host "AUMID: $aotAumId, read off $releaseSibling and found in the publish image"
+}
+else {
+    Write-Host "AUMID: not handed on ($why); the harnesses will refuse beside any other Wintty"
 }
 
 Write-Host "== AOT fuzz target: $PublishExe =="
@@ -58,7 +112,6 @@ function Stop-Wintty {
 }
 
 $script:PublishExe = $PublishExe
-Assert-NoWintty -Context 'The AOT fuzz'
 $script:WinttyStamp = Get-WinttyLaunchStamp
 $idx = 0
 foreach ($s in $Scripts) {
@@ -80,7 +133,10 @@ foreach ($s in $Scripts) {
             Stop-Wintty
             Start-Sleep -Seconds 2
         }
-        & pwsh -NoProfile -File (Join-Path $PSScriptRoot $s) -ExePath $PublishExe -OutDir $out
+        # Only to a harness that declares the parameter: -Scripts may name one
+        # that does not, and an unknown parameter is a binding error.
+        $aumArgs = if ($aotAumId -and (Test-ScriptTakesAumId (Join-Path $PSScriptRoot $s))) { @('-AumId', $aotAumId) } else { @() }
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot $s) -ExePath $PublishExe -OutDir $out @aumArgs
         $code = $LASTEXITCODE
         if ($code -ne 1) { break }
     }

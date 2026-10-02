@@ -21,7 +21,13 @@ param(
     [string]$DumpPath = (Join-Path $env:TEMP 'wintty-seam-crash.dmp')
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
+# The app runs under cdb with single-instance on and the per-user state tree,
+# launched by the debugger rather than through the coexistence guard, so this
+# refuses beside any Wintty.
+Assert-NoWintty -Context 'The cdb capture' -Reason ('it launches the app under cdb with single-instance on and ' +
+    'the per-user state tree, outside the coexistence guard')
 $exe = $ExePath
 $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
 $log = Join-Path $env:TEMP 'wintty-seam-cdb.log'

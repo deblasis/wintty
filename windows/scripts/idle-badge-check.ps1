@@ -40,7 +40,7 @@ Add-Type -AssemblyName System.Drawing
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = false
 profile.pwsh.name = PowerShell
@@ -55,6 +55,8 @@ $session = $null
 function Shot([string]$Name) {
     $rc = [SeamWin]::RectOf($session.Hwnd64)
     if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $Name" }
+    # The shot is the pixel oracle's input, so it is raised and hit-tested.
+    Assert-WinttyCaptureClear -Hwnd64 $session.Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What "the shot '$Name'" -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
@@ -141,7 +143,7 @@ if (-not $env:WINTTY_SEAM_LOCK_HELD) {
 }
 
 try {
-    Assert-NoWintty -Context 'the idle badge check'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'the idle badge check'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     if (-not (Wait-SeamReady $session.Proc)) { throw 'SEAM_REFUSED: app never announced the pipe' }
 

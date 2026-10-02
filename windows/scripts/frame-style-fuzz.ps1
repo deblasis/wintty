@@ -413,6 +413,7 @@ function Find-ByName($root, [string]$Name) {
 function Get-Shot([int64]$Hwnd64) {
     $rc = [FSz]::RectOf($Hwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: degenerate window rect' }
+    Assert-WinttyCaptureClear -Hwnd64 $Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What 'the frame-style capture' -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh, ([System.Drawing.Imaging.PixelFormat]::Format32bppRgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
@@ -788,9 +789,6 @@ function Get-DesktopPolarity {
 
 # ---- config staging -------------------------------------------------------
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-
 $originalNoColorSet = Test-Path Env:NO_COLOR
 $originalNoColor = if ($originalNoColorSet) { $env:NO_COLOR } else { $null }
 
@@ -798,30 +796,39 @@ $polarity = Get-DesktopPolarity
 $highContrast = [FSz]::HighContrastOn()
 Write-Host "desktop=$polarity highContrast=$highContrast (both read, neither set)"
 
+# ---- the gate -------------------------------------------------------------
+# First, above the staging and every launch: refusing over an open Wintty
+# from this exe is the most common way this run ends. Any other Wintty is
+# the coexistence guard's call, made before each launch.
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The frame-style fuzz'
+
 # ---- config staging -------------------------------------------------------
 #
 # Created before the catalogue below, because the catalogue is taken under it.
 
 # A per-run randomly named root from the shared helper (the old name was
-# HHmmss-keyed, so two runs inside a minute shared a stage). Entered
-# without a paired Exit here: the finally below pairs it.
-$script:TestConfig = Enter-WinttyTestConfig
-$tempXdg = $script:TestConfig.Dir
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-$configPath = Join-Path $tempXdg 'wintty\config.wintty'
+# HHmmss-keyed, so two runs inside a minute shared a stage). The catch
+# right below pairs it with Exit until the top-level finally takes over. A private state
+# tree too, so crash.log and the rest of the app's state are this run's and
+# the launches may run beside another Wintty.
+try {
+    $script:TestConfig = Enter-WinttyTestConfig -PrivateStateBase
+    $tempXdg = $script:TestConfig.Dir
+    New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
+    $configPath = Join-Path $tempXdg 'wintty\config.wintty'
 
-# The built-in pair, staged as theme files. The colours are wintty_theme.zig's
-# own (the pair the product overlays when no theme is configured), written
-# under the themes directory both halves of the app search:
-#   libghostty   $XDG_CONFIG_HOME/wintty/themes      (theme.zig, Location.user)
-#   C# chrome    <config root>/wintty/themes         (ThemeSearchPath)
-# which are the same directory under this staging. Without these files a
-# `theme =` line names something neither half can resolve, and the theme axis
-# measures nothing while looking like it ran.
-$themesDir = Join-Path $tempXdg 'wintty\themes'
-New-Item -ItemType Directory -Force -Path $themesDir | Out-Null
+    # The built-in pair, staged as theme files. The colours are wintty_theme.zig's
+    # own (the pair the product overlays when no theme is configured), written
+    # under the themes directory both halves of the app search:
+    #   libghostty   $XDG_CONFIG_HOME/wintty/themes      (theme.zig, Location.user)
+    #   C# chrome    <config root>/wintty/themes         (ThemeSearchPath)
+    # which are the same directory under this staging. Without these files a
+    # `theme =` line names something neither half can resolve, and the theme axis
+    # measures nothing while looking like it ran.
+    $themesDir = Join-Path $tempXdg 'wintty\themes'
+    New-Item -ItemType Directory -Force -Path $themesDir | Out-Null
 
-$winttyThemeLight = @'
+    $winttyThemeLight = @'
 background = #f4f6fb
 foreground = #1e2333
 cursor-color = #1668c4
@@ -844,7 +851,7 @@ palette = 13=#65329f
 palette = 14=#0b5a69
 palette = 15=#cfd5e3
 '@
-$winttyThemeDark = @'
+    $winttyThemeDark = @'
 background = #131620
 foreground = #d5d9e5
 cursor-color = #4babef
@@ -867,74 +874,79 @@ palette = 13=#d3abff
 palette = 14=#8ae7f5
 palette = 15=#f2f4fa
 '@
-[IO.File]::WriteAllText((Join-Path $themesDir 'wintty-light'), $winttyThemeLight + "`r`n")
-[IO.File]::WriteAllText((Join-Path $themesDir 'wintty-dark'), $winttyThemeDark + "`r`n")
+    [IO.File]::WriteAllText((Join-Path $themesDir 'wintty-light'), $winttyThemeLight + "`r`n")
+    [IO.File]::WriteAllText((Join-Path $themesDir 'wintty-dark'), $winttyThemeDark + "`r`n")
 
-# ---- theme catalogue ------------------------------------------------------
-# Enumerated UNDER the staging, by handing the child the same XDG_CONFIG_HOME
-# the case launches get. The catalogue this answers is the one the launched
-# processes can actually resolve; enumerating the user's own instead was how a
-# theme name the staging could not resolve got into the config, leaving the
-# axis silently inert. --plain is load-bearing: without it the TUI takes over
-# as soon as stdout is a terminal, and what comes back is a screenful of
-# escape sequences.
-function Get-ThemeCatalogue([string]$Exe) {
-    $names = [System.Collections.Generic.List[string]]::new()
-    $out = ''
-    try {
-        # Started with the stream redirected rather than called as `& $Exe`,
-        # which comes back empty: this is a GUI-subsystem binary, and its CLI
-        # path writes to a stdout the shell never gets a handle to. An empty
-        # catalogue is a legitimate answer here, so the difference does not show
-        # up as an error - the run just quietly stops fuzzing themes.
-        $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
-        $psi.ArgumentList.Add('+list-themes')
-        $psi.ArgumentList.Add('--plain')
-        # The child reads this dictionary rather than the harness process's
-        # own environment, so the staging never leaks into anything else here.
-        $psi.EnvironmentVariables['XDG_CONFIG_HOME'] = $tempXdg
-        $psi.EnvironmentVariables['WINTTY_TEST_CONFIG'] = '1'
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.UseShellExecute = $false
-        $p = [System.Diagnostics.Process]::Start($psi)
-        $out = $p.StandardOutput.ReadToEnd()
-        [void]$p.StandardError.ReadToEnd()
-        [void]$p.WaitForExit(30000)
-    } catch {
-        return @()
+    # ---- theme catalogue ------------------------------------------------------
+    # Enumerated UNDER the staging, by handing the child the same XDG_CONFIG_HOME
+    # the case launches get. The catalogue this answers is the one the launched
+    # processes can actually resolve; enumerating the user's own instead was how a
+    # theme name the staging could not resolve got into the config, leaving the
+    # axis silently inert. --plain is load-bearing: without it the TUI takes over
+    # as soon as stdout is a terminal, and what comes back is a screenful of
+    # escape sequences.
+    function Get-ThemeCatalogue([string]$Exe) {
+        $names = [System.Collections.Generic.List[string]]::new()
+        $out = ''
+        # The catalogue run launches the exe under test too, so it gets a
+        # staged config and the guard like every case launch below. Outside
+        # the try: a refusal must stop the run, not read as an empty catalogue.
+        [IO.File]::WriteAllText($configPath, (Add-WinttyHarnessConfigDefaults "windows-single-instance = false`r`nwindow-save-state = never`r`n"))
+        [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText ([IO.File]::ReadAllText($configPath)) -Context 'The frame-style fuzz catalogue')
+        try {
+            # Started with the stream redirected rather than called as `& $Exe`,
+            # which comes back empty: this is a GUI-subsystem binary, and its CLI
+            # path writes to a stdout the shell never gets a handle to. An empty
+            # catalogue is a legitimate answer here, so the difference does not show
+            # up as an error - the run just quietly stops fuzzing themes.
+            $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
+            $psi.ArgumentList.Add('+list-themes')
+            $psi.ArgumentList.Add('--plain')
+            # The child reads this dictionary rather than the harness process's
+            # own environment, so the staging never leaks into anything else here.
+            $psi.EnvironmentVariables['XDG_CONFIG_HOME'] = $tempXdg
+            $psi.EnvironmentVariables['WINTTY_TEST_CONFIG'] = '1'
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $out = $p.StandardOutput.ReadToEnd()
+            [void]$p.StandardError.ReadToEnd()
+            [void]$p.WaitForExit(30000)
+        } catch {
+            return @()
+        }
+        foreach ($line in ($out -split "`r?`n")) {
+            $t = "$line".Trim()
+            if (-not $t) { continue }
+            # The plain listing prints "<name> (<source>)". Anything that is not
+            # that shape is not a theme name and is dropped rather than guessed at:
+            # a name this harness invents goes into a config file, and a theme that
+            # does not resolve is a different case from the one being fuzzed.
+            if ($t -match '^(?<n>.+?)\s+\([\w_]+\)$') { $names.Add($Matches.n.Trim()) }
+        }
+        return @($names | Select-Object -Unique)
     }
-    foreach ($line in ($out -split "`r?`n")) {
-        $t = "$line".Trim()
-        if (-not $t) { continue }
-        # The plain listing prints "<name> (<source>)". Anything that is not
-        # that shape is not a theme name and is dropped rather than guessed at:
-        # a name this harness invents goes into a config file, and a theme that
-        # does not resolve is a different case from the one being fuzzed.
-        if ($t -match '^(?<n>.+?)\s+\([\w_]+\)$') { $names.Add($Matches.n.Trim()) }
+
+    $catalogue = @(Get-ThemeCatalogue $ExePath)
+    Write-Host "themes=$($catalogue.Count)"
+
+    # The pair has to be IN that catalogue. This is the acceptance gate for the
+    # whole theme axis: a staging that cannot enumerate its own themes is the old
+    # defect wearing a new directory, and every case after this would measure
+    # defaults while claiming to measure themes.
+    foreach ($must in @('wintty-light', 'wintty-dark')) {
+        if ($catalogue -notcontains $must) {
+            throw ("HARVEST_MISS: the staged theme '$must' is not in the catalogue the process sees under " +
+                   "the staging ($($catalogue.Count) name(s)$(if ($catalogue.Count -gt 0) { ': ' + ($catalogue -join ', ') })), " +
+                   'so no case could load it and the theme axis would be silently inert')
+        }
     }
-    return @($names | Select-Object -Unique)
+} catch {
+    # The top-level finally is not armed yet, so a staging failure restores here.
+    if ($script:TestConfig) { Exit-WinttyTestConfig $script:TestConfig }
+    throw
 }
-
-$catalogue = @(Get-ThemeCatalogue $ExePath)
-Write-Host "themes=$($catalogue.Count)"
-
-# The pair has to be IN that catalogue. This is the acceptance gate for the
-# whole theme axis: a staging that cannot enumerate its own themes is the old
-# defect wearing a new directory, and every case after this would measure
-# defaults while claiming to measure themes.
-foreach ($must in @('wintty-light', 'wintty-dark')) {
-    if ($catalogue -notcontains $must) {
-        throw ("HARVEST_MISS: the staged theme '$must' is not in the catalogue the process sees under " +
-               "the staging ($($catalogue.Count) name(s)$(if ($catalogue.Count -gt 0) { ': ' + ($catalogue -join ', ') })), " +
-               'so no case could load it and the theme axis would be silently inert')
-    }
-}
-
-# ---- the gate -------------------------------------------------------------
-# Above the top-level try and above the staged config and every case launch:
-# refusing over an open Wintty is the most common way this run ends.
-Assert-NoWintty
 
 <#
     One case is one config plus what this harness expects of it.
@@ -983,7 +995,8 @@ function Write-CaseConfig($Case) {
                    'material layer estimates against; teach Get-BackdropGround about it before staging it')
         }
     }
-    [IO.File]::WriteAllText($configPath, ($body -join "`r`n") + "`r`n")
+    # The harness quick-terminal chord: the default hotkey is session-global.
+    [IO.File]::WriteAllText($configPath, (Add-WinttyHarnessConfigDefaults (($body -join "`r`n") + "`r`n")))
 }
 
 # How long a translucent frame is given to stop being a transition. The
@@ -1050,7 +1063,7 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
     # return value, and a throw never assigns it there, so an un-set flag means
     # nobody owns the window and this function is the last one that can take
     # it down. Otherwise one flaky splash drop strands a Wintty that blocks
-    # every later harness's Assert-NoWintty.
+    # every later harness's Assert-NoWinttyFrom.
     $handedOff = $false
     $stamp = Get-WinttyLaunchStamp
     try {
@@ -1060,6 +1073,7 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
         # what got measured that nothing in the report would explain. Cleared
         # for the children and restored in the outer finally, same as XDG.
         Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+        [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText ([IO.File]::ReadAllText($configPath)) -Context 'The frame-style fuzz')
         # --config-file hands libghostty the staged config by name (#787; long
         # `=` form only), on top of the XDG discovery below it. Started through
         # ProcessStartInfo rather than Start-Process because ArgumentList
@@ -1940,7 +1954,8 @@ finally {
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     Exit-WinttyTestConfig $script:TestConfig
 
-    $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+    # Exit read the private tree's crash.log before removing the root.
+    $crashGrew = @(Get-WinttyTestConfigCrashLogs $script:TestConfig).Count -gt 0
     if ($crashGrew) { $findings.Add('crash.log grew during the run') }
 
     # Written from the finally so the report survives a throw from anywhere

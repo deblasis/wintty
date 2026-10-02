@@ -535,7 +535,9 @@ if (-not $env:WINTTY_SEAM_LOCK_HELD) {
 $exit = 0
 $session = $null
 try {
-    Assert-NoWintty -Context 'the layout-switch filmstrip'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'the layout-switch filmstrip'
+    # Its budget is wall clock, so a neighbour's load is worth a line.
+    Write-WinttyTimingNeighbourWarning -ExePath $ExePath -Context 'the layout-switch filmstrip'
 
     # vertical-tabs is written explicitly, and false is the value the run
     # starts from. Not decoration: MainWindow only lets a reload re-drive

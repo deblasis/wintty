@@ -38,7 +38,11 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [Parameter(Mandatory)][string]$OutDir
+    [Parameter(Mandatory)][string]$OutDir,
+    # The build's AUMID, for the coexistence guard, when it cannot read it
+    # itself (a NativeAOT publish has no Ghostty.Core.dll; aot-fuzz.ps1
+    # passes the sibling Release build's).
+    [string]$AumId = ''
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -49,7 +53,7 @@ Add-Type -AssemblyName System.Drawing
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 clipboard-paste-protection = false
 profile.pwsh.name = PowerShell
@@ -60,8 +64,7 @@ default-profile = pwsh
 # The marker carries BMP CJK and a supplementary-plane emoji: the two
 # halves of the UTF-16 encoding path.
 $marker = 'CJK-FUZZ-日中文🚀'
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -80,8 +83,12 @@ function Shot($Session, [string]$Name) {
 }
 
 try {
-    Assert-NoWintty -Context 'The ime-cjk harness'
-    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The ime-cjk harness'
+    # The paste goes through the real clipboard, which the whole session
+    # shares: a paste in the user's Wintty meanwhile would get the payload,
+    # and clipboard history keeps it. So it refuses beside another one.
+    Assert-WinttySessionStateFree -ExePath $ExePath -Context 'The ime-cjk harness' -What 'the clipboard'
+    $session = Start-SeamSession -ExePath $ExePath -AumId $AumId -ConfigText $Config
     $hwnd64 = [int64]$session.Hwnd64
     Write-Host "hwnd=$hwnd64 pid=$($session.Proc.Id)"
     Shot $session '00-launch'
@@ -182,7 +189,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

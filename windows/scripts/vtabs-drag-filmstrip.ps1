@@ -156,11 +156,10 @@ function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0, [i
 
 # ---- run -------------------------------------------------------------------
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 windows-settings-ui = true
 vertical-tabs = true
@@ -175,7 +174,10 @@ $script:FatalWasProduct = $null
 
 # Above the try, so the refusal survives a finally that would otherwise bind
 # a null stamp to a mandatory parameter.
-Assert-NoWintty -Context 'The drag filmstrip'
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The drag filmstrip'
+# Its oracles are frame counts and a 500ms window, so a neighbour's load is
+# worth a line.
+Write-WinttyTimingNeighbourWarning -ExePath $ExePath -Context 'The drag filmstrip'
 
 # The machine's animation gate, read directly: this oracle measures the
 # glide, and a machine running with animations off would make every timing
@@ -280,6 +282,9 @@ try {
             [void](Invoke-SeamCommand $session @{ op = 'select'; index = 2 })
             Start-Sleep -Milliseconds 500
         }
+        # The band is measured in screen pixels, so the window is raised and
+        # the crop hit-tested before every grab: a covered frame is a miss.
+        Assert-WinttyCaptureClear -Hwnd64 $script:MainHwnd64 -X $cropX -Y $cropY -Width $cropW -Height $cropH -What 'the calibration crop' -Raise
         $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
         $g = [System.Drawing.Graphics]::FromImage($full)
         $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
@@ -323,6 +328,7 @@ try {
     $sendAt = $sw.ElapsedMilliseconds
     Send-SeamCommand $session @{ op = 'drag-paced'; from = 1; to = 2; tickMs = $TickMs }
     for ($i = 0; $i -lt $MaxFrames; $i++) {
+        Assert-WinttyCaptureClear -Hwnd64 $script:MainHwnd64 -X $cropX -Y $cropY -Width $cropW -Height $cropH -What "film frame $i"
         $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
         $g = [System.Drawing.Graphics]::FromImage($full)
         $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
@@ -472,7 +478,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 if ($crashGrew) {
     Write-Host 'PRODUCT_FAIL: crash.log grew during the run' -ForegroundColor Red
     exit 2

@@ -73,7 +73,7 @@ function Invoke-Chord($Session, [int]$Key, [switch]$Plain) {
 }
 
 try {
-    Assert-NoWintty -Context 'The switcher capture'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The switcher capture'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     $hwnd64 = [int64]$session.Hwnd64
     Start-Sleep -Milliseconds 500

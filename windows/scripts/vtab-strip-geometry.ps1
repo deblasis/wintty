@@ -117,7 +117,7 @@ $ChipSize = 40
 # whole of XDG_CONFIG_HOME, so nothing from the machine's own config
 # reaches the window under test.
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = true
 vertical-tabs-pinned = false
@@ -127,7 +127,6 @@ theme = Catppuccin Mocha
 '@
 
 $names = @('geom-1', 'geom-2', 'geom-3', 'geom-4', 'geom-5')
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Findings = [System.Collections.Generic.List[object]]::new()
 $script:Checks = [System.Collections.Generic.List[object]]::new()
 
@@ -411,11 +410,11 @@ if (-not (Test-Path $ExePath)) {
     exit 1
 }
 
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 $session = $null
 $harnessError = ''
 try {
-    Assert-NoWintty -Context 'The vertical strip geometry harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The vertical strip geometry harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
 
     # TWO pins, because one cannot show a band: whether pins share a row
@@ -530,7 +529,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

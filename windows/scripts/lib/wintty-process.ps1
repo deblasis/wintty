@@ -7,43 +7,53 @@
     builds from other worktrees and the window the developer is working in,
     which is not a harness's call to make.
 
-    The replacement is two rules:
+    The replacement is three rules:
 
-      1. Refuse to start while any Wintty is running. Say which pids, so the
-         developer can close them. This is not about the single-instance
-         mutex - that is keyed on a hash of the exe path, so another
-         worktree's build would not collide. It is that state is shared:
-         crash.log lives under %LOCALAPPDATA% per user rather than per exe
-         path, and a harness that reads it cannot tell whose crash it saw.
+      1. Refuse to start while a Wintty is running from the exe under test
+         (Assert-NoWinttyFrom). Say which pids, so the developer can close
+         them. Such an instance is the one thing a run cannot work around:
+         dotnet build cannot overwrite its locked exe, and a sweep by exe
+         path cannot tell it from the run's own launches.
 
-      2. Clean up only what the run started, identified by start time and,
+      2. Run beside any other Wintty only through the coexistence guard
+         below (Test-WinttyCoexistence / Assert-WinttyCoexistence): a launch
+         may run beside instances somebody else started when, and only
+         when, it proves before launching that it can neither reach them
+         nor share any state with them. See the guard's own header for the
+         list. Start-SeamSession runs it before every launch.
+
+      3. Clean up only what the run started, identified by start time and,
          where the caller knows it, image path. Anything that cannot be
          positively identified is left alone: an unreadable path or start
          time is a reason to skip a process, never a reason to kill it.
 
-    Rule 1 has one sanctioned exception, the coexistence guard below
-    (Test-WinttyCoexistence / Assert-WinttyCoexistence): a launch may run
-    beside Wintty instances somebody else started when, and only when, it
-    proves before launching that it can neither reach them nor share any
-    state with them. See the guard's own header for the list.
+    Assert-NoWintty, the old blanket refusal, is left for a harness that
+    cannot share the machine with any Wintty however it isolates itself,
+    and it says why.
 
     Dot-source it:
 
         . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 #>
 
-# Throws if any Wintty is running. Call once, before the first launch.
+# Throws if any Wintty is running. Only for a harness with a reason no
+# isolation removes; -Reason says it, and the refusal quotes it. The default
+# is the reason that holds for a launch that does not isolate its state.
+# Call once, before the first launch.
 function Assert-NoWintty {
-    param([string]$Context = 'This harness')
+    param(
+        [string]$Context = 'This harness',
+        [string]$Reason = ('it shares crash.log and the state directory with them, so their ' +
+                           'crashes would be read as belonging to this run')
+    )
 
     $running = @(Get-Process Wintty -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return }
 
     $pids = ($running | ForEach-Object { $_.Id }) -join ', '
     throw ("close the running Wintty first (pid: $pids). " +
-           "$Context shares crash.log and the state directory with it, so " +
-           'its crashes would be read as belonging to this run, and this ' +
-           'harness will not kill instances it did not start.')
+           "$Context cannot run beside any Wintty: $Reason. " +
+           'It will not stop instances it did not start.')
 }
 
 # The timestamp to hand to Stop-WinttyStartedAfter. Take it immediately
@@ -157,11 +167,41 @@ function Get-WinttyExeSpellings([Parameter(Mandatory)][string]$Path) {
 
 # Whether $Path is $Root or lies under it. Both are the run's own (its temp
 # roots, the temp directory), so both are expanded before the compare.
-function Test-WinttyPathUnder([string]$Path, [string]$Root) {
+#
+# Lexically under is not enough: a junction or symlink under the root that
+# points outside it passes the string compare while every write through it
+# lands elsewhere (the real per-user state dir, say). So every segment that
+# exists below the root is also checked for a reparse point, and one there
+# is a no. Segments that do not exist yet cannot redirect anything.
+#
+# A segment whose attributes cannot be read (access denied, a sharing
+# violation, anything but "not there") is a no as well: what cannot be
+# shown not to redirect is treated as redirecting.
+function Test-WinttyPathUnder(
+    [string]$Path,
+    [string]$Root,
+    # How a segment's attributes are read; [IO.File]::GetAttributes when
+    # omitted. A seam for the tests, which need a read that fails.
+    [scriptblock]$ReadAttributes = { param($p) [System.IO.File]::GetAttributes($p) }
+) {
     if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
-    $p = ConvertTo-WinttyPathKey ([WinttyLongPath]::Of([System.IO.Path]::GetFullPath($Path)))
+    $pFull = [WinttyLongPath]::Of([System.IO.Path]::GetFullPath($Path))
+    $p = ConvertTo-WinttyPathKey $pFull
     $r = ConvertTo-WinttyPathKey ([WinttyLongPath]::Of([System.IO.Path]::GetFullPath($Root)))
-    return $p -eq $r -or $p.StartsWith($r + '\', [StringComparison]::Ordinal)
+    if (-not ($p -eq $r -or $p.StartsWith($r + '\', [StringComparison]::Ordinal))) { return $false }
+    $seg = $pFull.TrimEnd('\')
+    while ($seg -and (ConvertTo-WinttyPathKey $seg).Length -gt $r.Length) {
+        try { $attrs = & $ReadAttributes $seg }
+        catch {
+            $inner = $_.Exception
+            while ($inner -is [System.Management.Automation.MethodInvocationException] -and $inner.InnerException) { $inner = $inner.InnerException }
+            if ($inner -is [System.IO.FileNotFoundException] -or $inner -is [System.IO.DirectoryNotFoundException]) { $attrs = $null }
+            else { return $false }
+        }
+        if ($null -ne $attrs -and ($attrs -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+        $seg = [System.IO.Path]::GetDirectoryName($seg)
+    }
+    return $true
 }
 
 # ---- the staged config, read the way the app reads it -------------------------
@@ -257,8 +297,29 @@ function Get-WinttyToastRegistrations {
 # there is no such assembly (a single-file or AOT publish); the caller then
 # has to say which AUMID it launches.
 function Get-WinttyBuildAumid([Parameter(Mandatory)][string]$ExePath) {
-    $dll = Join-Path (Split-Path -Parent ([System.IO.Path]::GetFullPath($ExePath))) 'Ghostty.Core.dll'
-    if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { return $null }
+    return Get-WinttyBuildConstant -ExePath $ExePath -Namespace 'Ghostty.Core.Version' -Type 'BuildInfo' -Field 'AumId'
+}
+
+# The folder name the build keeps its per-user state under
+# (Ghostty.Core.AppIdentity.StateDirName), read the same way. $null when
+# there is no Ghostty.Core.dll beside the exe.
+function Get-WinttyBuildStateDirName([Parameter(Mandatory)][string]$ExePath) {
+    return Get-WinttyBuildConstant -ExePath $ExePath -Namespace 'Ghostty.Core' -Type 'AppIdentity' -Field 'StateDirName'
+}
+
+# A string constant out of the metadata of the Ghostty.Core.dll beside the
+# exe; nothing is loaded or run.
+function Get-WinttyBuildConstant {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [Parameter(Mandatory)][string]$Namespace,
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][string]$Field
+    )
+    # String work and one existence probe: Join-Path and Split-Path would
+    # throw on a drive that does not exist, and a throw is not an answer.
+    $dll = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ExePath)), 'Ghostty.Core.dll')
+    if (-not [System.IO.File]::Exists($dll)) { return $null }
     $stream = [System.IO.File]::OpenRead($dll)
     try {
         $pe = [System.Reflection.PortableExecutable.PEReader]::new($stream)
@@ -266,13 +327,13 @@ function Get-WinttyBuildAumid([Parameter(Mandatory)][string]$ExePath) {
             if (-not $pe.HasMetadata) { return $null }
             $md = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
             foreach ($typeHandle in $md.TypeDefinitions) {
-                $type = $md.GetTypeDefinition($typeHandle)
-                if ($md.GetString($type.Name) -cne 'BuildInfo' -or
-                    $md.GetString($type.Namespace) -cne 'Ghostty.Core.Version') { continue }
-                foreach ($fieldHandle in $type.GetFields()) {
-                    $field = $md.GetFieldDefinition($fieldHandle)
-                    if ($md.GetString($field.Name) -cne 'AumId') { continue }
-                    $constantHandle = $field.GetDefaultValue()
+                $typeDef = $md.GetTypeDefinition($typeHandle)
+                if ($md.GetString($typeDef.Name) -cne $Type -or
+                    $md.GetString($typeDef.Namespace) -cne $Namespace) { continue }
+                foreach ($fieldHandle in $typeDef.GetFields()) {
+                    $fieldDef = $md.GetFieldDefinition($fieldHandle)
+                    if ($md.GetString($fieldDef.Name) -cne $Field) { continue }
+                    $constantHandle = $fieldDef.GetDefaultValue()
                     if ($constantHandle.IsNil) { return $null }
                     $blob = $md.GetBlobReader($md.GetConstant($constantHandle).Value)
                     return $blob.ReadUTF16($blob.Length)
@@ -302,6 +363,11 @@ function Get-WinttyBuildAumid([Parameter(Mandatory)][string]$ExePath) {
         temp;
       - state: WINTTY_STATE_BASE set and under the temp directory, so logs,
         crash.log, session and window state are the run's own;
+      - native state: XDG_STATE_HOME and XDG_CACHE_HOME set and under the
+        temp directory. WINTTY_STATE_BASE moves the shell's tree only;
+        libghostty resolves its crash envelopes, sentry bookkeeping and
+        caches through these two, and falls back to %LOCALAPPDATA%, which
+        the installed app shares;
       - single instance: every windows-single-instance line of the staged
         config is false, so the launch neither forwards to nor takes
         forwards from anybody else's instance (the app acts on the first
@@ -424,6 +490,15 @@ function Test-WinttyCoexistence {
     elseif (-not (Test-WinttyPathUnder $stateBase $TempRoot)) {
         $why.Add("WINTTY_STATE_BASE '$stateBase' is not under the temp directory")
     }
+    foreach ($name in 'XDG_STATE_HOME', 'XDG_CACHE_HOME') {
+        $value = & $read $name
+        if (-not $value) {
+            $why.Add("$name is not set, so libghostty's native state (crash envelopes, sentry, caches) would land in the per-user %LOCALAPPDATA% tree")
+        }
+        elseif (-not (Test-WinttyPathUnder $value $TempRoot)) {
+            $why.Add("$name '$value' is not under the temp directory")
+        }
+    }
 
     # Every line, not the one the app happens to act on: the election reads
     # the first, and a guard reading any single line proves nothing about
@@ -455,7 +530,16 @@ function Test-WinttyCoexistence {
     }
 
     if ($foreign.Count -gt 0) {
-        if (-not $AumId) { $AumId = Get-WinttyBuildAumid $ExePath }
+        # The build's own AUMID wins: a passed one only fills in where the
+        # exe's cannot be read (a NativeAOT publish), and one that disagrees
+        # with what the build carries is a caller that got the wrong build.
+        $ownAumId = Get-WinttyBuildAumid $ExePath
+        if ($ownAumId) {
+            if ($AumId -and $AumId -ine $ownAumId) {
+                $why.Add("the AUMID passed for this build ($AumId) is not the one its Ghostty.Core.dll carries ($ownAumId)")
+            }
+            $AumId = $ownAumId
+        }
         if (-not $AumId) {
             $why.Add("the AUMID this build runs as cannot be read (no Ghostty.Core.dll beside $ExePath), so it cannot be compared with the running instances'; pass it explicitly")
         }
@@ -498,19 +582,255 @@ function Assert-WinttyCoexistence {
         'Nothing was launched and nothing was stopped.')
 }
 
-# The narrow up-front check for a harness that isolates itself: refuse only
-# an instance of THIS build, which shares the exe with the run and which a
-# sweep by exe path could not tell apart from the run's own. Whether the
-# launch may go ahead beside anything else is Start-SeamSession's call,
-# through the guard above.
+# The up-front check every harness takes: refuse only an instance of THIS
+# build, which shares the exe with the run and which a sweep by exe path
+# could not tell apart from the run's own. Whether the launch may go ahead
+# beside anything else is the guard's call, made right before the launch
+# (Start-SeamSession does it).
 function Assert-NoWinttyFrom {
     param(
         [Parameter(Mandatory)][string]$ExePath,
-        [string]$Context = 'This harness'
+        [string]$Context = 'This harness',
+        # The running instances ({ Id, Path }); the live process table when
+        # omitted. A seam for the tests.
+        [object[]]$Instances
     )
+    # Resolved against the PowerShell location, as Start-SeamSession's
+    # Resolve-Path does: GetFullPath alone would use the process directory,
+    # which a harness that changed location no longer shares.
+    $ExePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExePath)
+    if (-not $PSBoundParameters.ContainsKey('Instances')) { $Instances = Get-WinttyInstances }
     $mine = Get-WinttyExeSpellings $ExePath
-    $own = @(Get-WinttyInstances | Where-Object { $_.Path -and $mine -contains (ConvertTo-WinttyPathKey $_.Path) })
+    $own = @($Instances | Where-Object { $_.Path -and $mine -contains (ConvertTo-WinttyPathKey $_.Path) })
     if ($own.Count -eq 0) { return }
     throw ("close the Wintty running from $ExePath first (pid: $(($own | ForEach-Object { $_.Id }) -join ', ')). " +
         "$Context launches that exe itself, and only ever stops what it started.")
+}
+
+# For a harness whose verdict rests on wall-clock budgets or frame timing.
+# Another Wintty rendering beside the run competes for the same CPU, GPU and
+# compositor and can push a figure over its budget. That skews a number
+# without crossing any state, so it warns rather than refuses, and names
+# the pids so a missed budget can be read against them.
+function Write-WinttyTimingNeighbourWarning {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [string]$Context = 'This harness',
+        # The running instances ({ Id, Path }); the live process table when
+        # omitted. A seam for the tests.
+        [object[]]$Instances
+    )
+    $others = @(Get-WinttyOtherInstances -ExePath $ExePath -Instances $(if ($PSBoundParameters.ContainsKey('Instances')) { $Instances } else { Get-WinttyInstances }))
+    if ($others.Count -eq 0) { return }
+    Write-Warning ("$Context measures timings, and Wintty pid(s) $(($others | ForEach-Object { $_.Id }) -join ', ') " +
+        'run beside it: a budget missed here may be their load rather than the build''s. Close them for a clean figure.')
+}
+
+# The running instances that are not from $ExePath (resolved against the
+# PowerShell location). An instance whose path cannot be read counts as
+# another one: it cannot be shown to be this build's.
+function Get-WinttyOtherInstances {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [AllowEmptyCollection()][object[]]$Instances = @()
+    )
+    $ExePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExePath)
+    $mine = Get-WinttyExeSpellings $ExePath
+    return @($Instances | Where-Object { $null -ne $_ -and -not ($_.Path -and $mine -contains (ConvertTo-WinttyPathKey $_.Path)) })
+}
+
+# ---- owned state trees --------------------------------------------------------
+
+# A state tree a run hands to its launches, and may hand to a child script,
+# is marked as that run's: a marker file inside it holds a random token, and
+# the token travels in WINTTY_STATE_BASE_TOKEN beside WINTTY_STATE_BASE.
+# Start-SeamSession adopts a caller's tree only when the two agree. A
+# WINTTY_STATE_BASE alone proves nothing: every pane of a harness-launched
+# Wintty inherits the one its app runs on, so a harness started from such a
+# shell would otherwise adopt a live instance's tree and share its
+# crash.log, session and window state. The token is kept out of the app's
+# environment for exactly that reason (Start-SeamSession strips it).
+function Get-WinttyStateOwnerMarkerName { return '.wintty-state-owner' }
+
+# Mints a fresh owned tree under the temp directory, or under $Under when
+# given, and returns { Path, Token }. It sets nothing; the caller exports
+# both variables when it wants a child to adopt the tree.
+function New-WinttyOwnedStateBase {
+    param([string]$Under = [System.IO.Path]::GetTempPath(), [string]$Prefix = 'wintty-state-')
+    $bytes = [byte[]]::new(16)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $token = [System.Convert]::ToHexString($bytes).ToLowerInvariant()
+    $path = Join-Path $Under ($Prefix + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $path | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $path (Get-WinttyStateOwnerMarkerName)), $token)
+    return [pscustomobject]@{ Path = $path; Token = $token }
+}
+
+# Whether $Path is an owned tree under the temp directory whose marker holds
+# $Token. A missing, empty or unreadable marker is a no.
+function Test-WinttyOwnedStateBase([string]$Path, [string]$Token, [string]$TempRoot = [System.IO.Path]::GetTempPath()) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Token)) { return $false }
+    if (-not (Test-WinttyPathUnder $Path $TempRoot)) { return $false }
+    $marker = Join-Path $Path (Get-WinttyStateOwnerMarkerName)
+    $held = try { [System.IO.File]::ReadAllText($marker).Trim() } catch { '' }
+    return $held.Length -gt 0 -and $held -ceq $Token.Trim()
+}
+
+# ---- a verdict before the expensive part ---------------------------------------
+
+# The coexistence verdict a launch of $ExePath would get, computed before a
+# harness builds or publishes anything, so a refusal costs seconds rather
+# than a build. The environment is a synthetic, fully isolated one (paths
+# under temp that are not created): what is judged is everything the
+# harness's own staging cannot change, namely the exe, the build's AUMID
+# and the running instances, plus the config text when one is given. The
+# real launch still goes through the guard.
+function Test-WinttyCoexistencePreflight {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [string]$AumId,
+        [AllowEmptyString()][string]$ConfigText = (Add-WinttyHarnessConfigDefaults "windows-single-instance = false`n"),
+        [object[]]$Instances,
+        [System.Collections.IDictionary]$Registrations
+    )
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('wintty-preflight-' + [guid]::NewGuid().ToString('N'))
+    $check = @{
+        ExePath     = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExePath)
+        ConfigText  = $ConfigText
+        Environment = @{
+            WINTTY_TEST_CONFIG = '1'
+            XDG_CONFIG_HOME    = $root
+            WINTTY_STATE_BASE  = (Join-Path $root 'state')
+            XDG_STATE_HOME     = (Join-Path $root 'xdg-state')
+            XDG_CACHE_HOME     = (Join-Path $root 'xdg-cache')
+        }
+    }
+    if ($AumId) { $check.AumId = $AumId }
+    if ($PSBoundParameters.ContainsKey('Instances')) { $check.Instances = $Instances }
+    if ($PSBoundParameters.ContainsKey('Registrations')) { $check.Registrations = $Registrations }
+    return Test-WinttyCoexistence @check
+}
+
+# ---- session-wide settings ------------------------------------------------------
+
+# A harness that changes something the whole user session shares (system
+# parameters such as animations or High Contrast, the light/dark theme and
+# accent keys, the wallpaper, the clipboard, or every other app's windows)
+# changes it under the user's Wintty too, and every other app. Isolation
+# cannot move any of these, so the only safe place for such a change is a
+# desktop with no other Wintty on it. Both helpers refuse beside one, with
+# the reason; the gate scan in SeamClient.Tests.ps1 fails a harness that
+# writes such state without going through them.
+
+# Refuses (throws) when a Wintty other than $ExePath's is running. For a
+# harness whose change spans its whole run and whose own finally restores
+# it; call it before the first change.
+function Assert-WinttySessionStateFree {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        # What is changed, for the message: 'the desktop wallpaper'.
+        [Parameter(Mandatory)][string]$What,
+        [string]$Context = 'This harness',
+        [object[]]$Instances
+    )
+    $others = @(Get-WinttyOtherInstances -ExePath $ExePath -Instances $(if ($PSBoundParameters.ContainsKey('Instances')) { $Instances } else { Get-WinttyInstances }))
+    if ($others.Count -eq 0) { return }
+    throw ("HARNESS: skipped: $Context changes $What, which the whole session shares, and Wintty pid(s) " +
+        "$(($others | ForEach-Object { $_.Id }) -join ', ') run beside it; close them to run it. Nothing was changed.")
+}
+
+# The scoped form: refuses like the above, then runs $Change and always
+# runs $Restore after it, in a finally. -SkipBeside turns the refusal into a
+# printed skip that returns $false, for a change the run can do without.
+# Returns $true when $Change ran.
+function Invoke-WinttySessionStateChange {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][scriptblock]$Change,
+        [scriptblock]$Restore,
+        [string]$Context = 'This harness',
+        [switch]$SkipBeside,
+        [object[]]$Instances
+    )
+    $check = @{ ExePath = $ExePath; What = $What; Context = $Context }
+    if ($PSBoundParameters.ContainsKey('Instances')) { $check.Instances = $Instances }
+    try { Assert-WinttySessionStateFree @check }
+    catch {
+        if (-not $SkipBeside) { throw }
+        Write-Host ($_.Exception.Message -replace '^HARNESS: skipped: ', 'skipped: ')
+        return $false
+    }
+    try { $null = & $Change }
+    finally { if ($Restore) { $null = & $Restore } }
+    return $true
+}
+
+# ---- screen captures ---------------------------------------------------------------
+
+if (-not ('WinttyCaptureCheck' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class WinttyCaptureCheck {
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    public static long RootAt(int x, int y) {
+        var p = new POINT { X = x, Y = y };
+        var h = WindowFromPoint(p);
+        return h == IntPtr.Zero ? 0 : GetAncestor(h, 2).ToInt64();
+    }
+    public static uint PidOf(long hwnd) { uint pid; GetWindowThreadProcessId(new IntPtr(hwnd), out pid); return pid; }
+    public static string TitleOf(long hwnd) { var sb = new StringBuilder(256); GetWindowText(new IntPtr(hwnd), sb, 256); return sb.ToString(); }
+    // Topmost without activation: above whatever the desktop parks over it,
+    // without taking the keyboard from anybody.
+    public static void Raise(long hwnd) {
+        SetWindowPos(new IntPtr(hwnd), new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+    }
+}
+'@
+}
+
+# The gate in front of every screen-pixel oracle. A capture of the screen
+# reads whatever is on top, and beside another Wintty the fuzz suite no
+# longer minimizes the developer's windows, so a window of theirs over the
+# app under test would be measured as the app. -Raise first puts the
+# harness window topmost without activating it; then the four corners and
+# the centre of the sampled rect (screen coordinates) must all belong to a
+# window of its process (the app's own popups and quick terminal count).
+# One that does not throws a HARVEST_MISS: the sample is not taken, and the
+# harness reports could-not-run, never a finding or a pass.
+function Assert-WinttyCaptureClear {
+    param(
+        [Parameter(Mandatory)][int64]$Hwnd64,
+        [Parameter(Mandatory)][int]$X,
+        [Parameter(Mandatory)][int]$Y,
+        [Parameter(Mandatory)][int]$Width,
+        [Parameter(Mandatory)][int]$Height,
+        [string]$What = 'the capture',
+        [switch]$Raise,
+        # Where a point's root window is read; the live desktop when omitted.
+        # A seam for the tests.
+        [scriptblock]$RootAt = { param($px, $py) [WinttyCaptureCheck]::RootAt($px, $py) }
+    )
+    if ($Raise) { [WinttyCaptureCheck]::Raise($Hwnd64) }
+    if ($Width -lt 1 -or $Height -lt 1) { throw "HARVEST_MISS: ${What}: the sample rect is empty" }
+    $right = $X + [Math]::Max(0, $Width - 2)
+    $bottom = $Y + [Math]::Max(0, $Height - 2)
+    $points = @(@(($X + 1), ($Y + 1)), @($right, ($Y + 1)), @(($X + 1), $bottom), @($right, $bottom),
+        @(($X + [int]($Width / 2)), ($Y + [int]($Height / 2))))
+    $ownPid = [WinttyCaptureCheck]::PidOf($Hwnd64)
+    foreach ($pt in $points) {
+        $root = [int64](& $RootAt $pt[0] $pt[1])
+        if ($root -ne $Hwnd64 -and ($root -eq 0 -or $ownPid -eq 0 -or [WinttyCaptureCheck]::PidOf($root) -ne $ownPid)) {
+            $who = if ($root -ne 0) { "pid $([WinttyCaptureCheck]::PidOf($root)), '$([WinttyCaptureCheck]::TitleOf($root))'" } else { 'nothing' }
+            throw ("HARVEST_MISS: ${What}: the point $($pt[0]),$($pt[1]) of the sampled rect belongs to another window ($who), " +
+                'so the sample would measure that window; it is not taken')
+        }
+    }
 }

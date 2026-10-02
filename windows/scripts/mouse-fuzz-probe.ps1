@@ -41,11 +41,11 @@ Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
+windows-single-instance = false
 window-save-state = never
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $script:Steps = [System.Collections.Generic.List[string]]::new()
@@ -87,7 +87,7 @@ function New-TabByButton($Session, [string]$Name) {
 }
 
 try {
-    Assert-NoWintty -Context 'The probe harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The probe harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     Write-Host "hwnd=$($session.Hwnd64) pid=$($session.Proc.Id)"
     [SeamWin]::PlaceOnTop($session.Hwnd64)
@@ -147,7 +147,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
 
 [ordered]@{

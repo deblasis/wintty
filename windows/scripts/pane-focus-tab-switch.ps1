@@ -92,7 +92,7 @@ public static class PaneProbe {
 # else is left at stock: the point is to measure the product's appearance,
 # not the owner's config.
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = true
 window-theme = wintty
@@ -107,7 +107,6 @@ $LeafSampleInset = 10   # px, clears the pane border and the divider
 $DimMargin       = 8    # luma points the dimmed leaf must fall behind by
 $CursorMinRed    = 90   # px; calibrated below, see the header of the run
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:MainHwnd64 = 0
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 
@@ -116,6 +115,7 @@ $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 function Get-WindowShot([int64]$Hwnd64, [string]$SavePath) {
     $rc = [SeamWin]::RectOf($Hwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: the window has no usable rect' }
+    Assert-WinttyCaptureClear -Hwnd64 $Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What 'the window shot' -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
@@ -220,12 +220,12 @@ function Assert-Leaves($State, [int]$want) {
 }
 
 function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
-    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $crashMark = Get-SeamSessionMark
     $s = $null
     $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = '' }
     Write-Host "=== scenario $Name ==="
     try {
-        Assert-NoWintty -Context "The pane focus scenario '$Name'"
+        Assert-NoWinttyFrom -ExePath $ExePath -Context "The pane focus scenario '$Name'"
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $Config
         $script:MainHwnd64 = $s.Hwnd64
         & $Body $s
@@ -245,7 +245,7 @@ function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
     } finally {
         if ($null -ne $s) { Stop-SeamSession $s }
     }
-    if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    if ((Test-SeamCrashLogWritten -Since $crashMark)) {
         $entry.ok = $false
         $entry.class = 'product'
         $entry.error = ($entry.error + ' crash.log grew during the scenario').Trim()

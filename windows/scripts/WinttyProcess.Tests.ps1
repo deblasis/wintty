@@ -37,6 +37,14 @@ function Assert-True($cond, $msg) {
 
 $script:lib = Join-Path $PSScriptRoot 'lib/wintty-process.ps1'
 
+# A build whose Ghostty.Core.dll carries an AUMID, for the cases where the
+# build's own AUMID and a passed one meet. Compiled once, never loaded.
+$script:aumFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-aum-fixture-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path (Join-Path $script:aumFixtureRoot 'app') | Out-Null
+$script:aumFixtureExe = Join-Path $script:aumFixtureRoot 'app\Wintty.exe'
+Add-Type -OutputAssembly (Join-Path $script:aumFixtureRoot 'app\Ghostty.Core.dll') -OutputType Library -TypeDefinition @"
+namespace Ghostty.Core.Version { public static class BuildInfo { public const string AumId = "com.example.built"; } }
+"@
 # ---- layer 1: decisions -------------------------------------------------------
 
 # Runs every decision case against the library at $LibPath and returns the
@@ -47,6 +55,13 @@ function Invoke-DecisionCases([string]$LibPath) {
         param($lib)
         . $lib
         $failed = [System.Collections.Generic.List[string]]::new()
+        foreach ($name in 'New-WinttyOwnedStateBase', 'Test-WinttyOwnedStateBase', 'Test-WinttyCoexistencePreflight', 'Write-WinttyTimingNeighbourWarning',
+                'Assert-WinttySessionStateFree', 'Invoke-WinttySessionStateChange', 'Assert-WinttyCaptureClear') {
+            if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+                $failed.Add("$name does not exist")
+                return , $failed
+            }
+        }
         $temp = [System.IO.Path]::GetTempPath()
         $exe = 'C:\builds\mine\out\Wintty.exe'
         $userPath = 'C:\Users\someone\AppData\Local\Vendor\Wintty.User\current\Wintty.exe'
@@ -55,6 +70,8 @@ function Invoke-DecisionCases([string]$LibPath) {
             WINTTY_TEST_CONFIG = '1'
             XDG_CONFIG_HOME    = (Join-Path $temp 'wintty-seam-case')
             WINTTY_STATE_BASE  = (Join-Path $temp 'wintty-seam-case\state')
+            XDG_STATE_HOME     = (Join-Path $temp 'wintty-seam-case\state\xdg-state')
+            XDG_CACHE_HOME     = (Join-Path $temp 'wintty-seam-case\state\xdg-cache')
         }
         $chord = Get-WinttyHarnessQuickTerminalKey
         $isolatedConfig = "window-save-state = never`nwindows-single-instance = false`nquick-terminal-key = $chord`n"
@@ -108,6 +125,55 @@ function Invoke-DecisionCases([string]$LibPath) {
         Case 'registration names another exe' $false @{
             Registrations = @{ 'Vendor.Wintty.User' = 'C:\elsewhere\Wintty.exe' } }
         Case 'build AUMID unknown (no Ghostty.Core.dll)' $false @{ AumId = '' }
+        # The build's own AUMID wins; a passed one only fills in where the
+        # build's cannot be read, and one that contradicts it refuses.
+        Case 'AUMID read off the build itself' $true @{ ExePath = $script:aumFixtureExe; AumId = '' }
+        Case 'passed AUMID agrees with the build''s own' $true @{ ExePath = $script:aumFixtureExe; AumId = 'COM.example.built' }
+        Case 'passed AUMID contradicts the build''s own' $false @{ ExePath = $script:aumFixtureExe; AumId = 'com.example.mine' }
+        Case 'passed AUMID cannot hide a same-edition build' $false @{
+            ExePath = $script:aumFixtureExe; AumId = 'com.example.mine'; Registrations = @{ 'com.example.built' = $userPath } }
+
+        # A segment whose attributes cannot be read fails closed; one that is
+        # not there yet is skipped.
+        $denied = { param($p) throw [System.UnauthorizedAccessException]::new('denied') }
+        $absent = { param($p) throw [System.IO.FileNotFoundException]::new('absent') }
+        if (Test-WinttyPathUnder (Join-Path $temp 'wintty-attr-case\x') $temp -ReadAttributes $denied) {
+            $failed.Add('a segment whose attributes cannot be read counts as under temp')
+        }
+        if (-not (Test-WinttyPathUnder (Join-Path $temp 'wintty-attr-case\x') $temp -ReadAttributes $absent)) {
+            $failed.Add('a segment that does not exist yet stops a path counting as under temp')
+        }
+
+        # The capture gate: every probed point of the sampled rect must be the
+        # harness window's, and one that is not refuses the sample.
+        $fakeHwnd = [int64]0x7F00AA
+        $threw = $false
+        try { Assert-WinttyCaptureClear -Hwnd64 $fakeHwnd -X 10 -Y 20 -Width 300 -Height 200 -RootAt { param($x, $y) $fakeHwnd } } catch { $threw = $true }
+        if ($threw) { $failed.Add('the capture gate refuses a rect its own window covers entirely') }
+        $threw = $false
+        try {
+            Assert-WinttyCaptureClear -Hwnd64 $fakeHwnd -X 10 -Y 20 -Width 300 -Height 200 `
+                -RootAt { param($x, $y) if ($x -eq 160 -and $y -eq 120) { [int64]0x7F00BB } else { $fakeHwnd } }
+        }
+        catch { $threw = "$_" -match '^HARVEST_MISS' }
+        if (-not $threw) { $failed.Add('the capture gate takes a sample whose centre another window covers') }
+        # The session-state helpers: refuse beside another Wintty before
+        # anything changes, skip when asked, and always restore once the
+        # change ran.
+        $ran = @{ change = 0; restore = 0 }
+        $threw = $false
+        try { Assert-WinttySessionStateFree -ExePath $exe -What 'x' -Instances @($user) } catch { $threw = "$_" -match 'skipped' }
+        if (-not $threw) { $failed.Add('Assert-WinttySessionStateFree lets a change go ahead beside another Wintty') }
+        $threw = $false
+        try { Assert-WinttySessionStateFree -ExePath $exe -What 'x' -Instances @([pscustomobject]@{ Id = 7; Path = $exe }) } catch { $threw = $true }
+        if ($threw) { $failed.Add('Assert-WinttySessionStateFree refuses over the run''s own exe') }
+        $threw = $false
+        try { [void](Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @($user) -Change { $ran.change++ } -Restore { $ran.restore++ }) } catch { $threw = $true }
+        if (-not $threw -or $ran.change -ne 0 -or $ran.restore -ne 0) { $failed.Add('Invoke-WinttySessionStateChange ran a change beside another Wintty') }
+        $r = Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @($user) -SkipBeside -Change { $ran.change++ } -Restore { $ran.restore++ }
+        if ($r -ne $false -or $ran.change -ne 0) { $failed.Add('-SkipBeside did not skip the change beside another Wintty') }
+        try { [void](Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @() -Change { $ran.change++; throw 'mid-change' } -Restore { $ran.restore++ }) } catch { }
+        if ($ran.change -ne 1 -or $ran.restore -ne 1) { $failed.Add('Invoke-WinttySessionStateChange did not restore after a change that threw') }
         Case 'an instance of this exe is running' $false @{
             Instances = @([pscustomobject]@{ Id = 7; Path = $exe }) }
         Case 'an instance of this exe, other spelling' $false @{
@@ -174,6 +240,105 @@ function Invoke-DecisionCases([string]$LibPath) {
             Environment = (EnvWith @{ XDG_CONFIG_HOME = (Join-Path $tempSibling 'cfg') }) }
         Case 'state base in a sibling of temp' $false @{
             Environment = (EnvWith @{ WINTTY_STATE_BASE = (Join-Path $tempSibling 'state') }) }
+        # libghostty's native state: WINTTY_STATE_BASE does not move it.
+        Case 'native state dir missing' $false @{ Environment = (EnvWith @{ XDG_STATE_HOME = $null }) }
+        Case 'native state dir outside temp' $false @{
+            Environment = (EnvWith @{ XDG_STATE_HOME = 'C:\Users\someone\AppData\Local' }) }
+        Case 'native cache dir missing' $false @{ Environment = (EnvWith @{ XDG_CACHE_HOME = $null }) }
+        Case 'native cache dir outside temp' $false @{
+            Environment = (EnvWith @{ XDG_CACHE_HOME = 'C:\Users\someone\AppData\Local' }) }
+
+        # "Under temp" is not lexical: a junction below the root that points
+        # outside it fails. All of this sits under the real temp directory;
+        # a stand-in root inside it plays temp, so nothing is made elsewhere.
+        $jcase = Join-Path $temp "wintty-junction-case-$PID"
+        $fakeTemp = Join-Path $jcase 'temp'
+        $outside = Join-Path $jcase 'outside'
+        New-Item -ItemType Directory -Force -Path $fakeTemp, $outside | Out-Null
+        $junction = Join-Path $fakeTemp 'j'
+        if (-not (Test-Path -LiteralPath $junction)) { New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null }
+        if (Test-WinttyPathUnder (Join-Path $junction 'state') $fakeTemp) {
+            $failed.Add('a path through a junction under the root that points outside it counts as under the root')
+        }
+        if (-not (Test-WinttyPathUnder (Join-Path $fakeTemp 'plain\state') $fakeTemp)) {
+            $failed.Add('a plain path under the root (not yet created) does not count as under it')
+        }
+        $jenv = @{
+            WINTTY_TEST_CONFIG = '1'
+            XDG_CONFIG_HOME    = (Join-Path $fakeTemp 'cfg')
+            WINTTY_STATE_BASE  = (Join-Path $junction 'state')
+            XDG_STATE_HOME     = (Join-Path $fakeTemp 'xs')
+            XDG_CACHE_HOME     = (Join-Path $fakeTemp 'xc')
+        }
+        Case 'state base through a junction out of temp' $false @{ Environment = $jenv; TempRoot = $fakeTemp }
+
+        # Owned state trees: adopted only with the token their marker holds.
+        $ownedTree = New-WinttyOwnedStateBase -Under $fakeTemp
+        if (-not (Test-WinttyOwnedStateBase $ownedTree.Path $ownedTree.Token -TempRoot $fakeTemp)) {
+            $failed.Add('an owned tree with its own token is not recognised')
+        }
+        if (Test-WinttyOwnedStateBase $ownedTree.Path ('0' * 32) -TempRoot $fakeTemp) {
+            $failed.Add('an owned tree is recognised with the wrong token')
+        }
+        if (Test-WinttyOwnedStateBase $ownedTree.Path '' -TempRoot $fakeTemp) {
+            $failed.Add('an owned tree is recognised with no token at all')
+        }
+        $unmarked = Join-Path $fakeTemp 'unmarked'
+        New-Item -ItemType Directory -Force -Path $unmarked | Out-Null
+        if (Test-WinttyOwnedStateBase $unmarked $ownedTree.Token -TempRoot $fakeTemp) {
+            $failed.Add('a tree with no marker is recognised as owned')
+        }
+        $viaJunction = New-WinttyOwnedStateBase -Under $junction
+        if (Test-WinttyOwnedStateBase $viaJunction.Path $viaJunction.Token -TempRoot $fakeTemp) {
+            $failed.Add('an owned tree reached through a junction out of temp is recognised')
+        }
+
+        # The same-exe gate resolves a relative path against the PowerShell
+        # location, never the process directory, which is moved elsewhere
+        # for the case so the two cannot agree by accident.
+        $relRoot = Join-Path $jcase 'rel'
+        New-Item -ItemType Directory -Force -Path $relRoot | Out-Null
+        $relExe = Join-Path $relRoot 'Wintty.exe'
+        $cwd = [Environment]::CurrentDirectory
+        Push-Location -LiteralPath $relRoot
+        [Environment]::CurrentDirectory = $temp
+        try {
+            $threw = $false
+            try { Assert-NoWinttyFrom -ExePath 'Wintty.exe' -Instances @([pscustomobject]@{ Id = 9; Path = $relExe }) } catch { $threw = $true }
+            if (-not $threw) { $failed.Add('Assert-NoWinttyFrom does not resolve a relative exe against the PowerShell location') }
+            $threw = $false
+            try { Assert-NoWinttyFrom -ExePath 'Wintty.exe' -Instances @($user) } catch { $threw = $true }
+            if ($threw) { $failed.Add('Assert-NoWinttyFrom refuses an instance of another exe') }
+        }
+        finally {
+            [Environment]::CurrentDirectory = $cwd
+            Pop-Location
+        }
+
+        # The timing warning names other instances and never the run's own.
+        $w = $null
+        Write-WinttyTimingNeighbourWarning -ExePath $exe -Instances @($user) -WarningVariable w -WarningAction SilentlyContinue
+        if (@($w).Count -ne 1 -or "$($w[0])" -notmatch '\b101\b') {
+            $failed.Add('the timing warning does not name a Wintty from another exe')
+        }
+        $w = $null
+        Write-WinttyTimingNeighbourWarning -ExePath $exe -Instances @([pscustomobject]@{ Id = 7; Path = $exe }) -WarningVariable w -WarningAction SilentlyContinue
+        if (@($w).Count -ne 0) { $failed.Add('the timing warning fires over the run''s own exe') }
+
+        # The preflight judges what staging cannot change, the AUMID included.
+        $pre = @{ ExePath = $exe; Instances = @($user); Registrations = $userRegistrations }
+        try {
+            if ((Test-WinttyCoexistencePreflight @pre).Allowed) {
+                $failed.Add('the preflight allows a build whose AUMID it cannot read')
+            }
+            $v = Test-WinttyCoexistencePreflight @pre -AumId 'com.example.mine'
+            if (-not $v.Allowed) { $failed.Add("the preflight refuses a build handed its AUMID ($($v.Reasons -join ' | '))") }
+            if ((Test-WinttyCoexistencePreflight @pre -AumId 'Vendor.Wintty.User').Allowed) {
+                $failed.Add('the preflight allows a build of the same edition as a running instance')
+            }
+        }
+        catch { $failed.Add("the preflight threw: $($_.Exception.Message)") }
+
         Case 'daemon data dir in a sibling of temp' $false @{
             Environment = (EnvWith @{ WINTTY_SESSIOND_DATA_DIR = (Join-Path $tempSibling 'd') }) }
         Case 'per-user daemon pipe' $false @{
@@ -230,6 +395,10 @@ function Invoke-DecisionCases([string]$LibPath) {
         finally {
             Remove-Item -LiteralPath $sweepRoot -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $vpkRoot -Recurse -Force -ErrorAction SilentlyContinue
+            # The junction goes first, as a link: deleting it never touches
+            # what it points at.
+            if (Test-Path -LiteralPath $junction) { try { [System.IO.Directory]::Delete($junction) } catch { } }
+            Remove-Item -LiteralPath $jcase -Recurse -Force -ErrorAction SilentlyContinue
         }
 
         return , $failed
@@ -257,12 +426,19 @@ Copy-Item (Join-Path $env:SystemRoot 'System32\PING.EXE') $mineImage
 # guard reads, so the AUMID really comes out of assembly metadata here.
 Add-Type -OutputAssembly (Join-Path $mineDir 'Ghostty.Core.dll') -OutputType Library -TypeDefinition @'
 namespace Ghostty.Core.Version { public static class BuildInfo { public const string AumId = "com.example.fixture"; } }
+namespace Ghostty.Core { internal static class AppIdentity { public const string StateDirName = "WinttyFixture"; } }
 '@
+
+Assert-True ((Get-WinttyBuildAumid $mineImage) -ceq 'com.example.fixture') 'the AUMID is read out of the Ghostty.Core.dll beside the exe'
+Assert-True ((Get-WinttyBuildStateDirName $mineImage) -ceq 'WinttyFixture') 'the state dir name is read out of the Ghostty.Core.dll beside the exe'
+Assert-True ($null -eq (Get-WinttyBuildStateDirName $userImage)) 'no Ghostty.Core.dll, no state dir name'
 
 $isolated = @{
     WINTTY_TEST_CONFIG = '1'
     XDG_CONFIG_HOME    = (Join-Path $root 'cfg')
     WINTTY_STATE_BASE  = (Join-Path $root 'state')
+    XDG_STATE_HOME     = (Join-Path $root 'state\xdg-state')
+    XDG_CACHE_HOME     = (Join-Path $root 'state\xdg-cache')
     WINTTY_SESSIOND_PIPE = '\\.\pipe\winttyd-test-' + [guid]::NewGuid().ToString('N')
 }
 $config = "windows-single-instance = false`nquick-terminal-key = $(Get-WinttyHarnessQuickTerminalKey)`n"
@@ -414,6 +590,30 @@ $mutations = @(
        Find = "`$stateBase = & `$read 'WINTTY_STATE_BASE'"; Replace = "`$stateBase = & `$read 'XDG_CONFIG_HOME'" },
     @{ Name = 'state base may sit outside temp'
        Find = 'elseif (-not (Test-WinttyPathUnder $stateBase $TempRoot))'; Replace = 'elseif ($false)' },
+    @{ Name = 'the capture gate does not hit-test'
+       Find = '        if ($root -ne $Hwnd64 -and'; Replace = '        if ($false -and' },
+    @{ Name = 'a passed AUMID overrides the build''s own'
+       Find = '            if ($AumId -and $AumId -ine $ownAumId) {'; Replace = '            if ($false) {' },
+    @{ Name = 'an unreadable path segment is skipped'
+       Find = '            else { return $false }'; Replace = '            else { $attrs = $null }' },
+    @{ Name = 'the session-state helper does not refuse'
+       Find = '    if ($others.Count -eq 0) { return }' + "`n" + '    throw ("HARNESS: skipped:'; Replace = '    return' + "`n" + '    throw ("HARNESS: skipped:' },
+    @{ Name = 'the session-state restore is not in a finally'
+       Find = '    try { $null = & $Change }' + "`n" + '    finally { if ($Restore) { $null = & $Restore } }'
+       Replace = '    $null = & $Change' + "`n" + '    if ($Restore) { $null = & $Restore }' },
+    @{ Name = 'native state dirs not checked'
+       Find = "foreach (`$name in 'XDG_STATE_HOME', 'XDG_CACHE_HOME') {"; Replace = 'foreach ($name in @()) {' },
+    @{ Name = 'a junction under temp counts as under temp'
+       Find = 'if ($null -ne $attrs -and ($attrs -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }'; Replace = '' },
+    @{ Name = 'a relative exe resolves against the process directory'
+       Find = '$ExePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExePath)'; Replace = '' },
+    @{ Name = 'any marker proves ownership'
+       Find = 'return $held.Length -gt 0 -and $held -ceq $Token.Trim()'; Replace = 'return $true' },
+    @{ Name = 'the preflight drops the AUMID'
+       Find = "    if (`$AumId) { `$check.AumId = `$AumId }`n    if (`$PSBoundParameters.ContainsKey('Instances'))"
+       Replace = "    if (`$PSBoundParameters.ContainsKey('Instances'))" },
+    @{ Name = 'the timing warning counts the run''s own instance'
+       Find = '-not ($_.Path -and $mine -contains (ConvertTo-WinttyPathKey $_.Path)) })'; Replace = '$true })' },
     @{ Name = 'a per-user daemon pipe is accepted'
        Find = "-match '(?i)-S-1-\d+(-\d+)+'"; Replace = "-match 'never(?!)'" },
     @{ Name = 'daemon dirs may sit outside temp'
@@ -444,6 +644,7 @@ try {
 }
 finally { Remove-Item -LiteralPath $mutantDir -Recurse -Force -ErrorAction SilentlyContinue }
 
+Remove-Item -LiteralPath $script:aumFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 if ($script:fails -gt 0) { Write-Host "$script:fails failure(s)" -ForegroundColor Red; exit 1 }
 Write-Host 'all green'

@@ -53,6 +53,7 @@ public static class TcPoint {
 "@
 
 $Config = @'
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = false
 window-theme = wintty
@@ -70,8 +71,7 @@ $AllPresets = @('Blue', 'Purple', 'Pink', 'Red', 'Orange', 'Yellow', 'Green', 'T
 $TabCount = 1 + $AllPresets.Count   # 10
 $Labels = @('') + $AllPresets
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -293,7 +293,7 @@ function Add-Phase([string]$Name, [scriptblock]$Body) {
 }
 
 try {
-    Assert-NoWintty -Context 'The tab-color fuzz'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The tab-color fuzz'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
     [SeamWin]::PlaceOnTop($session.Hwnd64)
     Write-Host "hwnd=$($session.Hwnd64) pid=$($session.Proc.Id)"
@@ -381,7 +381,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

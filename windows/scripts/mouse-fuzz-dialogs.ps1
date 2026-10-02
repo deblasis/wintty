@@ -21,7 +21,11 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [Parameter(Mandatory)][string]$OutDir
+    [Parameter(Mandatory)][string]$OutDir,
+    # The build's AUMID, for the coexistence guard, when it cannot read it
+    # itself (a NativeAOT publish has no Ghostty.Core.dll; aot-fuzz.ps1
+    # passes the sibling Release build's).
+    [string]$AumId = ''
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -34,11 +38,11 @@ Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
+windows-single-instance = false
 window-save-state = never
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -191,8 +195,8 @@ function Close-Extras([uint32]$ProcId, [int64]$MainHwnd) {
 }
 
 try {
-    Assert-NoWintty -Context 'The dialogs harness'
-    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The dialogs harness'
+    $session = Start-SeamSession -ExePath $ExePath -AumId $AumId -ConfigText $Config
     $pid32 = [uint32]$session.Proc.Id
     $hwnd64 = [int64]$session.Hwnd64
     [SeamWin]::PlaceOnTop($hwnd64)
@@ -260,7 +264,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 if ($crashGrew) { $script:Findings.Add('crash.log grew during the run') }
 if (-not $harnessError) {
     if (-not $paneMenuClose) { $script:Findings.Add('the pane menu has no Close Pane') }

@@ -72,6 +72,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $pwsh = (Get-Command pwsh -ErrorAction Stop).Source
 $Config = @"
+windows-single-instance = false
 window-save-state = never
 confirm-close-surface = false
 command = "$pwsh" -NoLogo

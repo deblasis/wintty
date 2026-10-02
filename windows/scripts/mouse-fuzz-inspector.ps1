@@ -31,7 +31,11 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [Parameter(Mandatory)][string]$OutDir
+    [Parameter(Mandatory)][string]$OutDir,
+    # The build's AUMID, for the coexistence guard, when it cannot read it
+    # itself (a NativeAOT publish has no Ghostty.Core.dll; aot-fuzz.ps1
+    # passes the sibling Release build's).
+    [string]$AumId = ''
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -44,13 +48,12 @@ Add-Type -AssemblyName UIAutomationTypes
 [void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 keybind = ctrl+t=new_tab
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $harnessError = ''
@@ -59,6 +62,8 @@ $session = $null
 function Shot([int64]$Hwnd64, [string]$name) {
     $rc = [SeamWin]::RectOf($Hwnd64)
     if ($null -eq $rc) { throw "HARVEST_MISS: degenerate rect for $name" }
+    # The shot is the pixel oracle's input, so it is raised and hit-tested.
+    Assert-WinttyCaptureClear -Hwnd64 $Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What "the shot '$name'" -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
@@ -133,8 +138,8 @@ function Invoke-Chord($Session, [int]$Key, [switch]$Plain) {
 }
 
 try {
-    Assert-NoWintty -Context 'The inspector harness'
-    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The inspector harness'
+    $session = Start-SeamSession -ExePath $ExePath -AumId $AumId -ConfigText $Config -AllowInput
     $proc = $session.Proc
     $pid32 = [uint32]$proc.Id
     $hwnd64 = [int64]$session.Hwnd64
@@ -213,7 +218,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

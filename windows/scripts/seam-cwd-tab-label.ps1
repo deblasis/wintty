@@ -157,7 +157,6 @@ function Exit-StagedResources($res) {
     Remove-Item $res.Stage -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 # Whether any scenario's shell actually started in the profile directory, so
 # the home assertions ran at all. See the 'home-exercised' scenario appended
@@ -199,19 +198,19 @@ function Invoke-Scenario(
     # so the tab carries the probe's own interpreter icon -- the thing the
     # icon assert is about; a scenario may declare its own through $ConfigExtra.
     $config = @"
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = true
 vertical-tabs-hover-expand = false
 default-profile = $Profile
 $ConfigExtra
 "@
-    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $crashMark = Get-SeamSessionMark
     $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; renderedH = ''; tooltip = ''; iconTooltip = ''; icon = ''; homeGlyph = $false; sawStarting = $false }
     $s = $null
     Write-Host "=== scenario $Name (profile $Profile) ==="
     try {
-        Assert-NoWintty -Context "The cwd label scenario '$Name'"
+        Assert-NoWinttyFrom -ExePath $ExePath -Context "The cwd label scenario '$Name'"
         # -AllowInput because this harness types a `cd` into the shell and
         # reads the label that comes back; send-text is off without it. It is
         # the only harness in the suite that needs the shell to run anything.
@@ -405,13 +404,11 @@ $ConfigExtra
         if ($null -ne $s) { Stop-SeamSession $s }
         Remove-Item $probe -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path $crashPath) {
-        if ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp) {
-            $entry.ok = $false
-            $entry.class = 'product'
-            $entry.error += ' | crash.log grew during the scenario'
-            Write-Host "FAIL $Name [product]: crash.log grew" -ForegroundColor Red
-        }
+    if (Test-SeamCrashLogWritten -Since $crashMark) {
+        $entry.ok = $false
+        $entry.class = 'product'
+        $entry.error += ' | crash.log grew during the scenario'
+        Write-Host "FAIL $Name [product]: crash.log grew" -ForegroundColor Red
     }
     $script:Scenarios.Add([pscustomobject]$entry)
 }
@@ -441,18 +438,18 @@ function Invoke-UncRefusedScenario {
     $name = 'unc-refused'
     $local = New-ProbeDir 'unc-local'
     $config = @"
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 vertical-tabs = true
 vertical-tabs-hover-expand = false
 default-profile = pwsh-7
 "@
-    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $crashMark = Get-SeamSessionMark
     $entry = [ordered]@{ name = $name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; tooltip = ''; iconTooltip = ''; icon = '' }
     $s = $null
     Write-Host "=== scenario $name ==="
     try {
-        Assert-NoWintty -Context "The cwd label scenario '$name'"
+        Assert-NoWinttyFrom -ExePath $ExePath -Context "The cwd label scenario '$name'"
         # -AllowInput for the same reason as the label scenarios: this one
         # types the prompt replacement and the injected reports into the shell.
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -AllowInput
@@ -504,13 +501,11 @@ default-profile = pwsh-7
         if ($null -ne $s) { Stop-SeamSession $s }
         Remove-Item $local -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path $crashPath) {
-        if ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp) {
-            $entry.ok = $false
-            $entry.class = 'product'
-            $entry.error += ' | crash.log grew during the scenario'
-            Write-Host "FAIL $name [product]: crash.log grew" -ForegroundColor Red
-        }
+    if (Test-SeamCrashLogWritten -Since $crashMark) {
+        $entry.ok = $false
+        $entry.class = 'product'
+        $entry.error += ' | crash.log grew during the scenario'
+        Write-Host "FAIL $name [product]: crash.log grew" -ForegroundColor Red
     }
     $script:Scenarios.Add([pscustomobject]$entry)
 }

@@ -224,11 +224,13 @@ function New-ConfigText {
     if ($raw -notmatch '(?m)^windows-settings-ui\s*=\s*true\s*$') {
         $raw = "windows-settings-ui = true`n" + $raw
     }
-    return "windows-settings-ui = true`n" + $raw
+    # Single-instance off first, so the launch may run beside another
+    # Wintty; a copied config that turns it back on is refused by the
+    # coexistence guard beside one, which checks every line.
+    return "windows-single-instance = false`nwindows-settings-ui = true`n" + $raw
 }
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $session = $null
 $keybindKilled = $false
@@ -236,7 +238,7 @@ $settingsTitle = $null
 $pages = @()
 $script:vtabFound = @()
 
-Assert-NoWintty -Context 'The settings harness'
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The settings harness'
 try {
     $session = Start-SeamSession -ExePath $ExePath -ConfigText (New-ConfigText)
     $proc = $session.Proc
@@ -349,7 +351,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 $result = @{
     aliveAtEnd = $false
     keybindKilled = $keybindKilled

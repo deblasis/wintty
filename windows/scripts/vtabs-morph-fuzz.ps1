@@ -71,7 +71,7 @@ Write-Host "seed=$Seed iterations=$Iterations"
 $startVertical = -not $StartHorizontal
 $Config = @"
 vertical-tabs = $($startVertical.ToString().ToLower())
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 window-theme = wintty
 theme = Catppuccin Mocha
@@ -151,7 +151,7 @@ function Invoke-FrameChord($Session, [int]$Key, [switch]$Ctrl, [switch]$Shift) {
 }
 
 try {
-    Assert-NoWintty -Context 'The layout-morph fuzz'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The layout-morph fuzz'
     $env:WINTTY_MORPH_TRACE = $log
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
     $hwnd64 = [int64]$session.Hwnd64

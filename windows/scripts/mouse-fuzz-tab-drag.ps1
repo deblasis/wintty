@@ -312,7 +312,7 @@ function Get-ScenarioTrace([string]$Name) {
 # ---- scenario runner -------------------------------------------------------
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 windows-settings-ui = true
 vertical-tabs = true
@@ -324,7 +324,6 @@ vertical-tabs-hover-expand = false
 $names = @('fuzzdrag-1', 'fuzzdrag-2', 'fuzzdrag-3', 'fuzzdrag-4', 'fuzzdrag-5')
 $V = $true
 $H = $false
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 $script:MainHwnd64 = 0
 $script:OrderMotionOn = $null
@@ -347,12 +346,12 @@ function Invoke-Seed($s) {
 function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
     $tracePath = Join-Path $OutDir "trace-$Name.trace"
     Remove-Item $tracePath -ErrorAction SilentlyContinue
-    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $crashMark = Get-SeamSessionMark
     $s = $null
     $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = '' }
     Write-Host "=== scenario $Name ==="
     try {
-        Assert-NoWintty -Context "The tab drag scenario '$Name'"
+        Assert-NoWinttyFrom -ExePath $ExePath -Context "The tab drag scenario '$Name'"
         $s = Start-SeamSession -ExePath $ExePath -ConfigText $Config -TraceFile $tracePath
         $script:MainHwnd64 = $s.Hwnd64
         & $Body $s
@@ -381,7 +380,7 @@ function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
     } finally {
         if ($null -ne $s) { Stop-SeamSession $s }
     }
-    if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+    if ((Test-SeamCrashLogWritten -Since $crashMark)) {
         $entry.ok = $false
         $entry.class = 'product'
         $entry.error = ($entry.error + ' crash.log grew during the scenario').Trim()
@@ -424,32 +423,36 @@ Invoke-Scenario 'vertical-reorder-motion-on' {
 Invoke-Scenario 'vertical-reorder-motion-off' {
     param($s)
     if ($null -eq $script:OrderMotionOn) { throw 'HARVEST_MISS: the motion-on scenario did not record its order' }
+    # Client-area animation is a session-wide setting every running app
+    # reads, the user's Wintty included, so the change goes through the
+    # shared helper: it refuses beside another Wintty before anything is
+    # changed, and runs the restore in a finally once something may have
+    # been. The snapshot is only a read, so it is taken first.
     $guardSnapshot = Join-Path $OutDir 'env-snapshot.json'
     if (-not (Save-EnvSnapshot -Path $guardSnapshot)) { throw 'HARVEST_MISS: env guard snapshot failed' }
     $before = Get-SpiUint ([uint32]0x1042)
-    Set-SpiUint ([uint32]0x1043) ([uint32]0)
-    $after = Get-SpiUint ([uint32]0x1042)
-    if ($after -ne 0) { throw "HARVEST_MISS: animation toggle read back $after, not 0" }
-    Write-Host "animations: $before -> 0 (read back)"
-    try {
-        [void](Invoke-Seed $s)
-        $drag = Invoke-SeamCommand $s @{ op = 'drag'; from = 1; to = 2 }
-        [void](Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5'))
-        $off = @($drag.order) -join ','
-        if ($off -ne $script:OrderMotionOn) {
-            throw "PRODUCT_FAIL: motion-off landed [$off] but motion-on landed [$script:OrderMotionOn] - the gate changed the outcome, not just the animation"
-        }
-        $sessions = @(Get-ScenarioTrace 'vertical-reorder-motion-off')
-        if ($sessions.Count -lt 1) { throw 'PRODUCT_FAIL: no trace session for the motion-off reorder' }
-        Assert-TraceSession $sessions[0] 'the motion-off reorder' 1 'off'
-    }
-    finally {
-        # A mid-scenario failure must still give the machine its
-        # animations back; the read-back inside the restore turns a
-        # silent miss into a loud harness failure.
-        Restore-EnvSnapshot -Path $guardSnapshot
-        Write-Host "animations restored to $(Get-SpiUint ([uint32]0x1042)) (read-back verified by the guard)"
-    }
+    [void](Invoke-WinttySessionStateChange -ExePath $ExePath -What 'client-area animation (SPI_SETCLIENTAREAANIMATION)' `
+        -Context 'The tab-drag motion-off leg' -Change {
+            Set-SpiUint ([uint32]0x1043) ([uint32]0)
+            $after = Get-SpiUint ([uint32]0x1042)
+            if ($after -ne 0) { throw "HARVEST_MISS: animation toggle read back $after, not 0" }
+            Write-Host "animations: $before -> 0 (read back)"
+            [void](Invoke-Seed $s)
+            $drag = Invoke-SeamCommand $s @{ op = 'drag'; from = 1; to = 2 }
+            [void](Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5'))
+            $off = @($drag.order) -join ','
+            if ($off -ne $script:OrderMotionOn) {
+                throw "PRODUCT_FAIL: motion-off landed [$off] but motion-on landed [$script:OrderMotionOn] - the gate changed the outcome, not just the animation"
+            }
+            $sessions = @(Get-ScenarioTrace 'vertical-reorder-motion-off')
+            if ($sessions.Count -lt 1) { throw 'PRODUCT_FAIL: no trace session for the motion-off reorder' }
+            Assert-TraceSession $sessions[0] 'the motion-off reorder' 1 'off'
+        } -Restore {
+            # The read-back inside the restore turns a silent miss into a
+            # loud harness failure.
+            Restore-EnvSnapshot -Path $guardSnapshot
+            Write-Host "animations restored to $(Get-SpiUint ([uint32]0x1042)) (read-back verified by the guard)"
+        })
 }
 
 Invoke-Scenario 'pin-zone-setup' {

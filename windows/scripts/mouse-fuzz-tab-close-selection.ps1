@@ -335,6 +335,7 @@ function Wait-StripSettled([int64]$Hwnd64, [bool]$Vertical, [string]$ExpectedNam
 function Get-WindowShot([int64]$Hwnd64) {
     $rc = [SeamWin]::RectOf($Hwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: degenerate window rect' }
+    Assert-WinttyCaptureClear -Hwnd64 $Hwnd64 -X $rc.L -Y $rc.T -Width $rc.W -Height $rc.Hh -What 'the window shot' -Raise
     $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rc.L, $rc.T, 0, 0, $bmp.Size)
@@ -589,8 +590,7 @@ function Test-SelectionFill($shot, $rows, [bool]$Vertical, [double]$Scale, $Grou
 
 # ---- the run ----------------------------------------------------------------
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 
 $rng = [System.Random]::new($Seed)
 $findings = [System.Collections.Generic.List[object]]::new()
@@ -628,7 +628,7 @@ function Get-HarnessConfig([bool]$Vertical) {
     # colour is the background the active tab must match.
     return @"
 command = cmd.exe
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 $verticalLine
 vertical-tabs-hover-expand = false
@@ -850,7 +850,7 @@ if (-not (Test-Path $ExePath)) {
     exit 1
 }
 
-Assert-NoWintty -Context 'The tab close selection harness'
+Assert-NoWinttyFrom -ExePath $ExePath -Context 'The tab close selection harness'
 
 # Each layout is its own process, so a leg that could not be run does not
 # take the other's verdicts with it: a HARVEST_MISS is recorded and the next
@@ -871,7 +871,7 @@ foreach ($vertical in @($true, $false)) {
     }
 }
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+$crashGrew = (Test-SeamCrashLogWritten -Since $crashMark)
 if ($crashGrew) { $findings.Add('crash.log grew during the run') }
 
 $result = @{

@@ -95,6 +95,15 @@ if (-not (Test-Path $ExePath)) {
 }
 $ExePath = (Resolve-Path $ExePath).Path
 
+# Refuses beside ANY Wintty, not just one from this exe. The scenario is the
+# single-instance election itself, so both launches keep it on, and they run
+# on the per-user state tree with the default quick-terminal hotkey: nothing
+# about them can be isolated from another instance without changing what is
+# measured, and the coexistence guard would refuse them for that reason.
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+Assert-NoWintty -Context 'The splash race' -Reason ('it measures the single-instance election, so its launches keep ' +
+    'single-instance on and share the per-user state tree and quick-terminal hotkey with any other instance')
+
 # Since #1094 the launches below run armed (WINTTY_TEST_CONFIG=1) over their
 # own scratch root, so their single-instance identity is not shared with any
 # Wintty that was already running: the founder's app elects under the

@@ -80,13 +80,12 @@ $script:Findings = [System.Collections.Generic.List[string]]::new()
 $script:Rows = [System.Collections.Generic.List[object]]::new()
 
 $Config = @'
-windows-single-instance = true
+windows-single-instance = false
 window-save-state = never
 window-theme = wintty
 theme = Catppuccin Mocha
 '@
 
-$crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 
 # One comparison: two DIP edges that must land on the SAME device pixel.
 #
@@ -241,11 +240,11 @@ if (-not (Test-Path $ExePath)) {
     exit 1
 }
 
-$crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$crashMark = Get-SeamSessionMark
 $session = $null
 $harnessError = ''
 try {
-    Assert-NoWintty -Context 'The tab field seam harness'
+    Assert-NoWinttyFrom -ExePath $ExePath -Context 'The tab field seam harness'
     $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
 
     $names = @('alpha', 'bravo', 'charlie', 'delta', 'echo')
@@ -306,7 +305,7 @@ finally {
     if ($null -ne $session) { Stop-SeamSession $session }
 }
 
-if ((Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)) {
+if ((Test-SeamCrashLogWritten -Since $crashMark)) {
     $script:Findings.Add('crash.log grew during the run')
 }
 

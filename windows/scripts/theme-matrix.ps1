@@ -529,6 +529,12 @@ function Set-DesktopPolarity([string]$P) {
 # ---- run ---------------------------------------------------------------------
 
 $startedUtc = (Get-Date).ToUniversalTime().ToString('o')
+# The run flips the desktop's light/dark setting and sets the wallpaper for
+# hours, both shared by the whole session and read live by the user's
+# Wintty, so it refuses beside another one before touching either. The
+# finally below puts both back.
+Assert-WinttySessionStateFree -ExePath $ExePath -Context 'The theme matrix' `
+    -What $(if ($NoFlip) { 'the desktop wallpaper' } else { 'the desktop light/dark setting and the wallpaper' })
 $snapshotPath = Save-EnvSnapshot
 # A copy the next harness cannot overwrite: the well-known snapshot is
 # replaced by whoever runs next, and after a kill mid-flip that would be a
@@ -549,6 +555,11 @@ try {
     $stage = Start-BackdropStage -X ($WinX - $Margin) -Y ($WinY - $Margin) -W ($WinW + 2 * $Margin) -H ($WinH + 2 * $Margin)
     $activePolarity = $polarityBefore
     foreach ($plan in $cells) {
+        # Again before every cell, not only at the start: the run is hours
+        # long, and a Wintty opened meanwhile would live through every later
+        # flip. A refusal here stops the rest of the run, and the finally
+        # below puts the desktop back.
+        Assert-WinttySessionStateFree -ExePath $ExePath -Context 'The theme matrix' -What 'the desktop light/dark setting and the wallpaper'
         if ($plan.Polarity -ne $activePolarity) {
             if ($NoFlip) {
                 $script:Cell = $plan; $script:LayoutName = '*'; $script:SceneName = '*'; $script:Shot = ''
@@ -597,6 +608,7 @@ try {
             # the object to strings and loses its Name.
             foreach ($sc in $scenes) {
                 $script:SceneName = $sc.Name
+                Assert-WinttySessionStateFree -ExePath $ExePath -Context 'The theme matrix' -What 'the desktop wallpaper'
                 [void](Set-BackdropScene -Stage $stage -Scene $sc -SceneDir $sceneDir -Wallpaper -Seed $Seed)
                 Start-Sleep -Milliseconds $(if ($translucent) { 1800 } else { 500 })
                 # The scene is proven on the stage's own margin before the
