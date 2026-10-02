@@ -746,7 +746,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 "# commented out with the default value. Uncomment it and set\n" +
                 "# your preferred value to change it.\n" +
                 "#\n" +
-                "# Config docs:  https://ghostty.org/docs/config\n" +
+                "# Config docs:  https://wintty.io/docs/config\n" +
                 "# Config path:  " + ConfigFilePath + "\n";
 
             // Exclusive, and re-checked under the hold: the checks above are
