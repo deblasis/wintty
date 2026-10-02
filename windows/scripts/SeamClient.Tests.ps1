@@ -424,33 +424,40 @@ function Invoke-StateBaseCases([string]$LibPath) {
 
 # Every harness here gates on the exe under test, never on any running
 # Wintty: the blanket check is left for a harness with a reason no isolation
-# removes, which has to say it. And no harness reads the per-user crash.log,
-# which every other Wintty on the machine writes too.
+# removes, which has to say it. Every launch of the exe is preceded by the
+# coexistence guard in the same function. No harness reads the per-user
+# crash.log, which every other Wintty on the machine writes too. And a
+# harness that changes session-wide state (system parameters, the HKCU
+# theme and desktop keys, the wallpaper, the clipboard, other apps' windows)
+# does it through the session-state helpers, which refuse beside another
+# Wintty.
 function Invoke-GateScanCases(
     [string]$ScriptDir = $PSScriptRoot,
     [string]$JustfilePath = (Join-Path $PSScriptRoot '..\..\justfile')
 ) {
     $failed = [System.Collections.Generic.List[string]]::new()
+    $A = [System.Management.Automation.Language.Ast]
     # The sanctioned blanket refusals, each with a reason no isolation
     # removes: WER LocalDumps is keyed on the image name, so it covers every
     # running Wintty; the splash race measures the single-instance election
-    # itself, so its launches keep it on and share the per-user tree.
-    $blanketAllowed = @('seam-crash-dump.ps1', 'splash-single-instance-race.ps1')
+    # itself; the cdb capture launches the app under a debugger with
+    # single-instance on and the per-user tree.
+    $blanketAllowed = @('seam-crash-dump.ps1', 'splash-single-instance-race.ps1', 'seam-cdb.ps1')
+    # The developer's own launcher (just run-win) is not a harness: it opens
+    # the app the way a user does, on purpose.
+    $notHarness = @('run-win-launch.ps1')
     # Scripts that launch the exe themselves without the guard or a blanket
     # refusal. None is run by a just recipe, the fuzz suite or the AOT fuzz,
     # and none ever had a gate this conversion loosened; each is listed so a
     # new one cannot join them silently, and listing is refused once a
     # recipe or a suite runs it.
-    # The developer's own launcher (just run-win) is not a harness: it opens
-    # the app the way a user does, on purpose.
-    $notHarness = @('run-win-launch.ps1')
     $unguardedAllowed = @{
-        'mouse-smoke-run.ps1' = 'the operator drives it by hand and quits the app themselves'
+        'mouse-smoke-run.ps1'  = 'the operator drives it by hand and quits the app themselves'
         'config-save-race.ps1' = 'a standalone repro, run by hand'
-        'crash-canary.ps1'    = 'a standalone crash repro against a NativeAOT publish, run by hand'
-        'crash-matrix.ps1'    = 'a standalone crash repro against a NativeAOT publish, run by hand'
-        'seam-bisect.ps1'     = 'a bisect driver, run by hand'
-        'seam-probe.ps1'      = 'a one-off probe, run by hand'
+        'crash-canary.ps1'     = 'a standalone crash repro against a NativeAOT publish, run by hand'
+        'crash-matrix.ps1'     = 'a standalone crash repro against a NativeAOT publish, run by hand'
+        'seam-bisect.ps1'      = 'a bisect driver, run by hand'
+        'seam-probe.ps1'       = 'a one-off probe, run by hand'
     }
 
     # What a recipe or an orchestrator runs: every script the justfile
@@ -474,79 +481,167 @@ function Invoke-GateScanCases(
         }
     }
 
-    # A launch of the exe under test: Start-Process or a ProcessStartInfo
-    # whose file is an exe variable, which is how every launcher here names
-    # the app (pwsh, rundll32 and wsl go in as literals or other names).
-    $exeArg = '(?i)^\(?\$(\w+[:.])?\w*exe\w*'
-    # A secondary launched from a session's own exe runs inside the
-    # environment that session's guard approved.
+    # An exe variable is how every launcher here names the app; an
+    # exe-carrying variable is one whose assignment mentions an exe variable
+    # (a debugger's argument line, a ProcessStartInfo). A value handed to a
+    # parameter named after an exe (-ExePath $x for a child harness) is not
+    # a launch of it.
+    $exeVar = '(?i)^\(?\$(\w+[:.])?\w*exe\w*'
     $sessionSecondary = '(?i)^\$\w+\.ExePath$'
+    $writers = @('Set-SpiUint', 'Set-SpiHoverTime', 'Set-HighContrastFlags', 'Set-DesktopWallpaper',
+        'Set-DesktopPolarity', 'Set-Clipboard', 'Clear-Desktop')
+    $regWriters = @('Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'New-Item', 'Remove-Item')
+    $libKeys = '(?i)\$script:(Personalize|Themes|Desktop|Dwm|Accent|BackdropDesktop)Key'
+
+    function EnclosingFunction($node) {
+        $n = $node.Parent
+        while ($null -ne $n -and $n -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $n = $n.Parent }
+        return $n
+    }
+    function InsideHelperBlock($node) {
+        $n = $node.Parent
+        while ($null -ne $n) {
+            if ($n -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
+                $n.Parent -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $n.Parent.Parent -is [System.Management.Automation.Language.CommandAst] -and
+                $n.Parent.Parent.GetCommandName() -eq 'Invoke-WinttySessionStateChange') { return $true }
+            if ($n -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
+                $n.Parent -is [System.Management.Automation.Language.CommandAst] -and
+                $n.Parent.GetCommandName() -eq 'Invoke-WinttySessionStateChange') { return $true }
+            $n = $n.Parent
+        }
+        return $false
+    }
+    # Whether some call named $Name precedes $node within the same function
+    # (or the same top level).
+    function PrecededBy($node, [string]$Name, $calls) {
+        $fn = EnclosingFunction $node
+        foreach ($c in $calls) {
+            if ($c.GetCommandName() -ne $Name) { continue }
+            if ([object]::ReferenceEquals((EnclosingFunction $c), $fn) -and $c.Extent.StartOffset -lt $node.Extent.StartOffset) { return $true }
+        }
+        return $false
+    }
 
     foreach ($file in Get-ChildItem -LiteralPath $ScriptDir -Filter *.ps1 -File) {
         if ($file.Name -like '*.Tests.ps1') { continue }
         $tokens = $null; $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
-        $calls = @($ast.FindAll({ param($n)
-                $n -is [System.Management.Automation.Language.CommandAst] -and
-                $n.GetCommandName() -eq 'Assert-NoWintty' }, $true))
+        $commands = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
         $reasoned = $false
-        foreach ($call in $calls) {
+        foreach ($call in @($commands | Where-Object { $_.GetCommandName() -eq 'Assert-NoWintty' })) {
             if ($blanketAllowed -notcontains $file.Name) {
                 $failed.Add("$($file.Name):$($call.Extent.StartLineNumber) refuses any running Wintty; gate on the exe under test (Assert-NoWinttyFrom)")
             }
             elseif ($call.Extent.Text -notmatch '-Reason\b') {
                 $failed.Add("$($file.Name):$($call.Extent.StartLineNumber) refuses any running Wintty without saying why (-Reason)")
             }
-            else { $reasoned = $true }
+            elseif ($null -eq (EnclosingFunction $call)) { $reasoned = $true }
         }
-        $guarded = @($ast.FindAll({ param($n)
-                $n -is [System.Management.Automation.Language.CommandAst] -and
-                $n.GetCommandName() -eq 'Assert-WinttyCoexistence' }, $true)).Count -gt 0
-        $usesSession = @($ast.FindAll({ param($n)
-                $n -is [System.Management.Automation.Language.CommandAst] -and
-                $n.GetCommandName() -eq 'Start-SeamSession' }, $true)).Count -gt 0
-
-        $launches = [System.Collections.Generic.List[string]]::new()
-        foreach ($c in $ast.FindAll({ param($n)
-                    $n -is [System.Management.Automation.Language.CommandAst] -and
-                    $n.GetCommandName() -eq 'Start-Process' }, $true)) {
-            $els = $c.CommandElements
-            # -FilePath by name, else the first positional element.
-            $target = $null
-            for ($i = 1; $i -lt $els.Count; $i++) {
-                if ($els[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and
-                    ($els[$i].ParameterName -like 'FilePath*' -or $els[$i].ParameterName -eq 'Path')) {
-                    $target = if ($els[$i].Argument) { $els[$i].Argument } elseif ($i + 1 -lt $els.Count) { $els[$i + 1] }
-                    break
+        $usesSession = @($commands | Where-Object { $_.GetCommandName() -eq 'Start-SeamSession' }).Count -gt 0
+        $carrying = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $hkcuVars = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($as in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+            if ($as.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+            $name = $as.Left.VariablePath.UserPath
+            # An exe variable in the value, other than as the value of an
+            # exe-named parameter (a session started with -ExePath $x carries
+            # a session, which its guard already judged).
+            foreach ($v in $as.Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+                if ($v.Extent.Text -notmatch $exeVar) { continue }
+                $parent = $v.Parent
+                if ($parent -is [System.Management.Automation.Language.CommandAst]) {
+                    $idx = [array]::IndexOf(@($parent.CommandElements), $v)
+                    if ($idx -gt 0 -and $parent.CommandElements[$idx - 1] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                        $parent.CommandElements[$idx - 1].ParameterName -match '(?i)exe') { continue }
                 }
+                [void]$carrying.Add($name); break
             }
-            if (-not $target -and $els.Count -gt 1 -and
-                $els[1] -isnot [System.Management.Automation.Language.CommandParameterAst]) { $target = $els[1] }
-            if ($target -and $target.Extent.Text -match $exeArg) {
-                $launches.Add("$($c.Extent.StartLineNumber):$($target.Extent.Text)")
+            if ($as.Right.Extent.Text -match '(?i)HKCU:|HKEY_CURRENT_USER') { [void]$hkcuVars.Add($name) }
+        }
+        function IsExeArg($el) {
+            $t = $el.Extent.Text
+            if ($t -match $exeVar) { return $true }
+            if ($el -is [System.Management.Automation.Language.VariableExpressionAst] -and $carrying.Contains($el.VariablePath.UserPath)) { return $true }
+            return $false
+        }
+
+        # ---- launches, judged one site at a time ----
+        $launches = [System.Collections.Generic.List[object]]::new()
+        foreach ($c in $commands) {
+            $name = $c.GetCommandName()
+            $els = $c.CommandElements
+            $amp = $c.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand
+            if ($name -ne 'Start-Process' -and -not $amp) { continue }
+            $hit = $null
+            $start = if ($amp) { 0 } else { 1 }
+            for ($i = $start; $i -lt $els.Count; $i++) {
+                $el = $els[$i]
+                if ($el -is [System.Management.Automation.Language.CommandParameterAst]) {
+                    # The value of an exe-named parameter is a child's input.
+                    if ($el.ParameterName -match '(?i)exe' -and -not ($name -eq 'Start-Process' -and $el.ParameterName -like 'FilePath*')) { $i++ }
+                    continue
+                }
+                if ($amp -and $i -eq 0 -and $el.Extent.Text -match '(?i)^(pwsh|powershell)') { break }
+                if (IsExeArg $el) { $hit = $el; break }
             }
+            if ($hit) { $launches.Add([pscustomobject]@{ Node = $c; Target = $hit.Extent.Text }) }
         }
         foreach ($m in $ast.FindAll({ param($n)
                     $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
                     $n.Member.Extent.Text -eq 'new' -and $n.Expression.Extent.Text -match 'ProcessStartInfo\]$' }, $true)) {
-            if ($m.Arguments.Count -gt 0 -and $m.Arguments[0].Extent.Text -match $exeArg) {
-                $launches.Add("$($m.Extent.StartLineNumber):$($m.Arguments[0].Extent.Text)")
+            if ($m.Arguments.Count -gt 0 -and (IsExeArg $m.Arguments[0])) {
+                $launches.Add([pscustomobject]@{ Node = $m; Target = $m.Arguments[0].Extent.Text })
             }
         }
-        $open = @($launches | Where-Object { -not ($usesSession -and ($_ -split ':', 2)[1] -match $sessionSecondary) })
-        if ($open.Count -gt 0 -and -not $guarded -and -not $reasoned -and $notHarness -notcontains $file.Name) {
+        foreach ($l in $launches) {
+            if ($reasoned -or $notHarness -contains $file.Name) { continue }
+            if ($usesSession -and $l.Target -match $sessionSecondary) { continue }
+            if (PrecededBy $l.Node 'Assert-WinttyCoexistence' $commands) { continue }
             if ($unguardedAllowed.ContainsKey($file.Name)) {
                 if ($reachable.Contains($file.Name)) {
                     $failed.Add("$($file.Name) launches the exe without the coexistence guard and is run by a recipe or a suite now; it can no longer be listed as hand-run")
                 }
+                continue
             }
-            else {
-                $failed.Add("$($file.Name) launches the exe (line $($open -join ', line ')) without the coexistence guard and without a reasoned Assert-NoWintty")
+            $failed.Add("$($file.Name):$($l.Node.Extent.StartLineNumber) launches the exe ($($l.Target)) without the coexistence guard before it in the same function, and without a reasoned Assert-NoWintty")
+        }
+
+        # ---- session-wide state, judged one write at a time ----
+        $hasHelper = @($commands | Where-Object { $_.GetCommandName() -in 'Assert-WinttySessionStateFree', 'Invoke-WinttySessionStateChange' }).Count -gt 0
+        $writes = [System.Collections.Generic.List[object]]::new()
+        foreach ($c in $commands) {
+            $name = $c.GetCommandName()
+            $text = $c.Extent.Text
+            if ($writers -contains $name) { $writes.Add($c); continue }
+            if ($name -eq 'Set-BackdropScene' -and $text -match '(?i)-Wallpaper\b') { $writes.Add($c); continue }
+            if ($regWriters -contains $name) {
+                $hk = $text -match '(?i)HKCU:|HKEY_CURRENT_USER' -or $text -match $libKeys
+                if (-not $hk) {
+                    foreach ($v in $c.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+                        if ($hkcuVars.Contains($v.VariablePath.UserPath)) { $hk = $true; break }
+                    }
+                }
+                if ($hk) { $writes.Add($c) }
             }
+        }
+        foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+            $member = $m.Member.Extent.Text
+            $args0 = if ($m.Arguments.Count -gt 0) { $m.Arguments[0].Extent.Text } else { '' }
+            if ($member -eq 'SystemParametersInfo' -and $args0 -match '(?i)SET') { $writes.Add($m) }
+            elseif ($member -eq 'ShowWindow' -and $m.Arguments.Count -gt 1 -and $m.Arguments[1].Extent.Text -match '(?i)MINIMIZE') { $writes.Add($m) }
+            elseif ($member -match '^Set(Text|Data|Image|Clipboard\w*)$' -and $m.Expression.Extent.Text -match '(?i)Clipboard\]$') { $writes.Add($m) }
+        }
+        foreach ($w in $writes) {
+            if ($reasoned) { continue }
+            if (InsideHelperBlock $w) { continue }
+            if ($null -ne (EnclosingFunction $w) -and $hasHelper) { continue }
+            if (PrecededBy $w 'Assert-WinttySessionStateFree' $commands) { continue }
+            $failed.Add("$($file.Name):$($w.Extent.StartLineNumber) changes session-wide state without the session-state helpers (Assert-WinttySessionStateFree / Invoke-WinttySessionStateChange)")
         }
 
         $code = ($tokens | Where-Object { $_.Kind -ne 'Comment' } | ForEach-Object { $_.Text }) -join ' '
-        if ($code -match '(?i)LOCALAPPDATA[^\r\n]{0,40}Wintty[\\/]+crash\.log') {
+        if ($code -match '(?i)LOCALAPPDATA[^\r\n]{0,60}Wintty[^\r\n]{0,20}crash\.log') {
             $failed.Add("$($file.Name) reads the per-user crash.log; read the session's own (Test-SeamCrashLogWritten)")
         }
     }
@@ -562,21 +657,39 @@ function Invoke-GateScanCases(
     return , $failed
 }
 
-# The scan's own teeth: a copy of the scripts with one harness's guard taken
-# out must turn it red. Each row names the file and what to remove.
+# The scan's own teeth: a copy of the scripts with one harness changed must
+# turn that harness red. Each row names the file and the change.
 function Invoke-GateScanMutations {
     $rows = @(
         @{ Name = 'the splash race launches without its blanket refusal'; File = 'splash-single-instance-race.ps1'
            From = "Assert-NoWintty -Context 'The splash race' -Reason ("; To = '$null = (' },
+        @{ Name = 'the cdb capture launches through a debugger without its refusal'; File = 'seam-cdb.ps1'
+           From = "Assert-NoWintty -Context 'The cdb capture' -Reason ("; To = '$null = (' },
         @{ Name = 'the shader fuzz launches without the guard'; File = 'shader-notice-fuzz.ps1'
            From = 'Assert-WinttyCoexistence'; To = 'Write-Output' },
+        @{ Name = 'a new unguarded launch in a file that guards its other one'; File = 'shader-notice-fuzz.ps1'
+           Add = 'Start-Process -FilePath $ExePath' },
+        @{ Name = 'a call-operator launch of the exe'; File = 'mouse-fuzz-probe.ps1'
+           Add = '& $ExePath' },
         @{ Name = 'a harness reads the per-user crash.log again'; File = 'mouse-fuzz-probe.ps1'
-           Add = '$crashPath = "$env:LOCALAPPDATA\Wintty\crash.log"' }
+           Add = '$crashPath = "$env:LOCALAPPDATA\Wintty\crash.log"' },
+        @{ Name = 'a harness reads the per-user crash.log through nested Join-Path'; File = 'mouse-fuzz-probe.ps1'
+           Add = '$crashPath = Join-Path (Join-Path $env:LOCALAPPDATA ''Wintty'') ''crash.log''' },
+        @{ Name = 'a harness turns animations off outside the helpers'; File = 'mouse-fuzz-probe.ps1'
+           Add = 'Set-SpiUint ([uint32]0x1043) ([uint32]0)' },
+        @{ Name = 'a harness writes the HKCU theme key outside the helpers'; File = 'mouse-fuzz-probe.ps1'
+           Add = "Set-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -Value 0" },
+        @{ Name = 'the theme matrix flips the desktop without its refusal'; File = 'theme-matrix.ps1'
+           From = 'Assert-WinttySessionStateFree -ExePath'; To = 'Write-Output -InputObject' },
+        @{ Name = 'the fuzz suite clears the desktop outside the helper'; File = 'fuzz-suite.ps1'
+           From = '[void](Invoke-WinttySessionStateChange'; To = '[void](Write-Output' }
     )
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-gatescan-" + [guid]::NewGuid().ToString('N'))
     try {
+        $i = 0
         foreach ($row in $rows) {
-            $dir = Join-Path $root ($row.File -replace '\W', '-')
+            $i++
+            $dir = Join-Path $root "row-$i"
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
             Copy-Item -Path (Join-Path $PSScriptRoot '*.ps1') -Destination $dir
             $target = Join-Path $dir $row.File

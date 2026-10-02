@@ -887,6 +887,11 @@ palette = 15=#f2f4fa
     function Get-ThemeCatalogue([string]$Exe) {
         $names = [System.Collections.Generic.List[string]]::new()
         $out = ''
+        # The catalogue run launches the exe under test too, so it gets a
+        # staged config and the guard like every case launch below. Outside
+        # the try: a refusal must stop the run, not read as an empty catalogue.
+        [IO.File]::WriteAllText($configPath, (Add-WinttyHarnessConfigDefaults "windows-single-instance = false`r`nwindow-save-state = never`r`n"))
+        [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText ([IO.File]::ReadAllText($configPath)) -Context 'The frame-style fuzz catalogue')
         try {
             # Started with the stream redirected rather than called as `& $Exe`,
             # which comes back empty: this is a GUI-subsystem binary, and its CLI
@@ -922,10 +927,6 @@ palette = 15=#f2f4fa
         return @($names | Select-Object -Unique)
     }
 
-    # The catalogue run launches the exe under test too, so it gets a staged
-    # config and the guard like every case launch below.
-    [IO.File]::WriteAllText($configPath, (Add-WinttyHarnessConfigDefaults "windows-single-instance = false`r`nwindow-save-state = never`r`n"))
-    [void](Assert-WinttyCoexistence -ExePath $ExePath -ConfigText ([IO.File]::ReadAllText($configPath)) -Context 'The frame-style fuzz catalogue')
     $catalogue = @(Get-ThemeCatalogue $ExePath)
     Write-Host "themes=$($catalogue.Count)"
 

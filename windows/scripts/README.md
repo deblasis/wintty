@@ -282,11 +282,25 @@ markdown is what gets pasted into #937, one comment per run.
   guard's call below.
 - `Assert-NoWintty -Reason` - the old blanket refusal of any running Wintty,
   kept for a harness that no isolation can separate from other instances.
-  It quotes its reason. Two callers here: `seam-crash-dump.ps1` arms WER
+  It quotes its reason. Three callers here: `seam-crash-dump.ps1` arms WER
   LocalDumps for the image name `Wintty.exe`, which covers every running
-  Wintty, and `splash-single-instance-race.ps1` measures the single-instance
+  Wintty; `splash-single-instance-race.ps1` measures the single-instance
   election, so its launches keep single-instance on and run on the per-user
-  state tree and hotkey.
+  state tree and hotkey; `seam-cdb.ps1` launches the app under cdb, outside
+  the guard.
+- `Assert-WinttySessionStateFree` / `Invoke-WinttySessionStateChange` - for a
+  harness that changes something the whole session shares: system parameters
+  (animations, High Contrast), the HKCU theme and desktop keys, the wallpaper,
+  the clipboard, or other apps' windows. No isolation moves any of these, and
+  the user's Wintty reads them live, so both refuse beside another Wintty;
+  the second also runs the change and always runs its restore in a finally,
+  and with `-SkipBeside` skips an optional change instead of refusing. The
+  callers: `theme-matrix.ps1` (light/dark and wallpaper, restored in its own
+  finally), the motion-off leg of `mouse-fuzz-tab-drag.ps1` (animations),
+  `mouse-fuzz-paste-payloads.ps1` and `mouse-fuzz-ime-cjk.ps1` (the
+  clipboard), and `fuzz-suite.ps1`, whose minimize-every-window step is skipped
+  beside another Wintty. The gate scan fails any harness that writes such
+  state outside them.
 - `Write-WinttyTimingNeighbourWarning` - for a harness whose verdict is a
   wall-clock budget or a frame count (`layout-switch-filmstrip.ps1`,
   `vtabs-drag-filmstrip.ps1`): another Wintty rendering beside it can push a
@@ -318,7 +332,8 @@ markdown is what gets pasted into #937, one comment per run.
   either: beside an instance of the same edition there is no isolated launch.
   A running instance's AUMID is read off the toast registration naming its
   image, and the build's own out of its `Ghostty.Core.dll`; anything that
-  cannot be told apart refuses. The guard only reads the process table and the
+  cannot be told apart refuses. A passed `-AumId` only fills in where the
+  build's own cannot be read, and one that contradicts it refuses. The guard only reads the process table and the
   registry. `Start-SeamSession` runs it right before every launch, so a seam
   harness that is not isolated still refuses beside a running Wintty. It
   checks at launch time only: a Wintty somebody starts after the check is not
@@ -342,7 +357,10 @@ Wintty. `-AumId` hands the guard the build's AUMID where it cannot read
 it (a NativeAOT publish has no `Ghostty.Core.dll`); `aot-fuzz.ps1` and
 `release-smoke.ps1` read it off the sibling Release build and take a
 `Test-WinttyCoexistencePreflight` verdict before they build, so a refusal
-costs seconds. The crash oracle reads the session's own tree:
+costs seconds. `aot-fuzz.ps1` reads it again after its publish refresh,
+and under `-SkipPublish` hands it on only when the sibling and the publish
+carry the same product version, and only to a harness that declares the
+parameter. The crash oracle reads the session's own tree:
 `Test-SeamCrashLogWritten -Since (Get-SeamSessionMark)` is true when a
 session started after the mark wrote a crash.log, including one that
 failed to start, because `Stop-SeamSession` reads the tree out before it
@@ -360,8 +378,9 @@ says why); `release-smoke.ps1`, which keeps the shipped default (on) when
 nothing else runs, so the trimmed builds still run the election, and turns
 it off only beside another Wintty, printing which; and a config a harness
 copies from the developer (`mouse-fuzz-settings.ps1`), whose own lines the
-guard checks too. `mouse-fuzz-tab-drag.ps1`'s motion-off leg turns
-animations off machine-wide, so it refuses beside any other Wintty.
+guard checks too. `release-smoke.ps1` looks again right before each launch,
+and a Wintty that started during the build makes it refuse with that
+reason.
 `frame-keybind-live-key.ps1` synthesizes OS input: it checks that its own
 window holds the foreground before each gesture and that the window under a
 click point is its own, which is what keeps the input out of somebody

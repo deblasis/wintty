@@ -37,6 +37,14 @@ function Assert-True($cond, $msg) {
 
 $script:lib = Join-Path $PSScriptRoot 'lib/wintty-process.ps1'
 
+# A build whose Ghostty.Core.dll carries an AUMID, for the cases where the
+# build's own AUMID and a passed one meet. Compiled once, never loaded.
+$script:aumFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-aum-fixture-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path (Join-Path $script:aumFixtureRoot 'app') | Out-Null
+$script:aumFixtureExe = Join-Path $script:aumFixtureRoot 'app\Wintty.exe'
+Add-Type -OutputAssembly (Join-Path $script:aumFixtureRoot 'app\Ghostty.Core.dll') -OutputType Library -TypeDefinition @"
+namespace Ghostty.Core.Version { public static class BuildInfo { public const string AumId = "com.example.built"; } }
+"@
 # ---- layer 1: decisions -------------------------------------------------------
 
 # Runs every decision case against the library at $LibPath and returns the
@@ -47,7 +55,8 @@ function Invoke-DecisionCases([string]$LibPath) {
         param($lib)
         . $lib
         $failed = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in 'New-WinttyOwnedStateBase', 'Test-WinttyOwnedStateBase', 'Test-WinttyCoexistencePreflight', 'Write-WinttyTimingNeighbourWarning') {
+        foreach ($name in 'New-WinttyOwnedStateBase', 'Test-WinttyOwnedStateBase', 'Test-WinttyCoexistencePreflight', 'Write-WinttyTimingNeighbourWarning',
+                'Assert-WinttySessionStateFree', 'Invoke-WinttySessionStateChange') {
             if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
                 $failed.Add("$name does not exist")
                 return , $failed
@@ -116,7 +125,42 @@ function Invoke-DecisionCases([string]$LibPath) {
         Case 'registration names another exe' $false @{
             Registrations = @{ 'Vendor.Wintty.User' = 'C:\elsewhere\Wintty.exe' } }
         Case 'build AUMID unknown (no Ghostty.Core.dll)' $false @{ AumId = '' }
-        Case 'an instance of this exe is running' $false @{
+        # The build's own AUMID wins; a passed one only fills in where the
+        # build's cannot be read, and one that contradicts it refuses.
+        Case 'AUMID read off the build itself' $true @{ ExePath = $script:aumFixtureExe; AumId = '' }
+        Case 'passed AUMID agrees with the build''s own' $true @{ ExePath = $script:aumFixtureExe; AumId = 'COM.example.built' }
+        Case 'passed AUMID contradicts the build''s own' $false @{ ExePath = $script:aumFixtureExe; AumId = 'com.example.mine' }
+        Case 'passed AUMID cannot hide a same-edition build' $false @{
+            ExePath = $script:aumFixtureExe; AumId = 'com.example.mine'; Registrations = @{ 'com.example.built' = $userPath } }
+
+        # A segment whose attributes cannot be read fails closed; one that is
+        # not there yet is skipped.
+        $denied = { param($p) throw [System.UnauthorizedAccessException]::new('denied') }
+        $absent = { param($p) throw [System.IO.FileNotFoundException]::new('absent') }
+        if (Test-WinttyPathUnder (Join-Path $temp 'wintty-attr-case\x') $temp -ReadAttributes $denied) {
+            $failed.Add('a segment whose attributes cannot be read counts as under temp')
+        }
+        if (-not (Test-WinttyPathUnder (Join-Path $temp 'wintty-attr-case\x') $temp -ReadAttributes $absent)) {
+            $failed.Add('a segment that does not exist yet stops a path counting as under temp')
+        }
+
+        # The session-state helpers: refuse beside another Wintty before
+        # anything changes, skip when asked, and always restore once the
+        # change ran.
+        $ran = @{ change = 0; restore = 0 }
+        $threw = $false
+        try { Assert-WinttySessionStateFree -ExePath $exe -What 'x' -Instances @($user) } catch { $threw = "$_" -match 'skipped' }
+        if (-not $threw) { $failed.Add('Assert-WinttySessionStateFree lets a change go ahead beside another Wintty') }
+        $threw = $false
+        try { Assert-WinttySessionStateFree -ExePath $exe -What 'x' -Instances @([pscustomobject]@{ Id = 7; Path = $exe }) } catch { $threw = $true }
+        if ($threw) { $failed.Add('Assert-WinttySessionStateFree refuses over the run''s own exe') }
+        $threw = $false
+        try { [void](Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @($user) -Change { $ran.change++ } -Restore { $ran.restore++ }) } catch { $threw = $true }
+        if (-not $threw -or $ran.change -ne 0 -or $ran.restore -ne 0) { $failed.Add('Invoke-WinttySessionStateChange ran a change beside another Wintty') }
+        $r = Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @($user) -SkipBeside -Change { $ran.change++ } -Restore { $ran.restore++ }
+        if ($r -ne $false -or $ran.change -ne 0) { $failed.Add('-SkipBeside did not skip the change beside another Wintty') }
+        try { [void](Invoke-WinttySessionStateChange -ExePath $exe -What 'x' -Instances @() -Change { $ran.change++; throw 'mid-change' } -Restore { $ran.restore++ }) } catch { }
+        if ($ran.change -ne 1 -or $ran.restore -ne 1) { $failed.Add('Invoke-WinttySessionStateChange did not restore after a change that threw') }        Case 'an instance of this exe is running' $false @{
             Instances = @([pscustomobject]@{ Id = 7; Path = $exe }) }
         Case 'an instance of this exe, other spelling' $false @{
             Instances = @($user, [pscustomobject]@{ Id = 7; Path = 'c:/BUILDS/mine/out/wintty.exe' }) }
@@ -532,7 +576,15 @@ $mutations = @(
        Find = "`$stateBase = & `$read 'WINTTY_STATE_BASE'"; Replace = "`$stateBase = & `$read 'XDG_CONFIG_HOME'" },
     @{ Name = 'state base may sit outside temp'
        Find = 'elseif (-not (Test-WinttyPathUnder $stateBase $TempRoot))'; Replace = 'elseif ($false)' },
-    @{ Name = 'native state dirs not checked'
+    @{ Name = 'a passed AUMID overrides the build''s own'
+       Find = '            if ($AumId -and $AumId -ine $ownAumId) {'; Replace = '            if ($false) {' },
+    @{ Name = 'an unreadable path segment is skipped'
+       Find = '            else { return $false }'; Replace = '            else { $attrs = $null }' },
+    @{ Name = 'the session-state helper does not refuse'
+       Find = '    if ($others.Count -eq 0) { return }' + "`n" + '    throw ("HARNESS: skipped:'; Replace = '    return' + "`n" + '    throw ("HARNESS: skipped:' },
+    @{ Name = 'the session-state restore is not in a finally'
+       Find = '    try { $null = & $Change }' + "`n" + '    finally { if ($Restore) { $null = & $Restore } }'
+       Replace = '    $null = & $Change' + "`n" + '    if ($Restore) { $null = & $Restore }' },    @{ Name = 'native state dirs not checked'
        Find = "foreach (`$name in 'XDG_STATE_HOME', 'XDG_CACHE_HOME') {"; Replace = 'foreach ($name in @()) {' },
     @{ Name = 'a junction under temp counts as under temp'
        Find = 'if ($null -ne $attrs -and ($attrs -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }'; Replace = '' },
@@ -575,6 +627,7 @@ try {
 }
 finally { Remove-Item -LiteralPath $mutantDir -Recurse -Force -ErrorAction SilentlyContinue }
 
+Remove-Item -LiteralPath $script:aumFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 if ($script:fails -gt 0) { Write-Host "$script:fails failure(s)" -ForegroundColor Red; exit 1 }
 Write-Host 'all green'

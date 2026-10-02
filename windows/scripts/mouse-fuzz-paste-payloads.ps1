@@ -150,6 +150,10 @@ function Invoke-PastePayload($Session, [string]$Payload, [string]$What) {
 
 try {
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The paste-payloads harness'
+    # The paste goes through the real clipboard, which the whole session
+    # shares: a paste in the user's Wintty meanwhile would get the payload,
+    # and clipboard history keeps it. So it refuses beside another one.
+    Assert-WinttySessionStateFree -ExePath $ExePath -Context 'The paste-payloads harness' -What 'the clipboard'
     $conptyPresent = Test-Path (Join-Path (Split-Path $ExePath) 'conpty.dll')
     Write-Host "conptyPresent=$conptyPresent"
     if (-not $conptyPresent) {

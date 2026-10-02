@@ -92,6 +92,17 @@ function Invoke-LaunchSmoke {
                    "extracts it from the Windows App SDK runtime package did not run.")
         }
     }
+    # The single-instance mode was chosen before the build, from what ran
+    # then. A Wintty that started during the build makes the staged mode
+    # wrong, and the refusal should say that rather than leave the guard to
+    # name a config line the run chose itself.
+    $nowOthers = @(Get-WinttyOtherInstances -ExePath $Exe -Instances (Get-WinttyInstances))
+    if ($singleInstance -eq 'true' -and $nowOthers.Count -gt 0) {
+        throw ("The $Label smoke will not launch: Wintty pid(s) $(($nowOthers | ForEach-Object { $_.Id }) -join ', ') started " +
+            'during the build, and this run staged single-instance on (the shipped default, chosen because nothing else ' +
+            'ran then), which cannot run beside another instance. Close them, or run the smoke again so it stages it off. ' +
+            'Nothing was launched.')
+    }
     [void](Assert-WinttyCoexistence -ExePath $Exe -ConfigText $smokeConfig -AumId "$script:SmokeAumId" -Context "The $Label smoke")
     $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
     $insightsLoaded = $false

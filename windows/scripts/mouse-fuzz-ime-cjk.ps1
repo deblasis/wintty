@@ -84,6 +84,10 @@ function Shot($Session, [string]$Name) {
 
 try {
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The ime-cjk harness'
+    # The paste goes through the real clipboard, which the whole session
+    # shares: a paste in the user's Wintty meanwhile would get the payload,
+    # and clipboard history keeps it. So it refuses beside another one.
+    Assert-WinttySessionStateFree -ExePath $ExePath -Context 'The ime-cjk harness' -What 'the clipboard'
     $session = Start-SeamSession -ExePath $ExePath -AumId $AumId -ConfigText $Config
     $hwnd64 = [int64]$session.Hwnd64
     Write-Host "hwnd=$hwnd64 pid=$($session.Proc.Id)"

@@ -173,7 +173,17 @@ function Get-WinttyExeSpellings([Parameter(Mandatory)][string]$Path) {
 # lands elsewhere (the real per-user state dir, say). So every segment that
 # exists below the root is also checked for a reparse point, and one there
 # is a no. Segments that do not exist yet cannot redirect anything.
-function Test-WinttyPathUnder([string]$Path, [string]$Root) {
+#
+# A segment whose attributes cannot be read (access denied, a sharing
+# violation, anything but "not there") is a no as well: what cannot be
+# shown not to redirect is treated as redirecting.
+function Test-WinttyPathUnder(
+    [string]$Path,
+    [string]$Root,
+    # How a segment's attributes are read; [IO.File]::GetAttributes when
+    # omitted. A seam for the tests, which need a read that fails.
+    [scriptblock]$ReadAttributes = { param($p) [System.IO.File]::GetAttributes($p) }
+) {
     if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
     $pFull = [WinttyLongPath]::Of([System.IO.Path]::GetFullPath($Path))
     $p = ConvertTo-WinttyPathKey $pFull
@@ -181,7 +191,13 @@ function Test-WinttyPathUnder([string]$Path, [string]$Root) {
     if (-not ($p -eq $r -or $p.StartsWith($r + '\', [StringComparison]::Ordinal))) { return $false }
     $seg = $pFull.TrimEnd('\')
     while ($seg -and (ConvertTo-WinttyPathKey $seg).Length -gt $r.Length) {
-        $attrs = try { [System.IO.File]::GetAttributes($seg) } catch { $null }
+        try { $attrs = & $ReadAttributes $seg }
+        catch {
+            $inner = $_.Exception
+            while ($inner -is [System.Management.Automation.MethodInvocationException] -and $inner.InnerException) { $inner = $inner.InnerException }
+            if ($inner -is [System.IO.FileNotFoundException] -or $inner -is [System.IO.DirectoryNotFoundException]) { $attrs = $null }
+            else { return $false }
+        }
         if ($null -ne $attrs -and ($attrs -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
         $seg = [System.IO.Path]::GetDirectoryName($seg)
     }
@@ -300,8 +316,10 @@ function Get-WinttyBuildConstant {
         [Parameter(Mandatory)][string]$Type,
         [Parameter(Mandatory)][string]$Field
     )
-    $dll = Join-Path (Split-Path -Parent ([System.IO.Path]::GetFullPath($ExePath))) 'Ghostty.Core.dll'
-    if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { return $null }
+    # String work and one existence probe: Join-Path and Split-Path would
+    # throw on a drive that does not exist, and a throw is not an answer.
+    $dll = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ExePath)), 'Ghostty.Core.dll')
+    if (-not [System.IO.File]::Exists($dll)) { return $null }
     $stream = [System.IO.File]::OpenRead($dll)
     try {
         $pe = [System.Reflection.PortableExecutable.PEReader]::new($stream)
@@ -512,7 +530,16 @@ function Test-WinttyCoexistence {
     }
 
     if ($foreign.Count -gt 0) {
-        if (-not $AumId) { $AumId = Get-WinttyBuildAumid $ExePath }
+        # The build's own AUMID wins: a passed one only fills in where the
+        # exe's cannot be read (a NativeAOT publish), and one that disagrees
+        # with what the build carries is a caller that got the wrong build.
+        $ownAumId = Get-WinttyBuildAumid $ExePath
+        if ($ownAumId) {
+            if ($AumId -and $AumId -ine $ownAumId) {
+                $why.Add("the AUMID passed for this build ($AumId) is not the one its Ghostty.Core.dll carries ($ownAumId)")
+            }
+            $AumId = $ownAumId
+        }
         if (-not $AumId) {
             $why.Add("the AUMID this build runs as cannot be read (no Ghostty.Core.dll beside $ExePath), so it cannot be compared with the running instances'; pass it explicitly")
         }
@@ -682,4 +709,59 @@ function Test-WinttyCoexistencePreflight {
     if ($PSBoundParameters.ContainsKey('Instances')) { $check.Instances = $Instances }
     if ($PSBoundParameters.ContainsKey('Registrations')) { $check.Registrations = $Registrations }
     return Test-WinttyCoexistence @check
+}
+
+# ---- session-wide settings ------------------------------------------------------
+
+# A harness that changes something the whole user session shares (system
+# parameters such as animations or High Contrast, the light/dark theme and
+# accent keys, the wallpaper, the clipboard, or every other app's windows)
+# changes it under the user's Wintty too, and every other app. Isolation
+# cannot move any of these, so the only safe place for such a change is a
+# desktop with no other Wintty on it. Both helpers refuse beside one, with
+# the reason; the gate scan in SeamClient.Tests.ps1 fails a harness that
+# writes such state without going through them.
+
+# Refuses (throws) when a Wintty other than $ExePath's is running. For a
+# harness whose change spans its whole run and whose own finally restores
+# it; call it before the first change.
+function Assert-WinttySessionStateFree {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        # What is changed, for the message: 'the desktop wallpaper'.
+        [Parameter(Mandatory)][string]$What,
+        [string]$Context = 'This harness',
+        [object[]]$Instances
+    )
+    $others = @(Get-WinttyOtherInstances -ExePath $ExePath -Instances $(if ($PSBoundParameters.ContainsKey('Instances')) { $Instances } else { Get-WinttyInstances }))
+    if ($others.Count -eq 0) { return }
+    throw ("HARNESS: skipped: $Context changes $What, which the whole session shares, and Wintty pid(s) " +
+        "$(($others | ForEach-Object { $_.Id }) -join ', ') run beside it; close them to run it. Nothing was changed.")
+}
+
+# The scoped form: refuses like the above, then runs $Change and always
+# runs $Restore after it, in a finally. -SkipBeside turns the refusal into a
+# printed skip that returns $false, for a change the run can do without.
+# Returns $true when $Change ran.
+function Invoke-WinttySessionStateChange {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][scriptblock]$Change,
+        [scriptblock]$Restore,
+        [string]$Context = 'This harness',
+        [switch]$SkipBeside,
+        [object[]]$Instances
+    )
+    $check = @{ ExePath = $ExePath; What = $What; Context = $Context }
+    if ($PSBoundParameters.ContainsKey('Instances')) { $check.Instances = $Instances }
+    try { Assert-WinttySessionStateFree @check }
+    catch {
+        if (-not $SkipBeside) { throw }
+        Write-Host ($_.Exception.Message -replace '^HARNESS: skipped: ', 'skipped: ')
+        return $false
+    }
+    try { $null = & $Change }
+    finally { if ($Restore) { $null = & $Restore } }
+    return $true
 }

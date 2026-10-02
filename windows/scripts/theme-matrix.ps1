@@ -529,6 +529,12 @@ function Set-DesktopPolarity([string]$P) {
 # ---- run ---------------------------------------------------------------------
 
 $startedUtc = (Get-Date).ToUniversalTime().ToString('o')
+# The run flips the desktop's light/dark setting and sets the wallpaper for
+# hours, both shared by the whole session and read live by the user's
+# Wintty, so it refuses beside another one before touching either. The
+# finally below puts both back.
+Assert-WinttySessionStateFree -ExePath $ExePath -Context 'The theme matrix' `
+    -What $(if ($NoFlip) { 'the desktop wallpaper' } else { 'the desktop light/dark setting and the wallpaper' })
 $snapshotPath = Save-EnvSnapshot
 # A copy the next harness cannot overwrite: the well-known snapshot is
 # replaced by whoever runs next, and after a kill mid-flip that would be a

@@ -1737,12 +1737,17 @@ if ($useFixtures) {
     # that AUMID's toast registration and jump list. Beside another edition
     # the refusals are: the splash race (it measures the single-instance
     # election), the jump-list handoff (single-instance on), the tab-drag
-    # motion-off leg (it turns animations off machine-wide), and any build
+    # motion-off leg (it turns animations off machine-wide), the paste and
+    # IME harnesses (they write the clipboard), and any build
     # whose AUMID cannot be read (a NativeAOT publish, unless its caller
     # passes it).
     Assert-NoWinttyFrom -ExePath $ExePath -Context 'The fuzz suite'
     Write-Host "exe:  $ExePath"
-    Clear-Desktop
+    # Minimizing every other window reaches the user's own Wintty windows
+    # too, so beside another Wintty the desktop is left as it is and a
+    # harness whose click point is covered says so itself.
+    [void](Invoke-WinttySessionStateChange -ExePath $ExePath -What 'every other window on the desktop (it minimizes them)' `
+        -Context 'The fuzz suite' -SkipBeside -Change { Clear-Desktop })
 }
 
 # ---- run ------------------------------------------------------------------

@@ -423,42 +423,36 @@ Invoke-Scenario 'vertical-reorder-motion-on' {
 Invoke-Scenario 'vertical-reorder-motion-off' {
     param($s)
     if ($null -eq $script:OrderMotionOn) { throw 'HARVEST_MISS: the motion-on scenario did not record its order' }
-    # This leg turns client-area animation off, a session-wide setting every
-    # running app reads, the user's Wintty included. Beside one it refuses
-    # rather than change that under them; the restore below runs either way.
-    $neighbours = @(Get-WinttyOtherInstances -ExePath $ExePath -Instances (Get-WinttyInstances))
-    if ($neighbours.Count -gt 0) {
-        throw ("HARNESS: skipped: this leg turns animations off machine-wide, and Wintty pid(s) {0} run beside it; close them to run it" -f
-            (($neighbours | ForEach-Object { $_.Id }) -join ', '))
-    }
+    # Client-area animation is a session-wide setting every running app
+    # reads, the user's Wintty included, so the change goes through the
+    # shared helper: it refuses beside another Wintty before anything is
+    # changed, and runs the restore in a finally once something may have
+    # been. The snapshot is only a read, so it is taken first.
     $guardSnapshot = Join-Path $OutDir 'env-snapshot.json'
     if (-not (Save-EnvSnapshot -Path $guardSnapshot)) { throw 'HARVEST_MISS: env guard snapshot failed' }
     $before = Get-SpiUint ([uint32]0x1042)
-    # The set sits inside the try, so even a read-back that fails puts the
-    # setting back.
-    try {
-        Set-SpiUint ([uint32]0x1043) ([uint32]0)
-        $after = Get-SpiUint ([uint32]0x1042)
-        if ($after -ne 0) { throw "HARVEST_MISS: animation toggle read back $after, not 0" }
-        Write-Host "animations: $before -> 0 (read back)"
-        [void](Invoke-Seed $s)
-        $drag = Invoke-SeamCommand $s @{ op = 'drag'; from = 1; to = 2 }
-        [void](Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5'))
-        $off = @($drag.order) -join ','
-        if ($off -ne $script:OrderMotionOn) {
-            throw "PRODUCT_FAIL: motion-off landed [$off] but motion-on landed [$script:OrderMotionOn] - the gate changed the outcome, not just the animation"
-        }
-        $sessions = @(Get-ScenarioTrace 'vertical-reorder-motion-off')
-        if ($sessions.Count -lt 1) { throw 'PRODUCT_FAIL: no trace session for the motion-off reorder' }
-        Assert-TraceSession $sessions[0] 'the motion-off reorder' 1 'off'
-    }
-    finally {
-        # A mid-scenario failure must still give the machine its
-        # animations back; the read-back inside the restore turns a
-        # silent miss into a loud harness failure.
-        Restore-EnvSnapshot -Path $guardSnapshot
-        Write-Host "animations restored to $(Get-SpiUint ([uint32]0x1042)) (read-back verified by the guard)"
-    }
+    [void](Invoke-WinttySessionStateChange -ExePath $ExePath -What 'client-area animation (SPI_SETCLIENTAREAANIMATION)' `
+        -Context 'The tab-drag motion-off leg' -Change {
+            Set-SpiUint ([uint32]0x1043) ([uint32]0)
+            $after = Get-SpiUint ([uint32]0x1042)
+            if ($after -ne 0) { throw "HARVEST_MISS: animation toggle read back $after, not 0" }
+            Write-Host "animations: $before -> 0 (read back)"
+            [void](Invoke-Seed $s)
+            $drag = Invoke-SeamCommand $s @{ op = 'drag'; from = 1; to = 2 }
+            [void](Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5'))
+            $off = @($drag.order) -join ','
+            if ($off -ne $script:OrderMotionOn) {
+                throw "PRODUCT_FAIL: motion-off landed [$off] but motion-on landed [$script:OrderMotionOn] - the gate changed the outcome, not just the animation"
+            }
+            $sessions = @(Get-ScenarioTrace 'vertical-reorder-motion-off')
+            if ($sessions.Count -lt 1) { throw 'PRODUCT_FAIL: no trace session for the motion-off reorder' }
+            Assert-TraceSession $sessions[0] 'the motion-off reorder' 1 'off'
+        } -Restore {
+            # The read-back inside the restore turns a silent miss into a
+            # loud harness failure.
+            Restore-EnvSnapshot -Path $guardSnapshot
+            Write-Host "animations restored to $(Get-SpiUint ([uint32]0x1042)) (read-back verified by the guard)"
+        })
 }
 
 Invoke-Scenario 'pin-zone-setup' {
