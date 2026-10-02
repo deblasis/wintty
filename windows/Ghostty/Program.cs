@@ -1465,10 +1465,11 @@ public static partial class Program
     // means "no running instance", and the caller falls back to the TUI.
     private static System.IO.Pipes.NamedPipeClientStream? ConnectThemePreviewPipe()
     {
-        // A server that let the ack wait run out once (an older build at the
-        // same path, which never acknowledges) will not answer a second
-        // attempt from this process either; +list-themes would otherwise pay
-        // the wait again before its TUI.
+        // A server that let the ack wait run out once is most likely an older
+        // build at the same path, which never acknowledges; +list-themes
+        // would otherwise pay the wait again before its TUI. If it was only a
+        // slow current server, this run loses its live preview, which is the
+        // safe direction.
         if (_themeAckTimedOut) return null;
 
         System.IO.Pipes.NamedPipeClientStream? pipe = null;
