@@ -358,6 +358,17 @@ public class TestSeamWiringTests
     /// than a reimplementation (a second discovery is a second thing to
     /// drift), and none of it reaches a shipping build.
     /// </summary>
+    /// <remarks>
+    /// Red-first record, taken 2026-10-02 with the op stashed out of the
+    /// dispatch (the test green against it in the same session):
+    /// <code>
+    /// Failed Ghostty.Tests.Wiring.TestSeamWiringTests.TheProfilesOpListsTheRegistry_WithoutOpeningAnything [587 ms]
+    ///   Error Message:
+    ///    expected one '"profiles"' case in ExecuteOnUiThreadAsync, found 0
+    ///   Stack Trace:
+    ///      at Ghostty.Tests.Wiring.ShellSource.Case(String method, String label) in ShellSource.cs:line 319
+    /// </code>
+    /// </remarks>
     [Fact]
     public void TheProfilesOpListsTheRegistry_WithoutOpeningAnything()
     {

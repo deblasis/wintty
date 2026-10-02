@@ -170,25 +170,42 @@ function Get-Budget([string]$Kind, [string]$Which) {
 # that fails is a LOUD SKIP (visible in the output, recorded in the
 # pending-WSL ledger), never a red for a broken environment and never a
 # silent green. The ledger is the re-run list once the environment is
-# confirmed healthy again.
-$PendingWslLedger = 'C:\wt\pending-wsl-tests.md'
+# confirmed healthy again; WINTTY_PENDING_WSL_LEDGER names a shared
+# ledger and the default sits beside the run's output.
+# The pending-WSL ledger path is never hardcoded to a directory another
+# machine may not have: WINTTY_PENDING_WSL_LEDGER names a shared ledger
+# when one is wanted (the founder's machine points it at the shared
+# C:\wt file), and the default lands beside the harness's own output,
+# created on demand. The skip machinery must never be a source of red, so
+# every ledger write degrades to a printed line if it cannot happen.
+$PendingWslLedger = if ($env:WINTTY_PENDING_WSL_LEDGER) { "$($env:WINTTY_PENDING_WSL_LEDGER)" }
+else { Join-Path $OutDir 'pending-wsl-tests.md' }
 $script:Skips = [System.Collections.Generic.List[string]]::new()
 
 function Add-PendingWsl([string]$What, [string]$ProbeNote) {
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    if (-not (Test-Path -LiteralPath $PendingWslLedger)) {
-        @(
-            '# Pending WSL tests'
-            ''
-            '# Every WSL combination skipped because the WSL environment was'
-            '# unhealthy at run time. This file is the re-run list: when the'
-            '# environment is confirmed healthy, run these rows. Founder'
-            '# directive 2026-10-02: WSL observed broken on this machine; the'
-            '# harness probes basic execution before every WSL scenario.'
-            ''
-        ) | Set-Content -LiteralPath $PendingWslLedger -Encoding utf8
+    try {
+        $dir = Split-Path -Parent $PendingWslLedger
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        if (-not (Test-Path -LiteralPath $PendingWslLedger)) {
+            @(
+                '# Pending WSL tests'
+                ''
+                '# Every WSL combination skipped because the WSL environment was'
+                '# unhealthy at run time. This file is the re-run list: when the'
+                '# environment is confirmed healthy, run these rows. Founder'
+                '# directive 2026-10-02: WSL observed broken on this machine; the'
+                '# harness probes basic execution before every WSL scenario.'
+                ''
+            ) | Set-Content -LiteralPath $PendingWslLedger -Encoding utf8
+        }
+        Add-Content -LiteralPath $PendingWslLedger -Value "$stamp | $What | probe: $ProbeNote" -Encoding utf8
     }
-    Add-Content -LiteralPath $PendingWslLedger -Value "$stamp | $What | probe: $ProbeNote" -Encoding utf8
+    catch {
+        Write-Host "SKIP machinery: could not write the pending-WSL ledger at $PendingWslLedger : $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
 
 function Add-WslSkip([string]$What, [string]$ProbeNote) {
@@ -474,12 +491,16 @@ function Test-OneCharWrap([string]$What, [string]$Text, [int]$Cols) {
 # the floor, and the screen carries no wrap signature. The creation-side
 # floor applies to every pane however late it is read - a pane BORN
 # degenerate and resized wider afterwards still shows its degenerate
-# spawn size, which is exactly the #1262 shape. The #1159 EQUALITY is a
-# birth-moment invariant and applies only to a pane this harness is
-# reading at its own birth ($Fresh): a split legitimately resizes the
-# panes that were already there, and their creation size stays the
-# historical one.
-function Test-Newborn([string]$What, $r, [string]$ScreenText, [bool]$Fresh) {
+# spawn size, which is exactly the #1262 shape. The #1159 EQUALITY is
+# UNCONDITIONAL: the pane under test's pty must have started at its
+# settled size, because every pane this function judges directly was read
+# at its own birth. The only exception is spelled out loud below
+# (-PaneWasResizedAfterBirth) for split leaves that a later split in the
+# chain resized after their birth: their creation size stays the
+# historical one, which is correct product behavior. A call site cannot
+# lose the equality by forgetting an argument - omitting the switch IS
+# the check.
+function Test-Newborn([string]$What, $r, [string]$ScreenText, [switch]$PaneWasResizedAfterBirth) {
     $fails = @()
     if ([int]$r.cols -lt $MinCols -or [int]$r.rows -lt $MinRows) {
         $fails += "${What}: settled at $($r.cols)x$($r.rows), floor is ${MinCols}x${MinRows} (I-1)"
@@ -487,7 +508,7 @@ function Test-Newborn([string]$What, $r, [string]$ScreenText, [bool]$Fresh) {
     if ([int]$r.spawnCols -lt $MinCols -or [int]$r.spawnRows -lt $MinRows) {
         $fails += "${What}: born at $($r.spawnCols)x$($r.spawnRows), floor is ${MinCols}x${MinRows} (I-1, creation size)"
     }
-    if ($Fresh -and ($f = Test-Pane $What $r)) { $fails += $f }
+    if (-not $PaneWasResizedAfterBirth -and ($f = Test-Pane $What $r)) { $fails += $f }
     if ($f = Test-OneCharWrap $What $ScreenText ([int]$r.cols)) { $fails += $f }
     return $fails
 }
@@ -614,7 +635,12 @@ function Test-Leaf([string]$What, $s, [int]$Index, [int]$Leaf, $Expected, [strin
         return @{ Fails = @("${What}: the pane's program output never reached the screen inside ${ReadySec}s (I-2); screen: $dump"); Detail = 'no output' }
     }
     $size = Read-Leaf $s $Index $Leaf
-    $fails = @(Test-Newborn $What $size $screen.text $Fresh)
+    # $Fresh (read at this leaf's own birth) maps to the loud opt-out the
+    # other way round: every pane this harness reads at its own birth
+    # keeps the equality, and only a leaf a LATER split resized after its
+    # birth carries the opt-out.
+    $fails = if ($Fresh) { @(Test-Newborn $What $size $screen.text) }
+    else { @(Test-Newborn $What $size $screen.text -PaneWasResizedAfterBirth) }
     $detail = "leaf ${Leaf}: born+settled $($size.cols)x$($size.rows) in $($size.widthPx)x$($size.heightPx) px, wraprun $(Count-OneCharRun $screen.text)"
     if ($null -ne $Expected -and $Geom.CellW -gt 0) {
         $wantCols = [int][math]::Floor(($Expected.W - $Geom.PadX) / $Geom.CellW)
@@ -963,11 +989,14 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
                 $pre = $before[$i]
                 $preText = if ($pre.live) { "live before shown, pty $($pre.spawnCols)x$($pre.spawnRows)" } else { 'no pty before shown' }
                 $entry.hidden += "tab ${i}: $preText; shown: $(Format-Pane $shown)"
-                # The marker wait is bounded but not a finding of its own
-                # here: a hidden tab's shell may be past its marker. The
-                # floor and the equality are.
+                # No output is a finding for every pane kind this
+                # harness births: a hidden tab runs the same echo program,
+                # and once shown its marker must reach the screen.
                 $screen = Wait-PaneOutput $s $i -1 $MarkerLaunch (Get-Budget cmd WarmReady)
                 $text = if ($screen) { $screen.text } else { '' }
+                if ($null -eq $screen) {
+                    $fails += "hidden tab $i once shown: its shell's output never reached the screen inside $(Get-Budget cmd WarmReady)s (I-2)"
+                }
                 $fails += @(Test-Newborn "hidden tab $i once shown" $shown $text)
             }
             if ($fails.Count -gt 0) { throw ('PRODUCT_FAIL: ' + ($fails -join '; ')) }
@@ -1060,14 +1089,17 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
                     # cold budget.
                     $screen = Wait-PaneAnyText $s $index -1 (Get-Budget $kind ColdReady)
                     $text = if ($screen) { $screen.text } else { (Read-Screen $s $index -1).text }
+                    $hasText = (($text -replace '\s', '').Length -gt 0)
                     $entry.sweep += "$profileId ($kind) -> $(Format-Pane $settled)"
                     $fails = @(Test-Newborn "profile $profileId new tab" $settled $text)
-                    # A profile whose program prints nothing inside its
-                    # kind's budget is not a wrap finding; record it.
-                    $hasText = (($text -replace '\s', '').Length -gt 0)
-                    if (-not $hasText) { $fails = @($fails | Where-Object { $_ -notlike '*wrap signature*' }) }
+                    # No output is a finding for every pane kind: a
+                    # profile whose program shows nothing inside its own
+                    # kind's cold budget is a blank-with-live-shell pane.
+                    if (-not $hasText) {
+                        $fails += "profile $profileId new tab: no output of its own reached the screen inside the ${kind} cold budget ($(Get-Budget $kind ColdReady)s) (I-2)"
+                    }
                     if ($fails.Count -gt 0) { throw ('PRODUCT_FAIL: ' + ($fails -join '; ')) }
-                    "$(Format-Pane $settled); screen $(if ($hasText) { "has text, wraprun $(Count-OneCharRun $text)" } else { 'no text yet (wrap signature not applicable)' })"
+                    "$(Format-Pane $settled); screen has text, wraprun $(Count-OneCharRun $text)"
                 }
                 if ($kind -in @('wsl', 'powershell')) {
                     Invoke-Scenario "profile-$profileId-warm$suffix" {
@@ -1081,6 +1113,9 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
                         $text = if ($screen) { $screen.text } else { '' }
                         $entry.sweep += "$profileId ($kind, warm) -> $(Format-Pane $settled)"
                         $fails = @(Test-Newborn "profile $profileId warm reopen" $settled $text)
+                        if (($text -replace '\s', '').Length -eq 0) {
+                            $fails += "profile $profileId warm reopen: no output of its own reached the screen inside the ${kind} warm budget ($(Get-Budget $kind WarmReady)s) (I-2)"
+                        }
                         if ($fails.Count -gt 0) { throw ('PRODUCT_FAIL: ' + ($fails -join '; ')) }
                         "warm reopen inside the ${kind} warm budget ($(Get-Budget $kind WarmSettle)s settle): $(Format-Pane $settled)"
                     }
