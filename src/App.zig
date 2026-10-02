@@ -644,22 +644,48 @@ pub const Mailbox = struct {
     /// latched wedged. Use `pushRequired` for the rare message whose
     /// loss nothing re-derives.
     pub fn push(self: Mailbox, msg: Message, timeout: Queue.Timeout) Queue.Size {
-        const result = switch (timeout) {
-            .forever => self.pushBounded(
-                msg,
-                Queue.wake_retry_timeout_ns,
-                Queue.wake_retry_attempts,
-                // The search thread emits match batches per tick and the
-                // pty reader emits per OSC, so this queue's producers do
-                // arrive in streams. Spending the budget once per stall
-                // rather than once per message is what keeps a wedged app
-                // thread from stalling them for as long as it is wedged.
-                .fail_fast,
-                null,
-            ),
-
-            .instant, .ns => self.mailbox.push(global.io(), msg, timeout),
+        return switch (timeout) {
+            .forever => self.pushAbortable(msg, null),
+            .instant, .ns => instant: {
+                const result = self.mailbox.push(global.io(), msg, timeout);
+                // Wake up our app loop
+                self.rt_app.wakeup();
+                break :instant result;
+            },
         };
+    }
+
+    /// `push(msg, .forever)` for a streaming producer that a teardown
+    /// joins back.
+    ///
+    /// `abort` is that producer's teardown flag, with the same contract
+    /// as `pushRequired`'s: checked before every attempt window, so a
+    /// raised flag ends the wait within one window instead of the
+    /// background budget. The pty reader is the producer this exists
+    /// for (#1189, #1266): on a close the UI thread's `Surface.deinit`
+    /// joins the io thread, whose exit runs `Exec.threadExit`, which
+    /// joins the reader; the UI thread is the only thing that drains
+    /// this queue, so a reader parked here at close
+    /// parks the window with it for the whole budget. A fresh shell's
+    /// startup burst (titles, pwd, prompt marks) is enough to fill the
+    /// queue while the UI thread is busy opening the next tab.
+    pub fn pushAbortable(
+        self: Mailbox,
+        msg: Message,
+        abort: ?*const std.atomic.Value(bool),
+    ) Queue.Size {
+        const result = self.pushBounded(
+            msg,
+            Queue.wake_retry_timeout_ns,
+            Queue.wake_retry_attempts,
+            // The search thread emits match batches per tick and the
+            // pty reader emits per OSC, so this queue's producers do
+            // arrive in streams. Spending the budget once per stall
+            // rather than once per message is what keeps a wedged app
+            // thread from stalling them for as long as it is wedged.
+            .fail_fast,
+            abort,
+        );
 
         // Wake up our app loop
         self.rt_app.wakeup();

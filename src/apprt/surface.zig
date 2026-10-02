@@ -341,6 +341,25 @@ pub const Mailbox = struct {
         }, timeout);
     }
 
+    /// `push(msg, .forever)` with the producer's teardown flag as an
+    /// abort token. See `App.Mailbox.pushAbortable`; the pty reader's
+    /// streaming messages take this so a close that joins the reader is
+    /// not held for the reader's delivery budget.
+    pub fn pushAbortable(
+        self: Mailbox,
+        msg: Message,
+        abort: ?*const std.atomic.Value(bool),
+    ) App.Mailbox.Queue.Size {
+        assert(msg.dropAllowed());
+
+        return self.app.pushAbortable(.{
+            .surface_message = .{
+                .surface = self.surface,
+                .message = msg,
+            },
+        }, abort);
+    }
+
     /// Send a message the surface cannot re-derive if it is lost.
     ///
     /// See `App.Mailbox.pushRequired`. Only for a one-shot whose loss is

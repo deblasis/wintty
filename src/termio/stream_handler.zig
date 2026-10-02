@@ -195,6 +195,19 @@ pub const StreamHandler = struct {
     /// ignored.
     pwd_refused: bool = false,
 
+    /// Latched by `Exec.stopReadThread` before any join of the pty
+    /// reader, and handed to the reader's blocking surface push as its
+    /// abort token (#1266). On a real close the UI thread waits on that
+    /// join (`Surface.deinit` joins the io thread, whose exit runs
+    /// `Exec.threadExit`), and it is the only drain of the app mailbox, so
+    /// without the token a reader parked on a full mailbox at close
+    /// holds the window for the whole background budget. On a real
+    /// close what the reader drops past this point is for a surface
+    /// `App.deleteSurface` already removed, so it would be discarded on
+    /// arrival anyway; on a `threadEnter` failure it is stream output
+    /// for a pane that is already non-functional.
+    teardown: std.atomic.Value(bool) = .init(false),
+
     pub const Stream = terminal.Stream(StreamHandler);
 
     /// True if we have tmux control mode built in.
@@ -277,7 +290,7 @@ pub const StreamHandler = struct {
         if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
             self.renderer_state.mutex.unlock(global.io());
             defer self.renderer_state.mutex.lockUncancelable(global.io());
-            _ = self.surface_mailbox.push(msg, .{ .forever = {} });
+            _ = self.surface_mailbox.pushAbortable(msg, &self.teardown);
         }
     }
 
@@ -2511,6 +2524,7 @@ const TestHandler = struct {
             .seen_title = false,
             .pwd_reported = false,
             .pwd_refused = false,
+            .teardown = .init(false),
         };
     }
 
@@ -2619,6 +2633,69 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     // Teardown leaves no transaction that could be committed and
     // forwarded to the macOS clipboard path.
     try testing.expect(th.termio_mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "a reader parked on a full app mailbox lets go when teardown latches" {
+    // #1266: closing a tab joins its pty reader on the UI thread, and the
+    // UI thread is the only drain of the app mailbox. A reader parked on
+    // a full mailbox at that moment used to hold the join -- and the
+    // window -- for its whole background budget (240 windows of 250 ms).
+    // This is that shape: the reader is already inside its wait when the
+    // close latches teardown, the way `Exec.stopReadThread` does before
+    // every join of the reader. With the token honoured the push gives up within
+    // one attempt window; without it this test waits out the minute and
+    // fails on the elapsed time.
+    const testing = std.testing;
+    const io = global.io();
+    var h: TestHandler = undefined;
+    try h.init(testing.allocator);
+    defer h.deinit(testing.allocator);
+    h.useArena();
+
+    // A UI thread that is busy elsewhere: every slot taken, none drained.
+    var queued: App.Mailbox.Queue.Size = 0;
+    while (h.app_mailbox.push(io, .{ .quit = {} }, .{ .instant = {} }) > 0) queued += 1;
+    defer _ = h.drain();
+
+    // The close, from the joining side: wait until the reader is parked
+    // on the queue, then latch teardown, as `Exec.stopReadThread` does
+    // before it joins.
+    //
+    // The poll is bounded so that a future change that stops the reader
+    // parking (it drops, or pushes somewhere else) cannot hang the suite:
+    // past the deadline the flag is raised anyway, the reader is released
+    // either way, and the assertions below decide.
+    const Closer = struct {
+        fn run(queue: *App.Mailbox.Queue, flag: *std.atomic.Value(bool)) void {
+            const thread_io = global.io();
+            const started = std.Io.Timestamp.now(thread_io, .awake);
+            while (started.untilNow(thread_io, .awake).toMilliseconds() < 10 * std.time.ms_per_s) {
+                queue.mutex.lockUncancelable(thread_io);
+                const parked = queue.not_full_waiters > 0;
+                queue.mutex.unlock(thread_io);
+                if (parked) break;
+                std.Thread.yield() catch {};
+            }
+            flag.store(true, .release);
+        }
+    };
+    const closer = try std.Thread.spawn(
+        .{},
+        Closer.run,
+        .{ h.app_mailbox, &h.handler.teardown },
+    );
+
+    // The reader: a fresh shell setting its title.
+    const start = std.Io.Timestamp.now(io, .awake);
+    h.feed("\x1b]2;pwsh\x07");
+    const elapsed_ms = start.untilNow(io, .awake).toMilliseconds();
+    closer.join();
+
+    // Well under the budget, with room for a loaded build machine; the
+    // unfixed wait is 60 s.
+    try testing.expect(elapsed_ms < 5 * std.time.ms_per_s);
+    // Given up, not delivered: the queue is exactly as full as it was.
+    try testing.expectEqual(queued, h.app_mailbox.len);
 }
 
 test "tmux control mode commands survive a full pty write backlog" {
