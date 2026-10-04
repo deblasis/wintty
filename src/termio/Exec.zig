@@ -20,6 +20,7 @@ const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const shell_integration = @import("shell_integration.zig");
 const wsl_shell_integration = @import("wsl_shell_integration.zig");
+const conpty_handshake = @import("conpty_handshake.zig");
 const terminfo_install = @import("../terminfo/install.zig");
 const terminfopkg = @import("../terminfo/main.zig");
 const DiskCache = @import("../cli/ssh-cache/DiskCache.zig");
@@ -215,7 +216,7 @@ pub fn threadEnter(
         try std.Thread.spawn(
             .{},
             ReadThread.threadMainWindows,
-            .{ pty_fds.read, io, pipe[0], &self.read_quit },
+            .{ pty_fds.read, pty_fds.write, io, pipe[0], &self.read_quit },
         )
     else
         try std.Thread.spawn(
@@ -905,6 +906,13 @@ pub const Config = struct {
     shell_integration_features: configpkg.Config.ShellIntegrationFeatures = .{},
     cursor_blink: ?bool = null,
     working_directory: ?[]const u8 = null,
+
+    /// Whether `working_directory` is a default this process filled in rather
+    /// than one the user wrote. Carried because the answer is not the same
+    /// directory for every command: see `Config.WorkingDirectoryDefaulted`,
+    /// which is where the rule lives and what the spawn path asks.
+    working_directory_defaulted: bool = false,
+
     resources_dir: ?[]const u8,
     term: []const u8,
 
@@ -1203,7 +1211,22 @@ const Subprocess = struct {
 
         // We have to copy the cwd because there is no guarantee that
         // pointers in full_config remain valid.
-        const cwd: ?[:0]u8 = if (cfg.working_directory) |cwd|
+        //
+        // A WSL shell nobody gave a starting directory to is launched with
+        // none, so wsl.exe applies its own default: the distro user's HOME. The
+        // directory this same config resolved above is the Windows home, which
+        // wsl.exe turns into /mnt/c/Users/<name> - the 9p bridge, where the
+        // shell is slow from its first prompt (#1268). The rule is a function
+        // of the three values rather than of this file, so the daemon-spawned
+        // path asks the same question and lands in the same place.
+        const wsl_default_cwd = configpkg.Config.WorkingDirectoryDefaulted(
+            args[0],
+            cfg.working_directory,
+            cfg.working_directory_defaulted,
+        );
+        const cwd: ?[:0]u8 = if (wsl_default_cwd)
+            null
+        else if (cfg.working_directory) |cwd|
             try alloc.dupeZ(u8, cwd)
         else
             null;
@@ -2350,8 +2373,12 @@ pub const ReadThread = struct {
     /// The real read surface for `readLoopWindows`.
     const WindowsReader = struct {
         fd: posix.fd_t,
+        /// The pty's input, for the one reply this reader writes itself:
+        /// conpty's startup DA1 (see conpty_handshake.zig).
+        reply_fd: posix.fd_t,
         io: *termio.Termio,
         quit: *Quit,
+        handshake: conpty_handshake.Handshake = .{},
         buf: [windows_read_capacity]u8 = undefined,
 
         fn read(self: *WindowsReader) WindowsRead {
@@ -2391,10 +2418,20 @@ pub const ReadThread = struct {
                 return .eof;
             }
 
-            return .{ .data = self.buf[0..n] };
+            // conpty holds the child's first output until its startup DA1
+            // is answered (forever, for a WSL child: #1268). Answer it here,
+            // before the bytes reach the parser, rather than through the
+            // parser's reply path, which needs the IO loop that may not be
+            // running yet; the request leaves the stream so the parser does
+            // not answer it a second time.
+            const filtered = self.handshake.filter(self.buf[0..n]);
+            if (filtered.reply) writeHandshakeReply(self.reply_fd);
+            return .{ .data = filtered.bytes };
         }
 
         fn process(self: *WindowsReader, data: []const u8) void {
+            // A chunk that was only the handshake request is empty now.
+            if (data.len == 0) return;
             @call(.always_inline, termio.Termio.processOutput, .{ self.io, data });
 
             // See threadMainPosix: hand the renderer state mutex
@@ -2451,8 +2488,62 @@ pub const ReadThread = struct {
         }
     };
 
+    /// Write conpty's startup DA1 reply to the pty's input from the reader
+    /// thread. The input pipe is overlapped (the IO loop writes it through
+    /// IOCP), so this write is overlapped too, waited on its own event. The
+    /// event handle's low bit is set so the completion is NOT posted to the
+    /// IO loop's completion port, which would receive a packet for an
+    /// OVERLAPPED it never issued. Best effort: a failure is logged and
+    /// leaves the parser's own answer to the next DA1 conpty sees, which is
+    /// no worse than before.
+    fn writeHandshakeReply(fd: posix.fd_t) void {
+        const reply = conpty_handshake.DA1_REPLY;
+        const event = windows.exp.kernel32.CreateEventW(
+            null,
+            windows.TRUE,
+            windows.FALSE,
+            null,
+        ) orelse {
+            log.warn("conpty handshake: no event for the DA1 reply err={}", .{windows.GetLastError()});
+            return;
+        };
+        defer windows.CloseHandle(event);
+
+        var ov = std.mem.zeroes(windows.OVERLAPPED);
+        ov.hEvent = @ptrFromInt(@intFromPtr(event) | 1);
+        if (windows.exp.kernel32.WriteFile(
+            fd,
+            reply.ptr,
+            @intCast(reply.len),
+            null,
+            &ov,
+        ) == windows.FALSE) {
+            switch (windows.GetLastError()) {
+                .IO_PENDING => {},
+                else => |err| {
+                    log.warn("conpty handshake: DA1 reply write failed err={}", .{err});
+                    return;
+                },
+            }
+        }
+
+        // conpty reads its input continuously, so this is a few
+        // microseconds; the bound only keeps a wedged pipe from parking
+        // the reader. An abandoned write is cancelled and waited out,
+        // because `ov` lives on this stack frame.
+        switch (windows.exp.kernel32.WaitForSingleObject(event, 1000)) {
+            windows.WAIT_OBJECT_0 => log.info("conpty handshake: answered the startup DA1", .{}),
+            else => {
+                _ = windows.exp.kernel32.CancelIoEx(fd, &ov);
+                _ = windows.exp.kernel32.WaitForSingleObject(event, windows.INFINITE);
+                log.warn("conpty handshake: DA1 reply did not complete within 1s; cancelled", .{});
+            },
+        }
+    }
+
     fn threadMainWindows(
         fd: posix.fd_t,
+        reply_fd: posix.fd_t,
         io: *termio.Termio,
         quit: posix.fd_t,
         quit_state: *Quit,
@@ -2475,6 +2566,7 @@ pub const ReadThread = struct {
 
         var reader: WindowsReader = .{
             .fd = fd,
+            .reply_fd = reply_fd,
             .io = io,
             .quit = quit_state,
         };
@@ -6513,11 +6605,15 @@ test "ReadThread windows: a blocked real read is interrupted and decoded" {
         }
     };
 
-    var ops: Ops = .{ .inner = .{
-        .fd = read_end,
-        .io = undefined,
-        .quit = &quit,
-    } };
+    var ops: Ops = .{
+        .inner = .{
+            .fd = read_end,
+            // No read returns data, so the handshake reply is never written.
+            .reply_fd = write_end,
+            .io = undefined,
+            .quit = &quit,
+        },
+    };
 
     var cancel: ReadThread.WindowsCancel = .{
         .fd = read_end,
@@ -6551,4 +6647,165 @@ test "ReadThread windows: a blocked real read is interrupted and decoded" {
     // The read that was parked came back as OPERATION_ABORTED rather
     // than an error or a spurious EOF, and the loop then saw the quit.
     try testing.expect(ops.aborts >= 1);
+}
+
+test "ReadThread windows: conpty's startup DA1 is answered on the pty input and kept from the parser" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    // #1268: a local pane must answer the bundled conpty's startup DA1
+    // itself, the way sessiond does for a daemon pane. Real pipes in the
+    // shapes the pty uses: an anonymous pipe for conpty's output, and an
+    // overlapped named pipe for its input, which is what makes the reply
+    // write overlapped.
+    var out_read: windows.HANDLE = undefined;
+    var out_write: windows.HANDLE = undefined;
+    if (windows.exp.kernel32.CreatePipe(
+        &out_read,
+        &out_write,
+        null,
+        0,
+    ) == windows.FALSE) return error.CreatePipeFailed;
+    defer windows.CloseHandle(out_read);
+    defer windows.CloseHandle(out_write);
+
+    var name_buf: [128]u8 = undefined;
+    var name_buf_w: [128]u16 = undefined;
+    const name = try std.fmt.bufPrint(
+        &name_buf,
+        "\\\\.\\pipe\\LOCAL\\ghostty-test-handshake-{d}",
+        .{windows.GetCurrentProcessId()},
+    );
+    const name_w_len = try std.unicode.utf8ToUtf16Le(&name_buf_w, name);
+    name_buf_w[name_w_len] = 0;
+    const name_w = name_buf_w[0..name_w_len :0];
+
+    const in_write = windows.exp.kernel32.CreateNamedPipeW(
+        name_w.ptr,
+        windows.PIPE_ACCESS_OUTBOUND |
+            windows.FILE_FLAG_FIRST_PIPE_INSTANCE |
+            windows.FILE_FLAG_OVERLAPPED,
+        windows.PIPE_TYPE_BYTE,
+        1,
+        4096,
+        4096,
+        0,
+        null,
+    );
+    if (in_write == windows.INVALID_HANDLE_VALUE) return error.CreateNamedPipeFailed;
+    defer windows.CloseHandle(in_write);
+    const in_read = windows.exp.kernel32.CreateFileW(
+        name_w.ptr,
+        windows.GENERIC_READ,
+        0,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (in_read == windows.INVALID_HANDLE_VALUE) return error.CreateFileFailed;
+    defer windows.CloseHandle(in_read);
+
+    var quit: ReadThread.Quit = .{};
+    var reader: ReadThread.WindowsReader = .{
+        .fd = out_read,
+        .reply_fd = in_write,
+        // read() never follows it; only process() does, and it is not
+        // called here.
+        .io = undefined,
+        .quit = &quit,
+    };
+
+    // What conpty 1.25 writes first, as a probe recorded it.
+    const preamble = "\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h";
+    var written: windows.DWORD = 0;
+    try testing.expect(windows.exp.kernel32.WriteFile(
+        out_write,
+        preamble,
+        preamble.len,
+        &written,
+        null,
+    ) != windows.FALSE);
+
+    // The parser gets everything but the request...
+    switch (reader.read()) {
+        .data => |d| try testing.expectEqualStrings("\x1b[1t\x1b[?1004h\x1b[?9001h", d),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // ...and conpty gets the reply on its input, already written by the
+    // time read() returned.
+    var reply_buf: [64]u8 = undefined;
+    var got: windows.DWORD = 0;
+    try testing.expect(windows.exp.kernel32.ReadFile(
+        in_read,
+        &reply_buf,
+        reply_buf.len,
+        &got,
+        null,
+    ) != windows.FALSE);
+    try testing.expectEqualStrings(conpty_handshake.DA1_REPLY, reply_buf[0..got]);
+
+    // Answered once: a DA1 the child asks later is the parser's.
+    const later = "$ \x1b[c";
+    try testing.expect(windows.exp.kernel32.WriteFile(
+        out_write,
+        later,
+        later.len,
+        &written,
+        null,
+    ) != windows.FALSE);
+    switch (reader.read()) {
+        .data => |d| try testing.expectEqualStrings(later, d),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The same handshake on a pty whose preamble arrived in two reads. A pipe
+    // read returns what is available, not what a write produced, so the
+    // request can straddle the seam; the reader has to carry the partial
+    // prefix, or conpty waits out its timeout and the pane sits blank.
+    var split: ReadThread.WindowsReader = .{
+        .fd = out_read,
+        .reply_fd = in_write,
+        .io = undefined,
+        .quit = &quit,
+    };
+
+    const head = "\x1b[1t\x1b[";
+    try testing.expect(windows.exp.kernel32.WriteFile(
+        out_write,
+        head,
+        head.len,
+        &written,
+        null,
+    ) != windows.FALSE);
+    switch (split.read()) {
+        .data => |d| try testing.expectEqualStrings(head, d),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const rest = "c\x1b[?1004h";
+    try testing.expect(windows.exp.kernel32.WriteFile(
+        out_write,
+        rest,
+        rest.len,
+        &written,
+        null,
+    ) != windows.FALSE);
+    switch (split.read()) {
+        .data => |d| try testing.expectEqualStrings("\x1b[?1004h", d),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The reply for the straddled request is on the input pipe too, written
+    // before the second read() returned.
+    try testing.expect(windows.exp.kernel32.ReadFile(
+        in_read,
+        &reply_buf,
+        reply_buf.len,
+        &got,
+        null,
+    ) != windows.FALSE);
+    try testing.expectEqualStrings(conpty_handshake.DA1_REPLY, reply_buf[0..got]);
 }

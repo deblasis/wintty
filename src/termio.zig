@@ -38,4 +38,5 @@ test {
 
     _ = @import("termio/shell_integration.zig");
     _ = @import("termio/write_limit.zig");
+    _ = @import("termio/conpty_handshake.zig");
 }

@@ -14,6 +14,7 @@ const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
 const iterm2_parser = @import("../terminal/osc/parsers/iterm2.zig");
+const conpty_handshake = @import("conpty_handshake.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -2571,6 +2572,24 @@ const TestHandler = struct {
         };
         return counts;
     }
+
+    /// Append to `out` everything the handler has queued for the pty since the
+    /// last call, in order. The parser's answers to a program's queries are the
+    /// real ones, so a test that wants to know what this terminal says asks the
+    /// parser through this rather than reading a constant out of the file that
+    /// answers.
+    fn ptyWrites(self: *TestHandler, out: *std.ArrayList(u8), alloc: Allocator) !void {
+        while (self.termio_mailbox.spsc.queue.pop(global.io())) |msg| {
+            defer msg.deinit();
+            const command: termio.Message.WriteReq = switch (msg) {
+                .write_small => |v| .{ .small = v },
+                .write_stable => |v| .{ .stable = v },
+                .write_alloc => |v| .{ .alloc = v },
+                else => continue,
+            };
+            try out.appendSlice(alloc, command.slice());
+        }
+    }
 };
 
 test "kitty clipboard read: targets-only never consumes a one-time grant" {
@@ -3093,4 +3112,40 @@ test "tmux control mode: a program cannot enter it unless configured" {
     var exit: terminal.dcs.Command = .{ .tmux = .exit };
     try handler.dcsCommand(&exit);
     try testing.expect(handler.tmux_viewer == null);
+}
+
+test "DA1: what the parser answers is what the pty reader sends" {
+    // conpty's startup request is answered by the pty reader before the parser
+    // ever sees it, with a string of its own (src/termio/conpty_handshake.zig),
+    // and a reply that drifted from the terminal's own would tell conpty
+    // something this terminal does not say about itself. So the two are pinned
+    // against each other here - against a real parser run, not against a
+    // second copy of the literal, which stays green through any edit to either
+    // file (deblasis/wintty#1268).
+    //
+    // The claim is scoped to the deny arm, and that is the whole of it: a
+    // build that allows clipboard writes answers with 52 in the list, and the
+    // reader sends the deny form to conpty regardless, because a handshake
+    // answered with more than the terminal would claim is the worse of the two.
+    const testing = std.testing;
+
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+
+    var answered: std.ArrayList(u8) = .empty;
+    defer answered.deinit(testing.allocator);
+
+    // With clipboard writes allowed the answer carries 52, so the deny arm
+    // below is answering for a config that exists rather than for every one.
+    th.handler.clipboard_write = .allow;
+    th.feed("\x1b[c");
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expectEqualStrings("\x1b[?62;4;22;52c", answered.items);
+
+    answered.clearRetainingCapacity();
+    th.handler.clipboard_write = .deny;
+    th.feed("\x1b[c");
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expectEqualStrings(conpty_handshake.DA1_REPLY, answered.items);
 }
