@@ -1283,6 +1283,78 @@ public sealed class TabStripSyncWiringTests
         Assert.Empty(seam.AssignsTo("_suppressSelectionEvent"));
     }
 
+    /// <summary>
+    /// #1283: after a hidden tab is shown, the active tab's rounded
+    /// rectangle did not draw. The strip's indicator is per-item
+    /// {ThemeResource} overrides -- ApplyTabChrome writes
+    /// TabViewItemHeaderBackgroundSelected and
+    /// TabViewSelectedItemBorderBrush into item.Resources, and MUXC
+    /// re-reads them only when it re-applies the item's visual state.
+    /// So the write at the top of SelectActive is a CLAIM, and the
+    /// selection is the only lever that turns it into paint.
+    ///
+    /// A genuine switch pays for itself: writing SelectedItem re-applies
+    /// the state. A remove/re-insert re-show does not -- WinUI re-targets
+    /// the selection as the selected item leaves the collection, and the
+    /// item comes back already being the SelectedItem. That is the arm
+    /// that used to return before the write, so nothing ever painted
+    /// until a resize or a hover re-evaluated the state group. The
+    /// ancestors-level fallback is transparent by design (the stock
+    /// selected fill is overridden to Transparent precisely so the real
+    /// one can only come from the per-item claim), which is why titles
+    /// and the seam cover drew and the indicator did not.
+    /// </summary>
+    [Fact]
+    public void SelectActive_nudges_the_visual_state_on_the_arm_that_already_matched()
+    {
+        var selectActive = ShellSource.Load(TabHostSource).Method("SelectActive");
+
+        // One call, and it must sit inside the already-matches gate. The
+        // gate's CONDITION is the bug, so it is pinned too: a nudge hung
+        // off some other if would fire on exactly the arms that already
+        // work and leave the re-show one bare.
+        var nudge = selectActive.Call("NudgeTabViewItemVisual");
+        var gate = Assert.Single(nudge.Ancestors().OfType<IfStatementSyntax>());
+        Assert.Equal(
+            "ReferenceEquals(TabViewControl.SelectedItem, item)",
+            gate.Condition.ToString());
+        Assert.True(
+            gate.Statement.Span.Contains(nudge.Span)
+                && gate.Statement.DescendantNodes().OfType<ReturnStatementSyntax>().Any(),
+            "The already-selected arm must nudge and then return: the nudge IS "
+            + "that arm's work, and falling through to the write would be the "
+            + "double-fire the genuine-switch arm must not pay.");
+
+        // And it is an if/else, not a bare early return: the switch arm
+        // keeps its own single write. Toggling and then nudging there
+        // would fire two selection changes for one activation and flicker
+        // the field's settle, which is why this leg does not move.
+        var other = gate.Else;
+        Assert.NotNull(other);
+        Assert.Contains(other!.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.Left.ToString() == "TabViewControl.SelectedItem");
+        Assert.DoesNotContain(other.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            c => c.CalleeText() == "NudgeTabViewItemVisual");
+
+        // The fence is the nudge's own: NudgeTabViewItemVisual saves and
+        // restores _suppressSelectionEvent around its null-then-item
+        // toggle. So this arm must sit OUTSIDE the switch arm's window --
+        // a nudge inside the fence is the one shape that cannot work,
+        // because the fence is disarmed before SelectActive returns and
+        // the toggle's own raise would arrive with nothing holding it.
+        var fence = selectActive.AssignsTo("_suppressSelectionEvent").ToList();
+        Assert.True(
+            fence.Count == 2
+                && fence[0].Right.IsKind(SyntaxKind.TrueLiteralExpression)
+                && fence[1].Right.IsKind(SyntaxKind.FalseLiteralExpression),
+            "The genuine-switch arm keeps exactly one arm/disarm pair around its "
+            + "write.");
+        Assert.True(
+            nudge.SpanStart < fence[0].SpanStart || nudge.Span.End > fence[1].Span.End,
+            "The already-selected arm must run outside the switch arm's "
+            + "_suppressSelectionEvent window; NudgeTabViewItemVisual carries its own.");
+    }
+
     [Fact]
     public void An_equal_count_content_skew_throws_into_the_rebuild()
     {

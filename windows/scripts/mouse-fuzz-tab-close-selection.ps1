@@ -30,6 +30,19 @@
     round reports the same measurement as idDrift, so a build where the ids do
     start following slots says so in the log rather than in a verdict.
 
+    One leg is not a close. A close is the one removal the strip recovers from
+    with an activation, so the rounds can only ever reach the arm of the
+    selection sync that re-applies an item's visual state as a side effect of
+    the selection write. A tab that LEAVES the strip and comes back already
+    being the selected item does not: its per-item theme-resource overrides are
+    written and never re-read, the transparent-by-design fallback paints
+    nothing, and the active tab's rounded rectangle is missing while its title,
+    its icon and the seam cover all draw - #1283. The hide-show leg stages that
+    through the collapsed run's own removal (group, fold, then activate the
+    member the chip hid) and asks the same two questions of it. It restores
+    the corpus before the rounds, and its row in the results is the round
+    named 'hidden-show'.
+
     Both checks read the strip only once it has stopped changing after the
     close. A removal takes several frames, and a selection sampled inside one
     describes a strip that has not finished deciding - which is not a defect,
@@ -44,8 +57,9 @@
     a second process is cheaper to reason about than a settled animation.
 
     Actuation: the in-process test seam, and nothing else. seed-tabs builds the
-    corpus, select moves the active tab, close removes one - each of them the
-    manager op the click and the chord funnel into. Zero OS input is
+    corpus, select moves the active tab, close removes one, and group +
+    collapse fold and unfold the run the hide-show leg hides behind - each of
+    them the manager op the click and the chord funnel into. Zero OS input is
     synthesized: nothing is typed, no pointer is moved, no foreground is taken,
     so the machine stays usable while this runs and a keystroke meant for the
     strip can no longer land in whatever the owner was doing. The window is
@@ -588,6 +602,158 @@ function Test-SelectionFill($shot, $rows, [bool]$Vertical, [double]$Scale, $Grou
     return $null
 }
 
+<#
+    The hide -> show leg, and the flow that would have caught #1283.
+
+    Everything above closes tabs. A close is the one removal the strip
+    recovers from with an activation, so it exercises the arm of
+    SelectActive that writes TabViewControl.SelectedItem - the arm that
+    re-applies the item's visual state for free, and therefore paints.
+    Nothing here exercised the OTHER arm: the strip's indicator is
+    per-item {ThemeResource} overrides that MUXC re-reads only when it
+    re-applies an item's visual state, so an item that leaves TabItems
+    and comes back already being the SelectedItem had its brushes
+    written and never painted with them. The fallback is transparent by
+    design, so what the user saw was titles and icons, the seam cover,
+    and no active-tab indicator until something repainted.
+
+    The flow is the collapsed run's, because that is the removal the
+    strip performs on its own: group two tabs, fold the run (the fold
+    mints the chip and mints the TabItems.Remove), then activate the
+    member the chip was hiding - which the Edge-135 active-visible rule
+    renders as a row instead of the chip, so the member re-enters and
+    takes the selection in the same pass. Both oracles then read it: UIA
+    for the selection, pixels for the field.
+
+    Same two claims as a close round, which is why it reuses them rather
+    than inventing a third: exactly one row reports itself selected, and
+    it is the row that was hidden; and the field is painted on it. The
+    fold is checked too, and that check is load-bearing rather than
+    bookkeeping: a fold that hid nothing would let this leg pass on an
+    item no removal ever touched, which is the same vacuity the pixel
+    half exists to rule out.
+#>
+function Measure-HiddenShowLeg(
+    $Session, [bool]$Vertical, [int64]$Hwnd64, [uint32]$ProcId, $Origin, [double]$Scale) {
+    $label = if ($Vertical) { 'vertical' } else { 'horizontal' }
+    $where = "$label hidden-show:"
+
+    $state = (Invoke-SeamCommand $Session @{ op = 'get-state' }).state
+    $tabs = @($state.tabs)
+    if ($tabs.Count -lt 5) {
+        throw ("HARVEST_MISS: $where the leg needs five tabs - two interior ones to fold, a host " +
+               "to fold them away from, and survivors either side of the row that comes back - " +
+               "and the manager holds $($tabs.Count)")
+    }
+
+    # Park the active tab OUTSIDE the run before folding it. A collapsed run never hides its
+    # active member, so folding the run the active tab is in mints no chip and stages no
+    # removal at all, and the show below would then measure an item nothing ever removed.
+    if ([int]$state.active -ne 0) {
+        [void](Invoke-SeamCommand $Session @{ op = 'select'; index = 0 })
+    }
+
+    # Two interior tabs, clear of both ends: the first is the one that comes back (so its row
+    # lands away from the run's slot) and the second stays folded, which keeps the chip and the
+    # gap it leaves part of the shape being measured rather than tidying it away.
+    $members = @(2, 3)
+    $titles = @($tabs[$members[0]].title, $tabs[$members[1]].title)
+    [void](Invoke-SeamCommand $Session @{ op = 'group'; indices = $members })
+    [void](Invoke-SeamCommand $Session @{ op = 'collapse'; index = $members[0]; collapsed = $true; via = 'router' })
+
+    # The hide half, read rather than assumed. This is the removal the strip performs on its
+    # own, and it is the whole reason this leg exists: if the fold left the rows standing there
+    # was no removal, and the show after it would prove nothing about #1283.
+    $folded = Get-TabRows (Get-UiaRoot $Hwnd64) $Vertical
+    Assert-DistinctTitles $folded $where
+    $visible = @($folded | Where-Object { $_.Name -in $titles })
+    if ($visible.Count -ne 0) {
+        throw ("HARVEST_MISS: $where the fold left $($visible.Name -join ', ') drawn, so the run's " +
+               'members were never removed and the show below would measure nothing that had been hidden')
+    }
+
+    # The show, in one pass: activating a hidden member is what makes the collapsed run render it
+    # instead of the chip, so the row re-enters the strip and takes the selection together.
+    [void](Invoke-SeamCommand $Session @{ op = 'select'; index = $members[0] })
+
+    # The settle is the rounds', unchanged: stop MOVING, never become correct, so a strip that
+    # settles onto the wrong row still fails both halves below.
+    $settled = Wait-StripSettled $Hwnd64 $Vertical $titles[0]
+    $rows = $settled.Rows
+    Assert-DistinctTitles $rows "$where after the show"
+
+    $verdicts = [System.Collections.Generic.List[string]]::new()
+    $back = @($rows | Where-Object { $_.Name -eq $titles[0] })
+    if ($back.Count -ne 1) {
+        $verdicts.Add("the hidden tab '$($titles[0])' is not a row after it was shown; the strip " +
+                      "holds $($rows.Name -join ', ')")
+    }
+    $selected = @($rows | Where-Object { $_.Selected })
+    if ($selected.Count -ne 1) {
+        $verdicts.Add("$($selected.Count) rows report themselves selected after showing the " +
+                      "hidden tab '$($titles[0])': $($selected.Name -join ', ')")
+    }
+    elseif ($selected[0].Name -ne $titles[0]) {
+        $verdicts.Add("selection sits on '$($selected[0].Name)' after showing the hidden tab " +
+                      "'$($titles[0])'")
+    }
+
+    # And the pixels, through the same oracle a close round uses: the shown row must carry the
+    # field and no other row may. This is the half that goes red on the un-fixed build - UIA
+    # reported the right tab selected the whole time there.
+    Assert-PointerClear $rows $where
+    $shot = Get-WindowShot $Hwnd64
+    $ground = $null
+    try {
+        [void](Assert-CaptureAlive $shot $where)
+        $paneState = (Invoke-SeamCommand $Session @{ op = 'get-state' }).state
+        $leaves = @($paneState.panes.leaves)
+        $leafIndex = [int]$paneState.panes.activeLeaf
+        if ($leafIndex -lt 0 -or $leafIndex -ge $leaves.Count) {
+            throw ("HARVEST_MISS: $where the shown tab reports leaf $leafIndex of $($leaves.Count), " +
+                   'so there is no pane to read the ground out of')
+        }
+        $ground = Measure-TerminalGround $shot (Convert-SeamRect $leaves[$leafIndex] $Origin $Scale) `
+            $ProcId $where
+
+        $paint = Test-SelectionFill $shot $rows $Vertical $Scale $ground $ProcId
+        if ($paint) {
+            $verdicts.Add("the painted selection disagrees with the strip after the show: $paint")
+            $shot.Bmp.Save((Join-Path $OutDir "shots\$label-hiddenshow-paint.png"))
+        }
+    } finally { $shot.Bmp.Dispose() }
+
+    # Hand the corpus back the way the rounds need it. Expanding retires the chip and renders
+    # every member again, so the strip holds one row per manager tab and
+    # Get-SeamIndexByTitle stops refusing. Without this the rounds would blame the build for a
+    # fold this leg staged - and the next round's close would be measured against a strip that
+    # is not the corpus.
+    $opened = (Invoke-SeamCommand $Session @{ op = 'collapse'; index = $members[0]; collapsed = $false; via = 'router' })
+    if (-not $opened.state.groups[0].collapsed) {
+        throw "HARVEST_MISS: $where the expand that restores the corpus did not land"
+    }
+    $restored = Wait-StripSettled $Hwnd64 $Vertical $titles[0]
+    Assert-DistinctTitles $restored.Rows "$where after the restore"
+    $restoredTabs = (Invoke-SeamCommand $Session @{ op = 'get-state' }).state
+    $leftBehind = @($restored.Rows).Count - @($restoredTabs.tabs).Count
+    if ($leftBehind -ne 0) {
+        throw ("HARVEST_MISS: $where the strip drew $(@($restored.Rows).Count) rows for " +
+               "$(@($restoredTabs.tabs).Count) tabs after the restore, so the corpus is not the one " +
+               'the close rounds measure')
+    }
+
+    return [pscustomobject]@{
+        Layout = $label
+        Shown = $titles[0]
+        StillFolded = $titles[1]
+        Remaining = @($rows).Count
+        SettleMs = $settled.SettleMs
+        TransientOff = $settled.TransientOff
+        TerminalGround = (Format-Rgb $ground)
+        Verdicts = @($verdicts)
+    }
+}
+
 # ---- the run ----------------------------------------------------------------
 
 $crashMark = Get-SeamSessionMark
@@ -728,6 +894,27 @@ function Invoke-Layout([bool]$Vertical) {
                         "($($drifted.Count) of $($after.Count) rows came back under another " +
                         "tab's id), which is why identity is matched on the title")
         }
+
+        # The hide -> show leg, on the corpus the control close left. A close is the one removal
+        # the strip recovers from with an activation, so the rounds below only ever exercise the
+        # arm of the selection sync that paints for free; this is the flow that exercises the
+        # other one (#1283). It runs before the rounds because it needs a corpus it can fold, and
+        # it restores the corpus before them.
+        $hiddenShow = Measure-HiddenShowLeg $session $Vertical $hwnd64 $pid32 $origin $scale
+        $rounds.Add([pscustomobject]@{
+            layout = $label; round = 'hidden-show'; kept = $hiddenShow.Shown
+            closed = ''; closedAbove = $false
+            remaining = $hiddenShow.Remaining
+            idDrift = -1; settleMs = $hiddenShow.SettleMs
+            transientOff = $hiddenShow.TransientOff
+            terminalGround = $hiddenShow.TerminalGround
+            verdicts = @($hiddenShow.Verdicts)
+        })
+        foreach ($v in $hiddenShow.Verdicts) { $findings.Add("[$label hidden-show] $v") }
+        Write-Host ("$label hidden-show shown='$($hiddenShow.Shown)' folded='$($hiddenShow.StillFolded)' " +
+                    "remaining=$($hiddenShow.Remaining) ground=$(Format-Rgb $hiddenShow.TerminalGround) " +
+                    "settleMs=$($hiddenShow.SettleMs) transientOff=$($hiddenShow.TransientOff) " +
+                    "verdicts=$(@($hiddenShow.Verdicts).Count)")
 
         for ($round = 0; $round -lt $RoundsPerLayout; $round++) {
             $rows = Get-TabRows (Get-UiaRoot $hwnd64) $Vertical

@@ -1460,11 +1460,42 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // against its inactive background (#342).
         RecolorTabText();
 
-        if (ReferenceEquals(TabViewControl.SelectedItem, item)) return;
-        _suppressSelectionEvent = true;
-        TabViewControl.SelectedItem = item;
-        _suppressSelectionEvent = false;
-        OnSelectionLanded(item);
+        // Two arms, and the reason they differ is the one thing the loop
+        // above cannot do for itself. Writing the per-item resource
+        // overrides is a CLAIM: MUXC re-reads {ThemeResource} references
+        // only when it re-applies the item's visual state, and the lever
+        // for that is the selection itself. A genuine switch re-applies
+        // the state for free, so that arm's write is the whole of its
+        // work.
+        //
+        // The already-selected arm has no such event, and it is the one a
+        // remove/re-insert lands on: WinUI re-targets the strip selection
+        // synchronously as the selected item leaves TabItems, so a member
+        // restored by RestoreRunMembers, ReconcileStripOrder's repair or
+        // the rebuild comes back ALREADY being SelectedItem. Returning
+        // there left the claim unpainted, and the fallback is transparent
+        // by design (the stock selected fill is overridden to Transparent
+        // precisely so the real one can only come from the per-item
+        // override), so the field and its rounded stroke did not draw
+        // until a resize, a hover or a tab switch re-evaluated the state
+        // group -- #1283, where the titles and the seam cover drew anyway
+        // because those are direct assignments. Hence the nudge: it is
+        // this arm's visual-state lever, it carries its own
+        // _suppressSelectionEvent fence, and the arm below deliberately
+        // does not also nudge, because toggling twice for one activation
+        // would flicker the field's settle.
+        if (ReferenceEquals(TabViewControl.SelectedItem, item))
+        {
+            NudgeTabViewItemVisual(item);
+            return;
+        }
+        else
+        {
+            _suppressSelectionEvent = true;
+            TabViewControl.SelectedItem = item;
+            _suppressSelectionEvent = false;
+            OnSelectionLanded(item);
+        }
     }
 
     /// <summary>
@@ -1608,6 +1639,23 @@ internal sealed partial class TabHost : UserControl, ITabHost
         return rows;
     }
 
+    /// <summary>
+    /// Re-derive the strip's inventory, order and selection, then place
+    /// the seam cover again. Nothing here is about the seam, despite the
+    /// name: it is the switch-on residual, and its callers are layout
+    /// changes the strip cannot observe.
+    /// </summary>
+    /// <remarks>
+    /// THE TRAP, and the reason this carries a doc comment at all: it
+    /// re-derives everything the strip HOLDS and nothing it DRAWS. The
+    /// per-item header brushes are claims until MUXC re-reads them, and
+    /// the re-read rides the item's visual state -- which is why
+    /// SelectActive owns it (#1283) rather than this pass. A reader who
+    /// adds a step here expecting it to repaint the strip gets presence,
+    /// order, selection and the cover, and a strip that still shows no
+    /// active-tab indicator. The paint lands when the selection is
+    /// applied, and SelectActive is where that happens.
+    /// </remarks>
     internal void RefreshSeam()
     {
         // Belt and braces. The standing subscriptions hold the strip in
