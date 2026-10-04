@@ -98,10 +98,21 @@ public class ConfigLoadOrderWiringTests
 
         var recursive = build.Call("NativeMethods.ConfigLoadRecursiveFiles");
         var loads = build.Calls("NativeMethods.ConfigLoadFile");
+        var shader = Assert.Single(loads, l => l.Arg(1) == "shaderOverlay");
         var overlay = Assert.Single(loads, l => l.Arg(1) == "overlayPath");
         var hc = Assert.Single(loads, l => l.Arg(1) == "hcPath");
-        Assert.Equal(2, loads.Count);
+        Assert.Equal(3, loads.Count);
         var finalize = build.Call("NativeMethods.ConfigFinalize");
+
+        // The gallery shader overlay replaces the user's custom-shader list
+        // with this install's resolved paths, so it has to land after the
+        // files that hold that list -- otherwise the token the user wrote is
+        // back in force and the shader cannot open. See
+        // GalleryShaderTokenWiringTests for why it exists at all.
+        Assert.True(
+            recursive.SpanStart < shader.SpanStart,
+            "the gallery shader overlay loads before the user's files, so the "
+                + "token it resolves is put back by them");
 
         Assert.True(
             recursive.SpanStart < overlay.SpanStart,

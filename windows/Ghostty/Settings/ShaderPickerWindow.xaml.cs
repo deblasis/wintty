@@ -46,15 +46,30 @@ public sealed partial class ShaderPickerWindow : Window
     private const string PreviewPlaceholderCommand =
         "powershell.exe -NoLogo -NoProfile -Command Start-Sleep -Seconds 2147483";
 
-    /// <summary>Path to preselect in the combo, if it is a gallery entry.</summary>
+    /// <summary>
+    /// The configured <c>custom-shader</c> value to preselect, in whatever
+    /// form the config holds it: a <c>gallery:&lt;id&gt;</c> token or a
+    /// hand-written path. Null preselects the first entry.
+    /// </summary>
     public string? CurrentPath { get; set; }
 
-    /// <summary>The committed selection, or null when cancelled.</summary>
+    /// <summary>
+    /// The committed selection, or null when cancelled. A gallery entry
+    /// commits its <c>gallery:&lt;id&gt;</c> token (what
+    /// <see cref="ShaderGallery.TokenFor"/> builds), never its installed
+    /// path: the path is a fact about this install and the next update moves
+    /// it, which left the shader silently not applying.
+    /// </summary>
     public string? PickedPath { get; private set; }
 
     private Controls.TerminalControl? _preview;
     private ShaderPreviewFeed? _feed;
     private readonly List<string> _orderedPaths = new();
+    // The token each combo item commits, in the same order as
+    // _orderedPaths. The preview needs the path (libghostty opens a file);
+    // the config gets the token, so both are kept rather than one derived
+    // from the other at commit time.
+    private readonly List<string> _orderedTokens = new();
     // Latched by Closed. The window's teardown is the point after which no
     // native surface may be created, and Closed is not a state the WinUI
     // Window type otherwise exposes.
@@ -140,11 +155,18 @@ public sealed partial class ShaderPickerWindow : Window
             return;
         }
 
+        // Resolve the configured value to a path to compare against, so a
+        // config holding either form of the same entry preselects it: the
+        // token a pick now writes, or a path a config written before tokens
+        // (or by hand) still carries.
+        var currentPath = ShaderGallery.ResolveTokenToPath(CurrentPath) ?? CurrentPath;
+
         var selected = 0;
         foreach (var entry in ShaderGallery.Entries)
         {
             var path = ShaderGallery.AbsolutePathFor(entry);
             _orderedPaths.Add(path);
+            _orderedTokens.Add(ShaderGallery.TokenFor(entry));
 
             var panel = new StackPanel();
             // Explicit typography rather than theme-resource lookups:
@@ -168,7 +190,7 @@ public sealed partial class ShaderPickerWindow : Window
             // to text scraping; give every item a real name.
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, entry.Name);
             PickerCombo.Items.Add(item);
-            if (path.Equals(CurrentPath, StringComparison.OrdinalIgnoreCase))
+            if (path.Equals(currentPath, StringComparison.OrdinalIgnoreCase))
             {
                 selected = PickerCombo.Items.Count - 1;
             }
@@ -372,7 +394,15 @@ public sealed partial class ShaderPickerWindow : Window
 
     private void Select_Click(object sender, RoutedEventArgs e)
     {
-        PickedPath = (PickerCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+        // The token, not the tag's path: the tag is what the preview needs to
+        // open the file in this install, and it is the one value that stops
+        // being true the moment the app is updated or moved. The item index
+        // is what carries the pairing, so an out-of-range index commits
+        // nothing rather than the wrong entry's token.
+        var index = PickerCombo.SelectedIndex;
+        PickedPath = index >= 0 && index < _orderedTokens.Count
+            ? _orderedTokens[index]
+            : null;
         Close();
     }
 
