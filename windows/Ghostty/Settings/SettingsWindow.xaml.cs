@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
@@ -78,6 +79,9 @@ internal sealed partial class SettingsWindow : Window
         var hwnd = WindowNative.GetWindowHandle(this);
         var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
         var appWindow = AppWindow.GetFromWindowId(windowId);
+        // The Raw Editor's unsaved-text prompt intercepts this close; see
+        // OnClosing.
+        appWindow.Closing += OnClosing;
         // Settings window is centered on the display the cursor is on,
         // sized to give room for the new sub-sectioned pages. The
         // DisplayArea API is the WinUI 3 equivalent of macOS's
@@ -135,6 +139,126 @@ internal sealed partial class SettingsWindow : Window
         Closed += OnClosed;
         NavView.SelectedItem = NavView.MenuItems[0];
     }
+
+    /// <summary>
+    /// The Raw Editor is the one settings page whose edits live in the editor
+    /// buffer rather than in the config file, so closing this window used to
+    /// discard a hand-written config with no word -- and quitting the app
+    /// discards it the same way, because this window is what the last window's
+    /// teardown closes.
+    /// </summary>
+    /// <remarks>
+    /// <c>AppWindow.Closing</c> rather than <c>Window.Closed</c>, because
+    /// Closed is the point after which the page is gone: the prompt has to
+    /// cancel the close and get an answer first. This is the same intercept the
+    /// quake terminal uses to hide instead of closing.
+    /// <para>
+    /// Re-entrancy is the shape to be careful about: the dialog is modal and
+    /// asynchronous, so a second close landing while it is up has to be turned
+    /// away rather than answered twice. The answer re-arms the close with
+    /// <see cref="_closeConfirmed"/> set, which is what lets the second pass
+    /// through instead of prompting again.
+    /// </para>
+    /// </remarks>
+    private void OnClosing(object? sender, AppWindowClosingEventArgs args)
+    {
+        if (_closeConfirmed) return;
+
+        var raw = UnsavedRawEditorPage();
+        if (raw is null || !raw.HasUnsavedChanges) return;
+
+        args.Cancel = true;
+        _ = PromptUnsavedRawEditorAsync(raw);
+    }
+
+    private Pages.RawEditorPage? UnsavedRawEditorPage()
+        => _pageCache.TryGetValue("raw", out var page) ? page as Pages.RawEditorPage : null;
+
+    /// <summary>
+    /// Ask about the Raw Editor's unsaved text, act on the answer, and let the
+    /// close proceed only if the answer says so.
+    /// </summary>
+    /// <remarks>
+    /// The decision is <see cref="UnsavedRawEditPrompt"/>'s, in Core, so the
+    /// rule that matters -- a Save that did not land must not close the window
+    /// -- is testable without a XamlRoot and cannot drift between here and
+    /// there. This method only supplies the three pieces it needs: the answer,
+    /// whether the write landed, and the writes themselves.
+    /// </remarks>
+    private async Task PromptUnsavedRawEditorAsync(Pages.RawEditorPage raw)
+    {
+        // One dialog at a time: WinUI allows only one ContentDialog, and a
+        // second ShowAsync on top of this one throws out of the async state
+        // machine. A close landing while the prompt is up is turned away
+        // instead, so nothing is lost by declining it.
+        if (_rawEditorPromptOpen) return;
+        // A ContentDialog needs a live XamlRoot; the Window has none of its
+        // own, so it comes off the content root (null until the tree loads,
+        // which is also too early for a close to reach here).
+        if (RootGrid.XamlRoot is not { } xamlRoot) return;
+        _rawEditorPromptOpen = true;
+        UnsavedRawEditAnswer answer;
+        bool saved = false;
+        try
+        {
+            answer = await AskAboutUnsavedRawEditorAsync(xamlRoot);
+            if (answer == UnsavedRawEditAnswer.Save)
+                saved = raw.SaveNow();
+            else if (answer == UnsavedRawEditAnswer.Discard)
+                raw.DiscardUnsavedChanges();
+        }
+        finally
+        {
+            _rawEditorPromptOpen = false;
+        }
+
+        // A failed save lands here with saved=false: the editor still holds the
+        // text and the file still does not, which is the only state the user
+        // can retry from. Closing would be the same loss the prompt exists to
+        // prevent, one step later.
+        if (!UnsavedRawEditPrompt.ShouldClose(answer, saved)) return;
+
+        _closeConfirmed = true;
+        Close();
+    }
+
+    private async Task<UnsavedRawEditAnswer> AskAboutUnsavedRawEditorAsync(
+        Microsoft.UI.Xaml.XamlRoot xamlRoot)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = "Save your changes?",
+            Content = "The Raw Editor has changes that are not in your config file. "
+                + "Closing Settings will discard them.",
+            PrimaryButtonText = "Save",
+            SecondaryButtonText = "Don't save",
+            CloseButtonText = "Cancel",
+            // Cancel, not Save: Enter should not be the answer that loses text.
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = xamlRoot,
+        };
+
+        // A dialog closed by Enter or Escape hands focus back to whatever was
+        // under it, and that key's trailing character would reach it. Same
+        // reason every other ContentDialog in the app goes through Watch.
+        Ghostty.Input.ConsumedCloseKey.Watch(dialog);
+
+        var result = await dialog.ShowAsync();
+        return result switch
+        {
+            ContentDialogResult.Primary => UnsavedRawEditAnswer.Save,
+            ContentDialogResult.Secondary => UnsavedRawEditAnswer.Discard,
+            _ => UnsavedRawEditAnswer.Cancel,
+        };
+    }
+
+    // Set once the Raw Editor question has been answered, so the second close
+    // that follows the answer passes the intercept above instead of asking
+    // again about text that is now saved or gone.
+    private bool _closeConfirmed;
+
+    // Whether the Raw Editor prompt is up. See PromptUnsavedRawEditorAsync.
+    private bool _rawEditorPromptOpen;
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
