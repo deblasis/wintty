@@ -1108,6 +1108,13 @@ public sealed partial class MainWindow : Window
         // the command palette does on close.
         NotificationHost.FocusReturn = FocusActiveLeaf;
 
+        // Same shape for the tab strips: a close requested from one of them
+        // can leave keyboard focus on a row (or on nothing), and only this
+        // window knows where the terminal is. Both strips get the same
+        // delegate so the two cannot drift into two different answers.
+        _horizontalTabHost.FocusReturn = RefocusTerminalAfterStripRemoval;
+        _verticalTabHost.FocusReturn = RefocusTerminalAfterStripRemoval;
+
         // Parent every existing and future PaneHost into the shared
         // container declared in MainWindow.xaml. This is the single
         // owner for PaneHost lifetime in the visual tree — both tab
@@ -1176,6 +1183,13 @@ public sealed partial class MainWindow : Window
             UnwireTabColor(t);
             DetachProcessTracking(t);
             RemovePaneHost(t);
+            // TabRemoved is the one signal EVERY close path raises -- the
+            // chord, the context menu, close-group, the row's own X -- and
+            // none of them is guaranteed to leave keyboard focus somewhere
+            // that can type. TabManager raises ActiveTabChanged only when the
+            // ACTIVE tab goes away, so a background close has no hand-back
+            // of its own and the removed row takes the focus with it.
+            RefocusTerminalAfterStripRemoval();
         };
         _tabManager.ActiveTabChanged += (_, _) =>
         {
@@ -1578,7 +1592,7 @@ public sealed partial class MainWindow : Window
             powerMonitor.LowPowerChanged += OnLowPowerChanged;
         }
 
-        _tabManager.LastTabClosed += (_, _) => Close();
+        _tabManager.LastTabClosed += (_, _) => OnLastTabClosed();
 
         // Settings page raises this the moment the user flips the
         // vertical-tabs toggle so we animate without waiting for the
@@ -4946,6 +4960,12 @@ public sealed partial class MainWindow : Window
     private void Show()
     {
         _hiding = false;
+        // The empty-window recovery, and it belongs HERE rather than only on
+        // the close that caused it: the summon is the one moment this window
+        // has to have a terminal to show, and it is reached from paths that
+        // never went through OnLastTabClosed. No-op as soon as a tab is
+        // there, so an ordinary summon is untouched.
+        SeedQuickTerminalTab();
         var duration = _configService.QuickTerminalAnimationDuration;
         if (duration > 0)
             _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
@@ -5035,6 +5055,89 @@ public sealed partial class MainWindow : Window
                 try { AppWindow.Hide(); }
                 catch (System.Runtime.InteropServices.COMException) { }
             });
+    }
+
+    /// <summary>
+    /// The last tab in this window went away.
+    ///
+    /// A regular window closes with it. The quick terminal does not:
+    /// <see cref="ApplyQuickTerminalBehaviour"/> intercepts
+    /// <c>AppWindow.Closing</c> into a hide -- that interception is what lets
+    /// the global hotkey re-summon the same shell instead of a new one -- so
+    /// <see cref="Window.Close"/> here became a hide of a window with zero
+    /// tabs. Nothing recovered from that state: the next
+    /// <see cref="Show"/> seeded no tab, <see cref="FocusActiveLeaf"/> chased
+    /// an active tab that had just been removed, and
+    /// <see cref="UpdateQuakeStripVisibility"/> hides the strip at one tab or
+    /// fewer (zero included), taking the new-tab button with it. Keybindings
+    /// reach the app only through a focused terminal, so the window that came
+    /// back had no keyboard path out until the process was restarted.
+    ///
+    /// So the quick terminal hides and leaves a fresh tab behind. The close
+    /// confirmation is not a hazard on this path: it is answered before the
+    /// tab is removed, so a declined close raises nothing here and leaves the
+    /// window exactly as the user left it.
+    /// </summary>
+    private void OnLastTabClosed()
+    {
+        // Teardown, not a close: the window is already gone and a second
+        // Close() (or a Hide() on a window being torn down) buys nothing.
+        if (_isClosed) return;
+
+        if (!IsQuickTerminal)
+        {
+            Close();
+            return;
+        }
+
+        // Hide first, seed second: a window left on screen with no tab is
+        // the state this whole guard exists to prevent.
+        Hide();
+        SeedQuickTerminalTab();
+    }
+
+    /// <summary>
+    /// Give the quick terminal a tab when it has none, so no summon can find
+    /// an empty window.
+    ///
+    /// A no-op as soon as one exists, which is what makes it safe to call
+    /// from every show rather than only from the close that emptied the
+    /// window. Seeds through the same funnel Ctrl+T uses, so a summoned
+    /// quick terminal runs the profile a new tab would.
+    /// </summary>
+    private void SeedQuickTerminalTab()
+    {
+        if (_isClosed) return;
+        if (_tabManager.Tabs.Count > 0) return;
+        OpenDefaultProfile(ProfileLaunchTarget.NewTab);
+    }
+
+    /// <summary>
+    /// Put keyboard focus back on the active terminal unless a live one
+    /// already has it.
+    ///
+    /// Raised by every tab removal, and by the strips' close request when
+    /// the confirmation is declined and nothing was removed at all. Focus
+    /// inside a PaneHost IS the terminal and needs nothing; focus on a strip
+    /// row, on a row's close button, or nowhere at all (the element that
+    /// held it was removed with the tab) is the failure this guards, because
+    /// keybinds reach the app only through a focused TerminalControl.
+    ///
+    /// Deferred by <see cref="FocusActiveLeaf"/>, so it runs after the
+    /// manager has moved ActiveTab onto the surviving tab.
+    /// </summary>
+    private void RefocusTerminalAfterStripRemoval()
+    {
+        // Teardown is not a focus event: enqueuing a focus for a window on
+        // its way out buys nothing and can land on a torn-down tree.
+        if (_isClosed) return;
+
+        if (Content?.XamlRoot is { } root
+            && FocusManager.GetFocusedElement(root) is DependencyObject focused
+            && VisualTreeHelperEx.FindAncestor<PaneHost>(focused) is not null)
+            return;
+
+        FocusActiveLeaf();
     }
 
     private void FocusActiveLeaf()

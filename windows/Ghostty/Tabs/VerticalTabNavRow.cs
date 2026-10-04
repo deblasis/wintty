@@ -98,6 +98,22 @@ internal sealed partial class VerticalTabNavRow : Grid
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             BorderThickness = new Thickness(0),
             VerticalAlignment = VerticalAlignment.Center,
+            // A close button that can hold keyboard focus strands the
+            // keyboard. Clicking the X of a BACKGROUND tab moved focus onto
+            // this button, the close then took the row (and the focused
+            // button with it) out of the tree, and nothing reachable was
+            // left holding focus -- keybinds only reach the app through a
+            // focused TerminalControl, so every chord went nowhere until the
+            // user clicked a pane.
+            //
+            // Two switches, because they are two different things: IsTabStop
+            // only takes the button out of the tab ORDER, while a pointer
+            // click still moves focus onto it. AllowFocusOnInteraction is the
+            // one that closes the repro; IsTabStop keeps it out of Tab order
+            // besides, so the row (which the strip's own focus hand-off
+            // already owns) is the only stop here.
+            IsTabStop = false,
+            AllowFocusOnInteraction = false,
             Tag = tab,
             Content = _closeGlyph = new FontIcon
             {
