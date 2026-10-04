@@ -6624,7 +6624,7 @@ test "ReadThread windows: conpty's startup DA1 is answered on the pty input and 
     var name_buf_w: [128]u16 = undefined;
     const name = try std.fmt.bufPrint(
         &name_buf,
-        "\\.\pipe\LOCAL\ghostty-test-handshake-{d}",
+        "\\\\.\\pipe\\LOCAL\\ghostty-test-handshake-{d}",
         .{windows.GetCurrentProcessId()},
     );
     const name_w_len = try std.unicode.utf8ToUtf16Le(&name_buf_w, name);
