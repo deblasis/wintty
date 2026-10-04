@@ -32,6 +32,8 @@ internal static class LogEvents
         public const int ThemePreviewKeptConfig = 1018;
         public const int ConfigFileVanished    = 1019;
         public const int ReloadDefaultFilesShrunk = 1020;
+        public const int WriteSchedulerOutcomeErr = 1021;
+        public const int GalleryShaderOverlaySkipped = 1022;
     }
 
     // 1100-1199: Frecency / command history
