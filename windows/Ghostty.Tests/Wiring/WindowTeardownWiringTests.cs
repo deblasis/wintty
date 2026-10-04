@@ -158,6 +158,8 @@ public class WindowTeardownWiringTests
     private static readonly (string Receiver, string Why)[] SettingsWindowOwned =
     {
         ("this", "the Window's own events; the window raises them and stops when it does"),
+        ("appWindow", "this window's own AppWindow, destroyed with it; the intercept is what "
+                 + "asks about the Raw Editor's unsaved text before the page cache is dropped"),
         ("ctrlF", "a KeyboardAccelerator this window creates and hands to its own NavView"),
         ("root", "a settings page's own element, passed into a static helper; the handler "
                  + "detaches itself on the first fire"),
