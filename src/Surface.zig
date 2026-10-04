@@ -734,6 +734,10 @@ pub fn init(
             .shell_integration_features = config.@"shell-integration-features",
             .cursor_blink = config.@"cursor-style-blink",
             .working_directory = if (config.@"working-directory") |wd| wd.value() else null,
+            // Whether that directory is one the user wrote. A WSL shell reads
+            // the difference as "open somewhere else instead": see
+            // Config.WorkingDirectoryDefaulted, which answers from these two.
+            .working_directory_defaulted = config._working_directory_defaulted,
             .resources_dir = global.resourcesDir().host(),
             .term = config.term,
             .utf8_console = if (comptime builtin.os.tag == .windows)

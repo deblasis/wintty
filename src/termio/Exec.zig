@@ -880,6 +880,13 @@ pub const Config = struct {
     shell_integration_features: configpkg.Config.ShellIntegrationFeatures = .{},
     cursor_blink: ?bool = null,
     working_directory: ?[]const u8 = null,
+
+    /// Whether `working_directory` is a default this process filled in rather
+    /// than one the user wrote. Carried because the answer is not the same
+    /// directory for every command: see `Config.WorkingDirectoryDefaulted`,
+    /// which is where the rule lives and what the spawn path asks.
+    working_directory_defaulted: bool = false,
+
     resources_dir: ?[]const u8,
     term: []const u8,
 
@@ -1178,7 +1185,22 @@ const Subprocess = struct {
 
         // We have to copy the cwd because there is no guarantee that
         // pointers in full_config remain valid.
-        const cwd: ?[:0]u8 = if (cfg.working_directory) |cwd|
+        //
+        // A WSL shell nobody gave a starting directory to is launched with
+        // none, so wsl.exe applies its own default: the distro user's HOME. The
+        // directory this same config resolved above is the Windows home, which
+        // wsl.exe turns into /mnt/c/Users/<name> - the 9p bridge, where the
+        // shell is slow from its first prompt (#1268). The rule is a function
+        // of the three values rather than of this file, so the daemon-spawned
+        // path asks the same question and lands in the same place.
+        const wsl_default_cwd = configpkg.Config.WorkingDirectoryDefaulted(
+            args[0],
+            cfg.working_directory,
+            cfg.working_directory_defaulted,
+        );
+        const cwd: ?[:0]u8 = if (wsl_default_cwd)
+            null
+        else if (cfg.working_directory) |cwd|
             try alloc.dupeZ(u8, cwd)
         else
             null;
@@ -6557,13 +6579,15 @@ test "ReadThread windows: a blocked real read is interrupted and decoded" {
         }
     };
 
-    var ops: Ops = .{ .inner = .{
-        .fd = read_end,
-        // No read returns data, so the handshake reply is never written.
-        .reply_fd = write_end,
-        .io = undefined,
-        .quit = &quit,
-    } };
+    var ops: Ops = .{
+        .inner = .{
+            .fd = read_end,
+            // No read returns data, so the handshake reply is never written.
+            .reply_fd = write_end,
+            .io = undefined,
+            .quit = &quit,
+        },
+    };
 
     var cancel: ReadThread.WindowsCancel = .{
         .fd = read_end,
@@ -6710,4 +6734,52 @@ test "ReadThread windows: conpty's startup DA1 is answered on the pty input and 
         .data => |d| try testing.expectEqualStrings(later, d),
         else => return error.TestUnexpectedResult,
     }
+
+    // The same handshake on a pty whose preamble arrived in two reads. A pipe
+    // read returns what is available, not what a write produced, so the
+    // request can straddle the seam; the reader has to carry the partial
+    // prefix, or conpty waits out its timeout and the pane sits blank.
+    var split: ReadThread.WindowsReader = .{
+        .fd = out_read,
+        .reply_fd = in_write,
+        .io = undefined,
+        .quit = &quit,
+    };
+
+    const head = "\x1b[1t\x1b[";
+    try testing.expect(windows.exp.kernel32.WriteFile(
+        out_write,
+        head,
+        head.len,
+        &written,
+        null,
+    ) != windows.FALSE);
+    switch (split.read()) {
+        .data => |d| try testing.expectEqualStrings(head, d),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const rest = "c\x1b[?1004h";
+    try testing.expect(windows.exp.kernel32.WriteFile(
+        out_write,
+        rest,
+        rest.len,
+        &written,
+        null,
+    ) != windows.FALSE);
+    switch (split.read()) {
+        .data => |d| try testing.expectEqualStrings("\x1b[?1004h", d),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The reply for the straddled request is on the input pipe too, written
+    // before the second read() returned.
+    try testing.expect(windows.exp.kernel32.ReadFile(
+        in_read,
+        &reply_buf,
+        reply_buf.len,
+        &got,
+        null,
+    ) != windows.FALSE);
+    try testing.expectEqualStrings(conpty_handshake.DA1_REPLY, reply_buf[0..got]);
 }

@@ -4182,6 +4182,13 @@ _replay_steps: std.ArrayList(Replay.Step) = .empty,
 /// clone, so a cloned config that is finalized again keeps the answer.
 _command_defaulted: bool = false,
 
+/// True when finalize filled in `working-directory` because nothing set it.
+/// The same reason and the same shape as `_command_defaulted`: the default is
+/// resolved to a concrete path here, so the value alone cannot say whether the
+/// user wrote one. The spawn path reads this, through
+/// `WorkingDirectoryDefaulted` below.
+_working_directory_defaulted: bool = false,
+
 pub fn deinit(self: *Config) void {
     if (self._arena) |arena| arena.deinit();
     self.* = undefined;
@@ -6195,6 +6202,11 @@ pub fn finalize(self: *Config) !void {
     }
 
     // The default for the working directory depends on the system.
+    //
+    // Whether the user wrote one has to be read here, before the default below
+    // fills it in and the two become indistinguishable. Recorded the same way,
+    // and for the same reason, as `command` a few lines down.
+    const wd_was_set = self.@"working-directory" != null;
     var wd: WorkingDirectory = self.@"working-directory" orelse if (probable_cli)
         .inherit
     else
@@ -6291,6 +6303,7 @@ pub fn finalize(self: *Config) !void {
     }
     try wd.finalize(alloc);
     self.@"working-directory" = wd;
+    if (!wd_was_set) self._working_directory_defaulted = true;
 
     // Apprt-specific defaults
     switch (build_config.app_runtime) {
@@ -6683,6 +6696,10 @@ pub fn clone(
     // set it has to travel with it.
     result._command_defaulted = self._command_defaulted;
 
+    // Same, and for the same reason: a finalized `working-directory` no longer
+    // says whether the user wrote one.
+    result._working_directory_defaulted = self._working_directory_defaulted;
+
     return result;
 }
 
@@ -7022,6 +7039,37 @@ pub const LinkUrlStyle = enum {
     @"hover-mods",
     always,
 };
+
+/// Whether a spawn should be handed no starting directory of its own, because
+/// the child is wsl.exe and the directory on offer is a default this process
+/// filled in rather than one the user wrote.
+///
+/// wsl.exe's own default is the distro user's HOME, and that is what a WSL
+/// shell should open in. A Windows directory handed to it as a starting
+/// directory becomes a path under /mnt/c instead: the 9p bridge, where a cold
+/// shell is slow from its first prompt and every path crossing goes into the
+/// VM on demand. Launching with no directory at all is therefore the fix, and
+/// it is wsl.exe's own mechanism rather than a value spelled here - `--cd ~`
+/// would work too, but naming the Linux home from a Windows config is a
+/// translation this module does not otherwise do (deblasis/wintty#1268).
+///
+/// A `working-directory` the user wrote is honoured as written, bridge and
+/// all.
+///
+/// Pure, and Windows-shaped by construction: it answers from the values rather
+/// than from the host, so a test can ask it on any platform and the
+/// daemon-spawned path can take the same rule verbatim.
+pub fn WorkingDirectoryDefaulted(
+    command: ?[]const u8,
+    working_directory: ?[]const u8,
+    working_directory_defaulted: bool,
+) bool {
+    if (comptime builtin.os.tag != .windows) return false;
+    // Not a std.fs.path.basename: that follows the host separator and misses a
+    // `C:\...\wsl.exe` arg0. isWslExe splits on both and strips quotes.
+    if (!internal_os.windows_shell.isWslExe(command orelse return false)) return false;
+    return working_directory == null or working_directory_defaulted;
+}
 
 /// See working-directory
 pub const WorkingDirectory = union(enum) {
@@ -13610,4 +13658,86 @@ test "issue 228: empty foreground via real config file defers to theme" {
         .g = 0xBB,
         .b = 0xCC,
     }, cfg.foreground);
+}
+
+test "WorkingDirectoryDefaulted: a WSL shell with no directory of its own opens in HOME" {
+    // The rule the spawn path applies, asked directly rather than through a
+    // build (#1268). Every leg is a shape a config can actually be in, so a
+    // later change to the defaults shows up here instead of in a pane.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A discovered profile, and the config-file form: no working-directory, so
+    // finalize put the Windows home there. Handing THAT to wsl.exe is the bug -
+    // the shell opens in /mnt/c/Users/<name>, over the 9p bridge.
+    try std.testing.expect(WorkingDirectoryDefaulted(
+        "wsl.exe",
+        "C:\\Users\\me",
+        true,
+    ));
+    try std.testing.expect(WorkingDirectoryDefaulted(
+        "C:\\Windows\\System32\\wsl.exe",
+        "C:\\Users\\me",
+        true,
+    ));
+    // Nothing to hand it at all - a config that left the union as .home or
+    // .inherit - is the same answer.
+    try std.testing.expect(WorkingDirectoryDefaulted("wsl.exe", null, false));
+
+    // A directory the user wrote is theirs, bridge included: a
+    // working-directory in a profile that runs wsl.exe, or a directory a shell
+    // reported over OSC 7 that a duplicate or a restore spawns into.
+    try std.testing.expect(!WorkingDirectoryDefaulted(
+        "wsl.exe",
+        "C:\\Users\\me\\src",
+        false,
+    ));
+
+    // No other shell is touched by any of this: cmd.exe still opens in the
+    // Windows home, which is what it always did.
+    try std.testing.expect(!WorkingDirectoryDefaulted(
+        "cmd.exe",
+        "C:\\Users\\me",
+        true,
+    ));
+    // And a profile that runs something else through wsl.exe is not a WSL pane
+    // either - Git's bash is a native shell.
+    try std.testing.expect(!WorkingDirectoryDefaulted(
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "C:\\Users\\me",
+        true,
+    ));
+}
+
+test "working-directory: a finalized config says whether it defaulted" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Nothing written, so the flag says so - and it survives the clone that
+    // loadTheme's rebuild from replay steps does, which is the same reason
+    // _command_defaulted is copied.
+    {
+        var cfg: Config = .{ .@"working-directory" = null };
+        defer cfg.deinit();
+        try cfg.finalize(arena.allocator());
+        try testing.expect(cfg._working_directory_defaulted);
+        try testing.expect(WorkingDirectoryDefaulted(
+            "wsl.exe",
+            if (cfg.@"working-directory") |wd| wd.value() else null,
+            cfg._working_directory_defaulted,
+        ));
+    }
+
+    // Written, so the flag does not claim otherwise whatever the path is.
+    {
+        var cfg: Config = .{ .@"working-directory" = .{ .path = "/home/me" } };
+        defer cfg.deinit();
+        try cfg.finalize(arena.allocator());
+        try testing.expect(!cfg._working_directory_defaulted);
+        try testing.expect(!WorkingDirectoryDefaulted(
+            "wsl.exe",
+            if (cfg.@"working-directory") |wd| wd.value() else null,
+            cfg._working_directory_defaulted,
+        ));
+    }
 }
