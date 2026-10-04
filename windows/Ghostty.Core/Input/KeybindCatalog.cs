@@ -60,6 +60,35 @@ public sealed class KeybindCatalog
     /// <summary>Header + item rows for a flat ListView (all categories).</summary>
     public IReadOnlyList<object> Flatten() => FlattenFrom(Categories);
 
+    /// <summary>
+    /// True when two filtered row lists would render identically, so the list
+    /// does not have to be rebuilt.
+    /// </summary>
+    /// <remarks>
+    /// A rows-view is a <c>Clear</c> plus an <c>Add</c> per row (WinUiList,
+    /// because WinUI 3 cannot marshal these records through ItemsSource), and
+    /// that re-realizes every container: the viewport goes back to the top and
+    /// whatever the reader had selected is gone. The rows are records, so
+    /// equal rows mean a list that looks the same -- which is the whole answer
+    /// to "this rebuild changed nothing, so leave the list alone".
+    /// <para>
+    /// A rebuild that changes nothing is the common case, not an edge: every
+    /// config reload lands here, and every settings page routes its writes
+    /// through a debounced scheduler, so a slider drag on another page scrolls
+    /// this list home while it is being browsed.
+    /// </para>
+    /// </remarks>
+    public static bool RowsMatch(IReadOnlyList<object> current, IReadOnlyList<object> next)
+    {
+        if (ReferenceEquals(current, next)) return true;
+        if (current.Count != next.Count) return false;
+        for (int i = 0; i < current.Count; i++)
+        {
+            if (!Equals(current[i], next[i])) return false;
+        }
+        return true;
+    }
+
     /// <summary>Filtered header + item rows; empty groups dropped. Optional conflicts-only.</summary>
     public IReadOnlyList<object> Filter(string? query, bool conflictsOnly = false)
     {

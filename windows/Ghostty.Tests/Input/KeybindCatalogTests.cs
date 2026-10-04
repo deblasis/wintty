@@ -149,4 +149,67 @@ public class KeybindCatalogTests
         var move = cat.Categories.Single(c => c.Name == "Groups").Items.Single(i => i.RawAction == "move_group:left");
         Assert.Equal("Move Group Left", move.Friendly);
     }
+
+    // The rows-view is Clear + Add per row, which re-realizes every container
+    // and puts the viewport back at the top. The page rebuilds on every config
+    // reload, and every settings write is debounced through the shared
+    // scheduler, so "another page changed something" was scrolling a
+    // keybinding list home mid-browse. RowsMatch is what lets an unchanged
+    // rebuild leave the list alone.
+    [Fact]
+    public void RowsMatch_IgnoresTheRebuildOfAnUnchangedCatalog()
+    {
+        var first = KeybindCatalog.Build(Sample()).Filter(null);
+        var rebuilt = KeybindCatalog.Build(Sample()).Filter(null);
+
+        Assert.NotSame(first, rebuilt);
+        Assert.True(KeybindCatalog.RowsMatch(first, rebuilt));
+    }
+
+    [Fact]
+    public void RowsMatch_NoticesARebind()
+    {
+        var before = KeybindCatalog.Build(Sample()).Filter(null);
+        var after = KeybindCatalog.Build(new List<EnumeratedKeybind>
+        {
+            Kb("new_tab", 40, 1u | 2u),          // same action, different chord
+            Kb("new_split:right", 16, 1u | 4u),
+            Kb("copy_to_clipboard:mixed", 22, 1u | 2u),
+        }).Filter(null);
+
+        Assert.False(KeybindCatalog.RowsMatch(before, after));
+    }
+
+    [Fact]
+    public void RowsMatch_NoticesARemovedRowAndADifferentFilter()
+    {
+        var all = KeybindCatalog.Build(Sample()).Filter(null);
+        var filtered = KeybindCatalog.Build(Sample()).Filter("copy");
+
+        Assert.False(KeybindCatalog.RowsMatch(all, filtered));
+        Assert.True(KeybindCatalog.RowsMatch(filtered, filtered));
+    }
+
+    [Fact]
+    public void RowsMatch_SeesTheSourceChangeOnAnOtherwiseIdenticalRow()
+    {
+        // Source (and conflict) travel on the row, so a keybind that became
+        // the user's changes the list without changing its shape. A length-only
+        // comparison would call that equal and leave the "User" tag unpainted.
+        var binds = new List<EnumeratedKeybind>
+        {
+            Kb("new_tab", 39, 1u << 1),
+            Kb("copy_to_clipboard:mixed", 22, 1u << 1),   // matches no default
+        };
+        var defaults = new List<EnumeratedKeybind>
+        {
+            Kb("new_tab", 39, 1u << 1),
+        };
+
+        var withoutDefaults = KeybindCatalog.Build(binds).Filter(null);
+        var withDefaults = KeybindCatalog.Build(binds, defaults).Filter(null);
+
+        Assert.Equal(withoutDefaults.Count, withDefaults.Count);
+        Assert.False(KeybindCatalog.RowsMatch(withoutDefaults, withDefaults));
+    }
 }
