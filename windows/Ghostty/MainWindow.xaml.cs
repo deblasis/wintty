@@ -1108,6 +1108,13 @@ public sealed partial class MainWindow : Window
         // the command palette does on close.
         NotificationHost.FocusReturn = FocusActiveLeaf;
 
+        // Same shape for the tab strips: a close requested from one of them
+        // can leave keyboard focus on a row (or on nothing), and only this
+        // window knows where the terminal is. Both strips get the same
+        // delegate so the two cannot drift into two different answers.
+        _horizontalTabHost.FocusReturn = RefocusTerminalAfterStripRemoval;
+        _verticalTabHost.FocusReturn = RefocusTerminalAfterStripRemoval;
+
         // Parent every existing and future PaneHost into the shared
         // container declared in MainWindow.xaml. This is the single
         // owner for PaneHost lifetime in the visual tree — both tab
@@ -1176,6 +1183,13 @@ public sealed partial class MainWindow : Window
             UnwireTabColor(t);
             DetachProcessTracking(t);
             RemovePaneHost(t);
+            // TabRemoved is the one signal EVERY close path raises -- the
+            // chord, the context menu, close-group, the row's own X -- and
+            // none of them is guaranteed to leave keyboard focus somewhere
+            // that can type. TabManager raises ActiveTabChanged only when the
+            // ACTIVE tab goes away, so a background close has no hand-back
+            // of its own and the removed row takes the focus with it.
+            RefocusTerminalAfterStripRemoval();
         };
         _tabManager.ActiveTabChanged += (_, _) =>
         {
@@ -5096,6 +5110,34 @@ public sealed partial class MainWindow : Window
         if (_isClosed) return;
         if (_tabManager.Tabs.Count > 0) return;
         OpenDefaultProfile(ProfileLaunchTarget.NewTab);
+    }
+
+    /// <summary>
+    /// Put keyboard focus back on the active terminal unless a live one
+    /// already has it.
+    ///
+    /// Raised by every tab removal, and by the strips' close request when
+    /// the confirmation is declined and nothing was removed at all. Focus
+    /// inside a PaneHost IS the terminal and needs nothing; focus on a strip
+    /// row, on a row's close button, or nowhere at all (the element that
+    /// held it was removed with the tab) is the failure this guards, because
+    /// keybinds reach the app only through a focused TerminalControl.
+    ///
+    /// Deferred by <see cref="FocusActiveLeaf"/>, so it runs after the
+    /// manager has moved ActiveTab onto the surviving tab.
+    /// </summary>
+    private void RefocusTerminalAfterStripRemoval()
+    {
+        // Teardown is not a focus event: enqueuing a focus for a window on
+        // its way out buys nothing and can land on a torn-down tree.
+        if (_isClosed) return;
+
+        if (Content?.XamlRoot is { } root
+            && FocusManager.GetFocusedElement(root) is DependencyObject focused
+            && VisualTreeHelperEx.FindAncestor<PaneHost>(focused) is not null)
+            return;
+
+        FocusActiveLeaf();
     }
 
     private void FocusActiveLeaf()

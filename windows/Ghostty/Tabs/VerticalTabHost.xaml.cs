@@ -317,7 +317,41 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     }
 
     public async Task RequestCloseTabAsync(TabModel tab)
-        => await TabCloseConfirmation.RequestAsync(_manager, tab, XamlRoot, _dialogs);
+    {
+        try
+        {
+            await TabCloseConfirmation.RequestAsync(_manager, tab, XamlRoot, _dialogs);
+        }
+        finally
+        {
+            // Focus left in the strip is focus nobody can type with: the row
+            // that took it is gone (or the dialog handed it straight back
+            // after a declined confirmation), and keybinds only reach the
+            // app through a focused terminal. Asked AFTER the close so the
+            // declined path is covered too -- that one removes nothing, so a
+            // hand-back hung on the removal never runs for it.
+            if (FocusIsInStrip()) FocusReturn?.Invoke();
+        }
+    }
+
+    /// <summary>
+    /// Whether keyboard focus currently sits inside this host's strip.
+    ///
+    /// Its OWN subtree, not the window's: a TabHost asked this question
+    /// would report no focus where the vertical row has some, and the
+    /// hand-back would never fire.
+    /// </summary>
+    private bool FocusIsInStrip()
+        => XamlRoot is { } root
+           && FocusManager.GetFocusedElement(root) is DependencyObject focused
+           && VisualTreeHelperEx.FindAncestor<VerticalTabHost>(focused) is not null;
+
+    /// <summary>
+    /// Hands keyboard focus back to the active terminal. Assigned by the
+    /// window, the way NotificationHost.FocusReturn is: the terminal lives
+    /// there and this close path lives here.
+    /// </summary>
+    internal Action? FocusReturn { get; set; }
 
     internal void ApplyShellTheme(ShellThemeService theme)
     {
