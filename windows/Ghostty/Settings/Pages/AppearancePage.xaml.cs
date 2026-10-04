@@ -51,121 +51,159 @@ internal sealed partial class AppearancePage : Page
         PopulateShaderGallery();
 
         _fontList = new SearchableList(FontFamilySearch, chosen => OnValueChanged("font-family", chosen));
-        OpacitySlider.Value = configService.BackgroundOpacity;
-        SelectWindowTheme(configService.WindowTheme);
 
-        // Seed font size from current config before the loading guard
-        // flips off so the ValueChanged handler doesn't fire a redundant
-        // write back to disk.
-        if (configService is ConfigService csFont)
-        {
-            FontSizeBox.Value = csFont.FontSize;
-        }
-
-        // Windows-only properties are on the concrete ConfigService, not IConfigService.
-        // Cast to read current values for initialization; fall back to defaults if the
-        // runtime type is different (e.g. in tests).
-        if (configService is ConfigService cs)
-        {
-            SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle, BackdropStyles.Default);
-
-            // FrameStyle answers the resolved value, so it cannot tell an
-            // unset key from one set to what the backdrop already says. The
-            // file can, and the two show as different entries here.
-            SelectComboByTag(
-                FrameStyleCombo,
-                cs.IsConfiguredInFile("frame-style") ? cs.FrameStyle : MatchBackdropTag);
-
-            // Seed power saver mode from config, defaulting to "auto".
-            var powerMode = cs.GetRawFileValue("power-saver-mode");
-            if (string.IsNullOrWhiteSpace(powerMode)) powerMode = "auto";
-            SelectComboByTag(PowerSaverModeCombo, powerMode.Trim().ToLowerInvariant());
-
-            // Seed the Animations lever from config, defaulting to "system".
-            SeedAnimationsCombo(cs);
-
-            // NoColorOverride is already normalized to one of notify/strip/keep.
-            SelectComboByTag(NoColorOverrideCombo, cs.NoColorOverride);
-
-            SeedShaderPath();
-
-            BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
-            if (cs.IsConfiguredInFile("background-tint-color"))
-            {
-                if (cs.BackgroundTintColor.HasValue)
-                {
-                    var c = cs.BackgroundTintColor.Value;
-                    TintColorPicker.Color = new Rgb(c.R, c.G, c.B).ToHex();
-                }
-                TintColorResetButton.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                TintColorPicker.Color = "";
-                TintColorResetButton.Visibility = Visibility.Collapsed;
-            }
-            TintOpacitySlider.Value = cs.BackgroundTintOpacity ?? 0.3;
-            LuminosityOpacitySlider.Value = cs.BackgroundLuminosityOpacity ?? 0.3;
-        }
-        else
-        {
-            SelectComboByTag(BackgroundStyleCombo, BackdropStyles.Default);
-            SelectComboByTag(FrameStyleCombo, MatchBackdropTag);
-        }
-
-        // Initialize gradient settings from current config.
-        if (configService is ConfigService configSvc)
-        {
-            var points = configSvc.GradientPoints;
-            GradientEnabledToggle.IsOn = points.Count > 0;
-            GradientSettingsPanel.Visibility = points.Count > 0
-                ? Visibility.Visible : Visibility.Collapsed;
-
-            // Load existing points into editor.
-            GradientEditor.SetPoints(points
-                .Select(p => new GradientPointModel(p.X, p.Y, p.Color, p.Radius))
-                .ToList());
-
-            // Parse animation mode into radio + checkboxes.
-            var anim = configSvc.GradientAnimation;
-            var effects = anim.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            // Select position radio.
-            string[] positionModes = ["", "drift", "orbit", "wander", "bounce"];
-            for (int i = 0; i < positionModes.Length; i++)
-            {
-                if (effects.Contains(positionModes[i]) || (i == 0 && !effects.Any(e => positionModes.Contains(e))))
-                {
-                    PositionAnimRadio.SelectedIndex = i;
-                    break;
-                }
-            }
-
-            BreatheCheck.IsChecked = effects.Contains("breathe");
-            ColorCycleCheck.IsChecked = effects.Contains("color-cycle");
-
-            GradientSpeedSlider.Value = configSvc.GradientSpeed;
-            GradientOpacitySlider.Value = configSvc.GradientOpacity;
-
-            SelectComboByTag(GradientBlendCombo, configSvc.GradientBlend);
-        }
+        // Every control this page can write the config from is seeded by one
+        // method, called from here with _loading still true and again from
+        // OnConfigChanged under the same guard. One seeding path is the whole
+        // point: a control seeded in only one of the two is a control that
+        // describes the config as of whenever the page happened to be built.
+        SeedFromConfig();
 
         GradientEditor.PointsChanged += (_, _) => WriteAllPoints();
 
         _loading = false;
 
-        // Re-seed the gradient editor when the config file changes on disk.
-        // The editor's own writes set _loading/SuppressWatcher, so this only
-        // fires for genuine external edits. Subscribe in Loaded rather than the
-        // ctor: SettingsWindow caches and reuses page instances, so the ctor
-        // runs once while Loaded/Unloaded fire on every navigation. A ctor-time
-        // subscription paired with an Unloaded unsubscribe would be dropped the
-        // first time the user navigates away and never restored on return.
+        // Subscribe in Loaded rather than the ctor: SettingsWindow caches and
+        // reuses page instances, so the ctor runs once while Loaded/Unloaded
+        // fire on every navigation. A ctor-time subscription paired with an
+        // Unloaded unsubscribe would be dropped the first time the user
+        // navigates away and never restored on return.
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
 
         LoadFontsAsync();
+    }
+
+    /// <summary>
+    /// Put every control on this page back in step with the config, and
+    /// write nothing.
+    ///
+    /// Callers own the <c>_loading</c> guard. That guard is load-bearing
+    /// here and not merely tidy: seeding a control fires that control's own
+    /// handler, and every one of those handlers writes the config key the
+    /// control is showing -- which, mid-re-seed, is the value the page is
+    /// halfway through adopting. Without the guard a reload writes the file
+    /// back what it just read, and does it in whatever order the seeds run.
+    ///
+    /// The Windows-only properties live on the concrete ConfigService, so the
+    /// fakes a test hands in fall back to the same defaults the constructor
+    /// has always used and pick up nothing else.
+    /// </summary>
+    private void SeedFromConfig()
+    {
+        OpacitySlider.Value = _configService.BackgroundOpacity;
+        SelectWindowTheme(_configService.WindowTheme);
+        SeedShaderPath();
+        SeedFontFamily();
+
+        if (_configService is not ConfigService cs)
+        {
+            SelectComboByTag(BackgroundStyleCombo, BackdropStyles.Default);
+            SelectComboByTag(FrameStyleCombo, MatchBackdropTag);
+            return;
+        }
+
+        SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle, BackdropStyles.Default);
+
+        // FrameStyle answers the resolved value, so it cannot tell an
+        // unset key from one set to what the backdrop already says. The
+        // file can, and the two show as different entries here.
+        SelectComboByTag(
+            FrameStyleCombo,
+            cs.IsConfiguredInFile("frame-style") ? cs.FrameStyle : MatchBackdropTag);
+
+        // Seed power saver mode from config, defaulting to "auto".
+        var powerMode = cs.GetRawFileValue("power-saver-mode");
+        if (string.IsNullOrWhiteSpace(powerMode)) powerMode = "auto";
+        SelectComboByTag(PowerSaverModeCombo, powerMode.Trim().ToLowerInvariant());
+
+        // Seed the Animations lever from config, defaulting to "system".
+        SeedAnimationsCombo(cs);
+
+        // NoColorOverride is already normalized to one of notify/strip/keep.
+        SelectComboByTag(NoColorOverrideCombo, cs.NoColorOverride);
+
+        BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
+        SeedTintColor(cs);
+        TintOpacitySlider.Value = cs.BackgroundTintOpacity ?? 0.3;
+        LuminosityOpacitySlider.Value = cs.BackgroundLuminosityOpacity ?? 0.3;
+
+        // Seed font size before the guard can matter, or the ValueChanged
+        // handler would write back the value this method just read.
+        FontSizeBox.Value = cs.FontSize;
+
+        SeedGradient(cs);
+    }
+
+    // The tint row reads as "unset" unless the file carries the key, the
+    // same rule the Colors rows follow: an inherited default is not something
+    // the user set, and writing it back is how a default becomes an override.
+    private void SeedTintColor(ConfigService cs)
+    {
+        if (!cs.IsConfiguredInFile("background-tint-color"))
+        {
+            TintColorPicker.Color = "";
+            TintColorResetButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (cs.BackgroundTintColor.HasValue)
+        {
+            var c = cs.BackgroundTintColor.Value;
+            TintColorPicker.Color = new Rgb(c.R, c.G, c.B).ToHex();
+        }
+        TintColorResetButton.Visibility = Visibility.Visible;
+    }
+
+    // The gradient card and everything under it, from the same resolved
+    // values the constructor has always read.
+    private void SeedGradient(ConfigService cs)
+    {
+        var points = cs.GradientPoints;
+        GradientEnabledToggle.IsOn = points.Count > 0;
+        GradientSettingsPanel.Visibility = points.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+        // Load existing points into editor.
+        GradientEditor.SetPoints(points
+            .Select(p => new GradientPointModel(p.X, p.Y, p.Color, p.Radius))
+            .ToList());
+
+        // Parse animation mode into radio + checkboxes.
+        var anim = cs.GradientAnimation;
+        var effects = anim.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Select position radio.
+        string[] positionModes = ["", "drift", "orbit", "wander", "bounce"];
+        for (int i = 0; i < positionModes.Length; i++)
+        {
+            if (effects.Contains(positionModes[i]) || (i == 0 && !effects.Any(e => positionModes.Contains(e))))
+            {
+                PositionAnimRadio.SelectedIndex = i;
+                break;
+            }
+        }
+
+        BreatheCheck.IsChecked = effects.Contains("breathe");
+        ColorCycleCheck.IsChecked = effects.Contains("color-cycle");
+
+        GradientSpeedSlider.Value = cs.GradientSpeed;
+        GradientOpacitySlider.Value = cs.GradientOpacity;
+
+        SelectComboByTag(GradientBlendCombo, cs.GradientBlend);
+    }
+
+    // font-family has no typed accessor on IConfigService, and the box has to
+    // show what is in use rather than sit empty. LoadFontsAsync sets it again
+    // once the enumeration lands; both read the same value, so the later one
+    // is a no-op unless the config moved in between.
+    private void SeedFontFamily()
+    {
+        if (_configService is ConfigService cs && !string.IsNullOrEmpty(cs.FontFamily))
+        {
+            FontFamilySearch.Text = cs.FontFamily;
+        }
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -736,32 +774,37 @@ internal sealed partial class AppearancePage : Page
 
     private void OnConfigChanged(IConfigService svc)
     {
-        // Echo from our own Reload(): editor already reflects these
-        // values, so skip the rebuild (which would tear down any open
-        // row, like a color picker flyout the user is dragging).
+        // Echo from our own Reload(): the editor already reflects these
+        // values, so skip the re-seed. That is also what keeps an in-progress
+        // row -- a color picker flyout the user is dragging -- from being torn
+        // down by the write the page just made.
         if (_expectingOwnReloads > 0)
         {
             _expectingOwnReloads--;
             return;
         }
         if (_loading) return;
-        // GradientPoints is on the concrete ConfigService, not the interface.
-        // Bail silently for any other runtime type (e.g. test fakes).
-        if (svc is not ConfigService cs) return;
+        // GradientPoints and the other Windows-only values are on the concrete
+        // ConfigService, not the interface. Bail silently for any other runtime
+        // type (e.g. test fakes).
+        if (svc is not ConfigService) return;
+
+        // Everything on the page, not just the gradient editor and the shader
+        // box. A control left showing the value the config had when the page
+        // was built writes THAT value on the next nudge, so an external edit
+        // -- the raw editor in this same dialog, a save from another editor,
+        // the file watcher -- is silently undone the moment the user touches
+        // a stale slider. SeedShaderPath also moves _shaderPathWritten with the
+        // box, without which a re-commit of the displayed path would read as
+        // unchanged and be suppressed.
+        //
+        // The guard is what stops this from being the same clobber by another
+        // route: assigning a control fires its own handler, and each of those
+        // writes the key.
         _loading = true;
         try
         {
-            GradientEditor.SetPoints(cs.GradientPoints
-                .Select(p => new Controls.Settings.GradientPointModel(
-                    p.X, p.Y, p.Color, p.Radius))
-                .ToList());
-
-            // The shader box has to move with the file too. Leaving it alone
-            // would not merely show a stale value: _shaderPathWritten would go
-            // on describing a write this page made before the external edit
-            // undid it, so re-committing the displayed value would read as
-            // unchanged and be suppressed.
-            SeedShaderPath();
+            SeedFromConfig();
         }
         finally
         {
