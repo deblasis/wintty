@@ -2516,6 +2516,14 @@ public sealed partial class MainWindow : Window
         // windows (a window emptied by closing its tabs one-by-one has nothing
         // to restore — those tabs were captured individually as closed tabs).
         var closedWindow = CaptureSession();
+        // Hand the session manager the same capture, BEFORE the panes are
+        // freed below. It is the last moment this window's real state --
+        // titles, pins, groups, working directories -- can be read: the
+        // surfaces go two lines down and the HWND is gone by the time the
+        // app's per-window Closed handler runs, so a recapture from there
+        // reads a torn-down window. The clean-shutdown write at app exit is
+        // built from what this leaves behind.
+        App.SessionManager?.CaptureClosingWindow(this, closedWindow);
         if (closedWindow is { Tabs.Count: > 0 })
             App.ClosedWindows.Push(closedWindow);
 

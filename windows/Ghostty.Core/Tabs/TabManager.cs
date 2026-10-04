@@ -102,6 +102,30 @@ internal sealed class TabManager
     public event EventHandler<Ghostty.Core.Bell.BellFeatures>? BellRang;
 
     /// <summary>
+    /// Raised when the group registry or some tab's membership in it
+    /// changed: a group formed, joined, dissolved, or collapsed, or a
+    /// member left and took the last one with it.
+    ///
+    /// It exists because the group ops otherwise raise NOTHING a consumer
+    /// can hear. <see cref="GroupTabs"/> and <see cref="Ungroup"/> write
+    /// <see cref="TabModel.Group"/>, whose INPC raise the strips read, but
+    /// <see cref="CollapseGroup"/> writes a plain property on
+    /// <see cref="TabGroup"/> (no INPC anywhere on it), and
+    /// <see cref="Normalize"/> dissolving an emptied group is a removal
+    /// from the registry that is not a tab removal either. Session
+    /// persistence is the consumer that matters: a saved session carries
+    /// each group's id, title, color and collapse bit
+    /// (<c>SessionCapture.CaptureGroups</c>), and none of that reached the
+    /// file before this event existed.
+    ///
+    /// Deliberately coarse -- one signal for "the group state may differ",
+    /// never which op moved it. It feeds a debounced write, and a per-op
+    /// taxonomy here would be a taxonomy nobody keeps current as ops are
+    /// added.
+    /// </summary>
+    public event EventHandler? GroupsChanged;
+
+    /// <summary>
     /// Raised AFTER the tab's manager subscriptions have been unwired
     /// but BEFORE the tab is removed from <see cref="Tabs"/>. Fired
     /// from <see cref="DetachTab"/> only; close paths do not fire it.
@@ -467,9 +491,38 @@ internal sealed class TabManager
         // An empty group must never be registered: Normalize dissolves
         // them, and a caller that grouped nothing gets nothing.
         if (!any) return;
-        if (!_groups.Contains(group)) _groups.Add(group);
+        RegisterGroup(group);
         Normalize();
+        GroupsChanged?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>
+    /// Add <paramref name="group"/> to the registry and subscribe the
+    /// manager's one forwarder to its notifications.
+    ///
+    /// The group itself is the carrier of its own presentation changes --
+    /// title, colour, collapse -- so the registry is where the manager
+    /// learns about them, and re-raising
+    /// <see cref="GroupsChanged"/> from here is what puts a rename or a
+    /// collapse into the saved session: neither writes a tab, so neither
+    /// reaches a consumer listening only to tabs.
+    /// </summary>
+    private void RegisterGroup(TabGroup group)
+    {
+        if (_groups.Contains(group)) return;
+        _groups.Add(group);
+        group.PropertyChanged += OnGroupPropertyChanged;
+    }
+
+    /// <summary>Drop <paramref name="group"/> and stop listening to it.</summary>
+    private void UnregisterGroup(TabGroup group)
+    {
+        group.PropertyChanged -= OnGroupPropertyChanged;
+        _groups.Remove(group);
+    }
+
+    private void OnGroupPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => GroupsChanged?.Invoke(this, EventArgs.Empty);
 
     /// <summary>
     /// New Group With Tab: a fresh group whose sole member is
@@ -525,7 +578,13 @@ internal sealed class TabManager
         foreach (var t in _tabs)
             if (ReferenceEquals(t.Group, group))
                 t.Group = null;
+        // Drop it from the registry here rather than waiting for
+        // Normalize's emptiness pass: the group is empty the moment the
+        // last membership write above lands, and this op is where a reader
+        // expects the registry to have answered.
+        UnregisterGroup(group);
         Normalize();
+        GroupsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -567,6 +626,7 @@ internal sealed class TabManager
         if (tab.Group is null) return;
         tab.Group = null;
         Normalize();
+        GroupsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -585,7 +645,13 @@ internal sealed class TabManager
     public void CollapseGroup(TabGroup group, bool collapsed)
     {
         ArgumentNullException.ThrowIfNull(group);
+        if (group.IsCollapsed == collapsed) return;
         group.IsCollapsed = collapsed;
+        // No raise here: the collapse bit is half of what a saved session
+        // restores a group into, and it reaches GroupsChanged through the
+        // registry's subscription to the group's own notification (see
+        // RegisterGroup), which is the same route a rename and a recolor
+        // take.
     }
 
     /// <summary>
@@ -713,8 +779,12 @@ internal sealed class TabManager
         }
 
         // No empty groups: the last member leaving dissolves the group,
-        // and its collapse state dies with the object.
-        _groups.RemoveAll(g => MembersOf(g).Count == 0);
+        // and its collapse state dies with the object. The copy is the
+        // registry itself being walked while UnregisterGroup removes from
+        // it.
+        foreach (var g in new List<TabGroup>(_groups))
+            if (MembersOf(g).Count == 0)
+                UnregisterGroup(g);
 
         // Pin prefix, repaired in place: the first pinned tab found after
         // unpinned tabs moves back to the prefix end. Both zones keep
