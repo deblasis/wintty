@@ -21,11 +21,24 @@
       0  pass
       2  product findings, in the build under test
       1  the harness could not run, so nothing is known about the product
+      3  skip: the area did not run at all, and nothing is wrong either
 
     A 1 is retried, because a run that never started tells you nothing and
     the causes are usually transient - the window never appeared, something
     stole the foreground. A 2 is never retried: re-running a real defect
     until it passes is how a regression gets buried.
+
+    A 3 is neither red nor green, and that is the whole point of giving it a
+    code of its own. A harness whose subject is not installed - a WSL distro
+    on a machine with no WSL, say - used to have two ways out and both were
+    lies: exit 1, which drags the run down to "could not run" over an area
+    nobody could have covered anyway, or exit 0, which files a skip in
+    result.json and reports PASS in the table and in the summary count. The
+    second is the failure this runner exists to prevent, so a skip is now
+    named: printed as `skip`, counted in summary.json under `skipped`, and
+    neither rolled into findings nor into the broken. A green run with a skip
+    in it says so, and reading the run as "every area passed" is now a
+    misreading of a line that says otherwise.
 
     That split only works because each harness leaves with the right code.
     Most signal defects by throwing, and an unhandled throw makes pwsh return
@@ -203,7 +216,7 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
                 oracle = 'every tab names its own active pane, live, whether or not it is selected (#1128, #1129). Two scenarios on cmd, whose `title` builtin reaches the app as OSC 0 through ConPTY. background: two tabs, tab 0 is told to wait and then retitle itself, tab 1 is selected before the wait ends; tab 0''s label must follow while it sits in the background, and the selected tab must keep its own title. panes: one tab split in two, each pane titled; the tab must name whichever pane is focused, follow focus both ways, ignore a title the unfocused pane sets, and show that title once the pane is focused. Every assertion reads three things: the model label (EffectiveTitle), the raw shell title the tab holds, and the vertical strip''s own rendered row text. It does not read the horizontal strip, UIA names or the window caption, and it does not cover a pane that has never reported a title (the fallback) - the model tests pin that. It arms send-text, because the shells have to run `title`, and runs on a private state base with single-instance off, so it can run beside another Wintty. Zero OS input is synthesized' }
 
     [ordered]@{ name = 'wsl-local';      script = 'seam-wsl-local.ps1';            tags = @('shell');          outDir = $true;  seed = $false; minutes = 2
-                oracle = 'a WSL profile hosted in this process renders its shell (#1268): the bundled conpty holds a child''s first output until its startup DA1 is answered, and a WSL child never came out of that on the local pane path - wsl.exe alive, the pane blank, one typed DA1 reply releasing it. One scenario: a staged profile running `wsl.exe -d <distro>` is opened through the seam and the pane''s own screen text must carry output within 30s, with NOTHING typed into it, since a keystroke is exactly what used to unstick it. WSL-gated on the machine''s own `wsl --list` and a command the distro must run: no distro, or one that cannot run, is a printed SKIP and exit 0, and a skip is not a pass. It says the pane rendered, not that the handshake was answered by the reader rather than the parser - the zig test in termio/Exec.zig pins that - and it covers the first distro listed only. Private state base, single-instance off, zero synthesized OS input' }
+                oracle = 'a WSL profile hosted in this process renders its shell AND conpty''s startup DA1 was answered by the pty reader (#1268): the bundled conpty holds a child''s first output until it is, and a WSL child never came out of that on the local pane path - wsl.exe alive, the pane blank, one typed DA1 reply releasing it. One scenario: a staged profile running `wsl.exe -d <distro>` is opened through the seam and the pane''s own screen text must carry output within 30s, with NOTHING typed into it, since a keystroke is exactly what used to unstick it. The screen alone cannot tell the two apart - the pane came up at 46ms answered and at 3s on conpty''s own timeout, and both are "output within 30s" - so the second assertion is the line the pty reader logs when the reply reaches conpty, read out of the app''s own log under the private state base. A pane that rendered without that line is the old bug wearing a passing screen, and is exit 2; a log that never appeared at all is exit 1, because then the scenario measured nothing. WSL-gated on the machine''s own `wsl --list` and a command the distro must run: no distro, or one that cannot run, exits 3, the suite''s skip verdict - printed and counted as `skipped` in summary.json, neither a pass nor a harness failure, because a machine with no WSL cannot have this coverage and saying PASS would be claiming it does. It covers the first distro listed only, and pins that the answer is the reader''s rather than the parser''s - the zig tests in termio/Exec.zig and termio/stream_handler.zig own that half. Private state base, single-instance off, zero synthesized OS input' }
 
     [ordered]@{ name = 'tab-tag-ink';    script = 'tab-tag-ink.ps1';              tags = @('tabs','chrome');  outDir = $true;  seed = $false; minutes = 2
                 oracle = 'does a colour-tagged tab''s PROFILE ICON get the tag''s ink? It reads PIXELS, and it has to: the brush was still computed and the call still written when the row lookup went through the header panel''s first child and the group rail took that slot (#833), so a test over resolved brushes would have measured the correct value of a colour nothing painted with (#883, #882). It drives real state through the seam, asks the seam where the icon landed, and samples the ink out of a screen capture. The canary used to be the pushpin; pinned tabs are icon squares now and carry none, so the icon is the glyph that remains, and it is the same loop over the header row''s children that stopped running. The claim is deliberately RELATIVE - the tagged tab''s icon ink IS the tag foreground and is NOT the untagged tab''s icon ink, with both tabs pinned and neither active so the tag is the only difference - because the strip renders light in every leg on this machine (Mica shows a light desktop through it even under a dark theme) and an absolute claim would be measuring the desktop. Like contrast-oracle.ps1 it does NOT call Assert-NoWintty: it launches its own instance with single-instance off against an isolated XDG_CONFIG_HOME, moves only its own window and stops only what it started, so a developer''s Wintty can be running beside it. Only the HORIZONTAL strip is staged, and only the profile icon of the row''s ink pass - the title and the bell share the brush but are not sampled. It also assumes the seeded tab''s icon is a GLYPH: a profile whose icon resolves to a bitmap takes no foreground, and the harness would read that as the tag failing to land' }
@@ -710,6 +723,7 @@ $SelfTestHarnesses = @(
     [ordered]@{ name = 'st-no-outdir';  script = 'lib/fuzz-selftest/no-outdir.ps1';  tags = @('selftest'); outDir = $false; seed = $true;  minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-product-throw'; script = 'lib/fuzz-selftest/product-throw.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-unknown-code';  script = 'lib/fuzz-selftest/unknown-code.ps1';  tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
+    [ordered]@{ name = 'st-skip';          script = 'lib/fuzz-selftest/skip.ps1';          tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-seed-unverified'; script = 'lib/fuzz-selftest/seed-unverified.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-seed-readback'; script = 'lib/fuzz-selftest/seed-readback-cases.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     # Deliberately short budget: the point is the runaway guard, not the wait.
@@ -801,6 +815,13 @@ function Get-Verdict {
         0       { 'pass' }
         2       { 'findings' }
         1       { 'harness' }
+        # The area did not run and nothing is wrong: a subject the machine
+        # does not have. Its own code rather than a 1, which would put it in
+        # `broken` and send the run to exit 1 over a machine that simply has
+        # no WSL, and rather than a 0, which would print PASS for an area
+        # nobody looked at. The retry loop below does not retry it either way,
+        # since `$code -ne 1`.
+        3       { 'skip' }
         default { 'error' }
     }
 }
@@ -815,6 +836,12 @@ function Get-SuiteOutcome {
 
     $findings = @($Rows | Where-Object { $_.verdict -eq 'findings' })
     $broken   = @($Rows | Where-Object { $_.verdict -eq 'harness' -or $_.verdict -eq 'error' })
+    # Counted, and kept out of both buckets above on purpose. In `broken` it
+    # would cost the run its exit 0 over a machine that cannot have the area;
+    # in `findings` it would file a machine without WSL as a product defect.
+    # What it must not be is absent: a run that reports one harness fewer than
+    # it selected reads as that area having passed.
+    $skipped  = @($Rows | Where-Object { $_.verdict -eq 'skip' })
     $notRun   = $SelectedCount - @($Rows).Count
 
     # Findings outrank a harness that could not run: a finding is actionable,
@@ -823,7 +850,7 @@ function Get-SuiteOutcome {
             elseif ($broken.Count -gt 0 -or $notRun -gt 0) { 1 }
             else { 0 }
 
-    [ordered]@{ findings = $findings; broken = $broken; notRun = $notRun; exit = $code }
+    [ordered]@{ findings = $findings; broken = $broken; skipped = $skipped; notRun = $notRun; exit = $code }
 }
 
 # Waits for a child, echoing its log as it grows, and kills it if it outstays
@@ -1752,6 +1779,8 @@ try {
         $row = Invoke-Harness -Harness $h -Root $OutRoot -Exe $ExePath -SeedValue $Seed -RetryCount $Retries
         $rows += $row
 
+        # Yellow is the skip and the two "nothing is known" verdicts alike,
+        # which is right: none of them is a pass and none is a finding.
         $colour = switch ($row.verdict) { 'pass' { 'Green' } 'findings' { 'Red' } default { 'Yellow' } }
         Write-Host ("{0}: {1} (exit {2}, {3}s)" -f $h.name, $row.verdict, $row.exit, $row.seconds) -ForegroundColor $colour
 
@@ -1794,6 +1823,7 @@ if ($SelfTest) {
         @{ name = 'st-no-outdir';  verdict = 'pass';     attempts = 1; why = '-OutDir is omitted and -Seed is passed through' }
         @{ name = 'st-product-throw'; verdict = 'findings'; attempts = 1; why = 'a thrown PRODUCT_FAIL leaves with 2, not the retryable 1' }
         @{ name = 'st-unknown-code'; verdict = 'error';    attempts = 1; why = 'an exit code outside the convention is not a pass' }
+        @{ name = 'st-skip';          verdict = 'skip';    attempts = 1; why = 'an area the machine has no subject for is named, not filed as a pass and not retried' }
         @{ name = 'st-hangs';      verdict = 'harness';  attempts = 2; why = 'a wedged harness is killed at its budget and treated as retryable' }
         @{ name = 'st-seed-unverified'; verdict = 'harness'; attempts = 2; why = 'a harness that could not establish its own corpus leaves with 1, not the never-retried 2' }
         @{ name = 'st-seed-readback'; verdict = 'pass'; attempts = 1; why = 'the seed read-back rules decide whether a run has a real corpus, so they are exercised rather than assumed' }
@@ -1850,6 +1880,22 @@ if ($SelfTest) {
     }
     if ($outcome.notRun -ne 0) {
         $bad += "roll-up counted $($outcome.notRun) not reached, expected 0"
+    }
+
+    # The skip is counted, and lands in neither bucket above. Two failures hide
+    # here, one per direction: a skip folded into `broken` costs a green run
+    # its exit 0 over a machine with no WSL, and a skip folded into `findings`
+    # files that machine's configuration as a product defect. So both counts
+    # are asserted rather than only the verdict, which is what would catch a
+    # skip merely getting a name.
+    if ($outcome.skipped.Count -ne 1) {
+        $bad += "roll-up counted $($outcome.skipped.Count) skips, expected 1"
+    }
+    if (@($outcome.broken | Where-Object { $_.name -eq 'st-skip' }).Count -ne 0) {
+        $bad += 'the skip landed in the could-not-run bucket, so a machine without the subject would take the whole run to exit 1'
+    }
+    if (@($outcome.findings | Where-Object { $_.name -eq 'st-skip' }).Count -ne 0) {
+        $bad += 'the skip landed in the findings bucket, so a machine without the subject would be filed as a product defect'
     }
 
     # st-stderr-flood's verdict says the child got to its exit; this says where
@@ -1946,6 +1992,28 @@ if ($SelfTest) {
     $onlyFindings = Invoke-Inner -Name 'only-findings' -Extra @('-Only', 'st-findings')
     if ($onlyFindings.exit -ne 2) {
         $bad += "-Only st-findings exited $($onlyFindings.exit), expected 2"
+    }
+    # The skip through the two lines that actually end a run, over a selection
+    # that is otherwise clean: it has to leave with 0, because no subject on
+    # this machine is not a broken harness. The message is asserted as well,
+    # because the exit code alone is what the exit-0 branch of the report block
+    # already got right when a skip was a 0 - the row read PASS and the run
+    # said nothing. That is the failure this whole state exists to end, so it
+    # is checked where it can still fail: a child whose table and summary
+    # still counted the skip as covered.
+    $onlySkip = Invoke-Inner -Name 'only-skip' -Extra @('-Only', 'st-pass,st-skip')
+    if ($onlySkip.exit -ne 0) {
+        $bad += "-Only over a clean and a skipped fixture exited $($onlySkip.exit), expected 0 - a skip is neither a finding nor a harness that could not run"
+    }
+    if ($onlySkip.text -notmatch '(?m)^\s*1 harness\(es\) skipped') {
+        $bad += 'a run with a skip in it never said how many were skipped, so a reader of the table has to infer it from a row that used to read PASS'
+    }
+    if ($onlySkip.text -notmatch 'PASS\s+2 harness\(es\), 0 findings, 1 skipped') {
+        $bad += 'the PASS line does not carry the skip count, so a green run reads as every area covered when one of them was not'
+    }
+    $skipSummary = Get-Content -LiteralPath (Join-Path $onlySkip.root 'summary.json') -Raw | ConvertFrom-Json
+    if (@($skipSummary.skipped).Count -ne 1 -or $skipSummary.skipped[0] -ne 'st-skip') {
+        $bad += 'summary.json does not name the skipped harness, so nothing downstream can tell a skipped area from one that passed'
     }
     $skipped = Invoke-Inner -Name 'skip' -Extra @('-Only', 'st-pass,st-findings', '-Skip', 'st-findings')
     if ($skipped.exit -ne 0) {
@@ -3037,6 +3105,7 @@ exit 0
 $outcome  = Get-SuiteOutcome -Rows $rows -SelectedCount $selected.Count
 $findings = $outcome.findings
 $broken   = $outcome.broken
+$skipped  = $outcome.skipped
 $notRun   = $outcome.notRun
 
 $summary = [ordered]@{
@@ -3045,6 +3114,10 @@ $summary = [ordered]@{
     selected         = @($selected | ForEach-Object { $_.name })
     findings         = @($findings | ForEach-Object { $_.name })
     couldNotRun      = @($broken | ForEach-Object { $_.name })
+    # Named apart from couldNotRun because the two are not the same event and
+    # a reader of this file cannot tell them apart otherwise: a skip is an area
+    # the machine has no subject for, a couldNotRun is a harness that broke.
+    skipped          = @($skipped | ForEach-Object { $_.name })
     skippedAfterStop = $notRun
     results          = $rows
 }
@@ -3065,6 +3138,14 @@ if ($broken.Count -gt 0) {
     Write-Host ("{0} harness(es) could not run, so nothing is known about the area they cover: {1}" -f
         $broken.Count, (($broken | ForEach-Object { $_.name }) -join ', ')) -ForegroundColor Yellow
 }
+# Printed even on a green run, and before the PASS line, because the PASS
+# line counts rows and a reader who does not notice the one above it reads the
+# whole run as every area covered. A skip is not a finding and not a failure:
+# it is an area this machine has no subject for.
+if ($skipped.Count -gt 0) {
+    Write-Host ("{0} harness(es) skipped - the area did not run and nothing is wrong with the build: {1}" -f
+        $skipped.Count, (($skipped | ForEach-Object { $_.name }) -join ', ')) -ForegroundColor Yellow
+}
 if ($notRun -gt 0) {
     Write-Host ("{0} harness(es) were not reached after -StopOnFindings" -f $notRun) -ForegroundColor Yellow
 }
@@ -3072,6 +3153,10 @@ if ($notRun -gt 0) {
 if ($findings.Count -gt 0) {
     Write-Host ("FINDINGS in {0} harness(es): {1}" -f $findings.Count, (($findings | ForEach-Object { $_.name }) -join ', ')) -ForegroundColor Red
 } elseif ($outcome.exit -eq 0) {
-    Write-Host ("PASS  {0} harness(es), 0 findings" -f @($rows).Count) -ForegroundColor Green
+    # The count says harnesses, not areas covered, and with a skip in the run
+    # the difference matters: say so in the line itself rather than leaving
+    # the reader to reconcile two.
+    $tail = if ($skipped.Count -gt 0) { "0 findings, $($skipped.Count) skipped" } else { '0 findings' }
+    Write-Host ("PASS  {0} harness(es), {1}" -f @($rows).Count, $tail) -ForegroundColor Green
 }
 exit $outcome.exit

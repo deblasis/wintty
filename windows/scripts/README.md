@@ -49,10 +49,20 @@ worth retrying:
 | 0 | clean |
 | 2 | product findings - read the harness's `result.json` and `shots/` |
 | 1 | the harness could not run; the product was never exercised, so do not file a bug. Retrying helps when the cause was transient (no window, foreground stolen, shell never came up); it will not help when the run was refused because a Wintty is open - close it first |
+| 3 | skip - the area did not run at all and nothing is wrong with the build, because the machine has no subject for it (no WSL distro). Printed and counted as its own verdict, and never retried |
 
 The suite retries 1 and never retries 2. Re-running a real defect until it
 passes is how a regression gets buried, which is what `aot-fuzz.ps1` used to
 do by retrying every non-zero exit and keeping only the last attempt.
+
+A skip is the third state, and it had to become one. A harness whose subject
+is not installed - `seam-wsl-local.ps1` on a machine with no WSL - used to
+exit 0 and print PASS: the verdict table row said `pass`, the summary counted
+it as a covered harness, and the only trace that nothing ran was a line in its
+own `result.json` that no roll-up read. That is precisely the shape of failure
+this runner exists to prevent, so it now exits 3. `summary.json` names those
+harnesses under `skipped`, apart from `couldNotRun` (a broken harness) and
+from `skippedAfterStop` (never reached).
 
 Conflating the two is also how a broken harness gets mistaken for a broken
 product, and getting it right needed more than fixing the tail of each
@@ -88,11 +98,14 @@ found real defects printed all green. That runner was what the vertical-tabs
 work leaned on.
 
 `just fuzz-selftest` runs the suite's own runner against fixtures in
-`lib/fuzz-selftest/` that exit 0, 1, 2 and 3 on purpose, plus one that
+`lib/fuzz-selftest/` that exit 0, 1, 2, 3 and an outside-the-convention code
+on purpose, plus one that
 throws, one that throws `PRODUCT_FAIL` from inside a `try`/`finally`, one
 that fails once and then works, one that hangs forever, and one that
 classifies its own failure to establish a corpus as the retryable 1 rather
-than a finding. It asserts the verdict *and* the attempt count for each. It
+than a finding. It asserts the verdict *and* the attempt count for each, and
+that a skipped harness lands in neither `findings` nor `couldNotRun` and is
+named in `summary.json`. It
 takes a minute and a half, needs no build or desktop, and is safe to run with
 Wintty open.
 

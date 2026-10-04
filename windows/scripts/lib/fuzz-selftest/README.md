@@ -13,7 +13,8 @@ needs no build, no window and no interactive desktop.
 | `flaky.ps1` | the retry re-runs rather than replaying the first verdict |
 | `no-outdir.ps1` | a harness that takes no `-OutDir` is called correctly, and `-Seed` reaches it |
 | `product-throw.ps1` | a thrown `PRODUCT_FAIL` leaves with 2 *and* still runs its `finally` |
-| `unknown-code.ps1` | an exit code outside the convention is not a pass |
+| `unknown-code.ps1` | an exit code outside the convention is not a pass (42: 3 is the skip, so it cannot play this part) |
+| `skip.ps1` | an area the machine has no subject for is `skip`, not a pass and not a harness failure: one attempt, and it lands in neither bucket of the roll-up |
 | `hangs.ps1` | a wedged harness is killed at its budget rather than hanging the run |
 | `seed-unverified.ps1` | a harness that could not establish its own corpus leaves with 1 out of a catch and a classification, and still runs its `finally` |
 | `seed-readback-cases.ps1` | the seed read-back rules themselves: a rising count is landing, an unreadable sample is not a miss |
