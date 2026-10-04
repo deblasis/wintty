@@ -20,8 +20,58 @@ internal sealed partial class AdvancedPage : Page
         InitializeComponent();
         LoadValues();
         _loading = false;
+
+        // Subscribe in Loaded rather than the ctor: SettingsWindow caches and
+        // reuses page instances, so the ctor runs once while Loaded/Unloaded
+        // fire on every navigation. A ctor-time subscription paired with an
+        // Unloaded unsubscribe would be dropped the first time the user
+        // navigates away and never restored on return.
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
+    private void OnLoaded(object sender, RoutedEventArgs e)
+        => _configService.ConfigChanged += OnConfigChanged;
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+        => _configService.ConfigChanged -= OnConfigChanged;
+
+    /// <summary>
+    /// An external config change moves every value on this page, and the
+    /// controls have to follow it.
+    ///
+    /// The two boxes here also keep the "what this page last wrote" markers
+    /// their LostFocus handlers compare against, and LoadValues moves those
+    /// with the boxes. Leaving them would be the quieter half of the same
+    /// bug: the display would be right and the guard wrong, so the next blur
+    /// would read as unchanged and suppress a write the user asked for.
+    ///
+    /// The guard is load-bearing, not tidy: assigning a control fires that
+    /// control's own handler, and every handler here writes the key the
+    /// control is showing.
+    /// </summary>
+    private void OnConfigChanged(IConfigService _)
+    {
+        if (_loading) return;
+        _loading = true;
+        try
+        {
+            LoadValues();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    /// <summary>
+    /// Put every control on this page in step with the config, and with the
+    /// markers the blur handlers compare against.
+    ///
+    /// Called from the constructor with <c>_loading</c> still true and again
+    /// from <see cref="OnConfigChanged"/> under the same guard, so the two
+    /// paths cannot describe different values.
+    /// </summary>
     private void LoadValues()
     {
         HighContrastToggle.IsOn = _configService.WindowsHighContrast;
