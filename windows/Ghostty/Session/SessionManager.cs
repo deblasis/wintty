@@ -252,6 +252,29 @@ internal sealed class SessionManager
     }
 
     /// <summary>
+    /// Save the live windows as a clean shutdown, NOW, with no debounce.
+    ///
+    /// A sign-out, a reboot and a Windows Update restart never send
+    /// WM_CLOSE: the OS ends the session and the process is simply gone,
+    /// so Window.Closed never fires and the clean flag was never set. Under
+    /// `window-save-state=default` that left the file permanently unclean
+    /// and the next launch opened one fresh window. The window procedure
+    /// calls this from WM_ENDSESSION
+    /// (Ghostty.Hosting.SessionEndCapture), which is the only moment the
+    /// message reaches a live process with its panes intact.
+    /// </summary>
+    public void CaptureForSessionEnd()
+    {
+        // Stop the debounce FIRST. A tick already queued would fire after
+        // the clean write below and put CleanShutdown=false back on disk,
+        // which is the very outcome this exists to prevent.
+        _debounce?.Stop();
+        if (_held) return;
+        if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
+        SaveLiveWindows(cleanShutdown: true);
+    }
+
+    /// <summary>
     /// Capture every live window, write the set, and leave the ledger
     /// holding exactly what was written. Null (nothing written) when no
     /// window holds a tab: blanking the file would throw away a session
