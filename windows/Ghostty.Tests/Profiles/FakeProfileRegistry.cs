@@ -14,6 +14,7 @@ internal sealed class FakeProfileRegistry : IProfileRegistry
     public IReadOnlyList<ResolvedProfile> Profiles => _profiles;
     public IReadOnlyList<ResolvedProfile> HiddenProfiles => _hidden;
     public string? DefaultProfileId { get; set; }
+    public IReadOnlyList<string> ProfileWarnings { get; set; } = [];
     public long Version { get; private set; }
 
     public event Action<IProfileRegistry>? ProfilesChanged;

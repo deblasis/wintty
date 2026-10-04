@@ -407,10 +407,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
     // Profile view is published atomically via a single volatile
     // ProfileView reference so non-UI consumers see a consistent
-    // five-field set without tearing. IProfileConfigSource is public,
+    // six-field set without tearing. IProfileConfigSource is public,
     // so while today's only consumer (ProfileRegistry) reads via the
     // UI-dispatched event, future worker-thread consumers are safe.
     public IReadOnlyDictionary<string, Ghostty.Core.Profiles.ProfileDef> ParsedProfiles => _profileView.ParsedProfiles;
+    public IReadOnlyDictionary<string, Ghostty.Core.Profiles.ProfileOverride> ProfileOverrides => _profileView.ProfileOverrides;
     public IReadOnlyList<string> ProfileOrder => _profileView.ProfileOrder;
     public string? DefaultProfileId => _profileView.DefaultProfileId;
     public IReadOnlySet<string> HiddenProfileIds => _profileView.HiddenProfileIds;
@@ -444,6 +445,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
     private static readonly Ghostty.Core.Config.ProfileView EmptyProfileView = new(
         ParsedProfiles: new Dictionary<string, Ghostty.Core.Profiles.ProfileDef>(),
+        ProfileOverrides: new Dictionary<string, Ghostty.Core.Profiles.ProfileOverride>(),
         ProfileOrder: Array.Empty<string>(),
         DefaultProfileId: null,
         HiddenProfileIds: System.Collections.Frozen.FrozenSet<string>.Empty,

@@ -22,6 +22,7 @@ public class SessionProfileResolverTests
         public IReadOnlyList<ResolvedProfile> Profiles => new List<ResolvedProfile>(_byId.Values);
         public IReadOnlyList<ResolvedProfile> HiddenProfiles => _hidden;
         public string? DefaultProfileId { get; set; }
+        public IReadOnlyList<string> ProfileWarnings => [];
         public event Action<IProfileRegistry>? ProfilesChanged { add { } remove { } }
 
         public void Add(ResolvedProfile p) => _byId[p.Id] = p;

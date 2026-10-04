@@ -7,6 +7,13 @@ namespace Ghostty.Tests.Profiles;
 
 public sealed class ProfileOrderResolverTests
 {
+    // Every fixture here composes full user definitions against discovery,
+    // so none of them has a partial block to merge. Shared rather than
+    // repeated because twenty call sites spelling it out would bury the
+    // two that mean something by it.
+    private static readonly IReadOnlyDictionary<string, ProfileOverride> NoOverrides =
+        new Dictionary<string, ProfileOverride>();
+
     private static ProfileDef User(string id, bool hidden = false)
         => new(Id: id, Name: id, Command: $"{id}.exe", Hidden: hidden);
 
@@ -21,6 +28,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
@@ -37,6 +45,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
@@ -54,6 +63,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
@@ -69,6 +79,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
@@ -86,6 +97,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: discovered,
             profileOrder: order,
             defaultProfileId: null,
@@ -102,6 +114,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: order,
             defaultProfileId: null,
@@ -117,6 +130,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: "zulu",
@@ -133,6 +147,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: "ghost",
@@ -149,6 +164,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
@@ -164,6 +180,7 @@ public sealed class ProfileOrderResolverTests
 
         var resolved = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
@@ -179,6 +196,7 @@ public sealed class ProfileOrderResolverTests
     {
         var resolved = ProfileOrderResolver.Resolve(
             user: [],
+            overrides: NoOverrides,
             discovered: new[] { Disc("wsl-ubuntu", probe: "wsl") },
             profileOrder: null,
             defaultProfileId: null,
@@ -192,6 +210,7 @@ public sealed class ProfileOrderResolverTests
     {
         var resolved = ProfileOrderResolver.Resolve(
             user: [],
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
@@ -207,6 +226,7 @@ public sealed class ProfileOrderResolverTests
 
         var before = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: "pwsh-7",
@@ -214,6 +234,7 @@ public sealed class ProfileOrderResolverTests
 
         var after = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: new[] { Disc("wsl-ubuntu"), Disc("wsl-debian") },
             profileOrder: null,
             defaultProfileId: "pwsh-7",
@@ -237,6 +258,7 @@ public sealed class ProfileOrderResolverTests
 
         var noHide = ProfileOrderResolver.Resolve(
             user: [],
+            overrides: NoOverrides,
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
@@ -244,6 +266,7 @@ public sealed class ProfileOrderResolverTests
 
         var hideKali = ProfileOrderResolver.Resolve(
             user: [],
+            overrides: NoOverrides,
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
@@ -265,6 +288,7 @@ public sealed class ProfileOrderResolverTests
 
         var pinned = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: new[] { "c", "a" },
             defaultProfileId: null,
@@ -281,6 +305,7 @@ public sealed class ProfileOrderResolverTests
 
         var set = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
@@ -297,6 +322,7 @@ public sealed class ProfileOrderResolverTests
 
         var set = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
@@ -313,6 +339,7 @@ public sealed class ProfileOrderResolverTests
 
         var set = ProfileOrderResolver.Resolve(
             user: users,
+            overrides: NoOverrides,
             discovered: [],
             profileOrder: null,
             defaultProfileId: "a",

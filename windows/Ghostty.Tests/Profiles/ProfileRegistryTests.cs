@@ -344,6 +344,90 @@ public class ProfileRegistryTests
         Assert.Equal(new[] { "a" }, registry.HiddenProfiles.Select(p => p.Id));
     }
 
+    // The warning a partial profile block carries is the parser saying "this
+    // bag is not a definition". The registry is the first thing that knows
+    // whether discovery supplies the rest, so the warnings it publishes are
+    // the parse-level list minus the blocks that turned out to be overrides
+    // -- which is every block the settings page writes.
+    private static FakeProfileConfigSource IconOverrideSource(string id)
+        => new()
+        {
+            ProfileOverrides = new Dictionary<string, ProfileOverride>
+            {
+                [id] = new(Id: id, Icon: new IconSpec.BrandKey("pwsh", null)),
+            },
+            ProfileWarnings = new[] { $"profile '{id}': missing required key 'name', dropped" },
+        };
+
+    private static Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>>
+        Discovering(params DiscoveredProfile[] found)
+        => (_, _) => Task.FromResult<IReadOnlyList<DiscoveredProfile>>(found);
+
+    [Fact]
+    public async Task ProfileWarnings_DropsOneDiscoveryExplained()
+    {
+        var src = IconOverrideSource("pwsh");
+        var pwsh = new DiscoveredProfile(
+            Id: "pwsh", Name: "PowerShell", Command: "pwsh.exe", ProbeId: "pwsh");
+
+        using var registry = new ProfileRegistry(
+            src, Discovering(pwsh), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
+        await WaitForVersion(registry, 2);
+
+        // The override is applied...
+        Assert.Equal(new IconSpec.BrandKey("pwsh", null), registry.Resolve("pwsh")!.Icon);
+        // ...and the block is not also reported as a broken one.
+        Assert.Empty(registry.ProfileWarnings);
+    }
+
+    [Fact]
+    public void ProfileWarnings_KeepsOneNothingExplained()
+    {
+        var src = IconOverrideSource("ghost");
+
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
+
+        Assert.Null(registry.Resolve("ghost"));
+        Assert.Single(registry.ProfileWarnings);
+        Assert.Contains("ghost", registry.ProfileWarnings[0]);
+    }
+
+    [Fact]
+    public async Task ProfileWarnings_RepublishedOnDiscoveryArriving()
+    {
+        // The composition is what explains the block, so the answer changes
+        // when discovery lands -- and the page's WarningsBar reads this
+        // list off the same snapshot as the rows.
+        var src = IconOverrideSource("pwsh");
+        var pwsh = new DiscoveredProfile(
+            Id: "pwsh", Name: "PowerShell", Command: "pwsh.exe", ProbeId: "pwsh");
+
+        // The ctor's discovery pass finds nothing; the refresh the user
+        // triggers finds the shell, which is the case the ctor pass cannot
+        // have covered.
+        var calls = 0;
+        Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> discovering = (_, _) =>
+        {
+            calls++;
+            return Task.FromResult<IReadOnlyList<DiscoveredProfile>>(
+                calls == 1 ? Array.Empty<DiscoveredProfile>() : new[] { pwsh });
+        };
+
+        using var registry = new ProfileRegistry(
+            src, discovering, SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
+        await WaitForVersion(registry, 2);
+
+        Assert.Single(registry.ProfileWarnings);
+        var events = new List<int>();
+        registry.ProfilesChanged += _ => events.Add(registry.ProfileWarnings.Count);
+
+        await registry.RefreshDiscoveryAsync(CancellationToken.None).ConfigureAwait(false);
+
+        Assert.Empty(registry.ProfileWarnings);
+        Assert.Equal(new[] { 0 }, events);
+    }
+
     [Fact]
     public async Task Dispose_CancelsPendingDiscovery_AndUnsubscribesSource()
     {

@@ -77,39 +77,52 @@ public static class ConfigServiceProfileParser
         // markers, not malformed definitions; the un-hide path of the
         // settings-page toggle writes hidden = false, so filtering only
         // on the true-set would leak false-positive warnings.
-        var warnings = FilterHiddenOnlyWarnings(parsed.Warnings, parsed.Profiles, hiddenMentions);
+        var warnings = SuppressExplainedWarnings(
+            parsed.Warnings, parsed.Profiles, hiddenMentions);
 
         return new ProfileView(
             ParsedProfiles: parsed.Profiles,
+            ProfileOverrides: parsed.Overrides,
             ProfileOrder: profileOrder,
             DefaultProfileId: defaultId,
             HiddenProfileIds: hidden,
             ProfileWarnings: warnings);
     }
 
-    // Warnings for an id which is in the hidden set and absent from parsed
-    // profiles are suppressed -- those entries are pure hide-overrides,
-    // not broken definitions. Anchor on the exact "profile '<id>':" prefix
-    // emitted by ProfileSourceParser so a hidden id that happens to be a
-    // substring of another id's warning does not accidentally suppress it.
-    private static IReadOnlyList<string> FilterHiddenOnlyWarnings(
+    /// <summary>
+    /// Drop the warnings belonging to <paramref name="explainedIds"/>, the
+    /// ids whose <c>profile.&lt;id&gt;.*</c> block is an intentional
+    /// partial override rather than a malformed definition. Used twice,
+    /// once per pass that can explain one:
+    /// <list type="bullet">
+    /// <item>here, for the hidden-only markers (<see cref="ProfileSourceParser.ExtractHiddenMentionIds"/>);</item>
+    /// <item>in <c>ProfileRegistry</c>, for the ids a partial block resolved
+    /// onto once discovery answered -- discovery is not visible from here,
+    /// which is why the second pass has to happen at the merge.</item>
+    /// </list>
+    /// An anchor on the exact "profile '&lt;id&gt;':" prefix
+    /// <see cref="ProfileSourceParser"/> emits, so one id that happens to be
+    /// a substring of another id's warning does not suppress it. Ids that
+    /// also have a full parsed definition are skipped: a warning about a
+    /// block that does define a profile is for a genuinely broken block,
+    /// not an override marker.
+    /// </summary>
+    public static IReadOnlyList<string> SuppressExplainedWarnings(
         IReadOnlyList<string> warnings,
         IReadOnlyDictionary<string, ProfileDef> profiles,
-        IReadOnlySet<string> hiddenMentions)
+        IReadOnlySet<string> explainedIds)
     {
         if (warnings.Count == 0) return warnings;
 
-        // Precompute the "profile '<id>':" prefixes once per mentioned id
-        // rather than per (warning x id) pair; the old string interpolation
-        // inside the inner loop allocated a new format string on every
-        // iteration. Skip ids that also have a full parsed definition --
-        // those warnings are for genuinely broken blocks, not hide-only
-        // overrides.
+        // Precompute the "profile '<id>':" prefixes once per explained id
+        // rather than per (warning x id) pair; a string interpolation
+        // inside the inner loop would allocate a new format string on every
+        // iteration.
         List<string>? prefixes = null;
-        foreach (var id in hiddenMentions)
+        foreach (var id in explainedIds)
         {
             if (profiles.ContainsKey(id)) continue;
-            (prefixes ??= new List<string>(hiddenMentions.Count)).Add($"profile '{id}':");
+            (prefixes ??= new List<string>(explainedIds.Count)).Add($"profile '{id}':");
         }
         if (prefixes is null) return warnings;
 
@@ -142,11 +155,12 @@ public static class ConfigServiceProfileParser
 }
 
 /// <summary>
-/// Immutable bundle of the five profile-view values. Matches the
+/// Immutable bundle of the six profile-view values. Matches the
 /// member shape of <see cref="IProfileConfigSource"/>.
 /// </summary>
 public sealed record ProfileView(
     IReadOnlyDictionary<string, ProfileDef> ParsedProfiles,
+    IReadOnlyDictionary<string, ProfileOverride> ProfileOverrides,
     IReadOnlyList<string> ProfileOrder,
     string? DefaultProfileId,
     IReadOnlySet<string> HiddenProfileIds,
