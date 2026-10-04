@@ -334,6 +334,32 @@ internal static class SyntaxQueries
             .ToList();
 
     /// <summary>
+    /// Calls whose callee ENDS WITH <paramref name="target"/>, receiver
+    /// included. <see cref="Calls"/> matches the callee as written, which
+    /// cannot answer "is this member called anywhere in here" when the
+    /// receiver is a local the reader has to name first -- and cannot see
+    /// through a null-conditional call at all, because that parses with the
+    /// receiver hoisted into a conditional access. For "does this still
+    /// happen", the receiver is noise; for "does this still happen here",
+    /// use <see cref="Calls"/>.
+    /// </summary>
+    public static List<InvocationExpressionSyntax> CallsEndingWith(
+        this SyntaxNode node, string target)
+        => node.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText().EndsWith(target, StringComparison.Ordinal))
+            .ToList();
+
+    /// <summary>The one call whose callee ends with <paramref name="target"/>.</summary>
+    public static InvocationExpressionSyntax CallEndingWith(this SyntaxNode node, string target)
+    {
+        var found = node.CallsEndingWith(target);
+        Assert.True(
+            found.Count == 1,
+            $"expected one call ending in '{target}', found {found.Count}");
+        return found[0];
+    }
+
+    /// <summary>
     /// The callee the way the source spells it, receiver included. A
     /// null-conditional call parses with the receiver hoisted out, so the
     /// callee on its own reads as ".TryEnqueue"; put the receiver back so a

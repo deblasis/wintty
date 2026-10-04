@@ -80,6 +80,9 @@ internal sealed partial class KeybindingsPage : Page
         _binds = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
         _defaults = _configService.EnumerateDefaultKeybinds();
         _catalog = KeybindCatalog.Build(_binds, _defaults);
+        // On a reload this usually ends up leaving the list alone: the
+        // rebuild exists for the config having changed, and most reloads are
+        // another page's debounced write. ApplyFilter owns that decision.
         ApplyFilter();
         if (KeyboardPanel.Visibility == Visibility.Visible) ApplyMap();
     }
@@ -211,9 +214,29 @@ internal sealed partial class KeybindingsPage : Page
     private void ConflictsToggle_Toggled(object sender, RoutedEventArgs e) => ApplyFilter();
 
     private void ApplyFilter()
-        => WinUiList.ReplaceItems(
-            BindingsList.Items,
-            _catalog.Filter(SearchBox.Text, ConflictsToggle.IsChecked == true));
+    {
+        var rows = _catalog.Filter(SearchBox.Text, ConflictsToggle.IsChecked == true);
+
+        // Replacing the rows re-realizes every container, which puts the
+        // viewport back at the top and drops whatever the reader had picked.
+        // Rebuild runs on EVERY config reload -- including the ones an
+        // unrelated settings page causes through the debounced write
+        // scheduler -- so a keybind list being browsed scrolled itself home
+        // under the cursor whenever anything else was touched. The rows are
+        // records, so an unchanged catalog filters to an equal list and the
+        // only thing left to do is nothing. The first pass always replaces:
+        // _shownRows starts empty and the list is empty too.
+        if (KeybindCatalog.RowsMatch(_shownRows, rows)) return;
+
+        _shownRows = rows;
+        WinUiList.ReplaceItems(BindingsList.Items, rows);
+    }
+
+    /// <summary>
+    /// The rows currently in the list, so a rebuild that changed nothing can
+    /// leave the list (and the reader's place in it) alone.
+    /// </summary>
+    private IReadOnlyList<object> _shownRows = Array.Empty<object>();
 
     private void ViewBar_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
     {

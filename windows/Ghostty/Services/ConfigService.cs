@@ -1909,6 +1909,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 config, out defaultFilesFound, out defaultFilesEmptyReads);
             NativeMethods.ConfigLoadCliArgs(config);
             NativeMethods.ConfigLoadRecursiveFiles(config);
+            // gallery:<id> shader tokens: the user's file names a manifest
+            // entry, and libghostty can only open paths. Resolve them here,
+            // above the user's own values and below the High Contrast
+            // override (which outranks everything anyway). Nothing is layered
+            // unless a token is actually configured, so a config that does not
+            // use them costs one read of a file already in memory.
+            if (WriteGalleryShaderOverlay() is { } shaderOverlay)
+                NativeMethods.ConfigLoadFile(config, shaderOverlay);
             // A palette preview's theme sits above the user's files, which is
             // where a `theme` line they wrote themselves would take effect.
             if (overlayPath is not null)
@@ -1954,6 +1962,55 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, $"theme = {themeName}\n");
         return path;
+    }
+
+    /// <summary>
+    /// Layer-ready path of a generated config file resolving the
+    /// <c>gallery:&lt;id&gt;</c> tokens in the user's <c>custom-shader</c>, or
+    /// null when there is nothing to resolve.
+    /// </summary>
+    /// <remarks>
+    /// The values are read from the user's config file rather than from
+    /// <c>_configFileCache</c>: this runs inside <see cref="BuildLiveConfig"/>,
+    /// which <see cref="Reload"/> calls BEFORE <see cref="ReadFlags"/> fills the
+    /// cache, so the cache is still the previous reload's snapshot at this
+    /// point -- a shader picked in this reload would resolve a reload late and
+    /// the panes would wear no shader for that cycle. One extra read of a file
+    /// this class already reads twice per reload, on reloads only.
+    /// <para>
+    /// A read that fails resolves to nothing rather than aborting the build:
+    /// that is the status quo this path exists to improve on, and a locked
+    /// config file must not cost the whole reload.
+    /// </para>
+    /// </remarks>
+    private string? WriteGalleryShaderOverlay()
+    {
+        const string key = Ghostty.Core.Settings.ShaderGalleryOverlay.ConfigKey;
+        IReadOnlyList<string> configured;
+        try
+        {
+            var file = Ghostty.Core.Config.ConfigIniFile.Load(ConfigSourcePath);
+            configured = file.TryGetValue(key, out var values)
+                ? values
+                : Array.Empty<string>();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            StaticLoggers.ConfigService.LogGalleryShaderOverlaySkipped(ex);
+            return null;
+        }
+
+        var body = Ghostty.Core.Settings.ShaderGalleryOverlay.RenderFor(configured);
+        if (body is null)
+        {
+            // Nothing to resolve: drop a leftover from a config that used to
+            // name one, rather than leave the state directory holding paths
+            // no build reads any more.
+            Ghostty.Settings.GalleryShaderOverlayFile.Delete();
+            return null;
+        }
+
+        return Ghostty.Settings.GalleryShaderOverlayFile.Write(body);
     }
 
     /// <summary>
@@ -2203,15 +2260,15 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     }
 
     /// <summary>
-    /// Read the first value for <paramref name="key"/> from the active
+    /// Read the value in force for <paramref name="key"/> from the active
     /// theme file cache, or null when there's no active theme or the
-    /// key isn't set.
+    /// key isn't set. Last line wins, as in the user's own config: a theme
+    /// file that sets a colour twice resolves to the colour libghostty is
+    /// actually painting with.
     /// </summary>
     private string? GetActiveThemeValue(string key)
-        => _activeThemeFileCache is not null
-            && _activeThemeFileCache.TryGetValue(key, out var list)
-            && list.Count > 0
-            ? list[0]
+        => ConfigIniFile.TryLast(_activeThemeFileCache, key, out var value)
+            ? value
             : null;
 
     /// <summary>
@@ -2284,8 +2341,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     }
 
     /// <summary>
-    /// Read the first non-empty value for a Windows-only config key
-    /// from the cached snapshot of the config file populated by
+    /// Read the value in force for a Windows-only config key from the
+    /// cached snapshot of the config file populated by
     /// <see cref="ReadFlags(bool)"/>. Keys not in the Zig config schema
     /// cannot be read via <c>ghostty_config_get</c>, so we parse the
     /// file ourselves.
@@ -2296,13 +2353,19 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// Otherwise its "unknown field" diagnostic reaches
     /// <see cref="CacheDiagnostics"/> unfiltered and the settings UI
     /// shows the user a config error for a setting the app honors.
+    /// <para>
+    /// The last line wins, through <see cref="ConfigIniFile.Last"/>:
+    /// libghostty is last-wins and the settings writer
+    /// (<c>ConfigFileParser.SetValue</c>) rewrites the LAST occurrence, so a
+    /// first-wins read here answered with a value nothing else in the app
+    /// was using. With two <c>theme</c> lines that showed one palette on the
+    /// chrome and another in the panes. A blank <c>key = </c> reads as the
+    /// default, because that is the reset the parse now applies (and the
+    /// shape a user writes to put a key back).
+    /// </para>
     /// </remarks>
     private string GetFileValue(string key, string defaultValue)
-        => _configFileCache is not null
-            && _configFileCache.TryGetValue(key, out var list)
-            && list.Count > 0
-            ? list[0]
-            : defaultValue;
+        => ConfigIniFile.Last(_configFileCache, key, defaultValue);
 
     /// <summary>
     /// Same lookup as <see cref="GetFileValue"/>, reporting whether the key
@@ -2312,21 +2375,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// this: <c>frame-style</c> unset means "match background-style", and
     /// with a default parameter that is indistinguishable from the user
     /// having written the default down. A sentinel string would only move
-    /// the ambiguity onto whatever value was picked as the sentinel.
+    /// the ambiguity onto whatever value was picked as the sentinel. A blank
+    /// <c>frame-style = </c> is a reset and answers false here, which is the
+    /// inheritance the comment above wants.
     /// </summary>
     private bool TryGetFileValue(string key, out string value)
-    {
-        if (_configFileCache is not null
-            && _configFileCache.TryGetValue(key, out var list)
-            && list.Count > 0)
-        {
-            value = list[0];
-            return true;
-        }
-
-        value = string.Empty;
-        return false;
-    }
+        => ConfigIniFile.TryLast(_configFileCache, key, out value);
 
     /// <summary>
     /// Fold a raw style value, and say so when it was not one.
@@ -2355,10 +2409,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             && list.Count > 0;
 
     /// <summary>
-    /// Raw cached first-line value for a config key, or empty if not
+    /// Raw cached value in force for a config key, or empty if not
     /// set in the user's file. For UI paths that need to display a
     /// user-authored override for a key without a typed accessor on
-    /// this service (e.g. selection-background).
+    /// this service (e.g. selection-background). The last line for the key
+    /// wins, as everywhere else; see <see cref="GetFileValue"/>.
     /// </summary>
     public string GetRawFileValue(string key) => GetFileValue(key, string.Empty);
 
@@ -2776,6 +2831,18 @@ internal static partial class ConfigServiceLogExtensions
                    Message = "[ConfigService] A layered config file is gone for good; the session ran on {Before} default files and {Now} remain, so this reload applies the configuration that is left: {Path}")]
     internal static partial void LogReloadDefaultFilesShrunk(
         this ILogger<ConfigService> logger, int before, int now, string path);
+
+    // Information, not Warning: nothing is lost and nothing is broken. This is
+    // the reload that proceeds with the config file unreadable -- an editor
+    // holding it exclusively is the usual cause -- and a config naming a
+    // gallery:<id> shader cannot resolve that token this once, so the panes
+    // keep no shader until the next reload reads it. The save in flight that
+    // caused it raises its own event.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.GalleryShaderOverlaySkipped,
+                   Level = LogLevel.Information,
+                   Message = "[ConfigService] Not resolving gallery shader tokens this reload: the config file could not be read")]
+    internal static partial void LogGalleryShaderOverlaySkipped(
+        this ILogger<ConfigService> logger, System.Exception ex);
 
     // Warning: the palette keeps showing whatever it showed before, and the
     // theme can still be chosen from Settings or the config file.

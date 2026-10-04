@@ -125,6 +125,11 @@ internal sealed partial class RawEditorPage : Page
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         _configService.ConfigChanged -= OnConfigChanged;
+        // The debounce timer belongs to the DispatcherQueue, which outlives
+        // this page and the window it lived in: a tick that fires after the
+        // tree is gone reaches an Editor that is no longer in a window at
+        // all. Stopping is not enough (see StopFindDebounce).
+        StopFindDebounce();
     }
 
     private static void OnContainerContentChanging(
@@ -248,6 +253,17 @@ internal sealed partial class RawEditorPage : Page
     }
 
     private void SaveButton_Click(object sender, RoutedEventArgs e)
+        => SaveNow();
+
+    /// <summary>
+    /// Write the editor's text to the config file and report whether it
+    /// landed. The prompt on the close path asks the same question, so both
+    /// callers share this: a "Save" answer that failed must leave the page
+    /// (and the settings window) open rather than report a save that did not
+    /// happen.
+    /// </summary>
+    /// <returns>True when the text reached the file.</returns>
+    internal bool SaveNow()
     {
         // _lastLoadedText is updated inside the edit so it only advances
         // if WriteRaw actually succeeded; on a disk failure it stays at the
@@ -262,14 +278,36 @@ internal sealed partial class RawEditorPage : Page
         {
             // The save never hit disk; tell the user instead of fail-fasting.
             StatusText.Text = $"Save failed: {result.Error?.Message}";
-            return;
+            return false;
         }
 
         var count = _configService.DiagnosticsCount;
         StatusText.Text = result.Reloaded
             ? $"Saved and reloaded ({count} diagnostic{(count == 1 ? "" : "s")})"
             : "Reload failed -- check diagnostics";
+        return true;
     }
+
+    /// <summary>
+    /// Whether the editor holds text the config file does not: everything
+    /// since the last successful load or save.
+    /// </summary>
+    /// <remarks>
+    /// The Raw Editor is the one settings page whose edits live in the buffer
+    /// rather than in the config, so this is the only question standing between
+    /// a user and losing a hand-written config: closing the settings window (or
+    /// quitting, which closes it) used to discard the buffer with no word.
+    /// <c>RefreshFromDiskIfPristine</c> means an external reload can move
+    /// _lastLoadedText under the user, so the comparison is against the
+    /// current text rather than latched at edit time.
+    /// </remarks>
+    public bool HasUnsavedChanges => GetEditorText() != _lastLoadedText;
+
+    /// <summary>
+    /// Put the file's text back in the editor, dropping the buffer's
+    /// unsaved edits. For the prompt's "Don't save" answer.
+    /// </summary>
+    public void DiscardUnsavedChanges() => LoadContent();
 
     private void RevertButton_Click(object sender, RoutedEventArgs e)
     {
@@ -404,6 +442,11 @@ internal sealed partial class RawEditorPage : Page
     private void HideFindBar()
     {
         FindBar.Visibility = Visibility.Collapsed;
+        // Before the highlights are wiped, not after: a debounce still armed
+        // when the bar closed fires 300ms later, repaints the matches that
+        // were just cleared, and writes a match count onto a collapsed bar.
+        // Esc right after typing is the cheapest way to reach that.
+        StopFindDebounce();
         ClearPreviousHighlights();
         _findMatches.Clear();
         _findCurrentIndex = -1;
@@ -471,9 +514,30 @@ internal sealed partial class RawEditorPage : Page
 
     private void OnFindDebounce(object? sender, object e)
     {
-        _findDebounce!.Stop();
-        _findDebounce.Tick -= OnFindDebounce;
+        StopFindDebounce();
+        // One tick can still be in flight: Stop does not unqueue a Tick the
+        // dispatcher has already taken, and that one arrives after the bar
+        // closed (or after the page left the tree), with nothing to update.
+        // Without this it repaints the highlights HideFindBar just cleared,
+        // restores the match count on a collapsed bar, and -- once the
+        // settings window is gone -- reaches an Editor that no longer has a
+        // visual tree under it.
+        if (FindBar.Visibility != Visibility.Visible) return;
         UpdateFindMatches();
+    }
+
+    /// <summary>
+    /// Stop the debounce and drop the handler. Detaching as well as stopping
+    /// is what turns away a tick that was already queued: the raise reads the
+    /// invocation list, so a stopped-but-still-subscribed timer still calls
+    /// us after the page is torn down (the SettingsWindow search timer does
+    /// this for the same reason).
+    /// </summary>
+    private void StopFindDebounce()
+    {
+        if (_findDebounce is null) return;
+        _findDebounce.Stop();
+        _findDebounce.Tick -= OnFindDebounce;
     }
 
     // --- Find logic ---

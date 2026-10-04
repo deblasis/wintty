@@ -98,6 +98,11 @@ internal sealed partial class AdvancedPage : Page
     //
     // Seeded values are trimmed to match what the handlers write, or a file
     // value with trailing space would look changed on the first blur.
+    //
+    // They are the value in the FILE, not the value last handed to the
+    // scheduler: WriteDebounced moves them only once the debounced write is
+    // known to have landed, which is the difference between "we asked" and
+    // "it is saved".
     private string _quakeKeyWritten = string.Empty;
     private string _logFilterWritten = string.Empty;
 
@@ -122,8 +127,7 @@ internal sealed partial class AdvancedPage : Page
         if (_loading) return;
         var raw = QuakeKeyBox.Text?.Trim() ?? string.Empty;
         if (raw == _quakeKeyWritten) return;
-        _quakeKeyWritten = raw;
-        Ghostty.App.ConfigWriteScheduler?.Schedule("quick-terminal-key", raw);
+        WriteDebounced("quick-terminal-key", raw, () => _quakeKeyWritten = raw);
     }
 
     private void LogLevel_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -141,8 +145,50 @@ internal sealed partial class AdvancedPage : Page
         if (_loading) return;
         var filter = LogFilterBox.Text?.Trim() ?? string.Empty;
         if (filter == _logFilterWritten) return;
-        _logFilterWritten = filter;
-        Ghostty.App.ConfigWriteScheduler?.Schedule("log-filter", filter);
+        WriteDebounced("log-filter", filter, () => _logFilterWritten = filter);
+    }
+
+    /// <summary>
+    /// Queue a debounced write and move <paramref name="onWritten"/> only once
+    /// the scheduler says the value reached the file.
+    /// </summary>
+    /// <remarks>
+    /// The scheduler swallows a disk failure and logs it, so a blur that
+    /// advanced the guard here advanced it for a write that never happened:
+    /// typing the same value again read as unchanged and was suppressed, and
+    /// the box looked saved while the file still held the old one. The
+    /// per-key outcome is the scheduler's answer to that, so the guard is
+    /// driven by the write and not by the intent.
+    /// <para>
+    /// A value that was replaced by a later edit of the same key, or that was
+    /// queued to a scheduler already disposed, reports
+    /// <see cref="ConfigWriteOutcome.Superseded"/> -- not a failure, but not a
+    /// landing either, so the guard stays where it was and the edit that
+    /// replaced it owns the answer. Nothing to do with either: the reload
+    /// signal still fired, so the runtime state is right.
+    /// </para>
+    /// <para>
+    /// The callback runs on the scheduler's thread, so the guard moves on the
+    /// dispatcher with everything else this page touches.
+    /// </para>
+    /// </remarks>
+    private void WriteDebounced(string key, string value, Action onWritten)
+    {
+        if (Ghostty.App.ConfigWriteScheduler is not { } scheduler)
+        {
+            // No scheduler to report from (a host that never created one).
+            // Nothing was queued either, so the old unconditional advance is
+            // the only answer available; freezing the box instead would make
+            // the setting un-editable on that host.
+            onWritten();
+            return;
+        }
+
+        scheduler.Schedule(key, value, outcome =>
+        {
+            if (outcome != ConfigWriteOutcome.Written) return;
+            DispatcherQueue.TryEnqueue(() => onWritten());
+        });
     }
 
     private static void SelectComboByTag(ComboBox combo, string tag)

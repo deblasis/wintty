@@ -249,4 +249,168 @@ public class ConfigWriteSchedulerTests
         Assert.Throws<ArgumentNullException>(() => new ConfigWriteScheduler(
             editor, timer, TimeSpan.FromMilliseconds(1), noop, null!));
     }
+
+    // --- Per-key outcomes -------------------------------------------------
+    //
+    // A page that suppresses a repeat write of the value it last asked for
+    // cannot tell a landed write from a lost one: the scheduler swallowed
+    // disk failures and only logged them, so the guard moved either way and
+    // re-typing the same value read as unchanged. These pin the answer the
+    // page now waits for: one outcome per Schedule call, Written only for a
+    // value that is in the file.
+
+    [Fact]
+    public void A_landed_value_reports_Written()
+    {
+        var timer = new FakeTimer();
+        var editor = new FakeEditor();
+        using var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(50), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        var outcomes = new List<ConfigWriteOutcome>();
+        scheduler.Schedule("log-filter", "warn", outcomes.Add);
+        Assert.Empty(outcomes);   // nothing is known before the flush
+
+        timer.Fire();
+
+        Assert.Equal([ConfigWriteOutcome.Written], outcomes);
+    }
+
+    [Fact]
+    public void A_failed_write_reports_Failed_and_the_batch_still_lands()
+    {
+        var timer = new FakeTimer();
+        var editor = new ThrowingEditor(throwOnKey: "log-filter");
+        using var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(50), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        var failed = new List<ConfigWriteOutcome>();
+        var landed = new List<ConfigWriteOutcome>();
+        scheduler.Schedule("log-filter", "warn", failed.Add);
+        scheduler.Schedule("log-level", "debug", landed.Add);
+        timer.Fire();
+
+        Assert.Equal([ConfigWriteOutcome.Failed], failed);
+        Assert.Equal([ConfigWriteOutcome.Written], landed);
+        Assert.Contains(("log-level", "debug"), editor.Writes);
+    }
+
+    [Fact]
+    public void The_value_a_later_edit_replaced_reports_Superseded()
+    {
+        var timer = new FakeTimer();
+        var editor = new FakeEditor();
+        using var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(50), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        var replaced = new List<ConfigWriteOutcome>();
+        var final = new List<ConfigWriteOutcome>();
+        scheduler.Schedule("quick-terminal-key", "ctrl+grave", replaced.Add);
+        scheduler.Schedule("quick-terminal-key", "ctrl+shift+grave", final.Add);
+
+        // Answered at replace time, not at the flush: the value is already
+        // unreachable, and a caller waiting on its outcome would otherwise
+        // wait for a flush that will not mention it.
+        Assert.Equal([ConfigWriteOutcome.Superseded], replaced);
+
+        timer.Fire();
+        Assert.Equal([ConfigWriteOutcome.Written], final);
+        Assert.Equal([("quick-terminal-key", "ctrl+shift+grave")], editor.Writes);
+    }
+
+    [Fact]
+    public void Coalescing_is_case_insensitive_so_one_call_is_answered_Superseded()
+    {
+        var timer = new FakeTimer();
+        var editor = new FakeEditor();
+        using var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(50), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        var first = new List<ConfigWriteOutcome>();
+        var second = new List<ConfigWriteOutcome>();
+        scheduler.Schedule("quick-terminal-key", "ctrl+grave", first.Add);
+        scheduler.Schedule("Quick-Terminal-Key", "ctrl+alt+grave", second.Add);
+
+        Assert.Equal([ConfigWriteOutcome.Superseded], first);
+
+        timer.Fire();
+        Assert.Equal([ConfigWriteOutcome.Written], second);
+        Assert.Single(editor.Writes);
+    }
+
+    [Fact]
+    public void Dispose_reports_the_drained_value_as_Written()
+    {
+        var timer = new FakeTimer();
+        var editor = new FakeEditor();
+        var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(200), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        var outcomes = new List<ConfigWriteOutcome>();
+        scheduler.Schedule("log-filter", "warn", outcomes.Add);
+        scheduler.Dispose();
+
+        Assert.Equal([ConfigWriteOutcome.Written], outcomes);
+    }
+
+    [Fact]
+    public void Scheduling_after_Dispose_reports_Superseded_rather_than_staying_silent()
+    {
+        // The shutdown drain runs before this, so the value is never written.
+        // A callback that never fires would leave a page's guard describing a
+        // write that is never going to happen.
+        var timer = new FakeTimer();
+        var editor = new FakeEditor();
+        var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(200), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        scheduler.Dispose();
+
+        var outcomes = new List<ConfigWriteOutcome>();
+        scheduler.Schedule("log-filter", "warn", outcomes.Add);
+
+        Assert.Equal([ConfigWriteOutcome.Superseded], outcomes);
+        Assert.Empty(editor.Writes);
+    }
+
+    [Fact]
+    public void A_throwing_outcome_callback_does_not_stop_the_rest_of_the_batch()
+    {
+        var timer = new FakeTimer();
+        var editor = new FakeEditor();
+        using var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(50), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        var reported = new List<ConfigWriteOutcome>();
+        scheduler.Schedule("log-filter", "warn", _ => throw new InvalidOperationException("boom"));
+        scheduler.Schedule("log-level", "debug", reported.Add);
+        timer.Fire();
+
+        Assert.Equal([ConfigWriteOutcome.Written], reported);
+        Assert.Equal(2, editor.Writes.Count);
+    }
+
+    [Fact]
+    public void A_key_scheduled_without_a_callback_is_never_reported()
+    {
+        var timer = new FakeTimer();
+        var editor = new FakeEditor();
+        using var scheduler = new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(50), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
+
+        scheduler.Schedule("log-level", "debug");
+        scheduler.Schedule("log-level", "trace");
+        timer.Fire();
+
+        Assert.Single(editor.Writes);
+        Assert.Equal(("log-level", "trace"), editor.Writes[0]);
+    }
 }

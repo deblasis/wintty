@@ -16,6 +16,14 @@ namespace Ghostty.Core.Config;
 /// </summary>
 public sealed partial class ConfigWriteScheduler : IConfigWriteScheduler
 {
+    /// <summary>
+    /// One queued write, with the outcome callback the caller handed in (null
+    /// for the callers that do not care, which is most of them).
+    /// </summary>
+    private readonly record struct PendingWrite(
+        string Value,
+        Action<ConfigWriteOutcome>? OnWritten);
+
     private readonly IConfigFileEditor _editor;
     private readonly ISchedulerTimer _timer;
     private readonly TimeSpan _debounce;
@@ -24,7 +32,7 @@ public sealed partial class ConfigWriteScheduler : IConfigWriteScheduler
     // OrdinalIgnoreCase matches ghostty's own config parser, so
     // Schedule("vertical-tabs") and Schedule("Vertical-Tabs") coalesce
     // the same way the downstream reader would treat them.
-    private readonly Dictionary<string, string> _pending =
+    private readonly Dictionary<string, PendingWrite> _pending =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
     private bool _disposed;
@@ -49,14 +57,34 @@ public sealed partial class ConfigWriteScheduler : IConfigWriteScheduler
         _timer.Callback = FlushFromTimer;
     }
 
-    public void Schedule(string key, string value)
+    public void Schedule(string key, string value, Action<ConfigWriteOutcome>? onWritten = null)
     {
+        Action<ConfigWriteOutcome>? replaced = null;
         lock (_lock)
         {
-            if (_disposed) return;
-            _pending[key] = value;       // last write wins
-            _timer.Schedule(_debounce);  // rearm trailing-edge timer
+            if (_disposed)
+            {
+                // Reported rather than dropped: the caller is waiting on this
+                // answer to decide whether its guard moved, and a callback
+                // that never runs leaves a guard describing a write that is
+                // never going to happen. Nothing is queued, so nothing is
+                // ever written -- which is what Superseded means.
+                replaced = onWritten;
+            }
+            else
+            {
+                // The value being replaced will never be written, so it is
+                // answered here rather than left waiting for a flush that
+                // will not mention it. Invoked outside the lock.
+                if (_pending.TryGetValue(key, out var previous))
+                    replaced = previous.OnWritten;
+
+                _pending[key] = new PendingWrite(value, onWritten);  // last write wins
+                _timer.Schedule(_debounce);  // rearm trailing-edge timer
+            }
         }
+
+        Report(replaced, ConfigWriteOutcome.Superseded);
     }
 
     public void Flush() => DrainAndWrite(signal: true);
@@ -65,30 +93,71 @@ public sealed partial class ConfigWriteScheduler : IConfigWriteScheduler
 
     private void DrainAndWrite(bool signal)
     {
-        List<KeyValuePair<string, string>>? snapshot;
+        List<KeyValuePair<string, PendingWrite>>? snapshot;
         lock (_lock)
         {
             _timer.Cancel();
             if (_pending.Count == 0) return;
-            snapshot = new List<KeyValuePair<string, string>>(_pending);
+            snapshot = new List<KeyValuePair<string, PendingWrite>>(_pending);
             _pending.Clear();
         }
-        WriteBatch(snapshot);
+        var outcomes = WriteBatch(snapshot);
         if (signal) _onFlushed();
+        // After the reload signal, so a caller told the value landed is not
+        // told it before the app has been told to re-read the file.
+        foreach (var (write, outcome, key) in outcomes)
+            Report(write.OnWritten, outcome, key);
     }
 
-    private void WriteBatch(List<KeyValuePair<string, string>> batch)
+    /// <summary>
+    /// Write every entry, reporting each one's outcome instead of only
+    /// logging the failures.
+    /// </summary>
+    /// <returns>
+    /// The reports to make once the reload signal has gone, in batch order:
+    /// the queued write, its outcome, and the key it was for.
+    /// </returns>
+    /// <remarks>
+    /// One bad SetValue (disk full, file locked) must not drop
+    /// the rest of the batch or skip the reload signal. Trace
+    /// and continue so the user sees at least partial persistence.
+    /// </remarks>
+    private List<(PendingWrite Write, ConfigWriteOutcome Outcome, string Key)> WriteBatch(
+        List<KeyValuePair<string, PendingWrite>> batch)
     {
-        // One bad SetValue (disk full, file locked) must not drop
-        // the rest of the batch or skip the reload signal. Trace
-        // and continue so the user sees at least partial persistence.
+        var outcomes = new List<(PendingWrite, ConfigWriteOutcome, string)>(batch.Count);
         foreach (var kv in batch)
         {
-            try { _editor.SetValue(kv.Key, kv.Value); }
+            var outcome = ConfigWriteOutcome.Written;
+            try { _editor.SetValue(kv.Key, kv.Value.Value); }
             catch (Exception ex)
             {
                 LogWriteFailed(ex, kv.Key);
+                outcome = ConfigWriteOutcome.Failed;
             }
+            outcomes.Add((kv.Value, outcome, kv.Key));
+        }
+        return outcomes;
+    }
+
+    /// <summary>
+    /// Hand one caller its outcome. Never throws: this runs inside the flush,
+    /// where a page's exception would take out the rest of the batch's
+    /// reporting and, on the dispose path, the shutdown drain.
+    /// </summary>
+    private void Report(
+        Action<ConfigWriteOutcome>? callback,
+        ConfigWriteOutcome outcome,
+        string? key = null)
+    {
+        if (callback is null) return;
+        try
+        {
+            callback(outcome);
+        }
+        catch (Exception ex)
+        {
+            LogOutcomeCallbackFailed(ex, key ?? "(unspecified)");
         }
     }
 
@@ -113,4 +182,9 @@ public sealed partial class ConfigWriteScheduler : IConfigWriteScheduler
                    Level = LogLevel.Warning,
                    Message = "[ConfigWriteScheduler] SetValue('{Key}') failed")]
     private partial void LogWriteFailed(System.Exception ex, string key);
+
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.WriteSchedulerOutcomeErr,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigWriteScheduler] the onWritten callback for '{Key}' threw")]
+    private partial void LogOutcomeCallbackFailed(System.Exception ex, string key);
 }

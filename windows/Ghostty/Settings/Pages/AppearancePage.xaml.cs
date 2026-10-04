@@ -359,11 +359,33 @@ internal sealed partial class AppearancePage : Page
     // ── Shader gallery ─────────────────────────────────────────────────────
 
     // Gallery entries keyed by the absolute installed path of their shader
-    // file, so a configured path can be mapped back to its combo item.
+    // file, so a config that names one directly -- a path written by an older
+    // build, or typed by hand -- can be mapped back to its entry.
     // Case-insensitive: the picker preselects and commits paths with
     // OrdinalIgnoreCase semantics, and a casing mismatch would otherwise
     // classify a gallery pick as "From file".
     private readonly Dictionary<string, ShaderGalleryEntry> _shaderGalleryByPath =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether a configured <c>custom-shader</c> value names a gallery entry,
+    /// in either form: the <c>gallery:&lt;id&gt;</c> token a pick writes, or an
+    /// installed path from a config older than the token.
+    /// </summary>
+    /// <remarks>
+    /// Used to decide what to hand the picker as its preselection. An
+    /// unresolved token counts: it still names a gallery slot the picker can
+    /// show, and preselecting the first entry instead would leave the combo
+    /// claiming a different shader than the config has while the user browses.
+    /// </remarks>
+    private bool IsGalleryShaderValue(string value)
+        => ShaderGallery.IsToken(value) || _shaderGalleryByPath.ContainsKey(value);
+
+    // The same entries by the id a <c>gallery:&lt;id&gt;</c> token names, which
+    // is what a configured value holds now. Case-insensitive for the same
+    // reason as the path map: the token is parsed out of a config the user
+    // can hand-edit.
+    private readonly Dictionary<string, ShaderGalleryEntry> _shaderGalleryById =
         new(StringComparer.OrdinalIgnoreCase);
 
     private void PopulateShaderGallery()
@@ -379,10 +401,12 @@ internal sealed partial class AppearancePage : Page
                 ShaderGallery.LoadDetail, AppContext.BaseDirectory);
         }
         // The picker window renders the entries; this page only needs the
-        // path -> entry map to classify a configured path as gallery vs file.
+        // maps to classify a configured value as gallery vs file: the token a
+        // pick writes (by id) and the path an older config still carries.
         foreach (var entry in ShaderGallery.Entries)
         {
             _shaderGalleryByPath[ShaderGallery.AbsolutePathFor(entry)] = entry;
+            _shaderGalleryById[entry.Id] = entry;
         }
     }
 
@@ -406,6 +430,23 @@ internal sealed partial class AppearancePage : Page
             GalleryPickRow.Visibility = Visibility.Collapsed;
             FilePickRow.Visibility = Visibility.Collapsed;
             GalleryPickLabel.Text = "No shader selected";
+        }
+        else if (ShaderGallery.IsToken(path))
+        {
+            // A gallery token, which is what a pick writes. The id may name an
+            // entry this install does not ship (dropped from the manifest, or a
+            // config carried from a build that had it), so the label says so
+            // rather than claiming a shader: showing "From file" for a value
+            // that is not a path would send the user looking for a file that
+            // does not exist.
+            ShaderGalleryRadio.IsChecked = true;
+            GalleryPickRow.Visibility = Visibility.Visible;
+            FilePickRow.Visibility = Visibility.Collapsed;
+            GalleryPickLabel.Text = ShaderGallery.TryGetTokenId(path, out var id)
+                && _shaderGalleryById.TryGetValue(id, out var tokenEntry)
+                    ? $"{tokenEntry.Name} — {tokenEntry.Description}"
+                    : $"{path} is not in the installed gallery";
+            ShaderPathBox.Text = path;
         }
         else if (_shaderGalleryByPath.TryGetValue(path, out var entry))
         {
@@ -483,9 +524,13 @@ internal sealed partial class AppearancePage : Page
             return;
         }
 
+        // Preselect by handing over whatever the config names, in whichever form:
+        // a gallery:<id> token for what a pick now writes, a path for a config
+        // older than the token. The picker resolves it before comparing, and
+        // anything it cannot match leaves the selection on the first entry.
         var picker = new ShaderPickerWindow
         {
-            CurrentPath = _shaderGalleryByPath.ContainsKey(_shaderPathWritten)
+            CurrentPath = IsGalleryShaderValue(_shaderPathWritten)
                 ? _shaderPathWritten
                 : null,
         };
@@ -747,7 +792,14 @@ internal sealed partial class AppearancePage : Page
         var result = _writer.Write(
             () => _editor.SetRepeatableValues("background-gradient-point", values),
             "background-gradient-point");
-        if (result.Reloaded)
+        // Both halves, in the order SettingsWriteResult documents: the
+        // increment only means something for a reload that actually
+        // happened, and the echo it skips is only worth skipping for a write
+        // that landed. A write that failed leaves the file holding the
+        // previous points, so the echo has to do its work -- skipping it left
+        // the editor showing dragged points that were never saved, and left
+        // the count holding a skip for the next change's echo.
+        if (result.WriteSucceeded && result.Reloaded)
         {
             _expectingOwnReloads++;
         }
