@@ -72,6 +72,11 @@ public sealed partial class MainWindow : Window
     // (e.g. the Alt+Shift+= / Alt+Shift+- splits) do not ring the Win32
     // menu beep. Disposed in OnClosedAsync to restore the original proc.
     private SysCharBeepSuppressor? _beepSuppressor;
+    // Subclasses this window's top-level WndProc for WM_QUERYENDSESSION /
+    // WM_ENDSESSION, so a sign-out, reboot or Windows Update restart still
+    // writes the session file clean. Disposed in OnClosedAsync alongside
+    // the beep suppressor.
+    private SessionEndCapture? _sessionEndCapture;
     private readonly ConfigService _configService;
     // Single process-wide editor (owned by App). The per-instance
     // RMW lock only serializes if every writer hits the SAME editor,
@@ -1597,6 +1602,16 @@ public sealed partial class MainWindow : Window
         _beepSuppressor = new SysCharBeepSuppressor();
         Activated += OnActivatedInstallBeepSuppressor;
 
+        // A session end never sends WM_CLOSE, so the clean-shutdown write
+        // that session restore keys on has to be driven from the window
+        // procedure instead (see SessionEndCapture). Subclasses the
+        // top-level HWND, which is the only one these two messages reach.
+        // Installed on Activated like the suppressor above, because the
+        // HWND does not exist until the window is first activated.
+        _sessionEndCapture = new SessionEndCapture(
+            () => App.SessionManager?.CaptureForSessionEnd());
+        Activated += OnActivatedInstallSessionEndCapture;
+
         // The opt-in test seam: not compiled at all unless the build defines
         // TESTSEAM (Debug does, a shipping Release does not), and then still
         // silent unless WINTTY_TEST_SEAM carries a session token. Armed, it
@@ -1675,6 +1690,18 @@ public sealed partial class MainWindow : Window
 
         if (_beepSuppressor.Install(WindowNative.GetWindowHandle(this)) > 0)
             Activated -= OnActivatedInstallBeepSuppressor;
+    }
+
+    private void OnActivatedInstallSessionEndCapture(object sender, WindowActivatedEventArgs args)
+    {
+        if (_sessionEndCapture is null)
+        {
+            Activated -= OnActivatedInstallSessionEndCapture;
+            return;
+        }
+
+        if (_sessionEndCapture.Install(WindowNative.GetWindowHandle(this)))
+            Activated -= OnActivatedInstallSessionEndCapture;
     }
 
     private void OnVerticalTabsToggledFromSettings(bool vertical)
@@ -2516,6 +2543,14 @@ public sealed partial class MainWindow : Window
         // windows (a window emptied by closing its tabs one-by-one has nothing
         // to restore — those tabs were captured individually as closed tabs).
         var closedWindow = CaptureSession();
+        // Hand the session manager the same capture, BEFORE the panes are
+        // freed below. It is the last moment this window's real state --
+        // titles, pins, groups, working directories -- can be read: the
+        // surfaces go two lines down and the HWND is gone by the time the
+        // app's per-window Closed handler runs, so a recapture from there
+        // reads a torn-down window. The clean-shutdown write at app exit is
+        // built from what this leaves behind.
+        App.SessionManager?.CaptureClosingWindow(this, closedWindow);
         if (closedWindow is { Tabs.Count: > 0 })
             App.ClosedWindows.Push(closedWindow);
 
@@ -2529,6 +2564,8 @@ public sealed partial class MainWindow : Window
         // Restore the original WndProc before the HWND is destroyed.
         _beepSuppressor?.Dispose();
         _beepSuppressor = null;
+        _sessionEndCapture?.Dispose();
+        _sessionEndCapture = null;
     }
 
     private void AddPaneHost(TabModel tab)

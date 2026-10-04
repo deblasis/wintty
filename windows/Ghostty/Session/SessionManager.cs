@@ -25,6 +25,14 @@ internal sealed class SessionManager
     private readonly Func<IEnumerable<MainWindow>> _windows;
     private DispatcherQueueTimer? _debounce;
 
+    // Every window this run captured, keyed by the window itself. The
+    // debounced persist writes it (the file IS this set from then on) and
+    // each window's own close refreshes its entry, so the clean-shutdown
+    // write at app exit has the closing window's real state to write
+    // rather than whatever the last debounce happened to see. See
+    // SessionWindowLedger for the two rules it keeps.
+    private readonly SessionWindowLedger<MainWindow> _ledger = new();
+
     // A cold `wintty -e` holds the saved session: it was not restored, so it
     // must not be written either (#1136).
     private bool _held;
@@ -105,10 +113,16 @@ internal sealed class SessionManager
         tm.TabRemoved += OnTabRemoved;
         tm.TabMoved += OnTabMoved;
         tm.ActiveTabChanged += OnActiveTabChanged;
+        // The group ops raised nothing at all: a rename, a recolor and a
+        // collapse write TabGroup's plain INPC properties, and a dissolve
+        // removes the group from the manager's registry. Neither is a tab
+        // add/move/activation, so without this the file kept whatever the
+        // registry looked like when the tab list last changed.
+        tm.GroupsChanged += OnGroupsChanged;
         // Pane-level structural changes for the tabs present now, plus any
         // added later (OnTabAdded wires those).
         foreach (var t in tm.Tabs)
-            t.PaneHost.LayoutChanged += OnLayoutSignal;
+            WatchTab(t);
         window.PositionChanged += OnLayoutSignal;
     }
 
@@ -126,14 +140,15 @@ internal sealed class SessionManager
         tm.TabRemoved -= OnTabRemoved;
         tm.TabMoved -= OnTabMoved;
         tm.ActiveTabChanged -= OnActiveTabChanged;
+        tm.GroupsChanged -= OnGroupsChanged;
         foreach (var t in tm.Tabs)
-            t.PaneHost.LayoutChanged -= OnLayoutSignal;
+            UnwatchTab(t);
         window.PositionChanged -= OnLayoutSignal;
     }
 
     private void OnTabAdded(object? sender, Ghostty.Core.Tabs.TabModel tab)
     {
-        tab.PaneHost.LayoutChanged += OnLayoutSignal;
+        WatchTab(tab);
         RequestPersist();
     }
 
@@ -141,9 +156,62 @@ internal sealed class SessionManager
     {
         // Unhook the closed tab's pane host so a per-tab subscription does not
         // outlive the tab within a still-open window.
-        tab.PaneHost.LayoutChanged -= OnLayoutSignal;
+        UnwatchTab(tab);
         RequestPersist();
     }
+
+    /// <summary>
+    /// The per-tab signals that name WHAT the tab is rather than how its
+    /// panes are arranged.
+    ///
+    /// The rename, the pin and the group membership ride TabModel's own
+    /// INPC, which is exact: each raises once per actual change, so this
+    /// is not a second copy of the title stream the caption follows. The
+    /// directory rides the pane host instead of the tab, because the tab's
+    /// copy is derived and one shell reporting the same folder again would
+    /// otherwise cost a write; and it is the leaf's own <c>LastCwd</c> that
+    /// session restore spawns into (Ghostty.Core/Session/SessionTree.cs),
+    /// so a cd that moves the tab's label and not that leaf is the half
+    /// that had no persist signal at all.
+    /// </summary>
+    private void WatchTab(Ghostty.Core.Tabs.TabModel tab)
+    {
+        tab.PropertyChanged += OnTabPropertyChanged;
+        tab.PaneHost.CwdChanged += OnCwdChanged;
+        tab.PaneHost.LayoutChanged += OnLayoutSignal;
+    }
+
+    private void UnwatchTab(Ghostty.Core.Tabs.TabModel tab)
+    {
+        tab.PropertyChanged -= OnTabPropertyChanged;
+        tab.PaneHost.CwdChanged -= OnCwdChanged;
+        tab.PaneHost.LayoutChanged -= OnLayoutSignal;
+    }
+
+    /// <summary>
+    /// The tab properties the saved session reads back. Everything else
+    /// TabModel raises is either not saved (bell, idle, colour -- all
+    /// documented in-memory) or already covered by a stronger signal: the
+    /// derived title names are re-raised for every tier that moves the
+    /// label, and the shell-reported title and directory change on every
+    /// prompt of every shell, so persisting on those would turn the debounce
+    /// into a constant write.
+    /// </summary>
+    private void OnTabPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        switch (e.PropertyName)
+        {
+            case nameof(Ghostty.Core.Tabs.TabModel.UserOverrideTitle):
+            case nameof(Ghostty.Core.Tabs.TabModel.IsPinned):
+            case nameof(Ghostty.Core.Tabs.TabModel.Group):
+                RequestPersist();
+                break;
+        }
+    }
+
+    private void OnCwdChanged(object? sender, string? cwd) => RequestPersist();
+
+    private void OnGroupsChanged(object? sender, EventArgs e) => RequestPersist();
 
     private void OnTabMoved(object? sender, (Ghostty.Core.Tabs.TabModel tab, int from, int to) e)
         => RequestPersist();
@@ -180,33 +248,110 @@ internal sealed class SessionManager
     {
         if (_held) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
-        var state = new SessionState { CleanShutdown = false };
+        SaveLiveWindows(cleanShutdown: false);
+    }
+
+    /// <summary>
+    /// Save the live windows as a clean shutdown, NOW, with no debounce.
+    ///
+    /// A sign-out, a reboot and a Windows Update restart never send
+    /// WM_CLOSE: the OS ends the session and the process is simply gone,
+    /// so Window.Closed never fires and the clean flag was never set. Under
+    /// `window-save-state=default` that left the file permanently unclean
+    /// and the next launch opened one fresh window. The window procedure
+    /// calls this from WM_ENDSESSION
+    /// (Ghostty.Hosting.SessionEndCapture), which is the only moment the
+    /// message reaches a live process with its panes intact.
+    /// </summary>
+    public void CaptureForSessionEnd()
+    {
+        // Stop the debounce FIRST. A tick already queued would fire after
+        // the clean write below and put CleanShutdown=false back on disk,
+        // which is the very outcome this exists to prevent.
+        _debounce?.Stop();
+        if (_held) return;
+        if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
+        SaveLiveWindows(cleanShutdown: true);
+    }
+
+    /// <summary>
+    /// Capture every live window, write the set, and leave the ledger
+    /// holding exactly what was written. Null (nothing written) when no
+    /// window holds a tab: blanking the file would throw away a session
+    /// that is still good.
+    /// </summary>
+    private void SaveLiveWindows(bool cleanShutdown)
+    {
+        var captured = new List<(MainWindow, Ghostty.Core.Session.WindowSession)>();
+        var state = new SessionState { CleanShutdown = cleanShutdown };
         foreach (var w in _windows())
         {
             var ws = w.CaptureSession();
-            if (ws is not null && ws.Tabs.Count > 0) state.Windows.Add(ws);
+            if (ws is not null && ws.Tabs.Count > 0)
+            {
+                state.Windows.Add(ws);
+                captured.Add((w, ws));
+            }
         }
-        // Nothing to save mid-session: skip rather than blank the file.
         if (state.Windows.Count == 0) return;
+        _ledger.ReplaceAll(captured);
         _store.Save(state);
     }
 
     /// <summary>
-    /// Mark the session clean at app shutdown. The running file already
-    /// reflects the open windows (continuously persisted), so we re-read
-    /// it and flip the flag rather than recapture -- by the time the last
-    /// window closes, earlier windows have already left the live set.
-    /// <paramref name="closingFallback"/> covers the cold case where no
-    /// mid-session write happened (e.g. launch then immediate quit): we
-    /// capture the last window directly. Windows close within the 750 ms
-    /// debounce of one another on a multi-window quit, so the pre-quit
-    /// snapshot still holds them all.
+    /// Take one closing window's state while its panes are still alive.
+    ///
+    /// Called from the window's own teardown, beside the capture it
+    /// already makes for reopen-closed-window, and for the same reason:
+    /// a window's surfaces are freed a few lines later and its HWND is
+    /// gone by the time the app's per-window Closed handler runs, so
+    /// recapturing it there reads a torn-down window. The capture replaces
+    /// this window's entry in the ledger rather than appending, which is
+    /// what makes the clean-shutdown write carry the state the user
+    /// actually quit with -- the rename in the last second before the X is
+    /// the case that used to be lost.
+    /// </summary>
+    public void CaptureClosingWindow(MainWindow window, Ghostty.Core.Session.WindowSession? session)
+    {
+        if (_held) return;
+        if (window.IsQuickTerminal) return;
+        if (session is not { Tabs.Count: > 0 }) return;
+        _ledger.Capture(window, session);
+    }
+
+    /// <summary>
+    /// Mark the session clean at app shutdown, from the windows as they
+    /// were captured rather than from whatever the file happens to hold.
+    ///
+    /// The closing window is in <see cref="_ledger"/> with the capture its
+    /// own teardown took, and every window that closed earlier in the quit
+    /// cascade is in there too -- which is why this writes the ledger
+    /// instead of re-reading the file. The old shape (load, flip the flag,
+    /// save) could only ever mark the last debounced write clean, so a
+    /// rename, a pin, a group edit or a cd made inside the debounce window
+    /// was saved as unclean-but-stale and restored as the old value.
+    /// <para>
+    /// An empty ledger means nothing was ever captured this run, which is
+    /// the cold path: a launch that was told not to restore, or one whose
+    /// close never reached the capture. Then the file is kept as it is and
+    /// only marked clean -- <see cref="closingFallback"/> covers the case
+    /// where even that is empty, and we capture the last window directly.
+    /// </para>
     /// </summary>
     public void FinalizeCleanShutdown(MainWindow? closingFallback)
     {
         _debounce?.Stop();
         if (_held) return;
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
+
+        var captured = _ledger.Sessions;
+        if (captured.Count > 0)
+        {
+            var state = new SessionState { CleanShutdown = true };
+            state.Windows.AddRange(captured);
+            _store.Save(state);
+            return;
+        }
 
         var onDisk = _store.Load();
         if (onDisk is { Windows.Count: > 0 })
@@ -217,12 +362,12 @@ internal sealed class SessionManager
         }
 
         // Cold path: nothing persisted this run. Capture the last window.
-        var state = new SessionState { CleanShutdown = true };
+        var cold = new SessionState { CleanShutdown = true };
         var ws = closingFallback?.CaptureSession();
         if (ws is not null && ws.Tabs.Count > 0)
         {
-            state.Windows.Add(ws);
-            _store.Save(state);
+            cold.Windows.Add(ws);
+            _store.Save(cold);
         }
     }
 }

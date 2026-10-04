@@ -30,6 +30,14 @@
          objects and start animations on them. -->
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!--
+      Because of SessionEndCapture.cs (linked below): [LibraryImport]'s
+      source generator emits unsafe code, so a host that compiles that file
+      has to allow it. Scoped to this project rather than to
+      Directory.Build.props, which would hand the flag to every project in
+      the solution.
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -59,5 +67,13 @@
     <Compile Include="..\Ghostty\Services\MotionGating.cs" Link="Motion\MotionGating.cs" />
     <Compile Include="..\Ghostty\Services\SystemAnimations.cs" Link="Motion\SystemAnimations.cs" />
     <Compile Include="..\Ghostty\Services\AnimationsState.cs" Link="Motion\AnimationsState.cs" />
+    <!--
+      The session-end window-proc subclass, for SessionEndCaptureTests: the
+      message policy behind "no session restore after a reboot" is only
+      reachable through a WndProc, so the test drives the same file the app
+      builds with faked messages and never creates an HWND. Same shape as
+      AnimationActivityRegistry above: the real source, not a copy.
+    -->
+    <Compile Include="..\Ghostty\Hosting\SessionEndCapture.cs" Link="Hosting\SessionEndCapture.cs" />
   </ItemGroup>
 </Project>
