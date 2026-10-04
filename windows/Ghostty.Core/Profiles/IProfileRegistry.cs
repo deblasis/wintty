@@ -39,6 +39,18 @@ public interface IProfileRegistry : IDisposable
     string? DefaultProfileId { get; }
 
     /// <summary>
+    /// Non-fatal profile warnings worth showing, recomposed with the same
+    /// snapshot as <see cref="Profiles"/>. These are the config service's
+    /// <see cref="IProfileConfigSource.ProfileWarnings"/> minus the ones a
+    /// partial <c>profile.&lt;id&gt;.*</c> block explains: the parser flags
+    /// every block it cannot make a definition of, and cannot see whether
+    /// discovery supplied the rest. A consumer that shows these wants this
+    /// list, not the parse-level one -- the difference is exactly "did you
+    /// just make an edit to a discovered profile".
+    /// </summary>
+    IReadOnlyList<string> ProfileWarnings { get; }
+
+    /// <summary>
     /// Monotonic counter for generation id. Bumped by 1 per successful
     /// recompose. Starts at 0 pre-ctor, reaches 1 after the ctor's
     /// initial synchronous compose, reaches 2 after the first

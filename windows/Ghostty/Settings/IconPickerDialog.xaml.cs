@@ -63,6 +63,51 @@ public sealed partial class IconPickerDialog : ContentDialog
             BundledItems.Add(new BundledRow(k, bmp));
         }
         BundledGrid.ItemsSource = BundledItems;
+
+        // After the grid has its rows: selecting a row is an index into it.
+        PrefillFromCurrentIcon();
+    }
+
+    /// <summary>
+    /// Open on the icon the profile already has. Without this the Change
+    /// button showed an empty picker every time, so the current icon had to
+    /// be remembered rather than seen, and a user changing one profile's
+    /// icon by accident was told nothing about what it had been.
+    ///
+    /// The three fields come from <see cref="IconPickerPrefill"/>, which
+    /// lives in Core so the mapping is unit-tested; what is left here is
+    /// WinUI. Nothing is seeded into <see cref="PickedSpec"/>: opening the
+    /// dialog is not choosing, so OK on an untouched dialog writes nothing
+    /// and the profile keeps the icon it had.
+    /// </summary>
+    private void PrefillFromCurrentIcon()
+    {
+        var prefill = IconPickerPrefill.FromSpec(InitialSpec);
+        Tabs.SelectedIndex = (int)prefill.Tab;
+
+        if (prefill.BundledKey is { } key)
+        {
+            for (int i = 0; i < BundledItems.Count; i++)
+            {
+                if (!string.Equals(BundledItems[i].Key, key, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                BundledGrid.SelectedIndex = i;
+                break;
+            }
+        }
+
+        if (prefill.Mdl2Text is { } mdl2)
+        {
+            Mdl2Input.Text = mdl2;
+            // Setting Text runs OnMdl2TextChanged, which would seed
+            // PickedSpec from the prefill itself. Opening a dialog on a
+            // profile that already uses this code point is not the user
+            // picking it, so take the seed back out.
+            PickedSpec = null;
+        }
+
+        if (prefill.FilePath is { } path)
+            PickedPathLabel.Text = path;
     }
 
     private void OnBundledItemClick(object sender, ItemClickEventArgs e)

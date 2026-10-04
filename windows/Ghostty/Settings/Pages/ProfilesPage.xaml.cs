@@ -76,7 +76,13 @@ internal sealed partial class ProfilesPage : Page
         _loading = true;
         try
         {
-            var warnings = _configService.ProfileWarnings;
+            // Read the registry's warnings, not the config service's: the service
+            // reports every partial profile block it could not turn into a
+            // definition, and this page's own writes are partial blocks
+            // against profiles the service never defined. The registry has
+            // seen discovery's answer by then, so its list is the same set
+            // minus the ones this page just wrote.
+            var warnings = _registry.ProfileWarnings;
             if (warnings.Count == 0)
             {
                 WarningsBar.IsOpen = false;

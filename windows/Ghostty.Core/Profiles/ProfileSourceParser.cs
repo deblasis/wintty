@@ -7,12 +7,17 @@ namespace Ghostty.Core.Profiles;
 
 /// <summary>
 /// Parsed result: the dictionary of profile defs by ID, plus any
-/// non-fatal warnings collected during parsing. Fatal errors (e.g.
-/// missing required keys) cause the offending profile to be omitted.
+/// non-fatal warnings collected during parsing, plus the partial blocks
+/// that are not defs. Fatal errors (e.g. missing required keys) omit the
+/// offending profile from <see cref="Profiles"/>; its bag survives as a
+/// <see cref="ProfileOverride"/> because the settings page writes exactly
+/// one subkey per edit and that bag is the user's override of whatever
+/// discovery finds for the id.
 /// </summary>
 public sealed record ProfileParseResult(
     IReadOnlyDictionary<string, ProfileDef> Profiles,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    IReadOnlyDictionary<string, ProfileOverride> Overrides);
 
 /// <summary>
 /// Pure function: extract per-profile keys from raw config text.
@@ -133,41 +138,73 @@ public static partial class ProfileSourceParser
     {
         var warnings = new List<string>();
         var profiles = new Dictionary<string, ProfileDef>();
+        var overrides = new Dictionary<string, ProfileOverride>();
         foreach (var (id, bag) in groups)
         {
-            if (!bag.TryGetValue("name", out var name) || name.Length == 0)
+            var block = BuildBlock(id, bag);
+
+            // A bag missing either required key is not a profile, but it is
+            // not nothing either: the settings page writes one subkey for
+            // the row it is editing and no definition around it, and that
+            // subkey is an override of the discovered profile with the same
+            // id. Keep the bag as one. The parser cannot see discovery, so
+            // it cannot tell an override that will resolve from one that
+            // will not, and it warns for both; ProfileOrderResolver is the
+            // one that knows, and it merges (or ignores) what lands here.
+            if (block.Name is null)
             {
                 warnings.Add($"profile '{id}': missing required key 'name', dropped");
+                overrides[id] = block;
                 continue;
             }
-            if (!bag.TryGetValue("command", out var command) || command.Length == 0)
+            if (block.Command is null)
             {
                 warnings.Add($"profile '{id}': missing required key 'command', dropped");
+                overrides[id] = block;
                 continue;
             }
 
-            var visuals = BuildVisuals(bag);
             profiles[id] = new ProfileDef(
                 Id: id,
-                Name: name,
-                Command: command,
-                WorkingDirectory: bag.GetValueOrDefault("working-directory"),
-                Icon: ParseIcon(bag.GetValueOrDefault("icon")),
-                TabTitle: bag.GetValueOrDefault("tab-title"),
-                Hidden: ParseBool(bag.GetValueOrDefault("hidden")),
+                Name: block.Name,
+                Command: block.Command,
+                WorkingDirectory: block.WorkingDirectory,
+                Icon: block.Icon,
+                TabTitle: block.TabTitle,
+                Hidden: block.Hidden,
                 ProbeId: null,
-                VisualsOrNull: visuals.HasAny ? visuals.Value : null,
+                VisualsOrNull: block.VisualsOrNull,
                 // Default true so profiles without an explicit override
-                // still participate in active-process icon tracking.
-                // Malformed values silently retain the default, matching
-                // how the existing parser treats other bad values rather
-                // than failing the profile load.
-                TabIconTracksForeground: ParseBoolOrDefault(
-                    bag.GetValueOrDefault("tab-icon-tracks-foreground"),
-                    defaultValue: true));
+                // still participate in active-process icon tracking, and a
+                // malformed value retains the default rather than failing
+                // the profile load -- the same way the parser treats every
+                // other bad value here.
+                TabIconTracksForeground: block.TabIconTracksForeground ?? true);
         }
 
-        return new ProfileParseResult(profiles, warnings);
+        return new ProfileParseResult(profiles, warnings, overrides);
+    }
+
+    // One bag -> one override. The def and the override read the same keys;
+    // what differs is that a required key the file did not spell is null
+    // here rather than a reason to lose the bag. Note the trinary
+    // tab-icon-tracks-foreground: an override that says nothing about the
+    // key must not turn it off, so absent has to stay distinguishable from
+    // false all the way to the merge.
+    private static ProfileOverride BuildBlock(string id, Dictionary<string, string> bag)
+    {
+        var visuals = BuildVisuals(bag);
+        return new ProfileOverride(
+            Id: id,
+            Name: NonEmptyOrNull(bag.GetValueOrDefault("name")),
+            Command: NonEmptyOrNull(bag.GetValueOrDefault("command")),
+            WorkingDirectory: bag.GetValueOrDefault("working-directory"),
+            Icon: ParseIcon(bag.GetValueOrDefault("icon")),
+            TabTitle: bag.GetValueOrDefault("tab-title"),
+            Hidden: ParseBool(bag.GetValueOrDefault("hidden")),
+            VisualsOrNull: visuals.HasAny ? visuals.Value : null,
+            TabIconTracksForeground: ParseBoolOrNull(
+                bag.GetValueOrDefault("tab-icon-tracks-foreground")));
     }
 
     /// <summary>
@@ -329,14 +366,19 @@ public static partial class ProfileSourceParser
            && bool.TryParse(value, out var b)
            && b;
 
-    // Trinary variant: distinguishes absent / malformed (use default)
-    // from explicit true / false. ParseBool collapses everything that
-    // isn't "true" into false, which is wrong for keys whose default
-    // is true (e.g. tab-icon-tracks-foreground).
-    private static bool ParseBoolOrDefault(string? value, bool defaultValue)
+    // Trinary variant for a key whose default is true: distinguishes
+    // absent / malformed (say nothing, let the base stand) from explicit
+    // true / false. ParseBool collapses everything that isn't "true" into
+    // false, which is wrong for such a key.
+    private static bool? ParseBoolOrNull(string? value)
         => value is not null && bool.TryParse(value, out var b)
             ? b
-            : defaultValue;
+            : null;
+
+    // "profile.x.name =" with nothing after it is the same as not writing
+    // the key at all, for the merge as much as for the required-key check.
+    private static string? NonEmptyOrNull(string? value)
+        => string.IsNullOrEmpty(value) ? null : value;
 
     private static double? ParseDouble(string? value)
     {

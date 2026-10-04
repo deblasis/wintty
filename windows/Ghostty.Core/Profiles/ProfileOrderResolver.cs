@@ -14,17 +14,28 @@ namespace Ghostty.Core.Profiles;
 /// the visible list, so the settings-UI inspector can offer an unhide
 /// affordance without re-running the resolver against a different
 /// hidden set.
+/// <para>
+/// A <paramref name="overrides"/> entry for an id that discovery also found
+/// is merged onto the discovered profile rather than dropped: that is the
+/// settings page's whole write -- one subkey against a profile it did not
+/// define -- and the merge is what keeps it from snapping back on reload.
+/// The ids that resolved are reported back in
+/// <see cref="ResolvedProfileSet.MergedOverrideIds"/> so the parse warning
+/// the block carries can be filtered for a caller that shows one.
+/// </para>
 /// </summary>
 public static class ProfileOrderResolver
 {
     public static ResolvedProfileSet Resolve(
         IReadOnlyList<ProfileDef> user,
+        IReadOnlyDictionary<string, ProfileOverride> overrides,
         IReadOnlyList<DiscoveredProfile> discovered,
         IReadOnlyList<string>? profileOrder,
         string? defaultProfileId,
         IReadOnlySet<string> hiddenIds)
     {
         ArgumentNullException.ThrowIfNull(user);
+        ArgumentNullException.ThrowIfNull(overrides);
         ArgumentNullException.ThrowIfNull(discovered);
         ArgumentNullException.ThrowIfNull(hiddenIds);
 
@@ -36,22 +47,45 @@ public static class ProfileOrderResolver
             userOrder.Add(u.Id);
         }
         var discoveredById = new Dictionary<string, DiscoveredProfile>();
+        var mergedOverrideIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var d in discovered)
         {
             discoveredById[d.Id] = d;
-            if (!combined.ContainsKey(d.Id))
+            if (combined.ContainsKey(d.Id)) continue;
+
+            // A partial block for this id is the user's override of what
+            // discovery found, and the merge is per-key: name and command
+            // are optional (discovery supplies them), and the keys the block
+            // says nothing about keep discovery's value. ProbeId is one of
+            // those -- a block that names a shell is not a reason to stop
+            // tracking that shell's foreground process.
+            if (overrides.TryGetValue(d.Id, out var o))
             {
+                mergedOverrideIds.Add(d.Id);
                 combined[d.Id] = new ProfileDef(
                     Id: d.Id,
-                    Name: d.Name,
-                    Command: d.Command,
-                    WorkingDirectory: d.WorkingDirectory,
-                    Icon: d.Icon,
-                    TabTitle: d.TabTitle,
-                    Hidden: false,
+                    Name: o.Name ?? d.Name,
+                    Command: o.Command ?? d.Command,
+                    WorkingDirectory: o.WorkingDirectory ?? d.WorkingDirectory,
+                    Icon: o.Icon ?? d.Icon,
+                    TabTitle: o.TabTitle ?? d.TabTitle,
+                    Hidden: o.Hidden,
                     ProbeId: d.ProbeId,
-                    VisualsOrNull: null);
+                    VisualsOrNull: o.VisualsOrNull,
+                    TabIconTracksForeground: o.TabIconTracksForeground ?? true);
+                continue;
             }
+
+            combined[d.Id] = new ProfileDef(
+                Id: d.Id,
+                Name: d.Name,
+                Command: d.Command,
+                WorkingDirectory: d.WorkingDirectory,
+                Icon: d.Icon,
+                TabTitle: d.TabTitle,
+                Hidden: false,
+                ProbeId: d.ProbeId,
+                VisualsOrNull: null);
         }
 
         var ordered = new List<string>();
@@ -86,7 +120,7 @@ public static class ProfileOrderResolver
             else
                 visible.Add(MakeProfile(def, visibleIndex++, isDefault: def.Id == defaultResolved));
         }
-        return new ResolvedProfileSet(visible, hidden);
+        return new ResolvedProfileSet(visible, hidden, mergedOverrideIds);
     }
 
     // Single source of truth for the ProfileDef -> ResolvedProfile

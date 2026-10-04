@@ -80,6 +80,7 @@ public sealed class ProfileOrderResolverIconFallbackTests
     {
         var set = ProfileOrderResolver.Resolve(
             user: new[] { def },
+            overrides: new Dictionary<string, ProfileOverride>(),
             discovered: System.Array.Empty<DiscoveredProfile>(),
             profileOrder: null,
             defaultProfileId: null,

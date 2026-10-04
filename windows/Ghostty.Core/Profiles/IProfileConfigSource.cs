@@ -22,6 +22,18 @@ public interface IProfileConfigSource
     IReadOnlyDictionary<string, ProfileDef> ParsedProfiles { get; }
 
     /// <summary>
+    /// Partial <c>profile.&lt;id&gt;.*</c> blocks by id: the ones missing
+    /// the <c>name</c> / <c>command</c> a standalone profile needs, and so
+    /// not in <see cref="ParsedProfiles"/>. This is the shape the settings
+    /// page writes -- one subkey per edit, no definition around it -- and
+    /// <c>ProfileOrderResolver</c> merges each entry onto the discovered
+    /// profile of the same id. An id nothing was discovered for resolves to
+    /// no profile at all and keeps its parser warning.
+    /// Replaced on every reload, like the rest of the view.
+    /// </summary>
+    IReadOnlyDictionary<string, ProfileOverride> ProfileOverrides { get; }
+
+    /// <summary>
     /// Ids from <c>profile-order = a,b,c</c>. Empty when the key is
     /// absent. Order is preserved; ids absent from both
     /// <see cref="ParsedProfiles"/> and the registry's discovered list

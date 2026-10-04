@@ -8,7 +8,7 @@
     CloseButtonText="Cancel"
     DefaultButton="Primary">
 
-    <Pivot SelectedIndex="0">
+    <Pivot x:Name="Tabs" SelectedIndex="0">
         <PivotItem Header="Bundled brands">
             <GridView x:Name="BundledGrid"
                       SelectionMode="Single"

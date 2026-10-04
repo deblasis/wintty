@@ -15,6 +15,8 @@ internal sealed class FakeProfileConfigSource : IProfileConfigSource
 {
     public IReadOnlyDictionary<string, ProfileDef> ParsedProfiles { get; set; } =
         new Dictionary<string, ProfileDef>();
+    public IReadOnlyDictionary<string, ProfileOverride> ProfileOverrides { get; set; } =
+        new Dictionary<string, ProfileOverride>();
     public IReadOnlyList<string> ProfileOrder { get; set; } = [];
     public string? DefaultProfileId { get; set; }
     public IReadOnlySet<string> HiddenProfileIds { get; set; } = FrozenSet<string>.Empty;

@@ -27,13 +27,15 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         IReadOnlyList<ResolvedProfile> Profiles,
         IReadOnlyList<ResolvedProfile> HiddenProfiles,
         FrozenDictionary<string, ResolvedProfile> ById,
-        string? DefaultProfileId);
+        string? DefaultProfileId,
+        IReadOnlyList<string> Warnings);
 
     private static readonly Snapshot EmptySnapshot = new(
         Array.Empty<ResolvedProfile>(),
         Array.Empty<ResolvedProfile>(),
         FrozenDictionary<string, ResolvedProfile>.Empty,
-        DefaultProfileId: null);
+        DefaultProfileId: null,
+        Warnings: Array.Empty<string>());
 
     private readonly IProfileConfigSource _source;
     private readonly Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> _discover;
@@ -54,6 +56,7 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
     public IReadOnlyList<ResolvedProfile> Profiles => _snapshot.Profiles;
     public IReadOnlyList<ResolvedProfile> HiddenProfiles => _snapshot.HiddenProfiles;
     public string? DefaultProfileId => _snapshot.DefaultProfileId;
+    public IReadOnlyList<string> ProfileWarnings => _snapshot.Warnings;
     public long Version => Interlocked.Read(ref _version);
 
     public ProfileRegistry(
@@ -112,11 +115,13 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         IReadOnlyList<ResolvedProfile> nextHidden;
         FrozenDictionary<string, ResolvedProfile> nextById;
         string? nextDefault;
+        IReadOnlyList<string> nextWarnings;
 
         lock (_sync)
         {
             var resolvedSet = ProfileOrderResolver.Resolve(
                 user: [.. _source.ParsedProfiles.Values],
+                overrides: _source.ProfileOverrides,
                 discovered: _discovered,
                 profileOrder: _source.ProfileOrder,
                 defaultProfileId: _source.DefaultProfileId,
@@ -132,9 +137,20 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
                 if (p.IsDefault) nextDefault = p.Id;
             }
             nextById = dict.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+
+            // The parser warns about every partial block it cannot make a
+            // definition out of, and it cannot see discovery. This is the
+            // pass that can: an id a partial block merged onto a discovered
+            // profile for is an intentional override, and telling the user
+            // their profile "was dropped" about one of their own edits is
+            // the warning being wrong. The config service's hidden-only
+            // pass has already filtered its own markers by the time we get
+            // here.
+            nextWarnings = Config.ConfigServiceProfileParser.SuppressExplainedWarnings(
+                _source.ProfileWarnings, _source.ParsedProfiles, resolvedSet.MergedOverrideIds);
         }
 
-        _snapshot = new Snapshot(next, nextHidden, nextById, nextDefault);
+        _snapshot = new Snapshot(next, nextHidden, nextById, nextDefault, nextWarnings);
         var newVersion = Interlocked.Increment(ref _version);
         LogRecomposed(newVersion, next.Count);
 
