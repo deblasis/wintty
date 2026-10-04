@@ -1578,7 +1578,7 @@ public sealed partial class MainWindow : Window
             powerMonitor.LowPowerChanged += OnLowPowerChanged;
         }
 
-        _tabManager.LastTabClosed += (_, _) => Close();
+        _tabManager.LastTabClosed += (_, _) => OnLastTabClosed();
 
         // Settings page raises this the moment the user flips the
         // vertical-tabs toggle so we animate without waiting for the
@@ -4946,6 +4946,12 @@ public sealed partial class MainWindow : Window
     private void Show()
     {
         _hiding = false;
+        // The empty-window recovery, and it belongs HERE rather than only on
+        // the close that caused it: the summon is the one moment this window
+        // has to have a terminal to show, and it is reached from paths that
+        // never went through OnLastTabClosed. No-op as soon as a tab is
+        // there, so an ordinary summon is untouched.
+        SeedQuickTerminalTab();
         var duration = _configService.QuickTerminalAnimationDuration;
         if (duration > 0)
             _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
@@ -5035,6 +5041,61 @@ public sealed partial class MainWindow : Window
                 try { AppWindow.Hide(); }
                 catch (System.Runtime.InteropServices.COMException) { }
             });
+    }
+
+    /// <summary>
+    /// The last tab in this window went away.
+    ///
+    /// A regular window closes with it. The quick terminal does not:
+    /// <see cref="ApplyQuickTerminalBehaviour"/> intercepts
+    /// <c>AppWindow.Closing</c> into a hide -- that interception is what lets
+    /// the global hotkey re-summon the same shell instead of a new one -- so
+    /// <see cref="Window.Close"/> here became a hide of a window with zero
+    /// tabs. Nothing recovered from that state: the next
+    /// <see cref="Show"/> seeded no tab, <see cref="FocusActiveLeaf"/> chased
+    /// an active tab that had just been removed, and
+    /// <see cref="UpdateQuakeStripVisibility"/> hides the strip at one tab or
+    /// fewer (zero included), taking the new-tab button with it. Keybindings
+    /// reach the app only through a focused terminal, so the window that came
+    /// back had no keyboard path out until the process was restarted.
+    ///
+    /// So the quick terminal hides and leaves a fresh tab behind. The close
+    /// confirmation is not a hazard on this path: it is answered before the
+    /// tab is removed, so a declined close raises nothing here and leaves the
+    /// window exactly as the user left it.
+    /// </summary>
+    private void OnLastTabClosed()
+    {
+        // Teardown, not a close: the window is already gone and a second
+        // Close() (or a Hide() on a window being torn down) buys nothing.
+        if (_isClosed) return;
+
+        if (!IsQuickTerminal)
+        {
+            Close();
+            return;
+        }
+
+        // Hide first, seed second: a window left on screen with no tab is
+        // the state this whole guard exists to prevent.
+        Hide();
+        SeedQuickTerminalTab();
+    }
+
+    /// <summary>
+    /// Give the quick terminal a tab when it has none, so no summon can find
+    /// an empty window.
+    ///
+    /// A no-op as soon as one exists, which is what makes it safe to call
+    /// from every show rather than only from the close that emptied the
+    /// window. Seeds through the same funnel Ctrl+T uses, so a summoned
+    /// quick terminal runs the profile a new tab would.
+    /// </summary>
+    private void SeedQuickTerminalTab()
+    {
+        if (_isClosed) return;
+        if (_tabManager.Tabs.Count > 0) return;
+        OpenDefaultProfile(ProfileLaunchTarget.NewTab);
     }
 
     private void FocusActiveLeaf()
