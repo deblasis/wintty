@@ -6,11 +6,15 @@
     nothing alike. cmd has only `PROMPT $p`, a RAW Windows path carried on
     OSC 9;9; a native PowerShell session sends a `file://HOST/c:/dir` URL on
     OSC 7. One scenario each, both against a fresh app process, and each
-    asks two independent questions:
+    asks three independent questions:
 
       (i)  did the report reach the app at all -- the seam reads the pane's
            own LastCwd, which stays null for a native shell whenever either
            arm is dead;
+      (i-a) did it reach the TAB. The pane's LastCwd and the tab's
+           ShellReportedCwd are separate stores bridged by
+           IPaneHost.CwdChanged (#1290), so a bridge that drops leaves this
+           question answering with the PREVIOUS directory while (i) passes;
       (ii) does the strip actually SAY that folder -- read twice, from the
            row's own TextBlock through the seam and from the rendered row's
            UIA Name, neither of which is the model property under test.
@@ -108,8 +112,8 @@ function Wait-Label($s, [scriptblock]$Until, [string]$What, [int]$Seconds = 45) 
         if (& $Until $last) { return $last }
         Start-Sleep -Milliseconds 400
     }
-    throw ("PRODUCT_FAIL: {0}; last saw cwd='{1}' rendered='{2}' title='{3}' shellTitle='{4}'" -f
-        $What, $last.cwd, $last.rendered, $last.title, $last.shellTitle)
+    throw ("PRODUCT_FAIL: {0}; last saw cwd='{1}' tabCwd='{2}' rendered='{3}' title='{4}' shellTitle='{5}'" -f
+        $What, $last.cwd, $last.tabCwd, $last.rendered, $last.title, $last.shellTitle)
 }
 
 # Invoke-SeamCommand prints a line per call; a poll would drown the log.
@@ -221,7 +225,7 @@ $ConfigExtra
         # writes: absent, a boolean reads as $false and every assertion
         # below it passes on silence.
         $probeLabel = (Invoke-SeamCommandQuiet $s @{ op = 'tab-labels' }).labels[0]
-        foreach ($field in 'settling', 'home', 'hover', 'renderedHomeGlyph') {
+        foreach ($field in 'settling', 'home', 'hover', 'renderedHomeGlyph', 'cwd', 'tabCwd') {
             if ($null -eq $probeLabel.PSObject.Properties[$field]) {
                 throw "HARNESS: the seam no longer reports '$field'; assertions on it would be dead"
             }
@@ -302,6 +306,20 @@ $ConfigExtra
         $label = Wait-Label $s { param($l) $l.cwd -eq $probe } `
             "$Name did not report '$probe'"
         $entry.cwd = $label.cwd
+
+        # (i-a) The TAB's own copy of that directory, asked separately from
+        # the pane's (#1290). `cwd` is the active leaf's LastCwd;
+        # `tabCwd` is TabModel.ShellReportedCwd, the store the strips compose
+        # their label from and the one tab-level session state reads. The two
+        # are separate stores bridged by IPaneHost.CwdChanged, so a bridge
+        # that drops leaves the pane right and the tab on the PREVIOUS
+        # directory -- and reading `cwd` alone cannot see it happen. This is
+        # the oracle the row assertions below cannot stand in for: they read
+        # rendered text, which a shell-reported title moves too.
+        if ($label.tabCwd -ne $probe) {
+            throw ("PRODUCT_FAIL: {0}: the pane reported '{1}' but the tab still answers '{2}'" -f
+                $Name, $label.cwd, $label.tabCwd)
+        }
 
         # (ii) the strip's own text, from the row's TextBlock. Away from home
         # the glyph is down and the name is printed again.
@@ -484,6 +502,13 @@ default-profile = pwsh-7
         if ($settled.cwd -ne $local) {
             throw ("PRODUCT_FAIL: {0}: expected the local report '{1}' to stand, saw '{2}'" -f
                 $name, $local, $settled.cwd)
+        }
+        # The tab's own copy of it, for the same reason the shell scenarios
+        # ask twice (#1290): the refused pair is worth nothing if the tab is
+        # still answering with a directory neither report named.
+        if ($settled.tabCwd -ne $local) {
+            throw ("PRODUCT_FAIL: {0}: the pane kept '{1}' but the tab answers '{2}'" -f
+                $name, $settled.cwd, $settled.tabCwd)
         }
         $entry.rendered = $settled.rendered
 

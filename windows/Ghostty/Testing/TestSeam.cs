@@ -898,6 +898,16 @@ internal static class TestSeam
                 // What the shell reported and what the strip drew, per tab.
                 // The cwd side proves the OSC 7 / OSC 9;9 round trip reached
                 // the app; the rendered side proves the label followed.
+                //
+                // Two cwds, not one, and the pair is the point (#1290). `cwd`
+                // is the PANE's own answer (the active leaf's LastCwd, which
+                // session restore spawns into); `tabCwd` is the TAB's, the
+                // copy the strips compose their label from and the tab-level
+                // session state reads. They are separate stores bridged by
+                // IPaneHost.CwdChanged, so a bridge that drops leaves the
+                // pane right and the tab on the previous directory -- and
+                // until this field existed the harness could not see that
+                // disagreement, only its consequence in the rendered text.
                 var strip = window.TestSeamVerticalStrip;
                 return Json(json =>
                 {
@@ -920,6 +930,8 @@ internal static class TestSeam
                         json.WriteString("profile", tab.ProfileSnapshot?.DisplayName ?? "");
                         if (tab.PaneHost.ActiveLeaf.LastCwd is { } cwd)
                             json.WriteString("cwd", cwd);
+                        if (tab.ShellReportedCwd is { } tabCwd)
+                            json.WriteString("tabCwd", tabCwd);
                         if (tab.ShellReportedTitle is { } shell)
                             json.WriteString("shellTitle", shell);
                         json.WriteString("iconKey", IconKey(tab.TabIcon.Icon));

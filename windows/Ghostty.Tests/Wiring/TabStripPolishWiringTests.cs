@@ -239,6 +239,12 @@ public class TabStripPolishWiringTests
     [InlineData("home")]
     [InlineData("renderedHomeGlyph")]
     [InlineData("renderedHomeGlyphH")]
+    // The pane's cwd and the TAB's cwd are separate stores (#1290), and the
+    // harness asserts both. Naming only the pane's left the disagreement
+    // unreadable: a tab left on the previous directory reads as a wrong label
+    // rather than as a dropped bridge.
+    [InlineData("cwd")]
+    [InlineData("tabCwd")]
     public void TheSeam_StillEmitsTheFieldTheHarnessReads(string field)
     {
         var seam = ShellSource.Load("Testing.TestSeam.cs").Root.ToString();
