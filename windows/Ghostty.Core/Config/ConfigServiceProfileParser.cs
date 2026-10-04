@@ -18,11 +18,12 @@ public static class ConfigServiceProfileParser
     /// <paramref name="configText"/> is the raw file contents. The
     /// <paramref name="fileValueReader"/> delegate is a thin adapter
     /// over <c>ConfigService</c>'s existing <c>GetFileValue</c>
-    /// helper: it returns the last raw value for a key, or
-    /// <see langword="null"/> when the key is absent. Has no production
-    /// caller since <c>ConfigService.ReadFlagsCore</c> reads the ini
-    /// cache; kept as the reference implementation the pairs overload is
-    /// tested against and as the simpler fixture API for tests.
+    /// helper: it returns the last raw value in force for a key -- config
+    /// keys are last-wins, and a blank <c>key = </c> is the reset, so a
+    /// reset key reads as absent -- or <see langword="null"/> when the key
+    /// is absent. Has no production caller since <c>ConfigService.ReadFlagsCore</c>
+    /// reads the ini cache; kept as the reference implementation the pairs
+    /// overload is tested against and as the simpler fixture API for tests.
     /// </summary>
     public static ProfileView ParseAll(
         string configText,

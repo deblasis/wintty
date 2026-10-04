@@ -64,6 +64,70 @@ public sealed class ConfigIniFileTests : IDisposable
         Assert.Equal("", ConfigIniFile.First(file, "windows-single-instance"));
     }
 
+    [Fact]
+    public void EmptyValue_ResetsWhatAnEarlierLineSet()
+    {
+        // The other half of the same rule, and the shape a user actually
+        // writes: blanking the line is how a key goes back to its default.
+        // libghostty assigns the field default for an empty value, so the
+        // parse has to stop counting the lines above it -- otherwise
+        // `theme = ` after `theme = catppuccin` leaves the chrome reading a
+        // palette nothing is wearing.
+        var path = Write("""
+            theme = catppuccin-mocha
+            theme =
+            """);
+
+        var file = ConfigIniFile.Load(path);
+        Assert.Empty(file);
+        Assert.Equal("", ConfigIniFile.Last(file, "theme"));
+        Assert.False(ConfigIniFile.TryLast(file, "theme", out _));
+    }
+
+    [Fact]
+    public void AValueAfterAResetIsTheOneInForce()
+    {
+        var path = Write("""
+            theme = catppuccin-mocha
+            theme =
+            theme = catppuccin-latte
+            """);
+
+        Assert.Equal(
+            "catppuccin-latte",
+            ConfigIniFile.Last(ConfigIniFile.Load(path), "theme"));
+    }
+
+    [Fact]
+    public void AResetOfOneKeyLeavesTheOthersAlone()
+    {
+        var path = Write("""
+            theme = catppuccin-mocha
+            background = #ff0000
+            theme =
+            """);
+
+        var file = ConfigIniFile.Load(path);
+        Assert.Equal("#ff0000", ConfigIniFile.Last(file, "background"));
+        Assert.False(file.ContainsKey("theme"));
+    }
+
+    [Fact]
+    public void AResetRepeatableKeyDropsEveryEarlierValue()
+    {
+        // A blank value resets a repeatable key's whole list (Config.zig's
+        // parseIntoField assigns the field default, which for a repeatable is
+        // the empty list), so the keybind the user cleared is gone rather
+        // than still bound from the line above it.
+        var path = Write("""
+            keybind = ctrl+a=copy
+            keybind =
+            keybind = ctrl+b=paste
+            """);
+
+        Assert.Equal(["ctrl+b=paste"], ConfigIniFile.Load(path)["keybind"]);
+    }
+
     [Theory]
     [InlineData("windows-single-instance=true")]
     [InlineData("windows-single-instance =true")]
@@ -107,6 +171,23 @@ public sealed class ConfigIniFileTests : IDisposable
     }
 
     [Fact]
+    public void RepeatedKey_LastWinsIsTheValueInForce()
+    {
+        // The defect itself, on the theme the settings UI reads: two
+        // `theme` lines, and the panes wear the second one while a
+        // first-wins reader hands the chrome the first.
+        var path = Write("""
+            theme = catppuccin-mocha
+            theme = catppuccin-latte
+            """);
+
+        var file = ConfigIniFile.Load(path);
+        Assert.Equal("catppuccin-latte", ConfigIniFile.Last(file, "theme"));
+        Assert.True(ConfigIniFile.TryLast(file, "theme", out var value));
+        Assert.Equal("catppuccin-latte", value);
+    }
+
+    [Fact]
     public void ValueMayContainEqualsSigns()
     {
         var path = Write("keybind = ctrl+shift+t=new_tab\n");
@@ -127,5 +208,16 @@ public sealed class ConfigIniFileTests : IDisposable
     public void First_OnNullFile_ReturnsDefault()
     {
         Assert.Equal("off", ConfigIniFile.First(null, "windows-single-instance", "off"));
+    }
+
+    [Fact]
+    public void Last_OnNullFileAndUnsetKey_ReturnsDefault()
+    {
+        Assert.Equal("off", ConfigIniFile.Last(null, "windows-single-instance", "off"));
+
+        var file = ConfigIniFile.Load(Write("windows-single-instance = true\n"));
+        Assert.Equal("off", ConfigIniFile.Last(file, "vertical-tabs", "off"));
+        Assert.False(ConfigIniFile.TryLast(file, "vertical-tabs", out var value));
+        Assert.Equal("", value);
     }
 }

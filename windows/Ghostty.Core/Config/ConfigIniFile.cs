@@ -18,9 +18,20 @@ public static class ConfigIniFile
 {
     /// <summary>
     /// Load <paramref name="path"/> into a key/value dictionary. Empty lines
-    /// and #-prefixed comments are skipped, empty values are ignored entirely,
-    /// and keys are matched case-insensitively. Values may themselves contain
-    /// <c>=</c>; only the first one separates.
+    /// and #-prefixed comments are skipped, keys are matched
+    /// case-insensitively, and each key's values are kept in file order. Values
+    /// may themselves contain <c>=</c>; only the first one separates.
+    /// <para>
+    /// An empty value (<c>theme = </c>) is a RESET, not a value: it drops every
+    /// earlier line for that key, leaving the key absent. That is what
+    /// libghostty does with it -- an empty value assigns the field's default,
+    /// and for a repeatable key the default is the empty list (Config.zig's
+    /// parseIntoField, and the <c>key = ""</c> recipe it documents) -- and it
+    /// is what the writer emits for a cleared key (<see cref="ConfigFileParser.SetValue"/>).
+    /// Ignoring the blank instead, as this did, left the parse answering
+    /// "A" for <c>theme = A</c> followed by <c>theme = </c>: the one shape a
+    /// user writes to put a key back.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// Returns an empty dictionary for a path that does not exist -- and for
@@ -77,7 +88,17 @@ public static class ConfigIniFile
             var k = trimmed[..eqIndex].Trim();
             if (k.Length == 0) continue;
             var v = trimmed[(eqIndex + 1)..].Trim();
-            if (v.Length == 0) continue;
+            // A blank value resets the key, so anything the file set for it
+            // before this line stops counting. Dropping the entry (rather
+            // than recording the empty string) is what makes "the file clears
+            // a key" and "the file never mentions the key" the same answer to
+            // every reader below, which is what libghostty's own default
+            // assignment makes them.
+            if (v.Length == 0)
+            {
+                dict.Remove(k);
+                continue;
+            }
             if (!dict.TryGetValue(k, out var list))
             {
                 list = new List<string>(1);
@@ -92,6 +113,13 @@ public static class ConfigIniFile
     /// First value recorded for <paramref name="key"/>, or
     /// <paramref name="defaultValue"/> when the file does not set it.
     /// </summary>
+    /// <remarks>
+    /// Kept for the readers whose key is genuinely first-wins, and pinned by
+    /// its own tests so nobody re-points it at <see cref="Last"/> by accident.
+    /// Config keys are last-wins (ghostty's own parser, and the writer in
+    /// <see cref="ConfigFileParser"/>), which is what <see cref="Last"/>
+    /// exists for.
+    /// </remarks>
     public static string First(
         IReadOnlyDictionary<string, List<string>>? file,
         string key,
@@ -101,4 +129,51 @@ public static class ConfigIniFile
             && list.Count > 0
             ? list[0]
             : defaultValue;
+
+    /// <summary>
+    /// Value in force for <paramref name="key"/>, or
+    /// <paramref name="defaultValue"/> when the file does not set it.
+    /// </summary>
+    /// <remarks>
+    /// The last line wins, because that is what libghostty applies and what
+    /// the settings UI writes: a config with two <c>theme</c> lines paints the
+    /// panes from the second one, so a reader that answered with the first
+    /// would theme the window next to a terminal wearing a different palette.
+    /// Reading <c>First</c> here is the defect this exists to correct, and the
+    /// tests pin both halves: duplicate lines resolve to the last, and a blank
+    /// <c>key = </c> resolves to the default (see <see cref="Parse"/>).
+    /// </remarks>
+    public static string Last(
+        IReadOnlyDictionary<string, List<string>>? file,
+        string key,
+        string defaultValue = "")
+        => file is not null
+            && file.TryGetValue(key, out var list)
+            && list.Count > 0
+            ? list[^1]
+            : defaultValue;
+
+    /// <summary>
+    /// <see cref="Last"/> reporting whether the file sets the key at all,
+    /// for the readers whose meaning depends on presence rather than on the
+    /// value: an unset <c>frame-style</c> means "match the backdrop", and a
+    /// default argument could not tell that apart from the user having
+    /// written the default down.
+    /// </summary>
+    public static bool TryLast(
+        IReadOnlyDictionary<string, List<string>>? file,
+        string key,
+        out string value)
+    {
+        if (file is not null
+            && file.TryGetValue(key, out var list)
+            && list.Count > 0)
+        {
+            value = list[^1];
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
 }
