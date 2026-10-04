@@ -2599,14 +2599,29 @@ public sealed partial class MainWindow : Window
         PaneHostContainer.Children.Remove(paneHost);
     }
 
-    private MenuFlyout BuildPaneContextMenu(Controls.TerminalControl control, Panes.PaneHost paneHost) =>
+    /// <summary>
+    /// Open a tab that runs <paramref name="argvCommandLine"/> (an argv
+    /// quoted by the Windows command-line rules) directly, the way a
+    /// <c>-e</c> launch does: it closes on a clean exit and stays open on
+    /// a failure. Used for a file transfer the host wants answered by hand.
+    /// </summary>
+    internal void OpenCommandTab(string argvCommandLine)
+        => _tabManager.NewTab(Ghostty.Core.Profiles.PaneCommandPolicy.ApplyLaunchCommand(
+            null, argvCommandLine, workingDirectory: null));
+
+    private MenuFlyout BuildPaneContextMenu(
+        Controls.TerminalControl control,
+        Panes.PaneHost paneHost,
+        Controls.TerminalControl.SftpDownloadOffer? sftpOffer = null) =>
         PaneContextMenuBuilder.Build(
             invokePaneAction: _router.Invoke,
             invokeBindingAction: ExecuteBindingAction,
             hasSelection: () => control.HasSelection,
             isZoomed: () => paneHost.IsZoomed,
             promptTabTitle: () => _ = ShowPromptTitleDialogAsync(isTab: true, control),
-            promptTerminalTitle: () => _ = ShowPromptTitleDialogAsync(isTab: false, control));
+            promptTerminalTitle: () => _ = ShowPromptTitleDialogAsync(isTab: false, control),
+            sftpDownloadName: sftpOffer is { } named ? Ghostty.Core.Ssh.RemotePath.FileName(named.RemotePath) : null,
+            sftpDownload: sftpOffer is { } offer ? () => _ = control.DownloadViaSftpAsync(offer) : null);
 
     private void OnPaneContextMenuRequested(object? sender, Panes.PaneContextMenuRequest request)
     {
@@ -2622,7 +2637,11 @@ public sealed partial class MainWindow : Window
         var paneHost = sender as Panes.PaneHost
             ?? (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
 
-        var flyout = BuildPaneContextMenu(control, paneHost);
+        // Read what is under the pointer now: by the time the menu is
+        // open the pointer is over the menu, not the text.
+        var sftpOffer = control.TryGetSftpDownloadOffer(fromPointer: request.Position is not null);
+
+        var flyout = BuildPaneContextMenu(control, paneHost, sftpOffer);
 
         if (request.Position is { } pos)
             flyout.ShowAt(control, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions { Position = pos });

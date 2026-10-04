@@ -1047,7 +1047,15 @@ public partial class App : Application
                     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                     ".ssh", "known_hosts");
                 return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
-            });
+            },
+            readSshConfig: () =>
+            {
+                var path = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".ssh", "config");
+                return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
+            },
+            userProfileDirectory: Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
         ProfileRegistry = _profileRegistry;
         _profileRegistry.ProfilesChanged += OnProfilesChangedRebuildJumpList;
         RebuildJumpList();

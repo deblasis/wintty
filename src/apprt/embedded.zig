@@ -2630,6 +2630,36 @@ pub const CAPI = struct {
         return readTextLocked(surface, core_sel, result);
     }
 
+    /// Read the word under the mouse pointer, by the same word boundaries
+    /// a double-click selects with. The Windows shell uses it to offer a
+    /// file name for download from the pane menu. Changes no selection.
+    /// Free the result with ghostty_surface_free_text.
+    export fn ghostty_surface_read_word_at_pointer(
+        ptr: *Surface,
+        result: *Text,
+    ) bool {
+        const surface = &ptr.core_surface;
+        // Wake-first: same dormancy rule as read_selection.
+        if (!surface.io.wakeIfDormant()) return false;
+        surface.renderer_state.mutex.lockUncancelable(global.io());
+        defer surface.renderer_state.mutex.unlock(global.io());
+
+        const pos = ptr.getCursorPos() catch return false;
+        const pt_viewport = surface.posToViewport(pos.x, pos.y);
+        const screen: *terminal.Screen = surface.io.terminal.screens.active;
+        const pin = screen.pages.pin(.{
+            .viewport = .{
+                .x = pt_viewport.x,
+                .y = pt_viewport.y,
+            },
+        }) orelse return false;
+        const sel = screen.selectWord(
+            pin,
+            surface.config.selection_word_chars,
+        ) orelse return false;
+        return readTextLocked(ptr, sel, result);
+    }
+
     /// Read some arbitrary text from the surface.
     ///
     /// This is an expensive operation so it shouldn't be called too

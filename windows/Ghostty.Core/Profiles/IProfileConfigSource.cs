@@ -78,6 +78,13 @@ public interface IProfileConfigSource
     string? SshHostsUser => null;
 
     /// <summary>
+    /// Saved ssh connections from <c>ssh.&lt;id&gt;.*</c> blocks. Each is
+    /// listed as a profile with the id <c>ssh-&lt;id&gt;</c>.
+    /// </summary>
+    IReadOnlyList<Ghostty.Core.Ssh.SshConnection> SshConnections
+        => Array.Empty<Ghostty.Core.Ssh.SshConnection>();
+
+    /// <summary>
     /// Raised on the UI dispatcher after <c>ConfigService</c> finishes
     /// a successful reload. Fires once per reload regardless of whether
     /// the profile-view values actually changed -- consumers must treat

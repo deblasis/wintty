@@ -66,7 +66,7 @@ public static class WindowsOnlyKeys
         new("profile-order",
             "Comma-separated list of profile ids defining the order shown in the tab picker and command palette."),
         new("ssh-hosts-discovery",
-            "When true, every named host in your ~/.ssh/known_hosts becomes a new-tab profile (id ssh-<host>) that runs ssh to it. Off by default; hashed, wildcard and IP-only entries are skipped."),
+            "When true, every Host alias in your ~/.ssh/config and every named host in your ~/.ssh/known_hosts becomes a new-tab profile (id ssh-<host>) that runs ssh to it. Off by default; hashed, wildcard and IP-only entries are skipped. Saved connections (ssh.<id>.host and friends) are always listed."),
         new("ssh-hosts-user",
             "Login used for the ssh-hosts-discovery profiles (ssh <user>@<host>). Unset lets ssh choose: your ~/.ssh/config, else your Windows user name."),
         new("no-color-override",
@@ -158,6 +158,14 @@ public static class WindowsOnlyKeys
         var sep = key.IndexOf('.', Prefix.Length);
         return sep > Prefix.Length && sep < key.Length - 1;
     }
+
+    /// <summary>
+    /// Returns true when <paramref name="key"/> is a saved-connection key
+    /// of the shape <c>ssh.&lt;id&gt;.&lt;subkey&gt;</c>. Absorbed by the
+    /// diagnostic filter the same way profile blocks are.
+    /// </summary>
+    public static bool IsSshConnectionKey(string key)
+        => Ghostty.Core.Ssh.SshConnectionParser.IsConnectionKey(key);
 
     /// <summary>
     /// Returns true when <paramref name="key"/> is an internal-namespace

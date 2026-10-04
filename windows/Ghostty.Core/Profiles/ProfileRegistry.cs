@@ -41,6 +41,8 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
     private readonly Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> _discover;
     private readonly Action<Action> _dispatcher;
     private readonly Func<string?>? _readKnownHosts;
+    private readonly Func<string?>? _readSshConfig;
+    private readonly string? _userProfileDirectory;
     private readonly ILogger<ProfileRegistry> _log;
     private readonly Lock _sync = new();
 
@@ -65,7 +67,9 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> discover,
         Action<Action> dispatcher,
         ILogger<ProfileRegistry>? log = null,
-        Func<string?>? readKnownHosts = null)
+        Func<string?>? readKnownHosts = null,
+        Func<string?>? readSshConfig = null,
+        string? userProfileDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(discover);
@@ -75,6 +79,8 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         _discover = discover;
         _dispatcher = dispatcher;
         _readKnownHosts = readKnownHosts;
+        _readSshConfig = readSshConfig;
+        _userProfileDirectory = userProfileDirectory;
         _log = log ?? NullLogger<ProfileRegistry>.Instance;
 
         RecomposeAndFire();
@@ -105,21 +111,40 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
 
     private void OnSourceChanged() => RecomposeAndFire();
 
+    // Saved connections first, then ~/.ssh/config aliases, then
+    // known_hosts names. An id already listed wins, so a connection the
+    // user saved replaces the bare entry discovery would add for it.
     private IReadOnlyList<DiscoveredProfile> ReadSshHosts()
     {
-        if (_readKnownHosts is null || !_source.SshHostsDiscovery)
-            return Array.Empty<DiscoveredProfile>();
-        try
+        var result = new List<DiscoveredProfile>();
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddAll(IEnumerable<DiscoveredProfile> profiles)
         {
-            return SshKnownHosts.Parse(_readKnownHosts(), _source.SshHostsUser);
+            foreach (var p in profiles)
+                if (ids.Add(p.Id)) result.Add(p);
         }
-        catch (Exception ex)
+
+        foreach (var connection in _source.SshConnections)
         {
-            // An unreadable known_hosts costs the ssh entries, never the
-            // rest of the profile list.
-            LogDiscoveryRefreshFailed(ex);
-            return Array.Empty<DiscoveredProfile>();
+            var profile = connection.ToProfile(_userProfileDirectory);
+            if (ids.Add(profile.Id)) result.Add(profile);
         }
+
+        if (!_source.SshHostsDiscovery) return result;
+
+        // An unreadable file costs its own entries, never the rest of
+        // the profile list.
+        if (_readSshConfig is not null)
+        {
+            try { AddAll(Ssh.SshConfigHosts.Parse(_readSshConfig())); }
+            catch (Exception ex) { LogDiscoveryRefreshFailed(ex); }
+        }
+        if (_readKnownHosts is not null)
+        {
+            try { AddAll(SshKnownHosts.Parse(_readKnownHosts(), _source.SshHostsUser)); }
+            catch (Exception ex) { LogDiscoveryRefreshFailed(ex); }
+        }
+        return result;
     }
 
     private void RecomposeAndFire()

@@ -418,6 +418,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public IReadOnlyList<string> ProfileWarnings => _profileView.ProfileWarnings;
     public bool SshHostsDiscovery => _profileView.SshHostsDiscovery;
     public string? SshHostsUser => _profileView.SshHostsUser;
+    public IReadOnlyList<Ghostty.Core.Ssh.SshConnection> SshConnections => _profileView.SshConnections;
 
     public event Action? ProfileConfigChanged;
 
@@ -1321,6 +1322,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                     // without surfacing a per-subkey entry in
                     // WindowsOnlyKeysUsed (would flood the settings UI
                     // notice list for a many-profile config).
+                    continue;
+                }
+                if (WindowsOnlyKeys.IsSshConnectionKey(key))
+                {
+                    // ssh.<id>.<subkey> saved connections, read from the
+                    // raw file like profile blocks; same quiet treatment.
                     continue;
                 }
                 if (WindowsOnlyKeys.IsInternalKey(key))

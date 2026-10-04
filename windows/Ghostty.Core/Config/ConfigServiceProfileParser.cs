@@ -57,7 +57,19 @@ public static class ConfigServiceProfileParser
         var hidden = ProfileSourceParser.ExtractHiddenIds(configPairs);
         var hiddenMentions = ProfileSourceParser.ExtractHiddenMentionIds(configPairs);
 
-        return BuildView(parsed, hidden, hiddenMentions, fileValueReader);
+        var view = BuildView(parsed, hidden, hiddenMentions, fileValueReader);
+
+        // Saved ssh connections (ssh.<id>.* blocks). Their warnings join
+        // the profile warnings: the settings UI shows one list.
+        var ssh = Ghostty.Core.Ssh.SshConnectionParser.Parse(configPairs);
+        if (ssh.Connections.Count == 0 && ssh.Warnings.Count == 0) return view;
+        return view with
+        {
+            SshConnections = ssh.Connections,
+            ProfileWarnings = ssh.Warnings.Count == 0
+                ? view.ProfileWarnings
+                : [.. view.ProfileWarnings, .. ssh.Warnings],
+        };
     }
 
     private static ProfileView BuildView(
@@ -174,4 +186,9 @@ public sealed record ProfileView(
     IReadOnlySet<string> HiddenProfileIds,
     IReadOnlyList<string> ProfileWarnings,
     bool SshHostsDiscovery = false,
-    string? SshHostsUser = null);
+    string? SshHostsUser = null)
+{
+    /// <summary>Saved connections from <c>ssh.&lt;id&gt;.*</c> blocks.</summary>
+    public IReadOnlyList<Ghostty.Core.Ssh.SshConnection> SshConnections { get; init; }
+        = Array.Empty<Ghostty.Core.Ssh.SshConnection>();
+}

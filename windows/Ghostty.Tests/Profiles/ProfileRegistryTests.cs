@@ -514,6 +514,45 @@ public class ProfileRegistryTests
     }
 
     [Fact]
+    public void SshConnections_AreListedWithoutTheDiscoveryToggle()
+    {
+        var reads = 0;
+        var src = new FakeProfileConfigSource
+        {
+            SshConnections = [new Ghostty.Core.Ssh.SshConnection("devel", "devel.local", "Devel box", "jgill", 2222)],
+        };
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance,
+            readKnownHosts: () => { reads++; return KnownHosts; },
+            readSshConfig: () => { reads++; return "Host cfg\n"; });
+
+        var saved = Assert.Single(registry.Profiles, p => p.Id == "ssh-devel");
+        Assert.Equal("Devel box", saved.Name);
+        Assert.Equal("ssh -p 2222 jgill@devel.local", saved.Command);
+        Assert.Equal(0, reads);
+    }
+
+    [Fact]
+    public void SshHosts_SavedBeatsConfigBeatsKnownHosts()
+    {
+        var src = new FakeProfileConfigSource
+        {
+            SshHostsDiscovery = true,
+            // Same id the known_hosts entry for devel.local would get.
+            SshConnections = [new Ghostty.Core.Ssh.SshConnection("devel-local", "devel.local", User: "root")],
+        };
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance,
+            readKnownHosts: () => KnownHosts + "build ssh-ed25519 DDDD\n",
+            readSshConfig: () => "Host build\n  HostName build.example\nHost alias\n");
+
+        Assert.Equal("ssh root@devel.local", Assert.Single(registry.Profiles, p => p.Id == "ssh-devel-local").Command);
+        // ~/.ssh/config's alias wins over the bare known_hosts name.
+        Assert.Equal("SSH: build", Assert.Single(registry.Profiles, p => p.Id == "ssh-build").Name);
+        Assert.Single(registry.Profiles, p => p.Id == "ssh-alias");
+    }
+
+    [Fact]
     public void SshHosts_UnreadableFile_KeepsTheRestOfTheList()
     {
         var src = new FakeProfileConfigSource
