@@ -3987,14 +3987,19 @@ else
 /// Available since: 1.1.1
 @"auto-reload-config": bool = false,
 
-/// Enable the built-in Settings UI on Windows. On other platforms,
-/// this option has no effect. When false, the "open config" action
-/// opens the config file in the default editor (matching macOS
-/// behavior). When true, opens the built-in settings window with
-/// structured editing.
+/// Enable the built-in Settings UI on Windows. This is the product
+/// default: the graphical settings are the app, so the "open config"
+/// action opens the built-in settings window with structured editing.
+/// Set this to false to get the previous behaviour instead, where the
+/// action hands the config file to the default editor (matching macOS).
+///
+/// On other platforms this option has no effect. A launch with
+/// --no-config never opens the settings window: nothing reads that file
+/// this session, so a window whose toggles write to it would be writing
+/// into an ignore.
 ///
 /// Available since: 1.1.1
-@"windows-settings-ui": bool = false,
+@"windows-settings-ui": bool = true,
 
 /// If `true` (default), applications running in the terminal can show desktop
 /// notifications using certain escape sequences such as OSC 9 or OSC 777.
