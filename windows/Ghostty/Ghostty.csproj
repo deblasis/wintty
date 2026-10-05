@@ -244,12 +244,15 @@
 
     <!--
       DirectX Shader Compiler redistributable. The DX12 renderer compiles
-      user custom shaders at runtime via LoadLibraryW("dxcompiler.dll")
-      (src/renderer/directx12/d3d12.zig, DxcLibrary.load). Without it the
+      user custom shaders at runtime, loading dxcompiler.dll by full path
+      out of the executable's own directory (src/renderer/directx12/
+      d3d12.zig, DxcLibrary.load), so this deployment location is what
+      the loader looks at and nothing else is. Without the DLL the
       custom-shader setting silently does nothing, which is what shipped
-      until now: the DLL is not an in-box Windows component, so the feature
-      only ever worked for people who happened to have a copy on PATH from
-      an unrelated install.
+      until now: the DLL is not an in-box Windows component, and the old
+      bare-name load only ever found it for people who happened to have a
+      copy somewhere the loader's search order reached from an unrelated
+      install.
 
       We deliberately ship dxcompiler.dll ALONE, without the dxil.dll
       validator that older guidance pairs with it. DXC 1.8.2502 stopped
@@ -359,13 +362,15 @@
   </Target>
 
   <!--
-    Deploy dxcompiler.dll for the build platform alongside Wintty.exe.
-    NOT into native\: LoadLibraryW with a bare name searches the directory
-    the *application* loaded from, never the directory of the calling DLL.
-    In Release the DX12 code is statically linked into Wintty.exe anyway
-    (DirectPInvoke + ghostty-static.lib); in Debug it lives in
-    native\ghostty.dll. The exe folder is the one location that works for
-    both.
+    Deploy dxcompiler.dll for the build platform alongside Wintty.exe,
+    which is the directory the loader resolves it in
+    (src/renderer/directx12/d3d12.zig, DxcLibrary.load, builds
+    <exe dir>\dxcompiler.dll by full path).
+    NOT into native\: the loader anchors on the *executable*, not on the
+    module containing the call site. In Release the DX12 code is
+    statically linked into Wintty.exe anyway (DirectPInvoke +
+    ghostty-static.lib); in Debug it lives in native\ghostty.dll. The
+    exe folder is the one location that works for both.
 
     Same longhand-per-RID shape as the ConPTY block above, and for the same
     MSBuild reason. Package arch folders are lowercase x86/x64/arm64 while
