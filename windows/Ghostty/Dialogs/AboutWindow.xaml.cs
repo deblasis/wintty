@@ -10,6 +10,8 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Win32;
+using Windows.Win32.Foundation;
 using WinRT.Interop;
 
 namespace Ghostty.Dialogs;
@@ -38,15 +40,18 @@ internal sealed partial class AboutWindow : Window
         var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
         var appWindow = AppWindow.GetFromWindowId(windowId);
 
-        // Small panel centered on the cursor's display, like SettingsWindow
-        // but sized to the content rather than the 1100x750 settings shell.
-        const int width = 420;
-        const int height = 560;
-        var display = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
-        var work = display.WorkArea;
-        var x = work.X + (work.Width - width) / 2;
-        var y = work.Y + (work.Height - height) / 2;
-        appWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
+        // Small panel centered on its display, like SettingsWindow but sized
+        // to the content rather than the 1100x750 settings shell. Both halves
+        // of that sentence used to be a lie at 150%: AppWindow sizes are in
+        // physical pixels, so the 420x560 opened as 280x373, and a panel
+        // taller than the work area centered to a negative y.
+        const int designWidth = 420;
+        const int designHeight = 560;
+        var dpi = PInvoke.GetDpiForWindow(new HWND(hwnd));
+        var placement = DpiScaledWindowPlacement.Compute(
+            designWidth, designHeight, dpi, WindowHelper.WorkAreaFor(windowId));
+        appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+            placement.X, placement.Y, placement.Width, placement.Height));
 
         // Follow OS theme unless window-theme forces light/dark, matching
         // the Settings window's System fallback.

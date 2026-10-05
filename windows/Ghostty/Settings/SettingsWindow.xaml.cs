@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Ghostty.Branding;
 using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
@@ -13,6 +14,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Windows.Win32;
+using Windows.Win32.Foundation;
 using WinRT.Interop;
 
 namespace Ghostty.Settings;
@@ -82,17 +85,21 @@ internal sealed partial class SettingsWindow : Window
         // The Raw Editor's unsaved-text prompt intercepts this close; see
         // OnClosing.
         appWindow.Closing += OnClosing;
-        // Settings window is centered on the display the cursor is on,
-        // sized to give room for the new sub-sectioned pages. The
-        // DisplayArea API is the WinUI 3 equivalent of macOS's
-        // NSScreen.mainScreen and handles multi-monitor correctly.
-        const int width = 1100;
-        const int height = 750;
-        var display = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
-        var work = display.WorkArea;
-        var x = work.X + (work.Width - width) / 2;
-        var y = work.Y + (work.Height - height) / 2;
-        appWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
+        // Settings window is centered on its display, sized to give room for
+        // the new sub-sectioned pages. Three numbers make that more than a
+        // comment: AppWindow sizes are in PHYSICAL pixels, so the design size
+        // below is scaled by this window's own DPI (the shader gallery
+        // picker's rule), and the result is clamped to the work area.
+        // Without the scale the 1100x750 opens at 733x500 on a 150% monitor;
+        // without the clamp a window taller than the work area centers to a
+        // negative y and starts off the top of the screen.
+        const int designWidth = 1100;
+        const int designHeight = 750;
+        var dpi = PInvoke.GetDpiForWindow(new HWND(hwnd));
+        var placement = DpiScaledWindowPlacement.Compute(
+            designWidth, designHeight, dpi, WindowHelper.WorkAreaFor(windowId));
+        appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+            placement.X, placement.Y, placement.Width, placement.Height));
 
         // Settings UI follows the OS theme unless window-theme is
         // explicitly "light" or "dark". Unlike the terminal chrome,

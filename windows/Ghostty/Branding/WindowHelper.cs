@@ -2,7 +2,12 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using Ghostty.Core.Windows;
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Windows.Win32;
+using Windows.Win32.Foundation;
 
 namespace Ghostty.Branding;
 
@@ -78,5 +83,23 @@ internal static class WindowHelper
             Debug.WriteLine(
                 $"AppWindow.SetIcon failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The work area of the display <paramref name="windowId"/> sits on, in
+    /// physical pixels, as the plain shape the Core placement math takes.
+    ///
+    /// DisplayArea is the WinUI 3 equivalent of macOS's NSScreen.mainScreen
+    /// and handles multi-monitor correctly; this only converts the
+    /// rectangle, so the scaling and clamping rules live in one tested
+    /// place instead of once per window constructor.
+    /// </summary>
+    public static WorkAreaRect WorkAreaFor(WindowId windowId) =>
+        WorkAreaOf(DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary));
+
+    private static WorkAreaRect WorkAreaOf(DisplayArea display)
+    {
+        var work = display.WorkArea;
+        return new WorkAreaRect(work.X, work.Y, work.Width, work.Height);
     }
 }
