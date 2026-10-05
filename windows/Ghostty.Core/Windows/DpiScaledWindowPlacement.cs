@@ -19,8 +19,8 @@ namespace Ghostty.Core.Windows;
 /// Contract, in the order the calls happen:
 ///
 ///   - The design size is scaled by the window's own DPI over
-///     <see cref="DefaultDpi"/>. A DPI of 0 -- what GetDpiForWindow returns
-///     for a window that has gone or a monitor the process cannot read --
+///     <see cref="DefaultDpi"/>. A DPI of 0 -- what a failed monitor DPI
+///     read yields (no monitor, or one the process cannot read) --
 ///     is taken as unscaled, which is what the shader gallery picker
 ///     already settled on.
 ///   - The scaled size is clamped to the work area on each axis. Bigger than

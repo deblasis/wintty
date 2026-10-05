@@ -14,8 +14,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using Windows.Win32;
-using Windows.Win32.Foundation;
 using WinRT.Interop;
 
 namespace Ghostty.Settings;
@@ -89,18 +87,22 @@ internal sealed partial class SettingsWindow : Window
         // sized to give room for the new sub-sectioned pages. Three numbers
         // make that more than a comment: it opens on the CALLER's monitor
         // (WorkAreaForCaller), AppWindow sizes are in PHYSICAL pixels so the
-        // design size below is scaled by this window's own DPI (the shader
-        // gallery picker's rule), and the result is clamped to the work area.
+        // design size below is scaled by the DPI of the monitor that work
+        // area is on (an unshown window's own DPI is still its birth
+        // monitor's), and the result is clamped to the work area.
         // Without the monitor the window opens on the primary whatever the
         // user was working on; without the scale the 1100x750 opens at
         // 733x500 on a 150% monitor; without the clamp a window taller than
         // the work area centers to a negative y and starts off-screen.
         const int designWidth = 1100;
         const int designHeight = 750;
-        var dpi = PInvoke.GetDpiForWindow(new HWND(hwnd));
+        var workArea = WindowHelper.WorkAreaForCaller(windowId);
+        // The DPI of the monitor the work area is on, not of this window:
+        // an unshown window reports its birth monitor's DPI, which on a
+        // mixed-DPI setup is not the monitor it is about to land on.
+        var dpi = WindowHelper.DpiForWorkArea(workArea);
         var placement = DpiScaledWindowPlacement.Compute(
-            designWidth, designHeight, dpi,
-            WindowHelper.WorkAreaForCaller(windowId));
+            designWidth, designHeight, dpi, workArea);
         appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
             placement.X, placement.Y, placement.Width, placement.Height));
 

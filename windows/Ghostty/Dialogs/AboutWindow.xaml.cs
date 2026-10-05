@@ -10,8 +10,6 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using Windows.Win32;
-using Windows.Win32.Foundation;
 using WinRT.Interop;
 
 namespace Ghostty.Dialogs;
@@ -47,9 +45,12 @@ internal sealed partial class AboutWindow : Window
         // taller than the work area centered to a negative y.
         const int designWidth = 420;
         const int designHeight = 560;
-        var dpi = PInvoke.GetDpiForWindow(new HWND(hwnd));
+        var workArea = WindowHelper.WorkAreaFor(windowId);
+        // Same rule as the settings window: DPI from the target monitor,
+        // not from an unshown window whose DPI is still its birth monitor's.
+        var dpi = WindowHelper.DpiForWorkArea(workArea);
         var placement = DpiScaledWindowPlacement.Compute(
-            designWidth, designHeight, dpi, WindowHelper.WorkAreaFor(windowId));
+            designWidth, designHeight, dpi, workArea);
         appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
             placement.X, placement.Y, placement.Width, placement.Height));
 

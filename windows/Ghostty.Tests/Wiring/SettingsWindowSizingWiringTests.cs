@@ -21,8 +21,10 @@ namespace Ghostty.Tests.Wiring;
 ///
 /// Four joints carry the fix, and each is separately defeatable:
 ///
-///   - The scale. A literal, a system DPI, or a call that reads the window's
-///     own DPI are three different windows; only the third is the fix.
+///   - The scale. A literal, a system DPI, and the window's own DPI read in
+///     a constructor are three wrong numbers; the fix reads the DPI of the
+///     monitor the WORK AREA is on, because an unshown window still reports
+///     its birth monitor's DPI wherever it is about to be placed.
 ///   - The design size. It has to stay declared as a constant the call
 ///     names, or the 1100x750 that reads as the design intent drifts into
 ///     the arithmetic and the scale silently applies to nothing.
@@ -33,7 +35,7 @@ namespace Ghostty.Tests.Wiring;
 ///     MoveAndResize arguments in order: a swapped pair would pass a
 ///     "does it resize" check.
 ///
-/// What this cannot prove: what GetDpiForWindow returns, or what the window
+/// What this cannot prove: what GetDpiForMonitor returns, or what the window
 /// looks like. Both need a real window on a real monitor.
 /// </summary>
 public class SettingsWindowSizingWiringTests
@@ -47,8 +49,9 @@ public class SettingsWindowSizingWiringTests
     /// <summary>The one placement call both windows must make.</summary>
     private const string Compute = "DpiScaledWindowPlacement.Compute";
 
-    /// <summary>The window read that supplies the scale.</summary>
-    private const string DpiCall = "PInvoke.GetDpiForWindow";
+    /// <summary>The DPI read that supplies the scale: the target monitor's,
+    /// taken from the work area the window is about to land on.</summary>
+    private const string DpiCall = "WindowHelper.DpiForWorkArea";
 
     [Theory]
     [InlineData(SettingsFile)]
@@ -62,22 +65,33 @@ public class SettingsWindowSizingWiringTests
         var compute = Assert.Single(ctor.Calls(Compute));
 
         Assert.Equal(4, compute.ArgumentList.Arguments.Count);
-        Assert.True(
-            compute.ArgExpression(3).ToString().Contains(
-                "WindowHelper.WorkAreaFor", StringComparison.Ordinal),
-            "the placement must be clamped against a work area resolved for this "
-            + $"window; found `{compute.Arg(3)}`. A size computed with nothing to "
-            + "clamp it against is how a 750-tall window starts above the top of a "
-            + "768-tall work area");
 
-        // The scale is this window's own monitor, read once, and handed on
-        // under the name the placement reads it by.
-        var dpi = Assert.Single(ctor.Calls(DpiCall));
+        // The work area is resolved once, by WindowHelper, and the SAME
+        // variable feeds the clamp: scale and clamp must agree about which
+        // monitor is the target.
+        var clampArea = Assert.IsType<IdentifierNameSyntax>(compute.ArgExpression(3));
+        var workAreaDecl = Assert.Single(
+            ctor.DescendantNodes().OfType<VariableDeclaratorSyntax>(),
+            v => v.Identifier.ValueText == clampArea.Identifier.ValueText);
         Assert.True(
-            dpi.ArgumentList.Arguments.Count == 1,
-            $"{DpiCall} takes the window handle and nothing else; found "
-            + $"{dpi.ArgumentList.Arguments.Count} arguments, so this test is not "
-            + "reading the scale the window will use");
+            Assert.IsType<InvocationExpressionSyntax>(workAreaDecl.Initializer!.Value)
+                .CalleeText().Contains(
+                    "WindowHelper.WorkAreaFor", StringComparison.Ordinal),
+            $"the work area `{clampArea.Identifier.ValueText}` must be resolved by a "
+            + "WindowHelper call (caller-resolved for settings, own-window for about); "
+            + "a size computed with nothing to clamp it against is how a 750-tall "
+            + "window starts above the top of a 768-tall work area");
+
+        // The scale is the DPI of the monitor that work area belongs to. A
+        // window reading its own DPI in a constructor reads its BIRTH
+        // monitor's - it has not been shown or moved yet - which on a
+        // mixed-DPI setup is not the monitor it lands on: the wrong-screen
+        // sizing this batch fixes, so the pin is the work-area-derived read.
+        var dpi = Assert.Single(ctor.Calls(DpiCall));
+        Assert.Single(dpi.ArgumentList.Arguments);
+        var dpiArea = Assert.IsType<IdentifierNameSyntax>(dpi.ArgExpression(0));
+        Assert.Equal(
+            clampArea.Identifier.ValueText, dpiArea.Identifier.ValueText);
 
         var scale = Assert.IsType<IdentifierNameSyntax>(compute.ArgExpression(2));
         var declared = Assert.Single(
@@ -88,8 +102,9 @@ public class SettingsWindowSizingWiringTests
         Assert.True(
             initializer.CalleeText().EndsWith(DpiCall, StringComparison.Ordinal),
             $"the `{scale}` the placement scales by must be read by {DpiCall}, found "
-            + $"`{initializer.CalleeText()}`. The system DPI is the wrong number on a "
-            + "per-monitor-scaled setup, which is exactly where this bug was reported");
+            + $"`{initializer.CalleeText()}`. GetDpiForWindow in a constructor is the "
+            + "birth monitor's number, which on a mixed-DPI setup scales the window "
+            + "for the wrong screen");
 
         // The design size stays a named constant the call names. Written into
         // the argument list instead, the constants still read as the design

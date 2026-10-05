@@ -63,33 +63,53 @@ public class SettingsWindowRestoreWiringTests
             $"the existing-window arm of {Method} must return; anything it falls "
             + "through to constructs a second settings window");
 
-        // Show, on that arm, through the AppWindow.
-        var shows = guard.Statement.Calls("_settingsWindow.AppWindow?.Show");
-        var show = Assert.Single(shows);
+        // Restore a minimized window through Win32: AppWindow.Show is SW_SHOW
+        // semantics - activate, not restore - and a minimized window is
+        // already visible, so Show alone leaves it in the taskbar. The iconic
+        // check is what makes the restore happen at all.
+        var restore = Assert.Single(
+            guard.Statement.Calls("Windows.Win32.PInvoke.ShowWindow"));
+        Assert.True(
+            restore.ArgumentList.Arguments.Count == 2
+            && restore.ArgumentList.Arguments[1].ToString().Contains(
+                "SW_RESTORE", StringComparison.Ordinal),
+            $"the minimized path must call ShowWindow with SW_RESTORE; found "
+            + $"'{restore}'");
+        Assert.Single(guard.Statement.Calls("Windows.Win32.PInvoke.IsIconic"));
 
-        // Then activate. The reverse order is the defect wearing this fix's
-        // own test green: an activated minimized window stays minimized.
+        // The restore belongs to the iconic arm specifically, UNGUARDED by a
+        // logical not: the exact historical mutation is `!IsIconic` with the
+        // restore in the else, which restores maximized windows
+        // (un-maximizing them) and never touches minimized ones. A contains-
+        // IsIconic pin alone would pass that mutation green.
+        var iconicArm = restore.Ancestors().OfType<IfStatementSyntax>()
+            .FirstOrDefault(a => a.Condition.ToString().Contains(
+                "IsIconic", StringComparison.Ordinal));
+        Assert.NotNull(iconicArm);
+        Assert.False(
+            iconicArm!.Condition.ToString().Contains('!'),
+            $"the IsIconic guard must not be negated; found `{iconicArm.Condition}`");
+
+        // Both paths converge on Activate, LAST: the reverse order is the
+        // defect wearing this fix's own test green (an activated minimized
+        // window stays minimized).
         var activate = Assert.Single(guard.Statement.Calls("_settingsWindow.Activate"));
         Assert.True(
-            show.SpanStart < activate.SpanStart,
+            restore.SpanStart < activate.SpanStart,
             $"{Method} must restore before it activates. `Activate` alone does not "
             + "reliably restore a minimized window -- the codebase's own note on the "
-            + "shader gallery picker says so -- so the Show has to come first or the "
-            + "second open of a minimized settings window answers the keystroke with "
-            + "nothing on screen");
+            + "shader gallery picker says so -- so the restore has to come first or "
+            + "the second open of a minimized settings window answers the keystroke "
+            + "with nothing on screen");
+        Assert.True(
+            activate.Ancestors().TakeWhile(a => a != guard.Statement)
+                .OfType<IfStatementSyntax>().FirstOrDefault() is null,
+            "Activate must sit at the arm's top level, after whichever restore path "
+            + "ran; inside a branch it stops applying to the other path");
 
-        // And neither is behind a further branch, which would disable the
-        // restore while leaving both calls right where this test looks.
-        foreach (var call in new[] { show, activate })
-        {
-            var branch = call.Ancestors().TakeWhile(a => a != guard.Statement)
-                .OfType<IfStatementSyntax>().FirstOrDefault();
-            Assert.True(
-                branch is null,
-                $"{call} sits inside another branch of the existing-window arm; a "
-                + "guard there that always holds disables the restore and leaves both "
-                + "calls present");
-        }
+        // And the non-minimized path still brings the window forward through
+        // the AppWindow.
+        Assert.Single(guard.Statement.Calls("appWindow.Show"));
     }
 
     [Fact]

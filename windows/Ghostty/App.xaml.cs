@@ -2165,12 +2165,29 @@ public partial class App : Application
             // bring a minimized window back: it raises the activation request
             // to a window the shell never shows, so the keystroke that asked
             // for the settings is answered with nothing on screen and the
-            // window stays in the taskbar. Same remedy the shader gallery
-            // picker already uses on its second entry point.
+            // window stays in the taskbar. AppWindow.Show is SW_SHOW
+            // semantics - activate, not restore - and a minimized window is
+            // already visible, so the explicit iconic check goes through
+            // ShowWindow(SW_RESTORE), matching the codebase's existing direct ShowWindow use.
             //
             // The single instance is kept: this is the window that was already
             // open, so nothing here can construct a second one.
-            _settingsWindow.AppWindow?.Show();
+            var appWindow = _settingsWindow.AppWindow;
+            if (appWindow is not null)
+            {
+                var hwnd = new Windows.Win32.Foundation.HWND(
+                    Microsoft.UI.Win32Interop.GetWindowFromWindowId(appWindow.Id));
+                if (Windows.Win32.PInvoke.IsIconic(hwnd))
+                {
+                    Windows.Win32.PInvoke.ShowWindow(
+                        hwnd,
+                        Windows.Win32.UI.WindowsAndMessaging.SHOW_WINDOW_CMD.SW_RESTORE);
+                }
+                else
+                {
+                    appWindow.Show();
+                }
+            }
             _settingsWindow.Activate();
             return;
         }

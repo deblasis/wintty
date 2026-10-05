@@ -12,7 +12,7 @@ namespace Ghostty.Tests.Config;
 /// <summary>
 /// That <c>windows-settings-ui</c> ships on.
 ///
-/// The graphical settings are the product default (founder decision, rc.8),
+/// The graphical settings are the product default (a founder decision),
 /// so the Zig schema says so, the app's own reader of the key agrees, and
 /// the one launch that must still not open a settings window says so for a
 /// reason of its own.
@@ -114,7 +114,8 @@ public class SettingsUiDefaultTests
             read.GuardedByConfigPath,
             "the " + Key + " read must not branch on the config file existing. "
             + "A user whose config file has not been written yet gets the "
-            + "product default and a seed write, not the pre-rc.8 behaviour.");
+            + "product default and a seed write, not the old text-editor "
+            + "behaviour.");
     }
 
     [Fact]
