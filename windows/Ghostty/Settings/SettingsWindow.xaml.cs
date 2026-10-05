@@ -85,19 +85,22 @@ internal sealed partial class SettingsWindow : Window
         // The Raw Editor's unsaved-text prompt intercepts this close; see
         // OnClosing.
         appWindow.Closing += OnClosing;
-        // Settings window is centered on its display, sized to give room for
-        // the new sub-sectioned pages. Three numbers make that more than a
-        // comment: AppWindow sizes are in PHYSICAL pixels, so the design size
-        // below is scaled by this window's own DPI (the shader gallery
-        // picker's rule), and the result is clamped to the work area.
-        // Without the scale the 1100x750 opens at 733x500 on a 150% monitor;
-        // without the clamp a window taller than the work area centers to a
-        // negative y and starts off the top of the screen.
+        // Settings window is centered on the display the request came from,
+        // sized to give room for the new sub-sectioned pages. Three numbers
+        // make that more than a comment: it opens on the CALLER's monitor
+        // (WorkAreaForCaller), AppWindow sizes are in PHYSICAL pixels so the
+        // design size below is scaled by this window's own DPI (the shader
+        // gallery picker's rule), and the result is clamped to the work area.
+        // Without the monitor the window opens on the primary whatever the
+        // user was working on; without the scale the 1100x750 opens at
+        // 733x500 on a 150% monitor; without the clamp a window taller than
+        // the work area centers to a negative y and starts off-screen.
         const int designWidth = 1100;
         const int designHeight = 750;
         var dpi = PInvoke.GetDpiForWindow(new HWND(hwnd));
         var placement = DpiScaledWindowPlacement.Compute(
-            designWidth, designHeight, dpi, WindowHelper.WorkAreaFor(windowId));
+            designWidth, designHeight, dpi,
+            WindowHelper.WorkAreaForCaller(windowId));
         appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
             placement.X, placement.Y, placement.Width, placement.Height));
 

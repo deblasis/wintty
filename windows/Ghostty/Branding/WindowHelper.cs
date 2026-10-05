@@ -86,6 +86,37 @@ internal static class WindowHelper
     }
 
     /// <summary>
+    /// The work area of the display the CALLER sits on, in physical pixels.
+    ///
+    /// A window opened on request belongs on the monitor the request came
+    /// from. The settings ask arrives as the app-targeted open_config action,
+    /// whose event carries no window -- libghostty raises it on the
+    /// process-wide bootstrap host, so there is nothing to take an owner
+    /// from. The foreground window at the moment the caller runs IS the
+    /// requesting one: a keybind, a command-palette entry and a tray menu all
+    /// fire while the terminal that owns them still holds the foreground, and
+    /// the window about to be opened has not been shown yet, so it cannot be
+    /// what this names.
+    ///
+    /// <paramref name="fallbackWindowId"/> is the caller's own window, used
+    /// when there is no foreground window to ask about -- a tray-only ask
+    /// during logon, or a moment with no foreground at all. Both arms end on
+    /// the primary display through DisplayAreaFallback.Primary, which is also
+    /// what a window id that has stopped resolving settles on.
+    /// </summary>
+    public static unsafe WorkAreaRect WorkAreaForCaller(WindowId fallbackWindowId)
+    {
+        // HWND wraps a raw pointer, so reading the handle out of it takes an
+        // unsafe context; the same cast InvisibleCursorFactory makes for a
+        // returned handle. Nothing else in here is a pointer.
+        var hwnd = (nint)PInvoke.GetForegroundWindow().Value;
+        var id = hwnd == 0
+            ? fallbackWindowId
+            : Win32Interop.GetWindowIdFromWindow(hwnd);
+        return WorkAreaOf(DisplayArea.GetFromWindowId(id, DisplayAreaFallback.Primary));
+    }
+
+    /// <summary>
     /// The work area of the display <paramref name="windowId"/> sits on, in
     /// physical pixels, as the plain shape the Core placement math takes.
     ///
