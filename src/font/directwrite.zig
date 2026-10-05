@@ -793,10 +793,12 @@ pub const DWriteCreateFactoryFn = *const fn (
     *?*anyopaque,
 ) callconv(.winapi) HRESULT;
 
-// Zig 0.16 dropped LoadLibraryW/GetProcAddress from std.os.windows.kernel32,
-// so declare them here: this is their only consumer.
-extern "kernel32" fn LoadLibraryW(
+// Zig 0.16 dropped the dynamic-loading entry points from
+// std.os.windows.kernel32, so declare them here: this is their only consumer.
+extern "kernel32" fn LoadLibraryExW(
     lpLibFileName: [*:0]const u16,
+    hFile: ?std.os.windows.HANDLE,
+    dwFlags: std.os.windows.DWORD,
 ) callconv(.winapi) ?std.os.windows.HMODULE;
 
 extern "kernel32" fn GetProcAddress(
@@ -804,10 +806,42 @@ extern "kernel32" fn GetProcAddress(
     lpProcName: [*:0]const u8,
 ) callconv(.winapi) ?std.os.windows.FARPROC;
 
-pub fn loadDWriteCreateFactory() !DWriteCreateFactoryFn {
-    const dwrite_dll = LoadLibraryW(
+extern "kernel32" fn GetModuleFileNameW(
+    hModule: ?std.os.windows.HMODULE,
+    lpFilename: [*]u16,
+    nSize: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.DWORD;
+
+extern "kernel32" fn GetEnvironmentVariableW(
+    lpName: [*:0]const u16,
+    lpBuffer: [*]u16,
+    nSize: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.DWORD;
+
+/// Resolve system libraries from System32 only. A bare-name load
+/// consults the loader's search order, whose first entry is the
+/// directory of the executable, so a dwrite.dll dropped beside Wintty
+/// (or beside the test binary, or in the working directory) would be
+/// mapped and its DWriteCreateFactory called with the process's
+/// privileges. dwrite.dll is an in-box DLL that no tier ships, so
+/// there is nothing to gain from letting the search order pick it.
+const LOAD_LIBRARY_SEARCH_SYSTEM32: std.os.windows.DWORD = 0x0000_0800;
+
+/// Load dwrite.dll from System32, or null when it is not there. Split
+/// out so a test can name the module that was actually mapped.
+pub fn loadDWrite() ?std.os.windows.HMODULE {
+    return LoadLibraryExW(
         std.unicode.utf8ToUtf16LeStringLiteral("dwrite.dll"),
-    ) orelse return error.DWriteNotAvailable;
+        null,
+        LOAD_LIBRARY_SEARCH_SYSTEM32,
+    );
+}
+
+pub fn loadDWriteCreateFactory() !DWriteCreateFactoryFn {
+    // The module is intentionally never freed: the returned pointer
+    // outlives this call, and unloading dwrite.dll under it would make
+    // it dangle. One module for the life of the process is the intent.
+    const dwrite_dll = loadDWrite() orelse return error.DWriteNotAvailable;
 
     const proc = GetProcAddress(
         dwrite_dll,
@@ -885,4 +919,77 @@ test "enum values" {
 
 test "DWRITE_UNICODE_RANGE size" {
     try std.testing.expectEqual(@sizeOf(DWRITE_UNICODE_RANGE), 8);
+}
+
+test "dwrite.dll is resolved from System32, not from the search order" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A same-named DLL in the working directory, loadable but without
+    // DWriteCreateFactory: the shape of the file a search-order load
+    // would pick up instead of the real one.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_w: [std.fs.max_path_bytes]u16 = undefined;
+    const root_len = GetEnvironmentVariableW(
+        std.unicode.utf8ToUtf16LeStringLiteral("SystemRoot"),
+        &root_w,
+        root_w.len,
+    );
+    if (root_len == 0 or root_len >= root_w.len) return error.SkipZigTest;
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len8 = std.unicode.utf16LeToUtf8(&root_buf, root_w[0..root_len]) catch
+        return error.SkipZigTest;
+    const source = try std.fs.path.join(alloc, &.{ root_buf[0..root_len8], "System32", "version.dll" });
+    defer alloc.free(source);
+
+    const work_dir = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    defer alloc.free(work_dir);
+    const plant = try std.fs.path.join(alloc, &.{ work_dir, "dwrite.dll" });
+    defer alloc.free(plant);
+    std.Io.Dir.copyFileAbsolute(source, plant, testing.io, .{}) catch
+        return error.SkipZigTest;
+
+    // The same plant BESIDE THE TEST BINARY: the application directory is
+    // FIRST in the old bare-name order, so only a plant there can turn the
+    // old loader red - a working-directory plant sits behind System32 and
+    // guards nothing. This is the location a hijack actually uses.
+    var exe_w: [std.fs.max_path_bytes]u16 = undefined;
+    const exe_len = GetModuleFileNameW(null, &exe_w, exe_w.len);
+    if (exe_len == 0 or exe_len >= exe_w.len) return error.SkipZigTest;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_len8 = try std.unicode.utf16LeToUtf8(&exe_buf, exe_w[0..exe_len]);
+    const exe_dir = std.fs.path.dirname(exe_buf[0..exe_len8]) orelse
+        return error.SkipZigTest;
+    const plant_exe = try std.fs.path.join(alloc, &.{ exe_dir, "dwrite.dll" });
+    defer alloc.free(plant_exe);
+    std.Io.Dir.copyFileAbsolute(source, plant_exe, testing.io, .{}) catch
+        return error.SkipZigTest;
+    defer std.fs.cwd().deleteFile(plant_exe) catch {};
+
+    var saved: [std.fs.max_path_bytes]u8 = undefined;
+    const saved_len = try std.process.currentPath(testing.io, &saved);
+    defer std.process.setCurrentPath(testing.io, saved[0..saved_len]) catch {};
+    try std.process.setCurrentPath(testing.io, work_dir);
+
+    // Resolves, and the module behind it is System32's, not the plant.
+    const module = loadDWrite() orelse return error.TestExpectedEqual;
+    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    const len = GetModuleFileNameW(module, &wide, wide.len);
+    if (len == 0 or len >= wide.len) return error.TestExpectedEqual;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try std.unicode.utf16LeToUtf8(&path_buf, wide[0..len]);
+    const path = path_buf[0..path_len];
+    try testing.expect(std.ascii.indexOfIgnoreCase(path, "\\System32\\") != null);
+    try testing.expect(std.ascii.endsWithIgnoreCase(path, "\\dwrite.dll"));
+
+    // And the factory is reachable through the same module, which a
+    // plant without the export could not answer.
+    const factory = try loadDWriteCreateFactory();
+    try testing.expect(@intFromPtr(factory) != 0);
 }

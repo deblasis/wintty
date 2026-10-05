@@ -1769,20 +1769,55 @@ pub const IDxcCompiler3 = extern struct {
 pub const CLSID_DxcUtils = GUID{ .data1 = 0x6245D6AF, .data2 = 0x66E0, .data3 = 0x48FD, .data4 = .{ 0x80, 0xB4, 0x4D, 0x27, 0x17, 0x96, 0x74, 0x8C } };
 pub const CLSID_DxcCompiler = GUID{ .data1 = 0x73E22D93, .data2 = 0xE6CE, .data3 = 0x47F3, .data4 = .{ 0xB5, 0xBF, 0xF0, 0x66, 0x4F, 0x39, 0xC1, 0xB0 } };
 
-// DxcLibrary handles dynamic loading of dxcompiler.dll
+// --- dxcompiler.dll resolution ---
+//
+// dxcompiler.dll is an application-local DLL: no tier ships it, and
+// the process never calls SetDefaultDllDirectories. Loading it by bare
+// name therefore hands the choice to the loader's default search order,
+// whose first entries are the directory of the executable and then the
+// current working directory, so a dxcompiler.dll planted in either one
+// is mapped into the renderer process. It is also why DX12 custom
+// shaders render blank today: the load finds nothing where the loader
+// looks first and gives up.
+//
+// So the DLL is named by full path, out of the directory of the
+// executable, which is the same discipline `src/pty.zig` already uses
+// for the bundled conpty.dll and the same location
+// `windows/Ghostty/Ghostty.csproj` deploys dxcompiler.dll to. A full
+// path is not subject to the search order at all, so no search flag
+// has to be invented for it; dxcompiler.dll's own imports keep
+// resolving exactly as they do today.
+pub const dxc_dll_name = "dxcompiler.dll";
+
 pub const DxcLibrary = struct {
     dll: ?std.os.windows.HMODULE,
     create_instance: ?*const fn (*const GUID, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
 
-    /// Load dxcompiler.dll and get DxcCreateInstance function pointer.
-    /// Returns null if the DLL cannot be loaded.
+    /// Load dxcompiler.dll from the directory of the executable and get
+    /// the DxcCreateInstance function pointer.
+    ///
+    /// Returns null if the DLL cannot be loaded, which is the mode
+    /// every shipped build is in today: `shaders.zig` turns that null
+    /// into `CustomShaderFailure.compiler_unavailable` and carries on
+    /// with the built-in pipelines.
     pub fn load() ?DxcLibrary {
-        const dll_name = std.unicode.utf8ToUtf16LeStringLiteral("dxcompiler.dll");
-        const dll = LoadLibraryW(dll_name) orelse return null;
+        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dir = exeDir(&dir_buf) orelse return null;
+        return loadFromDir(dir);
+    }
+
+    /// The same load, against an explicit application directory.
+    ///
+    /// This is the seam the tests drive: they need to point the loader
+    /// at a directory they control, with a same-named DLL in the
+    /// working directory to prove the working directory is never
+    /// consulted.
+    pub fn loadFromDir(dir: []const u8) ?DxcLibrary {
+        const module = loadModuleFromDir(dir) orelse return null;
 
         // Get the DxcCreateInstance function
-        const proc = GetProcAddress(dll, "DxcCreateInstance") orelse {
-            _ = FreeLibrary(dll);
+        const proc = GetProcAddress(module, "DxcCreateInstance") orelse {
+            _ = FreeLibrary(module);
             return null;
         };
 
@@ -1790,7 +1825,7 @@ pub const DxcLibrary = struct {
         // aarch64, so @alignCast asserts what the loader already
         // guarantees.
         return DxcLibrary{
-            .dll = dll,
+            .dll = module,
             .create_instance = @ptrCast(@alignCast(proc)),
         };
     }
@@ -1810,6 +1845,68 @@ pub const DxcLibrary = struct {
     }
 };
 
+// --- dxcompiler.dll path resolution ---
+
+/// Directory holding the running executable, as UTF-8 with no trailing
+/// separator. Null only when the loader cannot name our own module, in
+/// which case the caller degrades exactly as it does for an absent DLL.
+///
+/// The executable's directory is the anchor rather than the current
+/// directory because that is where `Ghostty.csproj` puts dxcompiler.dll
+/// (next to Wintty.exe, the one location that works whether the DX12
+/// code is statically linked into the exe or lives in native\
+/// ghostty.dll) and because the process working directory is whatever
+/// directory the user happened to launch from.
+pub fn exeDir(buf_out: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    const len = GetModuleFileNameW(null, &wide, wide.len);
+    // The return is the length copied, or the buffer size when the
+    // buffer was too small (in which case the path is truncated and
+    // must not be used).
+    if (len == 0 or len >= wide.len) return null;
+
+    const utf8_len = std.unicode.utf16LeToUtf8(buf_out, wide[0..len]) catch return null;
+    return std.fs.path.dirname(buf_out[0..utf8_len]) orelse null;
+}
+
+/// Full path of `dxcompiler.dll` inside `dir`, as a null-terminated
+/// UTF-16 path for LoadLibraryW.
+///
+/// `buf_out` must leave its final u16 free for the terminator. Returns
+/// null when the result does not fit, when `dir` cannot be joined to,
+/// or when it is not valid UTF-8. A UNC app dir (`\\server\share\...`)
+/// and one longer than MAX_PATH both come back whole: neither is
+/// shortened, which is the property that keeps a resolved path from
+/// silently naming a different file than the caller asked for.
+pub fn dxcPathWInDir(
+    dir: []const u8,
+    buf_out: *[std.fs.max_path_bytes]u16,
+) ?[:0]const u16 {
+    var utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(
+        &utf8_buf,
+        "{s}\\{s}",
+        .{ dir, dxc_dll_name },
+    ) catch return null;
+
+    const utf16_len = std.unicode.utf8ToUtf16Le(
+        buf_out[0 .. buf_out.len - 1],
+        path,
+    ) catch return null;
+    buf_out[utf16_len] = 0;
+    return buf_out[0..utf16_len :0];
+}
+
+/// Load dxcompiler.dll out of `dir` by full path, or null when it is
+/// not there (or cannot be mapped). Split out from `DxcLibrary` so the
+/// tests can assert on the loaded module without needing the DLL to
+/// export `DxcCreateInstance`.
+pub fn loadModuleFromDir(dir: []const u8) ?std.os.windows.HMODULE {
+    var path_buf: [std.fs.max_path_bytes]u16 = undefined;
+    const path_w = dxcPathWInDir(dir, &path_buf) orelse return null;
+    return LoadLibraryW(path_w);
+}
+
 // --- Kernel32 helpers for fence synchronization ---
 
 // Zig 0.16 dropped the dynamic-loading trio from std.os.windows; the
@@ -1817,6 +1914,12 @@ pub const DxcLibrary = struct {
 pub extern "kernel32" fn LoadLibraryW(
     lpLibFileName: [*:0]const u16,
 ) callconv(.winapi) ?std.os.windows.HMODULE;
+
+pub extern "kernel32" fn GetModuleFileNameW(
+    hModule: ?std.os.windows.HMODULE,
+    lpFilename: [*]u16,
+    nSize: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.DWORD;
 
 pub extern "kernel32" fn GetProcAddress(
     hModule: std.os.windows.HMODULE,
@@ -2023,6 +2126,273 @@ test "DxcLibrary.load returns null when dxcompiler.dll absent" {
     // We don't actually call load() since it would fail if dxcompiler.dll is present.
     try std.testing.expectEqual(@sizeOf(?std.os.windows.HMODULE), @sizeOf(@FieldType(DxcLibrary, "dll")));
     try std.testing.expectEqual(@sizeOf(?*const fn (*const GUID, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT), @sizeOf(@FieldType(DxcLibrary, "create_instance")));
+}
+
+// --- dxcompiler.dll resolution rows ---
+//
+// The loader is a security boundary: a bare-name LoadLibraryW would
+// take whatever the search order finds first, and the search order
+// ends at the process working directory. So the rows are about which
+// file on disk ends up mapped, and they name the file they expect
+// rather than only checking that a handle came back.
+//
+// States, and the row covering each (`app dir` is what the loader is
+// pointed at, `cwd` is the process working directory):
+//
+//   app dir   cwd        expected
+//   -------   --------   ------------------------------------------------
+//   DLL       absent     happy: the app-dir copy is the one mapped
+//   DLL       DLL        hijack: the app-dir copy wins, cwd is ignored
+//   absent    DLL        hijack: not found; the cwd copy is never read
+//   absent    absent     absent: null, no crash, shaders degrade
+//   UNC or longer than MAX_PATH: the path still resolves, untruncated
+//
+// The stand-in for dxcompiler.dll is a copy of System32's version.dll:
+// a real PE the loader will map, under the name the loader looks for.
+// It carries no `DxcCreateInstance` export, which is exactly why the
+// module rows assert on the loaded module (and its path) rather than on
+// `DxcLibrary`, and the degradation row asserts that the missing
+// export is what turns a mapped module back into "unavailable".
+
+const dxc_test_externs = struct {
+    extern "kernel32" fn GetEnvironmentVariableW(
+        lpName: [*:0]const u16,
+        lpBuffer: [*]u16,
+        nSize: std.os.windows.DWORD,
+    ) callconv(.winapi) std.os.windows.DWORD;
+};
+
+/// `%SystemRoot%`, or null when it cannot be read.
+fn systemRoot(buf: []u8) ?[]const u8 {
+    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    const len = dxc_test_externs.GetEnvironmentVariableW(
+        std.unicode.utf8ToUtf16LeStringLiteral("SystemRoot"),
+        &wide,
+        wide.len,
+    );
+    if (len == 0 or len >= wide.len) return null;
+    const utf8_len = std.unicode.utf16LeToUtf8(buf, wide[0..len]) catch return null;
+    return buf[0..utf8_len];
+}
+
+/// Path of a file as the loader sees it: the loader hands back what
+/// it mapped, which is what makes "the cwd copy was not the one used"
+/// an assertion rather than a hope.
+fn loadedModulePath(module: std.os.windows.HMODULE, buf: []u8) ?[]const u8 {
+    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    const len = GetModuleFileNameW(module, &wide, wide.len);
+    if (len == 0 or len >= wide.len) return null;
+    const utf8_len = std.unicode.utf16LeToUtf8(buf, wide[0..len]) catch return null;
+    return buf[0..utf8_len];
+}
+
+/// Copy System32's version.dll into `dir` under the name the loader
+/// looks for, and return the absolute path it now sits at. Skips the
+/// row on a machine whose System32 is not where we expect it.
+fn plantDxcStandIn(dir: std.Io.Dir, alloc: std.mem.Allocator) ![]const u8 {
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = systemRoot(&root_buf) orelse return error.SkipZigTest;
+    const source = try std.fs.path.join(alloc, &.{ root, "System32", "version.dll" });
+    defer alloc.free(source);
+
+    const abs_dir = try dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(abs_dir);
+    const dest = try std.fs.path.join(alloc, &.{ abs_dir, dxc_dll_name });
+    errdefer alloc.free(dest);
+
+    std.Io.Dir.copyFileAbsolute(source, dest, std.testing.io, .{}) catch
+        return error.SkipZigTest;
+    return dest;
+}
+
+/// The process working directory, moved for the life of a row.
+///
+/// The Windows loader's search order ends at the current directory,
+/// so proving the loader never consults it means putting a file there.
+/// The mutation is process-global, hence the explicit restore.
+const ScopedCwd = struct {
+    saved: [std.fs.max_path_bytes]u8 = undefined,
+    len: usize = 0,
+
+    fn enter(path: []const u8) !ScopedCwd {
+        var self: ScopedCwd = .{};
+        self.len = try std.process.currentPath(std.testing.io, &self.saved);
+        errdefer std.process.setCurrentPath(std.testing.io, self.saved[0..self.len]) catch {};
+        try std.process.setCurrentPath(std.testing.io, path);
+        return self;
+    }
+
+    fn leave(self: ScopedCwd) void {
+        std.process.setCurrentPath(std.testing.io, self.saved[0..self.len]) catch {};
+    }
+};
+
+test "dxcompiler.dll: happy row resolves the app dir and loads that copy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const alloc = std.testing.allocator;
+    const planted = try plantDxcStandIn(tmp.dir, alloc);
+    defer alloc.free(planted);
+
+    const abs_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(abs_dir);
+
+    const module = loadModuleFromDir(abs_dir) orelse return error.TestExpectedEqual;
+    defer _ = FreeLibrary(module);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const loaded = loadedModulePath(module, &path_buf) orelse return error.TestExpectedEqual;
+    // Full path, and the file the loader mapped is the one planted
+    // above: a bare name could not have found it, since the temp
+    // directory is not on the search order.
+    try std.testing.expectEqualStrings(planted, loaded);
+}
+
+test "dxcompiler.dll: hijack row ignores a same-named DLL in the working directory" {
+    var app = std.testing.tmpDir(.{});
+    defer app.cleanup();
+    var work = std.testing.tmpDir(.{});
+    defer work.cleanup();
+
+    const alloc = std.testing.allocator;
+    const planted = try plantDxcStandIn(app.dir, alloc);
+    defer alloc.free(planted);
+    const cwd_copy = try plantDxcStandIn(work.dir, alloc);
+    defer alloc.free(cwd_copy);
+
+    const app_dir = try app.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(app_dir);
+    const work_dir = try work.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(work_dir);
+
+    const scoped = try ScopedCwd.enter(work_dir);
+    defer scoped.leave();
+
+    const module = loadModuleFromDir(app_dir) orelse return error.TestExpectedEqual;
+    defer _ = FreeLibrary(module);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const loaded = loadedModulePath(module, &path_buf) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings(planted, loaded);
+    try std.testing.expect(!std.mem.eql(u8, loaded, cwd_copy));
+}
+
+test "dxcompiler.dll: hijack row reports not-found when only the working directory has one" {
+    var app = std.testing.tmpDir(.{});
+    defer app.cleanup();
+    var work = std.testing.tmpDir(.{});
+    defer work.cleanup();
+
+    const alloc = std.testing.allocator;
+    const cwd_copy = try plantDxcStandIn(work.dir, alloc);
+    defer alloc.free(cwd_copy);
+
+    const app_dir = try app.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(app_dir);
+    const work_dir = try work.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(work_dir);
+
+    const scoped = try ScopedCwd.enter(work_dir);
+    defer scoped.leave();
+
+    // The planted file is loadable from the working directory by name,
+    // so a loader that consulted the current directory would have
+    // found it. Resolving by full path finds nothing and says so.
+    try std.testing.expect(loadModuleFromDir(app_dir) == null);
+    // And the same for the full DxcLibrary wrapper, which is what
+    // `shaders.zig` probes: a null here is the
+    // `CustomShaderFailure.compiler_unavailable` answer.
+    try std.testing.expect(DxcLibrary.loadFromDir(app_dir) == null);
+}
+
+test "dxcompiler.dll: absent row degrades with no crash" {
+    var app = std.testing.tmpDir(.{});
+    defer app.cleanup();
+
+    const alloc = std.testing.allocator;
+    const app_dir = try app.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(app_dir);
+
+    try std.testing.expect(loadModuleFromDir(app_dir) == null);
+    try std.testing.expect(DxcLibrary.loadFromDir(app_dir) == null);
+}
+
+test "dxcompiler.dll: a mapped module without DxcCreateInstance is unavailable, not a crash" {
+    var app = std.testing.tmpDir(.{});
+    defer app.cleanup();
+
+    const alloc = std.testing.allocator;
+    const planted = try plantDxcStandIn(app.dir, alloc);
+    defer alloc.free(planted);
+    const app_dir = try app.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(app_dir);
+
+    // The module loads; the export is missing, so the wrapper unloads
+    // it and reports unavailable, which is the shipped behaviour of
+    // every build that does not ship the DLL.
+    const module = loadModuleFromDir(app_dir) orelse return error.TestExpectedEqual;
+    defer _ = FreeLibrary(module);
+    try std.testing.expect(DxcLibrary.loadFromDir(app_dir) == null);
+}
+
+test "dxcompiler.dll: path resolution keeps a UNC app dir intact" {
+    var buf: [std.fs.max_path_bytes]u16 = undefined;
+    const path = dxcPathWInDir("\\\\server\\share\\wintty", &buf) orelse
+        return error.TestExpectedEqual;
+
+    var utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const utf8_len = try std.unicode.utf16LeToUtf8(&utf8_buf, path);
+    try std.testing.expectEqualStrings(
+        "\\\\server\\share\\wintty\\dxcompiler.dll",
+        utf8_buf[0..utf8_len],
+    );
+    // LoadLibraryW reads until the terminator, which the slice does not
+    // carry itself: the u16 past the end has to be zero.
+    try std.testing.expectEqual(@as(u16, 0), buf[path.len]);
+}
+
+test "dxcompiler.dll: path resolution keeps an app dir longer than MAX_PATH intact" {
+    // Long enough that MAX_PATH (260) would truncate it, which for a
+    // bare name would be invisible and for a built path would be a
+    // wrong path rather than a missing one.
+    const long_dir = "C:\\" ++ "d" ** 400;
+
+    var buf: [std.fs.max_path_bytes]u16 = undefined;
+    const path = dxcPathWInDir(long_dir, &buf) orelse
+        return error.TestExpectedEqual;
+
+    var utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const utf8_len = try std.unicode.utf16LeToUtf8(&utf8_buf, path);
+    try std.testing.expectEqualStrings(
+        long_dir ++ "\\" ++ dxc_dll_name,
+        utf8_buf[0..utf8_len],
+    );
+    try std.testing.expect(utf8_len > 260);
+}
+
+test "dxcompiler.dll: exeDir is this module's own directory" {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = exeDir(&dir_buf) orelse return error.SkipZigTest;
+
+    // Absolute, and naming a directory rather than a file.
+    try std.testing.expect(std.fs.path.isAbsolute(dir));
+    try std.testing.expect(!std.mem.endsWith(u8, dir, "\\"));
+}
+
+test "dxcompiler.dll: load() resolves next to the executable" {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = exeDir(&dir_buf) orelse return error.SkipZigTest;
+
+    var want_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "{s}\\{s}", .{ dir, dxc_dll_name });
+
+    var path_buf: [std.fs.max_path_bytes]u16 = undefined;
+    const path = dxcPathWInDir(dir, &path_buf) orelse return error.TestExpectedEqual;
+
+    var utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const utf8_len = try std.unicode.utf16LeToUtf8(&utf8_buf, path);
+    try std.testing.expectEqualStrings(want, utf8_buf[0..utf8_len]);
 }
 
 test "CLSID constants are distinct" {
