@@ -141,10 +141,10 @@ lives upstream: [ghostty.org/docs](https://ghostty.org/docs).
 
 ## Star History
 
-<a href="https://star-history.dera.page/deblasis/wintty">
+<a href="https://www.star-history.com/?repos=deblasis%2Fwintty&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=deblasis/wintty&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=deblasis/wintty" />
-   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=deblasis/wintty" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=deblasis/wintty&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=deblasis/wintty&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=deblasis/wintty&type=date&legend=top-left" />
  </picture>
 </a>
