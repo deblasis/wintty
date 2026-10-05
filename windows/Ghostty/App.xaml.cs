@@ -2161,6 +2161,16 @@ public partial class App : Application
     {
         if (_settingsWindow is not null)
         {
+            // Restore before activating. Activate alone does not reliably
+            // bring a minimized window back: it raises the activation request
+            // to a window the shell never shows, so the keystroke that asked
+            // for the settings is answered with nothing on screen and the
+            // window stays in the taskbar. Same remedy the shader gallery
+            // picker already uses on its second entry point.
+            //
+            // The single instance is kept: this is the window that was already
+            // open, so nothing here can construct a second one.
+            _settingsWindow.AppWindow?.Show();
             _settingsWindow.Activate();
             return;
         }
