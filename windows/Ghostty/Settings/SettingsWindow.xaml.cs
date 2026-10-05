@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Ghostty.Branding;
 using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
@@ -82,17 +83,28 @@ internal sealed partial class SettingsWindow : Window
         // The Raw Editor's unsaved-text prompt intercepts this close; see
         // OnClosing.
         appWindow.Closing += OnClosing;
-        // Settings window is centered on the display the cursor is on,
-        // sized to give room for the new sub-sectioned pages. The
-        // DisplayArea API is the WinUI 3 equivalent of macOS's
-        // NSScreen.mainScreen and handles multi-monitor correctly.
-        const int width = 1100;
-        const int height = 750;
-        var display = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
-        var work = display.WorkArea;
-        var x = work.X + (work.Width - width) / 2;
-        var y = work.Y + (work.Height - height) / 2;
-        appWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
+        // Settings window is centered on the display the request came from,
+        // sized to give room for the new sub-sectioned pages. Three numbers
+        // make that more than a comment: it opens on the CALLER's monitor
+        // (WorkAreaForCaller), AppWindow sizes are in PHYSICAL pixels so the
+        // design size below is scaled by the DPI of the monitor that work
+        // area is on (an unshown window's own DPI is still its birth
+        // monitor's), and the result is clamped to the work area.
+        // Without the monitor the window opens on the primary whatever the
+        // user was working on; without the scale the 1100x750 opens at
+        // 733x500 on a 150% monitor; without the clamp a window taller than
+        // the work area centers to a negative y and starts off-screen.
+        const int designWidth = 1100;
+        const int designHeight = 750;
+        var workArea = WindowHelper.WorkAreaForCaller(windowId);
+        // The DPI of the monitor the work area is on, not of this window:
+        // an unshown window reports its birth monitor's DPI, which on a
+        // mixed-DPI setup is not the monitor it is about to land on.
+        var dpi = WindowHelper.DpiForWorkArea(workArea);
+        var placement = DpiScaledWindowPlacement.Compute(
+            designWidth, designHeight, dpi, workArea);
+        appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+            placement.X, placement.Y, placement.Width, placement.Height));
 
         // Settings UI follows the OS theme unless window-theme is
         // explicitly "light" or "dark". Unlike the terminal chrome,

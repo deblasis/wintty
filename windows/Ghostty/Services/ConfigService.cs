@@ -1431,14 +1431,19 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // top-level config file: a value set in an included file or a
         // conditional block won't be seen.
         //
-        // Reading it from that cache is also what settles the Settings UI
-        // under --no-config, and settles it the right way: the cache is
-        // empty, so the UI is off and the only remaining OpenConfig path
-        // hands the file to an external editor. A Settings window whose
-        // toggles wrote to a file this session is ignoring would be the
-        // confusing outcome, and this avoids it without a second rule.
-        SettingsUiEnabled = string.Equals(
-            GetFileValue("windows-settings-ui", "false"),
+        // The "true" fallback is the Zig default, and it has to be written
+        // here too: libghostty parses the key, so nothing syncs the two and
+        // a schema that says true against a reader that says false leaves
+        // every user who never set the key with the config file in notepad.
+        //
+        // --no-config is the one launch that still answers no. The cache is
+        // empty under the flag, so the product default would otherwise read
+        // as on and open a window whose toggles write to a file this
+        // session is ignoring -- the confusing outcome this guard exists to
+        // prevent, which is why the flag can no longer be handled by the
+        // fallback string alone the way it was when the default was off.
+        SettingsUiEnabled = !_noConfig && string.Equals(
+            GetFileValue("windows-settings-ui", "true"),
             "true", StringComparison.OrdinalIgnoreCase);
         // Clamp here so all consumers get a safe [0,1] value without
         // needing their own validation. WindowTransparencyState also
