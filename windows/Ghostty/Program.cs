@@ -23,7 +23,7 @@ public static partial class Program
     /// <summary>
     /// The directory the process was launched from, captured before the
     /// cwd is pinned to the install folder for WinAppSDK resource
-    /// resolution. This is what a forwarded launch should open in.
+    /// resolution. A launch with a -e command runs it here.
     /// </summary>
     public static string LaunchWorkingDirectory { get; private set; } =
         Environment.CurrentDirectory;
@@ -886,9 +886,8 @@ public static partial class Program
         // PRI/resource DLLs resolve relative to the process cwd. Pin cwd to
         // the exe folder so dev launches match double-click / Start Menu.
         //
-        // Capture the shell's directory first: it is the user's "open a
-        // terminal here" intent, and single-instance forwards it to the
-        // primary as the new tab's working directory. Reading
+        // Capture the shell's directory first: a -e command runs there, on a
+        // cold start or forwarded to the primary by single-instance. Reading
         // Environment.CurrentDirectory after this point yields the install
         // folder instead.
         LaunchWorkingDirectory = Environment.CurrentDirectory;

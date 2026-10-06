@@ -1481,7 +1481,8 @@ public partial class App : Application
     /// <summary>
     /// Open a new top-level window or tab for a launch forwarded from a
     /// secondary instance (single-instance mode) or a jump-list click.
-    /// Seeded with the forwarded working directory. Runs on the UI thread.
+    /// The forwarded working directory goes with a -e command only. Runs on
+    /// the UI thread.
     /// Mirrors MainWindow.OpenInNewWindow's wiring, including session Track.
     /// </summary>
     internal void OpenWindowFromLaunch(Ghostty.Core.SingleInstance.LaunchRequest req)
