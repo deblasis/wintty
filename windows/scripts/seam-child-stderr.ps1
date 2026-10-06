@@ -146,9 +146,15 @@ try {
             $m = [regex]::Match((Get-Screen $s $i), 'WSL-ERR-(TTY|PIPE)')
             if ($m.Success) { $tty = $m.Groups[1].Value } else { Start-Sleep -Milliseconds 250 }
         }
-        if (-not $tty) { Assert-AppAlive $s; throw "HARNESS: the WSL fd 2 probe printed no answer within ${PromptSeconds}s; nothing is known about its stderr" }
-        $legs.wslTty = "fd 2 is a $($tty.ToLower())"
-        if ($tty -ne 'TTY') { $findings.Add("wsl '$distro': sh reports fd 2 is a pipe, not the pty") }
+        if (-not $tty) {
+            Assert-AppAlive $s
+            # Silent with nothing found yet is a harness failure; findings already made still stand.
+            if ($findings.Count -eq 0) { throw "HARNESS: the WSL fd 2 probe printed no answer within ${PromptSeconds}s; nothing is known about its stderr" }
+            $legs.wslTty = 'no answer'
+        } else {
+            $legs.wslTty = "fd 2 is a $($tty.ToLower())"
+            if ($tty -ne 'TTY') { $findings.Add("wsl '$distro': sh reports fd 2 is a pipe, not the pty") }
+        }
 
         $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrwslprompt' }).state.active
         # Timing only: the prompt line carries user and host names.
