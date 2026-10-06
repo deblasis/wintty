@@ -395,16 +395,15 @@ const WindowsStdioMode = struct {
     inherit_handles: bool,
 };
 
-/// A pseudoconsole child takes its standard handles from the console it
-/// is attached to. `STARTF_USESTDHANDLES` would override those with the
-/// three NULL handles that path has, and nothing in it is passed by
-/// inheritance either, so inheriting is only a way to leak whatever
-/// inheritable handles this process happens to hold. The explicit-handle
-/// path needs both: the child sees the three handles we name, and only
-/// because it inherits them (bounded by the handle list attribute).
+/// With STARTF_USESTDHANDLES and NULL handles, a pseudoconsole child gets
+/// console handles. Without it, Windows copies the app's redirected stderr
+/// into the child, where it is not a console: stderr is lost and wsl.exe
+/// hands bash a pipe for fd 2, so the prompt never draws. Nothing on this
+/// path needs inheritance. The explicit-handle path inherits only the handles
+/// it names, bounded by the handle list.
 fn windowsStdioMode(has_pseudo_console: bool) WindowsStdioMode {
     return if (has_pseudo_console) .{
-        .use_std_handles = false,
+        .use_std_handles = true,
         .inherit_handles = false,
     } else .{
         .use_std_handles = true,
@@ -1089,15 +1088,11 @@ pub fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const 
     return buf.toOwnedSliceSentinel(0);
 }
 
-test "windowsStdioMode: a pseudoconsole child takes neither std handles nor inheritance" {
-    // A ConPTY child gets its standard handles from the pseudoconsole it
-    // is attached to, and nothing in that spawn is passed by inheritance.
+test "windowsStdioMode: a pseudoconsole child sets STARTF_USESTDHANDLES without inheritance" {
     const conpty = windowsStdioMode(true);
-    try testing.expect(!conpty.use_std_handles);
+    try testing.expect(conpty.use_std_handles);
     try testing.expect(!conpty.inherit_handles);
 
-    // The explicit-handle spawn is the opposite: the child only sees the
-    // three handles we name, and only if it inherits them.
     const explicit = windowsStdioMode(false);
     try testing.expect(explicit.use_std_handles);
     try testing.expect(explicit.inherit_handles);
