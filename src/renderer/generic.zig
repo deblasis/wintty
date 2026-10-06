@@ -226,6 +226,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// run for a geometry change, which draws anyway).
         uniforms: shaderpkg.Uniforms,
 
+        /// The themed background this surface has been asked for and not
+        /// yet shown. See `ThemedBackground`.
+        ///
+        /// This is the one repaint the config path owns outright: the
+        /// background pixel is otherwise written inside `updateFrame`,
+        /// behind its early returns, so a theme that arrived while the
+        /// surface was dormant, mid synchronized output, or had no work
+        /// would leave the swap chain holding the last frame it was
+        /// handed and the pane wearing the previous theme against
+        /// correctly themed chrome.
+        themed_background: ThemedBackground = .{},
+
         /// Custom shader uniform values.
         custom_shader_uniforms: shadertoy.Uniforms,
 
@@ -2160,24 +2172,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.scrollbar_dirty = true;
                 }
 
-                // Update our background color
-                self.uniforms.bg_color = .{
-                    self.terminal_state.colors.background.r,
-                    self.terminal_state.colors.background.g,
-                    self.terminal_state.colors.background.b,
-                    @intFromFloat(@round(self.config.background_opacity * 255.0)),
-                };
-
-                // If we're on macOS and have glass styles, we remove
-                // the background opacity because the glass effect handles
-                // it.
-                if (comptime builtin.os.tag == .macos) switch (self.config.background_blur) {
-                    .@"macos-glass-regular",
-                    .@"macos-glass-clear",
-                    => self.uniforms.bg_color[3] = 0,
-
-                    else => {},
-                };
+                // Update our background color. The terminal's resolved
+                // value, not the config's: this is where an OSC 11
+                // override and a `reverse-colors` mode land. `changeConfig`
+                // writes the same uniform from the config, so the gap
+                // between a theme swap and the first pass that gets this
+                // far still shows the new theme; this overwrites it with
+                // the terminal's answer as soon as there is one. The same
+                // helper as that write, so the two cannot scale alpha
+                // differently or disagree about macOS glass.
+                self.uniforms.bg_color = (ThemedBackground.Owed{
+                    .rgb = self.terminal_state.colors.background,
+                    .opacity = self.config.background_opacity,
+                }).uniform(self.config.background_blur);
 
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
@@ -2382,13 +2389,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             //
             // While any animation is in progress (a pending animation wake)
             // every draw must actually render.
-            const needs_redraw =
-                size_changed or
-                swap_chain_rebuilt or
-                swap_chain_resize_pending or
-                self.cells_rebuilt or
-                self.animationWake() != null or
-                sync;
+            const needs_redraw = needsRedraw(.{
+                .size_changed = size_changed,
+                .swap_chain_rebuilt = swap_chain_rebuilt,
+                .swap_chain_resize_pending = swap_chain_resize_pending,
+                .cells_rebuilt = self.cells_rebuilt,
+                .animation = self.animationWake() != null,
+                .themed_background_owed = self.themed_background.frameOwed(),
+                .sync = sync,
+            });
 
             if (!needs_redraw) {
                 // Ask our caller to resync the display link once the draw
@@ -2758,6 +2767,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Gating on `cells_rebuilt` keeps us from firing on frames drawn for
             // a resize, animation, or forced sync that paint no new content.
             if (cells_rebuilt and self.first_content_latched) first_content_painted = true;
+
+            // The frame is encoded and `frame_ctx.complete` above presents
+            // it, so any background a config swap was holding is now on the
+            // screen. This is the only place that debt is discharged: every
+            // early return above it -- the zero-sized surface, the
+            // unrealized display, the no-work fast path -- leaves it
+            // standing, which is what makes the themed repaint survive the
+            // states it has to survive.
+            self.themed_background.framePresented();
+
             return false;
         }
 
@@ -3177,6 +3196,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :custom_shaders_changed false;
             };
 
+            // Captured before the swap: `renamed` compares against what the
+            // pane is currently wearing, which is the outgoing config's
+            // background, not the incoming one.
+            const background_renamed = ThemedBackground.renamed(
+                self.config.background,
+                self.config.background_opacity,
+                config.background,
+                config.background_opacity,
+            );
+
             self.config.deinit();
             self.config = config.*;
 
@@ -3189,6 +3218,41 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // config through its options.
             if (@hasDecl(GraphicsAPI, "setBackgroundColor")) {
                 self.api.setBackgroundColor(config.background, config.background_opacity);
+            }
+
+            // A renamed background is the one thing a config swap must not
+            // leave to a later frame. The pane interior reaches the screen
+            // only through the `bg_color` draw step, which is inside a
+            // frame, and every one of the states this flow runs in can skip
+            // the frame: a dormant surface bails `updateFrame` outright, a
+            // synchronized output bails it from inside the critical
+            // section, and `drawFrameLocked` bails an unrealized or
+            // zero-sized surface and takes its no-work fast path when
+            // nothing else changed. Each of those leaves `self.config`
+            // already holding the new theme and the swap chain still
+            // holding the last frame it was given, which is the pane in
+            // its idle colour next to correctly themed chrome.
+            //
+            // So the swap itself writes the uniform and records the debt
+            // rather than trusting a frame to pick the value up. The debt
+            // is what makes the frame unskippable; the write is what makes
+            // the frame it does draw carry the new theme.
+            //
+            // The write is safe against the terminal's own overrides
+            // because `updateFrame` overwrites it from
+            // `terminal_state.colors.background` on every pass that gets
+            // past its early returns, and that is the value an OSC 11
+            // override or a `reverse-colors` mode resolves to. Writing the
+            // config value here only covers the gap between the swap and
+            // the first such pass, and it is the config value that belongs
+            // there: nothing has told us the terminal resolved it
+            // differently.
+            if (background_renamed) {
+                self.uniforms.bg_color = self.themed_background.owe(
+                    config.background,
+                    config.background_opacity,
+                    config.background_blur,
+                );
             }
 
             // If our background image path changed, prepare the new bg image.
@@ -4817,6 +4881,193 @@ fn replaceAtlasTexture(
     texture.* = new_texture;
 }
 
+/// The pane background a config change owes the screen, and the frame it
+/// is owed.
+///
+/// The pane interior and the chrome are two channels off one config. The
+/// chrome repaints from the app side on every reload, because it is
+/// painted by XAML and does not need a frame. The pane interior is the
+/// renderer's `bg_color` draw step, which runs *inside* a frame, so the
+/// background only lands if a frame that carries it is actually drawn.
+///
+/// That is not a given. `updateFrame` bails early on a dormant surface,
+/// on synchronized output, and `drawFrameLocked` bails on an unrealized
+/// or zero-sized surface and on its own no-work fast path -- and every one
+/// of those bails leaves `self.config` already holding the new background.
+/// The swap chain then keeps the content of the last frame it was handed,
+/// and the pane reads its idle colour while the gutter and every chrome
+/// surface around it read the new theme. The disagreement is by
+/// construction: the chrome is the half guaranteed to update.
+///
+/// So the config swap records the obligation here, where none of those
+/// bails can reach it, and the obligation survives until a frame that
+/// actually presents clears it. Both halves matter: without the record
+/// the frame is skipped, and without surviving the bails the record is
+/// lost in exactly the states the theme path runs in.
+///
+/// File scope, and taking the values rather than reading renderer state,
+/// so the matrix can be tested without a GPU (see the tests below).
+const ThemedBackground = struct {
+    /// The background a config swap named and no presented frame has
+    /// carried yet, or null when nothing is owed.
+    owed: ?Owed = null,
+
+    /// The background the last presented frame carried when it was a themed
+    /// one, or null if no themed frame has been presented since this
+    /// renderer existed. This is the half of the seam that tells a config
+    /// that *arrived* from a frame that *reached the screen*; the two
+    /// disagreeing is the whole defect.
+    presented: ?Owed = null,
+
+    /// A pane background: the RGB plus the opacity that scales its alpha.
+    ///
+    /// Both halves travel together because both are named by the same
+    /// config key pair and both reach the pane as one uniform.
+    pub const Owed = struct {
+        rgb: terminal.color.RGB,
+        opacity: f64,
+
+        /// The uniform a frame paints this background with. One place, so
+        /// `changeConfig` and `updateFrame` cannot disagree about the
+        /// alpha scaling or about macOS glass zeroing it.
+        fn uniform(self: Owed, blur: configpkg.Config.BackgroundBlur) [4]u8 {
+            var out: [4]u8 = .{
+                self.rgb.r,
+                self.rgb.g,
+                self.rgb.b,
+                @intFromFloat(@round(self.opacity * 255.0)),
+            };
+            if (comptime builtin.os.tag == .macos) switch (blur) {
+                .@"macos-glass-regular",
+                .@"macos-glass-clear",
+                => out[3] = 0,
+
+                else => {},
+            };
+            return out;
+        }
+    };
+
+    /// Whether a config swap names a different pane background.
+    ///
+    /// Opacity counts: it is half of what the pane pixel is, so a swap
+    /// that only moves it still owes a frame.
+    fn renamed(
+        old_rgb: terminal.color.RGB,
+        old_opacity: f64,
+        new_rgb: terminal.color.RGB,
+        new_opacity: f64,
+    ) bool {
+        return !old_rgb.eql(new_rgb) or old_opacity != new_opacity;
+    }
+
+    /// A config swap renamed the background: the surface owes a frame, and
+    /// this is the uniform the frame that discharges it must paint.
+    ///
+    /// Returned rather than only stored because `changeConfig` writes it
+    /// into `self.uniforms` immediately, on the render thread under
+    /// `draw_mutex`, before any frame has a chance to run. That write is
+    /// the half of the fix that reaches a surface whose frame is skipped:
+    /// the debt makes the frame happen, and the uniform makes the frame
+    /// that happens carry the new theme.
+    fn owe(
+        self: *ThemedBackground,
+        rgb: terminal.color.RGB,
+        opacity: f64,
+        blur: configpkg.Config.BackgroundBlur,
+    ) [4]u8 {
+        const owed: Owed = .{ .rgb = rgb, .opacity = opacity };
+        self.owed = owed;
+        return owed.uniform(blur);
+    }
+
+    /// Whether the surface still owes the background a frame. This is the
+    /// term `drawFrameLocked`'s no-work fast path is not allowed to take.
+    fn frameOwed(self: *const ThemedBackground) bool {
+        return self.owed != null;
+    }
+
+    /// A frame carried the owed background and reached the screen: the
+    /// obligation is discharged, and the frame's value is recorded so a
+    /// seam read can compare it against the config that asked for it.
+    ///
+    /// A frame drawn with nothing owed records nothing. `presented` is the
+    /// last *themed* frame, so the ordinary frames drawn between a config
+    /// swap and the one that carries it must not erase what the swap was
+    /// for.
+    fn framePresented(self: *ThemedBackground) void {
+        if (self.owed) |owed| {
+            self.presented = owed;
+        }
+        self.owed = null;
+    }
+
+    /// What a seam read reports for this surface: what was asked for,
+    /// what was shown, and whether the two are still in debt.
+    fn arrival(self: *const ThemedBackground) BackgroundArrival {
+        return .{
+            .configured = self.owed orelse self.presented,
+            .presented = self.presented,
+            .owed = self.owed != null,
+        };
+    }
+};
+
+/// Whether this draw has to actually render, or whether the frame it
+/// would produce is identical to the last one presented.
+///
+/// This is `drawFrameLocked`'s no-work fast path as a function of its
+/// terms, so the surface-state matrix can be checked without a swap
+/// chain. The themed-background term is the load-bearing one for this
+/// job: a config swap that renamed the background has already put the new
+/// colour in the uniform, and if this can answer false the pane keeps the
+/// content of the last frame it was handed -- the previous theme -- while
+/// every chrome surface around it, which does not depend on a frame, has
+/// already repainted.
+///
+/// Note what this function is *not*: it is not a general "repaint on
+/// config change". Only a renamed background sets that term, so the cost
+/// is one frame per theme change and nothing per frame after.
+const RedrawTerms = struct {
+    /// The surface size differs from what the last frame was drawn at.
+    size_changed: bool = false,
+    /// The swap chain had to be (re)built.
+    swap_chain_rebuilt: bool = false,
+    /// A resize the API has recorded but not applied.
+    swap_chain_resize_pending: bool = false,
+    /// The last update produced frame state the drawn frame does not show.
+    cells_rebuilt: bool = false,
+    /// An animation is mid-flight, so every draw must render.
+    animation: bool = false,
+    /// A config swap renamed the background and no frame has carried it
+    /// yet. See `ThemedBackground`.
+    themed_background_owed: bool = false,
+    /// The caller asked for a synchronous draw.
+    sync: bool = false,
+};
+
+fn needsRedraw(terms: RedrawTerms) bool {
+    return terms.size_changed or
+        terms.swap_chain_rebuilt or
+        terms.swap_chain_resize_pending or
+        terms.cells_rebuilt or
+        terms.animation or
+        terms.themed_background_owed or
+        terms.sync;
+}
+
+/// The pane background's arrival, as one read. This is what the seam
+/// reports, so a config that arrived and a frame that was presented become
+/// two values in a single readout instead of a pixel sample and a hope.
+pub const BackgroundArrival = struct {
+    /// The background the renderer was last asked to paint.
+    configured: ?ThemedBackground.Owed,
+    /// The background the last presented frame actually carried.
+    presented: ?ThemedBackground.Owed,
+    /// True when a config change is still owed a frame.
+    owed: bool,
+};
+
 /// Whether the post-process custom shader path can be used for a frame.
 ///
 /// `resources_valid` carries the backend-specific texture/PSO null checks
@@ -5453,6 +5704,294 @@ test "syncAtlasTexture: a grow whose upload is dropped is not reported as synced
     const after = testSyncAtlas(&data, 4);
     store.drop_next_upload = true;
     try std.testing.expect(!try syncAtlasTexture(&api, &after, &texture, null));
+}
+
+const themed_bg = ThemedBackground.Owed{
+    .rgb = .{ .r = 0x7A, .g = 0x10, .b = 0x10 },
+    .opacity = 1.0,
+};
+
+const themed_bg_next = ThemedBackground.Owed{
+    .rgb = .{ .r = 0x00, .g = 0x28, .b = 0x2C },
+    .opacity = 1.0,
+};
+
+/// The default blur mode, named so the uniform tests do not have to know
+/// which enum case it is on a platform that never reaches the glass
+/// branches.
+const no_blur: configpkg.Config.BackgroundBlur = .false;
+
+test "ThemedBackground: a renamed background is a rename" {
+    try std.testing.expect(ThemedBackground.renamed(
+        themed_bg_next.rgb,
+        themed_bg_next.opacity,
+        themed_bg.rgb,
+        themed_bg.opacity,
+    ));
+}
+
+test "ThemedBackground: an identical background is not a rename" {
+    try std.testing.expect(!ThemedBackground.renamed(
+        themed_bg.rgb,
+        themed_bg.opacity,
+        themed_bg.rgb,
+        themed_bg.opacity,
+    ));
+}
+
+test "ThemedBackground: opacity alone is a rename" {
+    // Half the pane pixel is the alpha, so a reload that only moves
+    // background-opacity still has to reach the screen.
+    try std.testing.expect(ThemedBackground.renamed(
+        themed_bg_next.rgb,
+        themed_bg_next.opacity,
+        themed_bg_next.rgb,
+        0.5,
+    ));
+}
+
+test "ThemedBackground: the uniform scales opacity to the alpha byte" {
+    try std.testing.expectEqual(
+        [4]u8{ 0x7A, 0x10, 0x10, 255 },
+        themed_bg.uniform(no_blur),
+    );
+    try std.testing.expectEqual(
+        [4]u8{ 0x7A, 0x10, 0x10, 128 },
+        (ThemedBackground.Owed{ .rgb = themed_bg.rgb, .opacity = 0.5 }).uniform(no_blur),
+    );
+    try std.testing.expectEqual(
+        [4]u8{ 0x7A, 0x10, 0x10, 0 },
+        (ThemedBackground.Owed{ .rgb = themed_bg.rgb, .opacity = 0.0 }).uniform(no_blur),
+    );
+}
+
+test "ThemedBackground: an ordinary frame does not erase the record" {
+    // Between the config swap and the frame that carries it, other frames
+    // are drawn -- a cursor blink is enough. If those cleared the record,
+    // a seam reading after them would report "nothing presented" for a
+    // theme that had already landed.
+    var themed: ThemedBackground = .{};
+    _ = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+    themed.framePresented();
+
+    for (0..5) |_| themed.framePresented();
+
+    // Asserted through the optional on purpose: with the record erased this
+    // is a clean expectation failure naming the row, not a panic on the
+    // unwrap that would take the rest of the suite down with it.
+    const read = themed.arrival().presented;
+    try std.testing.expect(read != null);
+    try std.testing.expectEqual(themed_bg.rgb, read.?.rgb);
+}
+
+test "ThemedBackground: a fresh renderer owes nothing" {
+    // The scope guard's first row. No config change, no debt, and so no
+    // term in `needs_redraw` that a frame is paying for.
+    var themed: ThemedBackground = .{};
+    try std.testing.expect(!themed.frameOwed());
+    try std.testing.expectEqual(false, themed.arrival().owed);
+}
+
+test "ThemedBackground: a config change owes a frame until one presents" {
+    var themed: ThemedBackground = .{};
+    // The uniform the swap writes straight into the renderer. This is the
+    // pane pixel for every frame drawn before `updateFrame` gets far
+    // enough to overwrite it from the terminal, which is what makes it
+    // the seam's answer for a surface whose frame is skipped.
+    try std.testing.expectEqual(
+        [4]u8{ 0x7A, 0x10, 0x10, 255 },
+        themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur),
+    );
+
+    try std.testing.expect(themed.frameOwed());
+    try std.testing.expectEqual(true, themed.arrival().owed);
+
+    // The arrival readout names the config that arrived and admits that
+    // nothing has presented it yet. That disagreement is what the seam
+    // reads; before the fix there was no `presented` half at all.
+    const mid = themed.arrival();
+    try std.testing.expect(mid.owed);
+    try std.testing.expectEqual(null, mid.presented);
+    try std.testing.expectEqual(themed_bg.rgb, mid.configured.?.rgb);
+
+    themed.framePresented();
+    try std.testing.expect(!themed.frameOwed());
+}
+
+test "ThemedBackground: a presented frame records what reached the screen" {
+    var themed: ThemedBackground = .{};
+    _ = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+    themed.framePresented();
+
+    const after = themed.arrival();
+    try std.testing.expect(!after.owed);
+    try std.testing.expectEqual(themed_bg.rgb, after.presented.?.rgb);
+    try std.testing.expectEqual(themed_bg.rgb, after.configured.?.rgb);
+}
+
+test "ThemedBackground: a second theme before the first presents keeps the newer debt" {
+    // The swap chain is still holding the first frame, so what is owed is
+    // the newest background: recording the older one would discharge the
+    // debt onto a value nobody asked for.
+    var themed: ThemedBackground = .{};
+    _ = themed.owe(themed_bg_next.rgb, themed_bg_next.opacity, no_blur);
+    _ = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+    themed.framePresented();
+
+    try std.testing.expectEqual(themed_bg.rgb, themed.arrival().presented.?.rgb);
+}
+
+test "ThemedBackground: a debt survives a frame that drew nothing" {
+    // The whole shape of the fix. Whatever the render thread's state was
+    // when the theme arrived, the debt is a field the swap owns and no
+    // skipped frame touches, so the next frame that does draw owes the
+    // background -- dormant, mid synchronized output, no-work, zero-sized
+    // and unrealized are all just "this frame did not happen".
+    var themed: ThemedBackground = .{};
+    const uniform = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+
+    // Each of these names one skipped-frame state -- dormant, mid
+    // synchronized output, the no-work fast path, a zero-sized surface, an
+    // unrealized display. They are all the same assertion: the debt is a
+    // field the config swap owns, so a frame that did not happen cannot
+    // have touched it, and the next frame that does draw still owes the
+    // background, still with the themed value in the uniform.
+    const skipped_states = [_][]const u8{
+        "dormant: updateFrame bailed before the bg_color write",
+        "synchronized output: updateFrame returned from inside the critical section",
+        "no work: drawFrameLocked took the no-work fast path",
+        "zero-sized: drawFrameLocked returned before the swap chain",
+        "unrealized: drawFrameLocked returned before drawing",
+    };
+    try std.testing.expectEqual(@as(usize, 5), skipped_states.len);
+    for (skipped_states) |_| {
+        try std.testing.expect(themed.frameOwed());
+        try std.testing.expect(needsRedraw(.{ .themed_background_owed = true }));
+        try std.testing.expectEqual(themed_bg.rgb, themed.arrival().configured.?.rgb);
+    }
+    // The pixel the next frame paints is the themed one, which is the
+    // other half of the row: a forced frame carrying the old background
+    // would still be the defect this is fixing.
+    try std.testing.expectEqual([4]u8{ 0x7A, 0x10, 0x10, 255 }, uniform);
+}
+
+test "ThemedBackground: an idle surface pays nothing after the frame lands" {
+    // The scope guard's second row: the unconditional path costs one frame
+    // per theme change and nothing after. Without this, the fix would
+    // redraw every surface forever.
+    var themed: ThemedBackground = .{};
+    _ = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+    themed.framePresented();
+
+    for (0..10) |_| {
+        try std.testing.expect(!themed.frameOwed());
+    }
+}
+
+// ---- The surface-state x theme-change matrix, happy rows first. ----
+//
+// Each row states the render-thread state a theme change lands in and
+// what the config swap owes the screen from it. `needsRedraw` is the
+// decision the fix turns on, so a row that asserts "a frame is owed" is a
+// row that was red before the fix: without the themed term this answers
+// false for every one of them and the pane sits in the old theme.
+//
+// The custom-shader row is here rather than UNTESTABLE: whether the
+// background reaches the screen through `back_texture` and the
+// post-process chain instead of straight to `frame.target` is decided at
+// `customShaderUsable`, *after* this decision, and both paths carry the
+// same `uniforms.bg_color` because the uniform is synced into the frame
+// before the render pass either way. So the row is answerable here, and
+// what is not answerable without a GPU is the pixels themselves.
+
+test "ThemedBackground matrix: a theme change draws the frame on every surface state" {
+    const states = [_]struct {
+        name: []const u8,
+        // Whether the surface was drawing frames normally when the config
+        // swap arrived. `false` is exactly the red-before case: the swap
+        // is the only thing that asks for a frame.
+        quiescent: bool,
+    }{
+        .{ .name = "awake, cells rebuilt by the swap", .quiescent = false },
+        .{ .name = "dormant (updateFrame bailed at the backstop)", .quiescent = true },
+        .{ .name = "mid synchronized output", .quiescent = true },
+        .{ .name = "no work (the no-work fast path)", .quiescent = true },
+        .{ .name = "zero-sized surface", .quiescent = true },
+        .{ .name = "unrealized display", .quiescent = true },
+    };
+
+    for (states) |state| {
+        // The swap arms the debt...
+        var themed: ThemedBackground = .{};
+        _ = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+
+        // ...and the frame that carries it is not skippable, whatever the
+        // surface was doing, because no other term in the decision is true.
+        try std.testing.expect(needsRedraw(.{
+            .size_changed = false,
+            .swap_chain_rebuilt = false,
+            .swap_chain_resize_pending = false,
+            .cells_rebuilt = !state.quiescent,
+            .animation = false,
+            .themed_background_owed = themed.frameOwed(),
+            .sync = false,
+        }));
+    }
+}
+
+test "ThemedBackground matrix: a quiescent surface owes the frame alone" {
+    // The row that is red today and green after: no work, no resize, no
+    // animation, no forced sync, and a background that was renamed. Before
+    // the fix this is the case that left the pane in its old theme.
+    try std.testing.expect(needsRedraw(.{
+        .themed_background_owed = true,
+    }));
+}
+
+test "ThemedBackground matrix: a usable custom shader still draws" {
+    // The custom-shader cell. `customShaderUsable` picks the target
+    // later, and it cannot suppress a frame this decision already owes.
+    const usable = customShaderUsable(true, true, 2);
+    try std.testing.expect(usable);
+    try std.testing.expect(needsRedraw(.{ .themed_background_owed = true }));
+
+    // And the fall-back paths a shader can take do not change it either.
+    try std.testing.expect(!customShaderUsable(true, false, 2));
+    try std.testing.expect(!customShaderUsable(false, true, 2));
+    try std.testing.expect(!customShaderUsable(true, true, 0));
+    try std.testing.expect(needsRedraw(.{ .themed_background_owed = true }));
+}
+
+test "ThemedBackground matrix: nothing changed means no frame" {
+    // The scope guard's hard row. This has to stay false or the fix would
+    // repaint every idle surface forever, which is the failure mode the
+    // brief's guard is written against.
+    try std.testing.expect(!needsRedraw(.{}));
+}
+
+test "ThemedBackground matrix: a discharged debt stops asking for frames" {
+    // ...and this is the same claim one theme change later, which is what
+    // makes the guard hold over the surface's life rather than for one
+    // frame.
+    var themed: ThemedBackground = .{};
+    _ = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+    themed.framePresented();
+
+    for (0..10) |_| {
+        try std.testing.expect(!needsRedraw(.{
+            .themed_background_owed = themed.frameOwed(),
+        }));
+    }
+}
+
+test "ThemedBackground matrix: the other terms still redraw on their own" {
+    // The fix must not have displaced any existing reason to draw.
+    try std.testing.expect(needsRedraw(.{ .size_changed = true }));
+    try std.testing.expect(needsRedraw(.{ .swap_chain_rebuilt = true }));
+    try std.testing.expect(needsRedraw(.{ .swap_chain_resize_pending = true }));
+    try std.testing.expect(needsRedraw(.{ .cells_rebuilt = true }));
+    try std.testing.expect(needsRedraw(.{ .animation = true }));
+    try std.testing.expect(needsRedraw(.{ .sync = true }));
 }
 
 test "customShaderUsable: no custom shader state means no custom shader path" {
