@@ -395,16 +395,29 @@ const WindowsStdioMode = struct {
     inherit_handles: bool,
 };
 
-/// A pseudoconsole child takes its standard handles from the console it
-/// is attached to. `STARTF_USESTDHANDLES` would override those with the
-/// three NULL handles that path has, and nothing in it is passed by
-/// inheritance either, so inheriting is only a way to leak whatever
-/// inheritable handles this process happens to hold. The explicit-handle
-/// path needs both: the child sees the three handles we name, and only
-/// because it inherits them (bounded by the handle list attribute).
+/// A pseudoconsole child must get all three standard handles from the
+/// console it is attached to, and `STARTF_USESTDHANDLES` with three NULL
+/// handles is what guarantees that: the console attach replaces each NULL
+/// with a real console handle.
+///
+/// Without the flag, Windows copies this process's own standard handles
+/// into the console child wherever they are not NULL. A GUI process has no
+/// stdin or stdout, but the app points its stderr at a log file
+/// (RedirectStderrToFile), and that handle is not inheritable, so the
+/// child received a stderr that is not a console and is not valid in the
+/// child either. Its stderr writes were lost. wsl.exe maps a standard
+/// handle onto the Linux pty only when it is a console, so an interactive
+/// shell in a WSL pane got a pipe for fd 2 and drew its prompt there: the
+/// pane stayed blank while the shell ran.
+///
+/// Inheritance stays off: nothing in this spawn is passed by inheritance,
+/// so inheriting would only leak whatever inheritable handles this process
+/// happens to hold. The explicit-handle path needs both: the child sees
+/// the three handles we name, and only because it inherits them (bounded
+/// by the handle list attribute).
 fn windowsStdioMode(has_pseudo_console: bool) WindowsStdioMode {
     return if (has_pseudo_console) .{
-        .use_std_handles = false,
+        .use_std_handles = true,
         .inherit_handles = false,
     } else .{
         .use_std_handles = true,
@@ -1089,11 +1102,14 @@ pub fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const 
     return buf.toOwnedSliceSentinel(0);
 }
 
-test "windowsStdioMode: a pseudoconsole child takes neither std handles nor inheritance" {
-    // A ConPTY child gets its standard handles from the pseudoconsole it
-    // is attached to, and nothing in that spawn is passed by inheritance.
+test "windowsStdioMode: a pseudoconsole child gets NULL std handles and no inheritance" {
+    // STARTF_USESTDHANDLES with the three NULL handles the pseudoconsole
+    // path carries: the console attach fills each one with a console
+    // handle. Without the flag, a non-NULL standard handle of this process
+    // (the app's redirected stderr) is copied into the child instead, and
+    // a WSL shell then draws its prompt on a pipe nobody reads.
     const conpty = windowsStdioMode(true);
-    try testing.expect(!conpty.use_std_handles);
+    try testing.expect(conpty.use_std_handles);
     try testing.expect(!conpty.inherit_handles);
 
     // The explicit-handle spawn is the opposite: the child only sees the
