@@ -4912,10 +4912,11 @@ const ThemedBackground = struct {
     /// carried yet, or null when nothing is owed.
     owed: ?Owed = null,
 
-    /// The background the last presented frame carried, or null if none
-    /// has been presented since this renderer existed. This is the half
-    /// of the seam that tells a config that *arrived* from a frame that
-    /// *reached the screen*; the two disagreeing is the whole defect.
+    /// The background the last presented frame carried when it was a themed
+    /// one, or null if no themed frame has been presented since this
+    /// renderer existed. This is the half of the seam that tells a config
+    /// that *arrived* from a frame that *reached the screen*; the two
+    /// disagreeing is the whole defect.
     presented: ?Owed = null,
 
     /// A pane background: the RGB plus the opacity that scales its alpha.
@@ -4989,8 +4990,15 @@ const ThemedBackground = struct {
     /// A frame carried the owed background and reached the screen: the
     /// obligation is discharged, and the frame's value is recorded so a
     /// seam read can compare it against the config that asked for it.
+    ///
+    /// A frame drawn with nothing owed records nothing. `presented` is the
+    /// last *themed* frame, so the ordinary frames drawn between a config
+    /// swap and the one that carries it must not erase what the swap was
+    /// for.
     fn framePresented(self: *ThemedBackground) void {
-        self.presented = self.owed;
+        if (self.owed) |owed| {
+            self.presented = owed;
+        }
         self.owed = null;
     }
 
@@ -5755,6 +5763,25 @@ test "ThemedBackground: the uniform scales opacity to the alpha byte" {
         [4]u8{ 0x7A, 0x10, 0x10, 0 },
         (ThemedBackground.Owed{ .rgb = themed_bg.rgb, .opacity = 0.0 }).uniform(no_blur),
     );
+}
+
+test "ThemedBackground: an ordinary frame does not erase the record" {
+    // Between the config swap and the frame that carries it, other frames
+    // are drawn -- a cursor blink is enough. If those cleared the record,
+    // a seam reading after them would report "nothing presented" for a
+    // theme that had already landed.
+    var themed: ThemedBackground = .{};
+    _ = themed.owe(themed_bg.rgb, themed_bg.opacity, no_blur);
+    themed.framePresented();
+
+    for (0..5) |_| themed.framePresented();
+
+    // Asserted through the optional on purpose: with the record erased this
+    // is a clean expectation failure naming the row, not a panic on the
+    // unwrap that would take the rest of the suite down with it.
+    const read = themed.arrival().presented;
+    try std.testing.expect(read != null);
+    try std.testing.expectEqual(themed_bg.rgb, read.?.rgb);
 }
 
 test "ThemedBackground: a fresh renderer owes nothing" {
