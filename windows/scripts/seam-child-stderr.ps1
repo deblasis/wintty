@@ -114,6 +114,11 @@ profile.stderrwslprompt.command = wsl.exe -d $quoted
 
 $legs = [ordered]@{}
 $findings = [System.Collections.Generic.List[string]]::new()
+function Add-LegFinding([string]$Leg, $Flags) {
+    if ($Flags.in -ne 'False' -or $Flags.out -ne 'False' -or $Flags.err -ne 'False') {
+        $findings.Add("$Leg child: IN-REDIR=$($Flags.in) OUT-REDIR=$($Flags.out) ERR-REDIR=$($Flags.err)")
+    }
+}
 $s = $null
 try {
     Assert-NoWinttyFrom -ExePath $ExePath -Context "The child stderr scenario"
@@ -123,6 +128,7 @@ try {
     $direct = Wait-Flags $s $i $ProbeSeconds
     if (-not $direct) { Assert-AppAlive $s; throw "HARNESS: the direct PowerShell child printed no flags within ${ProbeSeconds}s; nothing is known about its handles" }
     $legs.direct = $direct
+    Add-LegFinding 'direct' $direct
 
     $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrcmd' }).state.active
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
@@ -131,13 +137,8 @@ try {
     $viaCmd = Wait-Flags $s $i $ProbeSeconds
     if (-not $viaCmd) { Assert-AppAlive $s; throw "HARNESS: the PowerShell child cmd started printed no flags within ${ProbeSeconds}s; nothing is known about its handles" }
     $legs.viaCmd = $viaCmd
+    Add-LegFinding 'viaCmd' $viaCmd
 
-    foreach ($leg in @('direct', 'viaCmd')) {
-        $f = $legs[$leg]
-        if ($f.in -ne 'False' -or $f.out -ne 'False' -or $f.err -ne 'False') {
-            $findings.Add("$leg child: IN-REDIR=$($f.in) OUT-REDIR=$($f.out) ERR-REDIR=$($f.err)")
-        }
-    }
 
     if ($distro) {
         $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrwsltty' }).state.active
@@ -182,6 +183,8 @@ try {
 } catch {
     $msg = "$($_.Exception.Message)"
     $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+    # Findings already made stand even when a later leg could not run.
+    if ($class -eq 'harness' -and $findings.Count -gt 0) { $class = 'product'; $msg = "PRODUCT_FAIL: " + ($findings -join '; ') + "; then $msg" }
     Write-Host "FAIL child-stderr [$class]: $msg" -ForegroundColor Red
     Write-Result 'fail' $class $msg $legs
     if ($class -eq 'product') { exit 2 } else { exit 1 }
