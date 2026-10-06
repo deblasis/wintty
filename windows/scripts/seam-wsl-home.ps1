@@ -81,6 +81,11 @@ $quoted = if ($distro -match '\s') { "`"$distro`"" } else { $distro }
 $config = @"
 windows-single-instance = false
 window-save-state = never
+# The startup tab: without a default it would run the first profile below,
+# which the scenario then opens again.
+default-profile = idle
+profile.idle.name = Idle
+profile.idle.command = cmd.exe
 profile.wslhomecmd.name = WslHomeCommand
 profile.wslhomecmd.command = wsl.exe -d $quoted -- sh -c "echo WSL-CWD=`$PWD; exec sleep 60"
 profile.wslhomeshell.name = WslHomeShell
