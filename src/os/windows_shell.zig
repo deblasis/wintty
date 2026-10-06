@@ -583,6 +583,10 @@ test "wslArgsWithHomeCd: leaves alone what is not WSL or already picks a directo
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--cd", "/tmp" })) == null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "Debian", "--cd", "/srv" })) == null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-u", "root", "--cd", "/srv" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--distribution", "v", "--cd", "/srv" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--distribution-id", "v", "--cd", "/srv" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--user", "v", "--cd", "/srv" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--shell-type", "v", "--cd", "/srv" })) == null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "~" })) == null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "~", "-d", "Debian" })) == null);
 }
