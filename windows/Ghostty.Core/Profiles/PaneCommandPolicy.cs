@@ -91,6 +91,15 @@ public static class PaneCommandPolicy
             : null;
 
     /// <summary>
+    /// The directory a launch hands its first pane: the caller's, and only
+    /// when the launch carries a command (<c>-e</c>). A bare launch, a
+    /// shortcut or a jump-list task opens the profile in its own directory,
+    /// as Windows Terminal does: their working directory is the install
+    /// folder or System32, not a choice the user made.
+    /// </summary>
+    public static string? LaunchDirectory(string? launchCommand, string? callerDirectory)
+        => string.IsNullOrWhiteSpace(launchCommand) ? null : callerDirectory;
+    /// <summary>
     /// The first pane of the window a launch opens when the launch named no
     /// profile. <paramref name="launchArgv"/> (the <c>-e</c> command, rendered
     /// by <see cref="SingleInstance.LaunchCommand.FromArgs"/>) wins and keeps
