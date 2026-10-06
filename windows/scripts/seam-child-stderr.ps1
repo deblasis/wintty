@@ -1,42 +1,17 @@
 #requires -Version 7
 <#
-    A shell this app starts gets a console on all three standard handles.
+    A shell started by the app gets a console on all three std handles.
 
-    The app points its own stderr at a log file. A pseudoconsole spawn that
-    does not set STARTF_USESTDHANDLES lets Windows copy that handle into the
-    child, where it is not a console and not valid either: whatever the child
-    writes to stderr is lost. Most shells never notice, because they draw
-    their prompt on stdout. wsl.exe does: it maps a standard handle onto the
-    Linux pty only when that handle is a console, so an interactive shell in
-    a WSL pane got a pipe for fd 2, drew its prompt there, and the pane
-    stayed blank while the shell ran.
+    Decisive legs, no WSL needed: a PowerShell child, started directly and
+    from a cmd pane, must report [Console]::Is*Redirected False for stdin,
+    stdout and stderr. With a WSL distro, two more legs: fd 2 must be a tty,
+    and an interactive pane must not stay blank. Without one they are skipped.
 
-    The decisive legs need no WSL, so this scenario can always fail. A
-    PowerShell child reports [Console]::Is{Input,Output,Error}Redirected:
-
-      direct     the app spawns the child as a profile command
-      via-cmd    a cmd pane spawns it, so it inherits cmd's handles
-
-    Both must report False for all three. The WSL legs run when the machine
-    has a distro that can run a command, and then fail the scenario like any
-    other leg; without one they are recorded as skipped, and the scenario
-    still runs and decides on the two legs above:
-
-      wsl-tty     `sh -c` reports whether fd 2 is a tty
-      wsl-prompt  an interactive `wsl.exe -d <distro>` pane is not blank
-                  within the budget, with nothing typed into it. A blank pane
-                  is what the bug looked like: the shell drew its prompt on
-                  stderr. The leg checks that output arrived, not what the
-                  prompt says, since a prompt's shape is the user's.
-
-    Exits 0 on pass, 2 on a product finding, 1 when the harness could not
-    run and nothing is known about the product.
+    Exits 0 pass, 2 product failure, 1 harness failure.
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
-    # A PowerShell child prints its three flags in about a second; a cold
-    # distro can take far longer to show a prompt.
     [int]$ProbeSeconds = 20,
     [int]$PromptSeconds = 30
 )
@@ -57,8 +32,7 @@ function Write-Result([string]$Outcome, [string]$Class, [string]$Detail, $Legs) 
     } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8
 }
 
-# The probe a PowerShell child runs on itself. Each flag prints on its own
-# line as NAME=True|False, a shape the echoed command line cannot match.
+# NAME=True|False; the echoed command line cannot match that shape.
 $probe = "'IN-REDIR=' + [Console]::IsInputRedirected; 'OUT-REDIR=' + [Console]::IsOutputRedirected; 'ERR-REDIR=' + [Console]::IsErrorRedirected"
 $psDirect = "powershell.exe -NoLogo -NoProfile -Command `"$probe; Start-Sleep 60`""
 
@@ -67,7 +41,6 @@ function Get-Screen($s, [int]$Index) {
     catch { return '' } # no live surface yet
 }
 
-# The three flags off a screen, or $null until all three have printed.
 function Read-Flags([string]$Text) {
     $m = @{}
     foreach ($x in [regex]::Matches($Text, '\b(IN|OUT|ERR)-REDIR=(True|False)\b')) { $m[$x.Groups[1].Value] = $x.Groups[2].Value }
@@ -75,8 +48,7 @@ function Read-Flags([string]$Text) {
     return [ordered]@{ in = $m.IN; out = $m.OUT; err = $m.ERR }
 }
 
-# Before calling a silent leg a harness failure: a pane that printed nothing
-# because the app died is a product finding, and Get-Screen swallows that.
+# A silent pane from a dead app is a product failure, not a harness one.
 function Assert-AppAlive($s) {
     if ($s.Proc.HasExited) { throw ("APP_EXIT: the app exited during the scenario (code {0})" -f $s.Proc.ExitCode) }
 }
@@ -91,20 +63,17 @@ function Wait-Flags($s, [int]$Index, [int]$Seconds) {
     return $null
 }
 
-# The machine's own answer, never the app's. WSL_UTF8 makes wsl.exe list in
-# UTF-8 rather than UTF-16, so the names read back as written.
+# WSL_UTF8 makes wsl.exe list in UTF-8 rather than UTF-16.
 function Get-WslDistro {
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return $null }
     $env:WSL_UTF8 = '1'
     $out = & wsl.exe --list --quiet 2>$null
     if ($LASTEXITCODE -ne 0) { return $null }
-    # docker-desktop distros are infrastructure: they run no user shell.
     return @($out |
         ForEach-Object { "$_".Trim([char]0xFEFF, [char]0, ' ', "`t", "`r") } |
         Where-Object { $_ -and $_ -notlike 'docker-desktop*' }) | Select-Object -First 1
 }
 
-# Bounded, because a wedged WSL must not wedge the harness.
 function Test-WslDistroRuns([string]$Distro) {
     $job = Start-ThreadJob -ArgumentList $Distro -ScriptBlock {
         param($d)
@@ -143,16 +112,13 @@ $findings = [System.Collections.Generic.List[string]]::new()
 $s = $null
 try {
     Assert-NoWinttyFrom -ExePath $ExePath -Context "The child stderr scenario"
-    # send-text is armed only for the via-cmd leg, which has to type the probe.
     $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -PrivateStateBase -AllowInput
 
-    # direct: the app spawns the child itself.
     $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrdirect' }).state.active
     $direct = Wait-Flags $s $i $ProbeSeconds
     if (-not $direct) { Assert-AppAlive $s; throw "HARNESS: the direct PowerShell child printed no flags within ${ProbeSeconds}s; nothing is known about its handles" }
     $legs.direct = $direct
 
-    # via-cmd: a cmd pane spawns the same probe, inheriting cmd's handles.
     $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrcmd' }).state.active
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     while ($clock.Elapsed.TotalSeconds -lt $ProbeSeconds -and (Get-Screen $s $i) -notmatch '>\s*$') { Start-Sleep -Milliseconds 250 }
@@ -180,8 +146,7 @@ try {
         if ($tty -ne 'TTY') { $findings.Add("wsl '$distro': sh reports fd 2 is a pipe, not the pty") }
 
         $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrwslprompt' }).state.active
-        # Only the timing is recorded: the prompt itself carries the user and
-        # host names and a local path, and result.json gets pasted around.
+        # Timing only: the prompt line carries user and host names.
         $clock = [System.Diagnostics.Stopwatch]::StartNew(); $shown = $false
         while ($clock.Elapsed.TotalSeconds -lt $PromptSeconds) {
             if (((Get-Screen $s $i) -replace '\s', '').Length -gt 0) { $shown = $true; break }
