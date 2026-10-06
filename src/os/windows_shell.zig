@@ -500,6 +500,66 @@ test "isWslExe: windows path, forward slashes, quoted, bare, non-wsl" {
     try testing.expect(!isWslExe(""));
 }
 
+/// `argv` with `--cd ~` after the WSL launcher, or null when it is not WSL or
+/// its options already pick a directory (`--cd`, or wsl.exe's bare `~`).
+/// Without `--cd`, wsl.exe opens the Windows directory it inherited.
+pub fn wslArgsWithHomeCd(
+    alloc: Allocator,
+    argv: []const [:0]const u8,
+) Allocator.Error!?[]const [:0]const u8 {
+    if (argv.len == 0 or !isWslExe(argv[0])) return null;
+
+    for (argv[1..]) |a| {
+        // The in-distro command starts here; its args are not wsl.exe's.
+        if (std.mem.eql(u8, a, "--") or
+            std.mem.eql(u8, a, "-e") or
+            std.mem.eql(u8, a, "--exec")) break;
+        if (std.mem.eql(u8, a, "--cd") or
+            std.mem.startsWith(u8, a, "--cd=") or
+            std.mem.eql(u8, a, "~")) return null;
+    }
+
+    const out = try alloc.alloc([:0]const u8, argv.len + 2);
+    out[0] = argv[0];
+    out[1] = "--cd";
+    out[2] = "~";
+    @memcpy(out[3..], argv[1..]);
+    return out;
+}
+
+test "wslArgsWithHomeCd: a WSL launch gets --cd ~ right after the launcher" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const got = (try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "Ubuntu-24.04" })).?;
+    try testing.expectEqual(@as(usize, 5), got.len);
+    try testing.expectEqualStrings("wsl.exe", got[0]);
+    try testing.expectEqualStrings("--cd", got[1]);
+    try testing.expectEqualStrings("~", got[2]);
+    try testing.expectEqualStrings("-d", got[3]);
+    try testing.expectEqualStrings("Ubuntu-24.04", got[4]);
+
+    try testing.expectEqual(@as(usize, 3), (try wslArgsWithHomeCd(alloc, &.{"wsl"})).?.len);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{"C:\\Windows\\System32\\wsl.exe"})) != null);
+
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--", "ls", "~" })) != null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-e", "cd", "--cd" })) != null);
+}
+
+test "wslArgsWithHomeCd: leaves alone what is not WSL or already picks a directory" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{})) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "cmd.exe", "/k" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--cd", "/tmp" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "Debian", "--cd=/srv" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "~" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "Debian", "~" })) == null);
+}
+
 /// If `argv` invokes the WSL launcher, return the target distro from
 /// `-d <distro>` / `--distribution <distro>` (and the `=`-joined forms), or
 /// `""` for the default distro. Returns null for non-WSL commands. Pure; safe

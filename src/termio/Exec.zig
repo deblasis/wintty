@@ -1212,13 +1212,9 @@ const Subprocess = struct {
         // We have to copy the cwd because there is no guarantee that
         // pointers in full_config remain valid.
         //
-        // A WSL shell nobody gave a starting directory to is launched with
-        // none, so wsl.exe applies its own default: the distro user's HOME. The
-        // directory this same config resolved above is the Windows home, which
-        // wsl.exe turns into /mnt/c/Users/<name> - the 9p bridge, where the
-        // shell is slow from its first prompt (#1268). The rule is a function
-        // of the three values rather than of this file, so the daemon-spawned
-        // path asks the same question and lands in the same place.
+        // A WSL shell with no directory of its own opens in the Linux HOME:
+        // no cwd (the Windows home becomes /mnt/c, the slow 9p bridge, #1268)
+        // and `--cd ~`, since wsl.exe otherwise translates the inherited cwd.
         const wsl_default_cwd = configpkg.Config.WorkingDirectoryDefaulted(
             args[0],
             cfg.working_directory,
@@ -1230,6 +1226,10 @@ const Subprocess = struct {
             try alloc.dupeZ(u8, cwd)
         else
             null;
+        const spawn_args: []const [:0]const u8 = if (wsl_default_cwd)
+            (try internal_os.windows_shell.wslArgsWithHomeCd(alloc, args)) orelse args
+        else
+            args;
 
         // Propagate the current working directory (CWD) to the shell, enabling
         // the shell to display the current directory name rather than the
@@ -1244,7 +1244,7 @@ const Subprocess = struct {
             .arena = arena,
             .env = env,
             .cwd = cwd,
-            .args = args,
+            .args = spawn_args,
 
             .utf8_console = cfg.utf8_console,
 

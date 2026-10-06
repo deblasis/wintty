@@ -7049,14 +7049,9 @@ pub const LinkUrlStyle = enum {
 /// the child is wsl.exe and the directory on offer is a default this process
 /// filled in rather than one the user wrote.
 ///
-/// wsl.exe's own default is the distro user's HOME, and that is what a WSL
-/// shell should open in. A Windows directory handed to it as a starting
-/// directory becomes a path under /mnt/c instead: the 9p bridge, where a cold
-/// shell is slow from its first prompt and every path crossing goes into the
-/// VM on demand. Launching with no directory at all is therefore the fix, and
-/// it is wsl.exe's own mechanism rather than a value spelled here - `--cd ~`
-/// would work too, but naming the Linux home from a Windows config is a
-/// translation this module does not otherwise do (deblasis/wintty#1268).
+/// A WSL shell should open in the Linux HOME, not under /mnt/c on the slow 9p
+/// bridge (deblasis/wintty#1268). True means: spawn with no cwd and add
+/// `--cd ~` (`windows_shell.wslArgsWithHomeCd`).
 ///
 /// A `working-directory` the user wrote is honoured as written, bridge and
 /// all.
