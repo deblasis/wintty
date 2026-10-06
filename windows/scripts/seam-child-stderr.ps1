@@ -92,6 +92,11 @@ $quoted = if ($distro -and $distro -match '\s') { "`"$distro`"" } else { $distro
 $config = @"
 windows-single-instance = false
 window-save-state = never
+# The startup tab: without a default it would run the first profile below,
+# which the scenario then opens again.
+default-profile = idle
+profile.idle.name = Idle
+profile.idle.command = cmd.exe
 profile.stderrdirect.name = StderrDirect
 profile.stderrdirect.command = $psDirect
 profile.stderrcmd.name = StderrViaCmd
