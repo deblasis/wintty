@@ -1217,7 +1217,6 @@ const Subprocess = struct {
         // and `--cd ~`, since wsl.exe otherwise translates the inherited cwd.
         const wsl_default_cwd = configpkg.Config.WorkingDirectoryDefaulted(
             args[0],
-            cfg.working_directory,
             cfg.working_directory_defaulted,
         );
         const cwd: ?[:0]u8 = if (wsl_default_cwd)

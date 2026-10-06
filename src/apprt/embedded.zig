@@ -726,6 +726,9 @@ pub const Surface = struct {
                 var wd_val: configpkg.WorkingDirectory = .{ .path = wd };
                 if (wd_val.finalize(config.arenaAlloc())) |_| {
                     config.@"working-directory" = wd_val;
+                    // The host chose this directory (a profile's, a restore's), so a
+                    // WSL pane opens there rather than in HOME.
+                    config._working_directory_defaulted = false;
                 } else |err| {
                     log.warn(
                         "error finalizing working directory config dir={s} err={}",

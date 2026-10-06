@@ -501,22 +501,27 @@ test "isWslExe: windows path, forward slashes, quoted, bare, non-wsl" {
 }
 
 /// `argv` with `--cd ~` after the WSL launcher, or null when it is not WSL or
-/// its options already pick a directory (`--cd`, or wsl.exe's bare `~`).
-/// Without `--cd`, wsl.exe opens the Windows directory it inherited.
+/// already picks a directory: a `--cd` among wsl.exe's own options, or `~` as
+/// the first argument (wsl.exe's shorthand for HOME). Without either, wsl.exe
+/// opens the Windows directory it inherited.
 pub fn wslArgsWithHomeCd(
     alloc: Allocator,
     argv: []const [:0]const u8,
 ) Allocator.Error!?[]const [:0]const u8 {
     if (argv.len == 0 or !isWslExe(argv[0])) return null;
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], "~")) return null;
 
-    for (argv[1..]) |a| {
-        // The in-distro command starts here; its args are not wsl.exe's.
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const a = argv[i];
+        // The in-distro command starts at `--`, `-e`/`--exec`, or the first
+        // word that is not an option; its args are not wsl.exe's.
         if (std.mem.eql(u8, a, "--") or
             std.mem.eql(u8, a, "-e") or
-            std.mem.eql(u8, a, "--exec")) break;
-        if (std.mem.eql(u8, a, "--cd") or
-            std.mem.startsWith(u8, a, "--cd=") or
-            std.mem.eql(u8, a, "~")) return null;
+            std.mem.eql(u8, a, "--exec") or
+            !std.mem.startsWith(u8, a, "-")) break;
+        if (std.mem.eql(u8, a, "--cd")) return null;
+        if (wslOptionTakesValue(a)) i += 1;
     }
 
     const out = try alloc.alloc([:0]const u8, argv.len + 2);
@@ -525,6 +530,16 @@ pub fn wslArgsWithHomeCd(
     out[2] = "~";
     @memcpy(out[3..], argv[1..]);
     return out;
+}
+
+/// wsl.exe options whose value is the next argument, so it is never read as
+/// an option or as the start of the command.
+fn wslOptionTakesValue(a: []const u8) bool {
+    const with_value = [_][]const u8{
+        "-d", "--distribution", "--distribution-id", "-u", "--user", "--shell-type",
+    };
+    for (with_value) |o| if (std.mem.eql(u8, a, o)) return true;
+    return false;
 }
 
 test "wslArgsWithHomeCd: a WSL launch gets --cd ~ right after the launcher" {
@@ -543,8 +558,19 @@ test "wslArgsWithHomeCd: a WSL launch gets --cd ~ right after the launcher" {
     try testing.expectEqual(@as(usize, 3), (try wslArgsWithHomeCd(alloc, &.{"wsl"})).?.len);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{"C:\\Windows\\System32\\wsl.exe"})) != null);
 
+    // The command's own words are not wsl.exe's, however it starts.
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--", "ls", "~" })) != null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-e", "cd", "--cd" })) != null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--exec", "ls", "~" })) != null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "U", "ls", "--cd", "~" })) != null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "U", "~" })) != null);
+    // Past `--`, `-e` or `--exec` even a word that looks like an option is the command's.
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--", "--cd" })) != null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-e", "--cd" })) != null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--exec", "--cd" })) != null);
+    // An option's value is not an option: a user named --cd, a distro named ~.
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-u", "--cd" })) != null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--distribution", "~" })) != null);
 }
 
 test "wslArgsWithHomeCd: leaves alone what is not WSL or already picks a directory" {
@@ -555,11 +581,11 @@ test "wslArgsWithHomeCd: leaves alone what is not WSL or already picks a directo
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{})) == null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "cmd.exe", "/k" })) == null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "--cd", "/tmp" })) == null);
-    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "Debian", "--cd=/srv" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "Debian", "--cd", "/srv" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-u", "root", "--cd", "/srv" })) == null);
     try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "~" })) == null);
-    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "-d", "Debian", "~" })) == null);
+    try testing.expect((try wslArgsWithHomeCd(alloc, &.{ "wsl.exe", "~", "-d", "Debian" })) == null);
 }
-
 /// If `argv` invokes the WSL launcher, return the target distro from
 /// `-d <distro>` / `--distribution <distro>` (and the `=`-joined forms), or
 /// `""` for the default distro. Returns null for non-WSL commands. Pure; safe

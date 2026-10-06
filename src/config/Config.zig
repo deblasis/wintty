@@ -7053,22 +7053,22 @@ pub const LinkUrlStyle = enum {
 /// bridge (deblasis/wintty#1268). True means: spawn with no cwd and add
 /// `--cd ~` (`windows_shell.wslArgsWithHomeCd`).
 ///
-/// A `working-directory` the user wrote is honoured as written, bridge and
-/// all.
+/// A directory someone chose is honoured as written, bridge and all: a
+/// `working-directory` the user wrote (`inherit` included), or one the host
+/// set for the surface.
 ///
 /// Pure, and Windows-shaped by construction: it answers from the values rather
 /// than from the host, so a test can ask it on any platform and the
 /// daemon-spawned path can take the same rule verbatim.
 pub fn WorkingDirectoryDefaulted(
     command: ?[]const u8,
-    working_directory: ?[]const u8,
     working_directory_defaulted: bool,
 ) bool {
     if (comptime builtin.os.tag != .windows) return false;
     // Not a std.fs.path.basename: that follows the host separator and misses a
     // `C:\...\wsl.exe` arg0. isWslExe splits on both and strips quotes.
     if (!internal_os.windows_shell.isWslExe(command orelse return false)) return false;
-    return working_directory == null or working_directory_defaulted;
+    return working_directory_defaulted;
 }
 
 /// See working-directory
@@ -13667,47 +13667,22 @@ test "WorkingDirectoryDefaulted: a WSL shell with no directory of its own opens 
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     // A discovered profile, and the config-file form: no working-directory, so
-    // finalize put the Windows home there. Handing THAT to wsl.exe is the bug -
-    // the shell opens in /mnt/c/Users/<name>, over the 9p bridge.
-    try std.testing.expect(WorkingDirectoryDefaulted(
-        "wsl.exe",
-        "C:\\Users\\me",
-        true,
-    ));
-    try std.testing.expect(WorkingDirectoryDefaulted(
-        "C:\\Windows\\System32\\wsl.exe",
-        "C:\\Users\\me",
-        true,
-    ));
-    // Nothing to hand it at all - a config that left the union as .home or
-    // .inherit - is the same answer.
-    try std.testing.expect(WorkingDirectoryDefaulted("wsl.exe", null, false));
+    // finalize put the Windows home there (or, with no home, fell back to
+    // inheriting). Handing that to wsl.exe is the bug: the shell opens under
+    // /mnt/c, over the 9p bridge.
+    try std.testing.expect(WorkingDirectoryDefaulted("wsl.exe", true));
+    try std.testing.expect(WorkingDirectoryDefaulted("C:\\Windows\\System32\\wsl.exe", true));
 
-    // A directory the user wrote is theirs, bridge included: a
-    // working-directory in a profile that runs wsl.exe, or a directory a shell
-    // reported over OSC 7 that a duplicate or a restore spawns into.
-    try std.testing.expect(!WorkingDirectoryDefaulted(
-        "wsl.exe",
-        "C:\\Users\\me\\src",
-        false,
-    ));
+    // A directory someone chose is theirs, bridge included: a working-directory
+    // the user wrote (`inherit` too), or one the host set for the surface, such
+    // as a profile's directory or a restored one.
+    try std.testing.expect(!WorkingDirectoryDefaulted("wsl.exe", false));
 
     // No other shell is touched by any of this: cmd.exe still opens in the
-    // Windows home, which is what it always did.
-    try std.testing.expect(!WorkingDirectoryDefaulted(
-        "cmd.exe",
-        "C:\\Users\\me",
-        true,
-    ));
-    // And a profile that runs something else through wsl.exe is not a WSL pane
-    // either - Git's bash is a native shell.
-    try std.testing.expect(!WorkingDirectoryDefaulted(
-        "C:\\Program Files\\Git\\bin\\bash.exe",
-        "C:\\Users\\me",
-        true,
-    ));
+    // Windows home, and Git's bash is a native shell.
+    try std.testing.expect(!WorkingDirectoryDefaulted("cmd.exe", true));
+    try std.testing.expect(!WorkingDirectoryDefaulted("C:\\Program Files\\Git\\bin\\bash.exe", true));
 }
-
 test "working-directory: a finalized config says whether it defaulted" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -13722,11 +13697,7 @@ test "working-directory: a finalized config says whether it defaulted" {
         defer cfg.deinit();
         try cfg.finalize();
         try testing.expect(cfg._working_directory_defaulted);
-        try testing.expect(WorkingDirectoryDefaulted(
-            "wsl.exe",
-            if (cfg.@"working-directory") |wd| wd.value() else null,
-            cfg._working_directory_defaulted,
-        ));
+        try testing.expect(WorkingDirectoryDefaulted("wsl.exe", cfg._working_directory_defaulted));
     }
 
     // Written, so the flag does not claim otherwise whatever the path is.
@@ -13735,10 +13706,6 @@ test "working-directory: a finalized config says whether it defaulted" {
     // config from its replay steps and drops fields the literal wrote, so
     // the written case cannot survive a real finalize in this build.
     {
-        try testing.expect(!WorkingDirectoryDefaulted(
-            "wsl.exe",
-            "/home/me",
-            false,
-        ));
+        try testing.expect(!WorkingDirectoryDefaulted("wsl.exe", false));
     }
 }

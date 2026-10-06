@@ -3,8 +3,10 @@
     A WSL pane with no starting directory opens in the distro's Linux HOME,
     as reported by `wsl.exe -d <distro> -- printenv HOME`. Two legs: a profile
     whose `sh -c` prints its own $PWD, and an interactive shell asked for it.
+    A third leg gives a profile its own working-directory, which must win.
 
-    Exits 0 pass, 2 product failure, 1 harness failure, 3 skip (no distro).
+    Exits 0 pass, 2 product failure, 1 harness failure, 3 skip (no distro, or
+    the distro could not report its HOME within 90 s).
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
@@ -90,6 +92,9 @@ profile.wslhomecmd.name = WslHomeCommand
 profile.wslhomecmd.command = wsl.exe -d $quoted -- sh -c "echo WSL-CWD=`$PWD; exec sleep 60"
 profile.wslhomeshell.name = WslHomeShell
 profile.wslhomeshell.command = wsl.exe -d $quoted
+profile.wsldir.name = WslOwnDirectory
+profile.wsldir.command = wsl.exe -d $quoted -- sh -c "echo WSL-CWD=`$PWD; exec sleep 60"
+profile.wsldir.working-directory = C:\Windows
 "@
 
 $s = $null
@@ -110,14 +115,19 @@ try {
     $legs.shell = Wait-Cwd $s $i $PromptSeconds
     if (-not $legs.shell) { throw "HARNESS: the interactive WSL pane printed no directory within ${PromptSeconds}s; nothing is known about where it opened" }
 
+    $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'wsldir' }).state.active
+    $legs.ownDirectory = Wait-Cwd $s $i $PromptSeconds
+    if (-not $legs.ownDirectory) { throw "HARNESS: the WSL pane with its own directory printed none within ${PromptSeconds}s" }
+
     if ($s.Proc.HasExited) { throw ("APP_EXIT: the app exited during the scenario (code {0})" -f $s.Proc.ExitCode) }
 
     $wrong = @(foreach ($leg in 'command', 'shell') { if ($legs[$leg] -cne $expected) { "$leg pane opened in $($legs[$leg])" } })
+    if ($legs.ownDirectory -cne '/mnt/c/Windows') { $wrong += "a profile's working-directory C:\Windows opened in $($legs.ownDirectory)" }
     if ($wrong.Count -gt 0) {
-        throw ("PRODUCT_FAIL: a WSL pane with no starting directory did not open in the distro HOME $expected - " + ($wrong -join '; '))
+        throw ("PRODUCT_FAIL: expected the distro HOME $expected with no directory, /mnt/c/Windows with one - " + ($wrong -join '; '))
     }
 
-    $detail = "both WSL panes opened in the distro HOME ($expected)"
+    $detail = "both WSL panes with no directory opened in the distro HOME ($expected); the one with its own opened there"
     Write-Host "PASS wsl-home: $detail" -ForegroundColor Green
     Write-Result 'pass' '' $detail $legs
     exit 0
