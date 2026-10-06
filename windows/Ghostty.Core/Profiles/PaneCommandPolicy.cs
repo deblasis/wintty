@@ -99,6 +99,7 @@ public static class PaneCommandPolicy
     /// </summary>
     public static string? LaunchDirectory(string? launchCommand, string? callerDirectory)
         => string.IsNullOrWhiteSpace(launchCommand) ? null : callerDirectory;
+
     /// <summary>
     /// The first pane of the window a launch opens when the launch named no
     /// profile. <paramref name="launchArgv"/> (the <c>-e</c> command, rendered

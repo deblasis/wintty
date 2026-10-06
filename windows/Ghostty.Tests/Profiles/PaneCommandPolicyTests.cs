@@ -144,6 +144,7 @@ public sealed class PaneCommandPolicyTests
         // -e from a prompt runs the command where the prompt was.
         Assert.Equal(@"D:\proj", PaneCommandPolicy.LaunchDirectory("htop", @"D:\proj"));
     }
+
     [Fact]
     public void LaunchCommand_IsNotInheritedBySplits()
     {

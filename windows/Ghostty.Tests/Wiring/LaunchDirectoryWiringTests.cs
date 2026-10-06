@@ -30,6 +30,7 @@ public class LaunchDirectoryWiringTests
         var directory = method.DescendantNodes().OfType<VariableDeclaratorSyntax>()
             .Single(v => v.Identifier.ValueText == "directory");
         Assert.Same(rule, directory.Initializer!.Value);
+        Assert.Empty(method.AssignsTo("directory"));
         Assert.Equal("directory", method.Call("LaunchFirstPaneSnapshot").Arg(1));
         Assert.Equal("directory", method.Call("Ghostty.Core.Profiles.PaneCommandPolicy.ApplyLaunchCommand").Arg(2));
 
