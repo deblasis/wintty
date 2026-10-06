@@ -1219,7 +1219,8 @@ public partial class App : Application
                 showLaunchIcon: true,
                 initialSnapshot: LaunchFirstPaneSnapshot(
                     coldCommand,
-                    workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory,
+                    workingDirectory: Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(
+                        coldCommand, Program.LaunchWorkingDirectory),
                     initialCommand: initialCommand));
             window.Closed += OnAnyWindowClosedInternal;
             _sessionManager.Track(window);
@@ -1480,7 +1481,8 @@ public partial class App : Application
     /// <summary>
     /// Open a new top-level window or tab for a launch forwarded from a
     /// secondary instance (single-instance mode) or a jump-list click.
-    /// Seeded with the forwarded working directory. Runs on the UI thread.
+    /// The forwarded working directory goes with a -e command only. Runs on
+    /// the UI thread.
     /// Mirrors MainWindow.OpenInNewWindow's wiring, including session Track.
     /// </summary>
     internal void OpenWindowFromLaunch(Ghostty.Core.SingleInstance.LaunchRequest req)
@@ -1945,12 +1947,15 @@ public partial class App : Application
         // A window other than the cold -e one ends the hold (#1136).
         RestoreHeldSession();
 
+        // The caller's directory goes with a -e command only, as on a cold start.
+        var directory = Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(command, workingDirectory);
+
         Ghostty.Core.Profiles.ProfileSnapshot? snapshot;
         if (profileId is null)
         {
             // Nobody picked a profile (a bare forwarded launch, the jump
             // list's New Window task): the first pane of a launch.
-            snapshot = LaunchFirstPaneSnapshot(command, workingDirectory);
+            snapshot = LaunchFirstPaneSnapshot(command, directory);
         }
         else
         {
@@ -1961,7 +1966,7 @@ public partial class App : Application
                 ? Ghostty.Core.Profiles.ProfileSnapshotStore.From(resolved, registry.Version)
                 : Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(registry);
             snapshot = Ghostty.Core.Profiles.PaneCommandPolicy.ApplyLaunchCommand(
-                snapshot, command, workingDirectory);
+                snapshot, command, directory);
         }
 
         var window = MainWindow.CreateForNewTab(

@@ -135,6 +135,17 @@ public sealed class PaneCommandPolicyTests
     }
 
     [Fact]
+    public void LaunchDirectory_GoesWithACommandOnly()
+    {
+        // A shortcut, the taskbar or a jump-list task: the caller's directory
+        // is the install folder or System32, so the profile keeps its own.
+        Assert.Null(PaneCommandPolicy.LaunchDirectory(null, @"C:\Program Files\Wintty"));
+        Assert.Null(PaneCommandPolicy.LaunchDirectory(" ", @"C:\Windows\System32"));
+        // -e from a prompt runs the command where the prompt was.
+        Assert.Equal(@"D:\proj", PaneCommandPolicy.LaunchDirectory("htop", @"D:\proj"));
+    }
+
+    [Fact]
     public void LaunchCommand_IsNotInheritedBySplits()
     {
         var first = PaneCommandPolicy.LaunchFirstPane(

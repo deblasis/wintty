@@ -45,7 +45,7 @@ public sealed class LaunchCommandWiringTests
         Assert.Contains("command = null", source.Method("OpenJumpListWindow")
             .ParameterList.Parameters.ToString());
         var flat = System.Text.RegularExpressions.Regex.Replace(builder, @"\s+", " ");
-        Assert.Contains("LaunchFirstPaneSnapshot(command, workingDirectory)", flat);
-        Assert.Contains("PaneCommandPolicy.ApplyLaunchCommand( snapshot, command, workingDirectory)", flat);
+        Assert.Contains("LaunchFirstPaneSnapshot(command, directory)", flat);
+        Assert.Contains("PaneCommandPolicy.ApplyLaunchCommand( snapshot, command, directory)", flat);
     }
 }
