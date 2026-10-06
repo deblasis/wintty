@@ -18,12 +18,16 @@
       via-cmd    a cmd pane spawns it, so it inherits cmd's handles
 
     Both must report False for all three. The WSL legs run when the machine
-    has a distro that can run a command and are recorded as skipped when it
-    does not; they never decide the outcome on their own:
+    has a distro that can run a command, and then fail the scenario like any
+    other leg; without one they are recorded as skipped, and the scenario
+    still runs and decides on the two legs above:
 
-      wsl-tty     `bash -c` reports whether fd 2 is a tty
-      wsl-prompt  an interactive `wsl.exe -d <distro>` pane shows its prompt
-                  with nothing typed into it
+      wsl-tty     `sh -c` reports whether fd 2 is a tty
+      wsl-prompt  an interactive `wsl.exe -d <distro>` pane is not blank
+                  within the budget, with nothing typed into it. A blank pane
+                  is what the bug looked like: the shell drew its prompt on
+                  stderr. The leg checks that output arrived, not what the
+                  prompt says, since a prompt's shape is the user's.
 
     Exits 0 on pass, 2 on a product finding, 1 when the harness could not
     run and nothing is known about the product.
@@ -69,6 +73,12 @@ function Read-Flags([string]$Text) {
     foreach ($x in [regex]::Matches($Text, '\b(IN|OUT|ERR)-REDIR=(True|False)\b')) { $m[$x.Groups[1].Value] = $x.Groups[2].Value }
     if ($m.Count -lt 3) { return $null }
     return [ordered]@{ in = $m.IN; out = $m.OUT; err = $m.ERR }
+}
+
+# Before calling a silent leg a harness failure: a pane that printed nothing
+# because the app died is a product finding, and Get-Screen swallows that.
+function Assert-AppAlive($s) {
+    if ($s.Proc.HasExited) { throw ("APP_EXIT: the app exited during the scenario (code {0})" -f $s.Proc.ExitCode) }
 }
 
 function Wait-Flags($s, [int]$Index, [int]$Seconds) {
@@ -122,7 +132,7 @@ if ($distro) {
     $config += @"
 
 profile.stderrwsltty.name = StderrWslTty
-profile.stderrwsltty.command = wsl.exe -d $quoted -- bash -c "[ -t 2 ] && echo WSL-ERR-TTY || echo WSL-ERR-PIPE; exec sleep 60"
+profile.stderrwsltty.command = wsl.exe -d $quoted -- sh -c "[ -t 2 ] && echo WSL-ERR-TTY || echo WSL-ERR-PIPE; exec sleep 60"
 profile.stderrwslprompt.name = StderrWslPrompt
 profile.stderrwslprompt.command = wsl.exe -d $quoted
 "@
@@ -139,7 +149,7 @@ try {
     # direct: the app spawns the child itself.
     $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrdirect' }).state.active
     $direct = Wait-Flags $s $i $ProbeSeconds
-    if (-not $direct) { throw "HARNESS: the direct PowerShell child printed no flags within ${ProbeSeconds}s; nothing is known about its handles" }
+    if (-not $direct) { Assert-AppAlive $s; throw "HARNESS: the direct PowerShell child printed no flags within ${ProbeSeconds}s; nothing is known about its handles" }
     $legs.direct = $direct
 
     # via-cmd: a cmd pane spawns the same probe, inheriting cmd's handles.
@@ -148,7 +158,7 @@ try {
     while ($clock.Elapsed.TotalSeconds -lt $ProbeSeconds -and (Get-Screen $s $i) -notmatch '>\s*$') { Start-Sleep -Milliseconds 250 }
     Invoke-SeamCommand $s @{ op = 'send-text'; index = $i; text = "powershell.exe -NoLogo -NoProfile -Command `"$probe`"`r" } | Out-Null
     $viaCmd = Wait-Flags $s $i $ProbeSeconds
-    if (-not $viaCmd) { throw "HARNESS: the PowerShell child cmd started printed no flags within ${ProbeSeconds}s; nothing is known about its handles" }
+    if (-not $viaCmd) { Assert-AppAlive $s; throw "HARNESS: the PowerShell child cmd started printed no flags within ${ProbeSeconds}s; nothing is known about its handles" }
     $legs.viaCmd = $viaCmd
 
     foreach ($leg in @('direct', 'viaCmd')) {
@@ -165,29 +175,31 @@ try {
             $m = [regex]::Match((Get-Screen $s $i), 'WSL-ERR-(TTY|PIPE)')
             if ($m.Success) { $tty = $m.Groups[1].Value } else { Start-Sleep -Milliseconds 250 }
         }
-        $legs.wslTty = if ($tty) { "fd 2 is a $($tty.ToLower())" } else { 'no answer' }
-        if ($tty -ne 'TTY') { $findings.Add("wsl '$distro': bash reports fd 2 is $(if ($tty) { 'a pipe' } else { 'nothing within the budget' }), not the pty") }
+        if (-not $tty) { Assert-AppAlive $s; throw "HARNESS: the WSL fd 2 probe printed no answer within ${PromptSeconds}s; nothing is known about its stderr" }
+        $legs.wslTty = "fd 2 is a $($tty.ToLower())"
+        if ($tty -ne 'TTY') { $findings.Add("wsl '$distro': sh reports fd 2 is a pipe, not the pty") }
 
         $i = [int](Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'stderrwslprompt' }).state.active
-        $clock = [System.Diagnostics.Stopwatch]::StartNew(); $shown = $null
+        # Only the timing is recorded: the prompt itself carries the user and
+        # host names and a local path, and result.json gets pasted around.
+        $clock = [System.Diagnostics.Stopwatch]::StartNew(); $shown = $false
         while ($clock.Elapsed.TotalSeconds -lt $PromptSeconds) {
-            $t = Get-Screen $s $i
-            if (($t -replace '\s', '').Length -gt 0) { $shown = (($t -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1).Trim(); break }
+            if (((Get-Screen $s $i) -replace '\s', '').Length -gt 0) { $shown = $true; break }
             Start-Sleep -Milliseconds 250
         }
-        $legs.wslPrompt = if ($shown) { "rendered in $([math]::Round($clock.Elapsed.TotalSeconds, 2))s: '$shown'" } else { "blank after ${PromptSeconds}s" }
-        if (-not $shown) { $findings.Add("wsl '$distro': an interactive pane stayed blank for ${PromptSeconds}s with nothing typed into it") }
+        $legs.wslPrompt = if ($shown) { "output after $([math]::Round($clock.Elapsed.TotalSeconds, 2))s" } else { "blank after ${PromptSeconds}s" }
+        if (-not $shown) { Assert-AppAlive $s; $findings.Add("wsl '$distro': an interactive pane stayed blank for ${PromptSeconds}s with nothing typed into it") }
     } else {
         $legs.wsl = 'skipped: no WSL distro on this machine that can run a command'
     }
 
-    if ($s.Proc.HasExited) { throw ("APP_EXIT: the app exited during the scenario (code {0})" -f $s.Proc.ExitCode) }
+    Assert-AppAlive $s
 
     if ($findings.Count -gt 0) {
         throw ("PRODUCT_FAIL: a shell this app starts does not get a console on every standard handle - " + ($findings -join '; '))
     }
 
-    $detail = "direct and via-cmd children report all three handles as consoles" + $(if ($distro) { "; wsl '$distro' fd 2 is the pty and the prompt rendered" } else { '; wsl legs skipped (no distro)' })
+    $detail = "direct and via-cmd children report all three handles as consoles" + $(if ($distro) { "; wsl '$distro' fd 2 is the pty and the interactive pane is not blank" } else { '; wsl legs skipped (no distro)' })
     Write-Host "PASS child-stderr: $detail" -ForegroundColor Green
     Write-Result 'pass' '' $detail $legs
     exit 0
