@@ -11,15 +11,9 @@ namespace Ghostty.Core.Profiles.Probes;
 /// name. WindowsProcessRunner sets WSL_UTF8=1 so output is UTF-8; the
 /// leading BOM (if any) and stray NUL bytes are stripped defensively.
 /// <para>
-/// A discovered profile deliberately sets no <c>WorkingDirectory</c>. That is
-/// not an oversight, it is what makes the pane open in the right place:
-/// wsl.exe's own default is the distro user's HOME, whereas a Windows
-/// directory handed to it as a starting directory becomes a path under
-/// /mnt/c, on the 9p bridge, where a cold shell is slow from its first
-/// prompt. The spawn path reads the difference between "no directory" and "a
-/// directory the user chose" and launches this one with none
-/// (deblasis/wintty#1268). A user who wants a starting directory writes
-/// <c>profile.&lt;id&gt;.working-directory</c>, and gets it, bridge included.
+/// A discovered profile sets no <c>WorkingDirectory</c>, so the spawn opens it in
+/// the Linux HOME with <c>--cd ~</c> rather than under /mnt/c (deblasis/wintty#1268).
+/// <c>profile.&lt;id&gt;.working-directory</c> overrides that.
 /// </para>
 /// </summary>
 internal sealed class WslProbe(IProcessRunner runner) : IInstalledShellProbe
