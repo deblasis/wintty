@@ -192,8 +192,8 @@ public sealed class FirstPaneCommandWiringTests
         var call = seed.Expression.AssertCallTo("LaunchFirstPaneSnapshot");
         Assert.Equal("coldCommand", call.Arg(0));
         Assert.Equal(
-            "workingDirectory: coldCommand is null ? null : Program.LaunchWorkingDirectory",
-            call.Arg(1));
+            "workingDirectory: Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory( coldCommand, Program.LaunchWorkingDirectory)",
+            System.Text.RegularExpressions.Regex.Replace(call.Arg(1), @"\s+", " "));
         Assert.Equal("initialCommand: initialCommand", call.Arg(2));
 
         // It is the only window of the launch, so it takes the splash.
@@ -223,7 +223,7 @@ public sealed class FirstPaneCommandWiringTests
         var branch = helper.Ancestors().OfType<IfStatementSyntax>().First();
         Assert.Equal("profileId is null", branch.Condition.ToString());
         Assert.Equal("command", helper.Arg(0));
-        Assert.Equal("workingDirectory", helper.Arg(1));
+        Assert.Equal("directory", helper.Arg(1));
     }
 
     [Fact]

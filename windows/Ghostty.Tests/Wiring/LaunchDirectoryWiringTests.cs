@@ -26,6 +26,13 @@ public class LaunchDirectoryWiringTests
         Assert.Equal("command", rule.Arg(0));
         Assert.Equal("workingDirectory", rule.Arg(1));
 
+        // The rule's answer is what both arms hand the first pane.
+        var directory = method.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "directory");
+        Assert.Same(rule, directory.Initializer!.Value);
+        Assert.Equal("directory", method.Call("LaunchFirstPaneSnapshot").Arg(1));
+        Assert.Equal("directory", method.Call("Ghostty.Core.Profiles.PaneCommandPolicy.ApplyLaunchCommand").Arg(2));
+
         // Any other read of the raw parameter would bypass the rule.
         var raw = method.Body!.DescendantNodes().OfType<IdentifierNameSyntax>()
             .Count(id => id.Identifier.ValueText == "workingDirectory");
