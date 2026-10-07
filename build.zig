@@ -50,6 +50,14 @@ pub fn build(b: *std.Build) !void {
         "Filter for test. Only applies to Zig tests.",
     ) orelse &[0][]const u8{};
 
+    // Declared for every target so passing it to a build that never uses it
+    // (not Windows, or libghostty-vt only) is not an invalid-option error.
+    const dxc_dll = b.option(
+        []const u8,
+        "dxc-dll",
+        "dxcompiler.dll to place beside the Windows test binary",
+    );
+
     // Ghostty dependencies used by many artifacts.
     const deps = try buildpkg.SharedDeps.init(b, &config);
 
@@ -487,9 +495,14 @@ pub fn build(b: *std.Build) !void {
         // copy once an install has set installed_path, which is std's own
         // answer to DLLs beside an exe on Windows: install the DLL next to
         // every copy the run might pick, and order the run after them.
+        // --fuzz reruns the cached binary instead, so shader tests still
+        // report compiler_unavailable there.
         const test_target = config.baselineTarget(b.graph.io).result;
         if (test_target.os.tag == .windows) {
-            if (dxcTestDll(b, test_target.cpu.arch)) |dll| {
+            if (dxcTestDll(b, test_target.cpu.arch, dxc_dll)) |dll| {
+                // An input of the run, so a new DXC pin reruns the tests
+                // instead of replaying a result cached against the old DLL.
+                test_run.addFileInput(dll);
                 test_run.step.dependOn(test_exe_install_step);
                 test_run.step.dependOn(&b.addInstallFileWithDir(
                     dll,
@@ -578,12 +591,12 @@ fn installTestBinary(
 /// pins, read from there so the app and the tests cannot drift apart.
 /// Null when neither exists, and the shader tests then fail with
 /// compiler_unavailable exactly as they would without this.
-fn dxcTestDll(b: *std.Build, arch: std.Target.Cpu.Arch) ?std.Build.LazyPath {
-    if (b.option(
-        []const u8,
-        "dxc-dll",
-        "dxcompiler.dll to place beside the Windows test binary",
-    )) |path| return .{ .cwd_relative = path };
+fn dxcTestDll(
+    b: *std.Build,
+    arch: std.Target.Cpu.Arch,
+    override: ?[]const u8,
+) ?std.Build.LazyPath {
+    if (override) |path| return .{ .cwd_relative = path };
 
     const arch_dir = switch (arch) {
         .x86_64 => "x64",
