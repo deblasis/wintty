@@ -2294,21 +2294,92 @@ test "DirectX12: last-frame snapshot tracks the presented slot" {
     }
 }
 
+// ---- SRV tables: an in-flight table covers only what its binding owns ----
+//
+// Every SRV range in the root signatures is DATA_STATIC and not
+// DESCRIPTORS_VOLATILE, so each descriptor a bound table covers must stay
+// valid and unchanged until the GPU has finished the command list, whether
+// or not a shader reads it. The retirement queue frees a texture's resource
+// and slot on the fence of the first submission after the retire. That is
+// safe only while no LATER submission's table covers the slot, and a table
+// wider than the textures bound to it breaks exactly that: it reaches into
+// neighbouring slots owned by other textures, retired ones included.
+//
+// The debug layer answers the final release with
+// OBJECT_DELETED_WHILE_STILL_IN_USE (921) and a rewrite of a covered slot
+// with STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE (1001). 921 is a
+// CORRUPTION message, which the layer raises as exception 0x87D whatever
+// SetBreakOnSeverity says, and unhandled that kills the process with exit
+// code 2173. CorruptionTrap counts and resumes that raise, so a regression
+// is a failed assertion in one test instead of a dead test binary.
 
-// ---- #1722: an in-flight DATA_STATIC SRV table covers slots its base does not own ----
+const Dx12Api = @import("../DirectX12.zig");
+const font = @import("../../font/main.zig");
+
+const msg_object_deleted_while_still_in_use: u32 = 921;
+const msg_static_descriptor_invalid_descriptor_change: u32 = 1001;
+
+/// A vectored exception handler that counts the debug layer's CORRUPTION
+/// raise and resumes past it. Process-wide while installed; the tests that
+/// install it do not run concurrently with anything else that raises 0x87D.
+const CorruptionTrap = struct {
+    handle: *anyopaque,
+
+    const code: u32 = 0x87D;
+    var hits: std.atomic.Value(u32) = .init(0);
+
+    const EXCEPTION_RECORD = extern struct {
+        ExceptionCode: u32,
+        ExceptionFlags: u32,
+        ExceptionRecord: ?*EXCEPTION_RECORD,
+        ExceptionAddress: ?*anyopaque,
+        NumberParameters: u32,
+        ExceptionInformation: [15]usize,
+    };
+    const EXCEPTION_POINTERS = extern struct {
+        ExceptionRecord: *EXCEPTION_RECORD,
+        ContextRecord: *anyopaque,
+    };
+    const Handler = *const fn (*EXCEPTION_POINTERS) callconv(.winapi) i32;
+    extern "kernel32" fn AddVectoredExceptionHandler(first: u32, handler: Handler) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn RemoveVectoredExceptionHandler(handle: *anyopaque) callconv(.winapi) u32;
+
+    fn handler(info: *EXCEPTION_POINTERS) callconv(.winapi) i32 {
+        const rec = info.ExceptionRecord;
+        if (rec.ExceptionCode != code) return 0; // EXCEPTION_CONTINUE_SEARCH
+        _ = hits.fetchAdd(1, .monotonic);
+        // A noncontinuable raise cannot be resumed; let it end the run.
+        if (rec.ExceptionFlags & 1 != 0) return 0;
+        return -1; // EXCEPTION_CONTINUE_EXECUTION
+    }
+
+    fn install() !CorruptionTrap {
+        hits.store(0, .monotonic);
+        const h = AddVectoredExceptionHandler(1, &handler) orelse return error.VectoredHandlerFailed;
+        return .{ .handle = h };
+    }
+
+    fn uninstall(self: CorruptionTrap) void {
+        _ = RemoveVectoredExceptionHandler(self.handle);
+    }
+
+    fn take() u32 {
+        return hits.swap(0, .monotonic);
+    }
+};
 
 /// ID3D12InfoQueue::SetBreakOnSeverity is vtable slot 31 (after the 28
 /// storage/retrieval filter methods, AddMessage, AddApplicationMessage and
-/// SetBreakOnCategory). Off for CORRUPTION, so the defect this test pins is
-/// counted as a message instead of killing the test binary with 2173.
-fn iq1722SetBreakOnSeverity(iq: *InfoQueue, severity: u32, enable: bool) void {
+/// SetBreakOnCategory).
+fn infoQueueSetBreakOnSeverity(iq: *InfoQueue, severity: u32, enable: bool) void {
     const slots: [*]const *const anyopaque = @ptrCast(iq.vtable);
     const F = *const fn (*InfoQueue, u32, i32) callconv(.winapi) com.HRESULT;
     const f: F = @ptrCast(slots[31]);
     _ = f(iq, severity, if (enable) 1 else 0);
 }
 
-fn iq1722Count(iq: *InfoQueue, id: u32) usize {
+/// Count stored debug-layer messages with this ID, printing each one.
+fn infoQueueCount(iq: *InfoQueue, id: u32) usize {
     const alloc = std.testing.allocator;
     var hits: usize = 0;
     const n = iq.vtable.GetNumStoredMessages(iq);
@@ -2323,215 +2394,540 @@ fn iq1722Count(iq: *InfoQueue, id: u32) usize {
         if (msg.ID != id) continue;
         hits += 1;
         const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
-        std.debug.print("  [#1722 sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+        std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
     }
     return hits;
 }
 
-// The interleaving behind #1722, with nothing else in it:
-//
-//   1. textures take SRV slots: the render target first, then t0 (slot 1),
-//      t1 (slot 2) and the victim (slot 3) (production Texture.init, the
-//      device's retirement queue, a shader-visible heap);
-//   2. the victim is retired (a FrameState torn down when its tab is
-//      hidden) and the next submission seals it at fence V1, which the GPU
-//      then reaches;
-//   3. a later frame draws bg_image through the production RenderPass with
-//      t0 as its only texture. RenderPass binds the SRV table from t0's
-//      slot, and the root signature declares that table as srv_table_size
-//      (3) DATA_STATIC descriptors, so it covers slots 1..3: slot 3 still
-//      holds the victim's descriptor. bg_image samples t0 only. The queue
-//      is parked on a gate, so this submission (V2) is provably in flight;
-//   4. drawFrameStart's collect(GetCompletedValue()) runs verbatim:
-//      completed is V1, the victim is sealed at V1, so its resource is
-//      final-released and its slot rewritten while V2 still covers it.
-//
-// The debug layer answers step 4 with
-// ID3D12Resource::<final-release>: CORRUPTION ... OBJECT_DELETED_WHILE_STILL_IN_USE
-// (#921), the message the app dies of with exit code 2173, and the slot's
-// null-SRV rewrite with STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE (#1001).
-// Control first: the same sequence with the victim in a slot no bound table
-// covers (victim 1, t0 2, so the table spans 2..4). Expected green on the
-// current code; it runs first because the covered case kills the binary.
-test "SRV table: control, a retired texture outside every bound table is released cleanly (#1722)" {
-    try run1722(false);
-}
+/// A headless device with the production heaps, option builders, shaders
+/// and render pass, plus the means to keep one submission provably in
+/// flight while the retirement queue runs. Initialised in place: the
+/// textures it hands out point at its heaps.
+const CoverageRig = struct {
+    api: Dx12Api,
+    iq: *InfoQueue,
+    trap: CorruptionTrap,
+    shaders: Shaders,
+    srv_heap: DescriptorHeap,
+    sampler_heap: DescriptorHeap,
+    rtv_heap: DescriptorHeap,
+    /// Two recording contexts, like two frame slots: the second one records
+    /// while the first one's submission is still executing.
+    allocators: [2]*d3d12.ID3D12CommandAllocator,
+    lists: [2]*d3d12.ID3D12GraphicsCommandList,
+    current: usize,
+    list_open: bool,
+    big_src: *d3d12.ID3D12Resource,
+    big_dst: *d3d12.ID3D12Resource,
+    out: Texture,
+    uniforms: buffer_mod.Buffer(shaders_mod.Uniforms),
+    cells: buffer_mod.Buffer(shaders_mod.CellText),
+    cells_bg: buffer_mod.Buffer(shaders_mod.CellBg),
+    images: buffer_mod.Buffer(shaders_mod.Image),
+    bg_image: buffer_mod.Buffer(shaders_mod.BgImage),
+    sampler: Sampler,
 
-test "SRV table: a retired texture whose slot an in-flight table covers is not released (#1722)" {
-    try run1722(true);
-}
-
-fn run1722(covered: bool) !void {
-    if (comptime builtin.os.tag != .windows) return;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
-    const alloc = std.testing.allocator;
-
-    var dev = Device.init(.{ .shared_texture = .{ .width = 64, .height = 64 } }, .{}) catch return error.SkipZigTest;
-    defer dev.deinit();
-
-    var iq: ?*InfoQueue = null;
-    if (com.FAILED(dev.device.vtable.QueryInterface(dev.device, &InfoQueue.IID, @ptrCast(&iq))) or iq == null)
-        return error.SkipZigTest;
-    defer _ = iq.?.vtable.Release(iq.?);
-    iq1722SetBreakOnSeverity(iq.?, 0, false);
-    defer iq1722SetBreakOnSeverity(iq.?, 0, true);
-
-    var shaders = try Shaders.init(dev.device, alloc, &.{});
-    defer shaders.deinit(alloc);
-
-    var srv_heap = try DescriptorHeap.init(dev.device, .CBV_SRV_UAV, 8, true);
-    defer srv_heap.deinit();
-    var sampler_heap = try DescriptorHeap.init(dev.device, .SAMPLER, 4, true);
-    defer sampler_heap.deinit();
-    var rtv_heap = try DescriptorHeap.init(dev.device, .RTV, 4, false);
-    defer rtv_heap.deinit();
-    // Drain before the heaps go: retired slots point into them.
-    defer dev.waitForGpu() catch {};
-
-    var cmd_allocator: ?*d3d12.ID3D12CommandAllocator = null;
-    if (com.FAILED(dev.device.CreateCommandAllocator(.DIRECT, &d3d12.ID3D12CommandAllocator.IID, @ptrCast(&cmd_allocator))) or cmd_allocator == null)
-        return error.CommandAllocatorCreationFailed;
-    defer _ = cmd_allocator.?.Release();
-    var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
-    if (com.FAILED(dev.device.CreateCommandList(0, .DIRECT, cmd_allocator.?, null, &d3d12.ID3D12GraphicsCommandList.IID, @ptrCast(&cl))) or cl == null)
-        return error.CommandListCreationFailed;
-    defer _ = cl.?.Release();
-
-    var gate: ?*d3d12.ID3D12Fence = null;
-    if (com.FAILED(dev.device.CreateFence(0, .NONE, &d3d12.ID3D12Fence.IID, @ptrCast(&gate))) or gate == null)
-        return error.FenceCreationFailed;
-    defer _ = gate.?.Release();
-
-    // Two large DEFAULT-heap buffers for the busy work in step 3.
     const big_len: u64 = 256 * 1024 * 1024;
-    var big_src: ?*d3d12.ID3D12Resource = null;
-    var big_dst: ?*d3d12.ID3D12Resource = null;
-    {
-        const hp = d3d12.D3D12_HEAP_PROPERTIES{ .Type = .DEFAULT, .CPUPageProperty = 0, .MemoryPoolPreference = 0, .CreationNodeMask = 0, .VisibleNodeMask = 0 };
-        const rd = d3d12.D3D12_RESOURCE_DESC{ .Dimension = .BUFFER, .Alignment = 0, .Width = big_len, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1, .Format = .UNKNOWN, .SampleDesc = .{ .Count = 1, .Quality = 0 }, .Layout = .ROW_MAJOR, .Flags = .NONE };
-        if (com.FAILED(dev.device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&big_src))) or big_src == null) return error.SkipZigTest;
-        if (com.FAILED(dev.device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&big_dst))) or big_dst == null) return error.SkipZigTest;
-    }
-    defer _ = big_src.?.Release();
-    defer _ = big_dst.?.Release();
 
-    // 1. Slots: render target 0, t0 1, t1 2, victim 3.
-    const out = try Texture.init(.{
-        .device = dev.device,
-        .command_list = cl.?,
-        .srv_heap = &srv_heap,
-        .rtv_heap = &rtv_heap,
-        .retire = dev.retirement,
-        .pixel_format = .B8G8R8A8_UNORM,
-        .render_target = true,
-    }, 64, 64, null);
-    defer out.deinit();
-    const opts: Texture.Options = .{
-        .device = dev.device,
-        .command_list = cl.?,
-        .srv_heap = &srv_heap,
-        .retire = dev.retirement,
-        .pixel_format = .B8G8R8A8_UNORM,
+    pub const Verdict = struct {
+        deleted_in_use: usize,
+        static_changed: usize,
+        raised: u32,
     };
-    // covered: t0 1, t1 2, victim 3 (the table from 1 spans 1..3).
-    // control: victim 1, t0 2, t1 3 (the table from 2 spans 2..4).
-    const early_victim: ?Texture = if (covered) null else try Texture.init(opts, 4, 4, null);
-    const t0 = try Texture.init(opts, 4, 4, null);
-    defer t0.deinit();
-    const t1 = try Texture.init(opts, 4, 4, null);
-    defer t1.deinit();
-    const victim = early_victim orelse try Texture.init(opts, 4, 4, null);
-    try std.testing.expectEqual(@as(u32, if (covered) 1 else 2), t0.srv.index);
-    try std.testing.expectEqual(@as(u32, if (covered) 3 else 1), victim.srv.index);
-    std.debug.print("#1722 {s}: t0 slot {d}, victim slot {d}, table spans {d}..{d}\n", .{
-        if (covered) "covered" else "control", t0.srv.index, victim.srv.index, t0.srv.index, t0.srv.index + Pipeline.srv_table_size - 1,
-    });
 
-    var ubuf = try buffer_mod.Buffer(shaders_mod.Uniforms).init(.{ .device = dev.device, .retire = dev.retirement }, 1);
-    defer ubuf.deinit();
-    try ubuf.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
-    var ibuf = try buffer_mod.Buffer(shaders_mod.BgImage).init(.{ .device = dev.device, .retire = dev.retirement }, 1);
-    defer ibuf.deinit();
-    try ibuf.sync(&.{std.mem.zeroes(shaders_mod.BgImage)});
-    const sampler = try Sampler.init(.{ .device = dev.device, .sampler_heap = &sampler_heap, .retire = dev.retirement });
-    defer sampler.deinit();
+    fn init(self: *CoverageRig) !void {
+        if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+        // The debug layer is the oracle, and only Debug builds enable it.
+        if (comptime builtin.mode != .Debug) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
 
-    if (com.FAILED(cl.?.Close())) return error.CommandListCloseFailed;
-    {
-        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl.?};
-        dev.command_queue.ExecuteCommandLists(1, &lists);
+        self.api = .{ .allocator = alloc };
+        self.api.dev = Device.init(.{ .shared_texture = .{ .width = 64, .height = 64 } }, .{}) catch return error.SkipZigTest;
+        errdefer self.api.dev.?.deinit();
+        const d = &self.api.dev.?;
+
+        var iq: ?*InfoQueue = null;
+        if (com.FAILED(d.device.vtable.QueryInterface(d.device, &InfoQueue.IID, @ptrCast(&iq))) or iq == null)
+            return error.SkipZigTest;
+        self.iq = iq.?;
+        errdefer _ = self.iq.vtable.Release(self.iq);
+        infoQueueSetBreakOnSeverity(self.iq, 0, false);
+        errdefer infoQueueSetBreakOnSeverity(self.iq, 0, true);
+
+        self.trap = try CorruptionTrap.install();
+        errdefer self.trap.uninstall();
+
+        self.shaders = try Shaders.init(d.device, alloc, &.{});
+        errdefer self.shaders.deinit(alloc);
+
+        self.srv_heap = try DescriptorHeap.init(d.device, .CBV_SRV_UAV, 16, true);
+        errdefer self.srv_heap.deinit();
+        self.sampler_heap = try DescriptorHeap.init(d.device, .SAMPLER, 4, true);
+        errdefer self.sampler_heap.deinit();
+        self.rtv_heap = try DescriptorHeap.init(d.device, .RTV, 8, false);
+        errdefer self.rtv_heap.deinit();
+        self.api.srv_heap = &self.srv_heap;
+        self.api.sampler_heap = &self.sampler_heap;
+        self.api.rtv_heap = &self.rtv_heap;
+
+        var made: usize = 0;
+        errdefer for (0..made) |i| {
+            _ = self.lists[i].Release();
+            _ = self.allocators[i].Release();
+        };
+        while (made < 2) : (made += 1) {
+            var ca: ?*d3d12.ID3D12CommandAllocator = null;
+            if (com.FAILED(d.device.CreateCommandAllocator(.DIRECT, &d3d12.ID3D12CommandAllocator.IID, @ptrCast(&ca))) or ca == null)
+                return error.CommandAllocatorCreationFailed;
+            var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
+            if (com.FAILED(d.device.CreateCommandList(0, .DIRECT, ca.?, null, &d3d12.ID3D12GraphicsCommandList.IID, @ptrCast(&cl))) or cl == null) {
+                _ = ca.?.Release();
+                return error.CommandListCreationFailed;
+            }
+            // Created open; the second one is closed until it is first used.
+            if (made == 1) _ = cl.?.Close();
+            self.allocators[made] = ca.?;
+            self.lists[made] = cl.?;
+        }
+        self.current = 0;
+        self.list_open = true;
+        self.api.pending_command_list = self.lists[0];
+
+        // Busy work for the in-flight submission. A list parked behind a
+        // queue Wait on a CPU-signalled fence is held back by the runtime
+        // and the debug layer does not see it as executing, so the GPU is
+        // kept genuinely busy instead.
+        {
+            const hp = d3d12.D3D12_HEAP_PROPERTIES{ .Type = .DEFAULT, .CPUPageProperty = 0, .MemoryPoolPreference = 0, .CreationNodeMask = 0, .VisibleNodeMask = 0 };
+            const rd = d3d12.D3D12_RESOURCE_DESC{ .Dimension = .BUFFER, .Alignment = 0, .Width = big_len, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1, .Format = .UNKNOWN, .SampleDesc = .{ .Count = 1, .Quality = 0 }, .Layout = .ROW_MAJOR, .Flags = .NONE };
+            var src: ?*d3d12.ID3D12Resource = null;
+            if (com.FAILED(d.device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&src))) or src == null)
+                return error.SkipZigTest;
+            self.big_src = src.?;
+            var dst: ?*d3d12.ID3D12Resource = null;
+            if (com.FAILED(d.device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&dst))) or dst == null) {
+                _ = self.big_src.Release();
+                return error.SkipZigTest;
+            }
+            self.big_dst = dst.?;
+        }
+        errdefer _ = self.big_src.Release();
+        errdefer _ = self.big_dst.Release();
+
+        // The render target takes SRV slot 0, so the textures a test makes
+        // start at slot 1.
+        self.out = try Texture.init(.{
+            .device = d.device,
+            .command_list = self.lists[0],
+            .srv_heap = &self.srv_heap,
+            .rtv_heap = &self.rtv_heap,
+            .retire = d.retirement,
+            .pixel_format = .B8G8R8A8_UNORM,
+            .render_target = true,
+        }, 64, 64, null);
+        errdefer self.out.deinit();
+
+        const bopts: buffer_mod.Options = .{ .device = d.device, .retire = d.retirement };
+        self.uniforms = try .init(bopts, 1);
+        errdefer self.uniforms.deinit();
+        try self.uniforms.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
+        self.cells = try .init(bopts, 1);
+        errdefer self.cells.deinit();
+        try self.cells.sync(&.{std.mem.zeroes(shaders_mod.CellText)});
+        self.cells_bg = try .init(bopts, 1);
+        errdefer self.cells_bg.deinit();
+        try self.cells_bg.sync(&.{std.mem.zeroes(shaders_mod.CellBg)});
+        self.images = try .init(bopts, 1);
+        errdefer self.images.deinit();
+        try self.images.sync(&.{std.mem.zeroes(shaders_mod.Image)});
+        self.bg_image = try .init(bopts, 1);
+        errdefer self.bg_image.deinit();
+        try self.bg_image.sync(&.{std.mem.zeroes(shaders_mod.BgImage)});
+        self.sampler = try Sampler.init(.{ .device = d.device, .sampler_heap = &self.sampler_heap, .retire = d.retirement });
+        errdefer self.sampler.deinit();
+
+        // Flush the setup work and start from an idle GPU.
+        _ = try self.submit();
+        try d.waitForGpu();
+        try self.open();
     }
-    try dev.waitForGpu();
 
-    // 2. Retire the victim, seal it at V1, let the GPU reach V1.
-    victim.deinit();
-    const v1 = dev.fence_value.fetchAdd(1, .release) + 1;
-    if (com.FAILED(dev.command_queue.Signal(dev.fence, v1))) return error.FenceSignalFailed;
-    dev.retirement.seal(v1);
-    if (dev.fence.GetCompletedValue() < v1) {
-        _ = dev.fence.SetEventOnCompletion(v1, dev.fence_event);
-        _ = d3d12.WaitForSingleObject(dev.fence_event, d3d12.INFINITE);
+    /// Drain the GPU, then tear everything down. Whatever is still retired
+    /// is freed by the drain while the heaps it points into are alive.
+    fn deinit(self: *CoverageRig) void {
+        const alloc = std.testing.allocator;
+        const d = &self.api.dev.?;
+        // A list left open by a failed test is closed so it can be released.
+        if (self.list_open) _ = self.list().Close();
+        d.waitForGpu() catch {};
+        self.sampler.deinit();
+        self.bg_image.deinit();
+        self.images.deinit();
+        self.cells_bg.deinit();
+        self.cells.deinit();
+        self.uniforms.deinit();
+        self.out.deinit();
+        d.waitForGpu() catch {};
+        _ = self.big_dst.Release();
+        _ = self.big_src.Release();
+        for (self.lists, self.allocators) |cl, ca| {
+            _ = cl.Release();
+            _ = ca.Release();
+        }
+        self.rtv_heap.deinit();
+        self.sampler_heap.deinit();
+        self.srv_heap.deinit();
+        self.shaders.deinit(alloc);
+        self.trap.uninstall();
+        infoQueueSetBreakOnSeverity(self.iq, 0, true);
+        _ = self.iq.vtable.Release(self.iq);
+        self.api.dev.?.deinit();
     }
 
-    // 3. The next frame: bg_image with t0, through the production RenderPass.
-    if (com.FAILED(cmd_allocator.?.Reset())) return error.AllocatorResetFailed;
-    if (com.FAILED(cl.?.Reset(cmd_allocator.?, null))) return error.CommandListResetFailed;
-    // Keep the GPU genuinely busy ahead of the draw. A list parked behind a
-    // queue Wait on a CPU-signalled fence is held back by the runtime and
-    // the debug layer does not see it as executing, so a gate would hide
-    // exactly what this test needs the layer to see.
-    for (0..48) |_| cl.?.CopyBufferRegion(big_dst.?, 0, big_src.?, 0, big_len);
-    {
+    fn dev(self: *CoverageRig) *Device {
+        return &self.api.dev.?;
+    }
+
+    fn list(self: *CoverageRig) *d3d12.ID3D12GraphicsCommandList {
+        return self.lists[self.current];
+    }
+
+    /// Reopen the current recording context. Its previous submission must
+    /// be complete.
+    fn open(self: *CoverageRig) !void {
+        if (com.FAILED(self.allocators[self.current].Reset())) return error.AllocatorResetFailed;
+        if (com.FAILED(self.list().Reset(self.allocators[self.current], null))) return error.CommandListResetFailed;
+        self.api.pending_command_list = self.list();
+        self.list_open = true;
+    }
+
+    /// Move to the other recording context, the way the next frame slot
+    /// records while this one's submission is still executing.
+    fn rotate(self: *CoverageRig) !void {
+        self.current ^= 1;
+        try self.open();
+    }
+
+    /// Close and execute the current list and signal the fence the way
+    /// drawFrameEnd does: everything retired so far is sealed against it.
+    fn submit(self: *CoverageRig) !u64 {
+        const d = self.dev();
+        self.list_open = false;
+        if (com.FAILED(self.list().Close())) return error.CommandListCloseFailed;
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{self.list()};
+        d.command_queue.ExecuteCommandLists(1, &lists);
+        const v = d.fence_value.fetchAdd(1, .release) + 1;
+        if (com.FAILED(d.command_queue.Signal(d.fence, v))) return error.FenceSignalFailed;
+        d.retirement.seal(v);
+        return v;
+    }
+
+    fn waitFor(self: *CoverageRig, v: u64) void {
+        const d = self.dev();
+        if (d.fence.GetCompletedValue() < v) {
+            _ = d.fence.SetEventOnCompletion(v, d.fence_event);
+            _ = d3d12.WaitForSingleObject(d.fence_event, d3d12.INFINITE);
+        }
+    }
+
+    /// Submit the current list, wait for it, and reopen it.
+    fn submitAndWait(self: *CoverageRig) !u64 {
+        const v = try self.submit();
+        self.waitFor(v);
+        try self.open();
+        return v;
+    }
+
+    /// drawFrameStart's collect, verbatim.
+    fn collect(self: *CoverageRig) void {
+        const d = self.dev();
+        d.retirement.collect(d.fence.GetCompletedValue());
+    }
+
+    /// Keep the GPU busy ahead of whatever is recorded next, so the
+    /// submission is still executing when the test acts on it.
+    fn busy(self: *CoverageRig) void {
+        for (0..48) |_| self.list().CopyBufferRegion(self.big_dst, 0, self.big_src, 0, big_len);
+    }
+
+    /// One render pass into `out` with one step, through the production
+    /// RenderPass.
+    fn draw(self: *CoverageRig, step: RenderPassMod.Step) void {
         var pass = RenderPassMod.begin(.{
-            .command_list = cl.?,
-            .srv_heap = &srv_heap,
-            .sampler_heap = &sampler_heap,
+            .command_list = self.list(),
+            .srv_heap = &self.srv_heap,
+            .sampler_heap = &self.sampler_heap,
             .attachments = &.{.{
-                .target = .{ .texture = out },
+                .target = .{ .texture = self.out },
                 .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
             }},
         });
-        pass.step(.{
-            .pipeline = shaders.pipelines.bg_image,
-            .uniforms = ubuf.buffer,
-            .buffers = &.{ibuf.buffer},
-            .textures = &.{t0},
-            .samplers = &.{sampler},
-            .draw = .{ .type = .triangle, .vertex_count = 3 },
-        });
+        pass.step(step);
         pass.complete();
     }
-    if (com.FAILED(cl.?.Close())) return error.CommandListCloseFailed;
 
-    errdefer dev.waitForGpu() catch {};
-    {
-        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl.?};
-        dev.command_queue.ExecuteCommandLists(1, &lists);
+    /// The cell pass's step, as generic.zig records it.
+    fn drawCellText(self: *CoverageRig, grayscale: Texture, color: Texture) void {
+        self.draw(.{
+            .pipeline = self.shaders.pipelines.cell_text,
+            .uniforms = self.uniforms.buffer,
+            .buffers = &.{ self.cells.buffer, self.cells_bg.buffer },
+            .textures = &.{ grayscale, color },
+            .draw = .{ .type = .triangle_strip, .vertex_count = 4, .instance_count = 1 },
+        });
     }
-    const v2 = dev.fence_value.fetchAdd(1, .release) + 1;
-    if (com.FAILED(dev.command_queue.Signal(dev.fence, v2))) return error.FenceSignalFailed;
-    dev.retirement.seal(v2);
-    try std.testing.expect(dev.fence.GetCompletedValue() >= v1);
-    try std.testing.expect(dev.fence.GetCompletedValue() < v2);
 
+    /// A kitty image's step, as image.zig records it.
+    fn drawImage(self: *CoverageRig, texture: Texture) void {
+        self.draw(.{
+            .pipeline = self.shaders.pipelines.image,
+            .uniforms = self.uniforms.buffer,
+            .buffers = &.{self.images.buffer},
+            .textures = &.{texture},
+            .draw = .{ .type = .triangle_strip, .vertex_count = 4 },
+        });
+    }
 
-    // 4. drawFrameStart's collect, verbatim. With the defect present the
-    //    debug layer raises 0x87D here (exit code 2173) on the covered
-    //    victim; break-on-severity is turned off above so that, on a build
-    //    where the layer only records, the counts below fail instead.
-    iq.?.vtable.ClearStoredMessages(iq.?);
-    dev.retirement.collect(dev.fence.GetCompletedValue());
-    const still_in_flight = dev.fence.GetCompletedValue() < v2;
-    const deleted_in_use = iq1722Count(iq.?, 921);
-    const static_changed = iq1722Count(iq.?, 1001);
-    try dev.waitForGpu();
+    /// The background image's step, as generic.zig records it.
+    fn drawBgImage(self: *CoverageRig, texture: Texture) void {
+        self.draw(.{
+            .pipeline = self.shaders.pipelines.bg_image,
+            .uniforms = self.uniforms.buffer,
+            .buffers = &.{self.bg_image.buffer},
+            .textures = &.{texture},
+            .samplers = &.{self.sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+    }
 
-    std.debug.print("#1722 {s}: after collect V2 in flight={} OBJECT_DELETED_WHILE_STILL_IN_USE={d} STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE={d}\n", .{
-        if (covered) "covered" else "control", still_in_flight, deleted_in_use, static_changed,
-    });
-    // The precondition, or the run proves nothing: the busy work must
-    // still have been executing when collect ran.
-    try std.testing.expect(still_in_flight);
-    try std.testing.expectEqual(@as(usize, 0), deleted_in_use);
-    try std.testing.expectEqual(@as(usize, 0), static_changed);
+    /// Start counting debug-layer reports from here.
+    fn watch(self: *CoverageRig) void {
+        self.iq.vtable.ClearStoredMessages(self.iq);
+        _ = CorruptionTrap.take();
+    }
+
+    /// Assert that `v` is still executing: without that the scenario
+    /// proves nothing.
+    fn expectInFlight(self: *CoverageRig, v: u64) !void {
+        try std.testing.expect(self.dev().fence.GetCompletedValue() < v);
+    }
+
+    /// Drain the GPU and report everything the debug layer said since
+    /// `watch`.
+    fn verdict(self: *CoverageRig, name: []const u8) !Verdict {
+        if (self.list_open) {
+            self.list_open = false;
+            _ = self.list().Close();
+        }
+        try self.dev().waitForGpu();
+        try self.open();
+        const v: Verdict = .{
+            .deleted_in_use = infoQueueCount(self.iq, msg_object_deleted_while_still_in_use),
+            .static_changed = infoQueueCount(self.iq, msg_static_descriptor_invalid_descriptor_change),
+            .raised = CorruptionTrap.take(),
+        };
+        std.debug.print("SRV table {s}: OBJECT_DELETED_WHILE_STILL_IN_USE={d} STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE={d} 0x87D raised={d}\n", .{
+            name, v.deleted_in_use, v.static_changed, v.raised,
+        });
+        return v;
+    }
+
+    fn expectClean(v: Verdict) !void {
+        try std.testing.expectEqual(@as(usize, 0), v.deleted_in_use);
+        try std.testing.expectEqual(@as(usize, 0), v.static_changed);
+        try std.testing.expectEqual(@as(u32, 0), v.raised);
+    }
+};
+
+const RetiredNeighbour = enum { bg_image, image };
+
+/// The interleaving at the heart of it, with nothing else in it:
+///
+///   1. textures take SRV slots through the production option builders:
+///      t0, a neighbour and the victim (covered), or the victim first
+///      (control) so it sits below t0, outside every table bound from t0;
+///   2. the victim is retired (a frame state torn down when its tab is
+///      hidden) and the next submission seals it at X, which the GPU then
+///      reaches;
+///   3. a later frame draws with t0 as its only texture and is kept in
+///      flight;
+///   4. drawFrameStart's collect runs: X is complete, so the victim is
+///      final-released and its slot rewritten while that frame executes.
+///
+/// Step 4 is clean only if the frame's table does not cover the victim.
+fn runRetiredNeighbour(covered: bool, kind: RetiredNeighbour) !void {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const opts = switch (kind) {
+        .bg_image => rig.api.imageTextureOptions(.rgba, false),
+        .image => rig.api.imageTextureOptions(.bgra, false),
+    };
+    const early_victim: ?Texture = if (covered) null else try Texture.init(opts, 4, 4, null);
+    const t0 = try Texture.init(opts, 4, 4, null);
+    defer t0.deinit();
+    const neighbour = try Texture.init(opts, 4, 4, null);
+    defer neighbour.deinit();
+    const victim = early_victim orelse try Texture.init(opts, 4, 4, null);
+    try std.testing.expectEqual(@as(u32, if (covered) 1 else 2), t0.srv.index);
+    try std.testing.expectEqual(@as(u32, if (covered) 3 else 1), victim.srv.index);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+    victim.deinit();
+    _ = try rig.submitAndWait();
+
+    rig.busy();
+    switch (kind) {
+        .bg_image => rig.drawBgImage(t0),
+        .image => rig.drawImage(t0),
+    }
+    const frame = try rig.submit();
+    rig.collect();
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict(@tagName(kind)));
+}
+
+// Control first: the victim in a slot no bound table covers. Green on any
+// code; it shows the rig itself produces no reports.
+test "SRV table: control, a retired texture below every bound table is released cleanly" {
+    try runRetiredNeighbour(false, .bg_image);
+}
+
+test "SRV table: a retired texture two slots above a bound background image is not inside its table" {
+    try runRetiredNeighbour(true, .bg_image);
+}
+
+test "SRV table: a retired texture two slots above a bound kitty image is not inside its table" {
+    try runRetiredNeighbour(true, .image);
+}
+
+// The sequence the app crashed on: hide the tab, show it, hide it, show it,
+// draw. Each show builds a fresh atlas generation through the production
+// initAtlasTexture and the slots of the previous ones recycle lowest-first,
+// so the newest generation lands below a retired one. The frame that draws
+// it is still executing when the retired generation's fence is reached.
+test "SRV table: hide, show, hide, show, then draw frees the retired atlases cleanly" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const gray1: font.Atlas = .{ .data = undefined, .size = 1, .format = .grayscale };
+    const color1: font.Atlas = .{ .data = undefined, .size = 1, .format = .bgra };
+
+    // The first generation, drawn once.
+    const a_gray = try rig.api.initAtlasTexture(&gray1);
+    const a_color = try rig.api.initAtlasTexture(&color1);
+    rig.drawCellText(a_gray, a_color);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+
+    // Hide, then show before the GPU is told anything: the second
+    // generation is allocated while the first one's slots are still owned.
+    a_gray.deinit();
+    a_color.deinit();
+    const b_gray = try rig.api.initAtlasTexture(&gray1);
+    const b_color = try rig.api.initAtlasTexture(&color1);
+    rig.drawCellText(b_gray, b_color);
+    _ = try rig.submitAndWait();
+    rig.collect();
+
+    // Hide again. One more submission seals the second generation (the
+    // first frame after a show draws another frame slot's state), and the
+    // GPU reaches it.
+    b_gray.deinit();
+    b_color.deinit();
+    _ = try rig.submitAndWait();
+
+    // Show again: the third generation reuses the first one's slots, right
+    // below the retired second one, and its frame is kept in flight while
+    // the next drawFrameStart collects.
+    const c_gray = try rig.api.initAtlasTexture(&gray1);
+    defer c_gray.deinit();
+    const c_color = try rig.api.initAtlasTexture(&color1);
+    defer c_color.deinit();
+    rig.busy();
+    rig.drawCellText(c_gray, c_color);
+    const frame = try rig.submit();
+    rig.collect();
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict("hide/show twice"));
+}
+
+// A grayscale atlas that grows twice while the frame that binds it is still
+// executing: each grow replaces the texture (replaceAtlasTexture), and the
+// second one rewrites slots that frame's table covers if the table reaches
+// past the atlas textures it was bound for.
+test "SRV table: an atlas that grows twice under an in-flight frame rewrites no slot that frame covers" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const gray1: font.Atlas = .{ .data = undefined, .size = 1, .format = .grayscale };
+    const gray2: font.Atlas = .{ .data = undefined, .size = 2, .format = .grayscale };
+    const gray4: font.Atlas = .{ .data = undefined, .size = 4, .format = .grayscale };
+    const color1: font.Atlas = .{ .data = undefined, .size = 1, .format = .bgra };
+
+    var gray = try rig.api.initAtlasTexture(&gray1);
+    defer gray.deinit();
+    const color = try rig.api.initAtlasTexture(&color1);
+    defer color.deinit();
+    rig.drawCellText(gray, color);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+
+    // First grow, then the frame that draws the grown atlas, kept in flight.
+    {
+        const grown = try rig.api.initAtlasTexture(&gray2);
+        gray.deinit();
+        gray = grown;
+    }
+    rig.busy();
+    rig.drawCellText(gray, color);
+    const frame = try rig.submit();
+
+    // The next frame records on the other frame slot and grows the atlas
+    // again while the first one executes.
+    try rig.rotate();
+    {
+        const grown = try rig.api.initAtlasTexture(&gray4);
+        gray.deinit();
+        gray = grown;
+    }
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict("atlas grows twice"));
+}
+
+// A custom-shader render target resized while the frame that sampled it is
+// still executing (FrameState.resize runs ahead of the frame slot's fence
+// wait). The replacement texture's SRV must not be written into a slot that
+// frame's table covers.
+test "SRV table: a render target replaced under an in-flight frame writes no slot that frame covers" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    var back = try Texture.init(rig.api.renderTargetTextureOptions(null, null), 4, 4, null);
+    defer back.deinit();
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+    rig.busy();
+    rig.drawBgImage(back);
+    const frame = try rig.submit();
+
+    try rig.rotate();
+    {
+        // What CustomShaderState.resize hands the new texture.
+        const rtv_slot: ?DescriptorHeap.Descriptor = if (back.rtv.cpu.ptr != 0) back.rtv else null;
+        const srv_slot: ?DescriptorHeap.Descriptor = if (back.srv.gpu.ptr != 0) back.srv else null;
+        const resized = try Texture.init(rig.api.renderTargetTextureOptions(rtv_slot, srv_slot), 8, 8, null);
+        back.deinit();
+        back = resized;
+    }
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict("render target resize"));
 }
