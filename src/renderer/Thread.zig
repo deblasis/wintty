@@ -1477,7 +1477,13 @@ test "hidden drain idiom: a timer that re-runs itself lets a posted async throug
 // panicked with "attempt to use null value" in iocp.zig.
 const CursorBlinkTestHost = struct {
     loop: xev.Loop,
-    wakeup: xev.Async,
+    /// Counts the redraw wakes the blink asks for.
+    wakeup: struct {
+        notifies: usize = 0,
+        fn notify(self: *@This()) !void {
+            self.notifies += 1;
+        }
+    } = .{},
     cursor_h: xev.Timer,
     cursor_c: xev.Completion = .{},
     cursor_c_cancel: xev.Completion = .{},
@@ -1493,14 +1499,12 @@ const CursorBlinkTestHost = struct {
     fn init(self: *@This()) !void {
         self.* = .{
             .loop = try xev.Loop.init(.{}),
-            .wakeup = try xev.Async.init(),
             .cursor_h = try xev.Timer.init(),
             .kicker_h = try xev.Timer.init(),
         };
     }
 
     fn deinit(self: *@This()) void {
-        self.wakeup.deinit();
         self.loop.deinit();
     }
 
@@ -1533,11 +1537,36 @@ const CursorBlinkTestHost = struct {
         return .disarm;
     }
 
-    /// Focused, blinking, and showing the cursor.
+    /// Focused, blinking, showing the cursor, and the restart asked for a
+    /// redraw so the shown cursor reaches the screen. The blink itself
+    /// cannot have fired yet (its interval is far longer than a tick), so
+    /// the one wake is the restart's. Then it fires the blink once and
+    /// stops it, which leaves the host unfocused and its loop done.
     fn expectBlinking(self: *@This()) !void {
         try std.testing.expect(self.flags.focused);
         try std.testing.expectEqual(xev.CompletionState.active, self.cursor_c.state());
         try std.testing.expect(self.flags.cursor_blink_visible);
+        try std.testing.expectEqual(@as(usize, 1), self.wakeup.notifies);
+
+        // The restarted blink really blinks: make it due and tick. It was
+        // re-run from a callback, so it is still waiting to start and its
+        // deadline can be set before it reaches the timer heap.
+        try std.testing.expect(self.cursor_c.flags.state == .adding);
+        self.cursor_c.op.timer.next = 0;
+        try self.loop.run(.once);
+        try std.testing.expect(!self.flags.cursor_blink_visible);
+        try std.testing.expectEqual(@as(usize, 2), self.wakeup.notifies);
+        try std.testing.expectEqual(xev.CompletionState.active, self.cursor_c.state());
+
+        // And the loop's books balance: stop the blink and the loop must
+        // drain to done in a bounded number of ticks.
+        self.setFocus(false);
+        var ticks: usize = 0;
+        while (!self.loop.done() and ticks < 8) : (ticks += 1) {
+            try self.loop.run(.no_wait);
+        }
+        try std.testing.expect(self.loop.done());
+        try std.testing.expectEqual(xev.CompletionState.dead, self.cursor_c.state());
     }
 };
 
@@ -1594,6 +1623,34 @@ test "cursor blink: focus lost and regained before the loop ticks" {
     // The tick that delivers the cancel must not leave the blink dead.
     try h.loop.run(.once);
     try h.expectBlinking();
+}
+
+test "cursor blink: losing focus stops the blink for good" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var h: CursorBlinkTestHost = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.startBlink();
+    try h.loop.run(.no_wait); // started: in the timer heap
+    h.setFocus(false);
+    try std.testing.expectEqual(xev.CompletionState.active, h.cursor_c_cancel.state());
+
+    // Tick until the cancel has completed, boundedly.
+    var ticks: usize = 0;
+    while (h.cursor_c_cancel.state() == .active and ticks < 8) : (ticks += 1) {
+        try h.loop.run(.no_wait);
+    }
+    try std.testing.expectEqual(xev.CompletionState.dead, h.cursor_c_cancel.state());
+
+    // An unfocused surface does not blink, now or after further ticks.
+    for (0..4) |_| {
+        try std.testing.expectEqual(xev.CompletionState.dead, h.cursor_c.state());
+        try h.loop.run(.no_wait);
+    }
+    try std.testing.expectEqual(xev.CompletionState.dead, h.cursor_c.state());
+    try std.testing.expect(h.loop.done());
 }
 
 // The idiom test above drives safetyNetRearm directly, so it cannot
