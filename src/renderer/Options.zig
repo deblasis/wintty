@@ -26,7 +26,7 @@ thread: *renderer.Thread,
 
 /// Wall-clock timestamp (`.awake` clock) captured at the top of
 /// `Surface.init`, threaded through so GPU backend init phases (device
-/// creation, PSO build, init-fence wait) can report elapsed time under
+/// creation, PSO build) can report elapsed time under
 /// the `surface_init` scoped logger without their own plumbing. Optional
 /// and defaults to null so this struct's other constructors, if any are
 /// ever added, are not forced to supply it.
