@@ -11,9 +11,11 @@
 
         // Zig libs
         .libxev = .{
-            // mitchellh/libxev
-            .url = "https://deps.files.ghostty.org/libxev-9ce8e8e6ff89e583258a7f8e7adeeeaeae8611bf.tar.gz",
-            .hash = "libxev-0.0.0-86vtcwIRFADbH4hk-EjROXxlrKIRPQdA41XiTSytYO-F",
+            // deblasis/libxev: mitchellh/libxev 9ce8e8e6ff plus one IOCP
+            // fix (a timer canceled before it started must stay active
+            // until its callback). Return to upstream once it lands there.
+            .url = "https://github.com/deblasis/libxev/archive/47f66b35c2d8dcb925b868d317765c43628c5de8.tar.gz",
+            .hash = "libxev-0.0.0-86vtc5MfFADGZl1bO8GD6FunTurltz3pUk5Am2qEZ-un",
             .lazy = true,
         },
         .vaxis = .{

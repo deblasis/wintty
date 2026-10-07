@@ -1424,6 +1424,116 @@ test "hidden drain idiom: a timer that re-runs itself lets a posted async throug
     try testing.expect(st.timer_fires < 5);
 }
 
+// The cursor blink's focus handling against the real backend. Losing
+// focus cancels the blink timer, which may still be waiting to start
+// (cursorTimerCallback re-ran it earlier in the same tick); regaining
+// focus re-runs it when its state reads dead. If the regain happens in a
+// timer callback of the tick that processes the cancel (the safety net
+// drains the mailbox from one), libxev's IOCP backend used to report the
+// canceled completion as dead while it still sat in its completions
+// queue, the re-run wiped it in place, and the tick panicked with
+// "attempt to use null value" in iocp.zig's tick.
+test "cursor blink: refocus in the tick that cancels a not-yet-started blink" {
+    // The interleaving is the IOCP backend's: the others deliver a
+    // cancel's callbacks differently and have no window to test.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    const State = struct {
+        cursor_h: xev.Timer,
+        cursor_c: xev.Completion = .{},
+        cursor_c_cancel: xev.Completion = .{},
+        kicker_h: xev.Timer,
+        kicker_c: xev.Completion = .{},
+        blink_fires: usize = 0,
+        blink_canceled: usize = 0,
+        refocus_ran: bool = false,
+
+        fn onBlink(
+            self_: ?*@This(),
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            const self = self_.?;
+            _ = r catch |err| switch (err) {
+                error.Canceled => {
+                    self.blink_canceled += 1;
+                    return .disarm;
+                },
+                else => unreachable,
+            };
+            self.blink_fires += 1;
+            return .disarm;
+        }
+
+        fn onCancel(
+            _: ?*void,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.CancelError!void,
+        ) xev.CallbackAction {
+            _ = r catch {};
+            return .disarm;
+        }
+
+        /// The `.focus = true` branch of drainMailbox, run from a timer
+        /// callback the way safetyNetCallback runs it.
+        fn onKick(
+            self_: ?*@This(),
+            l: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            const self = self_.?;
+            self.refocus_ran = true;
+            if (self.cursor_c.state() != .active) {
+                self.cursor_h.run(l, &self.cursor_c, 60_000, @This(), self, onBlink);
+            }
+            return .disarm;
+        }
+    };
+
+    var st: State = .{
+        .cursor_h = try xev.Timer.init(),
+        .kicker_h = try xev.Timer.init(),
+    };
+
+    // Due long before the tick below, so it fires in that tick.
+    st.kicker_h.run(&loop, &st.kicker_c, 1, State, &st, State.onKick);
+
+    // cursorTimerCallback's tail: the blink is re-run, not yet started.
+    st.cursor_h.run(&loop, &st.cursor_c, 60_000, State, &st, State.onBlink);
+
+    // Then focus is lost before the loop ticks: drainMailbox's
+    // `.focus = false` branch, same guard.
+    try testing.expect(st.cursor_c.state() == .active);
+    try testing.expect(st.cursor_c_cancel.state() == .dead);
+    st.cursor_h.cancel(&loop, &st.cursor_c, &st.cursor_c_cancel, void, null, State.onCancel);
+
+    // A sleep, not a race: the kicker only needs its 1 ms deadline to be
+    // in the past when the tick starts.
+    try std.Io.sleep(global.io(), .fromMilliseconds(20), .awake);
+    try loop.run(.once);
+
+    try testing.expect(st.refocus_ran);
+    // The cancel reached the blink exactly once, and the refocus did not
+    // touch a completion libxev still owned. Whether the refocus then
+    // re-ran the blink depends on what the backend reports; either way
+    // the loop must be left consistent and drainable.
+    try testing.expectEqual(@as(usize, 1), st.blink_canceled);
+    try testing.expectEqual(@as(usize, 0), st.blink_fires);
+    if (st.cursor_c.state() == .active) {
+        st.cursor_h.cancel(&loop, &st.cursor_c, &st.cursor_c_cancel, void, null, State.onCancel);
+    }
+    try loop.run(.until_done);
+    try testing.expectEqual(@as(usize, 0), st.blink_fires);
+}
+
 // The idiom test above drives safetyNetRearm directly, so it cannot
 // catch a revert of safetyNetCallback's callsite (back to a bare
 // `return .rearm;`) while the helper itself stays correct. This census
