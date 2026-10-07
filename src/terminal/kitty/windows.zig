@@ -85,13 +85,19 @@ fn isSep(c: u8) bool {
 }
 
 /// Returns true if a path component names a reserved DOS device: CON,
-/// PRN, AUX, NUL, COM0 to COM9, LPT0 to LPT9, and the superscript digit
-/// variants.
+/// PRN, AUX, NUL, COM0 to COM9, LPT0 to LPT9, the superscript digit
+/// variants, and the console and clock devices CONIN$, CONOUT$ and CLOCK$.
 fn isReservedDeviceName(component: []const u8) bool {
     // The name ends at the extension or stream separator.
     const end = std.mem.findAny(u8, component, ".:") orelse component.len;
     const stem = std.mem.trimEnd(u8, component[0..end], " ");
     if (stem.len < 3) return false;
+
+    // CONIN$ and CONOUT$ open the process console's input and output
+    // buffers, where a read can block; CLOCK$ is the legacy clock device.
+    if (std.ascii.eqlIgnoreCase(stem, "CONIN$") or
+        std.ascii.eqlIgnoreCase(stem, "CONOUT$") or
+        std.ascii.eqlIgnoreCase(stem, "CLOCK$")) return true;
 
     const base = stem[0..3];
     const rest = stem[3..];
@@ -201,12 +207,19 @@ test "checkPath rejects reserved device names in any component" {
         "dir/aux/image.data",
         "C:/Windows/Temp/com1",
         "..\\PRN",
+        "CONIN$",
+        "conout$",
+        "CONOUT$.png",
+        "CLOCK$",
+        "C:\\dir\\CONIN$",
     };
     for (reserved) |path| {
         try testing.expectError(error.ReservedDeviceName, checkPath(path));
     }
 
     const plain = [_][]const u8{
+        "CONIN",
+        "CONOUT$X",
         "CONSOLE",
         "CON1",
         "xCON",
