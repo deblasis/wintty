@@ -11,11 +11,11 @@
 
         // Zig libs
         .libxev = .{
-            // deblasis/libxev: mitchellh/libxev 9ce8e8e6ff plus one IOCP
-            // fix (a timer canceled before it started must stay active
-            // until its callback). Return to upstream once it lands there.
-            .url = "https://github.com/deblasis/libxev/archive/47f66b35c2d8dcb925b868d317765c43628c5de8.tar.gz",
-            .hash = "libxev-0.0.0-86vtc5MfFADGZl1bO8GD6FunTurltz3pUk5Am2qEZ-un",
+            // deblasis/libxev: mitchellh/libxev 9ce8e8e6ff plus an IOCP fix
+            // (a timer canceled before it started stays active until its
+            // callback), tagged wintty-2026.10.07-iocp-cancel-before-start.
+            .url = "https://github.com/deblasis/libxev/archive/7f24148fc1884f69ffcfeb9568c949f0c3e7014e.tar.gz",
+            .hash = "libxev-0.0.0-86vtc5YjFACv9TvQj8m4HG6bSESzvha7In1vFnszQR02",
             .lazy = true,
         },
         .vaxis = .{

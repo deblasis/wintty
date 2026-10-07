@@ -479,35 +479,9 @@ fn drainMailbox(self: *Thread) !void {
                     // visible and idle -- the same starvation the hide
                     // transition kicks against (see .visible).
                     self.compression.wake(self);
-
-                    // If we're not focused, then we stop the cursor blink
-                    if (self.cursor_c.state() == .active and
-                        self.cursor_c_cancel.state() == .dead)
-                    {
-                        self.cursor_h.cancel(
-                            &self.loop,
-                            &self.cursor_c,
-                            &self.cursor_c_cancel,
-                            void,
-                            null,
-                            cursorCancelCallback,
-                        );
-                    }
-                } else {
-                    // If we're focused, we immediately show the cursor again
-                    // and then restart the timer.
-                    if (self.cursor_c.state() != .active) {
-                        self.flags.cursor_blink_visible = true;
-                        self.cursor_h.run(
-                            &self.loop,
-                            &self.cursor_c,
-                            cursorBlinkInterval(),
-                            Thread,
-                            self,
-                            cursorTimerCallback,
-                        );
-                    }
                 }
+
+                CursorBlink(Thread).focusChanged(self);
             },
 
             .reset_cursor_blink => {
@@ -942,40 +916,105 @@ fn animationTimerCallback(
     }
 }
 
-fn cursorTimerCallback(
-    self_: ?*Thread,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    _ = r catch |err| switch (err) {
-        // This is sent when our timer is canceled. That's fine.
-        error.Canceled => return .disarm,
+const cursorTimerCallback = CursorBlink(Thread).timerCallback;
 
-        else => {
-            log.warn("error in cursor timer callback err={}", .{err});
-            unreachable;
-        },
+/// The cursor blink timer: its focus handling and its callback. Generic
+/// over the host so the tests drive this exact code against the real
+/// backend. The host has `loop`, `wakeup`, `cursor_h`, `cursor_c`,
+/// `cursor_c_cancel`, and `flags.focused` / `flags.cursor_blink_visible`.
+fn CursorBlink(comptime Host: type) type {
+    return struct {
+        /// The cursor half of a `.focus` message; `flags.focused` is
+        /// already the new value.
+        fn focusChanged(host: *Host) void {
+            if (!host.flags.focused) {
+                // If we're not focused, then we stop the cursor blink
+                if (host.cursor_c.state() == .active and
+                    host.cursor_c_cancel.state() == .dead)
+                {
+                    host.cursor_h.cancel(
+                        &host.loop,
+                        &host.cursor_c,
+                        &host.cursor_c_cancel,
+                        void,
+                        null,
+                        cursorCancelCallback,
+                    );
+                }
+            } else {
+                // If we're focused, we immediately show the cursor again
+                // and then restart the timer.
+                if (host.cursor_c.state() != .active) {
+                    host.flags.cursor_blink_visible = true;
+                    host.cursor_h.run(
+                        &host.loop,
+                        &host.cursor_c,
+                        cursorBlinkInterval(),
+                        Host,
+                        host,
+                        timerCallback,
+                    );
+                }
+            }
+        }
+
+        fn timerCallback(
+            self_: ?*Host,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch |err| switch (err) {
+                // Our timer was canceled. Normally by losing focus, but a
+                // refocus can land while that cancel is still pending: it
+                // sees the blink as active and leaves it, and then this
+                // cancel arrives. Start the blink again if we are focused
+                // by now, or the surface keeps focus with no blink and
+                // possibly a hidden cursor. The completion is already off
+                // every loop queue here, so re-running it is safe.
+                error.Canceled => {
+                    const t = self_ orelse return .disarm;
+                    if (t.flags.focused and t.cursor_c.state() == .dead) {
+                        t.flags.cursor_blink_visible = true;
+                        t.wakeup.notify() catch {};
+                        t.cursor_h.run(
+                            &t.loop,
+                            &t.cursor_c,
+                            cursorBlinkInterval(),
+                            Host,
+                            t,
+                            timerCallback,
+                        );
+                    }
+                    return .disarm;
+                },
+
+                else => {
+                    log.warn("error in cursor timer callback err={}", .{err});
+                    unreachable;
+                },
+            };
+
+            const t: *Host = self_ orelse {
+                // This shouldn't happen so we log it.
+                log.warn("render callback fired without data set", .{});
+                return .disarm;
+            };
+
+            t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
+            t.wakeup.notify() catch {};
+
+            t.cursor_h.run(
+                &t.loop,
+                &t.cursor_c,
+                cursorBlinkInterval(),
+                Host,
+                t,
+                timerCallback,
+            );
+            return .disarm;
+        }
     };
-
-    const t: *Thread = self_ orelse {
-        // This shouldn't happen so we log it.
-        log.warn("render callback fired without data set", .{});
-        return .disarm;
-    };
-
-    t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
-    t.wakeup.notify() catch {};
-
-    t.cursor_h.run(
-        &t.loop,
-        &t.cursor_c,
-        cursorBlinkInterval(),
-        Thread,
-        t,
-        cursorTimerCallback,
-    );
-    return .disarm;
 }
 
 fn cursorCancelCallback(
@@ -1424,114 +1463,137 @@ test "hidden drain idiom: a timer that re-runs itself lets a posted async throug
     try testing.expect(st.timer_fires < 5);
 }
 
-// The cursor blink's focus handling against the real backend. Losing
-// focus cancels the blink timer, which may still be waiting to start
-// (cursorTimerCallback re-ran it earlier in the same tick); regaining
-// focus re-runs it when its state reads dead. If the regain happens in a
-// timer callback of the tick that processes the cancel (the safety net
-// drains the mailbox from one), libxev's IOCP backend used to report the
-// canceled completion as dead while it still sat in its completions
-// queue, the re-run wiped it in place, and the tick panicked with
-// "attempt to use null value" in iocp.zig's tick.
-test "cursor blink: refocus in the tick that cancels a not-yet-started blink" {
-    // The interleaving is the IOCP backend's: the others deliver a
-    // cancel's callbacks differently and have no window to test.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    const testing = std.testing;
+// The cursor blink's focus handling against the real backend, driving
+// CursorBlink's own code. Losing focus cancels the blink timer; regaining
+// it must leave a focused surface with the blink armed and the cursor
+// shown, however the cancel and the refocus interleave with the loop.
+//
+// The first case is the one that crashed: the blink was re-run but not
+// yet started (cursorTimerCallback's tail), focus is lost, and focus
+// comes back from a timer callback of the tick that processes the cancel
+// (the safety net drains the mailbox from one). libxev's IOCP backend
+// used to report the canceled timer as dead while it still sat in its
+// completions queue, the refocus re-ran it in place, and the tick
+// panicked with "attempt to use null value" in iocp.zig.
+const CursorBlinkTestHost = struct {
+    loop: xev.Loop,
+    wakeup: xev.Async,
+    cursor_h: xev.Timer,
+    cursor_c: xev.Completion = .{},
+    cursor_c_cancel: xev.Completion = .{},
+    kicker_h: xev.Timer,
+    kicker_c: xev.Completion = .{},
+    flags: packed struct {
+        focused: bool = true,
+        cursor_blink_visible: bool = false,
+    } = .{},
 
-    var loop = try xev.Loop.init(.{});
-    defer loop.deinit();
+    const Blink = CursorBlink(@This());
 
-    const State = struct {
-        cursor_h: xev.Timer,
-        cursor_c: xev.Completion = .{},
-        cursor_c_cancel: xev.Completion = .{},
-        kicker_h: xev.Timer,
-        kicker_c: xev.Completion = .{},
-        blink_fires: usize = 0,
-        blink_canceled: usize = 0,
-        refocus_ran: bool = false,
-
-        fn onBlink(
-            self_: ?*@This(),
-            _: *xev.Loop,
-            _: *xev.Completion,
-            r: xev.Timer.RunError!void,
-        ) xev.CallbackAction {
-            const self = self_.?;
-            _ = r catch |err| switch (err) {
-                error.Canceled => {
-                    self.blink_canceled += 1;
-                    return .disarm;
-                },
-                else => unreachable,
-            };
-            self.blink_fires += 1;
-            return .disarm;
-        }
-
-        fn onCancel(
-            _: ?*void,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            r: xev.Timer.CancelError!void,
-        ) xev.CallbackAction {
-            _ = r catch {};
-            return .disarm;
-        }
-
-        /// The `.focus = true` branch of drainMailbox, run from a timer
-        /// callback the way safetyNetCallback runs it.
-        fn onKick(
-            self_: ?*@This(),
-            l: *xev.Loop,
-            _: *xev.Completion,
-            r: xev.Timer.RunError!void,
-        ) xev.CallbackAction {
-            _ = r catch return .disarm;
-            const self = self_.?;
-            self.refocus_ran = true;
-            if (self.cursor_c.state() != .active) {
-                self.cursor_h.run(l, &self.cursor_c, 60_000, @This(), self, onBlink);
-            }
-            return .disarm;
-        }
-    };
-
-    var st: State = .{
-        .cursor_h = try xev.Timer.init(),
-        .kicker_h = try xev.Timer.init(),
-    };
-
-    // Due long before the tick below, so it fires in that tick.
-    st.kicker_h.run(&loop, &st.kicker_c, 1, State, &st, State.onKick);
-
-    // cursorTimerCallback's tail: the blink is re-run, not yet started.
-    st.cursor_h.run(&loop, &st.cursor_c, 60_000, State, &st, State.onBlink);
-
-    // Then focus is lost before the loop ticks: drainMailbox's
-    // `.focus = false` branch, same guard.
-    try testing.expect(st.cursor_c.state() == .active);
-    try testing.expect(st.cursor_c_cancel.state() == .dead);
-    st.cursor_h.cancel(&loop, &st.cursor_c, &st.cursor_c_cancel, void, null, State.onCancel);
-
-    // A sleep, not a race: the kicker only needs its 1 ms deadline to be
-    // in the past when the tick starts.
-    try std.Io.sleep(global.io(), .fromMilliseconds(20), .awake);
-    try loop.run(.once);
-
-    try testing.expect(st.refocus_ran);
-    // The cancel reached the blink exactly once, and the refocus did not
-    // touch a completion libxev still owned. Whether the refocus then
-    // re-ran the blink depends on what the backend reports; either way
-    // the loop must be left consistent and drainable.
-    try testing.expectEqual(@as(usize, 1), st.blink_canceled);
-    try testing.expectEqual(@as(usize, 0), st.blink_fires);
-    if (st.cursor_c.state() == .active) {
-        st.cursor_h.cancel(&loop, &st.cursor_c, &st.cursor_c_cancel, void, null, State.onCancel);
+    fn init(self: *@This()) !void {
+        self.* = .{
+            .loop = try xev.Loop.init(.{}),
+            .wakeup = try xev.Async.init(),
+            .cursor_h = try xev.Timer.init(),
+            .kicker_h = try xev.Timer.init(),
+        };
     }
-    try loop.run(.until_done);
-    try testing.expectEqual(@as(usize, 0), st.blink_fires);
+
+    fn deinit(self: *@This()) void {
+        self.wakeup.deinit();
+        self.loop.deinit();
+    }
+
+    /// A `.focus` message, as drainMailbox applies it.
+    fn setFocus(self: *@This(), focused: bool) void {
+        self.flags.focused = focused;
+        Blink.focusChanged(self);
+    }
+
+    /// Start the blink the way threadMain does.
+    fn startBlink(self: *@This()) void {
+        self.cursor_h.run(&self.loop, &self.cursor_c, cursorBlinkInterval(), @This(), self, Blink.timerCallback);
+    }
+
+    /// A timer that is due from the start, so it fires in the first tick
+    /// without depending on the clock moving; its callback refocuses.
+    fn armRefocusKicker(self: *@This()) void {
+        self.kicker_h.run(&self.loop, &self.kicker_c, 0, @This(), self, onKick);
+        self.kicker_c.op.timer.next = 0;
+    }
+
+    fn onKick(
+        self_: ?*@This(),
+        _: *xev.Loop,
+        _: *xev.Completion,
+        r: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        _ = r catch return .disarm;
+        self_.?.setFocus(true);
+        return .disarm;
+    }
+
+    /// Focused, blinking, and showing the cursor.
+    fn expectBlinking(self: *@This()) !void {
+        try std.testing.expect(self.flags.focused);
+        try std.testing.expectEqual(xev.CompletionState.active, self.cursor_c.state());
+        try std.testing.expect(self.flags.cursor_blink_visible);
+    }
+};
+
+test "cursor blink: refocus in the tick that cancels a not-yet-started blink" {
+    // The interleavings are the IOCP backend's.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var h: CursorBlinkTestHost = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.startBlink(); // queued, not yet started
+    h.setFocus(false); // cancels it before it starts
+    h.flags.cursor_blink_visible = false; // mid-blink, cursor hidden
+    h.armRefocusKicker();
+
+    try h.loop.run(.once);
+    try h.expectBlinking();
+}
+
+test "cursor blink: refocus in the tick that cancels a started blink" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var h: CursorBlinkTestHost = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.startBlink();
+    try h.loop.run(.no_wait); // started: in the timer heap
+    h.setFocus(false);
+    h.flags.cursor_blink_visible = false;
+    h.armRefocusKicker();
+
+    try h.loop.run(.once);
+    try h.expectBlinking();
+}
+
+test "cursor blink: focus lost and regained before the loop ticks" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var h: CursorBlinkTestHost = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.startBlink();
+    try h.loop.run(.no_wait); // started: in the timer heap
+    h.flags.cursor_blink_visible = false;
+
+    // Both messages in one mailbox drain: the cancel is queued, and the
+    // refocus sees the blink still active.
+    h.setFocus(false);
+    h.setFocus(true);
+
+    // The tick that delivers the cancel must not leave the blink dead.
+    try h.loop.run(.once);
+    try h.expectBlinking();
 }
 
 // The idiom test above drives safetyNetRearm directly, so it cannot
