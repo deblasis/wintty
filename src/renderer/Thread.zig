@@ -974,6 +974,8 @@ fn CursorBlink(comptime Host: type) type {
                 // every loop queue here, so re-running it is safe.
                 error.Canceled => {
                     const t = self_ orelse return .disarm;
+                    // The state check is defensive for non-IOCP backends: on IOCP the
+                    // timer is always dead here, so no Windows test can exercise it.
                     if (t.flags.focused and t.cursor_c.state() == .dead) {
                         t.flags.cursor_blink_visible = true;
                         t.wakeup.notify() catch {};
