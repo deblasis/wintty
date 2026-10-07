@@ -2343,13 +2343,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         self.api,
                         self.has_custom_shaders,
                     );
-                    // Flush any init-time GPU commands (e.g., DX12 texture
-                    // barriers). SwapChain.init creates placeholder atlas
-                    // textures that may need resource state transitions
-                    // submitted to the GPU before rendering.
-                    if (@hasDecl(GraphicsAPI, "flushInitCommands")) {
-                        self.api.flushInitCommands();
-                    }
                     break :rebuild .{ &self.swap_chain.?, true };
                 };
 
@@ -2958,9 +2951,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Every attempt rebuilds the device, not only the first. A
             // loss that lands while the previous attempt was building
             // shaders and frames on the device it had just created sets
-            // no latch (no draw ran), and that attempt's init command
-            // list still holds barriers naming textures it has since
-            // released; rebuilding the device discards both.
+            // no latch (no draw ran); rebuilding the device discards
+            // whatever that attempt left behind.
             self.api.recoverDevice() catch |err| switch (err) {
                 error.DeviceUnrecoverable => {
                     self.abandonRecovery(.unrecoverable_surface);
@@ -2984,9 +2976,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.api,
                 self.has_custom_shaders,
             );
-            if (comptime @hasDecl(GraphicsAPI, "flushInitCommands")) {
-                self.api.flushInitCommands();
-            }
             self.prepBackgroundImage() catch |err| {
                 // Not worth failing the recovery over: the terminal
                 // comes back without its wallpaper, same as at startup.

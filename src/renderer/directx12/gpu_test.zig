@@ -1946,7 +1946,6 @@ test "DirectX12: rebuilds every device-bound object after the device is removed"
     api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
         return error.SkipZigTest;
     defer api.deinit();
-    api.flushInitCommands();
     const version_before = api.dev.?.shared_texture.?.version;
 
     try removeDevice(api.dev.?.device);
@@ -1971,12 +1970,14 @@ test "DirectX12: rebuilds every device-bound object after the device is removed"
     try std.testing.expectEqual(@as(u32, 64), api.applied_width);
     try std.testing.expectEqual(@as(u32, 64), api.applied_height);
 
-    // The rebuilt queue accepts and completes work: the fresh init
-    // command list goes through Close, ExecuteCommandLists and a fence
-    // wait, none of which the old device could do.
-    try std.testing.expect(api.init_command_list != null);
-    api.flushInitCommands();
-    try std.testing.expect(api.init_command_list == null);
+    // The rebuilt queue accepts and completes work: a rebuilt frame's
+    // command list goes through Reset, Close, ExecuteCommandLists and a
+    // fence wait, none of which the old device could do.
+    const frame = &(api.gpu_frames[0] orelse return error.NoFrame);
+    try frame.reset();
+    try std.testing.expect(!com.FAILED(frame.command_list.?.Close()));
+    const lists = [_]*d3d12.ID3D12GraphicsCommandList{frame.command_list.?};
+    dev.command_queue.ExecuteCommandLists(1, &lists);
     try dev.waitForGpu();
 }
 
@@ -2252,7 +2253,6 @@ test "DirectX12: last-frame snapshot tracks the presented slot" {
     api.initGpu(.swap_chain_panel, snapshot_test.SIZE, snapshot_test.SIZE) catch
         return error.SkipZigTest;
     defer api.deinit();
-    api.flushInitCommands();
     const dev = &(api.dev orelse return error.NoDevice);
     const sc3 = api.swap_chain3 orelse return error.NoSwapChain;
 
@@ -3234,7 +3234,6 @@ test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
     api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
         return error.SkipZigTest;
     defer api.deinit();
-    if (comptime @hasDecl(DirectX12, "flushInitCommands")) api.flushInitCommands();
     const dev = &(api.dev orelse return error.NoDevice);
     const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
     defer _ = iq.vtable.Release(iq);
@@ -3252,8 +3251,7 @@ test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
     const sampler = try Sampler.init(api.samplerOptions());
     defer sampler.deinit();
 
-    // Between frames, which is where the rebuild runs: drawFrameEnd and
-    // the init flush both leave no list pending.
+    // Between frames, which is where the rebuild runs: no list is pending.
     try std.testing.expect(api.pending_command_list == null);
     const signals_before = dev.fence_value.load(.acquire);
     const grayscale = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .grayscale });
@@ -3322,7 +3320,6 @@ test "Frame: teardown after a completed frame leaves the debug layer quiet" {
     r.api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
         return error.SkipZigTest;
     defer r.api.deinit();
-    if (comptime @hasDecl(DirectX12, "flushInitCommands")) r.api.flushInitCommands();
     const dev = &(r.api.dev orelse return error.NoDevice);
     const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
     defer _ = iq.vtable.Release(iq);
@@ -3439,7 +3436,6 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
     r.api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
         return error.SkipZigTest;
     defer r.api.deinit();
-    if (comptime @hasDecl(DirectX12, "flushInitCommands")) r.api.flushInitCommands();
     const dev = &(r.api.dev orelse return error.NoDevice);
 
     r.alloc = alloc;
@@ -3499,9 +3495,10 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
     try std.testing.expect(completed >= v);
 }
 
-// Everything SwapChain.init builds is created inside initGpu's window. A
-// texture keeps the list it was created with for later uploads, so nothing
-// created there may keep a list the backend releases afterwards.
+// Everything SwapChain.init builds is created between initGpu and the
+// first frame. A texture keeps the list it was created with for later
+// uploads, so nothing created there may keep a list the backend does not
+// own for the rest of its life.
 test "DirectX12: textures built during init keep no command list past it" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -3519,8 +3516,6 @@ test "DirectX12: textures built during init keep no command list past it" {
     defer color.deinit();
     const front = try Texture.init(api.renderTargetTextureOptions(), 1, 1, null);
     defer front.deinit();
-
-    if (comptime @hasDecl(DirectX12, "flushInitCommands")) api.flushInitCommands();
     defer api.waitGpu();
 
     // A list a texture may hold is one the backend still owns: a frame's.
