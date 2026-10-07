@@ -3558,9 +3558,12 @@ fn iqPrintAll(iq: *InfoQueue) void {
 // the test signals, so it is still pending when releaseGpuResources runs,
 // whatever the machine's load. A helper thread opens that gate as soon as
 // the device fence is signalled past the draw, which is the first thing any
-// GPU wait does: the fixed code waits, opens the gate and returns with the
-// draw complete, while code that does not wait returns with the gate still
-// shut. No timing is involved in either outcome. The debug layer's
+// GPU wait does, and notes whether the shaders were still alive then: the
+// fixed code waits with them alive, opens the gate and returns with the
+// draw complete; code that does not wait returns with the gate still shut,
+// and code that waits too late is caught by the note. No timing decides
+// either outcome; the deadline only lets a wait that signals nothing new
+// finish instead of hanging. The debug layer's
 // CORRUPTION raise, if any, is counted and resumed, so a regression fails
 // this test instead of ending the test binary.
 test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shaders" {
@@ -3615,22 +3618,30 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
         pass.complete();
     }
     if (com.FAILED(cl.Close())) return error.CommandListCloseFailed;
-    if (com.FAILED(dev.command_queue.Wait(gate.?, 1))) return error.QueueWaitFailed;
-    {
-        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
-        dev.command_queue.ExecuteCommandLists(1, &lists);
-    }
-    const v = dev.fence_value.fetchAdd(1, .release) + 1;
-    if (com.FAILED(dev.command_queue.Signal(dev.fence, v))) return error.FenceSignalFailed;
-    dev.retirement.seal(v);
 
-    var opener: GateOpener = .{ .dev = dev, .gate = gate.?, .armed_at = v };
+    // The opener starts before anything is gated: if it cannot start,
+    // nothing is held on the queue and the test simply fails. It knows the
+    // fence value the draw will be signalled with before the draw goes in;
+    // nothing else on this thread signals the fence in between.
+    const v = dev.fence_value.load(.acquire) + 1;
+    var opener: GateOpener = .{ .dev = dev, .gate = gate.?, .armed_at = v, .shaders = &r.shaders };
     const thread = try std.Thread.spawn(.{}, GateOpener.run, .{&opener});
     // Runs before the GPU drain above: the drain needs the gate open.
     defer {
         opener.stop.store(true, .release);
         thread.join();
     }
+
+    if (com.FAILED(dev.command_queue.Wait(gate.?, 1))) return error.QueueWaitFailed;
+    // Whatever happens from here, the gate opens before the drain above.
+    defer _ = gate.?.Signal(1);
+    {
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+    }
+    try std.testing.expectEqual(v, dev.fence_value.fetchAdd(1, .release) + 1);
+    if (com.FAILED(dev.command_queue.Signal(dev.fence, v))) return error.FenceSignalFailed;
+    dev.retirement.seal(v);
 
     // The precondition holds by construction: the gate is shut and only
     // the opener, which nothing has woken, can open it.
@@ -3642,26 +3653,53 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
     const raised = CorruptionTrap.take();
 
     const completed = dev.fence.GetCompletedValue();
-    std.debug.print("releaseGpuResources unrealized: draw fence {d}, completed {d}, 0x87D raised={d}\n", .{ v, completed, raised });
+    const why = opener.why.load(.acquire);
+    const live = opener.shaders_live_at_open.load(.acquire);
+    std.debug.print("releaseGpuResources unrealized: draw fence {d}, completed {d}, 0x87D raised={d}, gate opened by {t}, shaders live at open={}\n", .{ v, completed, raised, why, live });
     try std.testing.expect(r.shaders.defunct);
     try std.testing.expectEqual(@as(u32, 0), raised);
     try std.testing.expect(completed >= v);
+    // Whatever opened the gate, the shaders were still alive when it did:
+    // a wait that only comes after the release would also leave the draw
+    // complete by now. A wait that never signals a new fence value (one
+    // on the last submitted value, say) is a correct idle; the opener's
+    // deadline lets it finish, after the timeout, instead of hanging.
+    try std.testing.expect(why != .stopped);
+    try std.testing.expect(live);
 }
 
 /// Opens a queue gate once the device fence is signalled past `armed_at`,
-/// or when told to stop.
+/// or after `timeout_ms` for a wait that signals nothing new, recording
+/// first whether the shaders were still alive at that moment. Also opens
+/// it when told to stop, so the test's own drain never waits on a shut
+/// gate.
 const GateOpener = struct {
     dev: *Device,
     gate: *d3d12.ID3D12Fence,
     armed_at: u64,
+    shaders: *const Shaders,
     stop: std.atomic.Value(bool) = .init(false),
+    why: std.atomic.Value(Why) = .init(.pending),
+    shaders_live_at_open: std.atomic.Value(bool) = .init(false),
+
+    const timeout_ms: u64 = 10_000;
+    const Why = enum(u8) { pending, fence, stopped, timeout };
+    extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+    extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 
     fn run(self: *GateOpener) void {
-        while (!self.stop.load(.acquire) and
-            self.dev.fence_value.load(.acquire) <= self.armed_at)
-        {
-            std.atomic.spinLoopHint();
-        }
+        const deadline = GetTickCount64() + timeout_ms;
+        const why: Why = while (true) {
+            if (self.dev.fence_value.load(.acquire) > self.armed_at) break .fence;
+            if (self.stop.load(.acquire)) break .stopped;
+            if (GetTickCount64() >= deadline) break .timeout;
+            Sleep(1);
+        };
+        // On the fence, the caller has just signalled it and is inside its
+        // wait; on the deadline, a caller that waits is still blocked on
+        // the shut gate. Either way the shaders are what it left them.
+        if (why != .stopped) self.shaders_live_at_open.store(self.shaders.root_signature != null, .release);
+        self.why.store(why, .release);
         _ = self.gate.Signal(1);
     }
 };
