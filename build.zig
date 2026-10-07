@@ -50,6 +50,14 @@ pub fn build(b: *std.Build) !void {
         "Filter for test. Only applies to Zig tests.",
     ) orelse &[0][]const u8{};
 
+    // Declared for every target so passing it to a build that never uses it
+    // (not Windows, or libghostty-vt only) is not an invalid-option error.
+    const dxc_dll = b.option(
+        []const u8,
+        "dxc-dll",
+        "dxcompiler.dll to place beside the Windows test binary",
+    );
+
     // Ghostty dependencies used by many artifacts.
     const deps = try buildpkg.SharedDeps.init(b, &config);
 
@@ -460,18 +468,18 @@ pub fn build(b: *std.Build) !void {
             // Crash on x86_64 without this
             .use_llvm = true,
         });
+        var test_exe_bin_install: ?*std.Build.Step = null;
         if (config.emit_test_exe) {
             const test_exe_install = b.addInstallArtifact(test_exe, .{});
             config.addPatchElf(test_exe, &test_exe_install.step);
             test_step.dependOn(&test_exe_install.step);
+            test_exe_bin_install = &test_exe_install.step;
         }
         // The test binary pins Debug above, so its dependencies stay Debug
         // too; -Doptimize and -Dvt-safe must not split the two apart.
         _ = try deps.add(test_exe, .Debug);
-        config.addPatchElf(
-            test_exe,
-            installTestBinary(b, test_binaries_step, &test_binary_roots, test_exe),
-        );
+        const test_exe_install_step = installTestBinary(b, test_binaries_step, &test_binary_roots, test_exe);
+        config.addPatchElf(test_exe, test_exe_install_step);
 
         addGhosttyH(b, test_exe.root_module, config.baselineTarget(b.graph.io), .Debug);
 
@@ -479,6 +487,38 @@ pub fn build(b: *std.Build) !void {
         const test_run = b.addRunArtifact(test_exe);
         config.addPatchElf(test_exe, &test_run.step);
         test_step.dependOn(&test_run.step);
+
+        // The DX12 renderer loads dxcompiler.dll only from the running
+        // executable's own directory (d3d12.zig, DxcLibrary.load), and the
+        // cached test binary has no such neighbour, so the custom-shader
+        // tests report compiler_unavailable. Step.Run executes the installed
+        // copy once an install has set installed_path, which is std's own
+        // answer to DLLs beside an exe on Windows: install the DLL next to
+        // every copy the run might pick, and order the run after them.
+        // --fuzz reruns the cached binary instead, so shader tests still
+        // report compiler_unavailable there.
+        const test_target = config.baselineTarget(b.graph.io).result;
+        if (test_target.os.tag == .windows) {
+            if (dxcTestDll(b, test_target.cpu.arch, dxc_dll)) |dll| {
+                // An input of the run, so a new DXC pin reruns the tests
+                // instead of replaying a result cached against the old DLL.
+                test_run.addFileInput(dll);
+                test_run.step.dependOn(test_exe_install_step);
+                test_run.step.dependOn(&b.addInstallFileWithDir(
+                    dll,
+                    .{ .custom = test_binaries_dir },
+                    "dxcompiler.dll",
+                ).step);
+                if (test_exe_bin_install) |install| {
+                    test_run.step.dependOn(install);
+                    test_run.step.dependOn(&b.addInstallFileWithDir(
+                        dll,
+                        .bin,
+                        "dxcompiler.dll",
+                    ).step);
+                }
+            }
+        }
 
         // Normal tests always test our libghostty modules
         //test_step.dependOn(test_lib_vt_step);
@@ -543,6 +583,53 @@ fn installTestBinary(
     ) catch @panic("OOM");
 
     return &install.step;
+}
+
+/// The dxcompiler.dll the Windows test run places beside its binary:
+/// -Ddxc-dll when given, otherwise the copy the C# restore left in the
+/// NuGet packages folder at the version windows/Ghostty/Ghostty.csproj
+/// pins, read from there so the app and the tests cannot drift apart.
+/// Null when neither exists, and the shader tests then fail with
+/// compiler_unavailable exactly as they would without this.
+fn dxcTestDll(
+    b: *std.Build,
+    arch: std.Target.Cpu.Arch,
+    override: ?[]const u8,
+) ?std.Build.LazyPath {
+    if (override) |path| return .{ .cwd_relative = path };
+
+    const arch_dir = switch (arch) {
+        .x86_64 => "x64",
+        .aarch64 => "arm64",
+        .x86 => "x86",
+        else => return null,
+    };
+
+    const csproj = b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        "windows/Ghostty/Ghostty.csproj",
+        b.allocator,
+        .limited(1 << 20),
+    ) catch return null;
+    const at = std.mem.indexOf(u8, csproj, "Include=\"Microsoft.Direct3D.DXC\"") orelse
+        return null;
+    const key = "Version=\"";
+    const start = (std.mem.indexOfPos(u8, csproj, at, key) orelse return null) + key.len;
+    const end = std.mem.indexOfScalarPos(u8, csproj, start, '"') orelse return null;
+    // The Version must belong to this PackageReference, not a later element.
+    const close = std.mem.indexOfScalarPos(u8, csproj, at, '>') orelse return null;
+    if (end > close) return null;
+
+    const env = &b.graph.environ_map;
+    const packages = env.get("NUGET_PACKAGES") orelse
+        b.pathJoin(&.{ env.get("USERPROFILE") orelse return null, ".nuget", "packages" });
+    const dll = b.pathJoin(&.{
+        packages, "microsoft.direct3d.dxc", csproj[start..end],
+        "build",  "native",                 "bin",
+        arch_dir, "dxcompiler.dll",
+    });
+    std.Io.Dir.accessAbsolute(b.graph.io, dll, .{}) catch return null;
+    return .{ .cwd_relative = dll };
 }
 
 /// Write the recorded module roots next to the binaries they describe.

@@ -931,7 +931,9 @@ pub fn snapshotLastFrame(
             return error.SnapshotFenceFailed;
         }
     }
-    defer if (fence) |f| { _ = f.Release(); };
+    defer if (fence) |f| {
+        _ = f.Release();
+    };
 
     var fence_handle: std.os.windows.HANDLE = undefined;
     {
@@ -990,7 +992,9 @@ pub fn snapshotLastFrame(
             return error.SnapshotTextureFailed;
         }
     }
-    defer if (dst) |d| { _ = d.Release(); };
+    defer if (dst) |d| {
+        _ = d.Release();
+    };
 
     var resource_handle: std.os.windows.HANDLE = undefined;
     {
@@ -1017,7 +1021,9 @@ pub fn snapshotLastFrame(
         );
         if (FAILED(hr)) return error.SnapshotAllocatorFailed;
     }
-    defer if (allocator) |a| { _ = a.Release(); };
+    defer if (allocator) |a| {
+        _ = a.Release();
+    };
 
     var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
     {
@@ -1031,7 +1037,9 @@ pub fn snapshotLastFrame(
         );
         if (FAILED(hr)) return error.SnapshotCommandListFailed;
     }
-    defer if (cl) |c| { _ = c.Release(); };
+    defer if (cl) |c| {
+        _ = c.Release();
+    };
 
     cl.?.CopyResource(dst.?, src);
     {

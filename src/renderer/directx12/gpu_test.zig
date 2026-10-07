@@ -2015,7 +2015,9 @@ const snapshot_test = struct {
             @ptrCast(&allocator),
         );
         if (com.FAILED(hr)) return error.AllocatorCreationFailed;
-        defer if (allocator) |a| { _ = a.Release(); };
+        defer if (allocator) |a| {
+            _ = a.Release();
+        };
 
         var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
         hr = dev.device.CreateCommandList(
@@ -2027,7 +2029,9 @@ const snapshot_test = struct {
             @ptrCast(&cl),
         );
         if (com.FAILED(hr)) return error.CommandListCreationFailed;
-        defer if (cl) |c| { _ = c.Release(); };
+        defer if (cl) |c| {
+            _ = c.Release();
+        };
 
         cl.?.OMSetRenderTargets(1, @ptrCast(&heap.cpuHandle(0)), .FALSE, null);
         cl.?.ClearRenderTargetView(heap.cpuHandle(0), color, 0, null);
@@ -2134,7 +2138,9 @@ const snapshot_test = struct {
             @ptrCast(&allocator),
         );
         try snapExpect(hr, "staging allocator");
-        defer if (allocator) |a| { _ = a.Release(); };
+        defer if (allocator) |a| {
+            _ = a.Release();
+        };
 
         var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
         hr = dev.device.CreateCommandList(
@@ -2146,7 +2152,9 @@ const snapshot_test = struct {
             @ptrCast(&cl),
         );
         try snapExpect(hr, "staging command list");
-        defer if (cl) |c| { _ = c.Release(); };
+        defer if (cl) |c| {
+            _ = c.Release();
+        };
 
         const dst_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
             .pResource = rb.?,

@@ -970,7 +970,7 @@ test "dwrite.dll is resolved from System32, not from the search order" {
     defer alloc.free(plant_exe);
     std.Io.Dir.copyFileAbsolute(source, plant_exe, testing.io, .{}) catch
         return error.SkipZigTest;
-    defer std.fs.cwd().deleteFile(plant_exe) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, plant_exe) catch {};
 
     var saved: [std.fs.max_path_bytes]u8 = undefined;
     const saved_len = try std.process.currentPath(testing.io, &saved);
