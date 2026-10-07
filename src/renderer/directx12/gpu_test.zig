@@ -2378,6 +2378,28 @@ fn infoQueueSetBreakOnSeverity(iq: *InfoQueue, severity: u32, enable: bool) void
     _ = f(iq, severity, if (enable) 1 else 0);
 }
 
+/// Count stored debug-layer messages of CORRUPTION or ERROR severity, any
+/// ID, printing each one.
+fn infoQueueCountSevere(iq: *InfoQueue) usize {
+    const alloc = std.testing.allocator;
+    var hits: usize = 0;
+    const n = iq.vtable.GetNumStoredMessages(iq);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        var len: usize = 0;
+        if (com.FAILED(iq.vtable.GetMessage(iq, i, null, &len))) continue;
+        const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch continue;
+        defer alloc.free(buf);
+        const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+        if (iq.vtable.GetMessage(iq, i, msg, &len) != 0) continue;
+        if (msg.Severity > 1) continue;
+        hits += 1;
+        const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+        std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+    }
+    return hits;
+}
+
 /// Count stored debug-layer messages with this ID, printing each one.
 fn infoQueueCount(iq: *InfoQueue, id: u32) usize {
     const alloc = std.testing.allocator;
@@ -2433,6 +2455,8 @@ const CoverageRig = struct {
         deleted_in_use: usize,
         static_changed: usize,
         raised: u32,
+        /// Every CORRUPTION or ERROR message, whatever its ID.
+        severe: usize,
     };
 
     fn init(self: *CoverageRig) !void {
@@ -2647,7 +2671,7 @@ const CoverageRig = struct {
     /// Keep the GPU busy ahead of whatever is recorded next, so the
     /// submission is still executing when the test acts on it.
     fn busy(self: *CoverageRig) void {
-        for (0..48) |_| self.list().CopyBufferRegion(self.big_dst, 0, self.big_src, 0, big_len);
+        for (0..128) |_| self.list().CopyBufferRegion(self.big_dst, 0, self.big_src, 0, big_len);
     }
 
     /// One render pass into `out` with one step, through the production
@@ -2725,9 +2749,10 @@ const CoverageRig = struct {
             .deleted_in_use = infoQueueCount(self.iq, msg_object_deleted_while_still_in_use),
             .static_changed = infoQueueCount(self.iq, msg_static_descriptor_invalid_descriptor_change),
             .raised = CorruptionTrap.take(),
+            .severe = infoQueueCountSevere(self.iq),
         };
-        std.debug.print("SRV table {s}: OBJECT_DELETED_WHILE_STILL_IN_USE={d} STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE={d} 0x87D raised={d}\n", .{
-            name, v.deleted_in_use, v.static_changed, v.raised,
+        std.debug.print("SRV table {s}: OBJECT_DELETED_WHILE_STILL_IN_USE={d} STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE={d} 0x87D raised={d} severe={d}\n", .{
+            name, v.deleted_in_use, v.static_changed, v.raised, v.severe,
         });
         return v;
     }
@@ -2901,33 +2926,177 @@ test "SRV table: an atlas that grows twice under an in-flight frame rewrites no 
     try CoverageRig.expectClean(try rig.verdict("atlas grows twice"));
 }
 
-// A custom-shader render target resized while the frame that sampled it is
-// still executing (FrameState.resize runs ahead of the frame slot's fence
-// wait). The replacement texture's SRV must not be written into a slot that
-// frame's table covers.
-test "SRV table: a render target replaced under an in-flight frame writes no slot that frame covers" {
+// A custom-shader state resized while the frame that sampled its back
+// texture is still executing: FrameState.resize runs ahead of the frame
+// slot's fence wait. The real CustomShaderState is driven here, so what is
+// tested is what the renderer does, sampled once through the main root
+// signature (bg_image) and once through the post-pass root signature the
+// custom shaders actually use.
+const CustomShaderState = @import("../generic.zig").Renderer(Dx12Api).CustomShaderState;
+
+const ResizeSampler = enum { main, post };
+
+extern "d3dcompiler" fn D3DCompile(
+    src: [*]const u8,
+    src_len: usize,
+    name: ?[*:0]const u8,
+    defines: ?*const anyopaque,
+    include: ?*anyopaque,
+    entry: [*:0]const u8,
+    target: [*:0]const u8,
+    flags1: u32,
+    flags2: u32,
+    code: *?*d3d12.ID3DBlob,
+    errors: *?*d3d12.ID3DBlob,
+) callconv(.winapi) com.HRESULT;
+
+/// A post-pass shader in the shape the custom shaders take: a full-screen
+/// triangle sampling t0 with s0 through the post root signature. Compiled
+/// with the system's d3dcompiler, since the DXC the custom-shader path
+/// uses is not shipped with the tests.
+const post_test_hlsl =
+    \\Texture2D<float4> src : register(t0);
+    \\SamplerState samp : register(s0);
+    \\float4 VS(uint id : SV_VertexID) : SV_POSITION {
+    \\    float2 uv = float2((id << 1) & 2, id & 2);
+    \\    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    \\}
+    \\float4 PS(float4 pos : SV_POSITION) : SV_TARGET {
+    \\    return src.Sample(samp, pos.xy / 64.0);
+    \\}
+;
+
+fn compilePostStage(entry: [*:0]const u8, target: [*:0]const u8) !*d3d12.ID3DBlob {
+    var code: ?*d3d12.ID3DBlob = null;
+    var errors: ?*d3d12.ID3DBlob = null;
+    const hr = D3DCompile(post_test_hlsl.ptr, post_test_hlsl.len, "post_test", null, null, entry, target, 0, 0, &code, &errors);
+    if (errors) |e| {
+        const msg: [*]const u8 = @ptrCast(e.GetBufferPointer());
+        std.debug.print("post test shader: {s}\n", .{msg[0..e.GetBufferSize()]});
+        _ = e.Release();
+    }
+    if (com.FAILED(hr) or code == null) return error.SkipZigTest;
+    return code.?;
+}
+
+const PostPipeline = struct {
+    root_signature: *d3d12.ID3D12RootSignature,
+    pipeline: Pipeline,
+
+    fn init(device: *d3d12.ID3D12Device) !PostPipeline {
+        const vs = try compilePostStage("VS", "vs_5_1");
+        defer _ = vs.Release();
+        const ps = try compilePostStage("PS", "ps_5_1");
+        defer _ = ps.Release();
+        const root_signature = try Pipeline.createPostRootSignature(device);
+        errdefer _ = root_signature.Release();
+        const vs_code = @as([*]const u8, @ptrCast(vs.GetBufferPointer()))[0..vs.GetBufferSize()];
+        const ps_code = @as([*]const u8, @ptrCast(ps.GetBufferPointer()))[0..ps.GetBufferSize()];
+        // Built the way shaders.zig builds a custom shader's pipeline.
+        const opts: Pipeline.Options = if (comptime @hasField(Pipeline.Options, "texture_tables")) .{
+            .device = device,
+            .root_signature = root_signature,
+            .texture_tables = &@field(Pipeline, "post_texture_tables"),
+            .vs_bytecode = vs_code,
+            .ps_bytecode = ps_code,
+        } else .{
+            .device = device,
+            .root_signature = root_signature,
+            .vs_bytecode = vs_code,
+            .ps_bytecode = ps_code,
+        };
+        return .{ .root_signature = root_signature, .pipeline = try Pipeline.init(opts) };
+    }
+
+    fn deinit(self: PostPipeline) void {
+        self.pipeline.deinit();
+        _ = self.root_signature.Release();
+    }
+};
+
+fn runCustomShaderResize(sampler: ResizeSampler) !void {
     var rig: CoverageRig = undefined;
     try rig.init();
     defer rig.deinit();
 
-    var back = try Texture.init(rig.api.renderTargetTextureOptions(), 4, 4, null);
-    defer back.deinit();
+    const post: ?PostPipeline = switch (sampler) {
+        .main => null,
+        .post => try PostPipeline.init(rig.dev().device),
+    };
+    defer if (post) |p| p.deinit();
+
+    // What drawFrame does for a frame state that gains custom shaders: init
+    // at 1x1, then resize to the surface.
+    var state = try CustomShaderState.init(rig.api);
+    defer state.deinit();
+    try state.resize(rig.api, 4, 4);
+    try state.uniforms.sync(&.{std.mem.zeroes(shadertoy.Uniforms)});
     _ = try rig.submitAndWait();
 
     rig.watch();
     rig.busy();
-    rig.drawBgImage(back);
+    switch (sampler) {
+        .main => rig.drawBgImage(state.back_texture),
+        .post => rig.draw(.{
+            .pipeline = post.?.pipeline,
+            .uniforms = state.uniforms.buffer,
+            .textures = &.{state.back_texture},
+            .samplers = &.{state.sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        }),
+    }
     const frame = try rig.submit();
 
+    // The next frame on the other slot: the surface changed size.
     try rig.rotate();
-    {
-        // What CustomShaderState.resize does: a new texture first, then
-        // the old one retired.
-        const resized = try Texture.init(rig.api.renderTargetTextureOptions(), 8, 8, null);
-        try std.testing.expect(resized.srv.index != back.srv.index);
-        back.deinit();
-        back = resized;
-    }
+    try state.resize(rig.api, 8, 8);
     try rig.expectInFlight(frame);
-    try CoverageRig.expectClean(try rig.verdict("render target resize"));
+    try CoverageRig.expectClean(try rig.verdict(@tagName(sampler)));
+}
+
+test "SRV table: a custom-shader resize under an in-flight frame writes no slot it binds (main root signature)" {
+    try runCustomShaderResize(.main);
+}
+
+test "SRV table: a custom-shader resize under an in-flight frame writes no slot it binds (post root signature)" {
+    try runCustomShaderResize(.post);
+}
+
+// The oracle itself, in the green run. A texture bound only through a table
+// its pipeline does not sample (the shape of the original defect) is
+// released on the spot while that frame executes. Every counter the other
+// tests assert to be zero has to see it here, or a green run proves nothing.
+test "SRV table: the debug-layer oracle reports a deliberate violation" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const t0 = try Texture.init(rig.api.imageTextureOptions(.rgba, false), 4, 4, null);
+    defer t0.deinit();
+    var opts = rig.api.imageTextureOptions(.rgba, false);
+    // No queue: deinit releases the resource and frees the slot at once,
+    // which is the violation.
+    opts.retire = null;
+    const victim = try Texture.init(opts, 4, 4, null);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+    rig.busy();
+    // bg_image samples t0 only; the victim is bound to the t1 table, so the
+    // GPU never reads it but the table covers it.
+    rig.draw(.{
+        .pipeline = rig.shaders.pipelines.bg_image,
+        .uniforms = rig.uniforms.buffer,
+        .buffers = &.{rig.bg_image.buffer},
+        .textures = &.{ t0, victim },
+        .samplers = &.{rig.sampler},
+        .draw = .{ .type = .triangle, .vertex_count = 3 },
+    });
+    const frame = try rig.submit();
+    victim.deinit();
+    try rig.expectInFlight(frame);
+    const v = try rig.verdict("deliberate violation");
+    try std.testing.expect(v.deleted_in_use >= 1);
+    try std.testing.expect(v.static_changed >= 1);
+    try std.testing.expect(v.raised >= 1);
 }

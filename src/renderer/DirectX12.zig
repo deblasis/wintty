@@ -76,9 +76,28 @@ pub const ImageTextureFormat = enum {
     bgra,
 };
 
-/// Number of CBV/SRV/UAV descriptors in the shader-visible heap.
-/// Covers font atlas (grayscale + color), grid texture, image textures,
-/// and ~50 custom shader textures.
+/// Number of CBV/SRV/UAV descriptors in the shader-visible heap, one heap
+/// per surface.
+///
+/// Every texture owns one slot, and a replaced texture's slot comes back
+/// only once the fence of the submission after its retirement passes, so
+/// the budget is the live set plus what is still retiring:
+///
+///   - live: frame_count frame states x (grayscale + color atlas + the
+///     two custom-shader targets) = 12, plus the background image = 13;
+///   - retiring: one draw can retire two custom-shader target pairs (the
+///     state created at 1x1 and resized in the same draw, then resized
+///     again by FrameState.resize) and both atlases, 6 slots, and up to
+///     frame_count + 1 draws (the open one and those in flight) can be
+///     waiting on their fence: 24.
+///
+/// That is 37 in the worst transient, leaving 27 for kitty images; the
+/// steady state is 13 plus the images. A hide/show pair adds one whole
+/// generation (12) until the first frame after the show completes. When
+/// the heap is full, Texture.init logs a warning and fails: an image
+/// upload drops that image, an atlas grow or a frame-state resize fails
+/// that draw (logged by the render thread), and the next draw retries
+/// once collect has freed what the fence released.
 const srv_heap_capacity: u32 = 64;
 
 /// Number of sampler descriptors in the shader-visible heap.
@@ -428,11 +447,20 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
 
     // Create RTV descriptor heap for back buffers plus custom shader
     // textures. Each FrameState may have 2 render-target textures
-    // (front/back for custom shader ping-pong). A resize or a hide/show
-    // allocates the replacements before the retirement queue has freed
-    // the slots of the ones they replace, so there is room for the live
-    // set plus a retiring set per frame in flight:
-    //   frame_count (swap chain) + frame_count * 2 * (1 + frame_count)
+    // (front/back for custom shader ping-pong). A resize allocates the
+    // replacements before the old ones are retired, and the old RTV slots
+    // come back through the retirement queue like the SRV slots do.
+    //
+    // RTVs are read when OMSetRenderTargets is recorded, not when the GPU
+    // runs, so waiting for the fence before reusing an RTV slot is more
+    // than D3D12 requires. It is done anyway because a texture's slots go
+    // back together, through one path. The cost is capacity: the live set
+    // is frame_count back buffers + frame_count * 2 targets = 9, and one
+    // draw can retire two target pairs (a custom-shader state created and
+    // resized in the same draw, then resized again by FrameState.resize),
+    // with up to frame_count + 1 draws waiting on their fence: 9 + 16 = 25
+    // in the worst case. The heap has
+    //   frame_count (swap chain) + frame_count * 2 * (1 + frame_count) = 27.
     const rtv_heap_capacity = device.Device.frame_count +
         device.Device.frame_count * 2 * (1 + device.Device.frame_count);
     {

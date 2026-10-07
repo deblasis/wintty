@@ -100,7 +100,7 @@ fn textureRange(register: u32) d3d12.D3D12_DESCRIPTOR_RANGE1 {
 /// The main root signature's texture ranges, indexed by register: t0 (the
 /// grayscale atlas, the kitty image, the background image) and t1 (the
 /// color atlas). Shader reflection pins this to what the shaders declare
-/// (shaders.zig, "texture tables match the shaders").
+/// (shaders.zig, "SRV table: texture tables match the shaders").
 pub const main_texture_ranges = [_]d3d12.D3D12_DESCRIPTOR_RANGE1{ textureRange(0), textureRange(1) };
 
 /// The root parameter holding each of `main_texture_ranges`.
@@ -480,7 +480,7 @@ test "root_param_srv_table_t1 index" {
     try std.testing.expectEqual(@as(u32, 4), root_param_srv_table_t1);
 }
 
-test "every texture table is one descriptor wide, at the register it is indexed by" {
+test "SRV table: every texture table is one descriptor wide, at the register it is indexed by" {
     // RenderPass binds Step.textures[i] from that texture's own slot to
     // table i. A range wider than one descriptor would cover the slots
     // after it, which belong to other textures, and a range at another

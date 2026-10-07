@@ -762,7 +762,7 @@ fn psvBindings(dxil: []const u8, out: []PsvBinding) !usize {
     return error.NoPsv0;
 }
 
-test "texture tables match the shaders" {
+test "SRV table: texture tables match the shaders" {
     // RenderPass binds Step.textures[i] to its own one-descriptor table at
     // register ti (Pipeline.zig pins the root signature side). This pins the
     // shader side: each pipeline's shaders read exactly the texture

@@ -183,8 +183,11 @@ pub fn complete(self: *Frame, sync: bool) void {
     } else .healthy;
 
     // Don't call frameCompleted here. The semaphore release must happen
-    // after the GPU fence is signaled in drawFrameEnd, because
-    // frame.resize() reuses descriptor slots that the GPU may still read.
+    // after the frame is submitted and the fence signaled in drawFrameEnd,
+    // so the retirements of this frame's draw are sealed against that
+    // fence before the next frame can replace anything. Descriptor slots
+    // themselves are never reused early: they come back through the
+    // retirement queue.
     const api: *DirectX12 = &self.renderer.api;
     api.pending_complete = .{
         .renderer = self.renderer,

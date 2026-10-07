@@ -42,11 +42,13 @@ pub const Options = struct {
     render_target: bool = false,
     // There is deliberately no way to hand a texture a slot to reuse. A
     // texture always allocates its own SRV (and RTV) slot and gives it back
-    // through the retirement queue on deinit. Writing a new descriptor into
-    // a slot that is still live means writing into a descriptor an
-    // in-flight command list may have bound as static, and a slot whose
-    // ownership was shared that way was also freed by the old texture while
-    // the new one still used it.
+    // through the retirement queue on deinit. Writing a new SRV into a
+    // slot that is still live means writing into a descriptor an in-flight
+    // command list may have bound as static, and a slot whose ownership
+    // was shared that way was also freed by the old texture while the new
+    // one still used it. RTVs are consumed at record time, so the fence
+    // wait is not needed for them; they follow the same path so that a
+    // texture's slots have one owner and one way back.
 };
 
 pub const Error = error{
@@ -164,7 +166,10 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     // Every slot allocate() hands out is one nothing references: never
     // used, or freed by the retirement queue once the fence of the last
     // submission that could bind it passed. Writing it here is safe.
-    const srv = srv_heap.allocate() catch return error.TextureCreateFailed;
+    const srv = srv_heap.allocate() catch {
+        log.warn("SRV descriptor heap is full ({d} slots); texture not created", .{srv_heap.capacity});
+        return error.TextureCreateFailed;
+    };
     errdefer srv_heap.release(srv.index);
 
     // Create the SRV.
@@ -191,7 +196,10 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     };
     if (opts.render_target) {
         const rtv_heap = opts.rtv_heap orelse return error.TextureCreateFailed;
-        rtv = rtv_heap.allocate() catch return error.TextureCreateFailed;
+        rtv = rtv_heap.allocate() catch {
+            log.warn("RTV descriptor heap is full ({d} slots); render target not created", .{rtv_heap.capacity});
+            return error.TextureCreateFailed;
+        };
         device.CreateRenderTargetView(resource, null, rtv.cpu);
     }
 

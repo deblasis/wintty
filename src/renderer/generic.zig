@@ -647,8 +647,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         };
 
-        /// State relevant to our custom shaders if we have any.
-        const CustomShaderState = struct {
+        /// State relevant to our custom shaders if we have any. Public so the
+        /// DX12 GPU tests can drive the real resize.
+        pub const CustomShaderState = struct {
             /// When we have a custom shader state, we maintain a front
             /// and back texture which we use as a swap chain to render
             /// between when multiple custom shaders are defined.
@@ -2395,9 +2396,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // path ends in `frameCompleted`, which releases the frame, and
             // a defer runs on the error paths too. Giving it back here as
             // well would post twice for one wait, and neither symptom is
-            // local. The spare permit lets `nextFrame` hand out a slot a
-            // draw is still using, whose `resize` reuses descriptor slots
-            // the GPU may still be reading; and it lets `SwapChain.deinit`
+            // local. The spare permit lets `nextFrame` hand out a frame
+            // state a draw is still recording into, whose `resize` would
+            // replace textures that draw has bound; and it lets `SwapChain.deinit`
             // stop waiting before the frames it destroys are done. That
             // second one bites on Metal, where the semaphore is posted
             // from the GPU completion handler and is the only proof of

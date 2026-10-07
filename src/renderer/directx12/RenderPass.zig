@@ -380,3 +380,98 @@ test "Step DrawType values" {
     try std.testing.expectEqual(@as(u1, 0), @intFromEnum(Step.DrawType.triangle));
     try std.testing.expectEqual(@as(u1, 1), @intFromEnum(Step.DrawType.triangle_strip));
 }
+
+/// A command list that records the descriptor tables RenderPass.step binds
+/// and nothing else. Every method step is not expected to call panics.
+const RecordingList = struct {
+    const L = d3d12.ID3D12GraphicsCommandList;
+    const Bound = struct { param: u32, base: u64 };
+
+    var bound: [8]Bound = undefined;
+    var count: usize = 0;
+
+    fn unexpected() callconv(.winapi) void {
+        @panic("RenderPass.step called a command list method this test does not expect");
+    }
+    fn setTable(_: *L, param: u32, base: u64) callconv(.winapi) void {
+        bound[count] = .{ .param = param, .base = base };
+        count += 1;
+    }
+    fn setPso(_: *L, _: *d3d12.ID3D12PipelineState) callconv(.winapi) void {}
+    fn setRootSignature(_: *L, _: ?*d3d12.ID3D12RootSignature) callconv(.winapi) void {}
+    fn setTopology(_: *L, _: d3d12.D3D_PRIMITIVE_TOPOLOGY) callconv(.winapi) void {}
+    fn setRootView(_: *L, _: u32, _: u64) callconv(.winapi) void {}
+    fn setVertexBuffers(_: *L, _: u32, _: u32, _: [*]const d3d12.D3D12_VERTEX_BUFFER_VIEW) callconv(.winapi) void {}
+    fn draw(_: *L, _: u32, _: u32, _: u32, _: u32) callconv(.winapi) void {}
+
+    const vtable: L.VTable = vt: {
+        var vt: L.VTable = undefined;
+        for (@typeInfo(L.VTable).@"struct".fields) |f| @field(vt, f.name) = @ptrCast(&unexpected);
+        vt.SetGraphicsRootDescriptorTable = &setTable;
+        vt.SetPipelineState = &setPso;
+        vt.SetGraphicsRootSignature = &setRootSignature;
+        vt.IASetPrimitiveTopology = &setTopology;
+        vt.SetGraphicsRootConstantBufferView = &setRootView;
+        vt.SetGraphicsRootShaderResourceView = &setRootView;
+        vt.IASetVertexBuffers = &setVertexBuffers;
+        vt.DrawInstanced = &draw;
+        break :vt vt;
+    };
+
+    fn record(textures: []const ?Texture) []const Bound {
+        var list: L = .{ .vtable = &vtable };
+        var pass: RenderPass = .{
+            .command_list = &list,
+            .srv_heap = null,
+            .sampler_heap = null,
+            .attachments = &.{},
+            .step_number = 0,
+        };
+        count = 0;
+        pass.step(.{
+            .pipeline = .{
+                .pso = @ptrFromInt(0xDEAD_0000),
+                .root_signature = @ptrFromInt(0xDEAD_1000),
+                .texture_tables = &Pipeline.main_texture_tables,
+            },
+            .textures = textures,
+            .draw = .{ .vertex_count = 3 },
+        });
+        return bound[0..count];
+    }
+};
+
+fn textureAtSlot(gpu: u64) Texture {
+    var t: Texture = .{};
+    t.srv.gpu = .{ .ptr = gpu };
+    return t;
+}
+
+test "SRV table: each texture is bound to its own register's table, from its own slot" {
+    const gray = textureAtSlot(0x1000);
+    const color = textureAtSlot(0x2000);
+
+    // The cell pass: t0 the grayscale atlas, t1 the color atlas, each
+    // from its own slot. Nothing else is bound.
+    const cell = RecordingList.record(&.{ gray, color });
+    try std.testing.expectEqual(@as(usize, 2), cell.len);
+    try std.testing.expectEqual(Pipeline.root_param_srv_table, cell[0].param);
+    try std.testing.expectEqual(@as(u64, 0x1000), cell[0].base);
+    try std.testing.expectEqual(Pipeline.root_param_srv_table_t1, cell[1].param);
+    try std.testing.expectEqual(@as(u64, 0x2000), cell[1].base);
+
+    // One texture (an image): t1 has no texture of its own, so it gets the
+    // step's texture rather than a slot nobody owns.
+    const image = RecordingList.record(&.{color});
+    try std.testing.expectEqual(@as(usize, 2), image.len);
+    try std.testing.expectEqual(@as(u64, 0x2000), image[0].base);
+    try std.testing.expectEqual(@as(u64, 0x2000), image[1].base);
+
+    // A missing second texture falls back the same way.
+    const missing = RecordingList.record(&.{ gray, null });
+    try std.testing.expectEqual(@as(u64, 0x1000), missing[0].base);
+    try std.testing.expectEqual(@as(u64, 0x1000), missing[1].base);
+
+    // No texture at all: no table is touched.
+    try std.testing.expectEqual(@as(usize, 0), RecordingList.record(&.{}).len);
+}
