@@ -2659,10 +2659,17 @@ const CoverageRig = struct {
     /// Hold the next submission on the GPU until verdict (or teardown)
     /// opens the gate: the queue waits on a fence only this test signals,
     /// so the frame cannot complete before the test has acted and checked,
-    /// however slow the host is. The debug layer still treats the held list
-    /// as in flight: the deliberate-violation test runs under the same hold
-    /// and has to see every report, and the covered scenarios are red on
-    /// the tree without the fix.
+    /// however slow the host is.
+    ///
+    /// While held, the list has been handed to ExecuteCommandLists but not
+    /// yet run. The debug layer checks it when the gate opens and it really
+    /// executes, and reports the defect then: OBJECT_DELETED_WHILE_STILL_IN_USE
+    /// as "deleted prior to executing the command list", and
+    /// STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE against the
+    /// CreateShaderResourceView that changed the bound descriptor. It does
+    /// not raise 0x87D on that path. The deliberate-violation test runs
+    /// under the same hold and has to see both reports, and the covered
+    /// scenarios are red on the tree without the fix.
     fn hold(self: *CoverageRig) !void {
         self.gate_value += 1;
         if (com.FAILED(self.dev().command_queue.Wait(self.gate, self.gate_value))) return error.QueueWaitFailed;
@@ -2756,10 +2763,12 @@ const CoverageRig = struct {
         return v;
     }
 
+    /// No deleted-object or static-descriptor report. The 0x87D count is
+    /// printed but not asserted: under the hold the layer reports without
+    /// raising (see hold), so an assertion on it could never fail.
     fn expectClean(v: Verdict) !void {
         try std.testing.expectEqual(@as(usize, 0), v.deleted_in_use);
         try std.testing.expectEqual(@as(usize, 0), v.static_changed);
-        try std.testing.expectEqual(@as(u32, 0), v.raised);
     }
 };
 
@@ -2803,6 +2812,9 @@ fn runRetiredNeighbour(covered: bool, kind: RetiredNeighbour) !void {
     _ = try rig.submitAndWait();
 
     try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
     switch (kind) {
         .bg_image => rig.drawBgImage(t0),
         .image => rig.drawImage(t0),
@@ -2873,6 +2885,9 @@ test "SRV table: hide, show, hide, show, then draw frees the retired atlases cle
     const c_color = try rig.api.initAtlasTexture(&color1);
     defer c_color.deinit();
     try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
     rig.drawCellText(c_gray, c_color);
     const frame = try rig.submit();
     rig.collect();
@@ -2910,6 +2925,9 @@ test "SRV table: an atlas that grows twice under an in-flight frame rewrites no 
         gray = grown;
     }
     try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
     rig.drawCellText(gray, color);
     const frame = try rig.submit();
 
@@ -3034,6 +3052,9 @@ fn runCustomShaderResize(sampler: ResizeSampler) !void {
 
     rig.watch();
     try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
     switch (sampler) {
         .main => rig.drawBgImage(state.back_texture),
         .post => rig.draw(.{
@@ -3063,12 +3084,11 @@ test "SRV table: a custom-shader resize under an in-flight frame writes no slot 
 
 // The oracle itself, in the green run. A texture bound only through a table
 // its pipeline does not sample (the shape of the original defect) is
-// released on the spot while that frame is held in flight. The reports the
-// other tests assert to be zero have to show up here, under the same hold,
-// or a green run proves nothing. The 0x87D raise is counted but not
-// required: with the list held behind the gate the layer records 921 but
-// was not seen to raise (it did raise when the list was kept in flight by
-// busy work instead). The trap stays installed for the case it does.
+// released on the spot while that frame is held behind the gate. The
+// reports the other tests assert to be zero have to show up here, under the
+// same hold, or a green run proves nothing. 0x87D is not raised on this path
+// (see hold); the trap stays installed so a raise elsewhere fails one test
+// rather than killing the binary.
 test "SRV table: the debug-layer oracle reports a deliberate violation" {
     var rig: CoverageRig = undefined;
     try rig.init();
@@ -3085,6 +3105,9 @@ test "SRV table: the debug-layer oracle reports a deliberate violation" {
 
     rig.watch();
     try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
     // bg_image samples t0 only; the victim is bound to the t1 table, so the
     // GPU never reads it but the table covers it.
     rig.draw(.{
@@ -3124,11 +3147,15 @@ test "SRV table: a texture whose upload fails partway leaves nothing the open li
     rig.watch();
     Texture.test_fail_upload_band = 1;
     defer Texture.test_fail_upload_band = null;
+    const retired_before = rig.dev().retirement.count();
     try std.testing.expectError(
         error.UploadFailed,
         Texture.init(rig.api.imageTextureOptions(.rgba, false), w, h, pixels),
     );
     Texture.test_fail_upload_band = null;
+    // Exactly the destination and the first band's staging buffer went to
+    // the queue; the slot, never bound, went straight back to the heap.
+    try std.testing.expectEqual(retired_before + 2, rig.dev().retirement.count());
 
     // The frame the failed upload was recorded into, submitted as usual.
     _ = try rig.submitAndWait();

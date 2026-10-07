@@ -154,11 +154,6 @@ init_started: ?std.Io.Timestamp = null,
 /// GraphicsAPI by value, and value-copied DescriptorHeap structs would
 /// diverge in their allocated counters, causing descriptor aliasing.
 rtv_heap: ?*DescriptorHeap = null,
-/// Snapshot of rtv_heap.allocated after swap chain back buffer slots
-/// are claimed in init().  Custom-shader ping-pong textures get
-/// descriptors above this base.  drawFrameStart resets allocated back
-/// to this value so resize can reuse the same slots.
-rtv_base: u32 = 0,
 
 /// Shader-visible CBV/SRV/UAV descriptor heap for textures and buffers.
 srv_heap: ?*DescriptorHeap = null,
@@ -458,11 +453,15 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
     // is frame_count back buffers + frame_count * 2 targets = 9, and one
     // draw can retire two target pairs (a custom-shader state created and
     // resized in the same draw, then resized again by FrameState.resize),
-    // with up to frame_count + 1 draws waiting on their fence: 9 + 16 = 25
-    // in the worst case. The heap has
-    //   frame_count (swap chain) + frame_count * 2 * (1 + frame_count) = 27.
+    // with up to frame_count + 1 draws waiting on their fence: 16. A tab
+    // hidden with custom shaders retires its frame_count * 2 targets in
+    // releaseGpuResources, and nothing seals them until the first
+    // submission after it is shown again, so they are still held while
+    // the shown tab builds its own: 6 more. 9 + 16 + 6 = 31 in the worst
+    // case. The heap has
+    //   frame_count (swap chain) + frame_count * 2 * (2 + frame_count) = 33.
     const rtv_heap_capacity = device.Device.frame_count +
-        device.Device.frame_count * 2 * (1 + device.Device.frame_count);
+        device.Device.frame_count * 2 * (2 + device.Device.frame_count);
     {
         const ptr = try self.allocator.create(DescriptorHeap);
         errdefer self.allocator.destroy(ptr);
@@ -565,7 +564,6 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         // a raw allocated write) so the free mask agrees and recycling
         // cannot hand these slots out again.
         self.rtv_heap.?.claimFirst(device.Device.frame_count);
-        self.rtv_base = self.rtv_heap.?.allocated;
     } else if (dev_ptr.shared_texture != null) {
         // Shared-texture mode: one RTV pointing at the shared resource.
         // Use RTV heap slot 0 -- we only ever need one slot because
@@ -576,7 +574,6 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
         self.shared_rtv = rtv_handle;
         self.rtv_heap.?.claimFirst(1);
-        self.rtv_base = 1;
     }
 
     // Create per-frame command allocators and command lists. Same
@@ -750,7 +747,6 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
     }
     self.rtv_handles = @splat(.{ .ptr = 0 });
     self.shared_rtv = null;
-    self.rtv_base = 0;
 
     if (self.sampler_heap) |h| {
         h.deinit();
