@@ -3241,17 +3241,6 @@ const msg_invalid_subresource_state: u32 = 538;
 /// D3D12_MESSAGE_ID_COMMAND_LIST_CLOSED: a call on a closed command list.
 const msg_command_list_closed: u32 = 547;
 
-fn bigBusyBuffers(device: *d3d12.ID3D12Device, len: u64) ![2]*d3d12.ID3D12Resource {
-    const hp = d3d12.D3D12_HEAP_PROPERTIES{ .Type = .DEFAULT, .CPUPageProperty = 0, .MemoryPoolPreference = 0, .CreationNodeMask = 0, .VisibleNodeMask = 0 };
-    const rd = d3d12.D3D12_RESOURCE_DESC{ .Dimension = .BUFFER, .Alignment = 0, .Width = len, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1, .Format = .UNKNOWN, .SampleDesc = .{ .Count = 1, .Quality = 0 }, .Layout = .ROW_MAJOR, .Flags = .NONE };
-    var src: ?*d3d12.ID3D12Resource = null;
-    var dst: ?*d3d12.ID3D12Resource = null;
-    if (com.FAILED(device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&src))) or src == null) return error.SkipZigTest;
-    errdefer _ = src.?.Release();
-    if (com.FAILED(device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&dst))) or dst == null) return error.SkipZigTest;
-    return .{ src.?, dst.? };
-}
-
 // A tab that is hidden releases its swap chain, and showing it again
 // rebuilds every frame state from drawFrameLocked before beginFrame has
 // opened a command list. The atlas placeholders built there must still be
@@ -3556,9 +3545,17 @@ fn iqPrintAll(iq: *InfoQueue) void {
 // releaseGpuResources frees the shaders when the display is unrealized.
 // Pipeline state objects and root signatures are not covered by the
 // retirement queue, so the GPU has to be idle before they go, the way
-// threadExit idles it. With the debug layer the early release stops the
-// process; without it the call returns with the queue still executing,
-// which the fence assertion below catches in every build mode.
+// threadExit idles it.
+//
+// The draw that uses the shaders is held on the queue behind a fence only
+// the test signals, so it is still pending when releaseGpuResources runs,
+// whatever the machine's load. A helper thread opens that gate as soon as
+// the device fence is signalled past the draw, which is the first thing any
+// GPU wait does: the fixed code waits, opens the gate and returns with the
+// draw complete, while code that does not wait returns with the gate still
+// shut. No timing is involved in either outcome. The debug layer's
+// CORRUPTION raise, if any, is counted and resumed, so a regression fails
+// this test instead of ending the test binary.
 test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shaders" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -3581,10 +3578,10 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
     r.shaders = try Shaders.init(dev.device, alloc, &.{});
     defer r.shaders.deinit(alloc);
 
-    const big_len: u64 = 256 * 1024 * 1024;
-    const big = try bigBusyBuffers(dev.device, big_len);
-    defer _ = big[0].Release();
-    defer _ = big[1].Release();
+    var gate: ?*d3d12.ID3D12Fence = null;
+    if (com.FAILED(dev.device.CreateFence(0, .NONE, &d3d12.ID3D12Fence.IID, @ptrCast(&gate))) or gate == null)
+        return error.FenceCreationFailed;
+    defer _ = gate.?.Release();
     defer dev.waitForGpu() catch {};
 
     const out = try Texture.init(r.api.renderTargetTextureOptions(), 64, 64, null);
@@ -3593,12 +3590,9 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
     defer ubuf.deinit();
     try ubuf.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
 
-    // A draw with the shaders, queued behind enough copy work that it is
-    // still executing when releaseGpuResources runs.
     const frame = &(r.api.gpu_frames[0] orelse return error.NoFrame);
     try frame.reset();
     const cl = frame.command_list.?;
-    for (0..48) |_| cl.CopyBufferRegion(big[1], 0, big[0], 0, big_len);
     {
         var pass = RenderPassMod.begin(.{
             .command_list = cl,
@@ -3614,6 +3608,7 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
         pass.complete();
     }
     if (com.FAILED(cl.Close())) return error.CommandListCloseFailed;
+    if (com.FAILED(dev.command_queue.Wait(gate.?, 1))) return error.QueueWaitFailed;
     {
         const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
         dev.command_queue.ExecuteCommandLists(1, &lists);
@@ -3621,17 +3616,48 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
     const v = dev.fence_value.fetchAdd(1, .release) + 1;
     if (com.FAILED(dev.command_queue.Signal(dev.fence, v))) return error.FenceSignalFailed;
     dev.retirement.seal(v);
-    // The precondition, or the run proves nothing.
+
+    var opener: GateOpener = .{ .dev = dev, .gate = gate.?, .armed_at = v };
+    const thread = try std.Thread.spawn(.{}, GateOpener.run, .{&opener});
+    // Runs before the GPU drain above: the drain needs the gate open.
+    defer {
+        opener.stop.store(true, .release);
+        thread.join();
+    }
+
+    // The precondition holds by construction: the gate is shut and only
+    // the opener, which nothing has woken, can open it.
     try std.testing.expect(dev.fence.GetCompletedValue() < v);
 
+    const trap = try CorruptionTrap.install();
+    defer trap.uninstall();
     r.releaseGpuResources();
+    const raised = CorruptionTrap.take();
 
     const completed = dev.fence.GetCompletedValue();
-    std.debug.print("releaseGpuResources unrealized: draw fence {d}, completed {d}\n", .{ v, completed });
+    std.debug.print("releaseGpuResources unrealized: draw fence {d}, completed {d}, 0x87D raised={d}\n", .{ v, completed, raised });
     try std.testing.expect(r.shaders.defunct);
+    try std.testing.expectEqual(@as(u32, 0), raised);
     try std.testing.expect(completed >= v);
 }
 
+/// Opens a queue gate once the device fence is signalled past `armed_at`,
+/// or when told to stop.
+const GateOpener = struct {
+    dev: *Device,
+    gate: *d3d12.ID3D12Fence,
+    armed_at: u64,
+    stop: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *GateOpener) void {
+        while (!self.stop.load(.acquire) and
+            self.dev.fence_value.load(.acquire) <= self.armed_at)
+        {
+            std.atomic.spinLoopHint();
+        }
+        _ = self.gate.Signal(1);
+    }
+};
 // Everything SwapChain.init builds is created between initGpu and the
 // first frame. A texture keeps the list it was created with for later
 // uploads, so nothing created there may keep a list the backend does not
