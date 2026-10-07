@@ -2293,3 +2293,245 @@ test "DirectX12: last-frame snapshot tracks the presented slot" {
         }
     }
 }
+
+
+// ---- #1722: an in-flight DATA_STATIC SRV table covers slots its base does not own ----
+
+/// ID3D12InfoQueue::SetBreakOnSeverity is vtable slot 31 (after the 28
+/// storage/retrieval filter methods, AddMessage, AddApplicationMessage and
+/// SetBreakOnCategory). Off for CORRUPTION, so the defect this test pins is
+/// counted as a message instead of killing the test binary with 2173.
+fn iq1722SetBreakOnSeverity(iq: *InfoQueue, severity: u32, enable: bool) void {
+    const slots: [*]const *const anyopaque = @ptrCast(iq.vtable);
+    const F = *const fn (*InfoQueue, u32, i32) callconv(.winapi) com.HRESULT;
+    const f: F = @ptrCast(slots[31]);
+    _ = f(iq, severity, if (enable) 1 else 0);
+}
+
+fn iq1722Count(iq: *InfoQueue, id: u32) usize {
+    const alloc = std.testing.allocator;
+    var hits: usize = 0;
+    const n = iq.vtable.GetNumStoredMessages(iq);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        var len: usize = 0;
+        if (com.FAILED(iq.vtable.GetMessage(iq, i, null, &len))) continue;
+        const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch continue;
+        defer alloc.free(buf);
+        const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+        if (iq.vtable.GetMessage(iq, i, msg, &len) != 0) continue;
+        if (msg.ID != id) continue;
+        hits += 1;
+        const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+        std.debug.print("  [#1722 sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+    }
+    return hits;
+}
+
+// The interleaving behind #1722, with nothing else in it:
+//
+//   1. textures take SRV slots: the render target first, then t0 (slot 1),
+//      t1 (slot 2) and the victim (slot 3) (production Texture.init, the
+//      device's retirement queue, a shader-visible heap);
+//   2. the victim is retired (a FrameState torn down when its tab is
+//      hidden) and the next submission seals it at fence V1, which the GPU
+//      then reaches;
+//   3. a later frame draws bg_image through the production RenderPass with
+//      t0 as its only texture. RenderPass binds the SRV table from t0's
+//      slot, and the root signature declares that table as srv_table_size
+//      (3) DATA_STATIC descriptors, so it covers slots 1..3: slot 3 still
+//      holds the victim's descriptor. bg_image samples t0 only. The queue
+//      is parked on a gate, so this submission (V2) is provably in flight;
+//   4. drawFrameStart's collect(GetCompletedValue()) runs verbatim:
+//      completed is V1, the victim is sealed at V1, so its resource is
+//      final-released and its slot rewritten while V2 still covers it.
+//
+// The debug layer answers step 4 with
+// ID3D12Resource::<final-release>: CORRUPTION ... OBJECT_DELETED_WHILE_STILL_IN_USE
+// (#921), the message the app dies of with exit code 2173, and the slot's
+// null-SRV rewrite with STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE (#1001).
+// Control first: the same sequence with the victim in a slot no bound table
+// covers (victim 1, t0 2, so the table spans 2..4). Expected green on the
+// current code; it runs first because the covered case kills the binary.
+test "SRV table: control, a retired texture outside every bound table is released cleanly (#1722)" {
+    try run1722(false);
+}
+
+test "SRV table: a retired texture whose slot an in-flight table covers is not released (#1722)" {
+    try run1722(true);
+}
+
+fn run1722(covered: bool) !void {
+    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    const alloc = std.testing.allocator;
+
+    var dev = Device.init(.{ .shared_texture = .{ .width = 64, .height = 64 } }, .{}) catch return error.SkipZigTest;
+    defer dev.deinit();
+
+    var iq: ?*InfoQueue = null;
+    if (com.FAILED(dev.device.vtable.QueryInterface(dev.device, &InfoQueue.IID, @ptrCast(&iq))) or iq == null)
+        return error.SkipZigTest;
+    defer _ = iq.?.vtable.Release(iq.?);
+    iq1722SetBreakOnSeverity(iq.?, 0, false);
+    defer iq1722SetBreakOnSeverity(iq.?, 0, true);
+
+    var shaders = try Shaders.init(dev.device, alloc, &.{});
+    defer shaders.deinit(alloc);
+
+    var srv_heap = try DescriptorHeap.init(dev.device, .CBV_SRV_UAV, 8, true);
+    defer srv_heap.deinit();
+    var sampler_heap = try DescriptorHeap.init(dev.device, .SAMPLER, 4, true);
+    defer sampler_heap.deinit();
+    var rtv_heap = try DescriptorHeap.init(dev.device, .RTV, 4, false);
+    defer rtv_heap.deinit();
+    // Drain before the heaps go: retired slots point into them.
+    defer dev.waitForGpu() catch {};
+
+    var cmd_allocator: ?*d3d12.ID3D12CommandAllocator = null;
+    if (com.FAILED(dev.device.CreateCommandAllocator(.DIRECT, &d3d12.ID3D12CommandAllocator.IID, @ptrCast(&cmd_allocator))) or cmd_allocator == null)
+        return error.CommandAllocatorCreationFailed;
+    defer _ = cmd_allocator.?.Release();
+    var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
+    if (com.FAILED(dev.device.CreateCommandList(0, .DIRECT, cmd_allocator.?, null, &d3d12.ID3D12GraphicsCommandList.IID, @ptrCast(&cl))) or cl == null)
+        return error.CommandListCreationFailed;
+    defer _ = cl.?.Release();
+
+    var gate: ?*d3d12.ID3D12Fence = null;
+    if (com.FAILED(dev.device.CreateFence(0, .NONE, &d3d12.ID3D12Fence.IID, @ptrCast(&gate))) or gate == null)
+        return error.FenceCreationFailed;
+    defer _ = gate.?.Release();
+
+    // Two large DEFAULT-heap buffers for the busy work in step 3.
+    const big_len: u64 = 256 * 1024 * 1024;
+    var big_src: ?*d3d12.ID3D12Resource = null;
+    var big_dst: ?*d3d12.ID3D12Resource = null;
+    {
+        const hp = d3d12.D3D12_HEAP_PROPERTIES{ .Type = .DEFAULT, .CPUPageProperty = 0, .MemoryPoolPreference = 0, .CreationNodeMask = 0, .VisibleNodeMask = 0 };
+        const rd = d3d12.D3D12_RESOURCE_DESC{ .Dimension = .BUFFER, .Alignment = 0, .Width = big_len, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1, .Format = .UNKNOWN, .SampleDesc = .{ .Count = 1, .Quality = 0 }, .Layout = .ROW_MAJOR, .Flags = .NONE };
+        if (com.FAILED(dev.device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&big_src))) or big_src == null) return error.SkipZigTest;
+        if (com.FAILED(dev.device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&big_dst))) or big_dst == null) return error.SkipZigTest;
+    }
+    defer _ = big_src.?.Release();
+    defer _ = big_dst.?.Release();
+
+    // 1. Slots: render target 0, t0 1, t1 2, victim 3.
+    const out = try Texture.init(.{
+        .device = dev.device,
+        .command_list = cl.?,
+        .srv_heap = &srv_heap,
+        .rtv_heap = &rtv_heap,
+        .retire = dev.retirement,
+        .pixel_format = .B8G8R8A8_UNORM,
+        .render_target = true,
+    }, 64, 64, null);
+    defer out.deinit();
+    const opts: Texture.Options = .{
+        .device = dev.device,
+        .command_list = cl.?,
+        .srv_heap = &srv_heap,
+        .retire = dev.retirement,
+        .pixel_format = .B8G8R8A8_UNORM,
+    };
+    // covered: t0 1, t1 2, victim 3 (the table from 1 spans 1..3).
+    // control: victim 1, t0 2, t1 3 (the table from 2 spans 2..4).
+    const early_victim: ?Texture = if (covered) null else try Texture.init(opts, 4, 4, null);
+    const t0 = try Texture.init(opts, 4, 4, null);
+    defer t0.deinit();
+    const t1 = try Texture.init(opts, 4, 4, null);
+    defer t1.deinit();
+    const victim = early_victim orelse try Texture.init(opts, 4, 4, null);
+    try std.testing.expectEqual(@as(u32, if (covered) 1 else 2), t0.srv.index);
+    try std.testing.expectEqual(@as(u32, if (covered) 3 else 1), victim.srv.index);
+    std.debug.print("#1722 {s}: t0 slot {d}, victim slot {d}, table spans {d}..{d}\n", .{
+        if (covered) "covered" else "control", t0.srv.index, victim.srv.index, t0.srv.index, t0.srv.index + Pipeline.srv_table_size - 1,
+    });
+
+    var ubuf = try buffer_mod.Buffer(shaders_mod.Uniforms).init(.{ .device = dev.device, .retire = dev.retirement }, 1);
+    defer ubuf.deinit();
+    try ubuf.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
+    var ibuf = try buffer_mod.Buffer(shaders_mod.BgImage).init(.{ .device = dev.device, .retire = dev.retirement }, 1);
+    defer ibuf.deinit();
+    try ibuf.sync(&.{std.mem.zeroes(shaders_mod.BgImage)});
+    const sampler = try Sampler.init(.{ .device = dev.device, .sampler_heap = &sampler_heap, .retire = dev.retirement });
+    defer sampler.deinit();
+
+    if (com.FAILED(cl.?.Close())) return error.CommandListCloseFailed;
+    {
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl.?};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+    }
+    try dev.waitForGpu();
+
+    // 2. Retire the victim, seal it at V1, let the GPU reach V1.
+    victim.deinit();
+    const v1 = dev.fence_value.fetchAdd(1, .release) + 1;
+    if (com.FAILED(dev.command_queue.Signal(dev.fence, v1))) return error.FenceSignalFailed;
+    dev.retirement.seal(v1);
+    if (dev.fence.GetCompletedValue() < v1) {
+        _ = dev.fence.SetEventOnCompletion(v1, dev.fence_event);
+        _ = d3d12.WaitForSingleObject(dev.fence_event, d3d12.INFINITE);
+    }
+
+    // 3. The next frame: bg_image with t0, through the production RenderPass.
+    if (com.FAILED(cmd_allocator.?.Reset())) return error.AllocatorResetFailed;
+    if (com.FAILED(cl.?.Reset(cmd_allocator.?, null))) return error.CommandListResetFailed;
+    // Keep the GPU genuinely busy ahead of the draw. A list parked behind a
+    // queue Wait on a CPU-signalled fence is held back by the runtime and
+    // the debug layer does not see it as executing, so a gate would hide
+    // exactly what this test needs the layer to see.
+    for (0..48) |_| cl.?.CopyBufferRegion(big_dst.?, 0, big_src.?, 0, big_len);
+    {
+        var pass = RenderPassMod.begin(.{
+            .command_list = cl.?,
+            .srv_heap = &srv_heap,
+            .sampler_heap = &sampler_heap,
+            .attachments = &.{.{
+                .target = .{ .texture = out },
+                .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
+            }},
+        });
+        pass.step(.{
+            .pipeline = shaders.pipelines.bg_image,
+            .uniforms = ubuf.buffer,
+            .buffers = &.{ibuf.buffer},
+            .textures = &.{t0},
+            .samplers = &.{sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+        pass.complete();
+    }
+    if (com.FAILED(cl.?.Close())) return error.CommandListCloseFailed;
+
+    errdefer dev.waitForGpu() catch {};
+    {
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl.?};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+    }
+    const v2 = dev.fence_value.fetchAdd(1, .release) + 1;
+    if (com.FAILED(dev.command_queue.Signal(dev.fence, v2))) return error.FenceSignalFailed;
+    dev.retirement.seal(v2);
+    try std.testing.expect(dev.fence.GetCompletedValue() >= v1);
+    try std.testing.expect(dev.fence.GetCompletedValue() < v2);
+
+
+    // 4. drawFrameStart's collect, verbatim. With the defect present the
+    //    debug layer raises 0x87D here (exit code 2173) on the covered
+    //    victim; break-on-severity is turned off above so that, on a build
+    //    where the layer only records, the counts below fail instead.
+    iq.?.vtable.ClearStoredMessages(iq.?);
+    dev.retirement.collect(dev.fence.GetCompletedValue());
+    const still_in_flight = dev.fence.GetCompletedValue() < v2;
+    const deleted_in_use = iq1722Count(iq.?, 921);
+    const static_changed = iq1722Count(iq.?, 1001);
+    try dev.waitForGpu();
+
+    std.debug.print("#1722 {s}: after collect V2 in flight={} OBJECT_DELETED_WHILE_STILL_IN_USE={d} STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE={d}\n", .{
+        if (covered) "covered" else "control", still_in_flight, deleted_in_use, static_changed,
+    });
+    // The precondition, or the run proves nothing: the busy work must
+    // still have been executing when collect ran.
+    try std.testing.expect(still_in_flight);
+    try std.testing.expectEqual(@as(usize, 0), deleted_in_use);
+    try std.testing.expectEqual(@as(usize, 0), static_changed);
+}
