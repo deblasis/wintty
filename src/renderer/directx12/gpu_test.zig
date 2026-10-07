@@ -3255,10 +3255,14 @@ test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
     // Between frames, which is where the rebuild runs: drawFrameEnd and
     // the init flush both leave no list pending.
     try std.testing.expect(api.pending_command_list == null);
+    const signals_before = dev.fence_value.load(.acquire);
     const grayscale = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .grayscale });
     defer grayscale.deinit();
     const color = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .bgra });
     defer color.deinit();
+    // The rebuild itself submits nothing and waits for nothing: every GPU
+    // wait goes through a fence signal, and none was issued.
+    try std.testing.expectEqual(signals_before, dev.fence_value.load(.acquire));
 
     // The next frame, the way beginFrame opens it, samples both halves of
     // the pair with neither uploaded.
