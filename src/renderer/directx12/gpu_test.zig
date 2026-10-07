@@ -3382,11 +3382,10 @@ test "Frame: teardown after a completed frame leaves the debug layer quiet" {
     try std.testing.expectEqual(@as(usize, 0), deleted);
 }
 
-// A frame that failed between reset and complete still holds an open
-// list, and teardown has to close that one. The frame's own record of its
-// list's state is what keeps the completed case above quiet, so both
-// halves are pinned.
-test "Frame: teardown closes a list that is still recording" {
+// A frame abandoned between reset and complete still holds an open list.
+// Teardown releases it without closing it, and that has to be as quiet as
+// tearing down a closed one: nothing at all in the info queue.
+test "Frame: teardown of a list that is still recording is quiet" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     if (comptime builtin.mode != .Debug) return error.SkipZigTest;
     var dev = Device.init(.{ .shared_texture = .{ .width = 16, .height = 16 } }, .{}) catch
@@ -3399,7 +3398,25 @@ test "Frame: teardown closes a list that is still recording" {
     try frame.reset();
     iq.vtable.ClearStoredMessages(iq);
     frame.deinit();
-    try std.testing.expectEqual(@as(usize, 0), countMessages(iq, msg_command_list_closed));
+    const stored = iq.vtable.GetNumStoredMessages(iq);
+    if (stored != 0) iqPrintAll(iq);
+    try std.testing.expectEqual(@as(u64, 0), stored);
+}
+
+fn iqPrintAll(iq: *InfoQueue) void {
+    const alloc = std.testing.allocator;
+    const n = iq.vtable.GetNumStoredMessages(iq);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        var len: usize = 0;
+        if (com.FAILED(iq.vtable.GetMessage(iq, i, null, &len))) continue;
+        const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch continue;
+        defer alloc.free(buf);
+        const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+        if (iq.vtable.GetMessage(iq, i, msg, &len) != 0) continue;
+        const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+        std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+    }
 }
 
 // releaseGpuResources frees the shaders when the display is unrealized.
