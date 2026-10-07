@@ -54,6 +54,13 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
 
     private IReadOnlyList<DiscoveredProfile> _discovered = Array.Empty<DiscoveredProfile>();
 
+    // Set once the first shell discovery has answered (or failed). Until
+    // then the ssh entries are held back: they are known immediately,
+    // the installed shells are not, and a list holding only ssh hosts
+    // would make one of them the default profile -- a first pane opened
+    // in that window would run ssh to it instead of the user's shell.
+    private volatile bool _initialDiscoverySettled;
+
     public event Action<IProfileRegistry>? ProfilesChanged;
 
     public IReadOnlyList<ResolvedProfile> Profiles => _snapshot.Profiles;
@@ -97,6 +104,7 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
             {
                 _discovered = discovered;
             }
+            _initialDiscoverySettled = true;
             RecomposeAndFire();
         }
         catch (OperationCanceledException)
@@ -106,6 +114,11 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         catch (Exception ex)
         {
             LogDiscoveryRefreshFailed(ex);
+            // No shells are coming; list the ssh entries rather than
+            // hold them back forever. With none to add the prior state
+            // stands and no change is announced.
+            _initialDiscoverySettled = true;
+            if (ReadSshHosts().Count > 0) RecomposeAndFire();
         }
     }
 
@@ -116,6 +129,8 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
     // user saved replaces the bare entry discovery would add for it.
     private IReadOnlyList<DiscoveredProfile> ReadSshHosts()
     {
+        if (!_initialDiscoverySettled) return Array.Empty<DiscoveredProfile>();
+
         var result = new List<DiscoveredProfile>();
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         void AddAll(IEnumerable<DiscoveredProfile> profiles)
@@ -233,6 +248,7 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
             {
                 _discovered = discovered;
             }
+            _initialDiscoverySettled = true;
             RecomposeAndFire();
         }
         catch (OperationCanceledException)

@@ -553,6 +553,55 @@ public class ProfileRegistryTests
     }
 
     [Fact]
+    public void SshEntries_WaitForShellDiscovery_SoNoneBecomesTheDefault()
+    {
+        // The user's default is a discovered shell that has not been found
+        // yet. If ssh entries were listed now, the fallback default (first
+        // visible) would be an ssh host and a first pane would connect to it.
+        var pending = new TaskCompletionSource<IReadOnlyList<DiscoveredProfile>>();
+        var src = new FakeProfileConfigSource
+        {
+            SshHostsDiscovery = true,
+            DefaultProfileId = "wsl-ubuntu",
+            SshConnections = [new Ghostty.Core.Ssh.SshConnection("aap", "aap.local")],
+        };
+        using var registry = new ProfileRegistry(
+            src, (_, _) => pending.Task, SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance,
+            readKnownHosts: () => KnownHosts);
+
+        Assert.Empty(registry.Profiles);
+        Assert.Null(registry.DefaultProfileId);
+
+        // A config reload in that window must not let them in either.
+        src.Raise();
+        Assert.Empty(registry.Profiles);
+
+        pending.SetResult([new DiscoveredProfile("wsl-ubuntu", "Ubuntu", "wsl.exe -d Ubuntu", "wsl")]);
+
+        // The registry resumes off this thread.
+        Assert.True(SpinWait.SpinUntil(() => registry.DefaultProfileId is not null, TimeSpan.FromSeconds(5)));
+        Assert.Equal("wsl-ubuntu", registry.DefaultProfileId);
+        Assert.Contains(registry.Profiles, p => p.Id == "ssh-aap");
+        Assert.Contains(registry.Profiles, p => p.Id == "ssh-devel-local");
+    }
+
+    [Fact]
+    public void SshEntries_AreListedWhenShellDiscoveryFails()
+    {
+        var src = new FakeProfileConfigSource
+        {
+            SshConnections = [new Ghostty.Core.Ssh.SshConnection("aap", "aap.local")],
+        };
+        using var registry = new ProfileRegistry(
+            src,
+            (_, _) => Task.FromException<IReadOnlyList<DiscoveredProfile>>(new InvalidOperationException("probe")),
+            SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
+
+        Assert.True(SpinWait.SpinUntil(() => registry.Profiles.Count > 0, TimeSpan.FromSeconds(5)));
+        Assert.Single(registry.Profiles, p => p.Id == "ssh-aap");
+    }
+
+    [Fact]
     public void SshHosts_UnreadableFile_KeepsTheRestOfTheList()
     {
         var src = new FakeProfileConfigSource
