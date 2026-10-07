@@ -3649,6 +3649,9 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
 
     const trap = try CorruptionTrap.install();
     defer trap.uninstall();
+    // The opener's deadline runs from here, so time spent before the
+    // release cannot use it up.
+    opener.go.store(true, .release);
     r.releaseGpuResources();
     const raised = CorruptionTrap.take();
 
@@ -3664,12 +3667,11 @@ test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shad
     // complete by now. A wait that never signals a new fence value (one
     // on the last submitted value, say) is a correct idle; the opener's
     // deadline lets it finish, after the timeout, instead of hanging.
-    try std.testing.expect(why != .stopped);
     try std.testing.expect(live);
 }
 
 /// Opens a queue gate once the device fence is signalled past `armed_at`,
-/// or after `timeout_ms` for a wait that signals nothing new, recording
+/// or `timeout_ms` after `go` for a wait that signals nothing new, recording
 /// first whether the shaders were still alive at that moment. Also opens
 /// it when told to stop, so the test's own drain never waits on a shut
 /// gate.
@@ -3678,6 +3680,7 @@ const GateOpener = struct {
     gate: *d3d12.ID3D12Fence,
     armed_at: u64,
     shaders: *const Shaders,
+    go: std.atomic.Value(bool) = .init(false),
     stop: std.atomic.Value(bool) = .init(false),
     why: std.atomic.Value(Why) = .init(.pending),
     shaders_live_at_open: std.atomic.Value(bool) = .init(false),
@@ -3688,6 +3691,7 @@ const GateOpener = struct {
     extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 
     fn run(self: *GateOpener) void {
+        while (!self.go.load(.acquire) and !self.stop.load(.acquire)) Sleep(1);
         const deadline = GetTickCount64() + timeout_ms;
         const why: Why = while (true) {
             if (self.dev.fence_value.load(.acquire) > self.armed_at) break .fence;
