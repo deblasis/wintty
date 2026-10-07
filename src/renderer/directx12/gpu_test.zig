@@ -3167,16 +3167,27 @@ test "SRV table: a texture whose upload fails partway leaves nothing the open li
 
 // ---- Rebuilt textures, frame teardown, and shader release ordering ----
 //
-// The debug layer's info queue is the oracle for the first group: each test
+// The debug layer's info queue is the oracle for most of these: each test
 // clears the stored messages before the step under test and counts the
-// specific message ids after it. Nothing here filters messages or changes
-// break settings; a regression shows up as a count or as the debug layer
-// stopping the process.
+// messages after it. Nothing here filters messages or changes break
+// settings; a regression shows up as a count.
 
 fn infoQueue(device: *d3d12.ID3D12Device) ?*InfoQueue {
     var iq: ?*InfoQueue = null;
     if (com.FAILED(device.vtable.QueryInterface(device, &InfoQueue.IID, @ptrCast(&iq)))) return null;
     return iq;
+}
+
+/// The info queue of a test whose oracle is the debug layer. Device.init
+/// enables the layer in every Debug build, so it is expected here; where it
+/// is missing (the Graphics Tools feature not installed) the test can judge
+/// nothing, and it skips under a fixed marker a regression run can count
+/// rather than as one more anonymous skip.
+fn debugLayerQueue(device: *d3d12.ID3D12Device, comptime test_name: []const u8) error{SkipZigTest}!*InfoQueue {
+    return infoQueue(device) orelse {
+        std.debug.print("DEBUG-LAYER-UNAVAILABLE: skipped \"{s}\"\n", .{test_name});
+        return error.SkipZigTest;
+    };
 }
 
 /// How many stored messages carry `id`, printing each one so a red run
@@ -3235,7 +3246,7 @@ test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
         return error.SkipZigTest;
     defer api.deinit();
     const dev = &(api.dev orelse return error.NoDevice);
-    const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
+    const iq = try debugLayerQueue(dev.device, "atlas textures rebuilt between frames");
     defer _ = iq.vtable.Release(iq);
 
     var shaders = try Shaders.init(dev.device, alloc, &.{});
@@ -3321,7 +3332,7 @@ test "Frame: teardown after a completed frame leaves the debug layer quiet" {
         return error.SkipZigTest;
     defer r.api.deinit();
     const dev = &(r.api.dev orelse return error.NoDevice);
-    const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
+    const iq = try debugLayerQueue(dev.device, "Frame teardown after a completed frame");
     defer _ = iq.vtable.Release(iq);
 
     var shaders = try Shaders.init(dev.device, alloc, &.{});
@@ -3388,7 +3399,7 @@ test "Frame: teardown of a list that is still recording is quiet" {
     var dev = Device.init(.{ .shared_texture = .{ .width = 16, .height = 16 } }, .{}) catch
         return error.SkipZigTest;
     defer dev.deinit();
-    const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
+    const iq = try debugLayerQueue(dev.device, "Frame teardown of a recording list");
     defer _ = iq.vtable.Release(iq);
 
     var frame = try Frame.init(dev.device);
