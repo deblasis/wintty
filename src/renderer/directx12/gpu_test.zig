@@ -3179,15 +3179,22 @@ fn infoQueue(device: *d3d12.ID3D12Device) ?*InfoQueue {
 }
 
 /// The info queue of a test whose oracle is the debug layer. Device.init
-/// enables the layer in every Debug build, so it is expected here; where it
-/// is missing (the Graphics Tools feature not installed) the test can judge
-/// nothing, and it skips under a fixed marker a regression run can count
-/// rather than as one more anonymous skip.
-fn debugLayerQueue(device: *d3d12.ID3D12Device, comptime test_name: []const u8) error{SkipZigTest}!*InfoQueue {
-    return infoQueue(device) orelse {
+/// enables the layer in every Debug build. Only a machine without the layer
+/// at all (the Graphics Tools feature not installed, so
+/// D3D12GetDebugInterface fails) skips, under a fixed marker a regression
+/// run can count. A machine that has the layer but a device without an
+/// info queue means the layer was not enabled, which is a setup regression,
+/// and fails.
+fn debugLayerQueue(device: *d3d12.ID3D12Device, comptime test_name: []const u8) error{ SkipZigTest, DebugLayerNotEnabled }!*InfoQueue {
+    if (infoQueue(device)) |iq| return iq;
+    var debug: ?*anyopaque = null;
+    if (com.FAILED(d3d12.D3D12GetDebugInterface(&d3d12.ID3D12Debug.IID, &debug)) or debug == null) {
         std.debug.print("DEBUG-LAYER-UNAVAILABLE: skipped \"{s}\"\n", .{test_name});
         return error.SkipZigTest;
-    };
+    }
+    releaseCom(debug);
+    std.debug.print("debug layer installed but not enabled on the device: \"{s}\"\n", .{test_name});
+    return error.DebugLayerNotEnabled;
 }
 
 /// How many stored messages are CORRUPTION or ERROR severity, printing
