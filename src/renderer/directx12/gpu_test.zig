@@ -3655,16 +3655,12 @@ test "DirectX12: textures built during init keep no command list past it" {
     defer front.deinit();
     defer api.waitGpu();
 
-    // A list a texture may hold is one the backend still owns: a frame's.
+    // None of them holds a list at all. Atlas textures take the frame's
+    // list before every upload, and render targets record through the
+    // frame's list directly, so a list kept from creation is never needed
+    // and is only ever stale.
     for ([_]Texture{ grayscale, color, front }, 0..) |tex, i| {
-        const held = tex.command_list orelse continue;
-        var owned = false;
-        for (api.gpu_frames) |gf| {
-            if (gf) |f| {
-                if (f.command_list == held) owned = true;
-            }
-        }
-        if (!owned) std.debug.print("texture {d} holds command list 0x{x}, which no frame owns\n", .{ i, @intFromPtr(held) });
-        try std.testing.expect(owned);
+        if (tex.command_list) |held| std.debug.print("texture {d} holds command list 0x{x}\n", .{ i, @intFromPtr(held) });
+        try std.testing.expect(tex.command_list == null);
     }
 }
