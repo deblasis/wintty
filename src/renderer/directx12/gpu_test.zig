@@ -3164,3 +3164,354 @@ test "SRV table: a texture whose upload fails partway leaves nothing the open li
     try CoverageRig.expectClean(v);
     try std.testing.expectEqual(@as(usize, 0), v.severe);
 }
+
+// ---- Rebuilt textures, frame teardown, and shader release ordering ----
+//
+// The debug layer's info queue is the oracle for the first group: each test
+// clears the stored messages before the step under test and counts the
+// specific message ids after it. Nothing here filters messages or changes
+// break settings; a regression shows up as a count or as the debug layer
+// stopping the process.
+
+fn infoQueue(device: *d3d12.ID3D12Device) ?*InfoQueue {
+    var iq: ?*InfoQueue = null;
+    if (com.FAILED(device.vtable.QueryInterface(device, &InfoQueue.IID, @ptrCast(&iq)))) return null;
+    return iq;
+}
+
+/// How many stored messages carry `id`, printing each one so a red run
+/// names the object the debug layer complained about.
+fn countMessages(iq: *InfoQueue, id: u32) usize {
+    const alloc = std.testing.allocator;
+    var hits: usize = 0;
+    const n = iq.vtable.GetNumStoredMessages(iq);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        var len: usize = 0;
+        if (com.FAILED(iq.vtable.GetMessage(iq, i, null, &len))) continue;
+        const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch continue;
+        defer alloc.free(buf);
+        const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+        if (iq.vtable.GetMessage(iq, i, msg, &len) != 0) continue;
+        if (msg.ID != id) continue;
+        hits += 1;
+        const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+        std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+    }
+    return hits;
+}
+
+/// D3D12_MESSAGE_ID_INVALID_SUBRESOURCE_STATE: a descriptor table names a
+/// texture in a state its shader stage cannot read.
+const msg_invalid_subresource_state: u32 = 538;
+/// D3D12_MESSAGE_ID_COMMAND_LIST_CLOSED: a call on a closed command list.
+const msg_command_list_closed: u32 = 547;
+
+fn bigBusyBuffers(device: *d3d12.ID3D12Device, len: u64) ![2]*d3d12.ID3D12Resource {
+    const hp = d3d12.D3D12_HEAP_PROPERTIES{ .Type = .DEFAULT, .CPUPageProperty = 0, .MemoryPoolPreference = 0, .CreationNodeMask = 0, .VisibleNodeMask = 0 };
+    const rd = d3d12.D3D12_RESOURCE_DESC{ .Dimension = .BUFFER, .Alignment = 0, .Width = len, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1, .Format = .UNKNOWN, .SampleDesc = .{ .Count = 1, .Quality = 0 }, .Layout = .ROW_MAJOR, .Flags = .NONE };
+    var src: ?*d3d12.ID3D12Resource = null;
+    var dst: ?*d3d12.ID3D12Resource = null;
+    if (com.FAILED(device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&src))) or src == null) return error.SkipZigTest;
+    errdefer _ = src.?.Release();
+    if (com.FAILED(device.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COMMON, null, &d3d12.ID3D12Resource.IID, @ptrCast(&dst))) or dst == null) return error.SkipZigTest;
+    return .{ src.?, dst.? };
+}
+
+// A tab that is hidden releases its swap chain, and showing it again
+// rebuilds every frame state from drawFrameLocked before beginFrame has
+// opened a command list. The atlas placeholders built there must still be
+// readable by the first frame that samples them: the color atlas of a
+// terminal with no color glyphs is never uploaded, so nothing else ever
+// moves its texture out of the state it was created in.
+test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    const alloc = std.testing.allocator;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = alloc };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+    if (comptime @hasDecl(DirectX12, "flushInitCommands")) api.flushInitCommands();
+    const dev = &(api.dev orelse return error.NoDevice);
+    const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
+    defer _ = iq.vtable.Release(iq);
+
+    var shaders = try Shaders.init(dev.device, alloc, &.{});
+    defer shaders.deinit(alloc);
+    const out = try Texture.init(api.renderTargetTextureOptions(), 64, 64, null);
+    defer out.deinit();
+    var ubuf = try buffer_mod.Buffer(shaders_mod.Uniforms).init(api.uniformBufferOptions(), 1);
+    defer ubuf.deinit();
+    try ubuf.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
+    var ibuf = try buffer_mod.Buffer(shaders_mod.BgImage).init(api.bgImageBufferOptions(), 1);
+    defer ibuf.deinit();
+    try ibuf.sync(&.{std.mem.zeroes(shaders_mod.BgImage)});
+    const sampler = try Sampler.init(api.samplerOptions());
+    defer sampler.deinit();
+
+    // Between frames, which is where the rebuild runs: drawFrameEnd and
+    // the init flush both leave no list pending.
+    try std.testing.expect(api.pending_command_list == null);
+    const grayscale = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .grayscale });
+    defer grayscale.deinit();
+    const color = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .bgra });
+    defer color.deinit();
+
+    // The next frame, the way beginFrame opens it, samples both halves of
+    // the pair with neither uploaded.
+    iq.vtable.ClearStoredMessages(iq);
+    const frame = &(api.gpu_frames[0] orelse return error.NoFrame);
+    try frame.reset();
+    api.pending_command_list = frame.command_list;
+    defer api.pending_command_list = null;
+    const cl = frame.command_list.?;
+    {
+        var pass = RenderPassMod.begin(.{
+            .command_list = cl,
+            .srv_heap = api.srv_heap,
+            .sampler_heap = api.sampler_heap,
+            .attachments = &.{.{ .target = .{ .texture = out }, .clear_color = .{ 0.0, 0.0, 0.0, 0.0 } }},
+        });
+        for ([_]Texture{ grayscale, color }) |tex| pass.step(.{
+            .pipeline = shaders.pipelines.bg_image,
+            .uniforms = ubuf.buffer,
+            .buffers = &.{ibuf.buffer},
+            .textures = &.{tex},
+            .samplers = &.{sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+        pass.complete();
+    }
+    if (com.FAILED(cl.Close())) return error.CommandListCloseFailed;
+    {
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+    }
+    try dev.waitForGpu();
+
+    const bad_state = countMessages(iq, msg_invalid_subresource_state);
+    std.debug.print("rebuilt atlas pair: INVALID_SUBRESOURCE_STATE={d}\n", .{bad_state});
+    try std.testing.expectEqual(@as(usize, 0), bad_state);
+}
+
+// A frame's command list is closed whenever it is not recording: Frame.init
+// closes it and complete() closes it after every frame. Tearing a frame
+// down must not call Close on it a second time. That call is invalid, and
+// the debug layer also walks the closed list's references while rejecting
+// it, so a frame whose last draw used shaders that threadExit has already
+// freed reports each of them as deleted while in use.
+test "Frame: teardown after a completed frame leaves the debug layer quiet" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    const alloc = std.testing.allocator;
+    const DirectX12 = @import("../DirectX12.zig");
+    const R = @import("../generic.zig").Renderer(DirectX12);
+
+    // Frame.complete reports through its renderer's api; the rest of the
+    // renderer is never touched.
+    const r = try alloc.create(R);
+    defer alloc.destroy(r);
+    r.api = .{ .allocator = alloc };
+    r.api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer r.api.deinit();
+    if (comptime @hasDecl(DirectX12, "flushInitCommands")) r.api.flushInitCommands();
+    const dev = &(r.api.dev orelse return error.NoDevice);
+    const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
+    defer _ = iq.vtable.Release(iq);
+
+    var shaders = try Shaders.init(dev.device, alloc, &.{});
+    defer shaders.deinit(alloc);
+    const out = try Texture.init(r.api.renderTargetTextureOptions(), 64, 64, null);
+    defer out.deinit();
+    var ubuf = try buffer_mod.Buffer(shaders_mod.Uniforms).init(r.api.uniformBufferOptions(), 1);
+    defer ubuf.deinit();
+    try ubuf.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
+
+    // One drawn frame on slot 0, through reset and complete.
+    {
+        const frame = &(r.api.gpu_frames[0] orelse return error.NoFrame);
+        frame.renderer = r;
+        try frame.reset();
+        const cl = frame.command_list.?;
+        var pass = RenderPassMod.begin(.{
+            .command_list = cl,
+            .srv_heap = r.api.srv_heap,
+            .sampler_heap = r.api.sampler_heap,
+            .attachments = &.{.{ .target = .{ .texture = out }, .clear_color = .{ 0.0, 0.0, 0.0, 0.0 } }},
+        });
+        pass.step(.{
+            .pipeline = shaders.pipelines.bg_color,
+            .uniforms = ubuf.buffer,
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+        pass.complete();
+        frame.complete(false);
+        // drawFrameEnd's half: settle the deferred completion, submit.
+        const pc = r.api.pending_complete orelse return error.NoPendingComplete;
+        try std.testing.expect(pc.health == .healthy);
+        r.api.pending_complete = null;
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+        try dev.waitForGpu();
+    }
+
+    // threadExit: idle the GPU, free the shaders. Then the device goes,
+    // frames first.
+    r.api.waitGpu();
+    shaders.deinit(alloc);
+
+    iq.vtable.ClearStoredMessages(iq);
+    for (&r.api.gpu_frames) |*gf| {
+        if (gf.*) |*f| {
+            f.deinit();
+            gf.* = null;
+        }
+    }
+    const closed = countMessages(iq, msg_command_list_closed);
+    const deleted = countMessages(iq, msg_object_deleted_while_still_in_use);
+    std.debug.print("frame teardown: COMMAND_LIST_CLOSED={d} OBJECT_DELETED_WHILE_STILL_IN_USE={d}\n", .{ closed, deleted });
+    try std.testing.expectEqual(@as(usize, 0), closed);
+    try std.testing.expectEqual(@as(usize, 0), deleted);
+}
+
+// A frame that failed between reset and complete still holds an open
+// list, and teardown has to close that one. The frame's own record of its
+// list's state is what keeps the completed case above quiet, so both
+// halves are pinned.
+test "Frame: teardown closes a list that is still recording" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .Debug) return error.SkipZigTest;
+    var dev = Device.init(.{ .shared_texture = .{ .width = 16, .height = 16 } }, .{}) catch
+        return error.SkipZigTest;
+    defer dev.deinit();
+    const iq = infoQueue(dev.device) orelse return error.SkipZigTest;
+    defer _ = iq.vtable.Release(iq);
+
+    var frame = try Frame.init(dev.device);
+    try frame.reset();
+    iq.vtable.ClearStoredMessages(iq);
+    frame.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countMessages(iq, msg_command_list_closed));
+}
+
+// releaseGpuResources frees the shaders when the display is unrealized.
+// Pipeline state objects and root signatures are not covered by the
+// retirement queue, so the GPU has to be idle before they go, the way
+// threadExit idles it. With the debug layer the early release stops the
+// process; without it the call returns with the queue still executing,
+// which the fence assertion below catches in every build mode.
+test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shaders" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const DirectX12 = @import("../DirectX12.zig");
+    const R = @import("../generic.zig").Renderer(DirectX12);
+
+    // releaseGpuResources reads swap_chain, display_realized, shaders,
+    // alloc and api, and nothing else.
+    const r = try alloc.create(R);
+    defer alloc.destroy(r);
+    r.api = .{ .allocator = alloc };
+    r.api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer r.api.deinit();
+    if (comptime @hasDecl(DirectX12, "flushInitCommands")) r.api.flushInitCommands();
+    const dev = &(r.api.dev orelse return error.NoDevice);
+
+    r.alloc = alloc;
+    r.swap_chain = null;
+    r.display_realized = false;
+    r.shaders = try Shaders.init(dev.device, alloc, &.{});
+    defer r.shaders.deinit(alloc);
+
+    const big_len: u64 = 256 * 1024 * 1024;
+    const big = try bigBusyBuffers(dev.device, big_len);
+    defer _ = big[0].Release();
+    defer _ = big[1].Release();
+    defer dev.waitForGpu() catch {};
+
+    const out = try Texture.init(r.api.renderTargetTextureOptions(), 64, 64, null);
+    defer out.deinit();
+    var ubuf = try buffer_mod.Buffer(shaders_mod.Uniforms).init(r.api.uniformBufferOptions(), 1);
+    defer ubuf.deinit();
+    try ubuf.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
+
+    // A draw with the shaders, queued behind enough copy work that it is
+    // still executing when releaseGpuResources runs.
+    const frame = &(r.api.gpu_frames[0] orelse return error.NoFrame);
+    try frame.reset();
+    const cl = frame.command_list.?;
+    for (0..48) |_| cl.CopyBufferRegion(big[1], 0, big[0], 0, big_len);
+    {
+        var pass = RenderPassMod.begin(.{
+            .command_list = cl,
+            .srv_heap = r.api.srv_heap,
+            .sampler_heap = r.api.sampler_heap,
+            .attachments = &.{.{ .target = .{ .texture = out }, .clear_color = .{ 0.0, 0.0, 0.0, 0.0 } }},
+        });
+        pass.step(.{
+            .pipeline = r.shaders.pipelines.bg_color,
+            .uniforms = ubuf.buffer,
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+        pass.complete();
+    }
+    if (com.FAILED(cl.Close())) return error.CommandListCloseFailed;
+    {
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+    }
+    const v = dev.fence_value.fetchAdd(1, .release) + 1;
+    if (com.FAILED(dev.command_queue.Signal(dev.fence, v))) return error.FenceSignalFailed;
+    dev.retirement.seal(v);
+    // The precondition, or the run proves nothing.
+    try std.testing.expect(dev.fence.GetCompletedValue() < v);
+
+    r.releaseGpuResources();
+
+    const completed = dev.fence.GetCompletedValue();
+    std.debug.print("releaseGpuResources unrealized: draw fence {d}, completed {d}\n", .{ v, completed });
+    try std.testing.expect(r.shaders.defunct);
+    try std.testing.expect(completed >= v);
+}
+
+// Everything SwapChain.init builds is created inside initGpu's window. A
+// texture keeps the list it was created with for later uploads, so nothing
+// created there may keep a list the backend releases afterwards.
+test "DirectX12: textures built during init keep no command list past it" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = alloc };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+
+    // FrameState.init and CustomShaderState.init, in that order.
+    const grayscale = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .grayscale });
+    defer grayscale.deinit();
+    const color = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .bgra });
+    defer color.deinit();
+    const front = try Texture.init(api.renderTargetTextureOptions(), 1, 1, null);
+    defer front.deinit();
+
+    if (comptime @hasDecl(DirectX12, "flushInitCommands")) api.flushInitCommands();
+    defer api.waitGpu();
+
+    // A list a texture may hold is one the backend still owns: a frame's.
+    for ([_]Texture{ grayscale, color, front }, 0..) |tex, i| {
+        const held = tex.command_list orelse continue;
+        var owned = false;
+        for (api.gpu_frames) |gf| {
+            if (gf) |f| {
+                if (f.command_list == held) owned = true;
+            }
+        }
+        if (!owned) std.debug.print("texture {d} holds command list 0x{x}, which no frame owns\n", .{ i, @intFromPtr(held) });
+        try std.testing.expect(owned);
+    }
+}
