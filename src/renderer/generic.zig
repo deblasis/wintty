@@ -1557,8 +1557,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.swap_chain = null;
             }
 
-            // Release the shaders as well if we're unrealized.
+            // Release the shaders as well if we're unrealized. Idle the GPU
+            // first, as threadExit does: the swap chain teardown above only
+            // waits for frames to be submitted, and an in-flight command
+            // list may still reference the pipeline objects. This runs on
+            // the render thread, and only on the unrealized path.
             if (!self.display_realized) {
+                self.api.waitGpu();
                 self.shaders.deinit(self.alloc);
             }
         }
