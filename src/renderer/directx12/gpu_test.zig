@@ -2910,7 +2910,7 @@ test "SRV table: a render target replaced under an in-flight frame writes no slo
     try rig.init();
     defer rig.deinit();
 
-    var back = try Texture.init(rig.api.renderTargetTextureOptions(null, null), 4, 4, null);
+    var back = try Texture.init(rig.api.renderTargetTextureOptions(), 4, 4, null);
     defer back.deinit();
     _ = try rig.submitAndWait();
 
@@ -2921,10 +2921,10 @@ test "SRV table: a render target replaced under an in-flight frame writes no slo
 
     try rig.rotate();
     {
-        // What CustomShaderState.resize hands the new texture.
-        const rtv_slot: ?DescriptorHeap.Descriptor = if (back.rtv.cpu.ptr != 0) back.rtv else null;
-        const srv_slot: ?DescriptorHeap.Descriptor = if (back.srv.gpu.ptr != 0) back.srv else null;
-        const resized = try Texture.init(rig.api.renderTargetTextureOptions(rtv_slot, srv_slot), 8, 8, null);
+        // What CustomShaderState.resize does: a new texture first, then
+        // the old one retired.
+        const resized = try Texture.init(rig.api.renderTargetTextureOptions(), 8, 8, null);
+        try std.testing.expect(resized.srv.index != back.srv.index);
         back.deinit();
         back = resized;
     }

@@ -236,20 +236,30 @@ pub fn step(self: *RenderPass, s: Step) void {
         }
     }
 
-    // Bind the SRV descriptor table at root parameter 1.
-    // The root signature declares a contiguous range of srv_table_size (3)
-    // descriptors. Unlike Metal which binds textures individually at indices,
-    // DX12 binds the whole table from one base GPU handle. Textures must be
-    // allocated contiguously in the SRV heap so the range covers all slots.
+    // Bind each texture to the one-descriptor table of its register, from
+    // the texture's own SRV slot: textures[i] samples as ti, like Metal's
+    // per-index binding. A table never covers a slot the bound texture
+    // does not own, so another texture's retirement (which frees and
+    // rewrites its slot once its own fence passes) cannot reach a table
+    // this command list still holds. A table with no texture for it gets
+    // the step's first texture, so every table the pipeline declares is
+    // set to a slot this step owns.
+    var first: ?Texture = null;
     for (s.textures) |t| {
-        if (t) |tex| {
-            if (tex.srv.gpu.ptr != 0) {
-                cl.SetGraphicsRootDescriptorTable(
-                    Pipeline.root_param_srv_table,
-                    tex.srv.gpu,
-                );
-                break;
-            }
+        const tex = t orelse continue;
+        if (tex.srv.gpu.ptr == 0) continue;
+        first = tex;
+        break;
+    }
+    if (first) |fallback| {
+        std.debug.assert(s.textures.len <= s.pipeline.texture_tables.len);
+        for (s.pipeline.texture_tables, 0..) |param, i| {
+            const tex: Texture = tex: {
+                if (i >= s.textures.len) break :tex fallback;
+                const t = s.textures[i] orelse break :tex fallback;
+                break :tex if (t.srv.gpu.ptr != 0) t else fallback;
+            };
+            cl.SetGraphicsRootDescriptorTable(param, tex.srv.gpu);
         }
     }
 

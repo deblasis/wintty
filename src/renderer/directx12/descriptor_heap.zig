@@ -49,18 +49,6 @@ shader_visible_srv: bool = false,
 /// init asserts rather than silently not recycling.
 free_mask: u128 = 0,
 
-/// Slot reserved for the second half of an atlas SRV pair, between the
-/// two initAtlasTexture calls that consume it. The cell pass binds
-/// grayscale+color as ONE descriptor-table range, so the pair must occupy
-/// adjacent slots; the first call allocates them together and parks the
-/// partner index here because the shared initAtlasTexture signature is
-/// *const self (the heap is already behind a pointer, so it is the
-/// mutable home). A stale value from an aborted pair is released before
-/// reuse -- it was never bound, so immediate release is safe. Only
-/// touched under the renderer's draw mutex, like every other heap
-/// mutation. SRV heap only.
-atlas_partner: ?u32 = null,
-
 pub const Descriptor = struct {
     cpu: d3d12.D3D12_CPU_DESCRIPTOR_HANDLE,
     gpu: d3d12.D3D12_GPU_DESCRIPTOR_HANDLE,
@@ -117,17 +105,12 @@ pub fn init(
         .shader_visible_srv = shader_visible and heap_type == .CBV_SRV_UAV,
     };
 
-    // D3D12 requires every descriptor in a range that is not
-    // DESCRIPTORS_VOLATILE to be initialized before the table is set, not
-    // just the ones a shader samples. RenderPass binds the srv_table_size
-    // table from a single texture's slot, so the slots behind it hold
-    // whatever was allocated next, which is nothing at all when that texture
-    // is the most recent one created, and every such bind failed validation
-    // with INVALID_DESCRIPTOR_HANDLE.
-    //
-    // Filling here rather than in allocate() is the point: the slots that
-    // were failing are the ones no texture ever claims. A null SRV reads as
-    // zeros, so an unused slot is defined rather than merely quiet.
+    // Every slot of a shader-visible SRV heap starts as a null SRV, so no
+    // slot is ever undefined: a table bound to a slot always finds a
+    // descriptor there, and a null SRV reads as zeros. RenderPass binds
+    // one-descriptor tables from a texture's own slot, so in practice only
+    // slots that hold a texture's SRV are bound; this keeps the rest
+    // defined anyway.
     if (shader_visible and heap_type == .CBV_SRV_UAV) {
         const null_srv = d3d12.D3D12_SHADER_RESOURCE_VIEW_DESC{
             .Format = .R8G8B8A8_UNORM,
@@ -210,7 +193,9 @@ pub fn allocate(self: *DescriptorHeap) !Descriptor {
 
 /// Return a slot for reuse. The caller must guarantee the GPU no longer
 /// reads a binding that covers this slot (route the release through the
-/// retirement queue alongside the resource it described).
+/// retirement queue alongside the resource it described). The null-SRV
+/// rewrite below is itself a write into the slot, which is why that
+/// guarantee has to hold at release time and not only at reallocation.
 pub fn release(self: *DescriptorHeap, index: u32) void {
     std.debug.assert(index < self.allocated);
     self.free_mask &= ~(@as(u128, 1) << @intCast(index));
@@ -237,50 +222,6 @@ pub fn release(self: *DescriptorHeap, index: u32) void {
             device.CreateShaderResourceView(null, &null_srv, self.cpuHandle(index));
         }
     }
-}
-
-/// Allocate `n` adjacent slots, returning the first. Descriptor tables
-/// bind a range from one base handle, so textures that a single table
-/// must cover (the atlas pair) have to occupy consecutive slots; per-slot
-/// recycling makes that an explicit request rather than a bump-order
-/// accident.
-pub fn allocateContiguous(self: *DescriptorHeap, n: u32) !Descriptor {
-    std.debug.assert(n > 0);
-    // Scan up to the frontier plus n fresh slots, capped at capacity. A
-    // heap whose high-water mark already equals capacity still gets a
-    // full scan: freed holes below the mark are as good as the frontier,
-    // and rejecting on "full" alone would strand recyclable pairs.
-    const total: u32 = @min(self.allocated +| n, self.capacity);
-
-    // Scan for a run of n free slots: recycled holes below the
-    // high-water mark, or the frontier itself. Capacity is small (64
-    // shader-visible slots at most), so the scan is cheaper than keeping
-    // a second free-run index in sync.
-    var run: u32 = 0;
-    var i: u32 = 0;
-    while (i < total) : (i += 1) {
-        const occupied = (i < self.allocated) and
-            (self.free_mask & (@as(u128, 1) << @intCast(i))) != 0;
-        if (occupied) {
-            run = 0;
-            continue;
-        }
-        run += 1;
-        if (run == n) {
-            const start = i + 1 - n;
-            var j = start;
-            while (j <= i) : (j += 1) {
-                self.free_mask |= @as(u128, 1) << @intCast(j);
-            }
-            if (i + 1 > self.allocated) self.allocated = i + 1;
-            return .{
-                .cpu = self.cpuHandle(start),
-                .gpu = self.gpuHandle(start),
-                .index = start,
-            };
-        }
-    }
-    return error.DescriptorHeapFull;
 }
 
 /// CPU handle for a given slot index.
@@ -417,74 +358,6 @@ test "release then reset clears the recycled state" {
     // After reset the allocator starts over; slot 0 comes out first.
     const d = try heap.allocate();
     try std.testing.expectEqual(@as(u32, 0), d.index);
-}
-
-test "allocateContiguous returns adjacent slots at the frontier" {
-    var heap = testHeap(4, 64);
-
-    const pair = try heap.allocateContiguous(2);
-    try std.testing.expectEqual(@as(u32, 0), pair.index);
-    try std.testing.expectEqual(@as(usize, 0x1000), pair.cpu.ptr);
-    try std.testing.expectEqual(@as(u64, 0x2000), pair.gpu.ptr);
-
-    // The pair's partner is the very next slot, and the next single
-    // allocation lands after the pair.
-    const single = try heap.allocate();
-    try std.testing.expectEqual(@as(u32, 2), single.index);
-}
-
-test "allocateContiguous fills an adjacent recycled pair" {
-    var heap = testHeap(4, 64);
-
-    // Occupy 0, 1, 2; then free 0 and 2, leaving holes at 0 and 2 with
-    // the frontier at 3. Slot 1 stays live throughout.
-    const d0 = try heap.allocate();
-    _ = try heap.allocate(); // slot 1, never released
-    const d2 = try heap.allocate();
-    heap.release(d0.index);
-    heap.release(d2.index);
-
-    // Slot 2's hole plus the frontier slot 3 form an adjacent run, and
-    // that is the pair the allocator takes: recycled hole first, only
-    // one slot of fresh capacity spent.
-    const pair = try heap.allocateContiguous(2);
-    try std.testing.expectEqual(@as(u32, 2), pair.index);
-
-    // The remaining hole 0 recycles for the next single allocation.
-    const next = try heap.allocate();
-    try std.testing.expectEqual(@as(u32, 0), next.index);
-
-    // With 0..3 all live again, freeing slots 0 and 2 leaves two
-    // NON-adjacent holes and no frontier: the request must fail rather
-    // than split a pair across them.
-    heap.release(next.index);
-    heap.release(pair.index);
-    try std.testing.expectError(error.DescriptorHeapFull, heap.allocateContiguous(2));
-
-    // Those two single holes still serve single allocations.
-    const single = try heap.allocate();
-    try std.testing.expectEqual(@as(u32, 0), single.index);
-}
-
-test "allocateContiguous fails when only non-adjacent holes remain" {
-    var heap = testHeap(2, 64);
-
-    const d0 = try heap.allocate();
-    const d1 = try heap.allocate();
-    heap.release(d0.index);
-    heap.release(d1.index);
-
-    // Holes 0 and 1 are adjacent, so the pair fits.
-    const pair = try heap.allocateContiguous(2);
-    try std.testing.expectEqual(@as(u32, 0), pair.index);
-
-    // Full again, no frontier left: single and pair both fail.
-    try std.testing.expectError(error.DescriptorHeapFull, heap.allocateContiguous(2));
-    try std.testing.expectError(error.DescriptorHeapFull, heap.allocate());
-
-    // Free only one of the two: a single hole cannot satisfy a pair.
-    heap.release(d1.index);
-    try std.testing.expectError(error.DescriptorHeapFull, heap.allocateContiguous(2));
 }
 
 test "claimFirst marks handle-written slots as live" {

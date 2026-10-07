@@ -5,9 +5,16 @@
 //! layout that all pipelines share:
 //!
 //!   Param 0: CBV at b0 (Uniforms constant buffer)
-//!   Param 1: Descriptor table for SRVs at t0..t2 (atlas textures)
+//!   Param 1: Descriptor table, one SRV at t0
 //!   Param 2: Descriptor table for samplers at s0
 //!   Param 3: Inline SRV at t3 (structured buffer, e.g. cells_bg)
+//!   Param 4: Descriptor table, one SRV at t1
+//!
+//! Each texture register gets a table of its own, one descriptor wide, and
+//! RenderPass binds each from the slot of the texture it samples. A table
+//! therefore never covers a slot owned by anything but the texture bound
+//! to it, which is what makes freeing a slot on the fence of the texture's
+//! own retirement safe. See `main_texture_ranges`.
 //!
 //! This matches the HLSL register layout in shaders.hlsl. All five
 //! pipelines (bg_color, cell_bg, cell_text, image, bg_image) share the
@@ -35,9 +42,17 @@ pso: ?*d3d12.ID3D12PipelineState = null,
 /// can bind it during draw calls.
 root_signature: ?*d3d12.ID3D12RootSignature = null,
 
+/// Root parameter of each texture table in `root_signature`, indexed by
+/// shader register: RenderPass binds `Step.textures[i]` to entry i.
+/// `main_texture_tables` or `post_texture_tables`.
+texture_tables: []const u32 = &.{},
+
 pub const Options = struct {
     device: *d3d12.ID3D12Device,
     root_signature: *d3d12.ID3D12RootSignature,
+    /// Which texture tables `root_signature` has: `main_texture_tables` for the
+    /// main root signature, `post_texture_tables` for the post one.
+    texture_tables: []const u32,
     vs_bytecode: []const u8,
     ps_bytecode: []const u8,
     input_layout: ?[]const d3d12.D3D12_INPUT_ELEMENT_DESC = null,
@@ -52,103 +67,137 @@ pub const BlendMode = enum {
     premultiplied_alpha,
 };
 
-/// Number of SRV slots in the descriptor table (t0..t2).
-pub const srv_table_size: u32 = 3;
-
 /// Root parameter indices. Must match createRootSignature() layout.
 pub const root_param_cbv: u32 = 0;
 pub const root_param_srv_table: u32 = 1;
 pub const root_param_sampler_table: u32 = 2;
 pub const root_param_buffer_srv: u32 = 3;
+pub const root_param_srv_table_t1: u32 = 4;
+
+/// One descriptor at texture register `register`.
+///
+/// One wide on purpose. A range is not DESCRIPTORS_VOLATILE, so D3D12
+/// requires every descriptor it covers to stay valid and unchanged until
+/// the command list that bound it has finished, sampled or not. A wider
+/// table bound from one texture's slot covers its neighbours too: slots
+/// that belong to other textures, which their own retirement frees (and
+/// rewrites as null SRVs) on a fence that says nothing about the frame
+/// holding the table. That was a final release of a texture the GPU was
+/// still bound to, and a rewrite of a static descriptor in flight.
+fn textureRange(register: u32) d3d12.D3D12_DESCRIPTOR_RANGE1 {
+    return .{
+        .RangeType = .SRV,
+        .NumDescriptors = 1,
+        .BaseShaderRegister = register,
+        .RegisterSpace = 0,
+        // DATA_STATIC: a texture's contents do not change while a command
+        // list that samples it executes.
+        .Flags = .DATA_STATIC,
+        .OffsetInDescriptorsFromTableStart = 0,
+    };
+}
+
+/// The main root signature's texture ranges, indexed by register: t0 (the
+/// grayscale atlas, the kitty image, the background image) and t1 (the
+/// color atlas). Shader reflection pins this to what the shaders declare
+/// (shaders.zig, "texture tables match the shaders").
+pub const main_texture_ranges = [_]d3d12.D3D12_DESCRIPTOR_RANGE1{ textureRange(0), textureRange(1) };
+
+/// The root parameter holding each of `main_texture_ranges`.
+pub const main_texture_tables = [_]u32{ root_param_srv_table, root_param_srv_table_t1 };
+
+/// The post root signature's single texture range (t0) and its parameter.
+pub const post_texture_ranges = [_]d3d12.D3D12_DESCRIPTOR_RANGE1{textureRange(0)};
+pub const post_texture_tables = [_]u32{root_param_srv_table};
+
+/// s0, in both root signatures. NONE: the v1.1 default for samplers is
+/// static descriptors.
+const sampler_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
+    .RangeType = .SAMPLER,
+    .NumDescriptors = 1,
+    .BaseShaderRegister = 0,
+    .RegisterSpace = 0,
+    .Flags = .NONE,
+    .OffsetInDescriptorsFromTableStart = 0,
+};
+
+/// The main root signature's parameters. See createRootSignature.
+pub const main_root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
+    // [0] Inline CBV at b0 -- binds with SetGraphicsRootConstantBufferView.
+    // DATA_VOLATILE: uniform buffer changes every frame.
+    .{
+        .ParameterType = .CBV,
+        .u = .{ .Descriptor = .{
+            .ShaderRegister = 0,
+            .RegisterSpace = 0,
+            .Flags = .DATA_VOLATILE,
+        } },
+        .ShaderVisibility = .ALL,
+    },
+    // [1] Descriptor table for t0.
+    //
+    // PIXEL, not ALL: visibility is what decides the resource state the
+    // debug layer demands at bind. ALL means any stage could read the
+    // table, so it requires NON_PIXEL_SHADER_RESOURCE |
+    // PIXEL_SHADER_RESOURCE, while these textures are only sampled from a
+    // pixel shader (CellTextPS, ImagePS, BgImagePS) and so sit in
+    // PIXEL_SHADER_RESOURCE alone.
+    .{
+        .ParameterType = .DESCRIPTOR_TABLE,
+        .u = .{ .DescriptorTable = .{
+            .NumDescriptorRanges = 1,
+            .pDescriptorRanges = @ptrCast(&main_texture_ranges[0]),
+        } },
+        .ShaderVisibility = .PIXEL,
+    },
+    // [2] Descriptor table for samplers.
+    .{
+        .ParameterType = .DESCRIPTOR_TABLE,
+        .u = .{ .DescriptorTable = .{
+            .NumDescriptorRanges = 1,
+            .pDescriptorRanges = @ptrCast(&sampler_range),
+        } },
+        .ShaderVisibility = .ALL,
+    },
+    // [3] Inline SRV for structured buffer data (cells_bg).
+    // Binds with SetGraphicsRootShaderResourceView -- the GPU virtual
+    // address is passed directly, no descriptor heap slot needed.
+    // DATA_VOLATILE: the buffer binding changes per draw call.
+    .{
+        .ParameterType = .SRV,
+        .u = .{ .Descriptor = .{
+            .ShaderRegister = 3,
+            .RegisterSpace = 0,
+            .Flags = .DATA_VOLATILE,
+        } },
+        .ShaderVisibility = .ALL,
+    },
+    // [4] Descriptor table for t1, PIXEL for the same reason as [1].
+    .{
+        .ParameterType = .DESCRIPTOR_TABLE,
+        .u = .{ .DescriptorTable = .{
+            .NumDescriptorRanges = 1,
+            .pDescriptorRanges = @ptrCast(&main_texture_ranges[1]),
+        } },
+        .ShaderVisibility = .PIXEL,
+    },
+};
 
 /// Create the shared root signature used by all pipelines.
 ///
 /// The layout is:
 ///   [0] CBV at b0 (inline root CBV -- just a GPU virtual address)
-///   [1] Descriptor table: 3 SRVs at t0, t1, t2
+///   [1] Descriptor table: 1 SRV at t0
 ///   [2] Descriptor table: 1 sampler at s0
 ///   [3] Inline SRV at t3 (structured buffer data, e.g. cells_bg)
+///   [4] Descriptor table: 1 SRV at t1
 pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignature {
-    // SRV range: t0..t2 (textures and structured buffers).
-    // DATA_STATIC: atlas textures are uploaded once and don't change
-    // within a command list execution.
-    const srv_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
-        .RangeType = .SRV,
-        .NumDescriptors = srv_table_size,
-        .BaseShaderRegister = 0,
-        .RegisterSpace = 0,
-        .Flags = .DATA_STATIC,
-        .OffsetInDescriptorsFromTableStart = 0,
-    };
-
-    // Sampler range: s0.
-    // NONE: default for v1.1 samplers is static descriptors.
-    const sampler_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
-        .RangeType = .SAMPLER,
-        .NumDescriptors = 1,
-        .BaseShaderRegister = 0,
-        .RegisterSpace = 0,
-        .Flags = .NONE,
-        .OffsetInDescriptorsFromTableStart = 0,
-    };
-
-    const root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
-        // [0] Inline CBV at b0 -- binds with SetGraphicsRootConstantBufferView.
-        // DATA_VOLATILE: uniform buffer changes every frame.
-        .{
-            .ParameterType = .CBV,
-            .u = .{ .Descriptor = .{
-                .ShaderRegister = 0,
-                .RegisterSpace = 0,
-                .Flags = .DATA_VOLATILE,
-            } },
-            .ShaderVisibility = .ALL,
-        },
-        // [1] Descriptor table for SRVs.
-        //
-        // PIXEL, not ALL: visibility is what decides the resource state the
-        // debug layer demands at bind. ALL means any stage could read the
-        // table, so it requires NON_PIXEL_SHADER_RESOURCE |
-        // PIXEL_SHADER_RESOURCE, while these textures are only sampled from a
-        // pixel shader (CellTextPS, ImagePS, BgImagePS) and so sit in
-        // PIXEL_SHADER_RESOURCE alone.
-        .{
-            .ParameterType = .DESCRIPTOR_TABLE,
-            .u = .{ .DescriptorTable = .{
-                .NumDescriptorRanges = 1,
-                .pDescriptorRanges = @ptrCast(&srv_range),
-            } },
-            .ShaderVisibility = .PIXEL,
-        },
-        // [2] Descriptor table for samplers.
-        .{
-            .ParameterType = .DESCRIPTOR_TABLE,
-            .u = .{ .DescriptorTable = .{
-                .NumDescriptorRanges = 1,
-                .pDescriptorRanges = @ptrCast(&sampler_range),
-            } },
-            .ShaderVisibility = .ALL,
-        },
-        // [3] Inline SRV for structured buffer data (cells_bg).
-        // Binds with SetGraphicsRootShaderResourceView -- the GPU virtual
-        // address is passed directly, no descriptor heap slot needed.
-        // DATA_VOLATILE: the buffer binding changes per draw call.
-        .{
-            .ParameterType = .SRV,
-            .u = .{ .Descriptor = .{
-                .ShaderRegister = 3,
-                .RegisterSpace = 0,
-                .Flags = .DATA_VOLATILE,
-            } },
-            .ShaderVisibility = .ALL,
-        },
-    };
-
+    const root_params = &main_root_params;
     const desc = d3d12.D3D12_VERSIONED_ROOT_SIGNATURE_DESC{
         .Version = .VERSION_1_1,
         .u = .{ .Desc_1_1 = .{
             .NumParameters = root_params.len,
-            .pParameters = &root_params,
+            .pParameters = root_params,
             .NumStaticSamplers = 0,
             .pStaticSamplers = null,
             .Flags = .ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
@@ -192,6 +241,40 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
     return root_sig.?;
 }
 
+/// The post root signature's parameters. See createPostRootSignature.
+pub const post_root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
+    // [0] Inline CBV at b0 (binding=1 shifted to b0 by zioshade).
+    .{
+        .ParameterType = .CBV,
+        .u = .{ .Descriptor = .{
+            .ShaderRegister = 0,
+            .RegisterSpace = 0,
+            .Flags = .DATA_VOLATILE,
+        } },
+        .ShaderVisibility = .ALL,
+    },
+    // [1] Descriptor table: 1 SRV at t0 (source texture).
+    // PIXEL for the same reason: only the post shader's pixel stage
+    // samples t0, which endPass leaves in PIXEL_SHADER_RESOURCE.
+    .{
+        .ParameterType = .DESCRIPTOR_TABLE,
+        .u = .{ .DescriptorTable = .{
+            .NumDescriptorRanges = 1,
+            .pDescriptorRanges = @ptrCast(&post_texture_ranges[0]),
+        } },
+        .ShaderVisibility = .PIXEL,
+    },
+    // [2] Descriptor table: 1 sampler at s0.
+    .{
+        .ParameterType = .DESCRIPTOR_TABLE,
+        .u = .{ .DescriptorTable = .{
+            .NumDescriptorRanges = 1,
+            .pDescriptorRanges = @ptrCast(&sampler_range),
+        } },
+        .ShaderVisibility = .ALL,
+    },
+};
+
 /// Root signature for custom post-process shaders.
 /// zioshade applies binding_shift -1 during SPIR-V to HLSL, so binding=1
 /// lands in register(b0) in the generated HLSL.
@@ -200,62 +283,12 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
 ///   [1] Descriptor table: 1 SRV at t0
 ///   [2] Descriptor table: 1 sampler at s0
 pub fn createPostRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignature {
-    const srv_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
-        .RangeType = .SRV,
-        .NumDescriptors = 1,
-        .BaseShaderRegister = 0,
-        .RegisterSpace = 0,
-        .Flags = .DATA_STATIC,
-        .OffsetInDescriptorsFromTableStart = 0,
-    };
-
-    const sampler_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
-        .RangeType = .SAMPLER,
-        .NumDescriptors = 1,
-        .BaseShaderRegister = 0,
-        .RegisterSpace = 0,
-        .Flags = .NONE,
-        .OffsetInDescriptorsFromTableStart = 0,
-    };
-
-    const root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
-        // [0] Inline CBV at b0 (binding=1 shifted to b0 by zioshade).
-        .{
-            .ParameterType = .CBV,
-            .u = .{ .Descriptor = .{
-                .ShaderRegister = 0,
-                .RegisterSpace = 0,
-                .Flags = .DATA_VOLATILE,
-            } },
-            .ShaderVisibility = .ALL,
-        },
-        // [1] Descriptor table: 1 SRV at t0 (source texture).
-        // PIXEL for the same reason: only the post shader's pixel stage
-        // samples t0, which endPass leaves in PIXEL_SHADER_RESOURCE.
-        .{
-            .ParameterType = .DESCRIPTOR_TABLE,
-            .u = .{ .DescriptorTable = .{
-                .NumDescriptorRanges = 1,
-                .pDescriptorRanges = @ptrCast(&srv_range),
-            } },
-            .ShaderVisibility = .PIXEL,
-        },
-        // [2] Descriptor table: 1 sampler at s0.
-        .{
-            .ParameterType = .DESCRIPTOR_TABLE,
-            .u = .{ .DescriptorTable = .{
-                .NumDescriptorRanges = 1,
-                .pDescriptorRanges = @ptrCast(&sampler_range),
-            } },
-            .ShaderVisibility = .ALL,
-        },
-    };
-
+    const root_params = &post_root_params;
     const desc = d3d12.D3D12_VERSIONED_ROOT_SIGNATURE_DESC{
         .Version = .VERSION_1_1,
         .u = .{ .Desc_1_1 = .{
             .NumParameters = root_params.len,
-            .pParameters = &root_params,
+            .pParameters = root_params,
             .NumStaticSamplers = 0,
             .pStaticSamplers = null,
             .Flags = .ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
@@ -412,6 +445,7 @@ pub fn init(opts: Options) !Pipeline {
     return .{
         .pso = pso,
         .root_signature = opts.root_signature,
+        .texture_tables = opts.texture_tables,
     };
 }
 
@@ -442,8 +476,48 @@ test "root_param_buffer_srv index" {
     try std.testing.expectEqual(@as(u32, 3), root_param_buffer_srv);
 }
 
-test "srv_table_size covers t0..t2" {
-    try std.testing.expectEqual(@as(u32, 3), srv_table_size);
+test "root_param_srv_table_t1 index" {
+    try std.testing.expectEqual(@as(u32, 4), root_param_srv_table_t1);
+}
+
+test "every texture table is one descriptor wide, at the register it is indexed by" {
+    // RenderPass binds Step.textures[i] from that texture's own slot to
+    // table i. A range wider than one descriptor would cover the slots
+    // after it, which belong to other textures, and a range at another
+    // register would sample the wrong texture.
+    const Sig = struct {
+        params: []const d3d12.D3D12_ROOT_PARAMETER1,
+        ranges: []const d3d12.D3D12_DESCRIPTOR_RANGE1,
+        tables: []const u32,
+    };
+    const sigs = [_]Sig{
+        .{ .params = &main_root_params, .ranges = &main_texture_ranges, .tables = &main_texture_tables },
+        .{ .params = &post_root_params, .ranges = &post_texture_ranges, .tables = &post_texture_tables },
+    };
+    for (sigs) |sig| {
+        try std.testing.expect(sig.ranges.len > 0);
+        try std.testing.expectEqual(sig.ranges.len, sig.tables.len);
+        for (sig.ranges, sig.tables, 0..) |*range, param, i| {
+            try std.testing.expectEqual(d3d12.D3D12_DESCRIPTOR_RANGE_TYPE.SRV, range.RangeType);
+            try std.testing.expectEqual(@as(u32, 1), range.NumDescriptors);
+            try std.testing.expectEqual(@as(u32, @intCast(i)), range.BaseShaderRegister);
+            try std.testing.expectEqual(@as(u32, 0), range.RegisterSpace);
+            const p = sig.params[param];
+            try std.testing.expectEqual(d3d12.D3D12_ROOT_PARAMETER_TYPE.DESCRIPTOR_TABLE, p.ParameterType);
+            try std.testing.expectEqual(@as(u32, 1), p.u.DescriptorTable.NumDescriptorRanges);
+            try std.testing.expectEqual(@intFromPtr(range), @intFromPtr(p.u.DescriptorTable.pDescriptorRanges.?));
+        }
+        // And no SRV table hides outside the list RenderPass binds from.
+        var srv_tables: usize = 0;
+        for (sig.params) |p| {
+            if (p.ParameterType != .DESCRIPTOR_TABLE) continue;
+            const ranges = p.u.DescriptorTable.pDescriptorRanges.?;
+            for (ranges[0..p.u.DescriptorTable.NumDescriptorRanges]) |r| {
+                if (r.RangeType == .SRV) srv_tables += 1;
+            }
+        }
+        try std.testing.expectEqual(sig.tables.len, srv_tables);
+    }
 }
 
 test "BlendMode values" {

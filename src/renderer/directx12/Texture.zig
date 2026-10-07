@@ -40,21 +40,13 @@ pub const Options = struct {
     /// and a shader resource (via SRV). The resource is created with
     /// ALLOW_RENDER_TARGET flag. No initial data upload is performed.
     render_target: bool = false,
-    /// When non-null, reuse this RTV descriptor slot instead of allocating
-    /// a new one from the heap. Used during resize to avoid overwriting
-    /// other frames' in-flight RTV descriptors.
-    rtv_slot: ?DescriptorHeap.Descriptor = null,
-    /// When non-null, reuse this SRV descriptor slot instead of allocating
-    /// a new one from the heap. Used during resize to prevent SRV heap
-    /// exhaustion from leaked descriptors.
-    srv_slot: ?DescriptorHeap.Descriptor = null,
-    /// Set when a passed-in srv_slot should be RELEASED by this texture's
-    /// deinit (through srv_heap and the retirement queue) rather than
-    /// remaining the caller's. The atlas pair uses this: the slots come
-    /// from a paired allocation, and each texture owns its half outright.
-    /// Slot-passing callers that keep recycling their own slots across
-    /// resizes (custom-shader ping-pong) leave this false.
-    owns_srv_slot: bool = false,
+    // There is deliberately no way to hand a texture a slot to reuse. A
+    // texture always allocates its own SRV (and RTV) slot and gives it back
+    // through the retirement queue on deinit. Writing a new descriptor into
+    // a slot that is still live means writing into a descriptor an
+    // in-flight command list may have bound as static, and a slot whose
+    // ownership was shared that way was also freed by the old texture while
+    // the new one still used it.
 };
 
 pub const Error = error{
@@ -94,10 +86,9 @@ format: dxgi.DXGI_FORMAT = .R8_UNORM,
 device: ?*d3d12.ID3D12Device = null,
 /// Cached command list for replaceRegion uploads.
 command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
-/// Heap this texture allocated its SRV slot from, when it did. Null when
-/// the slot came from Options.srv_slot (caller-owned) or no SRV exists.
-/// deinit returns the slot through the retirement queue so it can be
-/// recycled without overwriting a descriptor in-flight GPU work reads.
+/// Heap this texture allocated its SRV slot from. Null when no SRV
+/// exists. deinit returns the slot through the retirement queue so it can
+/// be recycled without overwriting a descriptor in-flight GPU work reads.
 srv_heap: ?*DescriptorHeap = null,
 /// Same as srv_heap for the RTV slot of render-target textures.
 rtv_heap: ?*DescriptorHeap = null,
@@ -170,8 +161,11 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         createTextureResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed;
     errdefer _ = resource.Release();
 
-    // Allocate or reuse SRV descriptor.
-    const srv = if (opts.srv_slot) |slot| slot else srv_heap.allocate() catch return error.TextureCreateFailed;
+    // Every slot allocate() hands out is one nothing references: never
+    // used, or freed by the retirement queue once the fence of the last
+    // submission that could bind it passed. Writing it here is safe.
+    const srv = srv_heap.allocate() catch return error.TextureCreateFailed;
+    errdefer srv_heap.release(srv.index);
 
     // Create the SRV.
     const srv_desc = d3d12.D3D12_SHADER_RESOURCE_VIEW_DESC{
@@ -197,12 +191,7 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     };
     if (opts.render_target) {
         const rtv_heap = opts.rtv_heap orelse return error.TextureCreateFailed;
-        if (opts.rtv_slot) |slot| {
-            // Reuse a pre-allocated RTV descriptor slot (e.g. during resize).
-            rtv = slot;
-        } else {
-            rtv = rtv_heap.allocate() catch return error.TextureCreateFailed;
-        }
+        rtv = rtv_heap.allocate() catch return error.TextureCreateFailed;
         device.CreateRenderTargetView(resource, null, rtv.cpu);
     }
 
@@ -218,12 +207,10 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         .device = device,
         .command_list = opts.command_list,
         .retire = opts.retire,
-        // Remember the heaps for the slots this texture will release on
-        // deinit: ones it allocated itself, or passed-in slots explicitly
-        // marked owns_srv_slot. Other slot-passing callers keep their own
-        // slot lifetime (that is the whole point of passing one).
-        .srv_heap = if (opts.srv_slot == null or opts.owns_srv_slot) opts.srv_heap else null,
-        .rtv_heap = if (opts.render_target and opts.rtv_slot == null) opts.rtv_heap else null,
+        // The heaps of the slots this texture allocated, to release on
+        // deinit.
+        .srv_heap = srv_heap,
+        .rtv_heap = if (opts.render_target) opts.rtv_heap else null,
         .state = if (opts.render_target)
             d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE
         else

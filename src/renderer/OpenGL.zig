@@ -383,9 +383,7 @@ pub inline fn textureOptions(self: OpenGL) Texture.Options {
     };
 }
 
-pub inline fn renderTargetTextureOptions(self: OpenGL, rtv_slot: anytype, srv_slot: anytype) Texture.Options {
-    _ = rtv_slot;
-    _ = srv_slot;
+pub inline fn renderTargetTextureOptions(self: OpenGL) Texture.Options {
     return self.textureOptions();
 }
 
