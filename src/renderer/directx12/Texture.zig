@@ -9,6 +9,7 @@
 const Texture = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const d3d12 = @import("d3d12.zig");
 const dxgi = @import("dxgi.zig");
@@ -137,6 +138,11 @@ pub fn takeUploadDropped(self: *Texture) bool {
     return self.upload_dropped;
 }
 
+/// Test seam: when set, uploadRegion fails at the band with this index the
+/// way a staging allocation failure would, after recording the earlier
+/// bands' copies. Read only in test builds.
+pub var test_fail_upload_band: ?u32 = null;
+
 /// Row-pitch alignment that DX12's CopyTextureRegion requires for staging
 /// buffers (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT). `pub` so image.zig can
 /// `comptime assert` its mirror constant stays in lockstep.
@@ -161,7 +167,14 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         createRenderTargetResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed
     else
         createTextureResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed;
-    errdefer _ = resource.Release();
+    // A failure after the upload below has started leaves copies into this
+    // resource recorded in the open command list, which is still submitted
+    // with the frame. So a failed init retires the resource like deinit
+    // does; with no queue (standalone tests) nothing is ever submitted and
+    // an immediate release is safe.
+    errdefer if (opts.retire) |q| q.retire(resource) else {
+        _ = resource.Release();
+    };
 
     // Every slot allocate() hands out is one nothing references: never
     // used, or freed by the retirement queue once the fence of the last
@@ -170,6 +183,8 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         log.warn("SRV descriptor heap is full ({d} slots); texture not created", .{srv_heap.capacity});
         return error.TextureCreateFailed;
     };
+    // The slot can go straight back: no command list has bound a table to
+    // it, since the texture was never returned.
     errdefer srv_heap.release(srv.index);
 
     // Create the SRV.
@@ -224,12 +239,18 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         else
             d3d12.D3D12_RESOURCE_STATES.COPY_DEST,
     };
+    // The staging buffers of the bands that were recorded before a failure
+    // are referenced by the same open list as the resource.
+    errdefer {
+        for (tex.pending_staging.items) |staging| tex.releaseResource(staging);
+        tex.pending_staging.deinit(std.heap.c_allocator);
+    }
 
     if (!opts.render_target) {
         // Upload initial data if provided. Propagate upload failures so
         // the caller doesn't end up with a texture that transitioned to
         // PIXEL_SHADER_RESOURCE without contents and renders as a black
-        // quad. The errdefer above releases the GPU resource.
+        // quad. The errdefers above retire what the open list references.
         if (data) |pixels| {
             try tex.uploadRegion(0, 0, @intCast(width), @intCast(height), pixels);
         }
@@ -316,8 +337,9 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// row-band as it walks the data. If a later band fails (staging alloc,
 /// Map, etc.) the earlier bands' copies stay recorded on the command
 /// list and will execute when the frame submits. For Texture.init the
-/// destination is errdefer-Released so the partial copies write to a
-/// soon-released resource (harmless). For replaceRegion the destination
+/// destination and the staging buffers are retired on the error path, so
+/// the partial copies run into a resource that is still alive and is
+/// freed once that submission's fence passes. For replaceRegion the destination
 /// survives, so a multi-band atlas update could leave the texture with
 /// the leading bands of the new content and the trailing rows of the
 /// previous content.
@@ -393,7 +415,11 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
     // failures with hex context worth investigating). Both still return
     // error.UploadFailed and let the caller drop the placement.
     var bands = Bands{ .height = height, .rows_per_band = rows_per };
-    while (bands.next()) |band| {
+    var band_index: u32 = 0;
+    while (bands.next()) |band| : (band_index += 1) {
+        if (builtin.is_test) {
+            if (test_fail_upload_band) |fail| if (band_index == fail) return error.UploadFailed;
+        }
         const band_size: u64 = @as(u64, region_aligned_pitch) * @as(u64, band.row_count);
 
         const staging = createStagingBuffer(device, band_size) orelse {

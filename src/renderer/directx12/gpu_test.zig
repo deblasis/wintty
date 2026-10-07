@@ -3100,3 +3100,38 @@ test "SRV table: the debug-layer oracle reports a deliberate violation" {
     try std.testing.expect(v.static_changed >= 1);
     try std.testing.expect(v.raised >= 1);
 }
+
+// A texture whose initial upload fails partway. Texture.init records one
+// copy per 8 MiB band into the open command list as it goes, so when a
+// later band fails, the earlier copies still reference the destination and
+// their staging buffers, and that list is submitted with the frame. The
+// failed init must hand those to the retirement queue rather than release
+// them under the list.
+test "SRV table: a texture whose upload fails partway leaves nothing the open list references released" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    // 4096 x 1024 RGBA is 16 MiB: two bands. The second one fails.
+    const w = 4096;
+    const h = 1024;
+    const pixels = try std.testing.allocator.alloc(u8, w * h * 4);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, 0x80);
+
+    rig.watch();
+    Texture.test_fail_upload_band = 1;
+    defer Texture.test_fail_upload_band = null;
+    try std.testing.expectError(
+        error.UploadFailed,
+        Texture.init(rig.api.imageTextureOptions(.rgba, false), w, h, pixels),
+    );
+    Texture.test_fail_upload_band = null;
+
+    // The frame the failed upload was recorded into, submitted as usual.
+    _ = try rig.submitAndWait();
+    rig.collect();
+    const v = try rig.verdict("failed upload");
+    try CoverageRig.expectClean(v);
+    try std.testing.expectEqual(@as(usize, 0), v.severe);
+}
