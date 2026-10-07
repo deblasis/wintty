@@ -465,6 +465,11 @@ pub const DirectWrite = struct {
     const Score = packed struct {
         const Backing = @typeInfo(@This()).@"struct".backing_integer.?;
         glyph_count: u16 = 0,
+        /// Tiebreak among faces that agree on bold/italic: the closer the
+        /// face's weight is to Regular (or Bold when bold is requested),
+        /// the higher this is. Without it, a family with Thin..ExtraBold
+        /// faces ranks them all equal and the sort picks one arbitrarily.
+        weight_closeness: u16 = 0,
         bold: bool = false,
         italic: bool = false,
         normal_stretch: bool = false,
@@ -489,6 +494,12 @@ pub const DirectWrite = struct {
 
         const is_bold = @intFromEnum(weight) >= @intFromEnum(dwrite.DWRITE_FONT_WEIGHT.SEMI_BOLD);
         score.bold = desc.bold == is_bold;
+
+        const target_weight: u32 = @intFromEnum(
+            if (desc.bold) dwrite.DWRITE_FONT_WEIGHT.BOLD else dwrite.DWRITE_FONT_WEIGHT.NORMAL,
+        );
+        const distance = @max(@intFromEnum(weight), target_weight) - @min(@intFromEnum(weight), target_weight);
+        score.weight_closeness = @intCast(1000 -| @min(distance, 1000));
 
         const is_italic = (style == .ITALIC or style == .OBLIQUE);
         score.italic = desc.italic == is_italic;
