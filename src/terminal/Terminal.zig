@@ -255,11 +255,11 @@ pub const Cursor = struct {
     /// Whether the current cursor appearance follows the configured defaults.
     is_default: bool = true,
 
-    /// Configured style restored by DECSCUSR default and RIS.
+    /// Configured style restored by DECSCUSR default, RIS and DECSTR.
     default_style: Screen.CursorStyle = .block,
 
-    /// Configured blink restored by DECSCUSR default and RIS. Null selects
-    /// the terminal emulator default, which is blinking.
+    /// Configured blink restored by DECSCUSR default, RIS and DECSTR.
+    /// Null selects the terminal emulator default, which is blinking.
     default_blink: ?bool = false,
 };
 
@@ -282,7 +282,7 @@ pub const Options = struct {
     /// will revert back to this state.
     default_modes: modespkg.ModePacked = .{},
 
-    /// Cursor state restored by DECSCUSR default and RIS.
+    /// Cursor state restored by DECSCUSR default, RIS and DECSTR.
     default_cursor_style: Screen.CursorStyle = .block,
     default_cursor_blink: ?bool = false,
 
