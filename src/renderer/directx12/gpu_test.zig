@@ -3190,6 +3190,29 @@ fn debugLayerQueue(device: *d3d12.ID3D12Device, comptime test_name: []const u8) 
     };
 }
 
+/// How many stored messages are CORRUPTION or ERROR severity, printing
+/// each one.
+fn countErrors(iq: *InfoQueue) usize {
+    const alloc = std.testing.allocator;
+    var hits: usize = 0;
+    const n = iq.vtable.GetNumStoredMessages(iq);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        var len: usize = 0;
+        if (com.FAILED(iq.vtable.GetMessage(iq, i, null, &len))) continue;
+        const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch continue;
+        defer alloc.free(buf);
+        const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+        if (iq.vtable.GetMessage(iq, i, msg, &len) != 0) continue;
+        // D3D12_MESSAGE_SEVERITY: CORRUPTION 0, ERROR 1, WARNING 2.
+        if (msg.Severity > 1) continue;
+        hits += 1;
+        const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+        std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+    }
+    return hits;
+}
+
 /// How many stored messages carry `id`, printing each one so a red run
 /// names the object the debug layer complained about.
 fn countMessages(iq: *InfoQueue, id: u32) usize {
@@ -3308,6 +3331,109 @@ test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
     const bad_state = countMessages(iq, msg_invalid_subresource_state);
     std.debug.print("rebuilt atlas pair: INVALID_SUBRESOURCE_STATE={d}\n", .{bad_state});
     try std.testing.expectEqual(@as(usize, 0), bad_state);
+}
+
+// The other side of creating textures shader-readable: everything that
+// writes to one afterwards has to move it to COPY_DEST first, from the state
+// it is really in. Three shapes cover the writers: a placeholder built
+// between frames and uploaded on the next one (an atlas sync), an atlas
+// grown inside a frame and filled whole (the sync's grow branch), and an
+// image created with its data. Each is uploaded and sampled for three
+// frames; a copy into a texture left in PIXEL_SHADER_RESOURCE, or a barrier
+// whose before-state disagrees with the resource, is an error the layer
+// reports at submission.
+test "DirectX12: textures written after creation keep the debug layer quiet" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    const alloc = std.testing.allocator;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = alloc };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+    const dev = &(api.dev orelse return error.NoDevice);
+    const iq = try debugLayerQueue(dev.device, "textures written after creation");
+    defer _ = iq.vtable.Release(iq);
+
+    var shaders = try Shaders.init(dev.device, alloc, &.{});
+    defer shaders.deinit(alloc);
+    const out = try Texture.init(api.renderTargetTextureOptions(), 64, 64, null);
+    defer out.deinit();
+    var ubuf = try buffer_mod.Buffer(shaders_mod.Uniforms).init(api.uniformBufferOptions(), 1);
+    defer ubuf.deinit();
+    try ubuf.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
+    var ibuf = try buffer_mod.Buffer(shaders_mod.BgImage).init(api.bgImageBufferOptions(), 1);
+    defer ibuf.deinit();
+    try ibuf.sync(&.{std.mem.zeroes(shaders_mod.BgImage)});
+    const sampler = try Sampler.init(api.samplerOptions());
+    defer sampler.deinit();
+
+    // Built between frames, the way a rebuild builds it.
+    try std.testing.expect(api.pending_command_list == null);
+    var placeholder = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 1, .format = .bgra });
+    defer placeholder.deinit();
+
+    iq.vtable.ClearStoredMessages(iq);
+    var grown: Texture = .{};
+    defer grown.deinit();
+    var image: Texture = .{};
+    defer image.deinit();
+    for (0..3) |round| {
+        const frame = &(api.gpu_frames[round % 2] orelse return error.NoFrame);
+        try frame.reset();
+        api.pending_command_list = frame.command_list;
+        defer api.pending_command_list = null;
+        const cl = frame.command_list.?;
+
+        // The atlas sync's order: take the frame's list, then upload.
+        api.updateTextureCommandList(&placeholder);
+        const px = [_]u8{ 1, 2, 3, 4 };
+        try placeholder.replaceRegion(0, 0, 1, 1, &px);
+        try std.testing.expect(!placeholder.takeUploadDropped());
+
+        // A grown atlas: created inside the frame with no data, then
+        // filled whole.
+        const g = try api.initAtlasTexture(&font.Atlas{ .data = undefined, .size = 8, .format = .grayscale });
+        grown.deinit();
+        grown = g;
+        api.updateTextureCommandList(&grown);
+        const big = [_]u8{7} ** (8 * 8);
+        try grown.replaceRegion(0, 0, 8, 8, &big);
+        try std.testing.expect(!grown.takeUploadDropped());
+
+        // An image created with its data inside the frame.
+        const img_px = [_]u8{9} ** (4 * 4 * 4);
+        const im = try Texture.init(api.imageTextureOptions(.rgba, false), 4, 4, &img_px);
+        image.deinit();
+        image = im;
+
+        {
+            var pass = RenderPassMod.begin(.{
+                .command_list = cl,
+                .srv_heap = api.srv_heap,
+                .sampler_heap = api.sampler_heap,
+                .attachments = &.{.{ .target = .{ .texture = out }, .clear_color = .{ 0.0, 0.0, 0.0, 0.0 } }},
+            });
+            for ([_]Texture{ placeholder, grown, image }) |tex| pass.step(.{
+                .pipeline = shaders.pipelines.bg_image,
+                .uniforms = ubuf.buffer,
+                .buffers = &.{ibuf.buffer},
+                .textures = &.{tex},
+                .samplers = &.{sampler},
+                .draw = .{ .type = .triangle, .vertex_count = 3 },
+            });
+            pass.complete();
+        }
+        if (com.FAILED(cl.Close())) return error.CommandListCloseFailed;
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
+        dev.command_queue.ExecuteCommandLists(1, &lists);
+        try dev.waitForGpu();
+    }
+
+    const errors = countErrors(iq);
+    std.debug.print("textures written after creation: debug-layer errors={d}\n", .{errors});
+    try std.testing.expectEqual(@as(usize, 0), errors);
 }
 
 // A frame's command list is closed whenever it is not recording: Frame.init
