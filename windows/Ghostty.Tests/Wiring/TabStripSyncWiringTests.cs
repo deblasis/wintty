@@ -1443,6 +1443,28 @@ public sealed class TabStripSyncWiringTests
             + "a null removes the key and the stroke setter of an item built unselected "
             + "keeps the stock stroke.");
 
+        // Both handles are born at a declaration, and an initializer is not
+        // an assignment expression: the scans above read neither declarator
+        // as a write, so a `selected ?` moved INTO one clears every assert
+        // so far while still freezing a tab built unselected -- the stroke
+        // on the stock accent instead of the tint's, the fill on whichever
+        // brush the selected item held. Neither initializer may read the
+        // parameter.
+        var fillDecl = chrome.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.Text == "selectedHandle");
+        foreach (var decl in new[] { strokeDecl, fillDecl })
+        {
+            var initializer = decl.Initializer?.Value;
+            Assert.True(
+                initializer is null
+                || !initializer.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>()
+                    .Any(n => n.Identifier.Text == "selected"),
+                $"{decl.Identifier.Text} must not read `selected` at its declaration: "
+                + "the initializer is not an assignment, so the gate scans above cannot "
+                + "see this write, and a tab built unselected freezes whatever it "
+                + $"resolves. Found: {decl.Identifier.Text} = {initializer}.");
+        }
+
         // The settle stays the selected item's alone: unselected items are
         // handed the brush, never a new flight.
         var settle = chrome.CallEndingWith("_field.Settle");
