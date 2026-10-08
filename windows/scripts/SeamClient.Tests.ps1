@@ -34,7 +34,11 @@
 #   7. the teardown hook a caller hands in: once per session on every path
 #      that ends in a teardown, after the app is gone and while the session's
 #      temp root is still on disk, with the tree deleted whether the hook
-#      threw or not.
+#      threw or not;
+#   8. the birth harness's half of that contract: it takes the caller's hook
+#      as a [scriptblock], forwards it to every session it starts, hands it to
+#      no Stop (Stop appends, so the hook would run twice), and records a
+#      teardown failure instead of throwing out of its finally.
 #
 # Nothing here launches Wintty: the guard cases inject stand-in instances,
 # the wiring cases read the library's text, the state-base cases stop
@@ -762,6 +766,78 @@ function Invoke-GateScanMutations {
     finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+# ---- layer 8: the birth harness's teardown forwarding -------------------------
+
+# The birth-coverage harness starts two seam sessions and tears both of them
+# down from a finally, so a caller's hook can only reach it as a parameter.
+# A hook belongs to a launch and never to a Stop (Stop appends, so handing it
+# to both runs it twice for one launch), and a hook that throws must be
+# recorded against the run rather than escaping the finally, where it would
+# abort the script. The harness launches the real app, so none of that can be
+# asserted by running it here: the scan reads the file instead.
+function Invoke-BirthForwardCases([string]$HarnessPath) {
+    $failed = [System.Collections.Generic.List[string]]::new()
+    $file = [System.IO.Path]::GetFileName($HarnessPath)
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($HarnessPath, [ref]$tokens, [ref]$errors)
+    $commands = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+
+    # Typed, not just present: an untyped parameter would take a path or a
+    # string of script text and hand it to the seam as a hook.
+    $declared = @($ast.ParamBlock.Parameters | Where-Object {
+            $_.Name.VariablePath.UserPath -eq 'BeforeTeardown' -and $_.StaticType -eq [scriptblock] })
+    if ($declared.Count -eq 0) {
+        $failed.Add("$($file) declares no [scriptblock]`$BeforeTeardown parameter")
+    }
+
+    $starts = @($commands | Where-Object { $_.GetCommandName() -eq 'Start-SeamSession' })
+    # A scan that found no session would be green for the wrong reason.
+    if ($starts.Count -eq 0) {
+        $failed.Add("$($file) starts no seam session: the scan found nothing to check")
+    }
+    foreach ($call in $starts) {
+        $forwards = $false
+        $els = @($call.CommandElements)
+        for ($i = 0; $i -lt ($els.Count - 1); $i++) {
+            if ($els[$i] -isnot [System.Management.Automation.Language.CommandParameterAst] -or
+                $els[$i].ParameterName -ne 'BeforeTeardown') { continue }
+            $value = $els[$i + 1]
+            if ($value -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $value.VariablePath.UserPath -eq 'BeforeTeardown') { $forwards = $true }
+            break
+        }
+        if (-not $forwards) {
+            $failed.Add("$($file):$($call.Extent.StartLineNumber) starts a seam session without -BeforeTeardown `$BeforeTeardown")
+        }
+    }
+
+    foreach ($call in @($commands | Where-Object { $_.GetCommandName() -eq 'Stop-SeamSession' })) {
+        if (@($call.CommandElements | Where-Object {
+                    $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $_.ParameterName -eq 'BeforeTeardown' }).Count -gt 0) {
+            $failed.Add("$($file):$($call.Extent.StartLineNumber) passes -BeforeTeardown to Stop-SeamSession (the hook would run twice)")
+        }
+        # Inside the body of a try that has a catch. A Stop left bare in a
+        # finally throws a hook failure out of the run that was recording it.
+        $guarded = $false
+        $node = $call.Parent
+        while ($null -ne $node) {
+            if ($node -is [System.Management.Automation.Language.TryStatementAst]) {
+                $body = $node.Body
+                if ($null -ne $body -and $node.CatchClauses.Count -gt 0 -and
+                    $body.Extent.StartOffset -le $call.Extent.StartOffset -and
+                    $call.Extent.EndOffset -le $body.Extent.EndOffset) { $guarded = $true }
+                break
+            }
+            $node = $node.Parent
+        }
+        if (-not $guarded) {
+            $failed.Add("$($file):$($call.Extent.StartLineNumber) calls Stop-SeamSession outside a try/catch (a hook failure would abort the run)")
+        }
+    }
+    return , $failed
+}
+
 # ---- layer 7: the teardown hook ----------------------------------------------
 
 # Start-SeamSession and Stop-SeamSession for real, with every launch step
@@ -1098,6 +1174,95 @@ $gateFailures = Invoke-GateScanCases
 foreach ($f in $gateFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
 Assert-True ($gateFailures.Count -eq 0) 'every harness gates on the exe under test and reads its own crash.log'
 Invoke-GateScanMutations
+
+$birthHarness = Join-Path $PSScriptRoot 'seam-initial-size.ps1'
+$birthFailures = Invoke-BirthForwardCases $birthHarness
+foreach ($f in $birthFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
+Assert-True ($birthFailures.Count -eq 0) 'the birth harness forwards -BeforeTeardown to every seam session and records a teardown failure'
+
+# The scan's own teeth: a copy of the birth harness with one rule broken has
+# to turn the scan red. Each row edits that file's lines, and a row whose
+# edit changed nothing says so instead of scanning a copy of the harness.
+$birthMutantRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-birth-mutants-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $birthMutantRoot | Out-Null
+try {
+    $birthLines = [System.IO.File]::ReadAllLines($birthHarness)
+    $birthMutant = Join-Path $birthMutantRoot ([System.IO.Path]::GetFileName($birthHarness))
+    $birthRows = @(
+        @{
+            Name = 'the parameter is gone'
+            Break = {
+                param($lines)
+                @($lines | Where-Object { $_ -notmatch '^\s*\[scriptblock\]\$BeforeTeardown = \$null\s*$' })
+            }
+        },
+        @{
+            Name = 'one start does not forward'
+            Break = {
+                param($lines)
+                # The second launch only: breaking the first would fail the
+                # same rule and the row would prove nothing of its own.
+                $out = [System.Collections.Generic.List[string]]::new()
+                $seen = 0
+                foreach ($line in $lines) {
+                    if ($line -match '^\s*\$s = Start-SeamSession ' -and (++$seen) -eq 2) {
+                        $out.Add($line.Replace(' -BeforeTeardown $BeforeTeardown', ''))
+                    }
+                    else { $out.Add($line) }
+                }
+                return , $out
+            }
+        },
+        @{
+            Name = 'Stop also gets the hook'
+            Break = {
+                param($lines)
+                $out = [System.Collections.Generic.List[string]]::new()
+                $done = $false
+                foreach ($line in $lines) {
+                    if (-not $done -and $line -match '^\s*Stop-SeamSession \$s\b') {
+                        $done = $true
+                        $out.Add($line + ' -BeforeTeardown $BeforeTeardown')
+                    }
+                    else { $out.Add($line) }
+                }
+                return , $out
+            }
+        },
+        @{
+            Name = 'a Stop outside try/catch'
+            Break = {
+                param($lines)
+                # The first wrapped Stop, un-wrapped: its try line goes and
+                # the catch becomes a plain block, so the call is bare in the
+                # finally again and a hook failure would abort the run.
+                $stop = -1
+                for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*Stop-SeamSession \$s\b') { $stop = $i; break } }
+                $try = -1
+                for ($i = $stop - 1; $i -ge 0; $i--) { if ($lines[$i] -match '^\s*try \{$') { $try = $i; break } }
+                $catch = -1
+                for ($i = $stop + 1; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*catch \{$') { $catch = $i; break } }
+                $out = [System.Collections.Generic.List[string]]::new()
+                for ($i = 0; $i -lt $lines.Count; $i++) {
+                    if ($i -eq $try) { continue }
+                    if ($i -eq $catch) { $out.Add($lines[$i].Replace('catch {', 'if ($true) {')); continue }
+                    $out.Add($lines[$i])
+                }
+                return , $out
+            }
+        }
+    )
+    foreach ($row in $birthRows) {
+        $lines = @(& $row.Break (, $birthLines))
+        if (($lines -join "`n") -ceq ($birthLines -join "`n")) {
+            Assert-True $false "birth mutation '$($row.Name)': its anchor is gone"
+            continue
+        }
+        [System.IO.File]::WriteAllLines($birthMutant, [string[]]$lines)
+        Assert-True ((Invoke-BirthForwardCases $birthMutant).Count -gt 0) "birth mutation went red: $($row.Name)"
+    }
+}
+finally { Remove-Item -LiteralPath $birthMutantRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 $script:testConfigLib = Join-Path $PSScriptRoot 'lib/test-config.ps1'
 $testConfigFailures = Invoke-TestConfigCases $script:testConfigLib
