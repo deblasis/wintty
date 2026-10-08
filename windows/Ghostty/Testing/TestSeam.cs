@@ -472,6 +472,23 @@ internal static class TestSeam
                     return Error(op, "count must be 1..32");
                 var titles = ArgStrings(args, "titles");
 
+                // `profile` births the added tabs through a RESOLVED profile
+                // snapshot, the way every real new-tab funnel does (a
+                // restore's tabs all carry snapshots too). A null snapshot
+                // is the cold-start shape: PaneHostingPolicy holds a local
+                // pane that runs libghostty's default shell, not any
+                // profile's command.
+                Ghostty.Core.Profiles.ProfileSnapshot? snapshot = null;
+                if (ArgString(args, "profile") is { } profileId)
+                {
+                    var registry = App.ProfileRegistry;
+                    if (registry is null) return Error(op, "no profile registry");
+                    var resolved = registry.Resolve(profileId);
+                    if (resolved is null) return Error(op, $"no profile '{profileId}'");
+                    snapshot = Ghostty.Core.Profiles.ProfileSnapshotStore.From(
+                        resolved, registry.Version);
+                }
+
                 // Deterministic start: seed means a clean slate, so leftover
                 // groups and the pinned prefix from a previous scenario go
                 // first -- through the manager's own dissolvers. Then close
@@ -497,7 +514,7 @@ internal static class TestSeam
                 }
                 for (int i = 0; i < count; i++)
                 {
-                    var tab = i == 0 ? manager.Tabs[0] : manager.NewTab();
+                    var tab = i == 0 ? manager.Tabs[0] : manager.NewTab(snapshot);
                     tab.UserOverrideTitle = i < titles.Count ? titles[i] : $"tab-{i + 1}";
                 }
                 return OkWithState(window, manager, op);
