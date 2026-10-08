@@ -377,34 +377,82 @@ pub const DirectWrite = struct {
         if (dwrite.FAILED(hr)) return error.DirectWriteError;
         defer _ = dw_family.?.Release();
 
-        const font_count = dw_family.?.GetFontCount();
-        var fonts = try alloc.alloc(ScoredFont, font_count);
-        var valid_count: usize = 0;
+        // Ask DirectWrite for the faces of this family that match what we
+        // want. Its answer is already ranked best first by its own rules,
+        // which is the matcher Windows Terminal uses, so ranking the family
+        // ourselves is both wrong (it made every non-bold weight tie) and
+        // redundant.
+        //
+        // These are the same weight and style discoverFallback passes to
+        // MapCharacters, so both paths ask the same question.
+        const weight: dwrite.DWRITE_FONT_WEIGHT = if (desc.bold) .BOLD else .NORMAL;
+        const style: dwrite.DWRITE_FONT_STYLE = if (desc.italic) .ITALIC else .NORMAL;
 
+        var dw_list: ?*dwrite.IDWriteFontList = null;
+        hr = dw_family.?.GetMatchingFonts(weight, .NORMAL, style, &dw_list);
+        if (dwrite.FAILED(hr)) return error.DirectWriteError;
+        defer _ = dw_list.?.Release();
+
+        const font_count = dw_list.?.GetFontCount();
+
+        // Scratch for the ordering pass below, freed on every path. The
+        // list is bounded by the family size and this runs at font load,
+        // not per glyph, so one allocation each is fine; none of it happens
+        // per face.
+        var fonts = try alloc.alloc(?*dwrite.IDWriteFont, font_count);
+        defer alloc.free(fonts);
+        var candidates = try alloc.alloc(FaceCandidate, font_count);
+        defer alloc.free(candidates);
+        var order = try alloc.alloc(usize, font_count);
+        defer alloc.free(order);
+
+        var valid: usize = 0;
         for (0..font_count) |i| {
             var dw_font: ?*dwrite.IDWriteFont = null;
-            hr = dw_family.?.GetFont(@intCast(i), &dw_font);
+            hr = dw_list.?.GetFont(@intCast(i), &dw_font);
             if (dwrite.FAILED(hr)) continue;
 
-            if (dw_font.?.GetSimulations() != .NONE) {
-                _ = dw_font.?.Release();
-                continue;
-            }
-
-            fonts[valid_count] = .{ .font = dw_font.?, .score = scoreFont(&desc, dw_font.?) };
-            valid_count += 1;
+            fonts[valid] = dw_font.?;
+            candidates[valid] = .{
+                .simulated = dw_font.?.GetSimulations() != .NONE,
+                .has_codepoint = if (desc.codepoint > 0) blk: {
+                    var cp_exists: i32 = 0;
+                    const cp_hr = dw_font.?.HasCharacter(desc.codepoint, &cp_exists);
+                    break :blk dwrite.SUCCEEDED(cp_hr) and cp_exists != 0;
+                } else false,
+            };
+            valid += 1;
         }
 
-        const scored = fonts[0..valid_count];
-        std.mem.sortUnstable(ScoredFont, scored, {}, struct {
-            fn lessThan(_: void, a: ScoredFont, b: ScoredFont) bool {
-                return a.score.int() > b.score.int();
-            }
-        }.lessThan);
+        const n = orderFaceCandidates(candidates[0..valid], desc.codepoint > 0, order);
 
-        var result = try alloc.alloc(*dwrite.IDWriteFont, valid_count);
-        for (scored, 0..) |sf, j| result[j] = sf.font;
-        alloc.free(fonts);
+        // Hand the kept faces to the iterator and release the rest, so that
+        // every face we obtained ends up in exactly one of the two. The
+        // kept ones are moved out of `fonts` and nulled there, so the
+        // release sees exactly the ones the iterator did not take. The
+        // errdefer covers the allocation of `result`: it runs while every
+        // face is still in `fonts`, and nothing after it can fail.
+        errdefer {
+            for (fonts[0..valid]) |maybe_font| {
+                if (maybe_font) |font| _ = font.Release();
+            }
+        }
+
+        var result = try alloc.alloc(*dwrite.IDWriteFont, n);
+        for (order[0..n], 0..) |idx, j| {
+            result[j] = fonts[idx].?;
+            fonts[idx] = null;
+        }
+        for (fonts[0..valid]) |maybe_font| {
+            if (maybe_font) |font| _ = font.Release();
+        }
+
+        if (n == 0) {
+            // DiscoverIterator.deinit only frees a non-empty slice, so the
+            // zero-length allocation above would leak. Use the empty one.
+            alloc.free(result);
+            return DiscoverIterator.empty(alloc, desc.variations);
+        }
 
         return DiscoverIterator{
             .fonts = result,
@@ -517,50 +565,6 @@ pub const DirectWrite = struct {
         return try self.discover(alloc, desc);
     }
 
-    // Scoring
-
-    const Score = packed struct {
-        const Backing = @typeInfo(@This()).@"struct".backing_integer.?;
-        glyph_count: u16 = 0,
-        bold: bool = false,
-        italic: bool = false,
-        normal_stretch: bool = false,
-        codepoint: bool = false,
-
-        pub fn int(self: Score) Backing {
-            return @bitCast(self);
-        }
-    };
-
-    const ScoredFont = struct {
-        font: *dwrite.IDWriteFont,
-        score: Score,
-    };
-
-    fn scoreFont(desc: *const Descriptor, font: *dwrite.IDWriteFont) Score {
-        var score: Score = .{};
-
-        const weight = font.GetWeight();
-        const style = font.GetStyle();
-        const stretch = font.GetStretch();
-
-        const is_bold = @intFromEnum(weight) >= @intFromEnum(dwrite.DWRITE_FONT_WEIGHT.SEMI_BOLD);
-        score.bold = desc.bold == is_bold;
-
-        const is_italic = (style == .ITALIC or style == .OBLIQUE);
-        score.italic = desc.italic == is_italic;
-
-        score.normal_stretch = (stretch == .NORMAL);
-
-        if (desc.codepoint > 0) {
-            var cp_exists: i32 = 0;
-            const cp_hr = font.HasCharacter(desc.codepoint, &cp_exists);
-            if (dwrite.SUCCEEDED(cp_hr) and cp_exists != 0) score.codepoint = true;
-        }
-
-        return score;
-    }
-
     // TextAnalysisSource -- minimal implementation for IDWriteFontFallback::MapCharacters
 
     const TextAnalysisSource = extern struct {
@@ -638,10 +642,11 @@ pub const DirectWrite = struct {
         return @ptrCast(buf[0..len :0].ptr);
     }
 
-    // Variation axes are not used for scoring because DirectWrite's
-    // GetWeight/GetStyle already return instance-level values. Variations
-    // are passed through to DeferredFace and applied when the font is
-    // loaded via FreeType (see DeferredFace.loadDirectWrite).
+    // Variation axes take no part in picking a face: DirectWrite matches on
+    // the weight, stretch and style the faces already report, and the
+    // variations in the descriptor are passed through to DeferredFace and
+    // applied when the font is loaded via FreeType (see
+    // DeferredFace.loadDirectWrite).
 
     pub const DiscoverIterator = struct {
         fonts: []*dwrite.IDWriteFont,
