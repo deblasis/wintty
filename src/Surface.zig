@@ -1277,6 +1277,27 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .program_status => |v| {
+            // The owned report lives until the action returns; the apprt
+            // copies what it keeps.
+            defer switch (v) {
+                .report => |r| r.destroy(),
+                .reset, .prompt_start => {},
+            };
+            const action: apprt.action.ProgramStatus = switch (v) {
+                .report => |r| .{ .event = .report, .report = &r.report },
+                .reset => .{ .event = .reset },
+                .prompt_start => .{ .event = .prompt_start },
+            };
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .program_status,
+                action,
+            ) catch |err| {
+                log.warn("apprt failed to report program status err={}", .{err});
+            };
+        },
+
         .selection_scroll_tick => |active| {
             self.selection_scroll_active = active;
             try self.selectionScrollTick();

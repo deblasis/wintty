@@ -1004,6 +1004,58 @@ typedef struct {
   int8_t progress;
 } ghostty_action_progress_report_s;
 
+// apprt.action.ProgramStatus.Event
+typedef enum {
+  GHOSTTY_ACTION_PROGRAM_STATUS_EVENT_REPORT,
+  GHOSTTY_ACTION_PROGRAM_STATUS_EVENT_RESET,
+  GHOSTTY_ACTION_PROGRAM_STATUS_EVENT_PROMPT_START,
+} ghostty_action_program_status_event_e;
+
+// apprt.action.ProgramStatus.State
+typedef enum {
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_IDLE,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_WORKING,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_DONE,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_BLOCKED,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_ERROR,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_CLEAR,
+} ghostty_action_program_status_state_e;
+
+// apprt.action.ProgramStatus.Kind
+typedef enum {
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_NONE,
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_PERMISSION,
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_QUESTION,
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_AUTH,
+} ghostty_action_program_status_kind_e;
+
+// apprt.action.ProgramStatus.Report. One validated OSC 7501 report. Text the
+// program did not send has len 0. Every pointer is borrowed for the duration
+// of the action callback. title and message are decoded UTF-8 with no
+// control characters, but untrusted.
+typedef struct {
+  ghostty_action_program_status_state_e state;
+  ghostty_action_program_status_kind_e kind;
+  // -1 if absent (indeterminate), otherwise 0-100.
+  int8_t progress;
+  const char* id;
+  uintptr_t id_len;
+  const char* app;
+  uintptr_t app_len;
+  const char* title;
+  uintptr_t title_len;
+  const char* message;
+  uintptr_t message_len;
+} ghostty_action_program_status_report_s;
+
+// apprt.action.ProgramStatus.C. Only performed after
+// ghostty_app_set_program_status(app, true). `report` is set for
+// GHOSTTY_ACTION_PROGRAM_STATUS_EVENT_REPORT and NULL otherwise.
+typedef struct {
+  ghostty_action_program_status_event_e event;
+  const ghostty_action_program_status_report_s* report;
+} ghostty_action_program_status_s;
+
 // apprt.action.CommandFinished.C
 typedef struct {
   // -1 if no exit code was reported, otherwise 0-255
@@ -1113,6 +1165,7 @@ typedef enum {
   GHOSTTY_ACTION_PIN_TAB,
   GHOSTTY_ACTION_UNPIN_TAB,
   GHOSTTY_ACTION_MOVE_GROUP,
+  GHOSTTY_ACTION_PROGRAM_STATUS,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1158,6 +1211,7 @@ typedef union {
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
   ghostty_action_open_config_e open_config;
+  ghostty_action_program_status_s program_status;
 } ghostty_action_u;
 
 typedef struct {
@@ -1326,6 +1380,11 @@ GHOSTTY_API void ghostty_app_free(ghostty_app_t);
 GHOSTTY_API void ghostty_app_tick(ghostty_app_t);
 GHOSTTY_API void* ghostty_app_userdata(ghostty_app_t);
 GHOSTTY_API void ghostty_app_set_focus(ghostty_app_t, bool);
+// Opt in to the program status protocol (OSC 7501). While on, every surface
+// answers the `OSC 7501 ; ?` support query and performs
+// GHOSTTY_ACTION_PROGRAM_STATUS. Off by default: an embedder that does not
+// act on reports must not claim support. Process-wide; the app may be NULL.
+GHOSTTY_API void ghostty_app_set_program_status(ghostty_app_t, bool);
 GHOSTTY_API bool ghostty_app_key(ghostty_app_t, ghostty_input_key_s);
 GHOSTTY_API void ghostty_app_keyboard_changed(ghostty_app_t);
 GHOSTTY_API void ghostty_app_open_config(ghostty_app_t);

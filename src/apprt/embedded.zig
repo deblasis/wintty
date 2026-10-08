@@ -17,6 +17,7 @@ const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
+const termio = @import("../termio.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
@@ -2389,6 +2390,18 @@ pub const CAPI = struct {
         focused: bool,
     ) void {
         app.focusEvent(focused);
+    }
+
+    /// Opt in to (or out of) the program status protocol (OSC 7501). See
+    /// termio.program_status. The setting is process-wide: it describes
+    /// the embedder, and a process has one. `app` may be NULL, so an
+    /// embedder can decide before it has created its app.
+    export fn ghostty_app_set_program_status(
+        app: ?*App,
+        enabled: bool,
+    ) void {
+        _ = app;
+        termio.program_status.set(enabled);
     }
 
     /// Notify the app of a global keypress capture. This will return

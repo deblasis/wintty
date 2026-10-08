@@ -18,6 +18,16 @@ pub const Message = union(enum) {
     /// we want this union to be.
     pub const WriteReq = MessageData(u8, 255);
 
+    /// A program status protocol (OSC 7501) event for the app thread.
+    pub const ProgramStatus = union(enum) {
+        /// An owned copy of one report. The receiver destroys it.
+        report: *apprt.action.ProgramStatus.Owned,
+        /// A full reset (RIS): every record is gone.
+        reset,
+        /// A new shell prompt (OSC 133 A): working and blocked records end.
+        prompt_start,
+    };
+
     /// A fixed-size desktop notification payload sent to the app thread.
     pub const DesktopNotification = struct {
         /// Desktop notification title.
@@ -138,6 +148,11 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    /// A program status protocol (OSC 7501) event, forwarded to the apprt
+    /// as the `program_status` action. Only sent while the embedder opted
+    /// in; see termio.program_status.
+    program_status: ProgramStatus,
+
     /// A command has started in the shell, start a timer.
     start_command,
 
@@ -198,6 +213,10 @@ pub const Message = union(enum) {
             .pwd_change => |v| v.deinit(),
             .kitty_clipboard_read => |v| v.destroy(),
             .kitty_clipboard_write => |v| v.destroy(),
+            .program_status => |v| switch (v) {
+                .report => |r| r.destroy(),
+                .reset, .prompt_start => {},
+            },
 
             .set_title,
             .report_title,
@@ -277,6 +296,7 @@ pub const Message = union(enum) {
             .pwd_change,
             .ring_bell,
             .progress_report,
+            .program_status,
             .start_command,
             .stop_command,
             .prompt_input,
@@ -588,7 +608,7 @@ test "surface message variants are all accounted for by the push give-up path" {
     // Make that decision, then bump this count. Without the guard a new
     // owning variant compiles and leaks silently on every drop.
     const fields = @typeInfo(Message).@"union".fields;
-    try std.testing.expectEqual(@as(usize, 28), fields.len);
+    try std.testing.expectEqual(@as(usize, 29), fields.len);
 }
 
 test "the child-exit notice is the one message push may not carry" {
