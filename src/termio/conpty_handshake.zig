@@ -12,11 +12,9 @@
 //! The terminal parser answers DA1 too, but only by way of the stream
 //! handler, the termio mailbox and the IO thread's write queue, none of
 //! which is guaranteed to be up when conpty asks: the reader starts inside
-//! `threadEnter`, before the IO loop is armed. A daemon pane never relied on
-//! any of that (sessiond answers this request itself, in
-//! src/sessiond/src/conpty_handshake.zig on the release side), so a local
-//! pane now does the same: the Windows reader removes the request from the
-//! stream and writes the reply straight to the pty's input. Removing it is
+//! `threadEnter`, before the IO loop is armed. So the Windows reader answers
+//! the handshake itself: it removes the request from the stream and writes
+//! the reply straight to the pty's input. Removing it is
 //! what keeps the parser from answering a second time; a second answer
 //! would reach the shell as typed input.
 //!
@@ -33,8 +31,8 @@ pub const DA1_REQUEST = "\x1b[c";
 
 /// What the parser answers for DA1 (`StreamHandler.deviceAttributes`,
 /// clipboard access withheld): level 2 conformance, Sixel, colour text.
-/// The same reply sessiond sends, and the string a reader here hands conpty
-/// before the parser could. Pinned against the parser's own answer by
+/// The string a reader here hands conpty before the parser could. Pinned
+/// against the parser's own answer by
 /// "DA1: what the parser answers is what the pty reader sends" in
 /// stream_handler.zig, which runs a real parser; comparing this against a
 /// second copy of the literal here would only prove the file agrees with
