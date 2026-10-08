@@ -2051,3 +2051,54 @@ test "directwrite never returns a simulated face" {
         try testing.expect(count > 0);
     }
 }
+
+fn testOrderFaceCandidates(
+    candidates: []const FaceCandidate,
+    want_codepoint: bool,
+    expected: []const usize,
+) !void {
+    var out: [16]usize = undefined;
+    const n = orderFaceCandidates(candidates, want_codepoint, &out);
+    try std.testing.expectEqualSlices(usize, expected, out[0..n]);
+}
+
+test "directwrite candidate order: keeps DirectWrite's order" {
+    try testOrderFaceCandidates(&.{ .{}, .{}, .{} }, false, &.{ 0, 1, 2 });
+}
+
+test "directwrite candidate order: drops simulated faces" {
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true }, .{}, .{ .simulated = true }, .{} },
+        false,
+        &.{ 1, 3 },
+    );
+}
+
+test "directwrite candidate order: codepoint holders first, order kept in each group" {
+    try testOrderFaceCandidates(
+        &.{ .{}, .{ .has_codepoint = true }, .{}, .{ .has_codepoint = true } },
+        true,
+        &.{ 1, 3, 0, 2 },
+    );
+}
+
+test "directwrite candidate order: codepoint ignored when none was asked for" {
+    try testOrderFaceCandidates(
+        &.{ .{}, .{ .has_codepoint = true }, .{}, .{ .has_codepoint = true } },
+        false,
+        &.{ 0, 1, 2, 3 },
+    );
+}
+
+test "directwrite candidate order: a simulated face is dropped even with the codepoint" {
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true, .has_codepoint = true }, .{} },
+        true,
+        &.{1},
+    );
+}
+
+test "directwrite candidate order: nothing in, nothing out" {
+    try testOrderFaceCandidates(&.{}, false, &.{});
+    try testOrderFaceCandidates(&.{ .{ .simulated = true }, .{ .simulated = true } }, true, &.{});
+}
