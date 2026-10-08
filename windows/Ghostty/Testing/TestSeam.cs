@@ -421,7 +421,7 @@ internal static class TestSeam
     /// harnesses read their assertions off it, so the pass is part of its
     /// contract; layout-frame is new and owes no one that.
     /// </remarks>
-    private static bool IsObserver(string op) => op is "layout-frame" or "surface-state";
+    private static bool IsObserver(string op) => op is "layout-frame" or "surface-state" or "selected-paint";
 
     /// <summary>
     /// The one marshal: every command, whatever it touches, runs on the
@@ -1269,6 +1269,42 @@ internal static class TestSeam
                     json.WriteBoolean("hasSurface", terminal.TestSeamHasSurface);
                     json.WriteBoolean("attempted", terminal.TestSeamSurfaceAttempted);
                     json.WriteNumber("retriesLeft", terminal.TestSeamSurfaceRetriesLeft);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "selected-paint":
+            {
+                // Read-only: what each horizontal header's Selected-state
+                // parts paint with on the live tree (the fill path and the
+                // container stroke), next to the strip's own selection. An
+                // observer, so the read cannot re-apply a state and heal
+                // what it is asked about.
+                var host = window.TestSeamTabHost;
+                if (host is null)
+                    return Error(op, "the horizontal strip is not the active host");
+                var rows = host.TestSeamSelectedPaint();
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteStartArray("headers");
+                    foreach (var row in rows)
+                    {
+                        json.WriteStartObject();
+                        json.WriteNumber("index", manager.Tabs.IndexOf(row.Tab));
+                        json.WriteBoolean("active", ReferenceEquals(row.Tab, manager.ActiveTab));
+                        json.WriteBoolean("selected", row.Selected);
+                        json.WriteBoolean("pathShown", row.PathShown);
+                        json.WriteBoolean("fillIsField", row.FillIsField);
+                        json.WriteString("fill", row.Fill);
+                        json.WriteBoolean("borderIsExpected", row.BorderIsExpected);
+                        json.WriteString("border", row.Border);
+                        json.WriteEndObject();
+                    }
+                    json.WriteEndArray();
+                    WriteState(json, window, manager);
                     json.WriteEndObject();
                 });
             }
