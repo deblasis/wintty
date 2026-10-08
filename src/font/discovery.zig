@@ -2004,6 +2004,34 @@ fn testDirectWriteHasFamily(dw: *const DirectWrite, family: [:0]const u8) bool {
     return dwrite.SUCCEEDED(hr) and exists != 0;
 }
 
+/// Test helper: the width Lucida Console ships at. Its one face is
+/// semi-condensed, which is what a regular request has to find.
+const testDirectWriteLucidaConsoleStretch = @intFromEnum(dwrite.DWRITE_FONT_STRETCH.SEMI_CONDENSED);
+
+/// Test helper: whether the family ships a real face of `weight`. The faces
+/// come from IDWriteFontFamily::GetFont, so a simulation never counts.
+fn testDirectWriteHasWeight(dw: *const DirectWrite, family: [:0]const u8, weight: u32) bool {
+    var buf: [128]u16 = undefined;
+    const wfamily = DirectWrite.utf8ToUtf16Le(&buf, family) orelse return false;
+    var index: u32 = 0;
+    var exists: i32 = 0;
+    const hr = dw.collection.FindFamilyName(wfamily, &index, &exists);
+    if (dwrite.FAILED(hr) or exists == 0) return false;
+
+    var dw_family: ?*dwrite.IDWriteFontFamily = null;
+    if (dwrite.FAILED(dw.collection.GetFontFamily(index, &dw_family))) return false;
+    defer _ = dw_family.?.Release();
+
+    const font_count = dw_family.?.GetFontCount();
+    for (0..font_count) |i| {
+        var dw_font: ?*dwrite.IDWriteFont = null;
+        if (dwrite.FAILED(dw_family.?.GetFont(@intCast(i), &dw_font))) continue;
+        defer _ = dw_font.?.Release();
+        if (@intFromEnum(dw_font.?.GetWeight()) == weight) return true;
+    }
+    return false;
+}
+
 const TestDirectWriteFace = struct {
     weight: u32,
     stretch: u32,
@@ -2026,12 +2054,16 @@ fn testDirectWriteFirstFace(dw: *const DirectWrite, desc: Descriptor) !?TestDire
     };
 }
 
-fn testDirectWriteExpectFace(
+/// Test helper: `desc` must resolve to a real face with the given weight and
+/// style, at the given stretch. The weight, the style and the width are all
+/// part of what DirectWrite matched, so all three are checked.
+fn testDirectWriteExpectFaceStretch(
     family: [:0]const u8,
     bold: bool,
     italic: bool,
     want_weight: u32,
     want_italic: bool,
+    want_stretch: u32,
 ) !void {
     if (options.backend != .directwrite_freetype) return error.SkipZigTest;
     const testing = std.testing;
@@ -2048,8 +2080,26 @@ fn testDirectWriteExpectFace(
     })) orelse return error.TestExpectedFace;
     try testing.expectEqual(want_weight, face.weight);
     try testing.expectEqual(want_italic, face.italic);
-    try testing.expectEqual(@intFromEnum(dwrite.DWRITE_FONT_STRETCH.NORMAL), face.stretch);
+    try testing.expectEqual(want_stretch, face.stretch);
     try testing.expect(!face.simulated);
+}
+
+/// Test helper: same, for the families that ship every face at normal width.
+fn testDirectWriteExpectFace(
+    family: [:0]const u8,
+    bold: bool,
+    italic: bool,
+    want_weight: u32,
+    want_italic: bool,
+) !void {
+    try testDirectWriteExpectFaceStretch(
+        family,
+        bold,
+        italic,
+        want_weight,
+        want_italic,
+        @intFromEnum(dwrite.DWRITE_FONT_STRETCH.NORMAL),
+    );
 }
 
 fn testDirectWriteExpectNoFace(family: [:0]const u8, bold: bool, italic: bool) !void {
@@ -2089,6 +2139,18 @@ test "directwrite multi-weight family: bold italic picks the 700 italic face" {
 }
 
 test "directwrite bold prefers Bold over an earlier SemiBold" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, "Sitka Text")) return error.SkipZigTest;
+
+    // The comparison only means something where the family has both faces to
+    // choose between, so a build without them skips instead of passing on a
+    // family that could not have ranked SemiBold first.
+    if (!testDirectWriteHasWeight(&dw, "Sitka Text", 600)) return error.SkipZigTest;
+    if (!testDirectWriteHasWeight(&dw, "Sitka Text", 700)) return error.SkipZigTest;
+
     try testDirectWriteExpectFace("Sitka Text", true, false, 700, false);
 }
 
@@ -2101,11 +2163,36 @@ test "directwrite regular and bold in a two-weight family" {
     try testDirectWriteExpectFace("Consolas", true, false, 700, false);
 }
 
+test "directwrite regular picks the 400 face of a semi-condensed family" {
+    // Lucida Console ships one face and it is semi-condensed, so a regular
+    // request at normal width has to make do with it: the face it ships is
+    // still the face for the request.
+    try testDirectWriteExpectFaceStretch(
+        "Lucida Console",
+        false,
+        false,
+        400,
+        false,
+        testDirectWriteLucidaConsoleStretch,
+    );
+}
+
 test "directwrite italic in a family without italic faces returns nothing" {
     try testDirectWriteExpectNoFace("Bahnschrift", false, true);
 }
 
 test "directwrite bold in a regular-only family returns nothing" {
+    // The family does have a face to find: assert that first, so discovery
+    // that answered nothing for every Lucida Console request cannot pass this
+    // test by emptying the family.
+    try testDirectWriteExpectFaceStretch(
+        "Lucida Console",
+        false,
+        false,
+        400,
+        false,
+        testDirectWriteLucidaConsoleStretch,
+    );
     try testDirectWriteExpectNoFace("Lucida Console", true, false);
 }
 
