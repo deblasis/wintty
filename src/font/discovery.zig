@@ -1908,3 +1908,146 @@ test "directwrite discover all" {
     // A typical Windows install has hundreds of fonts.
     try testing.expect(count > 0);
 }
+
+/// Test helper: whether the system collection has `family`. The integration
+/// tests below skip on images that do not ship the font they need.
+fn testDirectWriteHasFamily(dw: *const DirectWrite, family: [:0]const u8) bool {
+    var buf: [128]u16 = undefined;
+    const wfamily = DirectWrite.utf8ToUtf16Le(&buf, family) orelse return false;
+    var index: u32 = 0;
+    var exists: i32 = 0;
+    const hr = dw.collection.FindFamilyName(wfamily, &index, &exists);
+    return dwrite.SUCCEEDED(hr) and exists != 0;
+}
+
+const TestDirectWriteFace = struct {
+    weight: u32,
+    stretch: u32,
+    italic: bool,
+    simulated: bool,
+};
+
+/// Test helper: the first face discovery returns for `desc`, or null.
+fn testDirectWriteFirstFace(dw: *const DirectWrite, desc: Descriptor) !?TestDirectWriteFace {
+    var it = try dw.discover(std.testing.allocator, desc);
+    defer it.deinit();
+    var face = (try it.next()) orelse return null;
+    defer face.deinit();
+    const f = face.dw.?.font;
+    return .{
+        .weight = @intFromEnum(f.GetWeight()),
+        .stretch = @intFromEnum(f.GetStretch()),
+        .italic = f.GetStyle() != .NORMAL,
+        .simulated = f.GetSimulations() != .NONE,
+    };
+}
+
+fn testDirectWriteExpectFace(
+    family: [:0]const u8,
+    bold: bool,
+    italic: bool,
+    want_weight: u32,
+    want_italic: bool,
+) !void {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+    const testing = std.testing;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, family)) return error.SkipZigTest;
+
+    const face = (try testDirectWriteFirstFace(&dw, .{
+        .family = family,
+        .bold = bold,
+        .italic = italic,
+        .size = 12,
+    })) orelse return error.TestExpectedFace;
+    try testing.expectEqual(want_weight, face.weight);
+    try testing.expectEqual(want_italic, face.italic);
+    try testing.expectEqual(@intFromEnum(dwrite.DWRITE_FONT_STRETCH.NORMAL), face.stretch);
+    try testing.expect(!face.simulated);
+}
+
+fn testDirectWriteExpectNoFace(family: [:0]const u8, bold: bool, italic: bool) !void {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, family)) return error.SkipZigTest;
+
+    if (try testDirectWriteFirstFace(&dw, .{
+        .family = family,
+        .bold = bold,
+        .italic = italic,
+        .size = 12,
+    })) |face| {
+        std.debug.print("unexpected face: weight={d} stretch={d} italic={} simulated={}\n", .{
+            face.weight, face.stretch, face.italic, face.simulated,
+        });
+        return error.TestExpectedNoFace;
+    }
+}
+
+test "directwrite multi-weight family: regular picks the 400 face" {
+    try testDirectWriteExpectFace("Segoe UI", false, false, 400, false);
+}
+
+test "directwrite multi-weight family: bold picks the 700 face" {
+    try testDirectWriteExpectFace("Segoe UI", true, false, 700, false);
+}
+
+test "directwrite multi-weight family: italic picks the 400 italic face" {
+    try testDirectWriteExpectFace("Segoe UI", false, true, 400, true);
+}
+
+test "directwrite multi-weight family: bold italic picks the 700 italic face" {
+    try testDirectWriteExpectFace("Segoe UI", true, true, 700, true);
+}
+
+test "directwrite bold prefers Bold over an earlier SemiBold" {
+    try testDirectWriteExpectFace("Sitka Text", true, false, 700, false);
+}
+
+test "directwrite regular picks the 400 face at normal width" {
+    try testDirectWriteExpectFace("Bahnschrift", false, false, 400, false);
+}
+
+test "directwrite regular and bold in a two-weight family" {
+    try testDirectWriteExpectFace("Consolas", false, false, 400, false);
+    try testDirectWriteExpectFace("Consolas", true, false, 700, false);
+}
+
+test "directwrite italic in a family without italic faces returns nothing" {
+    try testDirectWriteExpectNoFace("Bahnschrift", false, true);
+}
+
+test "directwrite bold in a regular-only family returns nothing" {
+    try testDirectWriteExpectNoFace("Lucida Console", true, false);
+}
+
+test "directwrite never returns a simulated face" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+    const testing = std.testing;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, "Segoe UI")) return error.SkipZigTest;
+
+    for ([_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } }) |bi| {
+        var it = try dw.discover(testing.allocator, .{
+            .family = "Segoe UI",
+            .bold = bi[0],
+            .italic = bi[1],
+            .size = 12,
+        });
+        defer it.deinit();
+        var count: usize = 0;
+        while (try it.next()) |face_| {
+            var face = face_;
+            defer face.deinit();
+            try testing.expectEqual(dwrite.DWRITE_FONT_SIMULATIONS.NONE, face.dw.?.font.GetSimulations());
+            count += 1;
+        }
+        try testing.expect(count > 0);
+    }
+}
