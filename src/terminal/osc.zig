@@ -962,7 +962,14 @@ pub const Parser = struct {
                 // just fails to happen. An inline image that exceeds the
                 // budget looked exactly like one that was never sent.
                 error.WriteFailed => {
-                    log.warn(
+                    // A program can send over-long program status reports
+                    // as fast as it can write; warn for those would flood
+                    // the log, so they go to debug like the parser's own
+                    // rejections.
+                    if (self.state == .@"7501") log.debug(
+                        "OSC sequence was dropped, state={s} captured={d} limit={d}",
+                        .{ @tagName(self.state), cap.trailing().len, cap.max_bytes },
+                    ) else log.warn(
                         "OSC sequence was dropped, state={s} captured={d} limit={d}",
                         .{ @tagName(self.state), cap.trailing().len, cap.max_bytes },
                     );
@@ -1140,8 +1147,14 @@ pub const Parser = struct {
                 else => self.state = .invalid,
             },
 
+            // A report can be no longer than the specification's sequence
+            // limit, so the capture stops there: a program that never ends
+            // the sequence costs a pane a few KiB, not the general ceiling.
             .@"7501" => switch (c) {
-                ';' => self.captureTrailing(.allocating),
+                ';' => self.captureTrailingMax(
+                    .allocating,
+                    parsers.program_status.max_body_bytes + 1,
+                ),
                 else => self.state = .invalid,
             },
 
@@ -1625,4 +1638,49 @@ test "OSC 9001: conhost's shell-type announce is recognized and ignored" {
     for (input_bel) |ch| bel.next(ch);
     try testing.expectEqual(Parser.State.@"9001", bel.state);
     try testing.expect(bel.end('\x07') == null);
+
+test "OSC 7501: the capture stops at the body limit" {
+    // A report can never be longer than the specification's sequence
+    // limit, so its capture is bounded there rather than at the parser's
+    // general ceiling: a program that never ends the sequence costs a pane
+    // a few KiB, not megabytes.
+    const testing = std.testing;
+    const limit = parsers.program_status.max_body_bytes + 1;
+
+    const big = try testing.allocator.alloc(u8, 64 * 1024);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+
+    // In bulk.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice("7501;state=idle:");
+        p.nextSlice(big);
+        try testing.expectEqual(Parser.State.invalid, p.state);
+        try testing.expect(p.capture.?.writer.buffer.len <= limit);
+        try testing.expect(p.end(null) == null);
+    }
+
+    // And a byte at a time.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        for ("7501;state=idle:") |c| p.next(c);
+        for (big[0..8192]) |c| p.next(c);
+        try testing.expectEqual(Parser.State.invalid, p.state);
+        try testing.expect(p.capture.?.writer.buffer.len <= limit);
+        try testing.expect(p.end(null) == null);
+    }
+
+    // The largest legal report still fits.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        const fill = parsers.program_status.max_body_bytes - "state=idle:x=".len;
+        p.nextSlice("7501;state=idle:x=");
+        p.nextSlice(big[0..fill]);
+        try testing.expect(p.state != .invalid);
+        try testing.expect(p.end('\x1b') != null);
+    }
 }

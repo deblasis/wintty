@@ -325,11 +325,16 @@ fn validate(data: []const u8) error{
         while (it.next()) |v| if (v.len > limit[1]) return error.TooLong;
     }
 
+    // Every title and msg is decoded and checked, not only the last: the
+    // specification discards a report whose base64 fails or whose text
+    // carries a control character, whichever pair it is in.
     var buf: [max_msg_bytes]u8 = undefined;
-    if (lastValue("title", data)) |v| {
+    var titles: kitty_metadata.ValueIterator("title", value_bytes) = .init(data);
+    while (titles.next()) |v| {
         if ((try decodeText(v, &buf)).len > max_title_bytes) return error.TooLong;
     }
-    if (lastValue("msg", data)) |v| _ = try decodeText(v, &buf);
+    var msgs: kitty_metadata.ValueIterator("msg", value_bytes) = .init(data);
+    while (msgs.next()) |v| _ = try decodeText(v, &buf);
 
     // An unknown state discards the report rather than guessing, so a
     // state added in a later revision never turns into something else.
@@ -730,4 +735,36 @@ test "OSC 7501: no allocator" {
     const report = p.end('\x1b').?.program_status.report;
     try testing.expectEqual(State.working, report.state);
     try testing.expectEqualStrings("cargo", report.readOption(.app).?);
+}
+
+test "OSC 7501: a shadowed title or msg that fails is still a failure" {
+    // The specification discards a report whose base64 does not decode or
+    // whose decoded text carries a control character, and every value
+    // counts, even one a later pair replaces.
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const cases = [_][]const u8{
+        "7501;state=done:msg=AQ==:msg=SGk=", // a control character
+        "7501;state=done:msg=A:msg=SGk=", // not base64
+        "7501;state=done:title=AQ==:title=SGk=",
+        "7501;state=done:title=A:title=SGk=",
+        "7501;state=done:msg=/w==:msg=SGk=", // invalid UTF-8
+    };
+    for (cases) |input| {
+        p.reset();
+        p.nextSlice(input);
+        try testing.expect(p.end('\x1b') == null);
+    }
+
+    // Shadowed values that are valid are fine, and the last one wins.
+    p.reset();
+    p.nextSlice("7501;state=done:msg=SGk=:msg=SG8=");
+    const report = p.end('\x1b').?.program_status.report;
+    var buf: [max_msg_bytes]u8 = undefined;
+    var msg: std.Io.Writer = .fixed(&buf);
+    try report.writeText(.msg, &msg);
+    try testing.expectEqualStrings("Ho", msg.buffered());
 }
