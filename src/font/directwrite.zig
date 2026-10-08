@@ -536,7 +536,39 @@ pub const IDWriteFont = extern struct {
     }
 };
 
+// IDWriteFontList
+// Slots: GetFontCollection(3), GetFontCount(4), GetFont(5)
+// No IID: this list is only ever reached through the object that returns
+// it, so it is never queried for.
+pub const IDWriteFontList = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        // IUnknown
+        QueryInterface: Reserved,
+        AddRef: Reserved,
+        Release: *const fn (*IDWriteFontList) callconv(.winapi) u32,
+        // IDWriteFontList
+        GetFontCollection: Reserved,
+        GetFontCount: *const fn (*IDWriteFontList) callconv(.winapi) UINT32,
+        GetFont: *const fn (*IDWriteFontList, index: UINT32, font: *?*IDWriteFont) callconv(.winapi) HRESULT,
+    };
+
+    pub inline fn Release(self: *IDWriteFontList) u32 {
+        return self.vtable.Release(self);
+    }
+
+    pub inline fn GetFontCount(self: *IDWriteFontList) UINT32 {
+        return self.vtable.GetFontCount(self);
+    }
+
+    pub inline fn GetFont(self: *IDWriteFontList, index: UINT32, font: *?*IDWriteFont) HRESULT {
+        return self.vtable.GetFont(self, index, font);
+    }
+};
+
 // IDWriteFontFamily (extends IDWriteFontList)
+// Slots: GetFamilyNames(6), GetFirstMatchingFont(7), GetMatchingFonts(8)
 pub const IDWriteFontFamily = extern struct {
     vtable: *const VTable,
 
@@ -551,7 +583,14 @@ pub const IDWriteFontFamily = extern struct {
         GetFont: *const fn (*IDWriteFontFamily, index: UINT32, font: *?*IDWriteFont) callconv(.winapi) HRESULT,
         // IDWriteFontFamily
         GetFamilyNames: *const fn (*IDWriteFontFamily, names: *?*IDWriteLocalizedStrings) callconv(.winapi) HRESULT,
-        MatchClosestFont: Reserved,
+        GetFirstMatchingFont: Reserved,
+        GetMatchingFonts: *const fn (
+            *IDWriteFontFamily,
+            weight: DWRITE_FONT_WEIGHT,
+            stretch: DWRITE_FONT_STRETCH,
+            style: DWRITE_FONT_STYLE,
+            matchingFonts: *?*IDWriteFontList,
+        ) callconv(.winapi) HRESULT,
     };
 
     pub inline fn Release(self: *IDWriteFontFamily) u32 {
@@ -568,6 +607,19 @@ pub const IDWriteFontFamily = extern struct {
 
     pub inline fn GetFamilyNames(self: *IDWriteFontFamily, names: *?*IDWriteLocalizedStrings) HRESULT {
         return self.vtable.GetFamilyNames(self, names);
+    }
+
+    /// The family's fonts ranked best first for the requested weight,
+    /// stretch and style. This is the same matcher Windows Terminal uses
+    /// to pick a face, so we do not rank the family ourselves.
+    pub inline fn GetMatchingFonts(
+        self: *IDWriteFontFamily,
+        weight: DWRITE_FONT_WEIGHT,
+        stretch: DWRITE_FONT_STRETCH,
+        style: DWRITE_FONT_STYLE,
+        matchingFonts: *?*IDWriteFontList,
+    ) HRESULT {
+        return self.vtable.GetMatchingFonts(self, weight, stretch, style, matchingFonts);
     }
 };
 
@@ -885,6 +937,7 @@ test "vtable pointer sizes" {
     try std.testing.expectEqual(ptr_size, @sizeOf(IDWriteFontCollection));
     try std.testing.expectEqual(ptr_size, @sizeOf(IDWriteFontCollection1));
     try std.testing.expectEqual(ptr_size, @sizeOf(IDWriteFontFamily));
+    try std.testing.expectEqual(ptr_size, @sizeOf(IDWriteFontList));
     try std.testing.expectEqual(ptr_size, @sizeOf(IDWriteFont));
     try std.testing.expectEqual(ptr_size, @sizeOf(IDWriteFontFace));
     try std.testing.expectEqual(ptr_size, @sizeOf(IDWriteFontFile));
