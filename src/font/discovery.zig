@@ -343,6 +343,18 @@ pub const DirectWrite = struct {
     ) usize {
         assert(out.len >= candidates.len);
 
+        // A styled request that DirectWrite's own best match for is a
+        // simulation is a request the family cannot fill: it ships no real
+        // face of that style. The faces behind the simulation are of a
+        // different style, and taking one of them answers the wrong question
+        // (a family with Regular, Italic and Bold Italic but no upright Bold
+        // would answer a bold request with Bold Italic). Stopping here leaves
+        // the style to Collection.completeStyles, which synthesizes it from
+        // the regular face: the path Bahnschrift italic and Lucida Console
+        // bold are meant to take. A regular request is left alone: it asks
+        // for one style, so there is no missing style to notice.
+        if (request.styled and candidates.len > 0 and candidates[0].simulated) return 0;
+
         if (!request.codepoint) {
             var n: usize = 0;
             for (candidates, 0..) |candidate, i| {
@@ -2184,5 +2196,51 @@ test "directwrite candidate order: nothing in, nothing out" {
         &.{ .{ .simulated = true }, .{ .simulated = true } },
         .{ .styled = false, .codepoint = true },
         &.{},
+    );
+}
+
+test "directwrite candidate order: a simulated best match ends a styled request" {
+    // A family that ships Regular, Italic and Bold Italic but no upright
+    // Bold: DirectWrite ranks its synthetic bold first and the faces behind
+    // it are the wrong style. Answering a bold request with the Bold Italic
+    // face is worse than answering nothing, and nothing is what
+    // completeStyles needs to synthesize the bold from the regular face.
+    try testOrderFaceCandidates(
+        &.{
+            .{ .simulated = true }, // bold upright, simulated
+            .{}, // bold italic, real
+            .{}, // regular, real
+        },
+        .{ .styled = true, .codepoint = false },
+        &.{},
+    );
+
+    // A codepoint does not make the missing style real.
+    try testOrderFaceCandidates(
+        &.{
+            .{ .simulated = true, .has_codepoint = true },
+            .{ .has_codepoint = true },
+            .{},
+        },
+        .{ .styled = true, .codepoint = true },
+        &.{},
+    );
+}
+
+test "directwrite candidate order: a simulation only ends a styled request" {
+    // A styled request whose best match is a real face is ranked as before,
+    // simulation or not.
+    try testOrderFaceCandidates(
+        &.{ .{}, .{ .simulated = true }, .{} },
+        .{ .styled = true, .codepoint = false },
+        &.{ 0, 2 },
+    );
+
+    // A regular request is ranked as before too: it asks for one style, so
+    // the first entry says nothing about whether the family has that style.
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true }, .{} },
+        .{ .styled = false, .codepoint = false },
+        &.{1},
     );
 }
