@@ -1729,16 +1729,23 @@ pub const StreamHandler = struct {
                 self.surfaceMessageWriter(.prompt_input);
             },
 
-            // Handled by Terminal, no special handling by us
-            // A new shell prompt (OSC 133 A) ends every working and
-            // blocked program status record. The terminal still handles
-            // the fresh line itself below.
-            .fresh_line_new_prompt => self.programStatusEvent(.prompt_start),
+            // A new shell prompt ends every working and blocked program
+            // status record. Shells start one with A, with N, or with a
+            // primary P alone (Ghostty's zsh integration once a theme
+            // rebuilt PS1, bash under ble.sh), as upstream reads them. A
+            // secondary, right or continuation P is the same prompt going
+            // on. The terminal still handles the marks themselves below.
+            .fresh_line_new_prompt,
+            .new_command,
+            => self.programStatusEvent(.prompt_start),
+            .prompt_start => switch (cmd.readOption(.prompt_kind) orelse .initial) {
+                .initial => self.programStatusEvent(.prompt_start),
+                .right, .continuation, .secondary => {},
+            },
 
+            // Handled by Terminal, no special handling by us
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
-            .new_command,
-            .prompt_start,
             => {},
         }
 
@@ -3445,8 +3452,23 @@ test "program status: opted in, RIS is a reset and OSC 133 A a prompt start; DEC
     try testing.expectEqual(@as(usize, 1), drainProgramStatus(&th, &seen));
     try testing.expectEqual(apprt.action.ProgramStatus.Event.prompt_start, seen[0].event);
 
-    // The other prompt marks are not a new prompt.
+    // A shell may start its prompt without an A: Ghostty's own zsh
+    // integration sends only P;k=i once a theme rebuilt PS1, and bash
+    // under ble.sh does the same. N and a primary P are a new prompt too.
+    for ([_][]const u8{
+        "\x1b]133;P;k=i\x07",
+        "\x1b]133;P\x07",
+        "\x1b]133;N\x07",
+    }) |mark| {
+        th.feed(mark);
+        try testing.expectEqual(@as(usize, 1), drainProgramStatus(&th, &seen));
+        try testing.expectEqual(apprt.action.ProgramStatus.Event.prompt_start, seen[0].event);
+    }
+
+    // The other prompt marks are not a new prompt: a secondary, right or
+    // continuation prompt is the same prompt going on.
     th.feed("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
+    th.feed("\x1b]133;P;k=s\x07\x1b]133;P;k=r\x07\x1b]133;P;k=c\x07");
     try testing.expectEqual(@as(usize, 0), drainProgramStatus(&th, &seen));
 
     th.feed("\x1bc");
