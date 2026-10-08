@@ -11,9 +11,11 @@
 
         // Zig libs
         .libxev = .{
-            // mitchellh/libxev
-            .url = "https://deps.files.ghostty.org/libxev-9ce8e8e6ff89e583258a7f8e7adeeeaeae8611bf.tar.gz",
-            .hash = "libxev-0.0.0-86vtcwIRFADbH4hk-EjROXxlrKIRPQdA41XiTSytYO-F",
+            // deblasis/libxev: mitchellh/libxev 9ce8e8e6ff plus an IOCP fix
+            // (a timer canceled before it started stays active until its
+            // callback), tagged wintty-2026.10.07-iocp-cancel-before-start.
+            .url = "https://github.com/deblasis/libxev/archive/7f24148fc1884f69ffcfeb9568c949f0c3e7014e.tar.gz",
+            .hash = "libxev-0.0.0-86vtc5YjFACv9TvQj8m4HG6bSESzvha7In1vFnszQR02",
             .lazy = true,
         },
         .vaxis = .{
