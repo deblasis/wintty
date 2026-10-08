@@ -272,7 +272,9 @@ pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*OSCCommand {
 
     const data = cap.trailing();
     if (data.len > max_body_bytes) {
-        log.warn("OSC 7501 sequence too long len={d}", .{data.len});
+        // Debug, not warn: a program can send these as fast as it can write,
+        // and a log line per report would be a storm in the embedder's log.
+        log.debug("OSC 7501 sequence too long len={d}", .{data.len});
         parser.state = .invalid;
         return null;
     }
@@ -283,7 +285,7 @@ pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*OSCCommand {
     }
 
     const state = validate(data) catch |err| {
-        log.warn("invalid OSC 7501 report err={}", .{err});
+        log.debug("invalid OSC 7501 report err={}", .{err});
         parser.state = .invalid;
         return null;
     };
