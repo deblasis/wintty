@@ -2293,3 +2293,874 @@ test "DirectX12: last-frame snapshot tracks the presented slot" {
         }
     }
 }
+
+// ---- SRV tables: an in-flight table covers only what its binding owns ----
+//
+// Every SRV range in the root signatures is DATA_STATIC and not
+// DESCRIPTORS_VOLATILE, so each descriptor a bound table covers must stay
+// valid and unchanged until the GPU has finished the command list, whether
+// or not a shader reads it. The retirement queue frees a texture's resource
+// and slot on the fence of the first submission after the retire. That is
+// safe only while no LATER submission's table covers the slot, and a table
+// wider than the textures bound to it breaks exactly that: it reaches into
+// neighbouring slots owned by other textures, retired ones included.
+//
+// The debug layer answers the final release with
+// OBJECT_DELETED_WHILE_STILL_IN_USE (921) and a rewrite of a covered slot
+// with STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE (1001). 921 is a
+// CORRUPTION message, which the layer raises as exception 0x87D whatever
+// SetBreakOnSeverity says, and unhandled that kills the process with exit
+// code 2173. CorruptionTrap counts and resumes that raise, so a regression
+// is a failed assertion in one test instead of a dead test binary.
+
+const Dx12Api = @import("../DirectX12.zig");
+const font = @import("../../font/main.zig");
+
+const msg_object_deleted_while_still_in_use: u32 = 921;
+const msg_static_descriptor_invalid_descriptor_change: u32 = 1001;
+
+/// A vectored exception handler that counts the debug layer's CORRUPTION
+/// raise and resumes past it. Process-wide while installed; the tests that
+/// install it do not run concurrently with anything else that raises 0x87D.
+const CorruptionTrap = struct {
+    handle: *anyopaque,
+
+    const code: u32 = 0x87D;
+    var hits: std.atomic.Value(u32) = .init(0);
+
+    const EXCEPTION_RECORD = extern struct {
+        ExceptionCode: u32,
+        ExceptionFlags: u32,
+        ExceptionRecord: ?*EXCEPTION_RECORD,
+        ExceptionAddress: ?*anyopaque,
+        NumberParameters: u32,
+        ExceptionInformation: [15]usize,
+    };
+    const EXCEPTION_POINTERS = extern struct {
+        ExceptionRecord: *EXCEPTION_RECORD,
+        ContextRecord: *anyopaque,
+    };
+    const Handler = *const fn (*EXCEPTION_POINTERS) callconv(.winapi) i32;
+    extern "kernel32" fn AddVectoredExceptionHandler(first: u32, handler: Handler) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn RemoveVectoredExceptionHandler(handle: *anyopaque) callconv(.winapi) u32;
+
+    fn handler(info: *EXCEPTION_POINTERS) callconv(.winapi) i32 {
+        const rec = info.ExceptionRecord;
+        if (rec.ExceptionCode != code) return 0; // EXCEPTION_CONTINUE_SEARCH
+        _ = hits.fetchAdd(1, .monotonic);
+        // A noncontinuable raise cannot be resumed; let it end the run.
+        if (rec.ExceptionFlags & 1 != 0) return 0;
+        return -1; // EXCEPTION_CONTINUE_EXECUTION
+    }
+
+    fn install() !CorruptionTrap {
+        hits.store(0, .monotonic);
+        const h = AddVectoredExceptionHandler(1, &handler) orelse return error.VectoredHandlerFailed;
+        return .{ .handle = h };
+    }
+
+    fn uninstall(self: CorruptionTrap) void {
+        _ = RemoveVectoredExceptionHandler(self.handle);
+    }
+
+    fn take() u32 {
+        return hits.swap(0, .monotonic);
+    }
+};
+
+/// ID3D12InfoQueue::SetBreakOnSeverity is vtable slot 31 (after the 28
+/// storage/retrieval filter methods, AddMessage, AddApplicationMessage and
+/// SetBreakOnCategory).
+fn infoQueueSetBreakOnSeverity(iq: *InfoQueue, severity: u32, enable: bool) void {
+    const slots: [*]const *const anyopaque = @ptrCast(iq.vtable);
+    const F = *const fn (*InfoQueue, u32, i32) callconv(.winapi) com.HRESULT;
+    const f: F = @ptrCast(slots[31]);
+    _ = f(iq, severity, if (enable) 1 else 0);
+}
+
+/// Count stored debug-layer messages of CORRUPTION or ERROR severity, any
+/// ID, printing each one.
+fn infoQueueCountSevere(iq: *InfoQueue) usize {
+    const alloc = std.testing.allocator;
+    var hits: usize = 0;
+    const n = iq.vtable.GetNumStoredMessages(iq);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        var len: usize = 0;
+        if (com.FAILED(iq.vtable.GetMessage(iq, i, null, &len))) continue;
+        const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch continue;
+        defer alloc.free(buf);
+        const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+        if (iq.vtable.GetMessage(iq, i, msg, &len) != 0) continue;
+        if (msg.Severity > 1) continue;
+        hits += 1;
+        const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+        std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+    }
+    return hits;
+}
+
+/// Count stored debug-layer messages with this ID, printing each one.
+fn infoQueueCount(iq: *InfoQueue, id: u32) usize {
+    const alloc = std.testing.allocator;
+    var hits: usize = 0;
+    const n = iq.vtable.GetNumStoredMessages(iq);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        var len: usize = 0;
+        if (com.FAILED(iq.vtable.GetMessage(iq, i, null, &len))) continue;
+        const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch continue;
+        defer alloc.free(buf);
+        const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+        if (iq.vtable.GetMessage(iq, i, msg, &len) != 0) continue;
+        if (msg.ID != id) continue;
+        hits += 1;
+        const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+        std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+    }
+    return hits;
+}
+
+/// A headless device with the production heaps, option builders, shaders
+/// and render pass, plus the means to keep one submission provably in
+/// flight while the retirement queue runs. Initialised in place: the
+/// textures it hands out point at its heaps.
+const CoverageRig = struct {
+    api: Dx12Api,
+    iq: *InfoQueue,
+    trap: CorruptionTrap,
+    shaders: Shaders,
+    srv_heap: DescriptorHeap,
+    sampler_heap: DescriptorHeap,
+    rtv_heap: DescriptorHeap,
+    /// Two recording contexts, like two frame slots: the second one records
+    /// while the first one's submission is still executing.
+    allocators: [2]*d3d12.ID3D12CommandAllocator,
+    lists: [2]*d3d12.ID3D12GraphicsCommandList,
+    current: usize,
+    list_open: bool,
+    /// Holds a submission on the GPU until the test opens it. See hold.
+    gate: *d3d12.ID3D12Fence,
+    gate_value: u64,
+    out: Texture,
+    uniforms: buffer_mod.Buffer(shaders_mod.Uniforms),
+    cells: buffer_mod.Buffer(shaders_mod.CellText),
+    cells_bg: buffer_mod.Buffer(shaders_mod.CellBg),
+    images: buffer_mod.Buffer(shaders_mod.Image),
+    bg_image: buffer_mod.Buffer(shaders_mod.BgImage),
+    sampler: Sampler,
+
+    pub const Verdict = struct {
+        deleted_in_use: usize,
+        static_changed: usize,
+        raised: u32,
+        /// Every CORRUPTION or ERROR message, whatever its ID.
+        severe: usize,
+    };
+
+    fn init(self: *CoverageRig) !void {
+        if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+        // The debug layer is the oracle, and only Debug builds enable it.
+        if (comptime builtin.mode != .Debug) return error.SkipZigTest;
+        const alloc = std.testing.allocator;
+
+        self.api = .{ .allocator = alloc };
+        self.api.dev = Device.init(.{ .shared_texture = .{ .width = 64, .height = 64 } }, .{}) catch return error.SkipZigTest;
+        errdefer self.api.dev.?.deinit();
+        const d = &self.api.dev.?;
+
+        var iq: ?*InfoQueue = null;
+        if (com.FAILED(d.device.vtable.QueryInterface(d.device, &InfoQueue.IID, @ptrCast(&iq))) or iq == null)
+            return error.SkipZigTest;
+        self.iq = iq.?;
+        errdefer _ = self.iq.vtable.Release(self.iq);
+        infoQueueSetBreakOnSeverity(self.iq, 0, false);
+        errdefer infoQueueSetBreakOnSeverity(self.iq, 0, true);
+
+        self.trap = try CorruptionTrap.install();
+        errdefer self.trap.uninstall();
+
+        self.shaders = try Shaders.init(d.device, alloc, &.{});
+        errdefer self.shaders.deinit(alloc);
+
+        self.srv_heap = try DescriptorHeap.init(d.device, .CBV_SRV_UAV, 16, true);
+        errdefer self.srv_heap.deinit();
+        self.sampler_heap = try DescriptorHeap.init(d.device, .SAMPLER, 4, true);
+        errdefer self.sampler_heap.deinit();
+        self.rtv_heap = try DescriptorHeap.init(d.device, .RTV, 8, false);
+        errdefer self.rtv_heap.deinit();
+        self.api.srv_heap = &self.srv_heap;
+        self.api.sampler_heap = &self.sampler_heap;
+        self.api.rtv_heap = &self.rtv_heap;
+
+        var made: usize = 0;
+        errdefer for (0..made) |i| {
+            _ = self.lists[i].Release();
+            _ = self.allocators[i].Release();
+        };
+        while (made < 2) : (made += 1) {
+            var ca: ?*d3d12.ID3D12CommandAllocator = null;
+            if (com.FAILED(d.device.CreateCommandAllocator(.DIRECT, &d3d12.ID3D12CommandAllocator.IID, @ptrCast(&ca))) or ca == null)
+                return error.CommandAllocatorCreationFailed;
+            var cl: ?*d3d12.ID3D12GraphicsCommandList = null;
+            if (com.FAILED(d.device.CreateCommandList(0, .DIRECT, ca.?, null, &d3d12.ID3D12GraphicsCommandList.IID, @ptrCast(&cl))) or cl == null) {
+                _ = ca.?.Release();
+                return error.CommandListCreationFailed;
+            }
+            // Created open; the second one is closed until it is first used.
+            if (made == 1) _ = cl.?.Close();
+            self.allocators[made] = ca.?;
+            self.lists[made] = cl.?;
+        }
+        self.current = 0;
+        self.list_open = true;
+        self.api.pending_command_list = self.lists[0];
+
+        {
+            var gate: ?*d3d12.ID3D12Fence = null;
+            if (com.FAILED(d.device.CreateFence(0, .NONE, &d3d12.ID3D12Fence.IID, @ptrCast(&gate))) or gate == null)
+                return error.FenceCreationFailed;
+            self.gate = gate.?;
+            self.gate_value = 0;
+        }
+        errdefer _ = self.gate.Release();
+
+        // The render target takes SRV slot 0, so the textures a test makes
+        // start at slot 1.
+        self.out = try Texture.init(.{
+            .device = d.device,
+            .command_list = self.lists[0],
+            .srv_heap = &self.srv_heap,
+            .rtv_heap = &self.rtv_heap,
+            .retire = d.retirement,
+            .pixel_format = .B8G8R8A8_UNORM,
+            .render_target = true,
+        }, 64, 64, null);
+        errdefer self.out.deinit();
+
+        const bopts: buffer_mod.Options = .{ .device = d.device, .retire = d.retirement };
+        self.uniforms = try .init(bopts, 1);
+        errdefer self.uniforms.deinit();
+        try self.uniforms.sync(&.{std.mem.zeroes(shaders_mod.Uniforms)});
+        self.cells = try .init(bopts, 1);
+        errdefer self.cells.deinit();
+        try self.cells.sync(&.{std.mem.zeroes(shaders_mod.CellText)});
+        self.cells_bg = try .init(bopts, 1);
+        errdefer self.cells_bg.deinit();
+        try self.cells_bg.sync(&.{std.mem.zeroes(shaders_mod.CellBg)});
+        self.images = try .init(bopts, 1);
+        errdefer self.images.deinit();
+        try self.images.sync(&.{std.mem.zeroes(shaders_mod.Image)});
+        self.bg_image = try .init(bopts, 1);
+        errdefer self.bg_image.deinit();
+        try self.bg_image.sync(&.{std.mem.zeroes(shaders_mod.BgImage)});
+        self.sampler = try Sampler.init(.{ .device = d.device, .sampler_heap = &self.sampler_heap, .retire = d.retirement });
+        errdefer self.sampler.deinit();
+
+        // Flush the setup work and start from an idle GPU.
+        _ = try self.submit();
+        try d.waitForGpu();
+        try self.open();
+    }
+
+    /// Drain the GPU, then tear everything down. Whatever is still retired
+    /// is freed by the drain while the heaps it points into are alive.
+    fn deinit(self: *CoverageRig) void {
+        const alloc = std.testing.allocator;
+        const d = &self.api.dev.?;
+        // A list left open by a failed test is closed so it can be released,
+        // and a held submission is let go so the drain can finish.
+        if (self.list_open) _ = self.list().Close();
+        self.openGate();
+        d.waitForGpu() catch {};
+        self.sampler.deinit();
+        self.bg_image.deinit();
+        self.images.deinit();
+        self.cells_bg.deinit();
+        self.cells.deinit();
+        self.uniforms.deinit();
+        self.out.deinit();
+        d.waitForGpu() catch {};
+        _ = self.gate.Release();
+        for (self.lists, self.allocators) |cl, ca| {
+            _ = cl.Release();
+            _ = ca.Release();
+        }
+        self.rtv_heap.deinit();
+        self.sampler_heap.deinit();
+        self.srv_heap.deinit();
+        self.shaders.deinit(alloc);
+        self.trap.uninstall();
+        infoQueueSetBreakOnSeverity(self.iq, 0, true);
+        _ = self.iq.vtable.Release(self.iq);
+        self.api.dev.?.deinit();
+    }
+
+    fn dev(self: *CoverageRig) *Device {
+        return &self.api.dev.?;
+    }
+
+    fn list(self: *CoverageRig) *d3d12.ID3D12GraphicsCommandList {
+        return self.lists[self.current];
+    }
+
+    /// Reopen the current recording context. Its previous submission must
+    /// be complete.
+    fn open(self: *CoverageRig) !void {
+        if (com.FAILED(self.allocators[self.current].Reset())) return error.AllocatorResetFailed;
+        if (com.FAILED(self.list().Reset(self.allocators[self.current], null))) return error.CommandListResetFailed;
+        self.api.pending_command_list = self.list();
+        self.list_open = true;
+    }
+
+    /// Move to the other recording context, the way the next frame slot
+    /// records while this one's submission is still executing.
+    fn rotate(self: *CoverageRig) !void {
+        self.current ^= 1;
+        try self.open();
+    }
+
+    /// Close and execute the current list and signal the fence the way
+    /// drawFrameEnd does: everything retired so far is sealed against it.
+    fn submit(self: *CoverageRig) !u64 {
+        const d = self.dev();
+        self.list_open = false;
+        if (com.FAILED(self.list().Close())) return error.CommandListCloseFailed;
+        const lists = [_]*d3d12.ID3D12GraphicsCommandList{self.list()};
+        d.command_queue.ExecuteCommandLists(1, &lists);
+        const v = d.fence_value.fetchAdd(1, .release) + 1;
+        if (com.FAILED(d.command_queue.Signal(d.fence, v))) return error.FenceSignalFailed;
+        d.retirement.seal(v);
+        return v;
+    }
+
+    fn waitFor(self: *CoverageRig, v: u64) void {
+        const d = self.dev();
+        if (d.fence.GetCompletedValue() < v) {
+            _ = d.fence.SetEventOnCompletion(v, d.fence_event);
+            _ = d3d12.WaitForSingleObject(d.fence_event, d3d12.INFINITE);
+        }
+    }
+
+    /// Submit the current list, wait for it, and reopen it.
+    fn submitAndWait(self: *CoverageRig) !u64 {
+        const v = try self.submit();
+        self.waitFor(v);
+        try self.open();
+        return v;
+    }
+
+    /// drawFrameStart's collect, verbatim.
+    fn collect(self: *CoverageRig) void {
+        const d = self.dev();
+        d.retirement.collect(d.fence.GetCompletedValue());
+    }
+
+    /// Hold the next submission on the GPU until verdict (or teardown)
+    /// opens the gate: the queue waits on a fence only this test signals,
+    /// so the frame cannot complete before the test has acted and checked,
+    /// however slow the host is.
+    ///
+    /// While held, the list has been handed to ExecuteCommandLists but not
+    /// yet run. The debug layer checks it when the gate opens and it really
+    /// executes, and reports the defect then: OBJECT_DELETED_WHILE_STILL_IN_USE
+    /// as "deleted prior to executing the command list", and
+    /// STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE against the
+    /// CreateShaderResourceView that changed the bound descriptor. It does
+    /// not raise 0x87D on that path. The deliberate-violation test runs
+    /// under the same hold and has to see both reports, and the covered
+    /// scenarios are red on the tree without the fix.
+    fn hold(self: *CoverageRig) !void {
+        self.gate_value += 1;
+        if (com.FAILED(self.dev().command_queue.Wait(self.gate, self.gate_value))) return error.QueueWaitFailed;
+    }
+
+    fn openGate(self: *CoverageRig) void {
+        _ = self.gate.Signal(self.gate_value);
+    }
+
+    /// One render pass into `out` with one step, through the production
+    /// RenderPass.
+    fn draw(self: *CoverageRig, step: RenderPassMod.Step) void {
+        var pass = RenderPassMod.begin(.{
+            .command_list = self.list(),
+            .srv_heap = &self.srv_heap,
+            .sampler_heap = &self.sampler_heap,
+            .attachments = &.{.{
+                .target = .{ .texture = self.out },
+                .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
+            }},
+        });
+        pass.step(step);
+        pass.complete();
+    }
+
+    /// The cell pass's step, as generic.zig records it.
+    fn drawCellText(self: *CoverageRig, grayscale: Texture, color: Texture) void {
+        self.draw(.{
+            .pipeline = self.shaders.pipelines.cell_text,
+            .uniforms = self.uniforms.buffer,
+            .buffers = &.{ self.cells.buffer, self.cells_bg.buffer },
+            .textures = &.{ grayscale, color },
+            .draw = .{ .type = .triangle_strip, .vertex_count = 4, .instance_count = 1 },
+        });
+    }
+
+    /// A kitty image's step, as image.zig records it.
+    fn drawImage(self: *CoverageRig, texture: Texture) void {
+        self.draw(.{
+            .pipeline = self.shaders.pipelines.image,
+            .uniforms = self.uniforms.buffer,
+            .buffers = &.{self.images.buffer},
+            .textures = &.{texture},
+            .draw = .{ .type = .triangle_strip, .vertex_count = 4 },
+        });
+    }
+
+    /// The background image's step, as generic.zig records it.
+    fn drawBgImage(self: *CoverageRig, texture: Texture) void {
+        self.draw(.{
+            .pipeline = self.shaders.pipelines.bg_image,
+            .uniforms = self.uniforms.buffer,
+            .buffers = &.{self.bg_image.buffer},
+            .textures = &.{texture},
+            .samplers = &.{self.sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+    }
+
+    /// Start counting debug-layer reports from here.
+    fn watch(self: *CoverageRig) void {
+        self.iq.vtable.ClearStoredMessages(self.iq);
+        _ = CorruptionTrap.take();
+    }
+
+    /// Assert that `v` is still executing: without that the scenario
+    /// proves nothing.
+    fn expectInFlight(self: *CoverageRig, v: u64) !void {
+        try std.testing.expect(self.dev().fence.GetCompletedValue() < v);
+    }
+
+    /// Drain the GPU and report everything the debug layer said since
+    /// `watch`.
+    fn verdict(self: *CoverageRig, name: []const u8) !Verdict {
+        if (self.list_open) {
+            self.list_open = false;
+            _ = self.list().Close();
+        }
+        self.openGate();
+        try self.dev().waitForGpu();
+        try self.open();
+        const v: Verdict = .{
+            .deleted_in_use = infoQueueCount(self.iq, msg_object_deleted_while_still_in_use),
+            .static_changed = infoQueueCount(self.iq, msg_static_descriptor_invalid_descriptor_change),
+            .raised = CorruptionTrap.take(),
+            .severe = infoQueueCountSevere(self.iq),
+        };
+        std.debug.print("SRV table {s}: OBJECT_DELETED_WHILE_STILL_IN_USE={d} STATIC_DESCRIPTOR_INVALID_DESCRIPTOR_CHANGE={d} 0x87D raised={d} severe={d}\n", .{
+            name, v.deleted_in_use, v.static_changed, v.raised, v.severe,
+        });
+        return v;
+    }
+
+    /// No deleted-object or static-descriptor report. The 0x87D count is
+    /// printed but not asserted: under the hold the layer reports without
+    /// raising (see hold), so an assertion on it could never fail.
+    fn expectClean(v: Verdict) !void {
+        try std.testing.expectEqual(@as(usize, 0), v.deleted_in_use);
+        try std.testing.expectEqual(@as(usize, 0), v.static_changed);
+    }
+};
+
+const RetiredNeighbour = enum { bg_image, image };
+
+/// The interleaving at the heart of it, with nothing else in it:
+///
+///   1. textures take SRV slots through the production option builders:
+///      t0, a neighbour and the victim (covered), or the victim first
+///      (control) so it sits below t0, outside every table bound from t0;
+///   2. the victim is retired (a frame state torn down when its tab is
+///      hidden) and the next submission seals it at X, which the GPU then
+///      reaches;
+///   3. a later frame draws with t0 as its only texture and is kept in
+///      flight;
+///   4. drawFrameStart's collect runs: X is complete, so the victim is
+///      final-released and its slot rewritten while that frame executes.
+///
+/// Step 4 is clean only if the frame's table does not cover the victim.
+fn runRetiredNeighbour(covered: bool, kind: RetiredNeighbour) !void {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const opts = switch (kind) {
+        .bg_image => rig.api.imageTextureOptions(.rgba, false),
+        .image => rig.api.imageTextureOptions(.bgra, false),
+    };
+    const early_victim: ?Texture = if (covered) null else try Texture.init(opts, 4, 4, null);
+    const t0 = try Texture.init(opts, 4, 4, null);
+    defer t0.deinit();
+    const neighbour = try Texture.init(opts, 4, 4, null);
+    defer neighbour.deinit();
+    const victim = early_victim orelse try Texture.init(opts, 4, 4, null);
+    try std.testing.expectEqual(@as(u32, if (covered) 1 else 2), t0.srv.index);
+    try std.testing.expectEqual(@as(u32, if (covered) 3 else 1), victim.srv.index);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+    victim.deinit();
+    _ = try rig.submitAndWait();
+
+    try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
+    switch (kind) {
+        .bg_image => rig.drawBgImage(t0),
+        .image => rig.drawImage(t0),
+    }
+    const frame = try rig.submit();
+    rig.collect();
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict(@tagName(kind)));
+}
+
+// Control first: the victim in a slot no bound table covers. Green on any
+// code; it shows the rig itself produces no reports.
+test "SRV table: control, a retired texture below every bound table is released cleanly" {
+    try runRetiredNeighbour(false, .bg_image);
+}
+
+test "SRV table: a retired texture two slots above a bound background image is not inside its table" {
+    try runRetiredNeighbour(true, .bg_image);
+}
+
+test "SRV table: a retired texture two slots above a bound kitty image is not inside its table" {
+    try runRetiredNeighbour(true, .image);
+}
+
+// The sequence the app crashed on: hide the tab, show it, hide it, show it,
+// draw. Each show builds a fresh atlas generation through the production
+// initAtlasTexture and the slots of the previous ones recycle lowest-first,
+// so the newest generation lands below a retired one. The frame that draws
+// it is still executing when the retired generation's fence is reached.
+test "SRV table: hide, show, hide, show, then draw frees the retired atlases cleanly" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const gray1: font.Atlas = .{ .data = undefined, .size = 1, .format = .grayscale };
+    const color1: font.Atlas = .{ .data = undefined, .size = 1, .format = .bgra };
+
+    // The first generation, drawn once.
+    const a_gray = try rig.api.initAtlasTexture(&gray1);
+    const a_color = try rig.api.initAtlasTexture(&color1);
+    rig.drawCellText(a_gray, a_color);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+
+    // Hide, then show before the GPU is told anything: the second
+    // generation is allocated while the first one's slots are still owned.
+    a_gray.deinit();
+    a_color.deinit();
+    const b_gray = try rig.api.initAtlasTexture(&gray1);
+    const b_color = try rig.api.initAtlasTexture(&color1);
+    rig.drawCellText(b_gray, b_color);
+    _ = try rig.submitAndWait();
+    rig.collect();
+
+    // Hide again. One more submission seals the second generation (the
+    // first frame after a show draws another frame slot's state), and the
+    // GPU reaches it.
+    b_gray.deinit();
+    b_color.deinit();
+    _ = try rig.submitAndWait();
+
+    // Show again: the third generation reuses the first one's slots, right
+    // below the retired second one, and its frame is kept in flight while
+    // the next drawFrameStart collects.
+    const c_gray = try rig.api.initAtlasTexture(&gray1);
+    defer c_gray.deinit();
+    const c_color = try rig.api.initAtlasTexture(&color1);
+    defer c_color.deinit();
+    try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
+    rig.drawCellText(c_gray, c_color);
+    const frame = try rig.submit();
+    rig.collect();
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict("hide/show twice"));
+}
+
+// A grayscale atlas that grows twice while the frame that binds it is still
+// executing: each grow replaces the texture (replaceAtlasTexture), and the
+// second one rewrites slots that frame's table covers if the table reaches
+// past the atlas textures it was bound for.
+test "SRV table: an atlas that grows twice under an in-flight frame rewrites no slot that frame covers" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const gray1: font.Atlas = .{ .data = undefined, .size = 1, .format = .grayscale };
+    const gray2: font.Atlas = .{ .data = undefined, .size = 2, .format = .grayscale };
+    const gray4: font.Atlas = .{ .data = undefined, .size = 4, .format = .grayscale };
+    const color1: font.Atlas = .{ .data = undefined, .size = 1, .format = .bgra };
+
+    var gray = try rig.api.initAtlasTexture(&gray1);
+    defer gray.deinit();
+    const color = try rig.api.initAtlasTexture(&color1);
+    defer color.deinit();
+    rig.drawCellText(gray, color);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+
+    // First grow, then the frame that draws the grown atlas, kept in flight.
+    {
+        const grown = try rig.api.initAtlasTexture(&gray2);
+        gray.deinit();
+        gray = grown;
+    }
+    try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
+    rig.drawCellText(gray, color);
+    const frame = try rig.submit();
+
+    // The next frame records on the other frame slot and grows the atlas
+    // again while the first one executes.
+    try rig.rotate();
+    {
+        const grown = try rig.api.initAtlasTexture(&gray4);
+        gray.deinit();
+        gray = grown;
+    }
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict("atlas grows twice"));
+}
+
+// A custom-shader state resized while the frame that sampled its back
+// texture is still executing: FrameState.resize runs ahead of the frame
+// slot's fence wait. The real CustomShaderState is driven here, so what is
+// tested is what the renderer does, sampled once through the main root
+// signature (bg_image) and once through the post-pass root signature the
+// custom shaders actually use.
+const CustomShaderState = @import("../generic.zig").Renderer(Dx12Api).CustomShaderState;
+
+const ResizeSampler = enum { main, post };
+
+extern "d3dcompiler" fn D3DCompile(
+    src: [*]const u8,
+    src_len: usize,
+    name: ?[*:0]const u8,
+    defines: ?*const anyopaque,
+    include: ?*anyopaque,
+    entry: [*:0]const u8,
+    target: [*:0]const u8,
+    flags1: u32,
+    flags2: u32,
+    code: *?*d3d12.ID3DBlob,
+    errors: *?*d3d12.ID3DBlob,
+) callconv(.winapi) com.HRESULT;
+
+/// A post-pass shader in the shape the custom shaders take: a full-screen
+/// triangle sampling t0 with s0 through the post root signature. Compiled
+/// with the system's d3dcompiler, since the DXC the custom-shader path
+/// uses is not shipped with the tests.
+const post_test_hlsl =
+    \\Texture2D<float4> src : register(t0);
+    \\SamplerState samp : register(s0);
+    \\float4 VS(uint id : SV_VertexID) : SV_POSITION {
+    \\    float2 uv = float2((id << 1) & 2, id & 2);
+    \\    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    \\}
+    \\float4 PS(float4 pos : SV_POSITION) : SV_TARGET {
+    \\    return src.Sample(samp, pos.xy / 64.0);
+    \\}
+;
+
+fn compilePostStage(entry: [*:0]const u8, target: [*:0]const u8) !*d3d12.ID3DBlob {
+    var code: ?*d3d12.ID3DBlob = null;
+    var errors: ?*d3d12.ID3DBlob = null;
+    const hr = D3DCompile(post_test_hlsl.ptr, post_test_hlsl.len, "post_test", null, null, entry, target, 0, 0, &code, &errors);
+    if (errors) |e| {
+        const msg: [*]const u8 = @ptrCast(e.GetBufferPointer());
+        std.debug.print("post test shader: {s}\n", .{msg[0..e.GetBufferSize()]});
+        _ = e.Release();
+    }
+    if (com.FAILED(hr) or code == null) return error.SkipZigTest;
+    return code.?;
+}
+
+const PostPipeline = struct {
+    root_signature: *d3d12.ID3D12RootSignature,
+    pipeline: Pipeline,
+
+    fn init(device: *d3d12.ID3D12Device) !PostPipeline {
+        const vs = try compilePostStage("VS", "vs_5_1");
+        defer _ = vs.Release();
+        const ps = try compilePostStage("PS", "ps_5_1");
+        defer _ = ps.Release();
+        const root_signature = try Pipeline.createPostRootSignature(device);
+        errdefer _ = root_signature.Release();
+        const vs_code = @as([*]const u8, @ptrCast(vs.GetBufferPointer()))[0..vs.GetBufferSize()];
+        const ps_code = @as([*]const u8, @ptrCast(ps.GetBufferPointer()))[0..ps.GetBufferSize()];
+        // Built the way shaders.zig builds a custom shader's pipeline.
+        const opts: Pipeline.Options = if (comptime @hasField(Pipeline.Options, "texture_tables")) .{
+            .device = device,
+            .root_signature = root_signature,
+            .texture_tables = &@field(Pipeline, "post_texture_tables"),
+            .vs_bytecode = vs_code,
+            .ps_bytecode = ps_code,
+        } else .{
+            .device = device,
+            .root_signature = root_signature,
+            .vs_bytecode = vs_code,
+            .ps_bytecode = ps_code,
+        };
+        return .{ .root_signature = root_signature, .pipeline = try Pipeline.init(opts) };
+    }
+
+    fn deinit(self: PostPipeline) void {
+        self.pipeline.deinit();
+        _ = self.root_signature.Release();
+    }
+};
+
+fn runCustomShaderResize(sampler: ResizeSampler) !void {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const post: ?PostPipeline = switch (sampler) {
+        .main => null,
+        .post => try PostPipeline.init(rig.dev().device),
+    };
+    defer if (post) |p| p.deinit();
+
+    // What drawFrame does for a frame state that gains custom shaders: init
+    // at 1x1, then resize to the surface.
+    var state = try CustomShaderState.init(rig.api);
+    defer state.deinit();
+    try state.resize(rig.api, 4, 4);
+    try state.uniforms.sync(&.{std.mem.zeroes(shadertoy.Uniforms)});
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+    try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
+    switch (sampler) {
+        .main => rig.drawBgImage(state.back_texture),
+        .post => rig.draw(.{
+            .pipeline = post.?.pipeline,
+            .uniforms = state.uniforms.buffer,
+            .textures = &.{state.back_texture},
+            .samplers = &.{state.sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        }),
+    }
+    const frame = try rig.submit();
+
+    // The next frame on the other slot: the surface changed size.
+    try rig.rotate();
+    try state.resize(rig.api, 8, 8);
+    try rig.expectInFlight(frame);
+    try CoverageRig.expectClean(try rig.verdict(@tagName(sampler)));
+}
+
+test "SRV table: a custom-shader resize under an in-flight frame writes no slot it binds (main root signature)" {
+    try runCustomShaderResize(.main);
+}
+
+test "SRV table: a custom-shader resize under an in-flight frame writes no slot it binds (post root signature)" {
+    try runCustomShaderResize(.post);
+}
+
+// The oracle itself, in the green run. A texture bound only through a table
+// its pipeline does not sample (the shape of the original defect) is
+// released on the spot while that frame is held behind the gate. The
+// reports the other tests assert to be zero have to show up here, under the
+// same hold, or a green run proves nothing. 0x87D is not raised on this path
+// (see hold); the trap stays installed so a raise elsewhere fails one test
+// rather than killing the binary.
+test "SRV table: the debug-layer oracle reports a deliberate violation" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const t0 = try Texture.init(rig.api.imageTextureOptions(.rgba, false), 4, 4, null);
+    defer t0.deinit();
+    var opts = rig.api.imageTextureOptions(.rgba, false);
+    // No queue: deinit releases the resource and frees the slot at once,
+    // which is the violation.
+    opts.retire = null;
+    const victim = try Texture.init(opts, 4, 4, null);
+    _ = try rig.submitAndWait();
+
+    rig.watch();
+    try rig.hold();
+    // A failing check must not release anything the held list references
+    // before the gate opens: open it on the way out.
+    errdefer rig.openGate();
+    // bg_image samples t0 only; the victim is bound to the t1 table, so the
+    // GPU never reads it but the table covers it.
+    rig.draw(.{
+        .pipeline = rig.shaders.pipelines.bg_image,
+        .uniforms = rig.uniforms.buffer,
+        .buffers = &.{rig.bg_image.buffer},
+        .textures = &.{ t0, victim },
+        .samplers = &.{rig.sampler},
+        .draw = .{ .type = .triangle, .vertex_count = 3 },
+    });
+    const frame = try rig.submit();
+    victim.deinit();
+    try rig.expectInFlight(frame);
+    const v = try rig.verdict("deliberate violation");
+    try std.testing.expect(v.deleted_in_use >= 1);
+    try std.testing.expect(v.static_changed >= 1);
+}
+
+// A texture whose initial upload fails partway. Texture.init records one
+// copy per 8 MiB band into the open command list as it goes, so when a
+// later band fails, the earlier copies still reference the destination and
+// their staging buffers, and that list is submitted with the frame. The
+// failed init must hand those to the retirement queue rather than release
+// them under the list.
+test "SRV table: a texture whose upload fails partway leaves nothing the open list references released" {
+    var rig: CoverageRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    // 4096 x 1024 RGBA is 16 MiB: two bands. The second one fails.
+    const w = 4096;
+    const h = 1024;
+    const pixels = try std.testing.allocator.alloc(u8, w * h * 4);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, 0x80);
+
+    rig.watch();
+    Texture.test_fail_upload_band = 1;
+    defer Texture.test_fail_upload_band = null;
+    const retired_before = rig.dev().retirement.count();
+    try std.testing.expectError(
+        error.UploadFailed,
+        Texture.init(rig.api.imageTextureOptions(.rgba, false), w, h, pixels),
+    );
+    Texture.test_fail_upload_band = null;
+    // Exactly the destination and the first band's staging buffer went to
+    // the queue; the slot, never bound, went straight back to the heap.
+    try std.testing.expectEqual(retired_before + 2, rig.dev().retirement.count());
+
+    // The frame the failed upload was recorded into, submitted as usual.
+    _ = try rig.submitAndWait();
+    rig.collect();
+    const v = try rig.verdict("failed upload");
+    try CoverageRig.expectClean(v);
+    try std.testing.expectEqual(@as(usize, 0), v.severe);
+}

@@ -421,6 +421,7 @@ pub const Shaders = struct {
         pipelines.bg_color = try Pipeline.init(.{
             .device = dev,
             .root_signature = root_sig,
+            .texture_tables = &Pipeline.main_texture_tables,
             .vs_bytecode = shader_bytecode.bg_color_vs,
             .ps_bytecode = shader_bytecode.bg_color_ps,
             .blend = .premultiplied_alpha,
@@ -428,6 +429,7 @@ pub const Shaders = struct {
         pipelines.cell_bg = try Pipeline.init(.{
             .device = dev,
             .root_signature = root_sig,
+            .texture_tables = &Pipeline.main_texture_tables,
             .vs_bytecode = shader_bytecode.bg_color_vs,
             .ps_bytecode = shader_bytecode.cell_bg_ps,
             .blend = .premultiplied_alpha,
@@ -435,6 +437,7 @@ pub const Shaders = struct {
         pipelines.cell_text = try Pipeline.init(.{
             .device = dev,
             .root_signature = root_sig,
+            .texture_tables = &Pipeline.main_texture_tables,
             .vs_bytecode = shader_bytecode.cell_text_vs,
             .ps_bytecode = shader_bytecode.cell_text_ps,
             .input_layout = &cell_text_input_elements,
@@ -443,6 +446,7 @@ pub const Shaders = struct {
         pipelines.image = try Pipeline.init(.{
             .device = dev,
             .root_signature = root_sig,
+            .texture_tables = &Pipeline.main_texture_tables,
             .vs_bytecode = shader_bytecode.image_vs,
             .ps_bytecode = shader_bytecode.image_ps,
             .input_layout = &image_input_elements,
@@ -451,6 +455,7 @@ pub const Shaders = struct {
         pipelines.bg_image = try Pipeline.init(.{
             .device = dev,
             .root_signature = root_sig,
+            .texture_tables = &Pipeline.main_texture_tables,
             .vs_bytecode = shader_bytecode.bg_image_vs,
             .ps_bytecode = shader_bytecode.bg_image_ps,
             .input_layout = &bg_image_input_elements,
@@ -548,6 +553,7 @@ pub const Shaders = struct {
             const pso = Pipeline.init(.{
                 .device = dev,
                 .root_signature = custom_root_sig,
+                .texture_tables = if (post_root_sig != null) &Pipeline.post_texture_tables else &Pipeline.main_texture_tables,
                 .vs_bytecode = shader_bytecode.bg_color_vs,
                 .ps_bytecode = dxil,
                 .blend = .none,
@@ -700,4 +706,103 @@ test "all input elements use PER_INSTANCE_DATA" {
     for (&bg_image_input_elements) |elem| {
         try std.testing.expectEqual(PER_INSTANCE, elem.InputSlotClass);
     }
+}
+
+/// A resource binding as the DXIL container's PSV0 part records it: the
+/// runtime's own list of what a shader reads, after the compiler dropped
+/// anything unused.
+const PsvBinding = struct {
+    /// PSVResourceType: 3 is a typed SRV (Texture2D), 5 a structured
+    /// buffer, 1 a sampler, 2 a constant buffer.
+    res_type: u32,
+    space: u32,
+    lower: u32,
+    upper: u32,
+
+    const srv_typed: u32 = 3;
+};
+
+fn readU32(bytes: []const u8, off: usize) !u32 {
+    if (off + 4 > bytes.len) return error.Truncated;
+    return std.mem.readInt(u32, bytes[off..][0..4], .little);
+}
+
+/// The PSV0 bindings of a DXIL container, into `out`. Returns how many.
+fn psvBindings(dxil: []const u8, out: []PsvBinding) !usize {
+    if (dxil.len < 32 or !std.mem.eql(u8, dxil[0..4], "DXBC")) return error.NotDxil;
+    // magic, 16-byte digest, two u16 versions, container size, part count.
+    const part_count = try readU32(dxil, 28);
+    for (0..part_count) |i| {
+        const off = try readU32(dxil, 32 + i * 4);
+        if (off + 8 > dxil.len) return error.Truncated;
+        if (!std.mem.eql(u8, dxil[off..][0..4], "PSV0")) continue;
+        const size = try readU32(dxil, off + 4);
+        if (off + 8 + size > dxil.len) return error.Truncated;
+        const psv = dxil[off + 8 ..][0..size];
+        const info_size = try readU32(psv, 0);
+        var at: usize = 4 + info_size;
+        const count = try readU32(psv, at);
+        at += 4;
+        if (count == 0) return 0;
+        if (count > out.len) return error.TooManyBindings;
+        const stride = try readU32(psv, at);
+        at += 4;
+        if (stride < 16) return error.Truncated;
+        for (0..count) |r| {
+            const base = at + r * stride;
+            out[r] = .{
+                .res_type = try readU32(psv, base),
+                .space = try readU32(psv, base + 4),
+                .lower = try readU32(psv, base + 8),
+                .upper = try readU32(psv, base + 12),
+            };
+        }
+        return count;
+    }
+    return error.NoPsv0;
+}
+
+test "SRV table: texture tables match the shaders" {
+    // RenderPass binds Step.textures[i] to its own one-descriptor table at
+    // register ti (Pipeline.zig pins the root signature side). This pins the
+    // shader side: each pipeline's shaders read exactly the texture
+    // registers the renderer hands it textures for, and none that has no
+    // table. A shader that grows a texture without a table, or a table
+    // widened back over its neighbours, fails here or in Pipeline.zig
+    // before it can reach a device.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const Case = struct { name: []const u8, vs: []const u8, ps: []const u8, textures: u32 };
+    const cases = [_]Case{
+        .{ .name = "bg_color", .vs = shader_bytecode.bg_color_vs, .ps = shader_bytecode.bg_color_ps, .textures = 0 },
+        .{ .name = "cell_bg", .vs = shader_bytecode.bg_color_vs, .ps = shader_bytecode.cell_bg_ps, .textures = 0 },
+        .{ .name = "cell_text", .vs = shader_bytecode.cell_text_vs, .ps = shader_bytecode.cell_text_ps, .textures = 2 },
+        .{ .name = "image", .vs = shader_bytecode.image_vs, .ps = shader_bytecode.image_ps, .textures = 1 },
+        .{ .name = "bg_image", .vs = shader_bytecode.bg_image_vs, .ps = shader_bytecode.bg_image_ps, .textures = 1 },
+    };
+    var widest: u32 = 0;
+    var seen_any = false;
+    for (cases) |case| {
+        var registers: u32 = 0; // bit r set: the shaders read texture tr
+        for ([_][]const u8{ case.vs, case.ps }) |code| {
+            var buf: [16]PsvBinding = undefined;
+            const n = try psvBindings(code, &buf);
+            for (buf[0..n]) |b| {
+                if (b.res_type != PsvBinding.srv_typed) continue;
+                seen_any = true;
+                try std.testing.expectEqual(@as(u32, 0), b.space);
+                var r = b.lower;
+                while (r <= b.upper) : (r += 1) registers |= @as(u32, 1) << @intCast(r);
+            }
+        }
+        const expected: u32 = (@as(u32, 1) << @intCast(case.textures)) - 1;
+        if (registers != expected) {
+            std.debug.print("{s}: shaders read texture registers 0x{x}, renderer binds 0x{x}\n", .{ case.name, registers, expected });
+        }
+        try std.testing.expectEqual(expected, registers);
+        widest = @max(widest, case.textures);
+    }
+    // Non-vacuity: the parse found textures at all, and every table the
+    // root signature declares is read by some shader.
+    try std.testing.expect(seen_any);
+    try std.testing.expectEqual(@as(usize, widest), Pipeline.main_texture_ranges.len);
 }

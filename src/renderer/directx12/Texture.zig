@@ -9,6 +9,7 @@
 const Texture = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const d3d12 = @import("d3d12.zig");
 const dxgi = @import("dxgi.zig");
@@ -40,21 +41,15 @@ pub const Options = struct {
     /// and a shader resource (via SRV). The resource is created with
     /// ALLOW_RENDER_TARGET flag. No initial data upload is performed.
     render_target: bool = false,
-    /// When non-null, reuse this RTV descriptor slot instead of allocating
-    /// a new one from the heap. Used during resize to avoid overwriting
-    /// other frames' in-flight RTV descriptors.
-    rtv_slot: ?DescriptorHeap.Descriptor = null,
-    /// When non-null, reuse this SRV descriptor slot instead of allocating
-    /// a new one from the heap. Used during resize to prevent SRV heap
-    /// exhaustion from leaked descriptors.
-    srv_slot: ?DescriptorHeap.Descriptor = null,
-    /// Set when a passed-in srv_slot should be RELEASED by this texture's
-    /// deinit (through srv_heap and the retirement queue) rather than
-    /// remaining the caller's. The atlas pair uses this: the slots come
-    /// from a paired allocation, and each texture owns its half outright.
-    /// Slot-passing callers that keep recycling their own slots across
-    /// resizes (custom-shader ping-pong) leave this false.
-    owns_srv_slot: bool = false,
+    // There is deliberately no way to hand a texture a slot to reuse. A
+    // texture always allocates its own SRV (and RTV) slot and gives it back
+    // through the retirement queue on deinit. Writing a new SRV into a
+    // slot that is still live means writing into a descriptor an in-flight
+    // command list may have bound as static, and a slot whose ownership
+    // was shared that way was also freed by the old texture while the new
+    // one still used it. RTVs are consumed at record time, so the fence
+    // wait is not needed for them; they follow the same path so that a
+    // texture's slots have one owner and one way back.
 };
 
 pub const Error = error{
@@ -94,10 +89,9 @@ format: dxgi.DXGI_FORMAT = .R8_UNORM,
 device: ?*d3d12.ID3D12Device = null,
 /// Cached command list for replaceRegion uploads.
 command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
-/// Heap this texture allocated its SRV slot from, when it did. Null when
-/// the slot came from Options.srv_slot (caller-owned) or no SRV exists.
-/// deinit returns the slot through the retirement queue so it can be
-/// recycled without overwriting a descriptor in-flight GPU work reads.
+/// Heap this texture allocated its SRV slot from. Null when no SRV
+/// exists. deinit returns the slot through the retirement queue so it can
+/// be recycled without overwriting a descriptor in-flight GPU work reads.
 srv_heap: ?*DescriptorHeap = null,
 /// Same as srv_heap for the RTV slot of render-target textures.
 rtv_heap: ?*DescriptorHeap = null,
@@ -144,6 +138,11 @@ pub fn takeUploadDropped(self: *Texture) bool {
     return self.upload_dropped;
 }
 
+/// Test seam: when set, uploadRegion fails at the band with this index the
+/// way a staging allocation failure would, after recording the earlier
+/// bands' copies. Read only in test builds.
+pub var test_fail_upload_band: ?u32 = null;
+
 /// Row-pitch alignment that DX12's CopyTextureRegion requires for staging
 /// buffers (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT). `pub` so image.zig can
 /// `comptime assert` its mirror constant stays in lockstep.
@@ -168,10 +167,25 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         createRenderTargetResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed
     else
         createTextureResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed;
-    errdefer _ = resource.Release();
+    // A failure after the upload below has started leaves copies into this
+    // resource recorded in the open command list, which is still submitted
+    // with the frame. So a failed init retires the resource like deinit
+    // does; with no queue (standalone tests) nothing is ever submitted and
+    // an immediate release is safe.
+    errdefer if (opts.retire) |q| q.retire(resource) else {
+        _ = resource.Release();
+    };
 
-    // Allocate or reuse SRV descriptor.
-    const srv = if (opts.srv_slot) |slot| slot else srv_heap.allocate() catch return error.TextureCreateFailed;
+    // Every slot allocate() hands out is one nothing references: never
+    // used, or freed by the retirement queue once the fence of the last
+    // submission that could bind it passed. Writing it here is safe.
+    const srv = srv_heap.allocate() catch {
+        log.warn("SRV descriptor heap is full ({d} slots); texture not created", .{srv_heap.capacity});
+        return error.TextureCreateFailed;
+    };
+    // The slot can go straight back: no command list has bound a table to
+    // it, since the texture was never returned.
+    errdefer srv_heap.release(srv.index);
 
     // Create the SRV.
     const srv_desc = d3d12.D3D12_SHADER_RESOURCE_VIEW_DESC{
@@ -197,12 +211,10 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     };
     if (opts.render_target) {
         const rtv_heap = opts.rtv_heap orelse return error.TextureCreateFailed;
-        if (opts.rtv_slot) |slot| {
-            // Reuse a pre-allocated RTV descriptor slot (e.g. during resize).
-            rtv = slot;
-        } else {
-            rtv = rtv_heap.allocate() catch return error.TextureCreateFailed;
-        }
+        rtv = rtv_heap.allocate() catch {
+            log.warn("RTV descriptor heap is full ({d} slots); render target not created", .{rtv_heap.capacity});
+            return error.TextureCreateFailed;
+        };
         device.CreateRenderTargetView(resource, null, rtv.cpu);
     }
 
@@ -218,23 +230,27 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         .device = device,
         .command_list = opts.command_list,
         .retire = opts.retire,
-        // Remember the heaps for the slots this texture will release on
-        // deinit: ones it allocated itself, or passed-in slots explicitly
-        // marked owns_srv_slot. Other slot-passing callers keep their own
-        // slot lifetime (that is the whole point of passing one).
-        .srv_heap = if (opts.srv_slot == null or opts.owns_srv_slot) opts.srv_heap else null,
-        .rtv_heap = if (opts.render_target and opts.rtv_slot == null) opts.rtv_heap else null,
+        // The heaps of the slots this texture allocated, to release on
+        // deinit.
+        .srv_heap = srv_heap,
+        .rtv_heap = if (opts.render_target) opts.rtv_heap else null,
         .state = if (opts.render_target)
             d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE
         else
             d3d12.D3D12_RESOURCE_STATES.COPY_DEST,
     };
+    // The staging buffers of the bands that were recorded before a failure
+    // are referenced by the same open list as the resource.
+    errdefer {
+        for (tex.pending_staging.items) |staging| tex.releaseResource(staging);
+        tex.pending_staging.deinit(std.heap.c_allocator);
+    }
 
     if (!opts.render_target) {
         // Upload initial data if provided. Propagate upload failures so
         // the caller doesn't end up with a texture that transitioned to
         // PIXEL_SHADER_RESOURCE without contents and renders as a black
-        // quad. The errdefer above releases the GPU resource.
+        // quad. The errdefers above retire what the open list references.
         if (data) |pixels| {
             try tex.uploadRegion(0, 0, @intCast(width), @intCast(height), pixels);
         }
@@ -321,8 +337,9 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// row-band as it walks the data. If a later band fails (staging alloc,
 /// Map, etc.) the earlier bands' copies stay recorded on the command
 /// list and will execute when the frame submits. For Texture.init the
-/// destination is errdefer-Released so the partial copies write to a
-/// soon-released resource (harmless). For replaceRegion the destination
+/// destination and the staging buffers are retired on the error path, so
+/// the partial copies run into a resource that is still alive and is
+/// freed once that submission's fence passes. For replaceRegion the destination
 /// survives, so a multi-band atlas update could leave the texture with
 /// the leading bands of the new content and the trailing rows of the
 /// previous content.
@@ -398,7 +415,11 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
     // failures with hex context worth investigating). Both still return
     // error.UploadFailed and let the caller drop the placement.
     var bands = Bands{ .height = height, .rows_per_band = rows_per };
-    while (bands.next()) |band| {
+    var band_index: u32 = 0;
+    while (bands.next()) |band| : (band_index += 1) {
+        if (builtin.is_test) {
+            if (test_fail_upload_band) |fail| if (band_index == fail) return error.UploadFailed;
+        }
         const band_size: u64 = @as(u64, region_aligned_pitch) * @as(u64, band.row_count);
 
         const staging = createStagingBuffer(device, band_size) orelse {

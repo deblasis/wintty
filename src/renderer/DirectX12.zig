@@ -76,9 +76,28 @@ pub const ImageTextureFormat = enum {
     bgra,
 };
 
-/// Number of CBV/SRV/UAV descriptors in the shader-visible heap.
-/// Covers font atlas (grayscale + color), grid texture, image textures,
-/// and ~50 custom shader textures.
+/// Number of CBV/SRV/UAV descriptors in the shader-visible heap, one heap
+/// per surface.
+///
+/// Every texture owns one slot, and a replaced texture's slot comes back
+/// only once the fence of the submission after its retirement passes, so
+/// the budget is the live set plus what is still retiring:
+///
+///   - live: frame_count frame states x (grayscale + color atlas + the
+///     two custom-shader targets) = 12, plus the background image = 13;
+///   - retiring: one draw can retire two custom-shader target pairs (the
+///     state created at 1x1 and resized in the same draw, then resized
+///     again by FrameState.resize) and both atlases, 6 slots, and up to
+///     frame_count + 1 draws (the open one and those in flight) can be
+///     waiting on their fence: 24.
+///
+/// That is 37 in the worst transient, leaving 27 for kitty images; the
+/// steady state is 13 plus the images. A hide/show pair adds one whole
+/// generation (12) until the first frame after the show completes. When
+/// the heap is full, Texture.init logs a warning and fails: an image
+/// upload drops that image, an atlas grow or a frame-state resize fails
+/// that draw (logged by the render thread), and the next draw retries
+/// once collect has freed what the fence released.
 const srv_heap_capacity: u32 = 64;
 
 /// Number of sampler descriptors in the shader-visible heap.
@@ -135,11 +154,6 @@ init_started: ?std.Io.Timestamp = null,
 /// GraphicsAPI by value, and value-copied DescriptorHeap structs would
 /// diverge in their allocated counters, causing descriptor aliasing.
 rtv_heap: ?*DescriptorHeap = null,
-/// Snapshot of rtv_heap.allocated after swap chain back buffer slots
-/// are claimed in init().  Custom-shader ping-pong textures get
-/// descriptors above this base.  drawFrameStart resets allocated back
-/// to this value so resize can reuse the same slots.
-rtv_base: u32 = 0,
 
 /// Shader-visible CBV/SRV/UAV descriptor heap for textures and buffers.
 srv_heap: ?*DescriptorHeap = null,
@@ -192,27 +206,17 @@ frame_wait_count: u32 = 0,
 
 /// Deferred frame completion state. DX12 must at least submit the frame
 /// and signal the GPU fence before releasing the frame semaphore (which
-/// happens in frameCompleted), because frame.resize() reuses descriptor
-/// slots. Metal's completion handler runs after the GPU finishes; DX12's
-/// complete() runs before command list execution, so we defer
-/// frameCompleted to drawFrameEnd() which runs after ExecuteCommandLists
-/// + Signal.
+/// happens in frameCompleted). Metal's completion handler runs after the
+/// GPU finishes; DX12's complete() runs before command list execution, so
+/// we defer frameCompleted to drawFrameEnd() which runs after
+/// ExecuteCommandLists + Signal.
 ///
-/// Note what this does NOT buy, because the sentence above overstates it:
-/// a signal is not a completion, so the frame semaphore says nothing about
-/// whether the GPU has finished the frame it releases. Resource lifetimes
-/// must not lean on it -- that is what the device's retirement queue is
-/// for (issue #944).
-///
-/// Which means the "because frame.resize() reuses descriptor slots" reason
-/// is NOT satisfied by this deferral, and that hole is still open:
-/// CustomShaderState.resize reuses front_srv_slot/back_srv_slot in the
-/// SHADER-VISIBLE heap, and it runs before beginFrame's per-slot fence
-/// wait. The retirement queue keeps the old resource alive, so this is no
-/// longer a use-after-free -- but the descriptor is overwritten while the
-/// previous submission may still sample through it, so that frame reads
-/// the wrong texture. Descriptor lifetime is a different mechanism from
-/// resource lifetime and wants its own fix; tracked separately.
+/// Note what this does NOT buy: a signal is not a completion, so the frame
+/// semaphore says nothing about whether the GPU has finished the frame it
+/// releases. Resource and descriptor-slot lifetimes must not lean on it --
+/// that is what the device's retirement queue is for (issue #944). A
+/// frame-state resize allocates fresh slots and retires the old ones
+/// through that queue for exactly this reason.
 pending_complete: ?struct {
     renderer: *Renderer,
     health: rendererpkg.Health,
@@ -437,10 +441,27 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
     };
 
     // Create RTV descriptor heap for back buffers plus custom shader
-    // textures.  Each FrameState may have 2 render-target textures
-    // (front/back for custom shader ping-pong), so we need:
-    //   frame_count (swap chain) + frame_count * 2 (custom shader)
-    const rtv_heap_capacity = device.Device.frame_count + device.Device.frame_count * 2;
+    // textures. Each FrameState may have 2 render-target textures
+    // (front/back for custom shader ping-pong). A resize allocates the
+    // replacements before the old ones are retired, and the old RTV slots
+    // come back through the retirement queue like the SRV slots do.
+    //
+    // RTVs are read when OMSetRenderTargets is recorded, not when the GPU
+    // runs, so waiting for the fence before reusing an RTV slot is more
+    // than D3D12 requires. It is done anyway because a texture's slots go
+    // back together, through one path. The cost is capacity: the live set
+    // is frame_count back buffers + frame_count * 2 targets = 9, and one
+    // draw can retire two target pairs (a custom-shader state created and
+    // resized in the same draw, then resized again by FrameState.resize),
+    // with up to frame_count + 1 draws waiting on their fence: 16. A tab
+    // hidden with custom shaders retires its frame_count * 2 targets in
+    // releaseGpuResources, and nothing seals them until the first
+    // submission after it is shown again, so they are still held while
+    // the shown tab builds its own: 6 more. 9 + 16 + 6 = 31 in the worst
+    // case. The heap has
+    //   frame_count (swap chain) + frame_count * 2 * (2 + frame_count) = 33.
+    const rtv_heap_capacity = device.Device.frame_count +
+        device.Device.frame_count * 2 * (2 + device.Device.frame_count);
     {
         const ptr = try self.allocator.create(DescriptorHeap);
         errdefer self.allocator.destroy(ptr);
@@ -543,7 +564,6 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         // a raw allocated write) so the free mask agrees and recycling
         // cannot hand these slots out again.
         self.rtv_heap.?.claimFirst(device.Device.frame_count);
-        self.rtv_base = self.rtv_heap.?.allocated;
     } else if (dev_ptr.shared_texture != null) {
         // Shared-texture mode: one RTV pointing at the shared resource.
         // Use RTV heap slot 0 -- we only ever need one slot because
@@ -554,7 +574,6 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
         self.shared_rtv = rtv_handle;
         self.rtv_heap.?.claimFirst(1);
-        self.rtv_base = 1;
     }
 
     // Create per-frame command allocators and command lists. Same
@@ -728,7 +747,6 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
     }
     self.rtv_handles = @splat(.{ .ptr = 0 });
     self.shared_rtv = null;
-    self.rtv_base = 0;
 
     if (self.sampler_heap) |h| {
         h.deinit();
@@ -892,10 +910,6 @@ pub fn maxTextureSize(self: *const DirectX12) u32 {
 }
 
 pub fn drawFrameStart(self: *DirectX12) void {
-    // RTV heap slots are per-frame and stable. No reset needed; each frame's
-    // CustomShaderState reuses its own dedicated RTV descriptors during
-    // resize via the rtv_slot option in Texture.Options.
-
     // Free what the GPU has finished with. `beginFrame` collects too, but
     // it only runs on a wakeup the renderer decided was worth drawing, and
     // this runs on every wakeup. Whatever the last drawn frame retired
@@ -1623,13 +1637,9 @@ pub inline fn textureOptions(self: DirectX12) Texture.Options {
 
 /// Options for creating textures that serve as both render targets and
 /// shader resources. Used by CustomShaderState for ping-pong textures.
-/// When descriptor slots are provided, the texture reuses them instead of
-/// allocating new ones (for resize without heap exhaustion).
-pub inline fn renderTargetTextureOptions(
-    self: DirectX12,
-    rtv_slot: ?DescriptorHeap.Descriptor,
-    srv_slot: ?DescriptorHeap.Descriptor,
-) Texture.Options {
+/// Each texture allocates its own RTV and SRV slots and retires them on
+/// deinit, resizes included: see Texture.Options.
+pub inline fn renderTargetTextureOptions(self: DirectX12) Texture.Options {
     return .{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
@@ -1638,8 +1648,6 @@ pub inline fn renderTargetTextureOptions(
         .retire = if (self.dev) |*d| d.retirement else null,
         .pixel_format = .B8G8R8A8_UNORM,
         .render_target = true,
-        .rtv_slot = rtv_slot,
-        .srv_slot = srv_slot,
     };
 }
 
@@ -1689,46 +1697,16 @@ pub fn initAtlasTexture(
         .bgr => .B8G8R8A8_UNORM,
     };
 
-    // The cell pass binds grayscale+color as one descriptor-table range,
-    // so the pair needs adjacent SRV slots. The grayscale half claims a
-    // contiguous pair and parks the partner on the heap for the color
-    // half that follows it (generic.zig always creates them back to
-    // back). Both halves release their slot on deinit, so a regrow
-    // recycles the pair after the covering fence.
-    const srv_slot: ?DescriptorHeap.Descriptor = switch (atlas.format) {
-        .grayscale => pair: {
-            const heap = self.srv_heap orelse break :pair null;
-            if (heap.atlas_partner) |stale| {
-                // A previous pair was abandoned between its two calls
-                // (the color init failed). That partner was never bound
-                // by any command list, so releasing it here is safe.
-                heap.release(stale);
-                heap.atlas_partner = null;
-            }
-            const first = heap.allocateContiguous(2) catch break :pair null;
-            heap.atlas_partner = first.index + 1;
-            break :pair first;
-        },
-        .bgra, .bgr => partner: {
-            const heap = self.srv_heap orelse break :partner null;
-            const idx = heap.atlas_partner orelse break :partner null;
-            heap.atlas_partner = null;
-            break :partner .{
-                .cpu = heap.cpuHandle(idx),
-                .gpu = heap.gpuHandle(idx),
-                .index = idx,
-            };
-        },
-    };
-
+    // The cell pass binds the grayscale and color atlases to two separate
+    // one-descriptor tables (RenderPass.step), so each atlas texture takes
+    // whatever slot is free; the two need not be adjacent, and either can
+    // be replaced on its own when it grows.
     return Texture.init(.{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
         .srv_heap = self.srv_heap,
         .retire = if (self.dev) |*d| d.retirement else null,
         .pixel_format = pixel_format,
-        .srv_slot = srv_slot,
-        .owns_srv_slot = srv_slot != null,
     }, size, size, null);
 }
 

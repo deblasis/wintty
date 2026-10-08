@@ -647,8 +647,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         };
 
-        /// State relevant to our custom shaders if we have any.
-        const CustomShaderState = struct {
+        /// State relevant to our custom shaders if we have any. Public so the
+        /// DX12 GPU tests can drive the real resize.
+        pub const CustomShaderState = struct {
             /// When we have a custom shader state, we maintain a front
             /// and back texture which we use as a swap chain to render
             /// between when multiple custom shaders are defined.
@@ -685,14 +686,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Initialize the front and back textures at 1x1 px, this
                 // is slightly wasteful but it's only done once so whatever.
                 const front_texture = try Texture.init(
-                    api.renderTargetTextureOptions(null, null),
+                    api.renderTargetTextureOptions(),
                     1,
                     1,
                     null,
                 );
                 errdefer front_texture.deinit();
                 const back_texture = try Texture.init(
-                    api.renderTargetTextureOptions(null, null),
+                    api.renderTargetTextureOptions(),
                     1,
                     1,
                     null,
@@ -723,40 +724,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 width: usize,
                 height: usize,
             ) !void {
-                // DX12 reuses the existing RTV/SRV descriptor slots
-                // across resizes so each frame keeps its dedicated heap
-                // entries: prevents RTV overwrites across in-flight
-                // frames and SRV-heap exhaustion from leaked descriptors.
-                // Metal and OpenGL don't model descriptor heaps; their
-                // renderTargetTextureOptions take the slots as `anytype`
-                // and ignore them, so non-DX12 backends pass null and
-                // skip the field reads entirely (comptime-gated, the
-                // `.rtv`/`.srv` paths below never get type-checked on
-                // those backends).
-                const front_rtv_slot, const back_rtv_slot, const front_srv_slot, const back_srv_slot =
-                    if (comptime @hasField(Texture, "rtv")) slots: {
-                        const D = @TypeOf(self.front_texture.rtv);
-                        const fr = self.front_texture.rtv;
-                        const br = self.back_texture.rtv;
-                        const fs = self.front_texture.srv;
-                        const bs = self.back_texture.srv;
-                        break :slots .{
-                            @as(?D, if (fr.cpu.ptr != 0) fr else null),
-                            @as(?D, if (br.cpu.ptr != 0) br else null),
-                            @as(?D, if (fs.gpu.ptr != 0) fs else null),
-                            @as(?D, if (bs.gpu.ptr != 0) bs else null),
-                        };
-                    } else .{ null, null, null, null };
-
+                // Fresh textures with fresh descriptor slots; the old ones
+                // are retired below. On DX12 an in-flight frame may still
+                // bind the old textures' slots, so writing the new
+                // descriptors into them would change what that frame
+                // samples.
                 const front_texture = try Texture.init(
-                    api.renderTargetTextureOptions(front_rtv_slot, front_srv_slot),
+                    api.renderTargetTextureOptions(),
                     @intCast(width),
                     @intCast(height),
                     null,
                 );
                 errdefer front_texture.deinit();
                 const back_texture = try Texture.init(
-                    api.renderTargetTextureOptions(back_rtv_slot, back_srv_slot),
+                    api.renderTargetTextureOptions(),
                     @intCast(width),
                     @intCast(height),
                     null,
@@ -2415,9 +2396,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // path ends in `frameCompleted`, which releases the frame, and
             // a defer runs on the error paths too. Giving it back here as
             // well would post twice for one wait, and neither symptom is
-            // local. The spare permit lets `nextFrame` hand out a slot a
-            // draw is still using, whose `resize` reuses descriptor slots
-            // the GPU may still be reading; and it lets `SwapChain.deinit`
+            // local. The spare permit lets `nextFrame` hand out a frame
+            // state a draw is still recording into, whose `resize` would
+            // replace textures that draw has bound; and it lets `SwapChain.deinit`
             // stop waiting before the frames it destroys are done. That
             // second one bites on Metal, where the semaphore is posted
             // from the GPU completion handler and is the only proof of
