@@ -250,7 +250,27 @@ function Start-SeamSession(
     # 'wintty/config.wintty' replaces it byte for byte: that is how a harness
     # relaunches on the very file a previous run wrote. A path that resolves
     # outside the root is refused.
-    [hashtable]$ExtraFiles = @{}
+    [hashtable]$ExtraFiles = @{},
+    # A hook Stop-SeamSession calls once, after the app has exited and the
+    # environment is back and crash.log is read out, and before it deletes
+    # the session's temp root. That is the only moment a caller can read the
+    # app's own logs, so a harness that wants to assert on them hands the
+    # hook in here instead of racing the teardown.
+    #
+    # It is called as & $hook $context, with one object carrying the launch's
+    # roots (StateBase, TempRoot, DaemonLogDir, ExePath, Stamp), whether a
+    # process was started and its exit code, and the crash logs already read
+    # out. What a log has to say is the hook's business: the library owns
+    # when this runs and nothing else. Every hook runs even if an earlier one
+    # throws, whatever a hook writes to the pipeline lands in
+    # $session.TeardownFindings, and the temp root is deleted either way --
+    # a hook that throws fails the teardown, after the tree is gone.
+    #
+    # A hook passed to Stop-SeamSession runs after this one. The two refusals
+    # above the session table (an extra file outside the config root, and
+    # -PrivateStateBase with -SharedStateBase) launch nothing and leave no
+    # session behind, so neither reaches a hook.
+    [scriptblock]$BeforeTeardown = $null
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
@@ -302,7 +322,15 @@ function Start-SeamSession(
         OrigSessiondBinDir = if (Test-Path Env:WINTTY_SESSIOND_BIN_DIR) { $env:WINTTY_SESSIOND_BIN_DIR } else { $null }
         StateBase = $null
         SessionPipe = New-SeamSessionPipeName
+        # Set in the literal, before anything below can throw, so every path
+        # that leaves this function after the session is recorded reaches
+        # Stop-SeamSession with a list to run and a place to put what a hook
+        # wrote.
+        TeardownHooks = [System.Collections.Generic.List[scriptblock]]::new()
+        TeardownFindings = [System.Collections.Generic.List[object]]::new()
+        TeardownError = $null
     }
+    if ($BeforeTeardown) { $session.TeardownHooks.Add($BeforeTeardown) }
     if ($PrivateStateBase -and $SharedStateBase) {
         Remove-Item $tempXdg -Recurse -Force -ErrorAction SilentlyContinue
         throw 'HARNESS: -PrivateStateBase and -SharedStateBase ask for opposite state trees'
@@ -391,7 +419,12 @@ function Start-SeamSession(
     }
     catch {
         $refusal = $_.Exception.Message
-        Stop-SeamSession $session
+        # The teardown can fail too, when a hook does. The refusal is what the
+        # caller came for and stays the head of the message; the teardown's is
+        # appended rather than thrown over it.
+        $teardown = ''
+        try { Stop-SeamSession $session } catch { $teardown = $_.Exception.Message }
+        if ($teardown) { throw ("HARNESS: {0} (teardown also failed: {1})" -f $refusal, $teardown) }
         throw "HARNESS: $refusal"
     }
 
@@ -401,17 +434,19 @@ function Start-SeamSession(
         WorkingDirectory = (Split-Path -Parent $session.ExePath)
     }
     if ($Arguments.Count -gt 0) { $startArgs.ArgumentList = $Arguments }
-    $proc = Start-Process @startArgs
-    $session.Proc = $proc
-    # Everything from here can throw -- Wait-SeamReady on a window that never
-    # appears or a splash that never drops, Wait-SeamPipe on a Release build
-    # with the seam compiled out, Connect-SeamPipe on a timeout -- and the
-    # caller does not hold the session yet, so ITS finally cannot clean up.
-    # Left alone that strands a running Wintty, and Assert-NoWinttyFrom
-    # refuses beside it without stopping it, so one orphan blocks every seam
-    # harness on this build until a human intervenes. Tear down here and
-    # rethrow.
+    # Everything from here can throw -- Start-Process itself, on a missing or
+    # locked image, Wait-SeamReady on a window that never appears or a splash
+    # that never drops, Wait-SeamPipe on a Release build with the seam
+    # compiled out, Connect-SeamPipe on a timeout -- and the caller does not
+    # hold the session yet, so ITS finally cannot clean up. Left alone that
+    # strands a running Wintty, and Assert-NoWinttyFrom refuses beside it
+    # without stopping it, so one orphan blocks every seam harness on this
+    # build until a human intervenes; a launch that failed at Start-Process
+    # stranded the temp root and ran no teardown hook at all, which is why
+    # the launch itself sits inside this try. Tear down here and rethrow.
     try {
+        $proc = Start-Process @startArgs
+        $session.Proc = $proc
         $main = Wait-SeamReady $proc
         $session.Hwnd64 = [int64]$main.Hwnd64
 
@@ -425,8 +460,16 @@ function Start-SeamSession(
         $session.Writer.NewLine = "`n"
     }
     catch {
-        Stop-SeamSession $session
-        throw
+        # Same as the refusal above: what the caller came for leads, and a
+        # teardown failure (a throwing hook) follows it in one message
+        # rather than replacing it.
+        $failure = $_
+        $teardown = ''
+        try { Stop-SeamSession $session } catch { $teardown = $_.Exception.Message }
+        if ($teardown) {
+            throw ("{0} (teardown also failed: {1})" -f $failure.Exception.Message, $teardown)
+        }
+        throw $failure
     }
     return $session
 }
@@ -481,7 +524,8 @@ function Invoke-SeamCommand([Parameter(Mandatory)]$Session, [Parameter(Mandatory
     return $response
 }
 
-function Stop-SeamSession([Parameter(Mandatory)]$Session) {
+function Stop-SeamSession([Parameter(Mandatory)]$Session, [scriptblock]$BeforeTeardown = $null) {
+    if ($BeforeTeardown) { $Session.TeardownHooks.Add($BeforeTeardown) }
     if ($Session.Writer) { try { $Session.Writer.Dispose() } catch { } }
     if ($Session.Reader) { try { $Session.Reader.Dispose() } catch { } }
     if ($Session.Pipe)   { try { $Session.Pipe.Dispose() } catch { } }
@@ -534,7 +578,44 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
             Write-Host ("Stop-SeamSession: the app wrote {0}" -f $c.Path) -ForegroundColor Yellow
         }
     }
+    # The one moment the app's own logs are still readable: the process is
+    # gone, the sweep is done, the environment is back and crash.log is read
+    # out, and the tree below has not been touched. So the caller's hooks run
+    # here, once per session however many times Stop is called, and the tree
+    # dies after them.
+    if (-not $Session.TeardownHookRan) {
+        $Session.TeardownHookRan = $true
+        $launched = $null -ne $Session.Proc
+        $exitCode = $null
+        if ($launched -and $Session.Proc.HasExited) { try { $exitCode = $Session.Proc.ExitCode } catch { } }
+        $context = [pscustomobject]@{
+            StateBase    = $Session.StateBase
+            TempRoot     = $Session.TempXdg
+            DaemonLogDir = if ($Session.SessiondRoot) { Join-Path $Session.SessiondRoot 'logs' } else { $null }
+            ExePath      = $Session.ExePath
+            Stamp        = $Session.Stamp
+            Launched     = $launched
+            ExitCode     = $exitCode
+            CrashLogs    = @($Session.CrashLogs)
+        }
+        # Every hook runs, even when an earlier one threw: the delete below is
+        # what the next one would be too late for, so a hook that only reads
+        # the tree must not be skipped by a hook that only writes. The first
+        # failure is the one reported, and the findings every hook emitted are
+        # kept on the session either way.
+        foreach ($hook in @($Session.TeardownHooks)) {
+            try {
+                foreach ($finding in @(& $hook $context)) { $Session.TeardownFindings.Add($finding) }
+            }
+            catch {
+                if (-not $Session.TeardownError) { $Session.TeardownError = $_.Exception.Message }
+            }
+        }
+    }
     Remove-Item $Session.TempXdg -Recurse -Force -ErrorAction SilentlyContinue
+    # A hook that failed is reported only now: the tree is gone either way,
+    # and a caller that reads logs from the hook has had its chance.
+    if ($Session.TeardownError) { throw ("HARNESS: the BeforeTeardown hook failed: {0}" -f $Session.TeardownError) }
 }
 
 # Every session Start-SeamSession created in this run, in order. Kept in the

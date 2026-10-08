@@ -30,11 +30,16 @@
 #      and the crash oracle over that tree, driven through Start-SeamSession
 #      up to a stand-in for its guard;
 #   6. a scan of the harnesses: each gates on the exe under test rather than
-#      on any running Wintty, and none reads the per-user crash.log.
+#      on any running Wintty, and none reads the per-user crash.log;
+#   7. the teardown hook a caller hands in: once per session on every path
+#      that ends in a teardown, after the app is gone and while the session's
+#      temp root is still on disk, with the tree deleted whether the hook
+#      threw or not.
 #
 # Nothing here launches Wintty: the guard cases inject stand-in instances,
-# the wiring cases read the library's text, and the state-base cases stop
-# at a stand-in guard that refuses before anything starts.
+# the wiring cases read the library's text, the state-base cases stop
+# at a stand-in guard that refuses before anything starts, and the teardown
+# hook cases answer the launch, the splash wait and the pipe from stand-ins.
 param(
     # The library under test. Overridable so the mutation rows (and a red
     # proof against an earlier copy) can point at a file that is not the
@@ -757,7 +762,254 @@ function Invoke-GateScanMutations {
     finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-# ---- layer 7: the Start-Process harnesses' state tree (lib/test-config.ps1) -----
+# ---- layer 7: the teardown hook ----------------------------------------------
+
+# Start-SeamSession and Stop-SeamSession for real, with every launch step
+# answered by a stand-in, so nothing here starts the app. What the cases pin
+# is the hook's contract rather than any rule about what a log says: it runs
+# once per session on every path that ends in a teardown (the guard refusing,
+# the launch failing, the splash wait timing out, the caller stopping), after
+# the process is gone and the environment is back and crash.log is read out,
+# while the temp root is still on disk -- and the tree dies afterwards either
+# way.
+function Invoke-TeardownHookCases([string]$LibPath) {
+    return & {
+        param($processLib, $lib)
+        . $processLib
+        try { . $lib } catch {
+            $failed = [System.Collections.Generic.List[string]]::new()
+            $failed.Add("the library cannot be dot-sourced here: $($_.Exception.Message)")
+            return , $failed
+        }
+        $failed = [System.Collections.Generic.List[string]]::new()
+        $temp = [System.IO.Path]::GetTempPath()
+        $root = Join-Path $temp ("wintty-seam-hookcase-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        # The exe is an empty file, as layer 5 does: the teardown's sweep
+        # matches on this path and a start time, and matches nothing.
+        $exe = Join-Path $root 'Wintty.exe'
+        [System.IO.File]::WriteAllBytes($exe, [byte[]]@())
+        # What each stand-in does in the current case, and what the caller's
+        # path looked like when the guard saw it.
+        $case = @{ Guard = 'pass'; Start = 'ok'; Ready = 'ok' }
+        $cap = @{}
+        $seen = [System.Collections.Generic.List[object]]::new()
+
+        function Assert-WinttyCoexistence {
+            param($ExePath, $ConfigText, $AumId, $Context)
+            $cap.TempXdg = $env:XDG_CONFIG_HOME
+            if ($case.Guard -eq 'refuse') { throw 'hook-case refusal' }
+            return @{ Running = @() }
+        }
+        function Start-Process {
+            param($FilePath, $PassThru, $WorkingDirectory, $ArgumentList)
+            if ($case.Start -eq 'throw') { throw 'hook-case start failure' }
+            # An app that has already exited, so the teardown's kill is a
+            # no-op and the hook can still read the code.
+            return [pscustomobject]@{ HasExited = $true; ExitCode = 7; Id = 0 }
+        }
+        function Wait-SeamReady {
+            param($proc)
+            if ($case.Ready -eq 'throw') { throw 'hook-case timeout' }
+            return @{ Hwnd64 = 1 }
+        }
+        function Wait-SeamPipe { param($Token, $Proc, $TimeoutSeconds) return $true }
+        function Connect-SeamPipe { param($Token, $TimeoutMs) return [System.IO.MemoryStream]::new() }
+
+        # Two hooks that record what they were handed, whether the tree was still
+        # there at call time, and which hook of the case they are. The tag is
+        # baked into each body rather than read from a shared variable, since
+        # both run inside one teardown and would then see one tag. Output to
+        # the pipeline is a hook's own way of reporting a finding.
+        function Record-Hook([string]$Tag, [object]$Ctx) {
+            $seen.Add([pscustomobject]@{
+                Tag   = $Tag
+                Ctx   = $Ctx
+                Alive = (Test-Path -LiteralPath $Ctx.TempRoot)
+            })
+        }
+        $probeStart = { param($ctx) Record-Hook 'start' $ctx; 'hook-case finding from start' }
+        $probeStop = { param($ctx) Record-Hook 'stop' $ctx; 'hook-case finding from stop' }
+        # How many times a tagged hook ran, how many saw the tree still
+        # standing, and the context the last call was handed.
+        function Ran([string]$Tag) { return @($seen | Where-Object { $_.Tag -eq $Tag }).Count }
+        function Saw-Alive { return @($seen | Where-Object { $_.Alive }).Count }
+        function Last-Ctx { return $seen[$seen.Count - 1].Ctx }
+
+        $saved = @{}
+        foreach ($n in 'WINTTY_STATE_BASE', 'WINTTY_STATE_BASE_TOKEN', 'XDG_STATE_HOME', 'XDG_CACHE_HOME') {
+            $saved[$n] = [System.Environment]::GetEnvironmentVariable($n)
+        }
+        try {
+            foreach ($n in @($saved.Keys)) { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
+            $refuse = 'hook-case refusal'
+            $throwStart = 'hook-case start failure'
+            $throwReady = 'hook-case timeout'
+            $throwing = { param($ctx) throw 'boom' }
+
+            # ---- the plain path, one hook given to Start ----
+            $seen.Clear()
+            $s = $null
+            try {
+                $s = Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $probeStart
+                Stop-SeamSession -Session $s
+            }
+            catch { $failed.Add("success path: Stop-SeamSession threw $_") }
+            if ((Ran 'start') -ne 1) {
+                $failed.Add("success path: the hook ran $(Ran 'start') times, not once")
+            }
+            if ((Saw-Alive) -ne 1) {
+                $failed.Add('success path: the temp root was already deleted when the hook ran')
+            }
+            if ($s -and (Test-Path -LiteralPath $s.TempXdg)) {
+                $failed.Add('success path: the temp root survived teardown')
+            }
+            $ctx = Last-Ctx
+            if ($ctx) {
+                if ($ctx.StateBase -ne $s.StateBase -or $ctx.TempRoot -ne $s.TempXdg) {
+                    $failed.Add("success path: the hook got StateBase '$($ctx.StateBase)' / TempRoot '$($ctx.TempRoot)', not the session's")
+                }
+                if ($ctx.ExitCode -ne 7 -or -not $ctx.Launched) {
+                    $failed.Add('success path: the hook did not see the exited app (Launched/ExitCode)')
+                }
+            }
+
+            # ---- a second Stop on the same session is a no-op for the hook ----
+            $seen.Clear()
+            $s = $null
+            try {
+                $s = Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $probeStart
+                Stop-SeamSession -Session $s
+                Stop-SeamSession -Session $s
+            }
+            catch { $failed.Add("second Stop-SeamSession threw $_") }
+            if ((Ran 'start') -ne 1) {
+                $failed.Add('a second Stop-SeamSession ran the hook again')
+            }
+
+            # ---- the guard refuses: the hook still runs once ----
+            $seen.Clear()
+            $case.Guard = 'refuse'
+            $got = ''
+            try { Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $probeStart }
+            catch { $got = "$_" }
+            $case.Guard = 'pass'
+            if ($got -notmatch [regex]::Escape($refuse)) {
+                $failed.Add("guard refusal: the caller did not see the guard's own error ('$got')")
+            }
+            if ((Ran 'start') -ne 1) {
+                $failed.Add("guard refusal: the hook ran $(Ran 'start') times, not once")
+            }
+
+            # ---- Start-Process itself throws: nothing leaks, hook once ----
+            $seen.Clear()
+            $case.Start = 'throw'
+            $got = ''
+            $leaked = ''
+            try { Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $probeStart }
+            catch { $got = "$_" }
+            $case.Start = 'ok'
+            if ($got -notmatch [regex]::Escape($throwStart)) {
+                $failed.Add("launch failure: the caller did not see the launch's own error ('$got')")
+            }
+            if ((Ran 'start') -ne 1) {
+                $failed.Add("launch failure: the hook ran $(Ran 'start') times, not once")
+            }
+            if ($cap.TempXdg -and (Test-Path -LiteralPath $cap.TempXdg)) { $leaked = $cap.TempXdg }
+            if ($leaked) { $failed.Add("launch failure: the temp root was left behind ('$leaked')") }
+
+            # ---- the splash wait times out: hook once ----
+            $seen.Clear()
+            $case.Ready = 'throw'
+            $got = ''
+            try { Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $probeStart }
+            catch { $got = "$_" }
+            $case.Ready = 'ok'
+            if ($got -notmatch [regex]::Escape($throwReady)) {
+                $failed.Add("startup timeout: the caller did not see the startup error ('$got')")
+            }
+            if ((Ran 'start') -ne 1) {
+                $failed.Add("startup timeout: the hook ran $(Ran 'start') times, not once")
+            }
+
+            # ---- a throwing hook fails the teardown, and the tree still goes ----
+            $seen.Clear()
+            $s = $null
+            $got = ''
+            try {
+                $s = Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $throwing
+                Stop-SeamSession -Session $s
+            }
+            catch { $got = "$_" }
+            if (-not $got) {
+                $failed.Add('a throwing hook did not fail Stop-SeamSession')
+            }
+            elseif ($got -notmatch 'the BeforeTeardown hook failed: boom') {
+                $failed.Add("a throwing hook's error did not name it: '$got'")
+            }
+            if ($s -and (Test-Path -LiteralPath $s.TempXdg)) {
+                $failed.Add('a throwing hook left the temp root behind')
+            }
+
+            # ---- a throwing hook must not hide the error it rode in on ----
+            $seen.Clear()
+            $case.Ready = 'throw'
+            $got = ''
+            try { Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $throwing }
+            catch { $got = "$_" }
+            $case.Ready = 'ok'
+            $atTimeout = $got.IndexOf($throwReady)
+            $atBoom = $got.IndexOf('boom')
+            if ($atTimeout -lt 0 -or $atBoom -lt 0 -or $atTimeout -gt $atBoom) {
+                $failed.Add("a teardown failure hid the startup error: '$got'")
+            }
+
+            # ---- what a hook writes reaches the session ----
+            $seen.Clear()
+            $s = $null
+            try {
+                $s = Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $probeStart
+                Stop-SeamSession -Session $s
+            }
+            catch { }
+            if (-not $s -or -not $s.ContainsKey('TeardownFindings') -or
+                @($s.TeardownFindings | Where-Object { $_ -match 'hook-case finding' }).Count -eq 0) {
+                $failed.Add('the hook''s output did not reach TeardownFindings')
+            }
+
+            # ---- Stop's hook runs after Start's ----
+            $seen.Clear()
+            $s = $null
+            try {
+                $s = Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never' -BeforeTeardown $probeStart
+                Stop-SeamSession -Session $s -BeforeTeardown $probeStop
+            }
+            catch { $failed.Add("Stop's own hook path threw $_") }
+            if ((Ran 'start') -ne 1 -or (Ran 'stop') -ne 1) {
+                $failed.Add("Stop-SeamSession -BeforeTeardown did not run after Start's hook")
+            }
+
+            # ---- no hook at all: the pre-existing behaviour ----
+            $seen.Clear()
+            $s = $null
+            try {
+                $s = Start-SeamSession -ExePath $exe -ConfigText 'window-save-state = never'
+                Stop-SeamSession -Session $s
+            }
+            catch { $failed.Add("no hook: Stop-SeamSession threw $_") }
+            if ($s -and (Test-Path -LiteralPath $s.TempXdg)) {
+                $failed.Add('no hook: the temp root survived teardown')
+            }
+        }
+        finally {
+            foreach ($n in @($saved.Keys)) { if ($null -ne $saved[$n]) { Set-Item "Env:$n" $saved[$n] } else { Remove-Item "Env:$n" -ErrorAction SilentlyContinue } }
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        return , $failed
+    } $script:processLib $LibPath
+}
+
+# ---- layer 8: the Start-Process harnesses' state tree (lib/test-config.ps1) -----
 
 # Enter-WinttyTestConfig -PrivateStateBase for real: the tree and the
 # native-state dirs land under the random root, a crash.log written there is
@@ -838,6 +1090,10 @@ $stateFailures = Invoke-StateBaseCases $SeamClientPath
 foreach ($f in $stateFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
 Assert-True ($stateFailures.Count -eq 0) 'every state-base and crash-oracle case holds against the real library'
 
+$hookFailures = Invoke-TeardownHookCases $SeamClientPath
+foreach ($f in $hookFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
+Assert-True ($hookFailures.Count -eq 0) 'the teardown hook runs once on every exit path, before the tree is deleted'
+
 $gateFailures = Invoke-GateScanCases
 foreach ($f in $gateFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
 Assert-True ($gateFailures.Count -eq 0) 'every harness gates on the exe under test and reads its own crash.log'
@@ -865,6 +1121,52 @@ finally { Remove-Item -LiteralPath $tcMutant -Force -ErrorAction SilentlyContinu
 # A copy of the library with one rule broken. Every row must turn at least
 # one layer red; a row that stays green means the cases no longer pin that
 # rule.
+#
+# Two of the rows need a statement moved rather than a word replaced: the
+# hook block out from above the delete and below it, and the launch out of
+# the try that tears it down. Both are edits over the file's lines, and both
+# hand the lines back flat, which is what WriteAllLines below wants.
+function Get-BlockEnd([string[]]$Lines, [int]$Start) {
+    # A block ends at the first line that closes the indentation its own
+    # braces opened at, which is what the file's 4-space style means.
+    $indent = ([regex]::Match($Lines[$Start], '^(\s*)')).Groups[1].Value
+    for ($i = $Start + 1; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -ceq ($indent + '}')) { return $i }
+    }
+    return -1
+}
+function Move-LinesAfter([string[]]$Lines, [string]$Open, [string]$After) {
+    $start = -1
+    for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match $Open) { $start = $i; break } }
+    $end = if ($start -lt 0) { -1 } else { Get-BlockEnd $Lines $start }
+    $at = -1
+    if ($end -ge 0) {
+        for ($i = $end + 1; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match $After) { $at = $i; break } }
+    }
+    # An anchor that is not there is the row's business, not a crash here.
+    if ($end -lt 0 -or $at -lt 0) { return $Lines }
+    $out = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($i -lt $start -or $i -gt $end) { $out.Add($Lines[$i]) }
+        if ($i -eq $at) { $out.AddRange([string[]]$Lines[$start..$end]) }
+    }
+    return $out
+}
+function Move-LinesBefore([string[]]$Lines, [string]$Move, [string]$Before) {
+    $at = -1
+    for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match $Move) { $at = $i; break } }
+    $to = -1
+    if ($at -ge 0) {
+        for ($i = $at; $i -ge 0; $i--) { if ($Lines[$i] -match $Before) { $to = $i; break } }
+    }
+    if ($at -lt 0 -or $to -lt 0) { return $Lines }
+    $out = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($i -eq $to) { $out.Add($Lines[$at]) }
+        if ($i -ne $at) { $out.Add($Lines[$i]) }
+    }
+    return $out
+}
 $mutantRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-seam-mutants-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $mutantRoot | Out-Null
 try {
@@ -908,6 +1210,26 @@ try {
             Name    = 'the daemon log file is not named'
             Break   = { param($lines) @($lines | Where-Object { $_ -notmatch '^\s*\$env:WINTTY_SESSIOND_LOG_FILE\s*=' }) }
             Layer   = 'wiring'
+        },
+        @{
+            Name    = 'the hook runs after the tree is deleted'
+            Break   = { param($lines) Move-LinesAfter $lines '^(\s*)if \(-not \$Session\.TeardownHookRan\) \{$' '^\s*Remove-Item \$Session\.TempXdg' }
+            Layer   = 'hook'
+        },
+        @{
+            Name    = 'the hook runs on every Stop'
+            Break   = { param($lines) @($lines | ForEach-Object { $_.Replace('if (-not $Session.TeardownHookRan) {', 'if ($true) {') }) }
+            Layer   = 'hook'
+        },
+        @{
+            Name    = 'a throwing hook is swallowed'
+            Break   = { param($lines) @($lines | Where-Object { $_ -notmatch 'the BeforeTeardown hook failed:' }) }
+            Layer   = 'hook'
+        },
+        @{
+            Name    = 'Start-Process outside the teardown try'
+            Break   = { param($lines) Move-LinesBefore $lines '^\s*\$proc = Start-Process @startArgs$' '^\s*try \{$' }
+            Layer   = 'hook'
         }
     )
     foreach ($row in $rows) {
@@ -917,7 +1239,8 @@ try {
             (Invoke-MinterCases $mutant).Count -gt 0 -or
             (Invoke-GuardCases $mutant).Count -gt 0 -or
             (Invoke-WiringCases $mutant).Count -gt 0 -or
-            (Invoke-StateBaseCases $mutant).Count -gt 0
+            (Invoke-StateBaseCases $mutant).Count -gt 0 -or
+            (Invoke-TeardownHookCases $mutant).Count -gt 0
         Assert-True $wentRed ("mutation went red: $($row.Name)")
     }
 }
