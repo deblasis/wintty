@@ -1284,11 +1284,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .report => |r| r.destroy(),
                 .reset, .prompt_start => {},
             };
-            const action: apprt.action.ProgramStatus = switch (v) {
-                .report => |r| .{ .event = .report, .report = &r.report },
-                .reset => .{ .event = .reset },
-                .prompt_start => .{ .event = .prompt_start },
-            };
+            const action = v.action(self.config.desktop_notifications);
             _ = self.rt_app.performAction(
                 .{ .surface = self },
                 .program_status,
@@ -5503,9 +5499,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .reset => {
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
-            self.renderer_state.terminal.fullReset();
+            {
+                self.renderer_state.mutex.lockUncancelable(global.io());
+                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.terminal.fullReset();
+            }
+            // The records go with the reset, as they do for a program's RIS.
+            if (apprt.surface.Message.ProgramStatus.userReset(
+                termio.program_status.enabled.load(.acquire),
+            )) |event| try self.handleMessage(.{ .program_status = event });
         },
 
         .start_search => {

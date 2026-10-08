@@ -1053,6 +1053,10 @@ typedef struct {
 // GHOSTTY_ACTION_PROGRAM_STATUS_EVENT_REPORT and NULL otherwise.
 typedef struct {
   ghostty_action_program_status_event_e event;
+  // The surface's desktop-notifications setting. An apprt that turns a
+  // report into a desktop notification honours it, as the core does for
+  // OSC 9 and 777.
+  bool desktop_notifications;
   const ghostty_action_program_status_report_s* report;
 } ghostty_action_program_status_s;
 

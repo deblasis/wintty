@@ -26,6 +26,33 @@ pub const Message = union(enum) {
         reset,
         /// A new shell prompt (OSC 133 A): working and blocked records end.
         prompt_start,
+
+        /// What the user's reset keybinding sends: the same full reset a
+        /// program's RIS is, when the embedder keeps records. The binding
+        /// resets the terminal directly rather than through the stream, so
+        /// without this the records would outlive the reset the user asked
+        /// for.
+        pub fn userReset(enabled: bool) ?ProgramStatus {
+            return if (enabled) .reset else null;
+        }
+
+        /// The apprt action for this event. `desktop_notifications` is the
+        /// surface's setting of that name. A report is borrowed from the
+        /// owned copy, so the action must not outlive it.
+        pub fn action(
+            self: *const ProgramStatus,
+            desktop_notifications: bool,
+        ) apprt.action.ProgramStatus {
+            return switch (self.*) {
+                .report => |r| .{
+                    .event = .report,
+                    .report = &r.report,
+                    .desktop_notifications = desktop_notifications,
+                },
+                .reset => .{ .event = .reset, .desktop_notifications = desktop_notifications },
+                .prompt_start => .{ .event = .prompt_start, .desktop_notifications = desktop_notifications },
+            };
+        }
     };
 
     /// A fixed-size desktop notification payload sent to the app thread.
@@ -672,4 +699,34 @@ test "surface mailbox pushRequired forwards the teardown token" {
         &teardown,
     ));
     try std.testing.expect(!queue.wedged.load(.acquire));
+}
+
+test "program status: the action carries the surface's desktop-notifications setting" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var p: terminal.osc.Parser = .init(alloc);
+    defer p.deinit();
+    p.nextSlice("7501;state=blocked:kind=permission");
+    const report = p.end('\x1b').?.program_status.report;
+    const owned = try apprt.action.ProgramStatus.Owned.create(alloc, report);
+    defer owned.destroy();
+
+    const msg: Message.ProgramStatus = .{ .report = owned };
+    const off = msg.action(false);
+    try testing.expectEqual(apprt.action.ProgramStatus.Event.report, off.event);
+    try testing.expect(off.report == &owned.report);
+    try testing.expect(!off.desktop_notifications);
+    try testing.expect(off.cval().desktop_notifications == false);
+    try testing.expect(msg.action(true).desktop_notifications);
+
+    const reset: Message.ProgramStatus = .reset;
+    try testing.expect(reset.action(false).report == null);
+    try testing.expect(!reset.action(false).desktop_notifications);
+}
+
+test "program status: the reset keybinding is a full reset for the records" {
+    const testing = std.testing;
+    try testing.expect(Message.ProgramStatus.userReset(true).? == .reset);
+    try testing.expect(Message.ProgramStatus.userReset(false) == null);
 }

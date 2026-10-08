@@ -1123,6 +1123,11 @@ pub const ProgramStatus = struct {
     /// action, including its strings.
     report: ?*const Report = null,
 
+    /// The surface's `desktop-notifications` setting. The core does not
+    /// notify for a report itself; an apprt that turns a report into a
+    /// desktop notification honours this, as the core does for OSC 9.
+    desktop_notifications: bool = true,
+
     /// Sync with: ghostty_action_program_status_event_e
     pub const Event = enum(c_int) {
         /// A valid report, including `clear`. See `report`.
@@ -1205,11 +1210,16 @@ pub const ProgramStatus = struct {
     /// Sync with: ghostty_action_program_status_s
     pub const C = extern struct {
         event: Event,
+        desktop_notifications: bool,
         report: ?*const Report,
     };
 
     pub fn cval(self: ProgramStatus) C {
-        return .{ .event = self.event, .report = self.report };
+        return .{
+            .event = self.event,
+            .desktop_notifications = self.desktop_notifications,
+            .report = self.report,
+        };
     }
 
     /// A report copied out of the parser's buffer so it can cross from the
