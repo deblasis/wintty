@@ -316,6 +316,14 @@ pub const DirectWrite = struct {
         has_codepoint: bool = false,
     };
 
+    /// What the caller asked of a family, as far as the ordering cares.
+    const FaceRequest = struct {
+        /// Bold and/or italic was asked for, not just the regular face.
+        styled: bool,
+        /// A codepoint was asked for, so faces that have it are worth more.
+        codepoint: bool,
+    };
+
     /// Order the faces a family offered, dropping the simulated ones and, when
     /// a codepoint was asked for, putting the faces that have it first.
     ///
@@ -330,12 +338,12 @@ pub const DirectWrite = struct {
     /// is not a face we can render as such.
     fn orderFaceCandidates(
         candidates: []const FaceCandidate,
-        want_codepoint: bool,
+        request: FaceRequest,
         out: []usize,
     ) usize {
         assert(out.len >= candidates.len);
 
-        if (!want_codepoint) {
+        if (!request.codepoint) {
             var n: usize = 0;
             for (candidates, 0..) |candidate, i| {
                 if (candidate.simulated) continue;
@@ -423,7 +431,10 @@ pub const DirectWrite = struct {
             valid += 1;
         }
 
-        const n = orderFaceCandidates(candidates[0..valid], desc.codepoint > 0, order);
+        const n = orderFaceCandidates(candidates[0..valid], .{
+            .styled = desc.bold or desc.italic,
+            .codepoint = desc.codepoint > 0,
+        }, order);
 
         // Hand the kept faces to the iterator and release the rest, so that
         // every face we obtained ends up in exactly one of the two. The
@@ -2115,22 +2126,26 @@ test "directwrite never returns a simulated face" {
 
 fn testOrderFaceCandidates(
     candidates: []const DirectWrite.FaceCandidate,
-    want_codepoint: bool,
+    request: DirectWrite.FaceRequest,
     expected: []const usize,
 ) !void {
     var out: [16]usize = undefined;
-    const n = DirectWrite.orderFaceCandidates(candidates, want_codepoint, &out);
+    const n = DirectWrite.orderFaceCandidates(candidates, request, &out);
     try std.testing.expectEqualSlices(usize, expected, out[0..n]);
 }
 
 test "directwrite candidate order: keeps DirectWrite's order" {
-    try testOrderFaceCandidates(&.{ .{}, .{}, .{} }, false, &.{ 0, 1, 2 });
+    try testOrderFaceCandidates(
+        &.{ .{}, .{}, .{} },
+        .{ .styled = false, .codepoint = false },
+        &.{ 0, 1, 2 },
+    );
 }
 
 test "directwrite candidate order: drops simulated faces" {
     try testOrderFaceCandidates(
         &.{ .{ .simulated = true }, .{}, .{ .simulated = true }, .{} },
-        false,
+        .{ .styled = false, .codepoint = false },
         &.{ 1, 3 },
     );
 }
@@ -2138,7 +2153,7 @@ test "directwrite candidate order: drops simulated faces" {
 test "directwrite candidate order: codepoint holders first, order kept in each group" {
     try testOrderFaceCandidates(
         &.{ .{}, .{ .has_codepoint = true }, .{}, .{ .has_codepoint = true } },
-        true,
+        .{ .styled = false, .codepoint = true },
         &.{ 1, 3, 0, 2 },
     );
 }
@@ -2146,7 +2161,7 @@ test "directwrite candidate order: codepoint holders first, order kept in each g
 test "directwrite candidate order: codepoint ignored when none was asked for" {
     try testOrderFaceCandidates(
         &.{ .{}, .{ .has_codepoint = true }, .{}, .{ .has_codepoint = true } },
-        false,
+        .{ .styled = false, .codepoint = false },
         &.{ 0, 1, 2, 3 },
     );
 }
@@ -2154,12 +2169,20 @@ test "directwrite candidate order: codepoint ignored when none was asked for" {
 test "directwrite candidate order: a simulated face is dropped even with the codepoint" {
     try testOrderFaceCandidates(
         &.{ .{ .simulated = true, .has_codepoint = true }, .{} },
-        true,
+        .{ .styled = false, .codepoint = true },
         &.{1},
     );
 }
 
 test "directwrite candidate order: nothing in, nothing out" {
-    try testOrderFaceCandidates(&.{}, false, &.{});
-    try testOrderFaceCandidates(&.{ .{ .simulated = true }, .{ .simulated = true } }, true, &.{});
+    try testOrderFaceCandidates(
+        &.{},
+        .{ .styled = false, .codepoint = false },
+        &.{},
+    );
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true }, .{ .simulated = true } },
+        .{ .styled = false, .codepoint = true },
+        &.{},
+    );
 }
