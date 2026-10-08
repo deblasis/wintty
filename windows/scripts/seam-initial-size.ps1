@@ -110,7 +110,11 @@ param(
     [int]$Runs = 2,
     # Tabs seed-tabs adds per launch. The last becomes the active one, so
     # all but one of them are created hidden.
-    [int]$SeededTabs = 3
+    [int]$SeededTabs = 3,
+    # A caller's teardown hook, forwarded to every session this harness
+    # starts and to no Stop-SeamSession: Stop appends, so passing it there
+    # too would run the hook twice for one launch.
+    [scriptblock]$BeforeTeardown = $null
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
@@ -752,7 +756,8 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
     $s = $null
     try {
         Assert-NoWinttyFrom -ExePath $ExePath -Context 'seam-initial-size'
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -PrivateStateBase
+        # Forwarded here, never to the Stop-SeamSession in the finally below: Stop appends, so the hook would run twice for one launch.
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -PrivateStateBase -BeforeTeardown $BeforeTeardown
 
         # The registry snapshot the sampled scenario's profile pool and
         # the kind budgets need. Best-effort and early: discovery may
@@ -1145,7 +1150,19 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
             if (-not $entry.ok -and $s.StateBase) {
                 Copy-Item -LiteralPath $s.StateBase -Destination (Join-Path $OutDir "state-$N-$Mode") -Recurse -Force -ErrorAction SilentlyContinue
             }
-            Stop-SeamSession $s
+            # A teardown hook that throws must not abort the finally: it is
+            # recorded against the run instead.
+            try {
+                Stop-SeamSession $s
+            }
+            catch {
+                $teardownMsg = "$($_.Exception.Message)"
+                $entry.ok = $false
+                $entry.error += " | teardown: $teardownMsg"
+                if (-not $entry.class) {
+                    $entry.class = if ($teardownMsg -like '*PRODUCT_*') { 'product' } else { 'harness' }
+                }
+            }
             # The next run refuses to start beside this exe, so wait out a
             # slow exit rather than failing the next run on it.
             if ($s.Proc) { [void]$s.Proc.WaitForExit(20000) }
@@ -1169,7 +1186,7 @@ $script:RegistryCommands = @{}
     $s = $null
     try {
         Assert-NoWinttyFrom -ExePath $ExePath -Context 'seam-initial-size'
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $freshConfig -PrivateStateBase
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $freshConfig -PrivateStateBase -BeforeTeardown $BeforeTeardown
         $prev = $null
         $list = $null
         $deadline = (Get-Date).AddSeconds(20)
@@ -1198,7 +1215,16 @@ $script:RegistryCommands = @{}
     }
     finally {
         if ($null -ne $s) {
-            Stop-SeamSession $s
+            # Same rule as the run function: a throwing hook becomes a
+            # recorded finding, never an abort of the teardown.
+            try {
+                Stop-SeamSession $s
+            }
+            catch {
+                $teardownMsg = "$($_.Exception.Message)"
+                $teardownClass = if ($teardownMsg -like '*PRODUCT_*') { 'product' } else { 'harness' }
+                Add-Result 'detection-fresh-teardown' $false $teardownClass $teardownMsg
+            }
             if ($s.Proc) { [void]$s.Proc.WaitForExit(20000) }
         }
     }
