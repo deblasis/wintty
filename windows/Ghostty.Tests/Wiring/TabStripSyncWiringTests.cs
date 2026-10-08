@@ -1355,6 +1355,102 @@ public sealed class TabStripSyncWiringTests
             + "_suppressSelectionEvent window; NudgeTabViewItemVisual carries its own.");
     }
 
+    /// <summary>
+    /// The claim has a second way to miss, and the nudge above cannot reach
+    /// it. The Selected state's fill setter takes its
+    /// {ThemeResource TabViewItemHeaderBackgroundSelected} when the item's
+    /// template is applied, and keeps that value: later selections of the
+    /// item show the path again but do not look the resource up again. A
+    /// tab whose template is applied while it is NOT the selected one
+    /// (several tabs added in one dispatcher turn, a switch away before the
+    /// new tab's first layout pass) used to carry no per-item key at that
+    /// moment, because the untinted branch only wrote it for the selected
+    /// item. The setter then resolved to the strip-level fallback, which is
+    /// Transparent by design, and every later selection of that tab drew
+    /// no fill: only the seam cover's bottom line under an otherwise bare
+    /// header. Handing every untinted item the field's one brush under the
+    /// selected keys makes whatever the setter resolves the right instance,
+    /// whenever it resolves. The settle still runs only for the selected
+    /// item, so the field animates exactly as before.
+    /// </summary>
+    [Fact]
+    public void ApplyTabChrome_hands_unselected_untinted_items_the_field_under_the_selected_keys()
+    {
+        var chrome = ShellSource.Load(TabHostSource).Method("ApplyTabChrome");
+
+        // The untinted branch is the else of the preset-colour test.
+        var tintGate = chrome.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "tab.Color != TabColor.None");
+        Assert.NotNull(tintGate.Else);
+        var untinted = tintGate.Else!.Statement;
+
+        var handed = untinted.AssignsTo("selectedHandle").ToList();
+        Assert.True(
+            handed.Count == 1,
+            $"The untinted branch should write selectedHandle once; found {handed.Count}.");
+        var write = handed[0];
+
+        // Unselected items get the field's own brush: the one instance the
+        // active tab and the seam cover paint with, so a setter that froze
+        // on it is never wrong. The selected item keeps the fill colour,
+        // which the settle below reads as its target.
+        Assert.True(
+            write.Right is ConditionalExpressionSyntax
+            {
+                Condition: IdentifierNameSyntax { Identifier.Text: "selected" },
+            } pick
+                && pick.WhenTrue.ToString() == "_selectedTabFillBrush"
+                && pick.WhenFalse.ToString() == "_field.Brush",
+            "An unselected untinted item must carry _field.Brush under the selected "
+            + "keys (selected ? _selectedTabFillBrush : _field.Brush); without it, a "
+            + "template applied while the tab is unselected freezes the Selected fill "
+            + $"on the Transparent fallback. Found: selectedHandle = {write.Right}.");
+
+        // And nothing between the branch and the write may require the tab
+        // to be selected: that guard is exactly how the key went missing.
+        foreach (var gate in write.Ancestors().OfType<IfStatementSyntax>()
+                     .Where(g => untinted.Span.Contains(g.Span)))
+        {
+            Assert.DoesNotContain(
+                gate.Condition.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>(),
+                n => n.Identifier.Text == "selected");
+        }
+
+        // The stroke key freezes the same way: the Selected state's
+        // container stroke setter resolved the stock stroke for an item
+        // built unselected. Its value must not depend on the item being
+        // selected now.
+        var strokeWrite = chrome.Calls("SetItemHeaderBrush")
+            .Single(c => c.Arg(1) == "\"TabViewSelectedItemBorderBrush\"");
+        var stroke = strokeWrite.ArgExpression(2).ToString();
+        Assert.DoesNotContain(
+            strokeWrite.Ancestors().OfType<IfStatementSyntax>().Where(g => chrome.Span.Contains(g.Span)),
+            g => g.Condition.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>()
+                .Any(n => n.Identifier.Text == "selected"));
+        foreach (var strokeAssign in chrome.AssignsTo(stroke).ToList())
+        {
+            Assert.DoesNotContain(
+                strokeAssign.Ancestors().OfType<IfStatementSyntax>().Where(g => chrome.Span.Contains(g.Span)),
+                g => g.Condition.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>()
+                    .Any(n => n.Identifier.Text == "selected"));
+        }
+        var strokeDecl = chrome.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.Text == stroke);
+        Assert.True(
+            strokeDecl.Initializer is { Value: not LiteralExpressionSyntax }
+                || chrome.AssignsTo(stroke).Any(),
+            $"{stroke} must be computed for every item, not left null for unselected ones; "
+            + "a null removes the key and the stroke setter of an item built unselected "
+            + "keeps the stock stroke.");
+
+        // The settle stays the selected item's alone: unselected items are
+        // handed the brush, never a new flight.
+        var settle = chrome.CallEndingWith("_field.Settle");
+        var settleGate = Assert.Single(settle.Ancestors().OfType<IfStatementSyntax>()
+            .Where(g => chrome.Span.Contains(g.Span)));
+        Assert.StartsWith("selected &&", settleGate.Condition.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void An_equal_count_content_skew_throws_into_the_rebuild()
     {

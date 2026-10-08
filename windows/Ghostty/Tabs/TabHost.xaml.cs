@@ -233,6 +233,54 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 tab.Color, ReferenceEquals(tab, _manager.ActiveTab), _stripBackdropPacked);
 
     /// <summary>
+    /// What the selected-state template parts of every header actually
+    /// paint with, read off the live tree: the fill path the Selected state
+    /// shows, and the stroke it puts on the container. The per-item
+    /// resource ApplyTabChrome writes is only a claim; the template takes
+    /// its value when the setter resolves, so this reads the setter's
+    /// result, not the claim. Null rows for tabs the strip has not built.
+    /// </summary>
+    internal IReadOnlyList<(TabModel Tab, bool Selected, bool PathShown,
+        bool FillIsField, string Fill, bool BorderIsExpected, string Border)> TestSeamSelectedPaint()
+    {
+        static string Hex(Brush? b) => b is SolidColorBrush s
+            ? $"#{s.Color.A:X2}{s.Color.R:X2}{s.Color.G:X2}{s.Color.B:X2}"
+            : b is null ? "null" : b.GetType().Name;
+        static FrameworkElement? Find(DependencyObject root, string name)
+        {
+            var n = VisualTreeHelper.GetChildrenCount(root);
+            for (var i = 0; i < n; i++)
+            {
+                var child = VisualTreeHelper.GetChild(root, i);
+                if (child is FrameworkElement fe && fe.Name == name) return fe;
+                if (Find(child, name) is { } hit) return hit;
+            }
+            return null;
+        }
+
+        var rows = new List<(TabModel, bool, bool, bool, string, bool, string)>();
+        foreach (var tab in _manager.Tabs)
+        {
+            if (!_itemByModel.TryGetValue(tab, out var item)) continue;
+            var path = Find(item, "SelectedBackgroundPath") as Microsoft.UI.Xaml.Shapes.Path;
+            var container = Find(item, "TabContainer") as Grid;
+            var expectedBorder = tab.Color != TabColor.None
+                ? TabColorBrush.From(TabColorPalette.Border(tab.Color))
+                : _selectedBorderBrush;
+            rows.Add((
+                tab,
+                item.IsSelected,
+                path is { Visibility: Visibility.Visible },
+                path is not null && ReferenceEquals(path.Fill, _field.Brush),
+                Hex(path?.Fill),
+                container?.BorderBrush is SolidColorBrush stroke
+                    && expectedBorder is not null && stroke.Color == expectedBorder.Color,
+                Hex(container?.BorderBrush)));
+        }
+        return rows;
+    }
+
+    /// <summary>
     /// The wintty icon shown at the start of the tab strip. Exposed so
     /// the layout switch can spin it independently of the strip chrome.
     /// </summary>
@@ -2245,9 +2293,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     TabGroupField.WashArgb(_stripBackdropPacked));
                 washedByField = true;
             }
-            if (selected && _selectedTabFillBrush is not null)
+            // Every item carries the selected key, not only the selected one.
+            // The template's Selected setters take their value when the
+            // item's template is applied: an item built while another tab
+            // was selected would otherwise resolve the Transparent fallback
+            // and keep it, so selecting it later drew no fill. Unselected
+            // items get the field's own brush, the instance the active tab
+            // and the seam cover paint with, so whatever the setter froze on
+            // is right.
+            if (_selectedTabFillBrush is not null)
             {
-                selectedHandle = _selectedTabFillBrush;
+                selectedHandle = selected ? _selectedTabFillBrush : _field.Brush;
             }
         }
 
@@ -2279,13 +2335,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // A tab carrying a preset colour takes that colour's border, the same
         // way its pane does, so the stroke keeps identifying which pane the
         // tab belongs to instead of flattening every tab to the accent.
-        SolidColorBrush? selectedBorder = null;
-        if (selected)
-        {
-            selectedBorder = tab.Color != TabColor.None
-                ? TabColorBrush.From(TabColorPalette.Border(tab.Color))
-                : _selectedBorderBrush;
-        }
+        // Written for every item for the same reason as the fill above: the
+        // Selected state's stroke setter resolves when the template is
+        // applied, and an item built unselected kept the stock stroke.
+        var selectedBorder = tab.Color != TabColor.None
+            ? TabColorBrush.From(TabColorPalette.Border(tab.Color))
+            : _selectedBorderBrush;
         SetItemHeaderBrush(viewItem, "TabViewSelectedItemBorderBrush", selectedBorder);
 
         // The group rail rides every chrome pass, so a join, a leave, or a
