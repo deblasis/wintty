@@ -162,11 +162,22 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     const bpp: u32 = bppForFormat(opts.pixel_format);
     const aligned_row_pitch = alignPitch(@intCast(width * bpp));
 
+    // The state the resource is created in. Only an initial upload needs
+    // COPY_DEST; everything else starts where shaders read it. That way a
+    // texture created with no data needs no barrier, and so no command
+    // list: the renderer rebuilds its atlas placeholders between frames,
+    // where there is none, and a color atlas that never receives a glyph
+    // is never uploaded to and would otherwise stay in COPY_DEST for good.
+    const initial_state: d3d12.D3D12_RESOURCE_STATES = if (!opts.render_target and data != null)
+        d3d12.D3D12_RESOURCE_STATES.COPY_DEST
+    else
+        d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE;
+
     // Create the GPU texture resource. Render targets use ALLOW_RENDER_TARGET.
     const resource = if (opts.render_target)
         createRenderTargetResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed
     else
-        createTextureResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed;
+        createTextureResource(device, @intCast(width), @intCast(height), opts.pixel_format, initial_state) orelse return error.TextureCreateFailed;
     // A failure after the upload below has started leaves copies into this
     // resource recorded in the open command list, which is still submitted
     // with the frame. So a failed init retires the resource like deinit
@@ -234,10 +245,7 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         // deinit.
         .srv_heap = srv_heap,
         .rtv_heap = if (opts.render_target) opts.rtv_heap else null,
-        .state = if (opts.render_target)
-            d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE
-        else
-            d3d12.D3D12_RESOURCE_STATES.COPY_DEST,
+        .state = initial_state,
     };
     // The staging buffers of the bands that were recorded before a failure
     // are referenced by the same open list as the resource.
@@ -253,10 +261,9 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
         // quad. The errdefers above retire what the open list references.
         if (data) |pixels| {
             try tex.uploadRegion(0, 0, @intCast(width), @intCast(height), pixels);
+            // Created in COPY_DEST for exactly this upload.
+            tex.transition(d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE);
         }
-        // Transition to shader-readable. The texture was created in COPY_DEST
-        // so the initial upload (if any) could proceed without a barrier.
-        tex.transition(d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE);
     }
 
     return tex;
@@ -548,7 +555,13 @@ pub fn transitionBarrier(
     cl.ResourceBarrier(1, @ptrCast(&barrier));
 }
 
-fn createTextureResource(device: *d3d12.ID3D12Device, width: u32, height: u32, format: dxgi.DXGI_FORMAT) ?*d3d12.ID3D12Resource {
+fn createTextureResource(
+    device: *d3d12.ID3D12Device,
+    width: u32,
+    height: u32,
+    format: dxgi.DXGI_FORMAT,
+    initial_state: d3d12.D3D12_RESOURCE_STATES,
+) ?*d3d12.ID3D12Resource {
     const heap_props = d3d12.D3D12_HEAP_PROPERTIES{
         .Type = .DEFAULT,
         .CPUPageProperty = 0,
@@ -571,12 +584,11 @@ fn createTextureResource(device: *d3d12.ID3D12Device, width: u32, height: u32, f
     };
 
     var resource: ?*d3d12.ID3D12Resource = null;
-    // Texture starts in COPY_DEST state so we can upload initial data.
     const hr = device.CreateCommittedResource(
         &heap_props,
         0,
         &desc,
-        d3d12.D3D12_RESOURCE_STATES.COPY_DEST,
+        initial_state,
         null,
         &d3d12.ID3D12Resource.IID,
         @ptrCast(&resource),

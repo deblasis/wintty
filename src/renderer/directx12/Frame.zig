@@ -96,9 +96,13 @@ pub fn init(device: *d3d12.ID3D12Device) !Frame {
 }
 
 pub fn deinit(self: *Frame) void {
-    // Best-effort close in case the command list is still open.
+    // Release only. A list is valid to release in either state, and it is
+    // closed here in every path but a frame abandoned mid-recording:
+    // init() closes it and complete() closes it after every frame. Closing
+    // a closed list is an invalid call, and the debug layer, while
+    // rejecting it, reports every object the list's last frame referenced
+    // that has since been freed (the shaders, at teardown).
     if (self.command_list) |cl| {
-        _ = cl.Close();
         _ = cl.Release();
     }
     if (self.command_allocator) |ca| {

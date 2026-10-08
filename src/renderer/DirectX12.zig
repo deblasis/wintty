@@ -141,8 +141,8 @@ swap_chain3: ?*dxgi.IDXGISwapChain3 = null,
 allocator: Allocator = undefined,
 
 /// Copied from `rendererpkg.Options.init_started` at the top of `init`,
-/// so the GPU bring-up phases below (device creation, init-fence wait,
-/// PSO build in `initShaders`) can log elapsed time from the same
+/// so the GPU bring-up phases below (device creation, the PSO build in
+/// `initShaders`) can log elapsed time from the same
 /// reference `Surface.init` used, without their own plumbing. Null
 /// when unset (e.g. the non-Windows early return in `init`, or a
 /// caller that never threaded it through `Options`).
@@ -178,18 +178,11 @@ rtv_handles: [device.Device.frame_count]d3d12.D3D12_CPU_DESCRIPTOR_HANDLE =
 shared_rtv: ?d3d12.D3D12_CPU_DESCRIPTOR_HANDLE = null,
 
 /// Command list from the current beginFrame, executed in drawFrameEnd.
-/// Also temporarily set to the init command list during init() so that
-/// initAtlasTexture can record resource barriers for placeholder textures.
+/// Null outside a frame. Textures created then (the swap chain built at
+/// init or rebuilt when a hidden surface is shown again) record nothing:
+/// a texture with no initial data is created shader-readable, and atlas
+/// textures take the frame's list before every upload.
 pending_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
-
-/// Temporary command allocator for init-time GPU work (texture barriers).
-/// Created in init(), released by flushInitCommands().
-init_command_allocator: ?*d3d12.ID3D12CommandAllocator = null,
-
-/// Temporary command list for init-time GPU work.
-/// Set as pending_command_list during init so initAtlasTexture picks it
-/// up through the existing textureOptions path without signature changes.
-init_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 
 /// Back buffer index from the current beginFrame, used in drawFrameEnd
 /// to record the fence value against the correct frame slot.
@@ -371,15 +364,10 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
 }
 
 /// Build the device and everything that lives on it: swap chain, heaps,
-/// back buffers, per-frame command lists, and the one-shot init command
-/// list. Shared by `init` and `recoverDevice`, which is why it takes the
-/// surface and size explicitly rather than reading them off the options.
-/// Public so the GPU tests can build a headless instance without a
-/// renderer.Options.
-///
-/// Leaves `pending_command_list` pointing at the init command list so the
-/// generic renderer's atlas placeholders can record their barriers; the
-/// caller runs `flushInitCommands` once those exist.
+/// back buffers and per-frame command lists. Shared by `init` and
+/// `recoverDevice`, which is why it takes the surface and size explicitly
+/// rather than reading them off the options. Public so the GPU tests can
+/// build a headless instance without a renderer.Options.
 pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !void {
     self.surface = surface;
     // A freshly built swap chain carries no matrix transform, so whatever
@@ -593,44 +581,6 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         };
     }
 
-    // Create a one-shot command list for init-time texture work.
-    // initAtlasTexture (called from SwapChain.init) needs a command list
-    // to record COPY_DEST -> PIXEL_SHADER_RESOURCE barriers on placeholder
-    // textures. Per-frame command lists aren't available until beginFrame,
-    // so we create a dedicated one here and flush it after SwapChain.init.
-    {
-        var init_alloc: ?*d3d12.ID3D12CommandAllocator = null;
-        const alloc_hr = dev_ptr.device.CreateCommandAllocator(
-            .DIRECT,
-            &d3d12.ID3D12CommandAllocator.IID,
-            @ptrCast(&init_alloc),
-        );
-        if (com.FAILED(alloc_hr)) {
-            log.err("CreateCommandAllocator for init failed: 0x{x}", .{@as(u32, @bitCast(alloc_hr))});
-            return error.CommandAllocatorCreationFailed;
-        }
-        errdefer _ = init_alloc.?.Release();
-
-        var init_cl: ?*d3d12.ID3D12GraphicsCommandList = null;
-        const cl_hr = dev_ptr.device.CreateCommandList(
-            0,
-            .DIRECT,
-            init_alloc.?,
-            null,
-            &d3d12.ID3D12GraphicsCommandList.IID,
-            @ptrCast(&init_cl),
-        );
-        if (com.FAILED(cl_hr)) {
-            log.err("CreateCommandList for init failed: 0x{x}", .{@as(u32, @bitCast(cl_hr))});
-            return error.CommandListCreationFailed;
-        }
-        errdefer _ = init_cl.?.Release();
-
-        self.init_command_allocator = init_alloc;
-        self.init_command_list = init_cl;
-        self.pending_command_list = init_cl;
-    }
-
     self.applied_width = width;
     self.applied_height = height;
 
@@ -716,15 +666,6 @@ fn deinitGpu(self: *DirectX12, handle: SurfaceHandleDisposition) void {
         if (dev_ptr.shared_texture) |st| self.shared_texture_version = st.version;
     }
 
-    // Release init command list if never flushed (error during init).
-    if (self.init_command_list) |cl| {
-        _ = cl.Release();
-        self.init_command_list = null;
-    }
-    if (self.init_command_allocator) |alloc| {
-        _ = alloc.Release();
-        self.init_command_allocator = null;
-    }
     self.pending_command_list = null;
     // A deferred frameCompleted owes the swap chain a semaphore permit;
     // dropping one here would deadlock the next SwapChain.deinit. It is
@@ -838,50 +779,6 @@ pub fn recoverDevice(self: *DirectX12) !void {
     log.info("DX12 device recreated after loss ({}x{})", .{ width, height });
 }
 
-/// Execute and release the one-shot init command list.
-/// Called from GenericRenderer.init after SwapChain.init creates the
-/// initial atlas textures. Submits the recorded resource barriers
-/// (COPY_DEST -> PIXEL_SHADER_RESOURCE) and waits for the GPU to
-/// finish before the first render frame.
-pub fn flushInitCommands(self: *DirectX12) void {
-    const dev_ptr = &(self.dev orelse return);
-
-    if (self.init_command_list) |cl| {
-        const close_hr = cl.Close();
-        if (!com.FAILED(close_hr)) {
-            const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
-            dev_ptr.command_queue.ExecuteCommandLists(1, &lists);
-
-            dev_ptr.waitForGpu() catch |err| {
-                log.err("waitForGpu after init commands failed: {}", .{err});
-            };
-            if (self.init_started) |started| init_log.info(
-                "surface_init init-fence-wait done +{d} ms",
-                .{started.untilNow(global.io(), .awake).toMilliseconds()},
-            );
-        } else {
-            // Close failed -- the recorded barriers won't reach the GPU.
-            // Texture.state already reads PIXEL_SHADER_RESOURCE but the
-            // GPU-side state is still COPY_DEST, so the first render frame
-            // will likely hit a resource state mismatch. This typically
-            // means the device is already in a bad state.
-            log.err("init command list Close failed: 0x{x}", .{@as(u32, @bitCast(close_hr))});
-        }
-
-        _ = cl.Release();
-        self.init_command_list = null;
-    }
-
-    if (self.init_command_allocator) |alloc| {
-        _ = alloc.Release();
-        self.init_command_allocator = null;
-    }
-
-    // Clear so it doesn't point to the now-released init command list.
-    // beginFrame will set it to the per-frame command list.
-    self.pending_command_list = null;
-}
-
 /// Block until the GPU finishes all submitted work, then release
 /// everything the retirement queue is holding.
 ///
@@ -957,11 +854,6 @@ pub fn drawFrameEnd(self: *DirectX12) void {
 
     const dev_ptr = &(self.dev orelse return);
     const cl = self.pending_command_list orelse return;
-    // The init command list is still recording until flushInitCommands
-    // closes it. A draw that fails between a device rebuild and that
-    // flush lands here with it pending; executing an open list is an
-    // invalid call that would remove the device all over again.
-    if (cl == self.init_command_list) return;
     self.pending_command_list = null;
 
     // Execute the command list.
@@ -1807,15 +1699,12 @@ test "DirectX12 has device_lost field" {
     try std.testing.expect(@hasField(DirectX12, "device_lost"));
 }
 
-test "DirectX12 has init command list fields" {
-    try std.testing.expect(@hasField(DirectX12, "init_command_allocator"));
-    try std.testing.expect(@hasField(DirectX12, "init_command_list"));
-}
-
-test "DirectX12 init command list defaults to null" {
-    const api: DirectX12 = .{};
-    try std.testing.expect(api.init_command_allocator == null);
-    try std.testing.expect(api.init_command_list == null);
+test "DirectX12 has no init command list" {
+    // Nothing built between frames records GPU work, so there is no
+    // one-shot list for anything to keep a pointer to after it is gone.
+    try std.testing.expect(!@hasField(DirectX12, "init_command_allocator"));
+    try std.testing.expect(!@hasField(DirectX12, "init_command_list"));
+    try std.testing.expect(!@hasDecl(DirectX12, "flushInitCommands"));
 }
 
 test "DirectX12 default device_lost is false" {
