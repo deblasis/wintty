@@ -1067,7 +1067,9 @@ typedef struct {
  *   its id and every record beneath it, so clearing "build" also removes
  *   "build/test". A clear report with an empty id removes every record.
  * - When a new shell prompt starts (OSC 133 A) or the program running in
- *   the terminal exits, remove `working` and `blocked` records.
+ *   the terminal exits, remove `working` and `blocked` records. This
+ *   build's C API has no shell integration callback, so an embedder of it
+ *   cannot see the prompt start; the Ghostty app's own path does.
  *   You may remove `idle` records too. Keep `done` and `error` records
  *   until the user has seen them, for example until they next focus the
  *   terminal.

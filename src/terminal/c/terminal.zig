@@ -6446,3 +6446,92 @@ test "get_multi null keys returns invalid_value" {
     var values = [_]?*anyopaque{@ptrCast(&cols)};
     try testing.expectEqual(Result.invalid_value, get_multi(null, 1, null, &values, null));
 }
+
+/// The `NAME = value` entries of `typedef enum { ... } <typedef_name>;` in a
+/// C header, read as text. Nothing compiles osc.h or terminal.h against
+/// these enums, so this is the check that a renumbered pick cannot slip by.
+fn headerEnum(
+    alloc: std.mem.Allocator,
+    header: []const u8,
+    typedef_name: []const u8,
+) !std.StringHashMapUnmanaged(i64) {
+    const close = try std.fmt.allocPrint(alloc, "}} {s};", .{typedef_name});
+    defer alloc.free(close);
+    const end = std.mem.indexOf(u8, header, close) orelse return error.TypedefNotFound;
+    const start = std.mem.lastIndexOf(u8, header[0..end], "typedef enum") orelse return error.TypedefNotFound;
+    const open = std.mem.indexOfScalarPos(u8, header, start, '{') orelse return error.TypedefNotFound;
+
+    var map: std.StringHashMapUnmanaged(i64) = .empty;
+    errdefer map.deinit(alloc);
+    var lines = std.mem.splitScalar(u8, header[open + 1 .. end], '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r,");
+        if (!std.mem.startsWith(u8, line, "GHOSTTY_")) continue;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const name = std.mem.trim(u8, line[0..eq], " \t");
+        const value = std.fmt.parseInt(i64, std.mem.trim(u8, line[eq + 1 ..], " \t"), 10) catch continue;
+        try map.put(alloc, name, value);
+    }
+    return map;
+}
+
+fn expectHeaderEnum(
+    comptime T: type,
+    path: []const u8,
+    typedef_name: []const u8,
+    comptime prefix: []const u8,
+    renames: []const [2][]const u8,
+) !void {
+    const alloc = testing.allocator;
+    const header = try std.Io.Dir.cwd().readFileAlloc(testing.io, path, alloc, .unlimited);
+    defer alloc.free(header);
+    var map = try headerEnum(alloc, header, typedef_name);
+    defer map.deinit(alloc);
+
+    var seen: usize = 0;
+    inline for (@typeInfo(T).@"enum".fields) |field| {
+        var c_name_buf: [128]u8 = undefined;
+        var c_name: []const u8 = undefined;
+        const renamed = for (renames) |r| {
+            if (std.mem.eql(u8, r[0], field.name)) break r[1];
+        } else null;
+        if (renamed) |r| {
+            c_name = try std.fmt.bufPrint(&c_name_buf, "{s}{s}", .{ prefix, r });
+        } else {
+            const upper = std.ascii.upperString(c_name_buf[prefix.len..][0..field.name.len], field.name);
+            @memcpy(c_name_buf[0..prefix.len], prefix);
+            c_name = c_name_buf[0 .. prefix.len + upper.len];
+        }
+        const value = map.get(c_name) orelse {
+            std.log.err("{s}: {s} has no {s}", .{ path, field.name, c_name });
+            return error.MissingInHeader;
+        };
+        testing.expectEqual(@as(i64, field.value), value) catch |err| {
+            std.log.err("{s}: {s} is {d} in zig and {d} in the header", .{ path, c_name, field.value, value });
+            return err;
+        };
+        seen += 1;
+    }
+    // Nothing in the header that zig does not have (the MAX sentinel aside).
+    try testing.expectEqual(seen, map.count());
+}
+
+test "osc.h GhosttyOscCommandType matches osc.Command.Key" {
+    try expectHeaderEnum(
+        osc.Command.Key,
+        "include/ghostty/vt/osc.h",
+        "GhosttyOscCommandType",
+        "GHOSTTY_OSC_COMMAND_",
+        &.{},
+    );
+}
+
+test "terminal.h GhosttyTerminalOption matches Option" {
+    try expectHeaderEnum(
+        Option,
+        "include/ghostty/vt/terminal.h",
+        "GhosttyTerminalOption",
+        "GHOSTTY_TERMINAL_OPT_",
+        &.{.{ "size_cb", "SIZE" }},
+    );
+}
