@@ -6653,8 +6653,8 @@ test "ReadThread windows: conpty's startup DA1 is answered on the pty input and 
 
     const testing = std.testing;
 
-    // #1268: a local pane must answer the bundled conpty's startup DA1
-    // itself, the way sessiond does for a daemon pane. Real pipes in the
+    // #1268: a pane must answer the bundled conpty's startup DA1 itself,
+    // before the parser is reachable. Real pipes in the
     // shapes the pty uses: an anonymous pipe for conpty's output, and an
     // overlapped named pipe for its input, which is what makes the reply
     // write overlapped.
