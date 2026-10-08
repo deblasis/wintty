@@ -247,6 +247,63 @@ pub const Descriptor = struct {
     }
 };
 
+/// One face a discovery backend offered for a family, in the order the
+/// backend offered it. For DirectWrite this is an entry of the list
+/// returned by IDWriteFontFamily::GetMatchingFonts, which is already
+/// ranked by DirectWrite itself.
+///
+/// A simulated face is one DirectWrite synthesized (synthetic bold or
+/// oblique) rather than one the font file ships. We drop those: FreeType
+/// loads and renders the font file, not DirectWrite's simulation of it,
+/// so the simulated face renders as the face it was derived from.
+const FaceCandidate = struct {
+    simulated: bool = false,
+    has_codepoint: bool = false,
+};
+
+/// Order the faces a family offered, dropping the simulated ones and, when
+/// a codepoint was asked for, putting the faces that have it first.
+///
+/// The order within each group is the order DirectWrite returned, which is
+/// its own ranking of the family for the requested weight, stretch and
+/// style. There is nothing to sort here: the ranking is the input.
+///
+/// Simulated faces are dropped rather than ranked low because FreeType
+/// renders the font file, not DirectWrite's simulation, and
+/// Collection.completeStyles synthesizes a missing style from the regular
+/// face anyway. A face that only looks right because DirectWrite faked it
+/// is not a face we can render as such.
+fn orderFaceCandidates(
+    candidates: []const FaceCandidate,
+    want_codepoint: bool,
+    out: []usize,
+) usize {
+    assert(out.len >= candidates.len);
+
+    if (!want_codepoint) {
+        var n: usize = 0;
+        for (candidates, 0..) |candidate, i| {
+            if (candidate.simulated) continue;
+            out[n] = i;
+            n += 1;
+        }
+        return n;
+    }
+
+    var n: usize = 0;
+    for (candidates, 0..) |candidate, i| {
+        if (candidate.simulated or !candidate.has_codepoint) continue;
+        out[n] = i;
+        n += 1;
+    }
+    for (candidates, 0..) |candidate, i| {
+        if (candidate.simulated or candidate.has_codepoint) continue;
+        out[n] = i;
+        n += 1;
+    }
+    return n;
+}
+
 pub const DirectWrite = struct {
     factory: *dwrite.IDWriteFactory3,
     collection: *dwrite.IDWriteFontCollection,
