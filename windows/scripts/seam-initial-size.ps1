@@ -974,9 +974,12 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
 
         # hidden: seed-tabs closes down to one tab, then adds the rest in one
         # turn; the last one added is the active one and the others are
-        # created behind it.
+        # created behind it. `profile` births them through the resolved
+        # idle snapshot -- the shape a session restore has -- so each hidden
+        # pane runs the same echo program the launch pane does and its
+        # marker can reach the screen once shown.
         Invoke-Scenario "hidden-floor$suffix" {
-            $seeded = Invoke-SeamCommand $s @{ op = 'seed-tabs'; count = $SeededTabs + 1 }
+            $seeded = Invoke-SeamCommand $s @{ op = 'seed-tabs'; count = $SeededTabs + 1; profile = 'idle' }
             $tabs = @($seeded.state.tabs)
             if ($tabs.Count -ne $SeededTabs + 1) { throw "HARNESS: seed-tabs left $($tabs.Count) tabs, wanted $($SeededTabs + 1)" }
             $active = [int]$seeded.state.active
