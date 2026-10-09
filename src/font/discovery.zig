@@ -303,6 +303,82 @@ pub const DirectWrite = struct {
             self.discoverAll(alloc, desc);
     }
 
+    /// One face a family offered, in the order DirectWrite offered it: an
+    /// entry of the list returned by IDWriteFontFamily::GetMatchingFonts,
+    /// which is already ranked by DirectWrite itself.
+    ///
+    /// A simulated face is one DirectWrite synthesized (synthetic bold or
+    /// oblique) rather than one the font file ships. We drop those: FreeType
+    /// loads and renders the font file, not DirectWrite's simulation of it,
+    /// so the simulated face renders as the face it was derived from.
+    const FaceCandidate = struct {
+        simulated: bool = false,
+        has_codepoint: bool = false,
+    };
+
+    /// What the caller asked of a family, as far as the ordering cares.
+    const FaceRequest = struct {
+        /// Bold and/or italic was asked for, not just the regular face.
+        styled: bool,
+        /// A codepoint was asked for, so faces that have it are worth more.
+        codepoint: bool,
+    };
+
+    /// Order the faces a family offered, dropping the simulated ones and, when
+    /// a codepoint was asked for, putting the faces that have it first.
+    ///
+    /// The order within each group is the order DirectWrite returned, which is
+    /// its own ranking of the family for the requested weight, stretch and
+    /// style. There is nothing to sort here: the ranking is the input.
+    ///
+    /// Simulated faces are dropped rather than ranked low because FreeType
+    /// renders the font file, not DirectWrite's simulation, and
+    /// Collection.completeStyles synthesizes a missing style from the regular
+    /// face anyway. A face that only looks right because DirectWrite faked it
+    /// is not a face we can render as such.
+    fn orderFaceCandidates(
+        candidates: []const FaceCandidate,
+        request: FaceRequest,
+        out: []usize,
+    ) usize {
+        assert(out.len >= candidates.len);
+
+        // A styled request that DirectWrite's own best match for is a
+        // simulation is a request the family cannot fill: it ships no real
+        // face of that style. The faces behind the simulation are of a
+        // different style, and taking one of them answers the wrong question
+        // (a family with Regular, Italic and Bold Italic but no upright Bold
+        // would answer a bold request with Bold Italic). Stopping here leaves
+        // the style to Collection.completeStyles, which synthesizes it from
+        // the regular face: the path Bahnschrift italic and Lucida Console
+        // bold are meant to take. A regular request is left alone: it asks
+        // for one style, so there is no missing style to notice.
+        if (request.styled and candidates.len > 0 and candidates[0].simulated) return 0;
+
+        if (!request.codepoint) {
+            var n: usize = 0;
+            for (candidates, 0..) |candidate, i| {
+                if (candidate.simulated) continue;
+                out[n] = i;
+                n += 1;
+            }
+            return n;
+        }
+
+        var n: usize = 0;
+        for (candidates, 0..) |candidate, i| {
+            if (candidate.simulated or !candidate.has_codepoint) continue;
+            out[n] = i;
+            n += 1;
+        }
+        for (candidates, 0..) |candidate, i| {
+            if (candidate.simulated or candidate.has_codepoint) continue;
+            out[n] = i;
+            n += 1;
+        }
+        return n;
+    }
+
     fn discoverFamily(self: *const DirectWrite, alloc: Allocator, desc: Descriptor, family: [:0]const u8) !DiscoverIterator {
         // Convert family name to UTF-16 for DirectWrite APIs
         var wfamily_buf: [128]u16 = undefined;
@@ -320,34 +396,85 @@ pub const DirectWrite = struct {
         if (dwrite.FAILED(hr)) return error.DirectWriteError;
         defer _ = dw_family.?.Release();
 
-        const font_count = dw_family.?.GetFontCount();
-        var fonts = try alloc.alloc(ScoredFont, font_count);
-        var valid_count: usize = 0;
+        // Ask DirectWrite for the faces of this family that match what we
+        // want. Its answer is already ranked best first by its own rules,
+        // which is the matcher Windows Terminal uses, so ranking the family
+        // ourselves is both wrong (it made every non-bold weight tie) and
+        // redundant.
+        //
+        // These are the same weight and style discoverFallback passes to
+        // MapCharacters, so both paths ask the same question.
+        const weight: dwrite.DWRITE_FONT_WEIGHT = if (desc.bold) .BOLD else .NORMAL;
+        const style: dwrite.DWRITE_FONT_STYLE = if (desc.italic) .ITALIC else .NORMAL;
 
+        var dw_list: ?*dwrite.IDWriteFontList = null;
+        hr = dw_family.?.GetMatchingFonts(weight, .NORMAL, style, &dw_list);
+        if (dwrite.FAILED(hr)) return error.DirectWriteError;
+        defer _ = dw_list.?.Release();
+
+        const font_count = dw_list.?.GetFontCount();
+
+        // Scratch for the ordering pass below, freed on every path. The
+        // list is bounded by the family size and this runs at font load,
+        // not per glyph, so one allocation each is fine; none of it happens
+        // per face.
+        var fonts = try alloc.alloc(?*dwrite.IDWriteFont, font_count);
+        defer alloc.free(fonts);
+        var candidates = try alloc.alloc(FaceCandidate, font_count);
+        defer alloc.free(candidates);
+        var order = try alloc.alloc(usize, font_count);
+        defer alloc.free(order);
+
+        var valid: usize = 0;
         for (0..font_count) |i| {
             var dw_font: ?*dwrite.IDWriteFont = null;
-            hr = dw_family.?.GetFont(@intCast(i), &dw_font);
+            hr = dw_list.?.GetFont(@intCast(i), &dw_font);
             if (dwrite.FAILED(hr)) continue;
 
-            if (dw_font.?.GetSimulations() != .NONE) {
-                _ = dw_font.?.Release();
-                continue;
-            }
-
-            fonts[valid_count] = .{ .font = dw_font.?, .score = scoreFont(&desc, dw_font.?) };
-            valid_count += 1;
+            fonts[valid] = dw_font.?;
+            candidates[valid] = .{
+                .simulated = dw_font.?.GetSimulations() != .NONE,
+                .has_codepoint = if (desc.codepoint > 0) blk: {
+                    var cp_exists: i32 = 0;
+                    const cp_hr = dw_font.?.HasCharacter(desc.codepoint, &cp_exists);
+                    break :blk dwrite.SUCCEEDED(cp_hr) and cp_exists != 0;
+                } else false,
+            };
+            valid += 1;
         }
 
-        const scored = fonts[0..valid_count];
-        std.mem.sortUnstable(ScoredFont, scored, {}, struct {
-            fn lessThan(_: void, a: ScoredFont, b: ScoredFont) bool {
-                return a.score.int() > b.score.int();
-            }
-        }.lessThan);
+        const n = orderFaceCandidates(candidates[0..valid], .{
+            .styled = desc.bold or desc.italic,
+            .codepoint = desc.codepoint > 0,
+        }, order);
 
-        var result = try alloc.alloc(*dwrite.IDWriteFont, valid_count);
-        for (scored, 0..) |sf, j| result[j] = sf.font;
-        alloc.free(fonts);
+        // Hand the kept faces to the iterator and release the rest, so that
+        // every face we obtained ends up in exactly one of the two. The
+        // kept ones are moved out of `fonts` and nulled there, so the
+        // release sees exactly the ones the iterator did not take. The
+        // errdefer covers the allocation of `result`: it runs while every
+        // face is still in `fonts`, and nothing after it can fail.
+        errdefer {
+            for (fonts[0..valid]) |maybe_font| {
+                if (maybe_font) |font| _ = font.Release();
+            }
+        }
+
+        var result = try alloc.alloc(*dwrite.IDWriteFont, n);
+        for (order[0..n], 0..) |idx, j| {
+            result[j] = fonts[idx].?;
+            fonts[idx] = null;
+        }
+        for (fonts[0..valid]) |maybe_font| {
+            if (maybe_font) |font| _ = font.Release();
+        }
+
+        if (n == 0) {
+            // DiscoverIterator.deinit only frees a non-empty slice, so the
+            // zero-length allocation above would leak. Use the empty one.
+            alloc.free(result);
+            return DiscoverIterator.empty(alloc, desc.variations);
+        }
 
         return DiscoverIterator{
             .fonts = result,
@@ -460,50 +587,6 @@ pub const DirectWrite = struct {
         return try self.discover(alloc, desc);
     }
 
-    // Scoring
-
-    const Score = packed struct {
-        const Backing = @typeInfo(@This()).@"struct".backing_integer.?;
-        glyph_count: u16 = 0,
-        bold: bool = false,
-        italic: bool = false,
-        normal_stretch: bool = false,
-        codepoint: bool = false,
-
-        pub fn int(self: Score) Backing {
-            return @bitCast(self);
-        }
-    };
-
-    const ScoredFont = struct {
-        font: *dwrite.IDWriteFont,
-        score: Score,
-    };
-
-    fn scoreFont(desc: *const Descriptor, font: *dwrite.IDWriteFont) Score {
-        var score: Score = .{};
-
-        const weight = font.GetWeight();
-        const style = font.GetStyle();
-        const stretch = font.GetStretch();
-
-        const is_bold = @intFromEnum(weight) >= @intFromEnum(dwrite.DWRITE_FONT_WEIGHT.SEMI_BOLD);
-        score.bold = desc.bold == is_bold;
-
-        const is_italic = (style == .ITALIC or style == .OBLIQUE);
-        score.italic = desc.italic == is_italic;
-
-        score.normal_stretch = (stretch == .NORMAL);
-
-        if (desc.codepoint > 0) {
-            var cp_exists: i32 = 0;
-            const cp_hr = font.HasCharacter(desc.codepoint, &cp_exists);
-            if (dwrite.SUCCEEDED(cp_hr) and cp_exists != 0) score.codepoint = true;
-        }
-
-        return score;
-    }
-
     // TextAnalysisSource -- minimal implementation for IDWriteFontFallback::MapCharacters
 
     const TextAnalysisSource = extern struct {
@@ -581,10 +664,11 @@ pub const DirectWrite = struct {
         return @ptrCast(buf[0..len :0].ptr);
     }
 
-    // Variation axes are not used for scoring because DirectWrite's
-    // GetWeight/GetStyle already return instance-level values. Variations
-    // are passed through to DeferredFace and applied when the font is
-    // loaded via FreeType (see DeferredFace.loadDirectWrite).
+    // Variation axes take no part in picking a face: DirectWrite matches on
+    // the weight, stretch and style the faces already report, and the
+    // variations in the descriptor are passed through to DeferredFace and
+    // applied when the font is loaded via FreeType (see
+    // DeferredFace.loadDirectWrite).
 
     pub const DiscoverIterator = struct {
         fonts: []*dwrite.IDWriteFont,
@@ -1907,4 +1991,343 @@ test "directwrite discover all" {
 
     // A typical Windows install has hundreds of fonts.
     try testing.expect(count > 0);
+}
+
+/// Test helper: whether the system collection has `family`. The integration
+/// tests below skip on images that do not ship the font they need.
+fn testDirectWriteHasFamily(dw: *const DirectWrite, family: [:0]const u8) bool {
+    var buf: [128]u16 = undefined;
+    const wfamily = DirectWrite.utf8ToUtf16Le(&buf, family) orelse return false;
+    var index: u32 = 0;
+    var exists: i32 = 0;
+    const hr = dw.collection.FindFamilyName(wfamily, &index, &exists);
+    return dwrite.SUCCEEDED(hr) and exists != 0;
+}
+
+/// Test helper: the width Lucida Console ships at. Its one face is
+/// semi-condensed, which is what a regular request has to find.
+const testDirectWriteLucidaConsoleStretch = @intFromEnum(dwrite.DWRITE_FONT_STRETCH.SEMI_CONDENSED);
+
+/// Test helper: whether the family ships a real face of `weight`. The faces
+/// come from IDWriteFontFamily::GetFont, so a simulation never counts.
+fn testDirectWriteHasWeight(dw: *const DirectWrite, family: [:0]const u8, weight: u32) bool {
+    var buf: [128]u16 = undefined;
+    const wfamily = DirectWrite.utf8ToUtf16Le(&buf, family) orelse return false;
+    var index: u32 = 0;
+    var exists: i32 = 0;
+    const hr = dw.collection.FindFamilyName(wfamily, &index, &exists);
+    if (dwrite.FAILED(hr) or exists == 0) return false;
+
+    var dw_family: ?*dwrite.IDWriteFontFamily = null;
+    if (dwrite.FAILED(dw.collection.GetFontFamily(index, &dw_family))) return false;
+    defer _ = dw_family.?.Release();
+
+    const font_count = dw_family.?.GetFontCount();
+    for (0..font_count) |i| {
+        var dw_font: ?*dwrite.IDWriteFont = null;
+        if (dwrite.FAILED(dw_family.?.GetFont(@intCast(i), &dw_font))) continue;
+        defer _ = dw_font.?.Release();
+        if (@intFromEnum(dw_font.?.GetWeight()) == weight) return true;
+    }
+    return false;
+}
+
+const TestDirectWriteFace = struct {
+    weight: u32,
+    stretch: u32,
+    italic: bool,
+    simulated: bool,
+};
+
+/// Test helper: the first face discovery returns for `desc`, or null.
+fn testDirectWriteFirstFace(dw: *const DirectWrite, desc: Descriptor) !?TestDirectWriteFace {
+    var it = try dw.discover(std.testing.allocator, desc);
+    defer it.deinit();
+    var face = (try it.next()) orelse return null;
+    defer face.deinit();
+    const f = face.dw.?.font;
+    return .{
+        .weight = @intFromEnum(f.GetWeight()),
+        .stretch = @intFromEnum(f.GetStretch()),
+        .italic = f.GetStyle() != .NORMAL,
+        .simulated = f.GetSimulations() != .NONE,
+    };
+}
+
+/// Test helper: `desc` must resolve to a real face with the given weight and
+/// style, at the given stretch. The weight, the style and the width are all
+/// part of what DirectWrite matched, so all three are checked.
+fn testDirectWriteExpectFaceStretch(
+    family: [:0]const u8,
+    bold: bool,
+    italic: bool,
+    want_weight: u32,
+    want_italic: bool,
+    want_stretch: u32,
+) !void {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+    const testing = std.testing;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, family)) return error.SkipZigTest;
+
+    const face = (try testDirectWriteFirstFace(&dw, .{
+        .family = family,
+        .bold = bold,
+        .italic = italic,
+        .size = 12,
+    })) orelse return error.TestExpectedFace;
+    try testing.expectEqual(want_weight, face.weight);
+    try testing.expectEqual(want_italic, face.italic);
+    try testing.expectEqual(want_stretch, face.stretch);
+    try testing.expect(!face.simulated);
+}
+
+/// Test helper: same, for the families that ship every face at normal width.
+fn testDirectWriteExpectFace(
+    family: [:0]const u8,
+    bold: bool,
+    italic: bool,
+    want_weight: u32,
+    want_italic: bool,
+) !void {
+    try testDirectWriteExpectFaceStretch(
+        family,
+        bold,
+        italic,
+        want_weight,
+        want_italic,
+        @intFromEnum(dwrite.DWRITE_FONT_STRETCH.NORMAL),
+    );
+}
+
+fn testDirectWriteExpectNoFace(family: [:0]const u8, bold: bool, italic: bool) !void {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, family)) return error.SkipZigTest;
+
+    if (try testDirectWriteFirstFace(&dw, .{
+        .family = family,
+        .bold = bold,
+        .italic = italic,
+        .size = 12,
+    })) |face| {
+        std.debug.print("unexpected face: weight={d} stretch={d} italic={} simulated={}\n", .{
+            face.weight, face.stretch, face.italic, face.simulated,
+        });
+        return error.TestExpectedNoFace;
+    }
+}
+
+test "directwrite multi-weight family: regular picks the 400 face" {
+    try testDirectWriteExpectFace("Segoe UI", false, false, 400, false);
+}
+
+test "directwrite multi-weight family: bold picks the 700 face" {
+    try testDirectWriteExpectFace("Segoe UI", true, false, 700, false);
+}
+
+test "directwrite multi-weight family: italic picks the 400 italic face" {
+    try testDirectWriteExpectFace("Segoe UI", false, true, 400, true);
+}
+
+test "directwrite multi-weight family: bold italic picks the 700 italic face" {
+    try testDirectWriteExpectFace("Segoe UI", true, true, 700, true);
+}
+
+test "directwrite bold prefers Bold over an earlier SemiBold" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, "Sitka Text")) return error.SkipZigTest;
+
+    // The comparison only means something where the family has both faces to
+    // choose between, so a build without them skips instead of passing on a
+    // family that could not have ranked SemiBold first.
+    if (!testDirectWriteHasWeight(&dw, "Sitka Text", 600)) return error.SkipZigTest;
+    if (!testDirectWriteHasWeight(&dw, "Sitka Text", 700)) return error.SkipZigTest;
+
+    try testDirectWriteExpectFace("Sitka Text", true, false, 700, false);
+}
+
+test "directwrite regular picks the 400 face at normal width" {
+    try testDirectWriteExpectFace("Bahnschrift", false, false, 400, false);
+}
+
+test "directwrite regular and bold in a two-weight family" {
+    try testDirectWriteExpectFace("Consolas", false, false, 400, false);
+    try testDirectWriteExpectFace("Consolas", true, false, 700, false);
+}
+
+test "directwrite regular picks the 400 face of a semi-condensed family" {
+    // Lucida Console ships one face and it is semi-condensed, so a regular
+    // request at normal width has to make do with it: the face it ships is
+    // still the face for the request.
+    try testDirectWriteExpectFaceStretch(
+        "Lucida Console",
+        false,
+        false,
+        400,
+        false,
+        testDirectWriteLucidaConsoleStretch,
+    );
+}
+
+test "directwrite italic in a family without italic faces returns nothing" {
+    try testDirectWriteExpectNoFace("Bahnschrift", false, true);
+}
+
+test "directwrite bold in a regular-only family returns nothing" {
+    // The family does have a face to find: assert that first, so discovery
+    // that answered nothing for every Lucida Console request cannot pass this
+    // test by emptying the family.
+    try testDirectWriteExpectFaceStretch(
+        "Lucida Console",
+        false,
+        false,
+        400,
+        false,
+        testDirectWriteLucidaConsoleStretch,
+    );
+    try testDirectWriteExpectNoFace("Lucida Console", true, false);
+}
+
+test "directwrite never returns a simulated face" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+    const testing = std.testing;
+
+    var dw = DirectWrite.init(undefined);
+    defer dw.deinit();
+    if (!testDirectWriteHasFamily(&dw, "Segoe UI")) return error.SkipZigTest;
+
+    for ([_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } }) |bi| {
+        var it = try dw.discover(testing.allocator, .{
+            .family = "Segoe UI",
+            .bold = bi[0],
+            .italic = bi[1],
+            .size = 12,
+        });
+        defer it.deinit();
+        var count: usize = 0;
+        while (try it.next()) |face_| {
+            var face = face_;
+            defer face.deinit();
+            try testing.expectEqual(dwrite.DWRITE_FONT_SIMULATIONS.NONE, face.dw.?.font.GetSimulations());
+            count += 1;
+        }
+        try testing.expect(count > 0);
+    }
+}
+
+fn testOrderFaceCandidates(
+    candidates: []const DirectWrite.FaceCandidate,
+    request: DirectWrite.FaceRequest,
+    expected: []const usize,
+) !void {
+    var out: [16]usize = undefined;
+    const n = DirectWrite.orderFaceCandidates(candidates, request, &out);
+    try std.testing.expectEqualSlices(usize, expected, out[0..n]);
+}
+
+test "directwrite candidate order: keeps DirectWrite's order" {
+    try testOrderFaceCandidates(
+        &.{ .{}, .{}, .{} },
+        .{ .styled = false, .codepoint = false },
+        &.{ 0, 1, 2 },
+    );
+}
+
+test "directwrite candidate order: drops simulated faces" {
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true }, .{}, .{ .simulated = true }, .{} },
+        .{ .styled = false, .codepoint = false },
+        &.{ 1, 3 },
+    );
+}
+
+test "directwrite candidate order: codepoint holders first, order kept in each group" {
+    try testOrderFaceCandidates(
+        &.{ .{}, .{ .has_codepoint = true }, .{}, .{ .has_codepoint = true } },
+        .{ .styled = false, .codepoint = true },
+        &.{ 1, 3, 0, 2 },
+    );
+}
+
+test "directwrite candidate order: codepoint ignored when none was asked for" {
+    try testOrderFaceCandidates(
+        &.{ .{}, .{ .has_codepoint = true }, .{}, .{ .has_codepoint = true } },
+        .{ .styled = false, .codepoint = false },
+        &.{ 0, 1, 2, 3 },
+    );
+}
+
+test "directwrite candidate order: a simulated face is dropped even with the codepoint" {
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true, .has_codepoint = true }, .{} },
+        .{ .styled = false, .codepoint = true },
+        &.{1},
+    );
+}
+
+test "directwrite candidate order: nothing in, nothing out" {
+    try testOrderFaceCandidates(
+        &.{},
+        .{ .styled = false, .codepoint = false },
+        &.{},
+    );
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true }, .{ .simulated = true } },
+        .{ .styled = false, .codepoint = true },
+        &.{},
+    );
+}
+
+test "directwrite candidate order: a simulated best match ends a styled request" {
+    // A family that ships Regular, Italic and Bold Italic but no upright
+    // Bold: DirectWrite ranks its synthetic bold first and the faces behind
+    // it are the wrong style. Answering a bold request with the Bold Italic
+    // face is worse than answering nothing, and nothing is what
+    // completeStyles needs to synthesize the bold from the regular face.
+    try testOrderFaceCandidates(
+        &.{
+            .{ .simulated = true }, // bold upright, simulated
+            .{}, // bold italic, real
+            .{}, // regular, real
+        },
+        .{ .styled = true, .codepoint = false },
+        &.{},
+    );
+
+    // A codepoint does not make the missing style real.
+    try testOrderFaceCandidates(
+        &.{
+            .{ .simulated = true, .has_codepoint = true },
+            .{ .has_codepoint = true },
+            .{},
+        },
+        .{ .styled = true, .codepoint = true },
+        &.{},
+    );
+}
+
+test "directwrite candidate order: a simulation only ends a styled request" {
+    // A styled request whose best match is a real face is ranked as before,
+    // simulation or not.
+    try testOrderFaceCandidates(
+        &.{ .{}, .{ .simulated = true }, .{} },
+        .{ .styled = true, .codepoint = false },
+        &.{ 0, 2 },
+    );
+
+    // A regular request is ranked as before too: it asks for one style, so
+    // the first entry says nothing about whether the family has that style.
+    try testOrderFaceCandidates(
+        &.{ .{ .simulated = true }, .{} },
+        .{ .styled = false, .codepoint = false },
+        &.{1},
+    );
 }
