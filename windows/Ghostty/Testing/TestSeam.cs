@@ -739,6 +739,8 @@ internal static class TestSeam
                 // from the real action. The new leaf becomes the active
                 // one, exactly as it does for a user.
                 var horizontal = ArgString(args, "orientation") == "horizontal";
+                var host = window.TestSeamActivePaneHost;
+                var leavesBefore = host.TestSeamLeaves;
                 window.TestSeamRouter.Invoke(horizontal
                     ? Ghostty.Core.Input.PaneAction.SplitHorizontal
                     : Ghostty.Core.Input.PaneAction.SplitVertical);
@@ -746,6 +748,32 @@ internal static class TestSeam
                 // dispatcher turn (the new leaf has no measured size yet),
                 // so the ack owes the driver that turn.
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
+                // That turn lets the deferred focus RUN, not SURVIVE: the
+                // splice removed the previously focused terminal, and the
+                // focus restoration that follows can hand ActiveLeaf to an
+                // older pane after the newborn's turn already ran. A
+                // back-to-back split burst then divides the wrong pane
+                // while every ack still reports its own newborn (observed
+                // as a machine-timing race; the split ack is the only
+                // place the contract can be held). So the ack now holds it
+                // itself: find the newborn by reference, re-assert it
+                // bounded, and say so honestly if it will not stick
+                // instead of acking a lie.
+                var newborn = host.TestSeamLeaves.FirstOrDefault(
+                    l => !leavesBefore.Contains(l));
+                if (newborn is not null)
+                {
+                    for (var attempt = 0
+                        ; attempt < 5 && host.ActiveLeaf != newborn
+                        ; attempt++)
+                    {
+                        host.TestSeamMakeActive(newborn);
+                        await WaitForLowPriorityAsync(window.DispatcherQueue);
+                    }
+                    if (host.ActiveLeaf != newborn)
+                        return Error(op,
+                            "the split's new pane did not hold focus after 5 turns");
+                }
                 return OkWithState(window, manager, op);
             }
 

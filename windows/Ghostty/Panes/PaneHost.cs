@@ -402,6 +402,33 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
+    /// The tree's leaves as live references, in <see cref="PaneTree.Leaves"/>
+    /// order. Seam-only: the split ack diffs this list around a split to
+    /// identify the newborn by reference, then holds the contract that the
+    /// newborn is active before the ack returns.
+    /// </summary>
+    internal IReadOnlyList<LeafPane> TestSeamLeaves
+        => PaneTree.Leaves(_root).ToList();
+
+    /// <summary>
+    /// Re-assert the split contract for <paramref name="leaf"/>: active now,
+    /// programmatic focus and the highlight on the next dispatcher turn --
+    /// the same deferred shape <see cref="Split"/> itself uses, because the
+    /// leaf may still have no measured size. Seam-only; the burst driver's
+    /// ack calls it when the splice's focus restoration stole the newborn's
+    /// active slot.
+    /// </summary>
+    internal void TestSeamMakeActive(LeafPane leaf)
+    {
+        _activeLeaf = leaf;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            leaf.Terminal().Focus(FocusState.Programmatic);
+            UpdateHighlightPosition();
+        });
+    }
+
+    /// <summary>
     /// The Nth leaf's terminal, in <see cref="PaneTree.Leaves"/> order,
     /// or null when the index is out of range. Read-only seam access so
     /// a harness can address the pane a split just demoted.
