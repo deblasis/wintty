@@ -838,6 +838,132 @@ function Invoke-BirthForwardCases([string]$HarnessPath) {
     return , $failed
 }
 
+# ---- layer 8b: the resume harness's contract -----------------------------------
+
+# The session-resumption sibling (seam-session-resume.ps1) runs a different
+# lifecycle from the birth harness -- window-save-state=always plus ONE owned
+# tree shared across a save launch and a restore launch -- and pins the hot
+# path as a loud harness gap while the daemon is inert. A scan that found no
+# session, no owned tree, or no hot probe would be green for the wrong reason,
+# so each rule below fails on absence. What a live run asserts (beyond the
+# scan): the restore shows both tabs before opening anything, each pane live
+# with its marker inside the cmd budget under the birth oracles; the fallback
+# restore shows both tabs with `vanishing` unresolvable; the hot row stays a
+# harness gap until the daemon serves pane-sessions.
+function Invoke-ResumeCases([string]$HarnessPath) {
+    $failed = [System.Collections.Generic.List[string]]::new()
+    $file = [System.IO.Path]::GetFileName($HarnessPath)
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($HarnessPath, [ref]$tokens, [ref]$errors)
+    $commands = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+    $text = try { [System.IO.File]::ReadAllText($HarnessPath) } catch { '' }
+
+    # Typed, not just present: an untyped parameter would take a path or a
+    # string of script text and hand it to the seam as a hook.
+    $declared = @($ast.ParamBlock.Parameters | Where-Object {
+            $_.Name.VariablePath.UserPath -eq 'BeforeTeardown' -and $_.StaticType -eq [scriptblock] })
+    if ($declared.Count -eq 0) {
+        $failed.Add("$($file) declares no [scriptblock]`$BeforeTeardown parameter")
+    }
+
+    # The coordinator re-runs one path without the other: the selection must
+    # offer cold and hot.
+    $scen = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Scenario' })
+    if ($scen.Count -eq 0) {
+        $failed.Add("$($file) declares no `$Scenario selection parameter (cold/hot)")
+    }
+    elseif ($scen[0].Extent.Text -notmatch 'ValidateSet' -or
+            $scen[0].Extent.Text -notmatch "'cold'" -or
+            $scen[0].Extent.Text -notmatch "'hot'") {
+        $failed.Add("$($file)'s `$Scenario does not offer the cold/hot selection")
+    }
+
+    $starts = @($commands | Where-Object { $_.GetCommandName() -eq 'Start-SeamSession' })
+    # A scan that found no session would be green for the wrong reason: the
+    # resume needs at least a save launch and a restore launch.
+    if ($starts.Count -lt 2) {
+        $failed.Add("$($file) starts fewer than two seam sessions: no save/restore pair to check")
+    }
+    foreach ($call in $starts) {
+        $forwards = $false
+        $els = @($call.CommandElements)
+        for ($i = 0; $i -lt ($els.Count - 1); $i++) {
+            if ($els[$i] -isnot [System.Management.Automation.Language.CommandParameterAst] -or
+                $els[$i].ParameterName -ne 'BeforeTeardown') { continue }
+            $value = $els[$i + 1]
+            if ($value -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $value.VariablePath.UserPath -eq 'BeforeTeardown') { $forwards = $true }
+            break
+        }
+        if (-not $forwards) {
+            $failed.Add("$($file):$($call.Extent.StartLineNumber) starts a seam session without -BeforeTeardown `$BeforeTeardown")
+        }
+    }
+
+    foreach ($call in @($commands | Where-Object { $_.GetCommandName() -eq 'Stop-SeamSession' })) {
+        if (@($call.CommandElements | Where-Object {
+                    $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $_.ParameterName -eq 'BeforeTeardown' }).Count -gt 0) {
+            $failed.Add("$($file):$($call.Extent.StartLineNumber) passes -BeforeTeardown to Stop-SeamSession (the hook would run twice)")
+        }
+        # Inside the body of a try that has a catch. A Stop left bare in a
+        # finally throws a hook failure out of the run that was recording it.
+        $guarded = $false
+        $node = $call.Parent
+        while ($null -ne $node) {
+            if ($node -is [System.Management.Automation.Language.TryStatementAst]) {
+                $body = $node.Body
+                if ($null -ne $body -and $node.CatchClauses.Count -gt 0 -and
+                    $body.Extent.StartOffset -le $call.Extent.StartOffset -and
+                    $call.Extent.EndOffset -le $body.Extent.EndOffset) { $guarded = $true }
+                break
+            }
+            $node = $node.Parent
+        }
+        if (-not $guarded) {
+            $failed.Add("$($file):$($call.Extent.StartLineNumber) calls Stop-SeamSession outside a try/catch (a hook failure would abort the run)")
+        }
+    }
+
+    # The cold lifecycle: the kill in Stop-SeamSession never writes a clean
+    # shutdown, so only `always` restores the save's dirty file; and the
+    # restore only reads the save when both launches adopt ONE owned tree.
+    if ($text -notmatch 'window-save-state = always') {
+        $failed.Add("$($file) never stages window-save-state = always: a killed save leaves a dirty file `default` would not restore")
+    }
+    if (-not $text.Contains('New-WinttyOwnedStateBase')) {
+        $failed.Add("$($file) mints no owned state tree: the restore cannot read the save's session.json")
+    }
+    if (-not $text.Contains('$env:WINTTY_STATE_BASE = $OwnedPath')) {
+        $failed.Add("$($file) never exports the owned tree to its launches: each session would mint a fresh tree and the restore would be fresh too")
+    }
+
+    # The rows exist under the birth harness's row vocabulary.
+    foreach ($row in 'resume-cold', 'resume-cold-fallback', 'resume-hot@daemon') {
+        if (-not $text.Contains($row)) {
+            $failed.Add("$($file) has no '$row' scenario row")
+        }
+    }
+    # The hot proof owes a daemon handle: without the tier's session op no
+    # attach can be staged or proved, and the row must say HARNESS, never go
+    # green and never blame the product.
+    if (-not $text.Contains('pane-sessions')) {
+        $failed.Add("$($file)'s hot row never probes the pane-sessions op: it cannot tell a held session from a fresh boot")
+    }
+    elseif ($text -notmatch 'HARNESS[^`"]*pane-sessions|pane-sessions[^`"]*HARNESS') {
+        $failed.Add("$($file)'s hot row probes pane-sessions but records no HARNESS gap for the unserved tree")
+    }
+    # The release-side gate parses these rows; a renamed file or a lost exit
+    # split blinds it.
+    if (-not $text.Contains('results.json')) {
+        $failed.Add("$($file) writes no results.json scenario ledger")
+    }
+    if ($text -notmatch 'exit 2' -or $text -notmatch 'exit 1') {
+        $failed.Add("$($file) lost the product-finding (2) versus broken-harness (1) exit split")
+    }
+    return , $failed
+}
+
 # ---- layer 7: the teardown hook ----------------------------------------------
 
 # Start-SeamSession and Stop-SeamSession for real, with every launch step
@@ -1263,6 +1389,116 @@ try {
     }
 }
 finally { Remove-Item -LiteralPath $birthMutantRoot -Recurse -Force -ErrorAction SilentlyContinue }
+
+$resumeHarness = Join-Path $PSScriptRoot 'seam-session-resume.ps1'
+$resumeFailures = Invoke-ResumeCases $resumeHarness
+foreach ($f in $resumeFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
+Assert-True ($resumeFailures.Count -eq 0) 'the resume harness keeps the cold lifecycle, the hook forwarding and the hot pin'
+
+# The scan's own teeth: a copy of the resume harness with one rule broken has
+# to turn the scan red. Each row edits that file's lines, and a row whose
+# edit changed nothing says so instead of scanning a copy of the harness.
+$resumeMutantRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wintty-resume-mutants-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $resumeMutantRoot | Out-Null
+try {
+    $resumeLines = [System.IO.File]::ReadAllLines($resumeHarness)
+    $resumeMutant = Join-Path $resumeMutantRoot ([System.IO.Path]::GetFileName($resumeHarness))
+    $resumeRows = @(
+        @{
+            Name = 'the always policy is gone'
+            Break = {
+                param($lines)
+                @($lines | ForEach-Object { $_.Replace('window-save-state = always', 'window-save-state = never') })
+            }
+        },
+        @{
+            Name = 'the shared owned tree is gone'
+            Break = {
+                param($lines)
+                @($lines | Where-Object { $_ -notmatch 'New-WinttyOwnedStateBase' })
+            }
+        },
+        @{
+            Name = 'the Scenario selection is gone'
+            Break = {
+                param($lines)
+                @($lines | Where-Object { $_ -notmatch "ValidateSet\('all', 'cold', 'hot'\)" })
+            }
+        },
+        @{
+            Name = 'one start does not forward'
+            Break = {
+                param($lines)
+                # The second launch only: breaking the first would fail the
+                # same rule and the row would prove nothing of its own.
+                $out = [System.Collections.Generic.List[string]]::new()
+                $seen = 0
+                foreach ($line in $lines) {
+                    if ($line -match '^\s*\$s = Start-SeamSession ' -and (++$seen) -eq 2) {
+                        $out.Add($line.Replace(' -BeforeTeardown $BeforeTeardown', ''))
+                    }
+                    else { $out.Add($line) }
+                }
+                return , $out
+            }
+        },
+        @{
+            Name = 'Stop also gets the hook'
+            Break = {
+                param($lines)
+                $out = [System.Collections.Generic.List[string]]::new()
+                $done = $false
+                foreach ($line in $lines) {
+                    if (-not $done -and $line -match '^\s*Stop-SeamSession \$s\b') {
+                        $done = $true
+                        $out.Add($line + ' -BeforeTeardown $BeforeTeardown')
+                    }
+                    else { $out.Add($line) }
+                }
+                return , $out
+            }
+        },
+        @{
+            Name = 'a Stop outside try/catch'
+            Break = {
+                param($lines)
+                # The first wrapped Stop, un-wrapped: its try line goes and
+                # the catch becomes a plain block, so the call is bare in the
+                # finally again and a hook failure would abort the run.
+                $stop = -1
+                for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*Stop-SeamSession \$s\b') { $stop = $i; break } }
+                $try = -1
+                for ($i = $stop - 1; $i -ge 0; $i--) { if ($lines[$i] -match '^\s*try \{$') { $try = $i; break } }
+                $catch = -1
+                for ($i = $stop + 1; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*catch \{$') { $catch = $i; break } }
+                $out = [System.Collections.Generic.List[string]]::new()
+                for ($i = 0; $i -lt $lines.Count; $i++) {
+                    if ($i -eq $try) { continue }
+                    if ($i -eq $catch) { $out.Add($lines[$i].Replace('catch {', 'if ($true) {')); continue }
+                    $out.Add($lines[$i])
+                }
+                return , $out
+            }
+        },
+        @{
+            Name = 'the hot probe is gone'
+            Break = {
+                param($lines)
+                @($lines | Where-Object { $_ -notmatch 'pane-sessions' })
+            }
+        }
+    )
+    foreach ($row in $resumeRows) {
+        $lines = @(& $row.Break (, $resumeLines))
+        if (($lines -join "`n") -ceq ($resumeLines -join "`n")) {
+            Assert-True $false "resume mutation '$($row.Name)': its anchor is gone"
+            continue
+        }
+        [System.IO.File]::WriteAllLines($resumeMutant, [string[]]$lines)
+        Assert-True ((Invoke-ResumeCases $resumeMutant).Count -gt 0) "resume mutation went red: $($row.Name)"
+    }
+}
+finally { Remove-Item -LiteralPath $resumeMutantRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 $script:testConfigLib = Join-Path $PSScriptRoot 'lib/test-config.ps1'
 $testConfigFailures = Invoke-TestConfigCases $script:testConfigLib

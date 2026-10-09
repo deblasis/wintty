@@ -307,7 +307,7 @@ profile.vanishing.command = cmd.exe /d /c echo $MarkerVanish & ping -n 120 127.0
         if ($null -eq $saved) { throw 'HARNESS: session.json never held both tabs inside 30s; the debounced persist did not fire' }
         return [pscustomobject]@{
             Suffix = $suffix; Mode = $Mode; Active = $active
-            Clean = [bool]$saved.Parsed.CleanShutdown
+            Clean = [bool]($saved.Parsed.CleanShutdown)
             Text0 = "$($screen0.text)"; Text1 = "$($screen1.text)"
         }
     }
@@ -375,14 +375,14 @@ function Invoke-RestorePhase([string]$Row, [string]$Mode, [string]$OwnedPath, [s
                 $size = Get-Settled $s $i $SettleSec
                 $screen = Wait-PaneOutput $s $i -1 $markers[$i] $ColdReadySec
                 if ($null -eq $screen) {
-                    $fails += "restored tab $i: its program output never reached the screen inside ${ColdReadySec}s (I-2); screen: $(Format-Screen (Read-Screen $s $i -1).text)"
+                    $fails += "restored tab ${i}: its program output never reached the screen inside ${ColdReadySec}s (I-2); screen: $(Format-Screen (Read-Screen $s $i -1).text)"
                     continue
                 }
                 $fails += @(Test-Newborn "restored tab $i" $size $screen.text)
                 $details += "tab ${i}: born+settled $($size.cols)x$($size.rows) in $($size.widthPx)x$($size.heightPx) px, wraprun $(Count-OneCharRun $screen.text)"
             }
             if ($fails.Count -gt 0) { throw ('PRODUCT_FAIL: ' + ($fails -join '; ')) }
-            "restored 2/2 tabs (saved active $SavedActive, clean=$([bool](Get-Content -LiteralPath (Join-Path $OwnedPath 'Wintty/session.json') -Raw | ConvertFrom-Json).CleanShutdown)); $($details -join '; ')"
+            "restored 2/2 tabs (saved active $SavedActive); $($details -join '; ')"
         }
     }
     finally {
@@ -396,19 +396,6 @@ function Invoke-RestorePhase([string]$Row, [string]$Mode, [string]$OwnedPath, [s
             }
             if ($s.Proc) { [void]$s.Proc.WaitForExit(20000) }
         }
-    }
-}
-
-# The daemon dimension is only honest if recorded: probe the tier's
-# pane-sessions op, best-effort, so the row says whether this build has a
-# daemon at all. A tree with no sessions ops leaves the dimension inert.
-function Test-DaemonDimension($s) {
-    try {
-        $sessions = Invoke-SeamCommand $s @{ op = 'pane-sessions' }
-        return "pane-sessions: $(@($sessions.sessions).Count) session(s)"
-    }
-    catch {
-        return 'pane-sessions: not served (a tree with no sessions ops; the daemon dimension is inert here)'
     }
 }
 
