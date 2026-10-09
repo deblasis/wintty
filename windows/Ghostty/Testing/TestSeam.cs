@@ -794,7 +794,8 @@ internal static class TestSeam
                 var host = window.TestSeamActivePaneHost;
                 var leaves = host.TestSeamLeaves;
                 if (index < 0 || index >= leaves.Count
-                    || !leaves[index].Terminal().Focus(FocusState.Keyboard))
+                    || !leaves[index].Terminal().Focus(
+                        Microsoft.UI.Xaml.FocusState.Keyboard))
                     return Error(op, $"the active tab has no leaf at index {index}");
                 // Focus lands through GotFocus, and the border follows on
                 // the next layout pass; the ack holds the target across
