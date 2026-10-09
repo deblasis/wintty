@@ -1067,10 +1067,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // invalidates layout before the loaded event is raised): the
         // subscription above then never fires for that sizing, and a
         // measured pane sits surface-less forever -- no creation
-        // attempted, no retry armed. Attempt once here too; the size
-        // gate makes this a no-op for a not-yet-measured pane, and
-        // success unsubscribes the handler the event path would have.
-        TrySettleSurfaceCreation();
+        // attempted, no retry armed. A delayed fallback covers that
+        // pane without racing the healthy path: reading
+        // Panel.ActualHeight synchronously at (or one turn after)
+        // Loaded can catch a measure-phase value the arrange never
+        // completes (observed as a 4px pty/pane mismatch when creation
+        // ran at the transient size), so the fallback waits out the
+        // launch settle instead and no-ops when the event path already
+        // created the surface.
+        var fallback = DispatcherQueue.CreateTimer();
+        fallback.Interval = TimeSpan.FromMilliseconds(250);
+        fallback.IsRepeating = false;
+        fallback.Tick += (t, _) =>
+        {
+            t.Stop();
+            if (_surface.Handle == IntPtr.Zero)
+                TrySettleSurfaceCreation();
+        };
+        fallback.Start();
         DisableAncestorScrollViewerTabStop();
 
         // Repaint the gutter on every attach, not just at construction.
