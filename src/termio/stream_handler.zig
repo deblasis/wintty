@@ -1738,15 +1738,33 @@ pub const StreamHandler = struct {
     /// (a file:// URL), OSC 9;9 (a raw path) and OSC 7777 (a raw path out of
     /// the prompt report). The parameter is named `url` because the action's
     /// field is, and it is only a URL on the first of those, so the warnings
-    /// below name the set rather than guessing.
+    /// below name the set rather than guessing. The value may arrive wrapped
+    /// in double quotes (conhost synthesizes OSC 9;9 that way); that is
+    /// unwrapped first, so every arm below works on the bare path.
     fn reportPwd(self: *StreamHandler, url: []const u8) !void {
+        // conhost wraps the path in double quotes when it synthesizes
+        // OSC 9;9 itself (`ESC]9;9;"C:\dir"BEL`), one pair at every
+        // PowerShell prompt. A Windows path cannot contain a double quote,
+        // so a value that both starts and ends with one is always the
+        // wrapper and never the directory's own name: strip exactly one
+        // pair, before every arm, so the quoted form takes the same road
+        // as the raw one -- through the Windows-arm checks and the dedupe,
+        // neither of which the wrapper may bypass. (The one value this
+        // could misread is a POSIX directory both starting and ending with
+        // a quote at its root; parity with the shells that emit the
+        // wrapper wins.)
+        const pwd = if (url.len >= 2 and url[0] == '"' and url[url.len - 1] == '"')
+            url[1 .. url.len - 1]
+        else
+            url;
+
         // Special handling for the empty URL. We treat the empty URL
         // as resetting the pwd as if we never saw a pwd. I can't find any
         // other terminal that does this but it seems like a reasonable
         // behavior that enables some useful features. For example, the macOS
         // proxy icon can be hidden when a program reports it doesn't know
         // the pwd rather than showing a stale pwd.
-        if (url.len == 0) {
+        if (pwd.len == 0) {
             // Blank value can never fail because no allocs happen.
             self.terminal.setPwd("") catch unreachable;
 
@@ -1773,8 +1791,8 @@ pub const StreamHandler = struct {
         // bytes alone would let anything writing to the pty pick who receives
         // the user's credentials.
         if (comptime builtin.os.tag == .windows) {
-            if (internal_os.posix_path.isWindowsAbsolute(url)) {
-                const host = internal_os.posix_path.pathHost(url) catch {
+            if (internal_os.posix_path.isWindowsAbsolute(pwd)) {
+                const host = internal_os.posix_path.pathHost(pwd) catch {
                     log.warn("reported pwd (OSC 7/9;9/7777) names no directory we can use", .{});
                     return;
                 };
@@ -1785,16 +1803,16 @@ pub const StreamHandler = struct {
                         return;
                     },
                 }
-                return self.setPwdReported(url);
+                return self.setPwdReported(pwd);
             }
         }
 
         // Attempt to parse this file-style URI using options appropriate
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
         // unencoded path).
-        const uri: std.Uri = internal_os.uri.parse(url, .{
+        const uri: std.Uri = internal_os.uri.parse(pwd, .{
             .mac_address = comptime builtin.os.tag != .macos,
-            .raw_path = std.mem.startsWith(u8, url, "kitty-shell-cwd://"),
+            .raw_path = std.mem.startsWith(u8, pwd, "kitty-shell-cwd://"),
         }) catch |e| {
             log.warn("invalid url in reported pwd (OSC 7/9;9/7777): {}", .{e});
             return;
@@ -2811,6 +2829,45 @@ test "pwd: one prompt's OSC 7, 9;9 and 7777 burst reports once" {
     try testing.expectEqual(@as(usize, 1), moved.pwd);
     try testing.expectEqual(@as(usize, 1), moved.title);
     try testing.expectEqualStrings("C:\\Users\\me\\src", h.handler.terminal.getPwd().?);
+}
+
+test "pwd: conhost's quoted OSC 9;9 path is adopted" {
+    // conhost synthesizes its own OSC 9;9 for every shell session it
+    // proxies, and it wraps the path in double quotes:
+    // `ESC]9;9;"C:\dir"BEL`. Windows paths cannot contain a double quote,
+    // so the wrapper is unambiguous and the value inside it is the
+    // directory; Windows Terminal adopts the same bytes. Before the strip
+    // in `reportPwd`, this was a "invalid url in reported pwd" warn at
+    // every PowerShell prompt, and the surface kept a stale directory.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var h: TestHandler = undefined;
+    try h.init(testing.allocator);
+    defer h.deinit(testing.allocator);
+    h.useArena();
+
+    // The quoted drive path, with the space that makes the wrapper
+    // necessary for a shell that does not escape it.
+    h.feed("\x1b]9;9;\"C:\\Users\\x\\with space\"\x07");
+    const first = h.drain();
+    try testing.expectEqual(@as(usize, 1), first.pwd);
+    try testing.expectEqual(@as(usize, 1), first.title);
+    try testing.expectEqualStrings("C:\\Users\\x\\with space", h.handler.terminal.getPwd().?);
+
+    // The same quoted report at the next prompt is not news: the stripped
+    // value goes through the ordinary dedupe, not around it.
+    h.feed("\x1b]9;9;\"C:\\Users\\x\\with space\"\x07");
+    const again = h.drain();
+    try testing.expectEqual(@as(usize, 0), again.pwd);
+    try testing.expectEqual(@as(usize, 0), again.title);
+
+    // The unquoted form the fork's own integration writes is unchanged.
+    h.feed("\x1b]9;9;C:\\Users\\x\\with space\\src\x07");
+    const moved = h.drain();
+    try testing.expectEqual(@as(usize, 1), moved.pwd);
+    try testing.expectEqual(@as(usize, 1), moved.title);
+    try testing.expectEqualStrings("C:\\Users\\x\\with space\\src", h.handler.terminal.getPwd().?);
 }
 
 test "pwd: what counts as a plausible directory name" {
