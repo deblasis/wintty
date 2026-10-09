@@ -507,6 +507,9 @@ pub const Parser = struct {
         @"7",
         @"8",
         @"9",
+        @"90",
+        @"900",
+        @"9001",
         @"30",
         @"300",
         @"3008",
@@ -1171,6 +1174,28 @@ pub const Parser = struct {
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
                 '9' => self.state = .@"99",
+                '0' => self.state = .@"90",
+                else => self.state = .invalid,
+            },
+
+            // conhost announces the shell it is proxying with OSC 9001
+            // (`ESC]9001;ShellType;pwsh;<version>BEL`, one per session).
+            // We have no use for it, and the number must not fall out of
+            // the table into OSC 9's arms: recognized here, the sequence
+            // is consumed whole and produces no command, whatever a later
+            // rework of the digit transitions does around it.
+            .@"90" => switch (c) {
+                '0' => self.state = .@"900",
+                else => self.state = .invalid,
+            },
+
+            .@"900" => switch (c) {
+                '1' => self.state = .@"9001",
+                else => self.state = .invalid,
+            },
+
+            .@"9001" => switch (c) {
+                ';' => self.captureTrailing(.fixed),
                 else => self.state = .invalid,
             },
 
@@ -1252,6 +1277,14 @@ pub const Parser = struct {
             .@"3",
             .@"30",
             .@"300",
+
+            // OSC 9001 and its truncated prefixes: recognized and ignored
+            // (see the transition arms), so even a sequence cut off before
+            // its payload ends as no command rather than an accident of
+            // the table.
+            .@"90",
+            .@"900",
+            .@"9001",
             => null,
 
             .@"3008" => parsers.context_signal.parse(self, terminator_ch),
@@ -1532,4 +1565,28 @@ test "Parser allocating captures truncate at the default ceiling" {
     try testing.expectEqual(Parser.State.invalid, p.state);
     try testing.expectEqual(Parser.MAX_ALLOCATING_BUF, cap.trailing().len);
     try testing.expect(p.end('\x1b') == null);
+}
+
+test "OSC 9001: conhost's shell-type announce is recognized and ignored" {
+    const testing = std.testing;
+
+    // The exact sequence conhost appends for every shell session it
+    // proxies (`ESC]9001;ShellType;pwsh;<version>BEL`, captured beside the
+    // quoted OSC 9;9). It is an OSC of its own, not a payload of OSC 9, so
+    // it must reach neither the ConEmu arms nor the iTerm2-notification
+    // fallback in osc9.zig: the table consumes it as recognized-and-
+    // ignored, and the state below proves the sequence took that road
+    // rather than falling out of the table as invalid.
+    var p: Parser = .init(null);
+    const input = "9001;ShellType;pwsh;7.6.6";
+    for (input) |ch| p.next(ch);
+    try testing.expectEqual(Parser.State.@"9001", p.state);
+    try testing.expect(p.end('\x1b') == null);
+
+    // The 5.1 shape, and the BEL terminator conhost actually writes.
+    var bel: Parser = .init(null);
+    const input_bel = "9001;ShellType;powershell;5.1.26100.9444";
+    for (input_bel) |ch| bel.next(ch);
+    try testing.expectEqual(Parser.State.@"9001", bel.state);
+    try testing.expect(bel.end('\x07') == null);
 }
