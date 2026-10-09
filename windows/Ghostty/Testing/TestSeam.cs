@@ -739,6 +739,27 @@ internal static class TestSeam
                 // from the real action. The new leaf becomes the active
                 // one, exactly as it does for a user.
                 var horizontal = ArgString(args, "orientation") == "horizontal";
+                var host = window.TestSeamActivePaneHost;
+                // An explicit target (leaf=N) makes a burst deterministic:
+                // the driver says WHICH pane to divide instead of trusting
+                // the active slot to survive every late focus - a daemon
+                // attach completing mid-burst focuses its pane far after
+                // any drained-turn streak could prove the queue empty.
+                var target = ArgInt(args, "leaf", -1);
+                if (target >= 0)
+                {
+                    var targets = host.TestSeamLeaves;
+                    if (target >= targets.Count)
+                        return Error(op, $"the active tab has no leaf at index {target}");
+                    if (!ReferenceEquals(host.ActiveLeaf, targets[target]))
+                    {
+                        host.TestSeamMakeActive(targets[target]);
+                        if (!await HoldActiveAsync(host, targets[target], window.DispatcherQueue))
+                            return Error(op,
+                                $"leaf {target} did not hold focus across drained turns");
+                    }
+                }
+                var leavesBefore = host.TestSeamLeaves;
                 window.TestSeamRouter.Invoke(horizontal
                     ? Ghostty.Core.Input.PaneAction.SplitHorizontal
                     : Ghostty.Core.Input.PaneAction.SplitVertical);
@@ -746,17 +767,43 @@ internal static class TestSeam
                 // dispatcher turn (the new leaf has no measured size yet),
                 // so the ack owes the driver that turn.
                 await WaitForLowPriorityAsync(window.DispatcherQueue);
+                // That turn lets the deferred focus RUN, not SURVIVE: the
+                // splice removed the previously focused terminal, and the
+                // focus restoration that follows can hand ActiveLeaf to an
+                // older pane after the newborn's turn already ran. A
+                // back-to-back split burst then divides the wrong pane
+                // while every ack still reports its own newborn (observed
+                // as a machine-timing race; the split ack is the only
+                // place the contract can be held). So the ack now holds it
+                // itself: find the newborn by reference, re-assert it
+                // bounded, and say so honestly if it will not stick
+                // instead of acking a lie.
+                var newborn = host.TestSeamLeaves.FirstOrDefault(
+                    l => !leavesBefore.Contains(l));
+                if (newborn is null)
+                    return Error(op, "the split added no leaf");
+                if (!await HoldActiveAsync(host, newborn, window.DispatcherQueue))
+                    return Error(op,
+                        "the split's new pane did not hold focus across drained turns");
                 return OkWithState(window, manager, op);
             }
 
             case "focus-pane":
             {
                 var index = ArgInt(args, "index", -1);
-                if (!window.TestSeamActivePaneHost.TestSeamFocusLeaf(index))
+                var host = window.TestSeamActivePaneHost;
+                var leaves = host.TestSeamLeaves;
+                if (index < 0 || index >= leaves.Count
+                    || !leaves[index].Terminal().Focus(
+                        Microsoft.UI.Xaml.FocusState.Keyboard))
                     return Error(op, $"the active tab has no leaf at index {index}");
                 // Focus lands through GotFocus, and the border follows on
-                // the next layout pass.
-                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                // the next layout pass; the ack holds the target across
+                // drained turns the same way the split ack does, because
+                // the same queued-steal window applies to it.
+                if (!await HoldActiveAsync(host, leaves[index], window.DispatcherQueue))
+                    return Error(op,
+                        "the pane did not hold focus across drained turns");
                 return OkWithState(window, manager, op);
             }
 
@@ -1273,10 +1320,17 @@ internal static class TestSeam
                 // An observer op: polls must not force layout passes, or
                 // the polls would share the retry's creation path and a
                 // driver could never tell which one recovered the pane.
+                // leaf (optional) reads a specific leaf instead of the
+                // active one; panelW/panelH report the measured size the
+                // creation gate keys on (zero = never measured).
                 var index = ArgInt(args, "index", -1);
                 var tab = TabAt(manager, index);
                 if (tab is null) return Error(op, $"no tab at index {index}");
-                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                var stateHost = (Panes.PaneHost)tab.PaneHost;
+                var terminal = stateHost.TestSeamLeafTerminal(
+                    ArgInt(args, "leaf", -1))
+                    ?? tab.PaneHost.ActiveLeaf.Terminal();
+                var panelSize = terminal.TestSeamPanelSize;
                 return Json(json =>
                 {
                     json.WriteStartObject();
@@ -1286,6 +1340,8 @@ internal static class TestSeam
                     json.WriteBoolean("hasSurface", terminal.TestSeamHasSurface);
                     json.WriteBoolean("attempted", terminal.TestSeamSurfaceAttempted);
                     json.WriteNumber("retriesLeft", terminal.TestSeamSurfaceRetriesLeft);
+                    json.WriteNumber("panelW", panelSize.Width);
+                    json.WriteNumber("panelH", panelSize.Height);
                     json.WriteEndObject();
                 });
             }
@@ -2956,6 +3012,34 @@ internal static class TestSeam
             await Task.Delay(15);
         }
         return false;
+    }
+
+    /// <summary>
+    /// The contract both focus acks hold: the target IS the active leaf and
+    /// STAYS it across consecutive drained low-priority turns. A single
+    /// check passes while a queued steal (the splice's focus restoration,
+    /// a creation-time AutoFocus, a timer-driven GotFocus) is still in
+    /// flight, so only a streak of clean turns proves the queue is empty
+    /// of steals.
+    /// </summary>
+    private static async Task<bool> HoldActiveAsync(
+        Panes.PaneHost host, Core.Panes.LeafPane target, DispatcherQueue queue)
+    {
+        var stable = 0;
+        for (var attempt = 0; attempt < 10 && stable < 3; attempt++)
+        {
+            await WaitForLowPriorityAsync(queue);
+            if (host.ActiveLeaf != target)
+            {
+                host.TestSeamMakeActive(target);
+                stable = 0;
+            }
+            else
+            {
+                stable++;
+            }
+        }
+        return stable >= 3;
     }
 #endif
 

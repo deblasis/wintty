@@ -429,9 +429,37 @@ function Read-Size($s, [int]$Index) {
 }
 
 # A leaf's own viewport, off the cell grid. leaf=-1 reads the active
-# leaf, which after a split is the newborn.
+# leaf, which after a split is the newborn. "no live surface" is a
+# documented transient (the surface spawns asynchronously; surface-size
+# answers live=false gracefully but screen-text errors on it), so it
+# retries within a short budget rather than failing the scenario
+# outright.
 function Read-Screen($s, [int]$Index, [int]$Leaf) {
-    return Invoke-SeamCommand $s @{ op = 'screen-text'; index = $Index; leaf = $Leaf }
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($true) {
+        try {
+            return Invoke-SeamCommand $s @{ op = 'screen-text'; index = $Index; leaf = $Leaf }
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'no live surface' -or
+                [DateTime]::UtcNow -ge $deadline) {
+                # Self-describing failure: the surface-state readback says
+                # WHICH stuck state the pane is in (never measured, gave
+                # up, or still retrying), so the row's error is the
+                # diagnosis instead of a blind PRODUCT_FAIL.
+                if ($_.Exception.Message -match 'no live surface') {
+                    $st = $null
+                    try { $st = Invoke-SeamCommand $s @{ op = 'surface-state'; index = $Index; leaf = $Leaf } } catch { }
+                    if ($st) {
+                        throw ("{0} [surface-state: live={1} attempted={2} retriesLeft={3} panel={4}x{5}]" -f `
+                            $_.Exception.Message, $st.hasSurface, $st.attempted, $st.retriesLeft, $st.panelW, $st.panelH)
+                    }
+                }
+                throw
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
 }
 
 # The pane's settled size: read until two reads a second apart agree, so a
@@ -934,7 +962,10 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
             $rects = @([pscustomobject]@{ W = [double]$base.widthPx; H = [double]$base.heightPx })
             $active = 0
             foreach ($o in $combo.Orientations) {
-                $split = Invoke-SeamCommand $s @{ op = 'split'; orientation = $o }
+                # The model is authoritative: name the leaf to divide so no
+                # focus event (a daemon attach landing mid-burst) can send a
+                # split to the wrong pane.
+                $split = Invoke-SeamCommand $s @{ op = 'split'; orientation = $o; leaf = $active }
                 $tab = @($split.state.tabs)[$index]
                 $newborn = [int]$tab.activeLeaf
                 $pair = Split-ModelRects $rects[$active] $o

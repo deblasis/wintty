@@ -141,6 +141,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _surfaceRetryTimer;
     private int _surfaceRetryAttemptsLeft;
 
+    // One-shot, set by the Loaded fallback before it invalidates: the
+    // creation that follows must not pull programmatic focus, because the
+    // fallback fires long after the user's focus has settled somewhere
+    // deliberate. Cleared by the creation attempt that consumes it.
+    private bool _suppressCreationAutoFocus;
+
     // Retry cadence and budget for a failed surface creation. Each failed
     // attempt is cheap - the device init fails before the pty spawns, so no
     // shell is started - but the attempts still burn a loaded machine, so
@@ -656,6 +662,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// a bare -1 cannot.
     /// </summary>
     internal bool TestSeamSurfaceAttempted => _surfaceCreated;
+
+    /// <summary>
+    /// Seam readback: the panel's current measured size. The surface
+    /// creation gate refuses zero sizes, so a dead pane's diagnosis starts
+    /// here: attempted-but-zero means layout never measured the pane.
+    /// </summary>
+    internal Windows.Foundation.Size TestSeamPanelSize =>
+        new(Panel.ActualWidth, Panel.ActualHeight);
 #endif
 
     /// <summary>
@@ -1054,6 +1068,41 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // size to a surface that already exists (a reparent).
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
         Panel.LayoutUpdated += OnFirstLayoutUpdated;
+        // Loaded can land AFTER the layout pass that first sized the
+        // panel (observed under rapid split churn, where the splice
+        // invalidates layout before the loaded event is raised): the
+        // subscription above then never fires for that sizing, and a
+        // measured pane sits surface-less forever -- no creation
+        // attempted, no retry armed. A delayed fallback covers that
+        // pane without racing the healthy path: reading
+        // Panel.ActualHeight synchronously at (or one turn after)
+        // Loaded can catch a measure-phase value the arrange never
+        // completes (observed as a 4px pty/pane mismatch when creation
+        // ran at the transient size), so the fallback waits out the
+        // launch settle instead and no-ops when the event path already
+        // created the surface.
+        var fallback = DispatcherQueue.CreateTimer();
+        fallback.Interval = TimeSpan.FromMilliseconds(250);
+        fallback.IsRepeating = false;
+        fallback.Tick += (t, _) =>
+        {
+            t.Stop();
+            if (_surface.Handle != IntPtr.Zero) return;
+            // Attribution the event path cannot give: this pane missed
+            // its first layout event.
+            Ghostty.Logging.StaticLoggers.App.LogInformation(
+                "Terminal surface creation fallback: the pane missed its first layout event; invalidating to create it");
+            // Layout-synchronized, not wall-clock: forcing a measure
+            // gives the armed OnFirstLayoutUpdated a COMPLETED pass to
+            // create at, so the size is the arranged one (a direct read
+            // here could still catch a measure-phase ghost). Creation
+            // focus is suppressed for this pane: 250ms later the user's
+            // focus stands where they put it, and the harness asserts
+            // active-ness itself.
+            _suppressCreationAutoFocus = true;
+            Panel.InvalidateMeasure();
+        };
+        fallback.Start();
         DisableAncestorScrollViewerTabStop();
 
         // Repaint the gutter on every attach, not just at construction.
@@ -1284,10 +1333,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // actually in - so only a pane that is in the visible tree asks;
         // a recovered hidden pane gains focus from the user's next click,
         // like any pane that loads late.
-        if (AutoFocus && IsEffectivelyVisible())
+        if (!_suppressCreationAutoFocus && AutoFocus && IsEffectivelyVisible())
         {
             this.Focus(FocusState.Programmatic);
         }
+        _suppressCreationAutoFocus = false;
 
         // Surface exists and is registered; tell the host the shell has
         // spawned. Raised last on purpose: the startup glow reads the
