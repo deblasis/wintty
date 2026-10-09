@@ -1062,6 +1062,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // size to a surface that already exists (a reparent).
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
         Panel.LayoutUpdated += OnFirstLayoutUpdated;
+        // Loaded can land AFTER the layout pass that first sized the
+        // panel (observed under rapid split churn, where the splice
+        // invalidates layout before the loaded event is raised): the
+        // subscription above then never fires for that sizing, and a
+        // measured pane sits surface-less forever -- no creation
+        // attempted, no retry armed. Attempt once here too; the size
+        // gate makes this a no-op for a not-yet-measured pane, and
+        // success unsubscribes the handler the event path would have.
+        TrySettleSurfaceCreation();
         DisableAncestorScrollViewerTabStop();
 
         // Repaint the gutter on every attach, not just at construction.
