@@ -763,16 +763,30 @@ internal static class TestSeam
                     l => !leavesBefore.Contains(l));
                 if (newborn is not null)
                 {
-                    for (var attempt = 0
-                        ; attempt < 5 && host.ActiveLeaf != newborn
-                        ; attempt++)
+                    // A single passing check is not enough: the splice's
+                    // focus restoration reaches GotFocus one or more turns
+                    // AFTER the newborn's own turn, so ActiveLeaf can be
+                    // stolen between two acks even though every ack saw it
+                    // hold once. Hold the contract across CONSECUTIVE
+                    // drained turns, re-asserting on every drift, until no
+                    // queued steal outlives the ack.
+                    var stable = 0;
+                    for (var attempt = 0; attempt < 10 && stable < 3; attempt++)
                     {
-                        host.TestSeamMakeActive(newborn);
                         await WaitForLowPriorityAsync(window.DispatcherQueue);
+                        if (host.ActiveLeaf != newborn)
+                        {
+                            host.TestSeamMakeActive(newborn);
+                            stable = 0;
+                        }
+                        else
+                        {
+                            stable++;
+                        }
                     }
                     if (host.ActiveLeaf != newborn)
                         return Error(op,
-                            "the split's new pane did not hold focus after 5 turns");
+                            "the split's new pane did not hold focus across drained turns");
                 }
                 return OkWithState(window, manager, op);
             }
