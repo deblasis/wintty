@@ -429,9 +429,23 @@ function Read-Size($s, [int]$Index) {
 }
 
 # A leaf's own viewport, off the cell grid. leaf=-1 reads the active
-# leaf, which after a split is the newborn.
+# leaf, which after a split is the newborn. "no live surface" is a
+# documented transient (the surface spawns asynchronously; surface-size
+# answers live=false gracefully but screen-text errors on it), so it
+# retries within a short budget rather than failing the scenario
+# outright.
 function Read-Screen($s, [int]$Index, [int]$Leaf) {
-    return Invoke-SeamCommand $s @{ op = 'screen-text'; index = $Index; leaf = $Leaf }
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($true) {
+        try {
+            return Invoke-SeamCommand $s @{ op = 'screen-text'; index = $Index; leaf = $Leaf }
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'no live surface' -or
+                [DateTime]::UtcNow -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 250
+        }
+    }
 }
 
 # The pane's settled size: read until two reads a second apart agree, so a
