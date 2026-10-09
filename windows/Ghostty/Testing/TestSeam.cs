@@ -761,7 +761,8 @@ internal static class TestSeam
                 // instead of acking a lie.
                 var newborn = host.TestSeamLeaves.FirstOrDefault(
                     l => !leavesBefore.Contains(l));
-                if (newborn is not null)
+                if (newborn is null)
+                    return Error(op, "the split added no leaf");
                 {
                     // A single passing check is not enough: the splice's
                     // focus restoration reaches GotFocus one or more turns
@@ -784,7 +785,7 @@ internal static class TestSeam
                             stable++;
                         }
                     }
-                    if (host.ActiveLeaf != newborn)
+                    if (stable < 3)
                         return Error(op,
                             "the split's new pane did not hold focus across drained turns");
                 }
