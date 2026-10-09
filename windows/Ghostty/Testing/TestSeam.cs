@@ -3022,7 +3022,7 @@ internal static class TestSeam
     /// of steals.
     /// </summary>
     private static async Task<bool> HoldActiveAsync(
-        Panes.PaneHost host, Panes.LeafPane target, DispatcherQueue queue)
+        Panes.PaneHost host, Core.Panes.LeafPane target, DispatcherQueue queue)
     {
         var stable = 0;
         for (var attempt = 0; attempt < 10 && stable < 3; attempt++)
