@@ -791,6 +791,35 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "surface-state":
+            {
+                // Read-only diagnosis for a leaf the driver could not read:
+                // live surface or not, whether creation was attempted, the
+                // retry budget left, and the panel's measured size (the
+                // creation gate refuses zero, so never-attempted + zero
+                // means layout never measured the pane).
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var diagHost = (Panes.PaneHost)tab.PaneHost;
+                var diagTerminal = diagHost.TestSeamLeafTerminal(
+                    ArgInt(args, "leaf", -1))
+                    ?? diagHost.ActiveLeaf.Terminal();
+                var diagSize = diagTerminal.TestSeamPanelSize;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("live", diagTerminal.TestSeamHasSurface);
+                    json.WriteBoolean("attempted", diagTerminal.TestSeamSurfaceAttempted);
+                    json.WriteNumber("retriesLeft", diagTerminal.TestSeamSurfaceRetriesLeft);
+                    json.WriteNumber("panelW", diagSize.Width);
+                    json.WriteNumber("panelH", diagSize.Height);
+                    json.WriteEndObject();
+                });
+            }
+
             case "focus-pane":
             {
                 var index = ArgInt(args, "index", -1);

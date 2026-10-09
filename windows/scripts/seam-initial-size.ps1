@@ -442,7 +442,21 @@ function Read-Screen($s, [int]$Index, [int]$Leaf) {
         }
         catch {
             if ($_.Exception.Message -notmatch 'no live surface' -or
-                [DateTime]::UtcNow -ge $deadline) { throw }
+                [DateTime]::UtcNow -ge $deadline) {
+                # Self-describing failure: the surface-state readback says
+                # WHICH stuck state the pane is in (never measured, gave
+                # up, or still retrying), so the row's error is the
+                # diagnosis instead of a blind PRODUCT_FAIL.
+                if ($_.Exception.Message -match 'no live surface') {
+                    $st = $null
+                    try { $st = Invoke-SeamCommand $s @{ op = 'surface-state'; index = $Index; leaf = $Leaf } } catch { }
+                    if ($st) {
+                        throw ("{0} [surface-state: live={1} attempted={2} retriesLeft={3} panel={4}x{5}]" -f `
+                            $_.Exception.Message, $st.live, $st.attempted, $st.retriesLeft, $st.panelW, $st.panelH)
+                    }
+                }
+                throw
+            }
             Start-Sleep -Milliseconds 250
         }
     }

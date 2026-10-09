@@ -656,6 +656,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// a bare -1 cannot.
     /// </summary>
     internal bool TestSeamSurfaceAttempted => _surfaceCreated;
+
+    /// <summary>
+    /// Seam readback: the panel's current measured size. The surface
+    /// creation gate refuses zero sizes, so a dead pane's diagnosis starts
+    /// here: attempted-but-zero means layout never measured the pane.
+    /// </summary>
+    internal Windows.Foundation.Size TestSeamPanelSize =>
+        new(Panel.ActualWidth, Panel.ActualHeight);
 #endif
 
     /// <summary>
