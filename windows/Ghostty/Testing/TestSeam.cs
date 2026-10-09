@@ -791,35 +791,6 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
-            case "surface-state":
-            {
-                // Read-only diagnosis for a leaf the driver could not read:
-                // live surface or not, whether creation was attempted, the
-                // retry budget left, and the panel's measured size (the
-                // creation gate refuses zero, so never-attempted + zero
-                // means layout never measured the pane).
-                var index = ArgInt(args, "index", -1);
-                var tab = TabAt(manager, index);
-                if (tab is null) return Error(op, $"no tab at index {index}");
-                var diagHost = (Panes.PaneHost)tab.PaneHost;
-                var diagTerminal = diagHost.TestSeamLeafTerminal(
-                    ArgInt(args, "leaf", -1))
-                    ?? diagHost.ActiveLeaf.Terminal();
-                var diagSize = diagTerminal.TestSeamPanelSize;
-                return Json(json =>
-                {
-                    json.WriteStartObject();
-                    json.WriteBoolean("ok", true);
-                    json.WriteString("op", op);
-                    json.WriteBoolean("live", diagTerminal.TestSeamHasSurface);
-                    json.WriteBoolean("attempted", diagTerminal.TestSeamSurfaceAttempted);
-                    json.WriteNumber("retriesLeft", diagTerminal.TestSeamSurfaceRetriesLeft);
-                    json.WriteNumber("panelW", diagSize.Width);
-                    json.WriteNumber("panelH", diagSize.Height);
-                    json.WriteEndObject();
-                });
-            }
-
             case "focus-pane":
             {
                 var index = ArgInt(args, "index", -1);
@@ -1344,10 +1315,17 @@ internal static class TestSeam
                 // An observer op: polls must not force layout passes, or
                 // the polls would share the retry's creation path and a
                 // driver could never tell which one recovered the pane.
+                // leaf (optional) reads a specific leaf instead of the
+                // active one; panelW/panelH report the measured size the
+                // creation gate keys on (zero = never measured).
                 var index = ArgInt(args, "index", -1);
                 var tab = TabAt(manager, index);
                 if (tab is null) return Error(op, $"no tab at index {index}");
-                var terminal = tab.PaneHost.ActiveLeaf.Terminal();
+                var stateHost = (Panes.PaneHost)tab.PaneHost;
+                var terminal = stateHost.TestSeamLeafTerminal(
+                    ArgInt(args, "leaf", -1))
+                    ?? tab.PaneHost.ActiveLeaf.Terminal();
+                var panelSize = terminal.TestSeamPanelSize;
                 return Json(json =>
                 {
                     json.WriteStartObject();
@@ -1357,6 +1335,8 @@ internal static class TestSeam
                     json.WriteBoolean("hasSurface", terminal.TestSeamHasSurface);
                     json.WriteBoolean("attempted", terminal.TestSeamSurfaceAttempted);
                     json.WriteNumber("retriesLeft", terminal.TestSeamSurfaceRetriesLeft);
+                    json.WriteNumber("panelW", panelSize.Width);
+                    json.WriteNumber("panelH", panelSize.Height);
                     json.WriteEndObject();
                 });
             }

@@ -452,7 +452,7 @@ function Read-Screen($s, [int]$Index, [int]$Leaf) {
                     try { $st = Invoke-SeamCommand $s @{ op = 'surface-state'; index = $Index; leaf = $Leaf } } catch { }
                     if ($st) {
                         throw ("{0} [surface-state: live={1} attempted={2} retriesLeft={3} panel={4}x{5}]" -f `
-                            $_.Exception.Message, $st.live, $st.attempted, $st.retriesLeft, $st.panelW, $st.panelH)
+                            $_.Exception.Message, $st.hasSurface, $st.attempted, $st.retriesLeft, $st.panelW, $st.panelH)
                     }
                 }
                 throw
