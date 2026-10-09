@@ -141,6 +141,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _surfaceRetryTimer;
     private int _surfaceRetryAttemptsLeft;
 
+    // One-shot, set by the Loaded fallback before it invalidates: the
+    // creation that follows must not pull programmatic focus, because the
+    // fallback fires long after the user's focus has settled somewhere
+    // deliberate. Cleared by the creation attempt that consumes it.
+    private bool _suppressCreationAutoFocus;
+
     // Retry cadence and budget for a failed surface creation. Each failed
     // attempt is cheap - the device init fails before the pty spawns, so no
     // shell is started - but the attempts still burn a loaded machine, so
@@ -1081,8 +1087,20 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         fallback.Tick += (t, _) =>
         {
             t.Stop();
-            if (_surface.Handle == IntPtr.Zero)
-                TrySettleSurfaceCreation();
+            if (_surface.Handle != IntPtr.Zero) return;
+            // Attribution the event path cannot give: this pane missed
+            // its first layout event.
+            Ghostty.Logging.StaticLoggers.App.LogInformation(
+                "Terminal surface creation fallback: the pane missed its first layout event; invalidating to create it");
+            // Layout-synchronized, not wall-clock: forcing a measure
+            // gives the armed OnFirstLayoutUpdated a COMPLETED pass to
+            // create at, so the size is the arranged one (a direct read
+            // here could still catch a measure-phase ghost). Creation
+            // focus is suppressed for this pane: 250ms later the user's
+            // focus stands where they put it, and the harness asserts
+            // active-ness itself.
+            _suppressCreationAutoFocus = true;
+            Panel.InvalidateMeasure();
         };
         fallback.Start();
         DisableAncestorScrollViewerTabStop();
@@ -1315,10 +1333,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // actually in - so only a pane that is in the visible tree asks;
         // a recovered hidden pane gains focus from the user's next click,
         // like any pane that loads late.
-        if (AutoFocus && IsEffectivelyVisible())
+        if (!_suppressCreationAutoFocus && AutoFocus && IsEffectivelyVisible())
         {
             this.Focus(FocusState.Programmatic);
         }
+        _suppressCreationAutoFocus = false;
 
         // Surface exists and is registered; tell the host the shell has
         // spawned. Raised last on purpose: the startup glow reads the

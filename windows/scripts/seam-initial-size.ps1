@@ -962,7 +962,10 @@ profile.splitprobe.command = cmd.exe /d /c echo $MarkerSplit & ping -n 120 127.0
             $rects = @([pscustomobject]@{ W = [double]$base.widthPx; H = [double]$base.heightPx })
             $active = 0
             foreach ($o in $combo.Orientations) {
-                $split = Invoke-SeamCommand $s @{ op = 'split'; orientation = $o }
+                # The model is authoritative: name the leaf to divide so no
+                # focus event (a daemon attach landing mid-burst) can send a
+                # split to the wrong pane.
+                $split = Invoke-SeamCommand $s @{ op = 'split'; orientation = $o; leaf = $active }
                 $tab = @($split.state.tabs)[$index]
                 $newborn = [int]$tab.activeLeaf
                 $pair = Split-ModelRects $rects[$active] $o

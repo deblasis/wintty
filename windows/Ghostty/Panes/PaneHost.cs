@@ -390,17 +390,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             : 0u;
 
     /// <summary>
-    /// Focus the Nth leaf through the same call the split-navigation chords
-    /// make, so <see cref="OnTerminalGotFocus"/> -- not the seam -- is what
-    /// moves <see cref="ActiveLeaf"/>.
-    /// </summary>
-    internal bool TestSeamFocusLeaf(int index)
-    {
-        var leaves = PaneTree.Leaves(_root).ToList();
-        return index >= 0 && index < leaves.Count
-            && leaves[index].Terminal().Focus(FocusState.Keyboard);
-    }
-
     /// <summary>
     /// The tree's leaves as live references, in <see cref="PaneTree.Leaves"/>
     /// order. Seam-only: the split ack diffs this list around a split to
@@ -420,7 +409,16 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     internal void TestSeamMakeActive(LeafPane leaf)
     {
+        // The same settle OnTerminalGotFocus performs: the active slot,
+        // the highlight, and the LeafFocused compensation (the tab title,
+        // progress and bell read the active leaf through it) - a raw
+        // _activeLeaf write would leave those bound to the pane that
+        // stole focus. The deferred programmatic focus mirrors Split's
+        // own, because the leaf may still have no measured size.
+        if (ReferenceEquals(leaf, _activeLeaf)) return;
         _activeLeaf = leaf;
+        UpdateHighlightPosition();
+        LeafFocused?.Invoke(this, leaf);
         DispatcherQueue.TryEnqueue(() =>
         {
             leaf.Terminal().Focus(FocusState.Programmatic);
