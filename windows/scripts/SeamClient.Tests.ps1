@@ -959,10 +959,17 @@ function Invoke-ResumeCases([string]$HarnessPath) {
     # The rows live as invocations, not prose: the header names every row, so
     # a bare Contains stays green when the live lines are gone. Pin the
     # parsed commands instead (the same AST shape the forwarding rules use).
+    # The cold pin is anchored past the substring: 'resume-cold' NOT followed
+    # by a word char or '-', because the fallback invocation's
+    # 'resume-cold-fallback' satisfies the bare substring and a deleted plain
+    # row would stay green behind it. Red-proofed by deleting only the plain
+    # invocation from a scratch copy of the harness (the fallback invocation
+    # still present): the pin fires 'invokes no live Invoke-RestorePhase
+    # plain cold row'.
     $restores = @($commands | Where-Object { $_.GetCommandName() -eq 'Invoke-RestorePhase' })
     $restoreText = ($restores | ForEach-Object { $_.Extent.Text }) -join "`n"
-    if ($restores.Count -eq 0 -or $restoreText -notmatch 'resume-cold') {
-        $failed.Add("$($file) invokes no live Invoke-RestorePhase cold row (header prose alone proves nothing)")
+    if ($restores.Count -eq 0 -or $restoreText -notmatch 'resume-cold(?![\w-])') {
+        $failed.Add("$($file) invokes no live Invoke-RestorePhase plain cold row (anchored past 'resume-cold-fallback'; header prose alone proves nothing)")
     }
     if ($restoreText -notmatch 'resume-cold-fallback') {
         $failed.Add("$($file) invokes no live Invoke-RestorePhase fallback row (header prose alone proves nothing)")
