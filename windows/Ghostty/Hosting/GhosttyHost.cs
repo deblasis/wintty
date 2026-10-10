@@ -1238,11 +1238,12 @@ internal sealed partial class GhosttyHost : IDisposable
                     _dispatcher.TryEnqueue(() =>
                     {
                         if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
-                        // The program whose reports the pane was carrying is
-                        // gone; its status dies with it rather than going
-                        // stale on the tab.
-                        c.RaiseProgramStatus(new Ghostty.Core.Interop.ProgramStatusEvent(
-                            Ghostty.Core.Interop.ProgramStatusEventKind.Reset, default));
+                        // The program whose reports the pane was carrying
+                        // is gone. Its working and blocked states die with
+                        // it; a done or error it reported right before
+                        // exiting still waits to be seen (the spec keeps
+                        // those until viewed), so this is not a reset.
+                        c.RetireEphemeralProgramStatus();
                         // c.SurfaceCommandText is the text the surface was
                         // created to run; the policy decides how much of it
                         // a toast may show (deblasis/wintty#1193).

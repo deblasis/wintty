@@ -21,6 +21,11 @@ public class TabProgramStatusTests
 
     private static ProgramStatusEvent PromptStart => new(ProgramStatusEventKind.PromptStart, default);
 
+    // The child-exit edge is delivered as the protocol's prompt-start
+    // fold (see TerminalControl.RetireEphemeralProgramStatus): both mean
+    // "the working and asking states are over".
+    private static ProgramStatusEvent RetireOnExit => PromptStart;
+
     // ── what one report's state contributes ──────────────────────────
 
     [Theory]
@@ -56,9 +61,39 @@ public class TabProgramStatusTests
             TabProgramStatusRules.Apply(TabProgramStatus.Blocked, Reset, paneActive: false));
 
     [Fact]
-    public void APromptStart_ChangesNothing()
-        => Assert.Equal(TabProgramStatus.Working,
+    public void APromptStart_RetiresWorkingAndBlocked_Only()
+    {
+        // The spec's rule, and the headers' guidance: a new shell prompt
+        // means the program that was working or asking is gone. Done and
+        // error are results -- they wait to be seen.
+        Assert.Equal(TabProgramStatus.None,
             TabProgramStatusRules.Apply(TabProgramStatus.Working, PromptStart, paneActive: false));
+        Assert.Equal(TabProgramStatus.None,
+            TabProgramStatusRules.Apply(TabProgramStatus.Blocked, PromptStart, paneActive: false));
+        Assert.Equal(TabProgramStatus.Done,
+            TabProgramStatusRules.Apply(TabProgramStatus.Done, PromptStart, paneActive: false));
+        Assert.Equal(TabProgramStatus.Error,
+            TabProgramStatusRules.Apply(TabProgramStatus.Error, PromptStart, paneActive: false));
+        Assert.Equal(TabProgramStatus.None,
+            TabProgramStatusRules.Apply(TabProgramStatus.None, PromptStart, paneActive: false));
+    }
+
+    [Fact]
+    public void AChildExit_RetiresWorkingAndBlocked_Only()
+    {
+        // The same fold, from the child-exit edge: a done the program
+        // reported right before exiting is news the pane still owes the
+        // user, so it survives the exit and retires on viewing.
+        Assert.Equal(TabProgramStatus.None,
+            TabProgramStatusRules.Apply(TabProgramStatus.Blocked,
+                RetireOnExit, paneActive: false));
+        Assert.Equal(TabProgramStatus.Done,
+            TabProgramStatusRules.Apply(TabProgramStatus.Done,
+                RetireOnExit, paneActive: false));
+        Assert.Equal(TabProgramStatus.Error,
+            TabProgramStatusRules.Apply(TabProgramStatus.Error,
+                RetireOnExit, paneActive: false));
+    }
 
     [Fact]
     public void ADoneOnThePaneBeingLookedAt_NeverShows()

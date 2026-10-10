@@ -543,6 +543,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
 
     /// <summary>
+    /// The pane's child exited: its working and blocked states are over,
+    /// while done and error wait to be seen (the specification's exit
+    /// rule). Delivered as the protocol's prompt-start fold, which means
+    /// exactly this, so the fold itself lives in one testable place.
+    /// </summary>
+    internal void RetireEphemeralProgramStatus() =>
+        RaiseProgramStatus(new Ghostty.Core.Interop.ProgramStatusEvent(
+            Ghostty.Core.Interop.ProgramStatusEventKind.PromptStart, default));
+
+    /// <summary>
     /// The pane took focus: a done it was holding has been seen, so it
     /// stops contributing. Anything else keeps showing; only a fresh
     /// report changes it.
