@@ -199,7 +199,11 @@ function Test-Newborn([string]$What, $r, [string]$ScreenText) {
 
 # Wait until the pane's own program output is on screen, in either shape a
 # grid can hold it: the marker as a line (sane grid) or its vertical wrap
-# (the #1262 shape). $null when nothing arrived inside the budget.
+# (the #1262 shape -- at least 8 one-char lines means output landed and
+# wrapped, mirrored from seam-initial-size.ps1:560). 8 is deliberately below
+# the $WrapRunLimit=10 signature Test-Newborn flags: arrival versus defect,
+# so a marker-less 8-9 run returns here and the oracle still judges it
+# non-signature. $null when nothing arrived inside the budget.
 function Wait-PaneOutput($s, [int]$Index, [int]$Leaf, [string]$Marker, [int]$Seconds) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
