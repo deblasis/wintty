@@ -105,13 +105,13 @@ internal static class ProgramStatusActionDecoder
         var action = Unsafe.ReadUnaligned<GhosttyActionProgramStatus>((void*)payload);
         switch (action.Event)
         {
-            case (int)ProgramStatusEventKind.Reset:
+            case ProgramStatusEventKind.Reset:
                 evt = new ProgramStatusEvent(ProgramStatusEventKind.Reset, default, action.DesktopNotifications != 0);
                 return true;
-            case (int)ProgramStatusEventKind.PromptStart:
+            case ProgramStatusEventKind.PromptStart:
                 evt = new ProgramStatusEvent(ProgramStatusEventKind.PromptStart, default, action.DesktopNotifications != 0);
                 return true;
-            case (int)ProgramStatusEventKind.Report:
+            case ProgramStatusEventKind.Report:
                 break;
             default:
                 return false;
@@ -119,8 +119,8 @@ internal static class ProgramStatusActionDecoder
 
         if (action.Report == 0) return false;
         var r = Unsafe.ReadUnaligned<GhosttyActionProgramStatusReport>((void*)action.Report);
-        if (r.State is < 0 or > (int)ProgramStatusState.Clear) return false;
-        if (r.Kind is < 0 or > (int)ProgramStatusKind.Auth) return false;
+        if (r.State is < 0 or > ProgramStatusState.Clear) return false;
+        if (r.Kind is < 0 or > ProgramStatusKind.Auth) return false;
 
         if (!TryString(r.Id, r.IdLen, ProgramStatusLimits.MaxIdBytes, out var id) ||
             !TryString(r.App, r.AppLen, ProgramStatusLimits.MaxAppBytes, out var app) ||
@@ -131,8 +131,8 @@ internal static class ProgramStatusActionDecoder
         }
 
         evt = new ProgramStatusEvent(ProgramStatusEventKind.Report, new ProgramStatusReport(
-            (ProgramStatusState)r.State,
-            (ProgramStatusKind)r.Kind,
+            r.State,
+            r.Kind,
             r.Progress,
             id, app, title, message), action.DesktopNotifications != 0);
         return true;

@@ -43,7 +43,7 @@ public class ProgramStatusWiringTests
         var raise = control.Method("RaiseProgramStatus").ToString();
         Assert.Contains("TabProgramStatusRules.Apply(", raise);
         Assert.Contains("CurrentProgramStatus =", raise);
-        Assert.Contains("event EventHandler<ProgramStatusEvent>? ProgramStatusChanged",
+        Assert.Contains("event EventHandler<Ghostty.Core.Interop.ProgramStatusEvent>? ProgramStatusChanged",
             control.Root.ToString());
         var viewed = control.Method("MarkProgramStatusViewed").ToString();
         Assert.Contains("TabProgramStatusRules.Viewed(", viewed);
@@ -67,8 +67,10 @@ public class ProgramStatusWiringTests
     public void TabManager_ForwardsTheHostsStatusOntoTheTab_InBothWiringPaths()
     {
         var manager = ShellSource.Load("Tabs.TabManager.cs").Root.ToString();
-        Assert.Equal(2, Count(manager, "host.ProgramStatusChanged += statusHandler"));
-        Assert.Equal(2, Count(manager, "host.ProgramStatusChanged -= statusHandler"));
+        // Both spellings (host in CreateTab, tab.PaneHost in the adopter)
+        // end the same way, so the tail count is the wiring count.
+        Assert.Equal(2, Count(manager, "ProgramStatusChanged += statusHandler"));
+        Assert.Equal(2, Count(manager, "ProgramStatusChanged -= statusHandler"));
     }
 
     [Fact]
@@ -83,11 +85,13 @@ public class ProgramStatusWiringTests
     public void BothStrips_RenderTheStateGlyph_AndHonorAClaimedSlot()
     {
         var strip = ShellSource.Load("Tabs.TabHost.xaml.cs").Root.ToString();
-        Assert.Contains("ProgramStatusGlyph", strip);
-        Assert.Contains("TabModel.ProgramStatusPresentationClaimed", strip);
+        Assert.Contains("TabProgramStatusChrome.ProgramStatusGlyph(", strip);
         var row = ShellSource.Load("Tabs.VerticalTabNavRow.cs").Root.ToString();
-        Assert.Contains("ProgramStatusGlyph", row);
-        Assert.Contains("TabModel.ProgramStatusPresentationClaimed", row);
+        Assert.Contains("TabProgramStatusChrome.ProgramStatusGlyph(", row);
+        // The claim check lives once, in the chrome both strips share, so
+        // the baseline glyph and a richer presentation can never stack.
+        var chrome = ShellSource.Load("Tabs.TabProgramStatusChrome.cs").Root.ToString();
+        Assert.Contains("!TabModel.ProgramStatusPresentationClaimed", chrome);
     }
 
     private static int Count(string haystack, string needle) =>

@@ -525,6 +525,37 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         CurrentProgress = state;
         ProgressChanged?.Invoke(this, state);
     }
+
+    /// <summary>Raised for each program status action (OSC 7501 report,
+    /// full reset, new shell prompt), already copied out of the callback.
+    /// The control also folds the action into
+    /// <see cref="CurrentProgramStatus"/>: the tab's aggregate reads that
+    /// rather than replaying every event.</summary>
+    internal event EventHandler<Ghostty.Core.Interop.ProgramStatusEvent>? ProgramStatusChanged;
+
+    internal void RaiseProgramStatus(Ghostty.Core.Interop.ProgramStatusEvent e)
+    {
+        // OSC 7501 is pane output; same idle-stamp contract as the title.
+        NoteActivity();
+        CurrentProgramStatus = Ghostty.Core.Tabs.TabProgramStatusRules.Apply(
+            CurrentProgramStatus, e, IsActive);
+        ProgramStatusChanged?.Invoke(this, e);
+    }
+
+    /// <summary>
+    /// The pane took focus: a done it was holding has been seen, so it
+    /// stops contributing. Anything else keeps showing; only a fresh
+    /// report changes it.
+    /// </summary>
+    internal void MarkProgramStatusViewed()
+    {
+        // No event follows: the pane host calls this from its focus path
+        // and recomputes the tab itself, so the fold has no need to
+        // invent one -- a synthetic event would read as a report to
+        // anything else subscribed (the pro agents feature is).
+        CurrentProgramStatus = Ghostty.Core.Tabs.TabProgramStatusRules.Viewed(
+            CurrentProgramStatus);
+    }
     internal void RaisePromptReady() => PromptReady?.Invoke(this, EventArgs.Empty);
     internal void RaiseFirstRender() => FirstRender?.Invoke(this, EventArgs.Empty);
 
@@ -904,6 +935,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// <summary>Most recent OSC 9;4 state reported for this leaf.</summary>
     internal Ghostty.Core.Tabs.TabProgressState CurrentProgress { get; private set; }
         = Ghostty.Core.Tabs.TabProgressState.None;
+
+    /// <summary>
+    /// What this pane's OSC 7501 reports currently contribute to the tab:
+    /// the last report's state, folded through the tab rules (a done on
+    /// the pane being looked at never counts). None for a pane whose
+    /// program has never reported anything.
+    /// </summary>
+    internal Ghostty.Core.Tabs.TabProgramStatus CurrentProgramStatus { get; private set; }
+        = Ghostty.Core.Tabs.TabProgramStatus.None;
 
     // Events raised from the runtime action callback. They always fire
     // on the UI thread: the callback itself runs on libghostty's thread
@@ -1677,6 +1717,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         CloseRequested = null;
         HoveredLinkChanged = null;
         ProgressChanged = null;
+        ProgramStatusChanged = null;
         PromptReady = null;
         FirstRender = null;
         SurfaceSpawned = null;

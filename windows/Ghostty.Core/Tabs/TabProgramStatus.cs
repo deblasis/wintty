@@ -29,7 +29,14 @@ public static class TabProgramStatusRules
     /// What one report's state contributes. Idle and clear earn nothing:
     /// idle is a rest state, and a clear takes the record away.
     /// </summary>
-    public static TabProgramStatus From(ProgramStatusState state) => TabProgramStatus.None;
+    public static TabProgramStatus From(ProgramStatusState state) => state switch
+    {
+        ProgramStatusState.Blocked => TabProgramStatus.Blocked,
+        ProgramStatusState.Error => TabProgramStatus.Error,
+        ProgramStatusState.Working => TabProgramStatus.Working,
+        ProgramStatusState.Done => TabProgramStatus.Done,
+        _ => TabProgramStatus.None,
+    };
 
     /// <summary>
     /// Fold one action into a pane's current contribution. A reset clears
@@ -38,17 +45,30 @@ public static class TabProgramStatusRules
     /// at was seen the moment it arrived, so it never shows.
     /// </summary>
     public static TabProgramStatus Apply(
-        TabProgramStatus current, ProgramStatusEvent e, bool paneActive) => current;
+        TabProgramStatus current, ProgramStatusEvent e, bool paneActive)
+    {
+        var reported = e.Kind switch
+        {
+            ProgramStatusEventKind.Reset => TabProgramStatus.None,
+            ProgramStatusEventKind.Report => From(e.Report.State),
+            _ => current,
+        };
+        return reported == TabProgramStatus.Done && paneActive
+            ? TabProgramStatus.None
+            : reported;
+    }
 
     /// <summary>
     /// What a done contributes once its pane takes focus: nothing. The
     /// user has seen it; only a fresh report brings the state back.
     /// </summary>
-    public static TabProgramStatus Viewed(TabProgramStatus status) => status;
+    public static TabProgramStatus Viewed(TabProgramStatus status) =>
+        status == TabProgramStatus.Done ? TabProgramStatus.None : status;
 
     /// <summary>
     /// The worst of two panes' contributions. The enum's own order is the
     /// priority, so this is the larger of the two.
     /// </summary>
-    public static TabProgramStatus Worst(TabProgramStatus a, TabProgramStatus b) => a;
+    public static TabProgramStatus Worst(TabProgramStatus a, TabProgramStatus b) =>
+        a > b ? a : b;
 }

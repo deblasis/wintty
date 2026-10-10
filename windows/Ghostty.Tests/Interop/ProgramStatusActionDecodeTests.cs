@@ -48,8 +48,8 @@ public class ProgramStatusActionDecodeTests
     {
         var r = new GhosttyActionProgramStatusReport
         {
-            State = state,
-            Kind = kind,
+            State = (ProgramStatusState)state,
+            Kind = (ProgramStatusKind)kind,
             Progress = progress,
             Id = n.Bytes(id, out var idLen), IdLen = idLen,
             App = n.Bytes(app, out var appLen), AppLen = appLen,
@@ -57,7 +57,7 @@ public class ProgramStatusActionDecodeTests
             Message = nullMessage ? 0 : n.Bytes(message, out _),
         };
         r.MessageLen = messageLen ?? (nuint)Encoding.UTF8.GetByteCount(message);
-        return n.Struct(new GhosttyActionProgramStatus { Event = 0, DesktopNotifications = notify ? (byte)1 : (byte)0, Report = n.Struct(r) });
+        return n.Struct(new GhosttyActionProgramStatus { Event = ProgramStatusEventKind.Report, DesktopNotifications = notify ? (byte)1 : (byte)0, Report = n.Struct(r) });
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public class ProgramStatusActionDecodeTests
     public void Decode_LifetimeEvents_NeedNoReport(int raw, ProgramStatusEventKind kind)
     {
         using var n = new Native();
-        var p = n.Struct(new GhosttyActionProgramStatus { Event = raw, Report = 0 });
+        var p = n.Struct(new GhosttyActionProgramStatus { Event = (ProgramStatusEventKind)raw, Report = 0 });
         Assert.True(ProgramStatusActionDecoder.TryDecode(p, out var e));
         Assert.Equal(kind, e.Kind);
     }
@@ -101,7 +101,7 @@ public class ProgramStatusActionDecodeTests
     {
         using var n = new Native();
         Assert.False(ProgramStatusActionDecoder.TryDecode(0, out _));
-        Assert.False(ProgramStatusActionDecoder.TryDecode(n.Struct(new GhosttyActionProgramStatus { Event = 3 }), out _));
+        Assert.False(ProgramStatusActionDecoder.TryDecode(n.Struct(new GhosttyActionProgramStatus { Event = (ProgramStatusEventKind)3 }), out _));
         Assert.False(ProgramStatusActionDecoder.TryDecode(n.Struct(new GhosttyActionProgramStatus { Event = 0, Report = 0 }), out _));
         Assert.False(ProgramStatusActionDecoder.TryDecode(Report(n, 6, 0, -1, "", "", "", ""), out _));
         Assert.False(ProgramStatusActionDecoder.TryDecode(Report(n, 1, 4, -1, "", "", "", ""), out _));

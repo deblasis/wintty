@@ -300,7 +300,7 @@ internal struct GhosttyActionSearchSelected
 [StructLayout(LayoutKind.Sequential)]
 internal struct GhosttyActionProgramStatus
 {
-    public int Event;
+    public ProgramStatusEventKind Event;
     public byte DesktopNotifications;
     public nint Report;
 }
@@ -312,8 +312,8 @@ internal struct GhosttyActionProgramStatus
 [StructLayout(LayoutKind.Sequential)]
 internal struct GhosttyActionProgramStatusReport
 {
-    public int State;
-    public int Kind;
+    public ProgramStatusState State;
+    public ProgramStatusKind Kind;
     public sbyte Progress;
     public nint Id;
     public nuint IdLen;

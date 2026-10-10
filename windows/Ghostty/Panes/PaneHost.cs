@@ -257,6 +257,28 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void OnActiveLeafProgressChanged(object? sender, Ghostty.Core.Tabs.TabProgressState state)
         => ProgressChanged?.Invoke(this, state);
 
+    // Program status (OSC 7501) is every leaf's business, unlike progress:
+    // a blocked background pane is exactly what a tab headline exists to
+    // carry. Each leaf folds its own reports into its
+    // TerminalControl.CurrentProgramStatus; this is the worst across the
+    // tree, re-emitted whenever a leaf reports, is looked at, or joins or
+    // leaves the tree (RaiseLayoutChanged covers the last two).
+    public event EventHandler<Ghostty.Core.Tabs.TabProgramStatus>? ProgramStatusChanged;
+
+    private void OnTerminalProgramStatus(object? sender, Ghostty.Core.Interop.ProgramStatusEvent e)
+        => EmitProgramStatus();
+
+    private void EmitProgramStatus()
+    {
+        var worst = Ghostty.Core.Tabs.TabProgramStatus.None;
+        foreach (var leaf in PaneTree.Leaves(_root))
+        {
+            if (leaf.Terminal() is not { } t) continue;
+            worst = Ghostty.Core.Tabs.TabProgramStatusRules.Worst(worst, t.CurrentProgramStatus);
+        }
+        ProgramStatusChanged?.Invoke(this, worst);
+    }
+
     /// <summary>
     /// Raised when the directory the tab should name changes: the active
     /// leaf's shell reported a new one, or a focus change handed the tab a
@@ -469,7 +491,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public event EventHandler? LayoutChanged;
 
-    private void RaiseLayoutChanged() => LayoutChanged?.Invoke(this, EventArgs.Empty);
+    private void RaiseLayoutChanged()
+    {
+        LayoutChanged?.Invoke(this, EventArgs.Empty);
+        // A leaf that just left the tree may have been carrying the worst
+        // state; a leaf that joined starts plain. Either way the tab's
+        // headline is computed over the tree that exists now.
+        EmitProgramStatus();
+    }
 
     /// <summary>
     /// Override the pane chrome color. Pass null to revert to the default
@@ -821,6 +850,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             BindActiveLeafBell();
             EmitActiveLeafCwd();
             _titleForwarder.ActiveChanged();
+            // Looking at a pane retires an unviewed done it was holding;
+            // the tab's headline follows at once.
+            _activeLeaf.Terminal()?.MarkProgramStatusViewed();
+            EmitProgramStatus();
         };
     }
 
@@ -1160,6 +1193,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // must always be dropped. Matches TerminalControl.DisposeSurface.
         LeafFocused = null;
         ProgressChanged = null;
+        ProgramStatusChanged = null;
         BellRang = null;
         BellAcknowledged = null;
         _titleForwarder.Stop();
@@ -2238,6 +2272,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested += OnTerminalCloseRequested;
         t.ContextMenuRequested += OnTerminalContextMenuRequested;
         t.PwdChanged += OnTerminalPwdChanged;
+        t.ProgramStatusChanged += OnTerminalProgramStatus;
         _titleForwarder.Track(t);
         // Startup glow: begin the orbit when this leaf's surface spawns.
         // first_render only arms a short grace, not the end -- on a

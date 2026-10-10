@@ -860,6 +860,10 @@ internal sealed class TabManager
         // without needing a shared dictionary.
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         host.ProgressChanged += progressHandler;
+        // The worst OSC 7501 state across every pane in the tab; the
+        // strips render it as the program status glyph.
+        EventHandler<TabProgramStatus> statusHandler = (_, status) => tab.ProgramStatus = status;
+        host.ProgramStatusChanged += statusHandler;
         // The directory the tab names, from whichever pane is focused.
         EventHandler<string?> cwdHandler = (_, cwd) => tab.ShellReportedCwd = cwd;
         host.CwdChanged += cwdHandler;
@@ -893,6 +897,7 @@ internal sealed class TabManager
         tab.OnClose = () =>
         {
             host.ProgressChanged -= progressHandler;
+            host.ProgramStatusChanged -= statusHandler;
             host.CwdChanged -= cwdHandler;
             host.TitleChanged -= titleHandler;
             host.FirstRendered -= renderedHandler;
@@ -1049,6 +1054,10 @@ internal sealed class TabManager
         // An adopted tab is not restarted, so nothing begins settling here;
         // the bridge is wired all the same so a tab that arrives mid-start
         // (a restore) settles when its pane paints.
+        // The worst OSC 7501 state across every pane, same as CreateTab:
+        // an adopted tab's headline follows its panes in the new window.
+        EventHandler<TabProgramStatus> statusHandler = (_, status) => tab.ProgramStatus = status;
+        tab.PaneHost.ProgramStatusChanged += statusHandler;
         EventHandler renderedHandler = (_, _) => tab.Settle();
         tab.PaneHost.FirstRendered += renderedHandler;
         EventHandler<Ghostty.Core.Bell.BellFeatures> bellRangHandler = (_, features) =>
@@ -1073,6 +1082,7 @@ internal sealed class TabManager
         tab.OnClose = () =>
         {
             tab.PaneHost.ProgressChanged -= progressHandler;
+            tab.PaneHost.ProgramStatusChanged -= statusHandler;
             tab.PaneHost.CwdChanged -= cwdHandler;
             tab.PaneHost.TitleChanged -= titleHandler;
             tab.PaneHost.FirstRendered -= renderedHandler;

@@ -496,6 +496,28 @@ internal sealed partial class TabHost : UserControl, ITabHost
         iconRow.Children.Add(homeGlyph);
         iconRow.Children.Add(headerText);
 
+        // Program status (OSC 7501): the state glyph the tab's programs
+        // earn, worst across its panes -- blocked, error, working, a done
+        // nobody has looked at. Collapsed while nothing reports, and
+        // stood down entirely when a richer presentation has claimed the
+        // slot (the pro family's stacked indicator cards).
+        var statusGlyph = new FontIcon
+        {
+            Glyph = TabProgramStatusChrome.ProgramStatusGlyph(tab.ProgramStatus),
+            FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)
+                Application.Current.Resources["SymbolThemeFontFamily"],
+            FontSize = 12,
+            Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = TabProgramStatusChrome.BrushFor(tab.ProgramStatus),
+            Visibility = TabProgramStatusChrome.Visible(tab)
+                ? Visibility.Visible
+                : Visibility.Collapsed,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            statusGlyph, TabProgramStatusChrome.AutomationLabel(tab.ProgramStatus));
+        iconRow.Children.Add(statusGlyph);
+
         // Bell indicator: a Ringer glyph shown after the title while the
         // tab has an unacknowledged bell (bell-features `title`). Collapsed
         // by default; toggled from TabModel.BellRinging below.
@@ -631,6 +653,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
             else if (e.PropertyName == nameof(TabModel.Color))
             {
                 RefreshTabColors();
+            }
+            else if (e.PropertyName == nameof(TabModel.ProgramStatus))
+            {
+                statusGlyph.Glyph = TabProgramStatusChrome.ProgramStatusGlyph(tab.ProgramStatus);
+                statusGlyph.Foreground = TabProgramStatusChrome.BrushFor(tab.ProgramStatus);
+                statusGlyph.Visibility = TabProgramStatusChrome.Visible(tab)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                    statusGlyph, TabProgramStatusChrome.AutomationLabel(tab.ProgramStatus));
             }
             else if (e.PropertyName == nameof(TabModel.BellRinging))
             {
