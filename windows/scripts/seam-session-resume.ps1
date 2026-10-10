@@ -291,8 +291,12 @@ profile.vanishing.command = cmd.exe /d /c echo $MarkerVanish & ping -n 120 127.0
         $env:WINTTY_STATE_BASE = $OwnedPath
         $env:WINTTY_STATE_BASE_TOKEN = $OwnedToken
         # Forwarded here, never to the Stop-SeamSession in the finally below:
-        # Stop appends, so the hook would run twice for one launch.
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -PrivateStateBase -BeforeTeardown $BeforeTeardown
+        # Stop appends, so the hook would run twice for one launch. No
+        # -PrivateStateBase: it mints a fresh tree even over an owned one
+        # (lib/seam-client.ps1), so the app would never write the owned
+        # session.json Wait-SessionFile polls below.
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -BeforeTeardown $BeforeTeardown
+        if ($s.StateBase -ne $OwnedPath) { throw "HARNESS: Start-SeamSession did not adopt the owned tree (saw '$($s.StateBase)', wanted '$OwnedPath')" }
         $script:Current = $s
         $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'vanishing' }
         if (@($opened.state.tabs).Count -ne 2) { throw "HARNESS: open-profile left $(@($opened.state.tabs).Count) tabs, wanted 2" }
@@ -339,8 +343,11 @@ function Invoke-RestorePhase([string]$Row, [string]$Mode, [string]$OwnedPath, [s
         Assert-NoWinttyFrom -ExePath $ExePath -Context 'seam-session-resume restore'
         $env:WINTTY_STATE_BASE = $OwnedPath
         $env:WINTTY_STATE_BASE_TOKEN = $OwnedToken
-        # Forwarded here, never to the Stop-SeamSession in the finally below.
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $RestoreConfig -PrivateStateBase -BeforeTeardown $BeforeTeardown
+        # Forwarded here, never to the Stop-SeamSession in the finally below. No
+        # -PrivateStateBase, same reason as the save phase: the restore must
+        # adopt the save's owned tree, or it boots fresh and proves nothing.
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $RestoreConfig -BeforeTeardown $BeforeTeardown
+        if ($s.StateBase -ne $OwnedPath) { throw "HARNESS: Start-SeamSession did not adopt the owned tree (saw '$($s.StateBase)', wanted '$OwnedPath')" }
         $script:Current = $s
         Invoke-Scenario $Row {
             # The withdrawal is only honest if asserted: with the profile gone
@@ -481,8 +488,11 @@ default-profile = idle
 profile.idle.name = Idle
 profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > nul
 "@
-            # Forwarded here, never to the Stop-SeamSession in the finally below.
-            $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -PrivateStateBase -BeforeTeardown $BeforeTeardown
+            # Forwarded here, never to the Stop-SeamSession in the finally below. No
+            # -PrivateStateBase: the hot launch adopts the owned tree too, or
+            # its probe runs on a minted tree and proves nothing about it.
+            $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -BeforeTeardown $BeforeTeardown
+            if ($s.StateBase -ne $owned.Path) { throw "HARNESS: Start-SeamSession did not adopt the owned tree (saw '$($s.StateBase)', wanted '$($owned.Path)')" }
             $script:Current = $s
             Invoke-Scenario 'resume-hot@daemon' {
                 # The proof this row owes: the daemon held the session BEFORE
