@@ -1087,7 +1087,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         fallback.Tick += (t, _) =>
         {
             t.Stop();
-            if (_surface.Handle != IntPtr.Zero) return;
+            if (_surface.Handle != IntPtr.Zero || _surfaceDisposed) return;
+            // In-tree only (panel round): a detached pane retains its last
+            // arranged size, so the settle below would pass the size gate
+            // and spawn a shell nothing can see - the undo stack holds a
+            // soft-closed newborn exactly this way until its eviction
+            // runs DisposeSurface. The traced dead pane is attached, so
+            // this refusal costs the defect nothing.
+            if (XamlRoot is null) return;
             // Attribution the event path cannot give: this pane missed
             // its first layout event.
             Ghostty.Logging.StaticLoggers.App.LogInformation(
@@ -1095,12 +1102,23 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             // Layout-synchronized, not wall-clock: forcing a measure
             // gives the armed OnFirstLayoutUpdated a COMPLETED pass to
             // create at, so the size is the arranged one (a direct read
-            // here could still catch a measure-phase ghost). Creation
-            // focus is suppressed for this pane: 250ms later the user's
-            // focus stands where they put it, and the harness asserts
-            // active-ness itself.
+            // at Loaded could still catch a measure-phase ghost; by this
+            // tick the settle has drained, so the panel's own values are
+            // the arranged ones -- the same read the retry timer below
+            // trusts on its ticks). Creation focus is suppressed for
+            // this pane: 250ms later the user's focus stands where they
+            // put it, and the harness asserts active-ness itself.
             _suppressCreationAutoFocus = true;
             Panel.InvalidateMeasure();
+            // The forced pass alone is not a driver: it delivers creation
+            // only through the armed OnFirstLayoutUpdated, and a
+            // re-arrange at an unchanged size may not raise
+            // LayoutUpdated for this panel at all. So the fallback
+            // settles the creation itself: a measurable pane gets its
+            // surface here and now, a zero-size one is refused by the
+            // gate and keeps waiting on the subscription, and a renderer
+            // refusal arms the bounded retry like any failed attempt.
+            TrySettleSurfaceCreation();
         };
         fallback.Start();
         DisableAncestorScrollViewerTabStop();
@@ -1136,7 +1154,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// a height the first layout pass then settles a few pixels lower, and a
     /// hidden tab is not measured at all until it is first shown. Starting
     /// earlier means starting at a size the shell formats its startup output
-    /// for and the pane never has.
+    /// for and the pane never has. (The Loaded fallback and the retry timer
+    /// are the two documented exceptions: both settle at the panel's own
+    /// tick-time read, which a still-attached hidden pane retains from its
+    /// last arrangement - the same read the retry timer has always trusted.)
     ///
     /// Returns false, having done nothing, while the panel has no measured
     /// size; the caller tries again on the next layout pass. A hidden or
@@ -1546,10 +1567,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // surface is freed only when DisposeSurface() is called by
         // PaneHost when the leaf is actually being removed.
         //
-        // We only unsubscribe the one-shot LayoutUpdated handler to make
-        // sure it does not fire spuriously after the panel detaches.
-        // OnLoaded re-subscribes when the control re-enters a tree.
-        Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+        // Deliberately also NO unsubscribe of the one-shot LayoutUpdated
+        // handler. The splice a split performs removes and re-adds the
+        // divided control in one call stack, and WinUI 3 can then deliver
+        // the pending Unloaded AFTER the re-add's Loaded -- observed in a
+        // traced split burst as Loaded -> Unloaded 2 ms later with no
+        // further Loaded ever arriving for that pane. Unsubscribing here
+        // armed exactly one failure: a newborn pane whose surface had not
+        // been created yet ended that reparent ATTACHED, measured and
+        // uncreated with its creation subscription removed, so no layout
+        // pass -- not even the 250 ms fallback's forced one -- could ever
+        // drive its creation, and it sat forever at attempted=false,
+        // retriesLeft=-1 with a measured panel. The handler is one-shot
+        // in EFFECT, not in subscription: creation success unsubscribes
+        // it (TrySettleSurfaceCreation / the settled pass below), Dispose
+        // unsubscribes it, and a pass while the panel reads a transient
+        // zero size just refuses the gate and waits. OnLoaded's
+        // re-subscribe stays: it is idempotent and re-arms the reparent
+        // size push for panes whose surface already exists.
 
         // Deliberately do NOT stop the resize-overlay grace timer here. WinUI 3
         // raises Unloaded on every reparent (split / rebuild), not just on real
