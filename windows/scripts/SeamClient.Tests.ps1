@@ -992,12 +992,21 @@ function Invoke-ResumeCases([string]$HarnessPath) {
         $failed.Add("$($file)'s hot row probes pane-sessions but records no HARNESS gap for the unserved tree")
     }
     # The release-side gate parses these rows; a renamed file or a lost exit
-    # split blinds it.
-    if (-not $text.Contains('results.json')) {
-        $failed.Add("$($file) writes no results.json scenario ledger")
+    # split blinds it. Both pins sit on the live statements, never on whole
+    # file text: the header prose names 'results.json rows' and '(exit 1,'
+    # too, and prose alone would keep a deleted ledger write or a collapsed
+    # exit split green. Red-proofed by deleting each statement in turn from
+    # a scratch copy of the harness: each deletion fires its own pin.
+    $ledger = @($commands | Where-Object {
+            $_.GetCommandName() -eq 'Set-Content' -and $_.Extent.Text -match 'results\.json' })
+    if ($ledger.Count -eq 0) {
+        $failed.Add("$($file) writes no results.json scenario ledger (no live Set-Content names it)")
     }
-    if ($text -notmatch 'exit 2' -or $text -notmatch 'exit 1') {
-        $failed.Add("$($file) lost the product-finding (2) versus broken-harness (1) exit split")
+    # `exit 2` is a statement, not a command: pin the ExitStatementAsts.
+    $exits = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ExitStatementAst] }, $true) |
+        ForEach-Object { ($_.Extent.Text -replace '\s+', ' ').Trim() })
+    if (@($exits -eq 'exit 2').Count -eq 0 -or @($exits -eq 'exit 1').Count -eq 0) {
+        $failed.Add("$($file) lost the product-finding (2) versus broken-harness (1) exit split (no live exit 2 / exit 1)")
     }
     return , $failed
 }
