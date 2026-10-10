@@ -2308,6 +2308,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (sender is not TerminalControl tc) return;
         var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), tc));
         if (leaf is null) return;
+        // Focus is what views a pane, and it arrives without an
+        // active-leaf CHANGE: a single-pane background tab read
+        // straight-on never switches leaves, so retiring only on the
+        // switch would leave its done showing forever. Retire on every
+        // arrival, before the dedupe below returns.
+        tc.MarkProgramStatusViewed();
+        EmitProgramStatus();
         if (ReferenceEquals(leaf, _activeLeaf)) return;
         _activeLeaf = leaf;
         UpdateHighlightPosition();
