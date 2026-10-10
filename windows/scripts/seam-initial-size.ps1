@@ -727,6 +727,15 @@ function Test-ComboFeasible($BaseW, $BaseH, [string[]]$Orientations) {
         $cols = [int][math]::Floor(($r.W - $Geom.PadX) / $Geom.CellW)
         $rows = [int][math]::Floor(($r.H - $Geom.PadY) / $Geom.CellH)
         if ($cols -lt ($MinCols + $ShareSlack) -or $rows -lt ($MinRows + $ShareSlack)) { return $false }
+        # The I-2 oracle must be able to SEE the marker: at narrow shares
+        # the echoed marker wraps onto ceil(len/cols) lines and the leaf
+        # must hold those plus the prompt line, or the whitespace-stripped
+        # match can never succeed however healthy the pane (the 9:vvvvvhhh
+        # draw left its last leaves a legitimate 7x5 share - every pane
+        # painted, the oracle could not see it). Feasibility bounds by
+        # what the oracle can observe, not the founder's 2x2 floor alone.
+        $markerLines = [int][math]::Ceiling($MarkerSplit.Length / $cols)
+        if ($rows -lt ($markerLines + 1)) { return $false }
     }
     return $true
 }
