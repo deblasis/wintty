@@ -90,6 +90,18 @@ public class GhosttyStructHeaderParityTests
     public void ProgressReport_Layout_Matches_Header() =>
         AssertLayoutMatchesHeader<GhosttyActionProgressReport>("ghostty_action_progress_report_s");
 
+    // The program status pair. The report's pointers are borrowed for the
+    // callback only, so a layout drift reads past a buffer the app does
+    // not own; the decoder's own behaviour rows cover what it does with
+    // the fields once the layout is right.
+    [Fact]
+    public void ProgramStatus_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttyActionProgramStatus>("ghostty_action_program_status_s");
+
+    [Fact]
+    public void ProgramStatusReport_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttyActionProgramStatusReport>("ghostty_action_program_status_report_s");
+
     // The clipboard trio. These are the highest-value pins in the file: unlike
     // the action structs, nothing else checks them. Both sides of the clipboard
     // boundary compile independently, so a drifted layout here produces a

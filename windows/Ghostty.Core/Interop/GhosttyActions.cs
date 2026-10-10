@@ -87,6 +87,10 @@ internal enum GhosttyActionTag
     PinTab = 72,
     UnpinTab = 73,
     MoveGroup = 74,
+    // The program status protocol (OSC 7501). Only performed after the
+    // app opts in (ghostty_app_set_program_status); payload and decoder
+    // live beside the protocol types in ProgramStatusAction.cs.
+    ProgramStatus = 75,
 }
 
 // ghostty_target_tag_e: which half of OnAction the action is addressed to.
@@ -286,4 +290,37 @@ internal struct GhosttyActionSearchTotal
 internal struct GhosttyActionSearchSelected
 {
     public nint Selected;
+}
+
+// ghostty_action_program_status_s: { event (c enum, 4 bytes);
+//   bool desktop_notifications; const report_s* report; }
+// On x64: event@0, desktop_notifications@4, 3 bytes of padding, report@8,
+// 16 bytes. The action union sits at +8 of ghostty_action_s, so
+// GhosttyHost reads this at actionPtr + 8.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionProgramStatus
+{
+    public int Event;
+    public byte DesktopNotifications;
+    public nint Report;
+}
+
+// ghostty_action_program_status_report_s. On x64: state@0, kind@4,
+// progress@8, then 8-byte pointers and lengths from 16: id@16, id_len@24,
+// app@32, app_len@40, title@48, title_len@56, message@64, message_len@72;
+// 80 bytes. Every pointer is borrowed for the callback only.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionProgramStatusReport
+{
+    public int State;
+    public int Kind;
+    public sbyte Progress;
+    public nint Id;
+    public nuint IdLen;
+    public nint App;
+    public nuint AppLen;
+    public nint Title;
+    public nuint TitleLen;
+    public nint Message;
+    public nuint MessageLen;
 }
