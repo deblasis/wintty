@@ -841,15 +841,16 @@ function Invoke-BirthForwardCases([string]$HarnessPath) {
 # ---- layer 8b: the resume harness's contract -----------------------------------
 
 # The session-resumption sibling (seam-session-resume.ps1) runs a different
-# lifecycle from the birth harness -- window-save-state=always plus ONE owned
-# tree shared across a save launch and a restore launch -- and pins the hot
-# path as a loud harness gap while the daemon is inert. A scan that found no
-# session, no owned tree, or no hot probe would be green for the wrong reason,
-# so each rule below fails on absence. What a live run asserts (beyond the
-# scan): the restore shows both tabs before opening anything, each pane live
-# with its marker inside the cmd budget under the birth oracles; the fallback
-# restore shows both tabs with `vanishing` unresolvable; the hot row stays a
-# harness gap until the daemon serves pane-sessions.
+# lifecycle from the birth harness -- window-save-state=always plus a FRESH
+# owned tree per pair (a save and its restore share one tree, no pair sees
+# another's session.json) -- and pins the hot path as a loud harness gap
+# while the daemon is inert. A scan that found no session, no owned tree, or
+# no hot probe would be green for the wrong reason, so each rule below fails
+# on absence. What a live run asserts (beyond the scan): the restore shows
+# both tabs before opening anything, each pane live with its marker inside
+# the cmd budget under the birth oracles; the fallback restore shows both
+# tabs with `vanishing` unresolvable; the hot row stays a harness gap until
+# the daemon serves pane-sessions.
 function Invoke-ResumeCases([string]$HarnessPath) {
     $failed = [System.Collections.Generic.List[string]]::new()
     $file = [System.IO.Path]::GetFileName($HarnessPath)
@@ -899,6 +900,15 @@ function Invoke-ResumeCases([string]$HarnessPath) {
             $failed.Add("$($file):$($call.Extent.StartLineNumber) starts a seam session without -BeforeTeardown `$BeforeTeardown")
         }
     }
+    foreach ($call in $starts) {
+        # Owned, not private: the switch mints a fresh tree even over an
+        # owned one (lib/seam-client.ps1), so the restore would boot fresh.
+        if (@($call.CommandElements | Where-Object {
+                    $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $_.ParameterName -eq 'PrivateStateBase' }).Count -gt 0) {
+            $failed.Add("$($file):$($call.Extent.StartLineNumber) starts a seam session with -PrivateStateBase: it mints a fresh tree even over the owned one, so the restore boots fresh")
+        }
+    }
 
     foreach ($call in @($commands | Where-Object { $_.GetCommandName() -eq 'Stop-SeamSession' })) {
         if (@($call.CommandElements | Where-Object {
@@ -927,27 +937,48 @@ function Invoke-ResumeCases([string]$HarnessPath) {
 
     # The cold lifecycle: the kill in Stop-SeamSession never writes a clean
     # shutdown, so only `always` restores the save's dirty file; and the
-    # restore only reads the save when both launches adopt ONE owned tree.
+    # restore only reads the save when both launches of a pair adopt its
+    # fresh owned tree (one tree per pair, never one for the run: with
+    # `always` a shared tree hands the next save a restore).
     if ($text -notmatch 'window-save-state = always') {
         $failed.Add("$($file) never stages window-save-state = always: a killed save leaves a dirty file `default` would not restore")
     }
-    if (-not $text.Contains('New-WinttyOwnedStateBase')) {
+    $mints = @($commands | Where-Object { $_.GetCommandName() -eq 'New-WinttyOwnedStateBase' })
+    if ($mints.Count -eq 0) {
         $failed.Add("$($file) mints no owned state tree: the restore cannot read the save's session.json")
     }
-    if (-not $text.Contains('$env:WINTTY_STATE_BASE = $OwnedPath')) {
+    elseif ($mints.Count -lt 2) {
+        $failed.Add("$($file) mints only one owned tree for the run: a later pair boots on the earlier pair's session.json and restores instead of saving (each pair needs its own tree)")
+    }
+    $exports = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) | Where-Object {
+            $_.Left.Extent.Text -eq '$env:WINTTY_STATE_BASE' -and $_.Right.Extent.Text -match '\$OwnedPath|\$owned' })
+    if ($exports.Count -eq 0) {
         $failed.Add("$($file) never exports the owned tree to its launches: each session would mint a fresh tree and the restore would be fresh too")
     }
 
-    # The rows exist under the birth harness's row vocabulary.
-    foreach ($row in 'resume-cold', 'resume-cold-fallback', 'resume-hot@daemon') {
-        if (-not $text.Contains($row)) {
-            $failed.Add("$($file) has no '$row' scenario row")
-        }
+    # The rows live as invocations, not prose: the header names every row, so
+    # a bare Contains stays green when the live lines are gone. Pin the
+    # parsed commands instead (the same AST shape the forwarding rules use).
+    $restores = @($commands | Where-Object { $_.GetCommandName() -eq 'Invoke-RestorePhase' })
+    $restoreText = ($restores | ForEach-Object { $_.Extent.Text }) -join "`n"
+    if ($restores.Count -eq 0 -or $restoreText -notmatch 'resume-cold') {
+        $failed.Add("$($file) invokes no live Invoke-RestorePhase cold row (header prose alone proves nothing)")
+    }
+    if ($restoreText -notmatch 'resume-cold-fallback') {
+        $failed.Add("$($file) invokes no live Invoke-RestorePhase fallback row (header prose alone proves nothing)")
+    }
+    $scenarios = @($commands | Where-Object { $_.GetCommandName() -eq 'Invoke-Scenario' })
+    $scenarioText = ($scenarios | ForEach-Object { $_.Extent.Text }) -join "`n"
+    if ($scenarioText -notmatch 'resume-hot@daemon') {
+        $failed.Add("$($file) invokes no live Invoke-Scenario hot row (header prose alone proves nothing)")
     }
     # The hot proof owes a daemon handle: without the tier's session op no
     # attach can be staged or proved, and the row must say HARNESS, never go
-    # green and never blame the product.
-    if (-not $text.Contains('pane-sessions')) {
+    # green and never blame the product. Pinned on the live seam call, not
+    # the header's backticked mention.
+    $seamOps = @($commands | Where-Object { $_.GetCommandName() -eq 'Invoke-SeamCommand' })
+    $opText = ($seamOps | ForEach-Object { $_.Extent.Text }) -join "`n"
+    if ($opText -notmatch 'pane-sessions') {
         $failed.Add("$($file)'s hot row never probes the pane-sessions op: it cannot tell a held session from a fresh boot")
     }
     elseif ($text -notmatch 'HARNESS[^`"]*pane-sessions|pane-sessions[^`"]*HARNESS') {
@@ -1412,7 +1443,7 @@ try {
             }
         },
         @{
-            Name = 'the shared owned tree is gone'
+            Name = 'the owned trees are gone'
             Break = {
                 param($lines)
                 @($lines | Where-Object { $_ -notmatch 'New-WinttyOwnedStateBase' })
@@ -1485,6 +1516,34 @@ try {
             Break = {
                 param($lines)
                 @($lines | Where-Object { $_ -notmatch 'pane-sessions' })
+            }
+        },
+        @{
+            Name = 'a start mints private over the owned tree'
+            Break = {
+                param($lines)
+                # One switch back on the first launch: the owned tree is
+                # adopted only without it, so the scan must go red. The same
+                # AST-ish anchor the forwarding row uses.
+                $out = [System.Collections.Generic.List[string]]::new()
+                $done = $false
+                foreach ($line in $lines) {
+                    if (-not $done -and $line -match '^\s*\$s = Start-SeamSession ' -and $line -notmatch 'PrivateStateBase') {
+                        $done = $true
+                        $out.Add($line.Replace(' -BeforeTeardown $BeforeTeardown', ' -PrivateStateBase -BeforeTeardown $BeforeTeardown'))
+                    }
+                    else { $out.Add($line) }
+                }
+                return , $out
+            }
+        },
+        @{
+            Name = 'the live cold rows are gone (header prose remains)'
+            Break = {
+                param($lines)
+                # The header names every row, so only the live invocations
+                # go: a prose pin would stay green over this.
+                @($lines | Where-Object { $_ -notmatch '^\s*Invoke-RestorePhase\s' })
             }
         }
     )
