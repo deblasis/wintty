@@ -310,7 +310,7 @@ profile.vanishing.command = cmd.exe /d /c echo $MarkerVanish & ping -n 120 127.0
         if ($s.StateBase -ne $OwnedPath) { throw "HARNESS: Start-SeamSession did not adopt the owned tree (saw '$($s.StateBase)', wanted '$OwnedPath')" }
         $script:Current = $s
         $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'vanishing' }
-        if (@($opened.state.tabs).Count -ne 2) { throw "HARNESS: open-profile left $(@($opened.state.tabs).Count) tabs, wanted 2" }
+        if (@($opened.state.tabs).Count -ne 2) { throw "PRODUCT_FAIL: open-profile left $(@($opened.state.tabs).Count) tab(s), wanted 2 (tab creation dropped)" }
         $active = [int]$opened.state.active
         $screen0 = Wait-PaneOutput $s 0 -1 $MarkerCold $ColdReadySec
         if ($null -eq $screen0) { throw "PRODUCT_FAIL: the launch tab never showed its marker; screen: $(Format-Screen (Read-Screen $s 0 -1).text)" }
@@ -457,8 +457,11 @@ try {
                 catch {
                     $msg = "$($_.Exception.Message)"
                     $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+                    # No fallback row here: the fallback pair mints its own
+                    # tree and runs its own save below, so this failure never
+                    # reached it. A phantom fallback row would double-count
+                    # when that pair ledgers itself.
                     Add-Result "resume-cold$suffix" $false $class "save phase: $msg"
-                    Add-Result "resume-cold-fallback$suffix" $false $class "save phase failed, so the fallback restore never ran: $msg"
                     continue
                 }
                 $base = @"
