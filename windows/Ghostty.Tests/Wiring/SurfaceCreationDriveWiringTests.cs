@@ -101,4 +101,48 @@ public class SurfaceCreationDriveWiringTests
             a => a.IsKind(SyntaxKind.AddAssignmentExpression)
                  && a.Left.ToString() == "Panel.LayoutUpdated");
     }
+
+    /// <summary>
+    /// The removal rule is WHOLE-FILE: a regression that relocates the
+    /// unsubscribe out of OnUnloaded (a helper OnUnloaded calls, a detach
+    /// handler, OnSizeChanged) re-arms the dead-pane defect while every
+    /// method-scoped assert above stays green. The creation subscription
+    /// may be removed in exactly four shapes: the settle (success and the
+    /// first settled pass), the layout handler itself, teardown, and
+    /// OnLoaded's idempotent RE-ARM - which this fact also proves is a
+    /// re-arm (the add follows the removal in the same body), never a
+    /// bare disarm.
+    /// </summary>
+    [Fact]
+    public void CreationSubscription_IsRemovedNowhereElseInTheFile()
+    {
+        var terminal = Terminal();
+        var permitted = new HashSet<string>
+        {
+            "TrySettleSurfaceCreation",
+            "OnFirstLayoutUpdated",
+            "DisposeSurface",
+            "OnLoaded",
+        };
+
+        var offenders = terminal.Root.DescendantNodes()
+            .OfType<MethodDeclarationSyntax>()
+            .Where(m => m.Body is not null && !permitted.Contains(m.Identifier.ValueText))
+            .SelectMany(m => LayoutUpdatedRemovals(m).Select(r => (Method: m.Identifier.ValueText, Site: r)))
+            .ToList();
+
+        Assert.Empty(offenders.Select(o => $"{o.Method}: {o.Site}"));
+
+        // OnLoaded's permitted removal must be the re-arm: exactly one
+        // removal and one add, removal first, both in the same body (one
+        // call stack on the UI thread, so no layout can observe the gap).
+        var loaded = Terminal().Method("OnLoaded").Body!;
+        var removal = Assert.Single(LayoutUpdatedRemovals(Terminal().Method("OnLoaded")));
+        var add = Assert.Single(loaded.DescendantNodesAndSelf()
+            .OfType<AssignmentExpressionSyntax>(),
+            a => a.IsKind(SyntaxKind.AddAssignmentExpression)
+                 && a.Left.ToString() == "Panel.LayoutUpdated");
+        Assert.True(removal.SpanStart < add.SpanStart,
+            "OnLoaded's removal is only legal as the first half of the re-arm");
+    }
 }

@@ -1087,7 +1087,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         fallback.Tick += (t, _) =>
         {
             t.Stop();
-            if (_surface.Handle != IntPtr.Zero) return;
+            if (_surface.Handle != IntPtr.Zero || _surfaceDisposed) return;
+            // In-tree only (panel round): a detached pane retains its last
+            // arranged size, so the settle below would pass the size gate
+            // and spawn a shell nothing can see - the undo stack holds a
+            // soft-closed newborn exactly this way until its eviction
+            // runs DisposeSurface. The traced dead pane is attached, so
+            // this refusal costs the defect nothing.
+            if (XamlRoot is null) return;
             // Attribution the event path cannot give: this pane missed
             // its first layout event.
             Ghostty.Logging.StaticLoggers.App.LogInformation(
@@ -1147,7 +1154,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// a height the first layout pass then settles a few pixels lower, and a
     /// hidden tab is not measured at all until it is first shown. Starting
     /// earlier means starting at a size the shell formats its startup output
-    /// for and the pane never has.
+    /// for and the pane never has. (The Loaded fallback and the retry timer
+    /// are the two documented exceptions: both settle at the panel's own
+    /// tick-time read, which a still-attached hidden pane retains from its
+    /// last arrangement - the same read the retry timer has always trusted.)
     ///
     /// Returns false, having done nothing, while the panel has no measured
     /// size; the caller tries again on the next layout pass. A hidden or
