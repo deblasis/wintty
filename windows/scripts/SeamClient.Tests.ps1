@@ -1364,19 +1364,45 @@ Assert-True ($birthFailures.Count -eq 0) 'the birth harness forwards -BeforeTear
 # and flatten what comes back once: a row may return a filtered pipeline, a
 # bare list (the Move-* helpers) or a wrapped one (`return , $out`), and all
 # three have to write a line-per-line file.
+#
+# What the repair changed per row shape, honestly: it is identical only for
+# ForEach-Object/Replace-shaped rows (member enumeration had already run
+# them over the inner array); Where-Object-shaped rows changed from a
+# vacuous one-line mutant to a real filtered edit, and the moved-statement
+# rows from a wrapped list to a flat one. NOTES-mutengine-teeth.md records
+# a weakened row run through both engines.
 function Invoke-RowBreak([scriptblock]$Break, [string[]]$Lines) {
     [string[]](@(& $Break $Lines) | ForEach-Object { $_ })
 }
 
+# A mutant that does not parse is not a red any row can spend: the scans
+# fail their first absence rule over an effectively empty script and the
+# row would claim teeth it does not have. Every engine below parses its
+# mutant first and fails the row by name on any parse error.
+function Test-MutantParses([string]$Path, [string]$What) {
+    $tokens = $null; $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) {
+        Assert-True $false ("{0}: its mutant does not parse ({1}: {2}); a parse-error red proves nothing about the rule the row pins" -f
+            $What, $errors[0].Extent.StartLineNumber, $errors[0].Message)
+        return $false
+    }
+    return $true
+}
+
 # A block ends at the first line that closes the indentation its own braces
 # opened at, which is what the file's 4-space style means. Shared by the
-# moved-statement rows below and by the rows that un-guard a Stop.
+# moved-statement rows below and by the rows that un-guard a Stop. A block
+# with no close throws rather than returning -1: the rows that splice on a
+# -1 would build an unbalanced mutant, whose parse-error red proves nothing
+# about the rule the row pins. The engines catch the throw and fail the row
+# by name.
 function Get-BlockEnd([string[]]$Lines, [int]$Start) {
     $indent = ([regex]::Match($Lines[$Start], '^(\s*)')).Groups[1].Value
     for ($i = $Start + 1; $i -lt $Lines.Count; $i++) {
         if ($Lines[$i] -ceq ($indent + '}')) { return $i }
     }
-    return -1
+    throw "no closing brace for the block at line $($Start + 1): '$($Lines[$Start])'"
 }
 
 # The scan's own teeth: a copy of the birth harness with one rule broken has
@@ -1390,6 +1416,7 @@ try {
     $birthRows = @(
         @{
             Name = 'the parameter is gone'
+            Rule = 'declares no [scriptblock]$BeforeTeardown parameter'
             Break = {
                 param($lines)
                 # The parameter is the block's last, so the comma on the
@@ -1414,6 +1441,7 @@ try {
         },
         @{
             Name = 'one start does not forward'
+            Rule = 'without -BeforeTeardown $BeforeTeardown'
             Break = {
                 param($lines)
                 # The second launch only: breaking the first would fail the
@@ -1431,6 +1459,7 @@ try {
         },
         @{
             Name = 'Stop also gets the hook'
+            Rule = 'passes -BeforeTeardown to Stop-SeamSession'
             Break = {
                 param($lines)
                 $out = [System.Collections.Generic.List[string]]::new()
@@ -1447,6 +1476,7 @@ try {
         },
         @{
             Name = 'a Stop outside try/catch'
+            Rule = 'outside a try/catch'
             Break = {
                 param($lines)
                 # The first wrapped Stop, un-wrapped: its try line and the
@@ -1471,13 +1501,24 @@ try {
         }
     )
     foreach ($row in $birthRows) {
-        $lines = Invoke-RowBreak $row.Break $birthLines
+        $lines = $null
+        try { $lines = Invoke-RowBreak $row.Break $birthLines }
+        catch {
+            Assert-True $false "birth mutation '$($row.Name)': its break threw: $_"
+            continue
+        }
         if (($lines -join "`n") -ceq ($birthLines -join "`n")) {
             Assert-True $false "birth mutation '$($row.Name)': its anchor is gone"
             continue
         }
         [System.IO.File]::WriteAllLines($birthMutant, [string[]]$lines)
-        Assert-True ((Invoke-BirthForwardCases $birthMutant).Count -gt 0) "birth mutation went red: $($row.Name)"
+        if (-not (Test-MutantParses $birthMutant "birth mutation '$($row.Name)'")) { continue }
+        # The red has to fire the row's own rule, quoted in the assert, or
+        # the row proved some other rule while its own went green.
+        $red = Invoke-BirthForwardCases $birthMutant
+        $hit = @($red | Where-Object { $_.Contains($row.Rule) })
+        Assert-True ($hit.Count -gt 0) ("birth mutation went red on its rule: {0} [rule: {1}; red: {2}]" -f
+            $row.Name, $row.Rule, (($red | Select-Object -First 2) -join ' | '))
     }
 }
 finally { Remove-Item -LiteralPath $birthMutantRoot -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1498,6 +1539,7 @@ try {
     $resumeRows = @(
         @{
             Name = 'the always policy is gone'
+            Rule = 'never stages window-save-state = always'
             Break = {
                 param($lines)
                 @($lines | ForEach-Object { $_.Replace('window-save-state = always', 'window-save-state = never') })
@@ -1505,6 +1547,7 @@ try {
         },
         @{
             Name = 'the owned trees are gone'
+            Rule = 'mints no owned state tree'
             Break = {
                 param($lines)
                 @($lines | Where-Object { $_ -notmatch 'New-WinttyOwnedStateBase' })
@@ -1512,6 +1555,7 @@ try {
         },
         @{
             Name = 'the Scenario selection is gone'
+            Rule = 'declares no $Scenario selection parameter'
             Break = {
                 param($lines)
                 @($lines | Where-Object { $_ -notmatch "ValidateSet\('all', 'cold', 'hot'\)" })
@@ -1519,6 +1563,7 @@ try {
         },
         @{
             Name = 'one start does not forward'
+            Rule = 'without -BeforeTeardown $BeforeTeardown'
             Break = {
                 param($lines)
                 # The second launch only: breaking the first would fail the
@@ -1536,6 +1581,7 @@ try {
         },
         @{
             Name = 'Stop also gets the hook'
+            Rule = 'passes -BeforeTeardown to Stop-SeamSession'
             Break = {
                 param($lines)
                 $out = [System.Collections.Generic.List[string]]::new()
@@ -1552,6 +1598,7 @@ try {
         },
         @{
             Name = 'a Stop outside try/catch'
+            Rule = 'outside a try/catch'
             Break = {
                 param($lines)
                 # The first wrapped Stop, un-wrapped: its try line and the
@@ -1576,13 +1623,21 @@ try {
         },
         @{
             Name = 'the hot probe is gone'
+            Rule = 'never probes the pane-sessions op'
             Break = {
                 param($lines)
-                @($lines | Where-Object { $_ -notmatch 'pane-sessions' })
+                # Only the probe call goes, not every line naming the op: the
+                # served/unserved scaffolding around the probe carries the op
+                # name on structural lines too (the unknown-op check's if),
+                # and splicing those out left a mutant that did not parse.
+                # Replacing the call with no probe at all is the regression
+                # this row pins: nothing ever asks the daemon what it holds.
+                @($lines | ForEach-Object { $_.Replace("try { `$sessions = Invoke-SeamCommand `$s @{ op = 'pane-sessions' } }", 'try { $sessions = $null }') })
             }
         },
         @{
             Name = 'a start mints private over the owned tree'
+            Rule = 'with -PrivateStateBase'
             Break = {
                 param($lines)
                 # One switch back on the first launch: the owned tree is
@@ -1602,6 +1657,7 @@ try {
         },
         @{
             Name = 'the live cold rows are gone (header prose remains)'
+            Rule = 'invokes no live Invoke-RestorePhase plain cold row'
             Break = {
                 param($lines)
                 # The header names every row, so only the live invocations
@@ -1611,13 +1667,23 @@ try {
         }
     )
     foreach ($row in $resumeRows) {
-        $lines = Invoke-RowBreak $row.Break $resumeLines
+        $lines = $null
+        try { $lines = Invoke-RowBreak $row.Break $resumeLines }
+        catch {
+            Assert-True $false "resume mutation '$($row.Name)': its break threw: $_"
+            continue
+        }
         if (($lines -join "`n") -ceq ($resumeLines -join "`n")) {
             Assert-True $false "resume mutation '$($row.Name)': its anchor is gone"
             continue
         }
         [System.IO.File]::WriteAllLines($resumeMutant, [string[]]$lines)
-        Assert-True ((Invoke-ResumeCases $resumeMutant).Count -gt 0) "resume mutation went red: $($row.Name)"
+        if (-not (Test-MutantParses $resumeMutant "resume mutation '$($row.Name)'")) { continue }
+        # Same as the birth engine: the row's own rule has to be the red.
+        $red = Invoke-ResumeCases $resumeMutant
+        $hit = @($red | Where-Object { $_.Contains($row.Rule) })
+        Assert-True ($hit.Count -gt 0) ("resume mutation went red on its rule: {0} [rule: {1}; red: {2}]" -f
+            $row.Name, $row.Rule, (($red | Select-Object -First 2) -join ' | '))
     }
 }
 finally { Remove-Item -LiteralPath $resumeMutantRoot -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1641,9 +1707,10 @@ finally { Remove-Item -LiteralPath $tcMutant -Force -ErrorAction SilentlyContinu
 
 # ---- layer 4: mutation rows ---------------------------------------------------
 
-# A copy of the library with one rule broken. Every row must turn at least
-# one layer red; a row that stays green means the cases no longer pin that
-# rule.
+# A copy of the library with one rule broken. Every row names the layer
+# whose rule it breaks and must turn THAT layer red, quoted in the assert:
+# a red from some other layer proved nothing about the row's own rule while
+# it went quietly green.
 #
 # Two of the rows need a statement moved rather than a word replaced: the
 # hook block out from above the delete and below it, and the launch out of
@@ -1748,16 +1815,26 @@ try {
             Layer   = 'hook'
         }
     )
+    $layerCases = @{
+        minter = 'Invoke-MinterCases'
+        guard  = 'Invoke-GuardCases'
+        wiring = 'Invoke-WiringCases'
+        state  = 'Invoke-StateBaseCases'
+        hook   = 'Invoke-TeardownHookCases'
+    }
     foreach ($row in $rows) {
         $mutant = Join-Path $mutantRoot ('mutant-' + ($row.Name -replace '[^a-z0-9]+', '-') + '.ps1')
-        [System.IO.File]::WriteAllLines($mutant, (Invoke-RowBreak $row.Break ([System.IO.File]::ReadAllLines($SeamClientPath))))
-        $wentRed =
-            (Invoke-MinterCases $mutant).Count -gt 0 -or
-            (Invoke-GuardCases $mutant).Count -gt 0 -or
-            (Invoke-WiringCases $mutant).Count -gt 0 -or
-            (Invoke-StateBaseCases $mutant).Count -gt 0 -or
-            (Invoke-TeardownHookCases $mutant).Count -gt 0
-        Assert-True $wentRed ("mutation went red: $($row.Name)")
+        $flat = $null
+        try { $flat = Invoke-RowBreak $row.Break ([System.IO.File]::ReadAllLines($SeamClientPath)) }
+        catch {
+            Assert-True $false "mutation '$($row.Name)': its break threw: $_"
+            continue
+        }
+        [System.IO.File]::WriteAllLines($mutant, $flat)
+        if (-not (Test-MutantParses $mutant "mutation '$($row.Name)'")) { continue }
+        $red = & $layerCases[$row.Layer] $mutant
+        Assert-True ($red.Count -gt 0) ("mutation went red on its {0} layer: {1} [red: {2}]" -f
+            $row.Layer, $row.Name, (($red | Select-Object -First 2) -join ' | '))
     }
 }
 finally {
