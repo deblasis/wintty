@@ -1337,6 +1337,32 @@ $birthFailures = Invoke-BirthForwardCases $birthHarness
 foreach ($f in $birthFailures) { Write-Host "FAIL: $f" -ForegroundColor Red }
 Assert-True ($birthFailures.Count -eq 0) 'the birth harness forwards -BeforeTeardown to every seam session and records a teardown failure'
 
+# Every mutation engine below feeds its row's Break the harness one string
+# per line and takes lines back the same way. The invocation this engine was
+# born with, `@(& $row.Break (, $lines))`, binds the whole array as ONE item:
+# a filter row then ran Where-Object once over the file-as-object, its match
+# operator filtered an array inside a single truthiness test, and
+# WriteAllLines wrote the stringified file as one unparseable line. Such a
+# row went red on the parse errors of a mutant that carried no edit at all,
+# so the red proved nothing about the rule the row pins. Bind the lines flat
+# and flatten what comes back once: a row may return a filtered pipeline, a
+# bare list (the Move-* helpers) or a wrapped one (`return , $out`), and all
+# three have to write a line-per-line file.
+function Invoke-RowBreak([scriptblock]$Break, [string[]]$Lines) {
+    [string[]](@(& $Break $Lines) | ForEach-Object { $_ })
+}
+
+# A block ends at the first line that closes the indentation its own braces
+# opened at, which is what the file's 4-space style means. Shared by the
+# moved-statement rows below and by the rows that un-guard a Stop.
+function Get-BlockEnd([string[]]$Lines, [int]$Start) {
+    $indent = ([regex]::Match($Lines[$Start], '^(\s*)')).Groups[1].Value
+    for ($i = $Start + 1; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -ceq ($indent + '}')) { return $i }
+    }
+    return -1
+}
+
 # The scan's own teeth: a copy of the birth harness with one rule broken has
 # to turn the scan red. Each row edits that file's lines, and a row whose
 # edit changed nothing says so instead of scanning a copy of the harness.
@@ -1350,7 +1376,24 @@ try {
             Name = 'the parameter is gone'
             Break = {
                 param($lines)
-                @($lines | Where-Object { $_ -notmatch '^\s*\[scriptblock\]\$BeforeTeardown = \$null\s*$' })
+                # The parameter is the block's last, so the comma on the
+                # parameter above it goes too -- past the block's comments --
+                # because the mutant has to still parse.
+                $out = [System.Collections.Generic.List[string]]::new()
+                for ($i = 0; $i -lt $lines.Count; $i++) {
+                    if ($lines[$i] -match '^\s*\[scriptblock\]\$BeforeTeardown = \$null\s*$') {
+                        if ($i + 1 -lt $lines.Count -and $lines[$i + 1] -match '^\s*\)') {
+                            for ($j = $out.Count - 1; $j -ge 0; $j--) {
+                                if ($out[$j] -match '^\s*#') { continue }
+                                $out[$j] = $out[$j] -replace ',\s*$', ''
+                                break
+                            }
+                        }
+                        continue
+                    }
+                    $out.Add($lines[$i])
+                }
+                return , $out
             }
         },
         @{
@@ -1390,18 +1433,20 @@ try {
             Name = 'a Stop outside try/catch'
             Break = {
                 param($lines)
-                # The first wrapped Stop, un-wrapped: its try line goes and
-                # the catch becomes a plain block, so the call is bare in the
-                # finally again and a hook failure would abort the run.
+                # The first wrapped Stop, un-wrapped: its try line and the
+                # brace that closed it go, and the catch becomes a plain
+                # block, so the call is bare in the finally again, a hook
+                # failure would abort the run, and the mutant still parses.
                 $stop = -1
                 for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*Stop-SeamSession \$s\b') { $stop = $i; break } }
                 $try = -1
                 for ($i = $stop - 1; $i -ge 0; $i--) { if ($lines[$i] -match '^\s*try \{$') { $try = $i; break } }
                 $catch = -1
                 for ($i = $stop + 1; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*catch \{$') { $catch = $i; break } }
+                $close = Get-BlockEnd $lines $try
                 $out = [System.Collections.Generic.List[string]]::new()
                 for ($i = 0; $i -lt $lines.Count; $i++) {
-                    if ($i -eq $try) { continue }
+                    if ($i -eq $try -or $i -eq $close) { continue }
                     if ($i -eq $catch) { $out.Add($lines[$i].Replace('catch {', 'if ($true) {')); continue }
                     $out.Add($lines[$i])
                 }
@@ -1410,7 +1455,7 @@ try {
         }
     )
     foreach ($row in $birthRows) {
-        $lines = @(& $row.Break (, $birthLines))
+        $lines = Invoke-RowBreak $row.Break $birthLines
         if (($lines -join "`n") -ceq ($birthLines -join "`n")) {
             Assert-True $false "birth mutation '$($row.Name)': its anchor is gone"
             continue
@@ -1493,18 +1538,20 @@ try {
             Name = 'a Stop outside try/catch'
             Break = {
                 param($lines)
-                # The first wrapped Stop, un-wrapped: its try line goes and
-                # the catch becomes a plain block, so the call is bare in the
-                # finally again and a hook failure would abort the run.
+                # The first wrapped Stop, un-wrapped: its try line and the
+                # brace that closed it go, and the catch becomes a plain
+                # block, so the call is bare in the finally again, a hook
+                # failure would abort the run, and the mutant still parses.
                 $stop = -1
                 for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*Stop-SeamSession \$s\b') { $stop = $i; break } }
                 $try = -1
                 for ($i = $stop - 1; $i -ge 0; $i--) { if ($lines[$i] -match '^\s*try \{$') { $try = $i; break } }
                 $catch = -1
                 for ($i = $stop + 1; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*catch \{$') { $catch = $i; break } }
+                $close = Get-BlockEnd $lines $try
                 $out = [System.Collections.Generic.List[string]]::new()
                 for ($i = 0; $i -lt $lines.Count; $i++) {
-                    if ($i -eq $try) { continue }
+                    if ($i -eq $try -or $i -eq $close) { continue }
                     if ($i -eq $catch) { $out.Add($lines[$i].Replace('catch {', 'if ($true) {')); continue }
                     $out.Add($lines[$i])
                 }
@@ -1548,7 +1595,7 @@ try {
         }
     )
     foreach ($row in $resumeRows) {
-        $lines = @(& $row.Break (, $resumeLines))
+        $lines = Invoke-RowBreak $row.Break $resumeLines
         if (($lines -join "`n") -ceq ($resumeLines -join "`n")) {
             Assert-True $false "resume mutation '$($row.Name)': its anchor is gone"
             continue
@@ -1586,15 +1633,8 @@ finally { Remove-Item -LiteralPath $tcMutant -Force -ErrorAction SilentlyContinu
 # hook block out from above the delete and below it, and the launch out of
 # the try that tears it down. Both are edits over the file's lines, and both
 # hand the lines back flat, which is what WriteAllLines below wants.
-function Get-BlockEnd([string[]]$Lines, [int]$Start) {
-    # A block ends at the first line that closes the indentation its own
-    # braces opened at, which is what the file's 4-space style means.
-    $indent = ([regex]::Match($Lines[$Start], '^(\s*)')).Groups[1].Value
-    for ($i = $Start + 1; $i -lt $Lines.Count; $i++) {
-        if ($Lines[$i] -ceq ($indent + '}')) { return $i }
-    }
-    return -1
-}
+# Get-BlockEnd, which the moved-statement rows and the two un-try/catch rows
+# share, sits with the other engine helpers above the first engine.
 function Move-LinesAfter([string[]]$Lines, [string]$Open, [string]$After) {
     $start = -1
     for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match $Open) { $start = $i; break } }
@@ -1694,7 +1734,7 @@ try {
     )
     foreach ($row in $rows) {
         $mutant = Join-Path $mutantRoot ('mutant-' + ($row.Name -replace '[^a-z0-9]+', '-') + '.ps1')
-        [System.IO.File]::WriteAllLines($mutant, (@(& $row.Break (, [System.IO.File]::ReadAllLines($SeamClientPath)))))
+        [System.IO.File]::WriteAllLines($mutant, (Invoke-RowBreak $row.Break ([System.IO.File]::ReadAllLines($SeamClientPath))))
         $wentRed =
             (Invoke-MinterCases $mutant).Count -gt 0 -or
             (Invoke-GuardCases $mutant).Count -gt 0 -or
