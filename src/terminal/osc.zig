@@ -1638,6 +1638,7 @@ test "OSC 9001: conhost's shell-type announce is recognized and ignored" {
     for (input_bel) |ch| bel.next(ch);
     try testing.expectEqual(Parser.State.@"9001", bel.state);
     try testing.expect(bel.end('\x07') == null);
+}
 
 test "OSC 7501: the capture stops at the body limit" {
     // A report can never be longer than the specification's sequence
