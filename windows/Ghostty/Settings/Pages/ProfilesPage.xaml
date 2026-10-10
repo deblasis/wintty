@@ -20,6 +20,10 @@
                 <ctrl:SettingsCard x:Name="DefaultProfileCard" Header="Default profile id" />
             </ctrl:SettingsGroup>
 
+            <ctrl:SettingsGroup x:Name="SshGroup"
+                                Header="SSH connections"
+                                Description="Saved connections appear in the new-tab menu. In an ssh pane, drop files on the terminal to upload them, or right-click a file name to download it." />
+
             <ctrl:SettingsGroup x:Name="ProfilesGroup"
                                 Header="Profiles"
                                 Description="Hidden profiles stay listed here but don't appear in the new-tab menu, command palette, or Ctrl+Shift+1..9 chords." />

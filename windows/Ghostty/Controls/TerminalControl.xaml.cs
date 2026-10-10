@@ -2069,7 +2069,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return true;
     }
 
-    private static async Task TryLaunchHoveredLinkAsync(string url)
+    // One link confirmation at a time: a second ContentDialog on the same
+    // XamlRoot throws, and a burst of clicks should not queue dialogs.
+    private static bool _linkConfirmOpen;
+
+    private async Task TryLaunchHoveredLinkAsync(string url)
     {
         // Best-effort launch. Malformed URLs (e.g. corrupted OSC 8) or
         // schemes the user has no handler for shouldn't crash the
@@ -2077,13 +2081,70 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // URLs stop launching doesn't disappear silently.
         try
         {
-            if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
-                await Launcher.LaunchUriAsync(uri);
+            var decision = LinkLaunchPolicy.Decide(url, out var uri);
+            if (decision == LinkLaunchDecision.Refuse || uri is null) return;
+            if (decision == LinkLaunchDecision.Confirm && !await ConfirmLinkAsync(uri))
+                return;
+            await Launcher.LaunchUriAsync(uri);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine(
                 $"[TerminalControl] TryLaunchHoveredLinkAsync failed for '{url}': {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Ask before opening a link whose scheme is not a web or mail one,
+    /// showing the full URL: the text the link was drawn over may say
+    /// something else entirely. Cancel is the default button, and anything
+    /// that stops the dialog from showing counts as a no.
+    /// </summary>
+    private async Task<bool> ConfirmLinkAsync(Uri uri)
+    {
+        if (_linkConfirmOpen || XamlRoot is null) return false;
+        _linkConfirmOpen = true;
+        try
+        {
+            var panel = new StackPanel { Spacing = 12 };
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"This link uses the \"{uri.Scheme}:\" scheme, which Windows will hand to "
+                     + "whatever program is registered for it. A program in the terminal chose "
+                     + "this link, so only open it if you expected it.",
+                TextWrapping = TextWrapping.Wrap,
+            });
+            panel.Children.Add(new TextBlock
+            {
+                Text = uri.OriginalString,
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true,
+                FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Consolas"),
+            });
+
+            var dialog = new ContentDialog
+            {
+                Title = "Open this link?",
+                Content = new ScrollViewer { MaxHeight = 360, Content = panel },
+                PrimaryButtonText = "Open",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close, // Safety default: Cancel
+                XamlRoot = XamlRoot,
+            };
+            // Enter or Escape closes it back onto this pane; the key's
+            // character must not follow into the shell.
+            Ghostty.Input.ConsumedCloseKey.Watch(dialog);
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception)
+        {
+            // Another dialog already owns this XamlRoot, or the window is
+            // closing: not opening the link is the safe answer.
+            return false;
+        }
+        finally
+        {
+            _linkConfirmOpen = false;
         }
     }
 

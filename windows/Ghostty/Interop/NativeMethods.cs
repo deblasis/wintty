@@ -779,6 +779,21 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial byte SurfaceReadSelectionNative(GhosttySurface surface, out GhosttyText text);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_read_word_at_pointer")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceReadWordAtPointerNative(GhosttySurface surface, out GhosttyText text);
+
+    /// <summary>
+    /// The word under the mouse pointer (double-click word boundaries),
+    /// or null when the pointer is over nothing. Takes the renderer mutex.
+    /// </summary>
+    internal static string? SurfaceReadWordAtPointer(GhosttySurface surface)
+    {
+        if (SurfaceReadWordAtPointerNative(surface, out var native) == 0) return null;
+        var text = CopyAndFree(surface, ref native);
+        return text.Length == 0 ? null : text;
+    }
+
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_free_text")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial void SurfaceFreeTextNative(GhosttySurface surface, ref GhosttyText text);

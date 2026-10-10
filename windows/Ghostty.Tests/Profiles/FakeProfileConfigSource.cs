@@ -21,6 +21,10 @@ internal sealed class FakeProfileConfigSource : IProfileConfigSource
     public string? DefaultProfileId { get; set; }
     public IReadOnlySet<string> HiddenProfileIds { get; set; } = FrozenSet<string>.Empty;
     public IReadOnlyList<string> ProfileWarnings { get; set; } = [];
+    public bool SshHostsDiscovery { get; set; }
+    public IReadOnlyList<Ghostty.Core.Ssh.SshConnection> SshConnections { get; set; }
+        = System.Array.Empty<Ghostty.Core.Ssh.SshConnection>();
+    public string? SshHostsUser { get; set; }
 
     public event Action? ProfileConfigChanged;
 
