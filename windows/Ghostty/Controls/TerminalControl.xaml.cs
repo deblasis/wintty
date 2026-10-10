@@ -1095,12 +1095,23 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             // Layout-synchronized, not wall-clock: forcing a measure
             // gives the armed OnFirstLayoutUpdated a COMPLETED pass to
             // create at, so the size is the arranged one (a direct read
-            // here could still catch a measure-phase ghost). Creation
-            // focus is suppressed for this pane: 250ms later the user's
-            // focus stands where they put it, and the harness asserts
-            // active-ness itself.
+            // at Loaded could still catch a measure-phase ghost; by this
+            // tick the settle has drained, so the panel's own values are
+            // the arranged ones -- the same read the retry timer below
+            // trusts on its ticks). Creation focus is suppressed for
+            // this pane: 250ms later the user's focus stands where they
+            // put it, and the harness asserts active-ness itself.
             _suppressCreationAutoFocus = true;
             Panel.InvalidateMeasure();
+            // The forced pass alone is not a driver: it delivers creation
+            // only through the armed OnFirstLayoutUpdated, and a
+            // re-arrange at an unchanged size may not raise
+            // LayoutUpdated for this panel at all. So the fallback
+            // settles the creation itself: a measurable pane gets its
+            // surface here and now, a zero-size one is refused by the
+            // gate and keeps waiting on the subscription, and a renderer
+            // refusal arms the bounded retry like any failed attempt.
+            TrySettleSurfaceCreation();
         };
         fallback.Start();
         DisableAncestorScrollViewerTabStop();
