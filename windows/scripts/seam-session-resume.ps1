@@ -465,8 +465,19 @@ profile.vanishing.name = Vanishing
 profile.vanishing.command = cmd.exe /d /c echo $MarkerVanish & ping -n 120 127.0.0.1 > nul
 "@
                 # The plain cold restore: the same config, so both profiles
-                # resolve and both tabs come back by id.
-                Invoke-RestorePhase "resume-cold$($save.Suffix)" $mode $ownedCold.Path $ownedCold.Token $base $true $save.Active
+                # resolve and both tabs come back by id. A launch throw (guard
+                # refusal, pipe timeout) is ledgered here in the save's
+                # catch-shape, so later rows still run: Invoke-RestorePhase
+                # only finally-teardowns, and seam-initial-size.ps1 contains
+                # each row the same way (Invoke-Scenario classifies+records).
+                try {
+                    Invoke-RestorePhase "resume-cold$($save.Suffix)" $mode $ownedCold.Path $ownedCold.Token $base $true $save.Active
+                }
+                catch {
+                    $msg = "$($_.Exception.Message)"
+                    $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+                    Add-Result "resume-cold$($save.Suffix)" $false $class "restore phase: $msg"
+                }
             }
             finally {
                 Remove-ResumeOwned $ownedCold "cold$suffix" @("resume-cold$suffix", "resume-save-teardown$suffix")
@@ -493,7 +504,17 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
                     Add-Result "resume-cold-fallback$suffix" $false $class "save phase: $msg"
                     continue
                 }
-                Invoke-RestorePhase "resume-cold-fallback$suffix" $mode $ownedFallback.Path $ownedFallback.Token $withdrawn $false $save2.Active
+                # The fallback restore on the fallback pair's own save: a launch
+                # throw is ledgered in the same catch-shape, so the next mode
+                # still runs.
+                try {
+                    Invoke-RestorePhase "resume-cold-fallback$suffix" $mode $ownedFallback.Path $ownedFallback.Token $withdrawn $false $save2.Active
+                }
+                catch {
+                    $msg = "$($_.Exception.Message)"
+                    $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+                    Add-Result "resume-cold-fallback$suffix" $false $class "restore phase: $msg"
+                }
             }
             finally {
                 Remove-ResumeOwned $ownedFallback "fallback$suffix" @("resume-cold-fallback$suffix", "resume-save-teardown$suffix")
@@ -542,6 +563,15 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
                 }
                 'daemon held the session before attach (unreachable on this tree)'
             }
+        }
+        catch {
+            # A hot launch throw (guard refusal, pipe timeout) is ledgered in
+            # the same catch-shape, so the ledger names the row instead of
+            # skipping it silently: seam-initial-size.ps1's detection-fresh
+            # block records its launch the same way.
+            $msg = "$($_.Exception.Message)"
+            $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+            Add-Result 'resume-hot@daemon' $false $class "launch: $msg"
         }
         finally {
             $script:Current = $null
