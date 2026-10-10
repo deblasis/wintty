@@ -556,16 +556,20 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
                 # any client displayed it. Without the tier's session op there
                 # is no handle on "held", so no attach can be staged or proved
                 # -- and a green here would claim one was.
-                $held = $false
-                try {
-                    $sessions = Invoke-SeamCommand $s @{ op = 'pane-sessions' }
-                    $held = (@($sessions.sessions).Count -gt 0)
-                }
-                catch { $held = $false }
-                if (-not $held) {
+                $sessions = $null
+                try { $sessions = Invoke-SeamCommand $s @{ op = 'pane-sessions' } }
+                catch { }
+                if ($null -eq $sessions) {
                     throw 'HARNESS: resume-hot needs the daemon pane-sessions op and a daemon world shared across two client launches; this tree serves no sessions ops (the daemon dimension is inert -- mux-attach names nothing here), Start-SeamSession mints an isolated daemon world per launch, and the coexistence guard refuses a second live client on the same exe. No hot attach can be staged or proved through the seam today -- see REPORT for the seam gaps.'
                 }
-                'daemon held the session before attach (unreachable on this tree)'
+                # Served. An answer is still not the proof: the daemon world is
+                # minted per launch, so the list here is this launch's own
+                # just-booted session, and the old count passed the row
+                # vacuously with a lying detail (@(...) over an absent
+                # sessions property even counted $null as 1). Finish the row
+                # instead of going green: it needs a second client on a shared
+                # daemon world and the attach probe.
+                throw 'HARNESS: pane-sessions is served, but this row is not finished: the daemon world is minted per launch, so the answer only lists this launch''s own just-booted session, and the guard refuses a second live client on the same exe. Finish the row when the tier shares a daemon world: probe the held list from a second client, attach, and assert the first client''s marker without opening any profile.'
             }
         }
         catch {
