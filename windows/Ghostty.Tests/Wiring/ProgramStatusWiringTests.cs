@@ -1,5 +1,7 @@
 using System;
+using System.Linq;
 using Ghostty.Tests.Wiring;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace Ghostty.Tests.Wiring;
@@ -92,6 +94,72 @@ public class ProgramStatusWiringTests
         // the baseline glyph and a richer presentation can never stack.
         var chrome = ShellSource.Load("Tabs.TabProgramStatusChrome.cs").Root.ToString();
         Assert.Contains("!TabModel.ProgramStatusPresentationClaimed", chrome);
+    }
+
+    [Fact]
+    public void TheVerticalStrip_RefreshesTheRowOnProgramStatus()
+    {
+        // The vertical row's glyph updates only through
+        // VerticalTabNavRow.Refresh, which the strip drives from an
+        // AotBinding: the property must be INSIDE that binding's watched
+        // list, or the glyph is computed once at row construction and
+        // then moves only when an unrelated property happens to raise
+        // (panel finding: a background tab's blocked agent never showed).
+        // Structural, not a string count: the parsed binding whose
+        // callback refreshes the row must carry the property.
+        var strip = ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
+        var refreshBindings = strip.Root
+            .DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(i => i.CalleeText() == "AotBinding.Create"
+                && i.ArgumentList.Arguments.Count > 1
+                && i.ArgumentList.ToString().Contains("Refresh(tab)"))
+            .ToList();
+        Assert.True(refreshBindings.Count == 2,
+            $"expected the two refresh bindings (body + pinned), found {refreshBindings.Count}");
+        foreach (var binding in refreshBindings)
+            Assert.Contains("nameof(TabModel.ProgramStatus)", binding.ArgumentList.ToString());
+    }
+
+    [Fact]
+    public void ThePinnedRow_CarriesTheStateGlyph_Too()
+    {
+        // A pinned tab is still a tab: its blocked agent must read on
+        // the square exactly as it reads on a body row or the horizontal
+        // strip, or the pin would hide the one state that asks for the
+        // user (panel LOW, resolved by carrying the glyph).
+        var pinned = ShellSource.Load("Tabs.VerticalTabPinnedRow.cs").Root.ToString();
+        Assert.Contains("TabProgramStatusChrome.ProgramStatusGlyph(", pinned);
+        Assert.Contains("tab.ProgramStatus", pinned);
+    }
+
+    [Fact]
+    public void Host_ChildExit_RetiresOnlyTheEphemeralStates()
+    {
+        // The spec's exit rule removes working and blocked and keeps
+        // done and error until seen; a full Reset would retire a done
+        // the program reported right before exiting, before the user
+        // could ever see it.
+        var section = ShellSource.Load("Hosting.GhosttyHost.cs")
+            .Case("OnAction", "GhosttyActionTag.ShowChildExited");
+        Assert.Contains("RetireEphemeralProgramStatus(", section.ToString());
+        Assert.DoesNotContain("ProgramStatusEventKind.Reset", section.ToString());
+    }
+
+    [Fact]
+    public void PaneHost_RetiresDone_OnEveryFocusArrival()
+    {
+        // Focus is what views a pane, and focus arrives without an
+        // active-leaf CHANGE: a single-pane background tab read
+        // straight-on never switches leaves, and the dedupe would
+        // swallow it. The retirement must sit before the dedupe.
+        var gotFocus = ShellSource.Load("Panes.PaneHost.cs")
+            .Method("OnTerminalGotFocus").ToString();
+        var retire = gotFocus.IndexOf("MarkProgramStatusViewed", StringComparison.Ordinal);
+        var dedupe = gotFocus.IndexOf("if (ReferenceEquals(leaf, _activeLeaf))", StringComparison.Ordinal);
+        Assert.True(retire >= 0, "OnTerminalGotFocus does not retire the pane's done");
+        Assert.True(dedupe < 0 || retire < dedupe,
+            "the retirement must run before the active-leaf dedupe returns");
     }
 
     private static int Count(string haystack, string needle) =>

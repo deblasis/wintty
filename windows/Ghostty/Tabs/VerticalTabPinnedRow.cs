@@ -43,6 +43,7 @@ internal sealed partial class VerticalTabPinnedRow : Grid
 
     private readonly Grid _iconSlot;
     private readonly FontIcon _bell;
+    private readonly FontIcon _status;
     private readonly FontIcon _idle;
     private IconElement? _icon;
     private TextBlock? _iconFallback;
@@ -95,6 +96,25 @@ internal sealed partial class VerticalTabPinnedRow : Grid
             Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed,
         };
         _iconSlot.Children.Add(_bell);
+
+        // Program status (OSC 7501), beside the bell: a pinned tab is
+        // still a tab, and a blocked agent on a pinned square is exactly
+        // the state a pin must not hide. Stood down when a richer
+        // presentation claims the slot, same as every other strip shape.
+        _status = new FontIcon
+        {
+            Glyph = TabProgramStatusChrome.ProgramStatusGlyph(tab.ProgramStatus),
+            FontSize = 9,
+            Foreground = TabProgramStatusChrome.BrushFor(tab.ProgramStatus),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 2, 0),
+            Visibility = TabProgramStatusChrome.Visible(tab)
+                ? Visibility.Visible
+                : Visibility.Collapsed,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            _status, TabProgramStatusChrome.AutomationLabel(tab.ProgramStatus));
+        _iconSlot.Children.Add(_status);
 
         // The idle moon over the icon's opposite corner: the square
         // reads as "this icon is asleep" without spending width it does
@@ -211,6 +231,13 @@ internal sealed partial class VerticalTabPinnedRow : Grid
             _iconFallback.Text = InitialOf(TabAccessibleText.Name(tab));
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
         _idle.Visibility = IdleBadgeVisible(tab);
+        _status.Glyph = TabProgramStatusChrome.ProgramStatusGlyph(tab.ProgramStatus);
+        _status.Foreground = TabProgramStatusChrome.BrushFor(tab.ProgramStatus);
+        _status.Visibility = TabProgramStatusChrome.Visible(tab)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            _status, TabProgramStatusChrome.AutomationLabel(tab.ProgramStatus));
         // The whole slot dims -- icon and whatever badge is not showing
         // -- which is the square's only way to whisper "asleep": it has
         // no title to fade. The bell stays undimmed by never coexisting

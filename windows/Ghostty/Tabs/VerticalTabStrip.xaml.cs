@@ -2149,7 +2149,12 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.ShellReportedCwd),
         nameof(TabModel.BellRinging),
         nameof(TabModel.IsIdle),
-        nameof(TabModel.IsSettling));
+        nameof(TabModel.IsSettling),
+        // The row's program status glyph is computed in Refresh: without
+        // this property the glyph is set once at row construction and
+        // then moves only when an unrelated property happens to raise, so
+        // a background tab's blocked agent never reads on this strip.
+        nameof(TabModel.ProgramStatus));
 
         var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
             nameof(TabModel.Color));
@@ -2216,7 +2221,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.ShellReportedCwd),
         nameof(TabModel.BellRinging),
         nameof(TabModel.IsIdle),
-        nameof(TabModel.IsSettling));
+        nameof(TabModel.IsSettling),
+        // Same as the body row: the pinned square's refresh carries the
+        // program status glyph too.
+        nameof(TabModel.ProgramStatus));
 
         var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
             nameof(TabModel.Color));
