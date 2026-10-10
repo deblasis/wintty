@@ -35,13 +35,16 @@
         withdrawn built-in or retired template drops). Count stays two: a drop
         is a PRODUCT_FAIL with the resolver's name on it.
       resume-hot@daemon  the daemon already held the session. On this tree the
-        probe (`pane-sessions`) is unserved and Start-SeamSession mints an
-        isolated daemon world per launch while the guard refuses a second live
-        client, so the row records a HARNESS gap (exit 1, never a product red
-        and never a silent green) naming both missing pieces. Once served, its
-        live asserts are: the pre-attach session list is non-empty (the daemon
-        held it, the client did not boot it), and the attaching client's screen
-        carries the first client's marker without opening any profile.
+        probe (`pane-sessions`) answers unknown-op and Start-SeamSession mints
+        an isolated daemon world per launch while the guard refuses a second
+        live client, so the row records a HARNESS gap (exit 1) naming both
+        missing pieces. Served, it splits three ways: an op that errors,
+        answers with no sessions field, or lists nothing although this client
+        just booted one is a PRODUCT_FAIL (exit 2); a real list is still a
+        HARNESS gap, because an answer is not the proof -- the row needs a
+        second client on a shared daemon world, then the attach, and the
+        attaching client's screen carrying the first client's marker without
+        opening any profile.
 
     Nothing is typed and no OS input is synthesized, same as the birth harness.
     Exits 0 on pass, 2 on a product finding, 1 when the harness could not run.
@@ -556,11 +559,30 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
                 # any client displayed it. Without the tier's session op there
                 # is no handle on "held", so no attach can be staged or proved
                 # -- and a green here would claim one was.
+                # Three outcomes, kept split: an unserved op (the seam
+                # answers "unknown op") is the tree owing the op, a HARNESS
+                # gap; an op that IS served but errors, answers with no
+                # sessions field, or lists nothing although this client just
+                # booted one, is the product serving it wrong, a
+                # PRODUCT_FAIL; and a served list still cannot finish the
+                # row here (the finish-me below).
                 $sessions = $null
                 try { $sessions = Invoke-SeamCommand $s @{ op = 'pane-sessions' } }
-                catch { }
-                if ($null -eq $sessions) {
-                    throw 'HARNESS: resume-hot needs the daemon pane-sessions op and a daemon world shared across two client launches; this tree serves no sessions ops (the daemon dimension is inert -- mux-attach names nothing here), Start-SeamSession mints an isolated daemon world per launch, and the coexistence guard refuses a second live client on the same exe. No hot attach can be staged or proved through the seam today -- see REPORT for the seam gaps.'
+                catch {
+                    $probe = "$_"
+                    if ($probe -match "unknown op 'pane-sessions'") {
+                        throw 'HARNESS: resume-hot needs the daemon pane-sessions op and a daemon world shared across two client launches; the seam answers the probe with unknown op (the daemon dimension is inert -- mux-attach names nothing here), Start-SeamSession mints an isolated daemon world per launch, and the coexistence guard refuses a second live client on the same exe. No hot attach can be staged or proved through the seam today -- the gap is named in this file''s header and pinned in SeamClient.Tests.ps1''s resume cases.'
+                    }
+                    # PRODUCT_EXIT and seam-pipe failures keep their own
+                    # classes; only a served op's own error is recast.
+                    if ($probe -notlike 'PRODUCT_FAIL*') { throw }
+                    throw "PRODUCT_FAIL: pane-sessions is served but the probe errored: $probe"
+                }
+                if ($null -eq $sessions.PSObject.Properties['sessions']) {
+                    throw 'PRODUCT_FAIL: pane-sessions is served but answers with no sessions field'
+                }
+                if (@($sessions.sessions).Count -eq 0) {
+                    throw 'PRODUCT_FAIL: pane-sessions is served but lists no sessions although this client just booted one on this daemon world'
                 }
                 # Served. An answer is still not the proof: the daemon world is
                 # minted per launch, so the list here is this launch's own
