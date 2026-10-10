@@ -260,6 +260,10 @@ pub const Option = enum {
 ///   throws out the report instead of skipping the pair, so a report
 ///   meant for one record never falls back to the root record. For
 ///   `state=clear`, that would remove every record.
+/// - An id, title or msg value contains a byte outside the value
+///   alphabet. Such a value can be neither a valid id nor valid base64,
+///   and skipping it would read the pair as absent -- the clear-root
+///   fallback again -- so it discards the report too.
 /// - `title` or `msg` isn't valid base64, or decodes to text that isn't
 ///   UTF-8 or contains a control character.
 pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*OSCCommand {
@@ -303,6 +307,7 @@ fn validate(data: []const u8) error{
     InvalidId,
     InvalidText,
     TooLong,
+    InvalidValue,
 }!State {
     // A key that is too long breaks a limit, even a key we don't know.
     var pairs = std.mem.splitScalar(u8, data, ':');
@@ -312,29 +317,36 @@ fn validate(data: []const u8) error{
         if (key.len > max_key_bytes) return error.TooLong;
     }
 
-    // Every value is checked against its limit, even one a later pair
-    // replaces, because any limit violation discards the whole report.
-    var ids: kitty_metadata.ValueIterator("id", value_bytes) = .init(data);
-    while (ids.next()) |v| try validateId(v);
-    inline for (.{
-        .{ "app", max_app_bytes },
-        .{ "title", max_title_encoded_bytes },
-        .{ "msg", max_msg_encoded_bytes },
-    }) |limit| {
-        var it: kitty_metadata.ValueIterator(limit[0], value_bytes) = .init(data);
-        while (it.next()) |v| if (v.len > limit[1]) return error.TooLong;
-    }
+    // An app value is length-checked on the tolerant iterator: an app
+    // with a byte outside the alphabet is ignored, the report is not
+    // discarded -- the specification makes no discard promise for app,
+    // and an app never addresses records.
+    var apps: kitty_metadata.ValueIterator("app", value_bytes) = .init(data);
+    while (apps.next()) |v| if (v.len > max_app_bytes) return error.TooLong;
 
-    // Every title and msg is decoded and checked, not only the last: the
-    // specification discards a report whose base64 fails or whose text
-    // carries a control character, whichever pair it is in.
+    // The id, title and msg walks are STRICT. The parser's contract
+    // discards the report on an invalid id so a report meant for one
+    // record can never fall back to the root record, and on text that is
+    // not valid base64 -- and a value with a byte outside the alphabet
+    // can be neither. The tolerant iterator SKIPS such a value, which
+    // reads the pair as absent: state=clear:id=a!b would clear every
+    // record instead of being thrown out. Every value is still checked,
+    // even one a later pair replaces, because any violation discards the
+    // whole report.
+    var ids: kitty_metadata.StrictValueIterator("id", value_bytes) = .init(data);
+    while (try ids.next()) |v| try validateId(v);
+
     var buf: [max_msg_bytes]u8 = undefined;
-    var titles: kitty_metadata.ValueIterator("title", value_bytes) = .init(data);
-    while (titles.next()) |v| {
+    var titles: kitty_metadata.StrictValueIterator("title", value_bytes) = .init(data);
+    while (try titles.next()) |v| {
+        if (v.len > max_title_encoded_bytes) return error.TooLong;
         if ((try decodeText(v, &buf)).len > max_title_bytes) return error.TooLong;
     }
-    var msgs: kitty_metadata.ValueIterator("msg", value_bytes) = .init(data);
-    while (msgs.next()) |v| _ = try decodeText(v, &buf);
+    var msgs: kitty_metadata.StrictValueIterator("msg", value_bytes) = .init(data);
+    while (try msgs.next()) |v| {
+        if (v.len > max_msg_encoded_bytes) return error.TooLong;
+        _ = try decodeText(v, &buf);
+    }
 
     // An unknown state discards the report rather than guessing, so a
     // state added in a later revision never turns into something else.
@@ -619,6 +631,12 @@ test "OSC 7501: ids" {
         max_segment ++ "a",
         "a/b/c/d/e/f/g/h/i",
         ("a" ** 31 ++ "/") ** 4 ++ "a",
+        // Bytes outside the value alphabet never reach validateId on the
+        // tolerant iterator -- they used to be skipped, so the report
+        // read as having no id and a clear fell back to the root record.
+        "a!b",
+        "a b",
+        "build/test!",
     };
     for (invalid) |id| {
         p.reset();
@@ -711,6 +729,13 @@ test "OSC 7501: discarded reports" {
         // The whole sequence, including the terminator.
         .{ "7501;state=idle:" ++ "x" ** fill, true },
         .{ "7501;state=idle:" ++ "x" ** (fill + 1), false },
+
+        // Out-of-alphabet id, title and msg: skipped values used to
+        // read as absent, so a clear with a bad id fell back to the root
+        // record and a bad title read as no title. All discard now.
+        .{ "7501;state=clear:id=a!b", false },
+        .{ "7501;state=idle:title=a!", false },
+        .{ "7501;state=idle:msg=!x", false },
 
         // Numbers that only start like 7501.
         .{ "75;state=idle", false },
