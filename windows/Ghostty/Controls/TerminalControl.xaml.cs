@@ -1546,10 +1546,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // surface is freed only when DisposeSurface() is called by
         // PaneHost when the leaf is actually being removed.
         //
-        // We only unsubscribe the one-shot LayoutUpdated handler to make
-        // sure it does not fire spuriously after the panel detaches.
-        // OnLoaded re-subscribes when the control re-enters a tree.
-        Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+        // Deliberately also NO unsubscribe of the one-shot LayoutUpdated
+        // handler. The splice a split performs removes and re-adds the
+        // divided control in one call stack, and WinUI 3 can then deliver
+        // the pending Unloaded AFTER the re-add's Loaded -- observed in a
+        // traced split burst as Loaded -> Unloaded 2 ms later with no
+        // further Loaded ever arriving for that pane. Unsubscribing here
+        // armed exactly one failure: a newborn pane whose surface had not
+        // been created yet ended that reparent ATTACHED, measured and
+        // uncreated with its creation subscription removed, so no layout
+        // pass -- not even the 250 ms fallback's forced one -- could ever
+        // drive its creation, and it sat forever at attempted=false,
+        // retriesLeft=-1 with a measured panel. The handler is one-shot
+        // in EFFECT, not in subscription: creation success unsubscribes
+        // it (TrySettleSurfaceCreation / the settled pass below), Dispose
+        // unsubscribes it, and a pass while the panel reads a transient
+        // zero size just refuses the gate and waits. OnLoaded's
+        // re-subscribe stays: it is idempotent and re-arms the reparent
+        // size push for panes whose surface already exists.
 
         // Deliberately do NOT stop the resize-overlay grace timer here. WinUI 3
         // raises Unloaded on every reparent (split / rebuild), not just on real
