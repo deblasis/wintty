@@ -138,6 +138,11 @@ pub const StreamHandler = struct {
     /// into tmux control mode.
     tmux_control_mode: bool,
 
+    /// Whether the embedder consumes program status reports (OSC 7501).
+    /// While false the support query goes unanswered and reports, resets
+    /// and prompt starts are not forwarded. See termio.program_status.
+    program_status: *const std.atomic.Value(bool) = &termio.program_status.enabled,
+
     //---------------------------------------------------------------
     // Internal state
 
@@ -555,6 +560,8 @@ pub const StreamHandler = struct {
             .title_pop,
             .kitty_dnd,
             => {},
+
+            .program_status => try self.programStatus(value),
         }
     }
 
@@ -1163,6 +1170,10 @@ pub const StreamHandler = struct {
 
         // Clear the progress bar
         self.progressReport(.{ .state = .remove });
+
+        // A full reset removes every program status record. DECSTR is a
+        // different action and never reaches here.
+        self.programStatusEvent(.reset);
     }
 
     /// Record a Kitty clipboard protocol session grant so future
@@ -1718,12 +1729,23 @@ pub const StreamHandler = struct {
                 self.surfaceMessageWriter(.prompt_input);
             },
 
+            // A new shell prompt ends every working and blocked program
+            // status record. Shells start one with A, with N, or with a
+            // primary P alone (Ghostty's zsh integration once a theme
+            // rebuilt PS1, bash under ble.sh), as upstream reads them. A
+            // secondary, right or continuation P is the same prompt going
+            // on. The terminal still handles the marks themselves below.
+            .fresh_line_new_prompt,
+            .new_command,
+            => self.programStatusEvent(.prompt_start),
+            .prompt_start => switch (cmd.readOption(.prompt_kind) orelse .initial) {
+                .initial => self.programStatusEvent(.prompt_start),
+                .right, .continuation, .secondary => {},
+            },
+
             // Handled by Terminal, no special handling by us
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
-            .fresh_line_new_prompt,
-            .new_command,
-            .prompt_start,
             => {},
         }
 
@@ -2379,6 +2401,43 @@ pub const StreamHandler = struct {
         // Note: we don't have to do a queueRender here because every
         // processed stream will queue a render once it is done processing
         // the read() syscall.
+    }
+
+    /// Program status protocol (OSC 7501). Nothing happens unless the
+    /// embedder opted in (termio.program_status): an embedder that keeps no
+    /// records must not claim support, so the query goes unanswered and
+    /// reports are dropped here rather than forwarded to nobody.
+    fn programStatus(
+        self: *StreamHandler,
+        cmd: terminal.osc.Command.ProgramStatus,
+    ) !void {
+        if (!self.program_status.load(.acquire)) return;
+        switch (cmd) {
+            // The only bytes this protocol ever writes back: the fixed
+            // reply, ended with the query's own terminator.
+            .query => |terminator| self.messageWriter(.{ .write_stable = switch (terminator) {
+                .bel => "\x1b]7501;?\x07",
+                .st => "\x1b]7501;?\x1b\\",
+            } }),
+
+            .report => |report| {
+                const owned = try apprt.action.ProgramStatus.Owned.create(self.alloc, report);
+                self.surfaceMessageWriter(.{ .program_status = .{ .report = owned } });
+            },
+        }
+    }
+
+    /// A lifetime event for the embedder's program status records, sent
+    /// only while it opted in.
+    fn programStatusEvent(
+        self: *StreamHandler,
+        comptime event: enum { reset, prompt_start },
+    ) void {
+        if (!self.program_status.load(.acquire)) return;
+        self.surfaceMessageWriter(.{ .program_status = switch (event) {
+            .reset => .reset,
+            .prompt_start => .prompt_start,
+        } });
     }
 
     /// Display a GUI progress report.
@@ -3205,4 +3264,243 @@ test "DA1: what the parser answers is what the pty reader sends" {
     th.feed("\x1b[c");
     try th.ptyWrites(&answered, testing.allocator);
     try testing.expectEqualStrings(conpty_handshake.DA1_REPLY, answered.items);
+}
+
+/// What one program status message carried, copied out so the owned report
+/// can be released the way a real surface releases it.
+const SeenProgramStatus = struct {
+    event: apprt.action.ProgramStatus.Event,
+    state: apprt.action.ProgramStatus.State = .idle,
+    kind: apprt.action.ProgramStatus.Kind = .none,
+    progress: i8 = -1,
+    id: [128]u8 = undefined,
+    id_len: usize = 0,
+    app: [32]u8 = undefined,
+    app_len: usize = 0,
+    title: [192]u8 = undefined,
+    title_len: usize = 0,
+    message: [256]u8 = undefined,
+    message_len: usize = 0,
+};
+
+/// Drain the app mailbox and collect every program status message, freeing
+/// owned reports. Other messages are released and ignored.
+fn drainProgramStatus(th: *TestHandler, out: []SeenProgramStatus) usize {
+    var n: usize = 0;
+    while (th.app_mailbox.pop(global.io())) |msg| switch (msg) {
+        .surface_message => |sm| {
+            switch (sm.message) {
+                .program_status => |ps| {
+                    var seen: SeenProgramStatus = .{ .event = switch (ps) {
+                        .report => .report,
+                        .reset => .reset,
+                        .prompt_start => .prompt_start,
+                    } };
+                    if (ps == .report) {
+                        const r = &ps.report.report;
+                        seen.state = r.state;
+                        seen.kind = r.kind;
+                        seen.progress = r.progress;
+                        seen.id_len = r.id_len;
+                        @memcpy(seen.id[0..r.id_len], r.idSlice());
+                        seen.app_len = r.app_len;
+                        @memcpy(seen.app[0..r.app_len], r.appSlice());
+                        seen.title_len = r.title_len;
+                        @memcpy(seen.title[0..r.title_len], r.titleSlice());
+                        seen.message_len = @min(r.message_len, seen.message.len);
+                        @memcpy(seen.message[0..seen.message_len], r.messageSlice()[0..seen.message_len]);
+                    }
+                    if (n < out.len) out[n] = seen;
+                    n += 1;
+                },
+                else => {},
+            }
+            sm.message.deinit();
+        },
+        else => {},
+    };
+    return n;
+}
+
+test "program status: the embedder has not opted in by default" {
+    // The process-wide default every surface starts from. OSS and sponsor
+    // never call ghostty_app_set_program_status, so this is what they run.
+    try std.testing.expect(!termio.program_status.enabled.load(.acquire));
+
+    var th: TestHandler = undefined;
+    try th.init(std.testing.allocator);
+    defer th.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        @as(*const std.atomic.Value(bool), &termio.program_status.enabled),
+        th.handler.program_status,
+    );
+}
+
+test "program status: not opted in, the query gets no reply and nothing reaches the surface" {
+    const testing = std.testing;
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    var enabled: std.atomic.Value(bool) = .init(false);
+    th.handler.program_status = &enabled;
+
+    th.feed("\x1b]7501;?\x1b\\" ++ "\x1b]7501;?\x07" ++
+        "\x1b]7501;state=blocked:kind=permission:msg=QXBwbHk/\x1b\\" ++
+        "\x1b]133;A\x07" ++ "\x1bc");
+
+    var answered: std.ArrayList(u8) = .empty;
+    defer answered.deinit(testing.allocator);
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, answered.items, "7501") == null);
+
+    var seen: [8]SeenProgramStatus = undefined;
+    try testing.expectEqual(@as(usize, 0), drainProgramStatus(&th, &seen));
+}
+
+test "program status: opted in, the query is answered with its own terminator" {
+    const testing = std.testing;
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    var enabled: std.atomic.Value(bool) = .init(true);
+    th.handler.program_status = &enabled;
+
+    var answered: std.ArrayList(u8) = .empty;
+    defer answered.deinit(testing.allocator);
+
+    th.feed("\x1b]7501;?\x1b\\");
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expectEqualStrings("\x1b]7501;?\x1b\\", answered.items);
+
+    answered.clearRetainingCapacity();
+    th.feed("\x1b]7501;?\x07");
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expectEqualStrings("\x1b]7501;?\x07", answered.items);
+
+    // The query is not a report.
+    var seen: [8]SeenProgramStatus = undefined;
+    try testing.expectEqual(@as(usize, 0), drainProgramStatus(&th, &seen));
+
+    // Turning it off again takes effect on the next query.
+    enabled.store(false, .release);
+    answered.clearRetainingCapacity();
+    th.feed("\x1b]7501;?\x1b\\");
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expectEqualStrings("", answered.items);
+}
+
+test "program status: opted in, a report reaches the surface with every field" {
+    const testing = std.testing;
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    var enabled: std.atomic.Value(bool) = .init(true);
+    th.handler.program_status = &enabled;
+
+    // "Plan" and "Apply?"
+    th.feed("\x1b]7501;state=blocked:kind=permission:progress=40:id=a/b" ++
+        ":app=terraform:title=UGxhbg==:msg=QXBwbHk/\x07");
+    // Absent values are empty, none, or -1; kind is only read when blocked.
+    th.feed("\x1b]7501;state=done:kind=auth:progress=10\x1b\\");
+    th.feed("\x1b]7501;state=clear:id=a\x1b\\");
+
+    var seen: [8]SeenProgramStatus = undefined;
+    try testing.expectEqual(@as(usize, 3), drainProgramStatus(&th, &seen));
+
+    const r = seen[0];
+    try testing.expectEqual(apprt.action.ProgramStatus.Event.report, r.event);
+    try testing.expectEqual(apprt.action.ProgramStatus.State.blocked, r.state);
+    try testing.expectEqual(apprt.action.ProgramStatus.Kind.permission, r.kind);
+    try testing.expectEqual(@as(i8, 40), r.progress);
+    try testing.expectEqualStrings("a/b", r.id[0..r.id_len]);
+    try testing.expectEqualStrings("terraform", r.app[0..r.app_len]);
+    try testing.expectEqualStrings("Plan", r.title[0..r.title_len]);
+    try testing.expectEqualStrings("Apply?", r.message[0..r.message_len]);
+
+    const d = seen[1];
+    try testing.expectEqual(apprt.action.ProgramStatus.State.done, d.state);
+    try testing.expectEqual(apprt.action.ProgramStatus.Kind.none, d.kind);
+    try testing.expectEqual(@as(i8, -1), d.progress);
+    try testing.expectEqual(@as(usize, 0), d.id_len);
+    try testing.expectEqual(@as(usize, 0), d.app_len);
+    try testing.expectEqual(@as(usize, 0), d.title_len);
+    try testing.expectEqual(@as(usize, 0), d.message_len);
+
+    try testing.expectEqual(apprt.action.ProgramStatus.State.clear, seen[2].state);
+    try testing.expectEqualStrings("a", seen[2].id[0..seen[2].id_len]);
+
+    // Nothing from a report is ever written back.
+    var answered: std.ArrayList(u8) = .empty;
+    defer answered.deinit(testing.allocator);
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, answered.items, "7501") == null);
+}
+
+test "program status: opted in, RIS is a reset and OSC 133 A a prompt start; DECSTR is neither" {
+    const testing = std.testing;
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    var enabled: std.atomic.Value(bool) = .init(true);
+    th.handler.program_status = &enabled;
+
+    th.feed("\x1b[!p"); // DECSTR
+    var seen: [8]SeenProgramStatus = undefined;
+    try testing.expectEqual(@as(usize, 0), drainProgramStatus(&th, &seen));
+
+    th.feed("\x1b]133;A\x07");
+    try testing.expectEqual(@as(usize, 1), drainProgramStatus(&th, &seen));
+    try testing.expectEqual(apprt.action.ProgramStatus.Event.prompt_start, seen[0].event);
+
+    // A shell may start its prompt without an A: Ghostty's own zsh
+    // integration sends only P;k=i once a theme rebuilt PS1, and bash
+    // under ble.sh does the same. N and a primary P are a new prompt too.
+    for ([_][]const u8{
+        "\x1b]133;P;k=i\x07",
+        "\x1b]133;P\x07",
+        "\x1b]133;N\x07",
+    }) |mark| {
+        th.feed(mark);
+        try testing.expectEqual(@as(usize, 1), drainProgramStatus(&th, &seen));
+        try testing.expectEqual(apprt.action.ProgramStatus.Event.prompt_start, seen[0].event);
+    }
+
+    // The other prompt marks are not a new prompt: a secondary, right or
+    // continuation prompt is the same prompt going on.
+    th.feed("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
+    th.feed("\x1b]133;P;k=s\x07\x1b]133;P;k=r\x07\x1b]133;P;k=c\x07");
+    try testing.expectEqual(@as(usize, 0), drainProgramStatus(&th, &seen));
+
+    th.feed("\x1bc");
+    try testing.expectEqual(@as(usize, 1), drainProgramStatus(&th, &seen));
+    try testing.expectEqual(apprt.action.ProgramStatus.Event.reset, seen[0].event);
+}
+
+test "program status: a flood of invalid reports reaches nothing" {
+    const testing = std.testing;
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    var enabled: std.atomic.Value(bool) = .init(true);
+    th.handler.program_status = &enabled;
+
+    const bad = [_][]const u8{
+        "\x1b]7501;id=x\x1b\\", // no state
+        "\x1b]7501;state=sleeping\x1b\\", // unknown state
+        // Not base64. (A byte outside the value set, like `msg=!!!`, is a
+        // malformed pair: skipped, and the rest of the report stands.)
+        "\x1b]7501;state=working:msg=A\x1b\\",
+        "\x1b]7501;state=working:msg=AQ==\x1b\\", // decodes to a control char
+        "\x1b]7501;state=working:id=a//b\x1b\\", // empty id segment
+        "\x1b]7501;?x\x1b\\", // not the query
+    };
+    var i: usize = 0;
+    while (i < 200) : (i += 1) for (bad) |b| th.feed(b);
+
+    var seen: [8]SeenProgramStatus = undefined;
+    try testing.expectEqual(@as(usize, 0), drainProgramStatus(&th, &seen));
+    var answered: std.ArrayList(u8) = .empty;
+    defer answered.deinit(testing.allocator);
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expectEqualStrings("", answered.items);
 }

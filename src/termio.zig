@@ -21,6 +21,7 @@ const stream_handler = @import("termio/stream_handler.zig");
 
 const message = @import("termio/message.zig");
 pub const backend = @import("termio/backend.zig");
+pub const program_status = @import("termio/program_status.zig");
 pub const mailbox = @import("termio/mailbox.zig");
 pub const Exec = @import("termio/Exec.zig");
 pub const Options = @import("termio/Options.zig");

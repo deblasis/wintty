@@ -190,6 +190,37 @@ pub const ProgressReport = extern struct {
     progress: i8,
 };
 
+/// C: GhosttyProgramStatusState
+pub const ProgramStatusState = osc.Command.ProgramStatus.State;
+
+/// What a blocked program needs from the user. This matches
+/// `osc.Command.ProgramStatus.Kind` but adds `none` first, because C has
+/// no optional enums and a zeroed value must mean "no kind".
+///
+/// C: GhosttyProgramStatusKind
+pub const ProgramStatusKind = lib.Enum(lib.target, &.{
+    "none",
+    "permission",
+    "question",
+    "auth",
+});
+
+/// A program status report (OSC 7501). Absent text is an empty string,
+/// an absent kind is `none`, and absent progress is -1. See the header
+/// for the meaning of each field.
+///
+/// C: GhosttyTerminalProgramStatus
+pub const ProgramStatus = extern struct {
+    size: usize,
+    state: ProgramStatusState,
+    kind: ProgramStatusKind,
+    progress: i8,
+    id: lib.String,
+    app: lib.String,
+    title: lib.String,
+    message: lib.String,
+};
+
 /// A borrowed unsupported string sequence.
 ///
 /// C: GhosttyTerminalUnknownStringSequence
@@ -233,14 +264,22 @@ pub const ModeConfig = extern struct {
     }
 };
 
-/// C callback state for terminal effects. Most trampolines are always
-/// installed on the stream handler; they check these fields and no-op when
-/// the corresponding callback is null. The unknown-sequence and
-/// clipboard trampolines are installed dynamically to preserve their
-/// null fast paths (for clipboard_write, a null Zig-level effect makes
-/// Kitty clipboard writes fail up front instead of spooling a
-/// transaction that can never commit; for clipboard_read it keeps
-/// reads denied).
+/// C callback state for terminal effects.
+///
+/// Most trampolines are always installed on the stream handler. They check
+/// these fields and do nothing when the C callback is null.
+///
+/// A few trampolines are only installed while their C callback is set,
+/// because the stream handler behaves differently when the Zig effect is
+/// null:
+///
+/// - `unknown_sequence`: unknown sequences are skipped without being
+///   captured.
+/// - `clipboard_write`: Kitty clipboard writes fail up front instead of
+///   collecting data for a write that can never finish.
+/// - `clipboard_read`: clipboard reads are denied.
+/// - `program_status`: the OSC 7501 support query gets no reply, so
+///   programs know not to send reports.
 const Effects = struct {
     userdata: ?*anyopaque = null,
     write_pty: ?WritePtyFn = null,
@@ -253,6 +292,7 @@ const Effects = struct {
     title_changed: ?TitleChangedFn = null,
     pwd_changed: ?PwdChangedFn = null,
     progress_report: ?ProgressReportFn = null,
+    program_status: ?ProgramStatusFn = null,
     size_cb: ?SizeFn = null,
     clipboard_write: ?ClipboardWriteFn = null,
     clipboard_read: ?ClipboardReadFn = null,
@@ -309,6 +349,10 @@ const Effects = struct {
 
     /// C function pointer type for the progress_report callback.
     pub const ProgressReportFn = *const fn (Terminal, ?*anyopaque, *const ProgressReport) callconv(lib.calling_conv) void;
+
+    /// C function pointer type for the program_status callback. The report
+    /// and its strings are borrowed for the callback duration.
+    pub const ProgramStatusFn = *const fn (Terminal, ?*anyopaque, *const ProgramStatus) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the unknown_sequence callback. The request
     /// and its content are borrowed for the callback duration.
@@ -608,6 +652,37 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata, &c_report);
     }
 
+    fn programStatusTrampoline(
+        handler: *Handler,
+        report: osc.Command.ProgramStatus.Report,
+    ) void {
+        const wrapper = TerminalWrapper.fromHandler(handler);
+        const func = wrapper.effects.program_status orelse return;
+
+        // Both buffers hold the longest text the parser accepts, so
+        // writing to them can't fail.
+        var title_buf: [osc.program_status.max_title_bytes]u8 = undefined;
+        var title: std.Io.Writer = .fixed(&title_buf);
+        report.writeText(.title, &title) catch unreachable;
+        var message_buf: [osc.program_status.max_msg_bytes]u8 = undefined;
+        var message: std.Io.Writer = .fixed(&message_buf);
+        report.writeText(.msg, &message) catch unreachable;
+
+        const c_report: ProgramStatus = .{
+            .size = @sizeOf(ProgramStatus),
+            .state = report.state,
+            .kind = if (report.readOption(.kind)) |kind| switch (kind) {
+                inline else => |tag| @field(ProgramStatusKind, @tagName(tag)),
+            } else .none,
+            .progress = if (report.readOption(.progress)) |value| @intCast(value) else -1,
+            .id = .init(report.readOption(.id) orelse ""),
+            .app = .init(report.readOption(.app) orelse ""),
+            .title = .init(title.buffered()),
+            .message = .init(message.buffered()),
+        };
+        func(@ptrCast(wrapper), wrapper.effects.userdata, &c_report);
+    }
+
     fn unknownSequenceTrampoline(
         handler: *Handler,
         sequence: Handler.UnknownSequence,
@@ -678,6 +753,7 @@ fn wrap(
         // Installed dynamically when the callback is set; see Effects.
         .clipboard_write = null,
         .clipboard_read = null,
+        .program_status = null,
     };
 
     wrapper.* = .{
@@ -1174,6 +1250,7 @@ pub const Option = enum(c_int) {
     terminfo_name = 37,
     clipboard_read = 38,
     clipboard_write_max_bytes = 39,
+    program_status = 40,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -1189,6 +1266,7 @@ pub const Option = enum(c_int) {
             .title_changed => ?Effects.TitleChangedFn,
             .pwd_changed => ?Effects.PwdChangedFn,
             .progress_report => ?Effects.ProgressReportFn,
+            .program_status => ?Effects.ProgramStatusFn,
             .size_cb => ?Effects.SizeFn,
             .clipboard_write => ?Effects.ClipboardWriteFn,
             .clipboard_read => ?Effects.ClipboardReadFn,
@@ -1271,6 +1349,15 @@ fn setTyped(
             wrapper.effects.clipboard_read = value;
             wrapper.stream.handler.effects.clipboard_read = if (value != null)
                 &Effects.clipboardReadTrampoline
+            else
+                null;
+        },
+        .program_status => {
+            // Installed dynamically because the terminal only answers the
+            // OSC 7501 support query when something consumes reports.
+            wrapper.effects.program_status = value;
+            wrapper.stream.handler.effects.program_status = if (value != null)
+                &Effects.programStatusTrampoline
             else
                 null;
         },
@@ -4495,6 +4582,125 @@ test "set progress_report callback" {
     try testing.expectEqual(@as(usize, cases.len), S.count);
 }
 
+test "set program_status callback" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var count: usize = 0;
+        var last_userdata: ?*anyopaque = null;
+        var last_size: usize = 0;
+        var last_state: ProgramStatusState = .idle;
+        var last_kind: ProgramStatusKind = .none;
+        var last_progress: i8 = -1;
+        var last_id: [64]u8 = undefined;
+        var last_id_len: usize = 0;
+        var last_app: [64]u8 = undefined;
+        var last_app_len: usize = 0;
+        var last_title: [64]u8 = undefined;
+        var last_title_len: usize = 0;
+        var last_message: [64]u8 = undefined;
+        var last_message_len: usize = 0;
+        var written: [64]u8 = undefined;
+        var written_len: usize = 0;
+
+        fn programStatus(
+            _: Terminal,
+            ud: ?*anyopaque,
+            report: *const ProgramStatus,
+        ) callconv(lib.calling_conv) void {
+            count += 1;
+            last_userdata = ud;
+            last_size = report.size;
+            last_state = report.state;
+            last_kind = report.kind;
+            last_progress = report.progress;
+            last_id_len = copy(&last_id, report.id);
+            last_app_len = copy(&last_app, report.app);
+            last_title_len = copy(&last_title, report.title);
+            last_message_len = copy(&last_message, report.message);
+        }
+
+        fn writePty(
+            _: Terminal,
+            _: ?*anyopaque,
+            ptr: [*]const u8,
+            len: usize,
+        ) callconv(lib.calling_conv) void {
+            @memcpy(written[written_len..][0..len], ptr[0..len]);
+            written_len += len;
+        }
+
+        fn copy(dst: []u8, src: lib.String) usize {
+            if (src.len > 0) @memcpy(dst[0..src.len], src.ptr[0..src.len]);
+            return src.len;
+        }
+    };
+    S.count = 0;
+    S.written_len = 0;
+
+    var sentinel: u8 = 100;
+    try testing.expectEqual(Result.success, set(t, .userdata, @ptrCast(&sentinel)));
+    try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
+
+    // Without the callback, the support query is not answered.
+    const query = "\x1B]7501;?\x1B\\";
+    vt_write(t, query, query.len);
+    try testing.expectEqual(@as(usize, 0), S.written_len);
+
+    try testing.expectEqual(Result.success, set(
+        t,
+        .program_status,
+        @ptrCast(&S.programStatus),
+    ));
+
+    // With the callback, it is.
+    vt_write(t, query, query.len);
+    try testing.expectEqualStrings(query, S.written[0..S.written_len]);
+    try testing.expectEqual(@as(usize, 0), S.count);
+
+    // "Plan" and "Apply?"
+    const report = "\x1B]7501;state=blocked:kind=permission:progress=40:id=a/b" ++
+        ":app=terraform:title=UGxhbg==:msg=QXBwbHk/\x07";
+    vt_write(t, report, report.len);
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
+    try testing.expectEqual(@sizeOf(ProgramStatus), S.last_size);
+    try testing.expectEqual(ProgramStatusState.blocked, S.last_state);
+    try testing.expectEqual(ProgramStatusKind.permission, S.last_kind);
+    try testing.expectEqual(@as(i8, 40), S.last_progress);
+    try testing.expectEqualStrings("a/b", S.last_id[0..S.last_id_len]);
+    try testing.expectEqualStrings("terraform", S.last_app[0..S.last_app_len]);
+    try testing.expectEqualStrings("Plan", S.last_title[0..S.last_title_len]);
+    try testing.expectEqualStrings("Apply?", S.last_message[0..S.last_message_len]);
+
+    // Absent values are empty, none, or -1.
+    const minimal = "\x1B]7501;state=done\x1B\\";
+    vt_write(t, minimal, minimal.len);
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqual(ProgramStatusState.done, S.last_state);
+    try testing.expectEqual(ProgramStatusKind.none, S.last_kind);
+    try testing.expectEqual(@as(i8, -1), S.last_progress);
+    try testing.expectEqual(@as(usize, 0), S.last_id_len);
+    try testing.expectEqual(@as(usize, 0), S.last_app_len);
+    try testing.expectEqual(@as(usize, 0), S.last_title_len);
+    try testing.expectEqual(@as(usize, 0), S.last_message_len);
+
+    // Unsetting the callback ignores reports and the query again.
+    try testing.expectEqual(Result.success, set(t, .program_status, null));
+    S.written_len = 0;
+    vt_write(t, query, query.len);
+    vt_write(t, minimal, minimal.len);
+    try testing.expectEqual(@as(usize, 0), S.written_len);
+    try testing.expectEqual(@as(usize, 2), S.count);
+}
+
 test "set unknown_sequence callback" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
@@ -6239,4 +6445,93 @@ test "get_multi null keys returns invalid_value" {
     var cols: u16 = 0;
     var values = [_]?*anyopaque{@ptrCast(&cols)};
     try testing.expectEqual(Result.invalid_value, get_multi(null, 1, null, &values, null));
+}
+
+/// The `NAME = value` entries of `typedef enum { ... } <typedef_name>;` in a
+/// C header, read as text. Nothing compiles osc.h or terminal.h against
+/// these enums, so this is the check that a renumbered pick cannot slip by.
+fn headerEnum(
+    alloc: std.mem.Allocator,
+    header: []const u8,
+    typedef_name: []const u8,
+) !std.StringHashMapUnmanaged(i64) {
+    const close = try std.fmt.allocPrint(alloc, "}} {s};", .{typedef_name});
+    defer alloc.free(close);
+    const end = std.mem.indexOf(u8, header, close) orelse return error.TypedefNotFound;
+    const start = std.mem.lastIndexOf(u8, header[0..end], "typedef enum") orelse return error.TypedefNotFound;
+    const open = std.mem.indexOfScalarPos(u8, header, start, '{') orelse return error.TypedefNotFound;
+
+    var map: std.StringHashMapUnmanaged(i64) = .empty;
+    errdefer map.deinit(alloc);
+    var lines = std.mem.splitScalar(u8, header[open + 1 .. end], '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r,");
+        if (!std.mem.startsWith(u8, line, "GHOSTTY_")) continue;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const name = std.mem.trim(u8, line[0..eq], " \t");
+        const value = std.fmt.parseInt(i64, std.mem.trim(u8, line[eq + 1 ..], " \t"), 10) catch continue;
+        try map.put(alloc, name, value);
+    }
+    return map;
+}
+
+fn expectHeaderEnum(
+    comptime T: type,
+    path: []const u8,
+    typedef_name: []const u8,
+    comptime prefix: []const u8,
+    renames: []const [2][]const u8,
+) !void {
+    const alloc = testing.allocator;
+    const header = try std.Io.Dir.cwd().readFileAlloc(testing.io, path, alloc, .unlimited);
+    defer alloc.free(header);
+    var map = try headerEnum(alloc, header, typedef_name);
+    defer map.deinit(alloc);
+
+    var seen: usize = 0;
+    inline for (@typeInfo(T).@"enum".fields) |field| {
+        var c_name_buf: [128]u8 = undefined;
+        var c_name: []const u8 = undefined;
+        const renamed = for (renames) |r| {
+            if (std.mem.eql(u8, r[0], field.name)) break r[1];
+        } else null;
+        if (renamed) |r| {
+            c_name = try std.fmt.bufPrint(&c_name_buf, "{s}{s}", .{ prefix, r });
+        } else {
+            const upper = std.ascii.upperString(c_name_buf[prefix.len..][0..field.name.len], field.name);
+            @memcpy(c_name_buf[0..prefix.len], prefix);
+            c_name = c_name_buf[0 .. prefix.len + upper.len];
+        }
+        const value = map.get(c_name) orelse {
+            std.log.err("{s}: {s} has no {s}", .{ path, field.name, c_name });
+            return error.MissingInHeader;
+        };
+        testing.expectEqual(@as(i64, field.value), value) catch |err| {
+            std.log.err("{s}: {s} is {d} in zig and {d} in the header", .{ path, c_name, field.value, value });
+            return err;
+        };
+        seen += 1;
+    }
+    // Nothing in the header that zig does not have (the MAX sentinel aside).
+    try testing.expectEqual(seen, map.count());
+}
+
+test "osc.h GhosttyOscCommandType matches osc.Command.Key" {
+    try expectHeaderEnum(
+        osc.Command.Key,
+        "include/ghostty/vt/osc.h",
+        "GhosttyOscCommandType",
+        "GHOSTTY_OSC_COMMAND_",
+        &.{},
+    );
+}
+
+test "terminal.h GhosttyTerminalOption matches Option" {
+    try expectHeaderEnum(
+        Option,
+        "include/ghostty/vt/terminal.h",
+        "GhosttyTerminalOption",
+        "GHOSTTY_TERMINAL_OPT_",
+        &.{.{ "size_cb", "SIZE" }},
+    );
 }

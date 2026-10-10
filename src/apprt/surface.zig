@@ -18,6 +18,43 @@ pub const Message = union(enum) {
     /// we want this union to be.
     pub const WriteReq = MessageData(u8, 255);
 
+    /// A program status protocol (OSC 7501) event for the app thread.
+    pub const ProgramStatus = union(enum) {
+        /// An owned copy of one report. The receiver destroys it.
+        report: *apprt.action.ProgramStatus.Owned,
+        /// A full reset (RIS): every record is gone.
+        reset,
+        /// A new shell prompt (OSC 133 A): working and blocked records end.
+        prompt_start,
+
+        /// What the user's reset keybinding sends: the same full reset a
+        /// program's RIS is, when the embedder keeps records. The binding
+        /// resets the terminal directly rather than through the stream, so
+        /// without this the records would outlive the reset the user asked
+        /// for.
+        pub fn userReset(enabled: bool) ?ProgramStatus {
+            return if (enabled) .reset else null;
+        }
+
+        /// The apprt action for this event. `desktop_notifications` is the
+        /// surface's setting of that name. A report is borrowed from the
+        /// owned copy, so the action must not outlive it.
+        pub fn action(
+            self: *const ProgramStatus,
+            desktop_notifications: bool,
+        ) apprt.action.ProgramStatus {
+            return switch (self.*) {
+                .report => |r| .{
+                    .event = .report,
+                    .report = &r.report,
+                    .desktop_notifications = desktop_notifications,
+                },
+                .reset => .{ .event = .reset, .desktop_notifications = desktop_notifications },
+                .prompt_start => .{ .event = .prompt_start, .desktop_notifications = desktop_notifications },
+            };
+        }
+    };
+
     /// A fixed-size desktop notification payload sent to the app thread.
     pub const DesktopNotification = struct {
         /// Desktop notification title.
@@ -138,6 +175,11 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    /// A program status protocol (OSC 7501) event, forwarded to the apprt
+    /// as the `program_status` action. Only sent while the embedder opted
+    /// in; see termio.program_status.
+    program_status: ProgramStatus,
+
     /// A command has started in the shell, start a timer.
     start_command,
 
@@ -198,6 +240,10 @@ pub const Message = union(enum) {
             .pwd_change => |v| v.deinit(),
             .kitty_clipboard_read => |v| v.destroy(),
             .kitty_clipboard_write => |v| v.destroy(),
+            .program_status => |v| switch (v) {
+                .report => |r| r.destroy(),
+                .reset, .prompt_start => {},
+            },
 
             .set_title,
             .report_title,
@@ -277,6 +323,7 @@ pub const Message = union(enum) {
             .pwd_change,
             .ring_bell,
             .progress_report,
+            .program_status,
             .start_command,
             .stop_command,
             .prompt_input,
@@ -588,7 +635,7 @@ test "surface message variants are all accounted for by the push give-up path" {
     // Make that decision, then bump this count. Without the guard a new
     // owning variant compiles and leaks silently on every drop.
     const fields = @typeInfo(Message).@"union".fields;
-    try std.testing.expectEqual(@as(usize, 28), fields.len);
+    try std.testing.expectEqual(@as(usize, 29), fields.len);
 }
 
 test "the child-exit notice is the one message push may not carry" {
@@ -652,4 +699,34 @@ test "surface mailbox pushRequired forwards the teardown token" {
         &teardown,
     ));
     try std.testing.expect(!queue.wedged.load(.acquire));
+}
+
+test "program status: the action carries the surface's desktop-notifications setting" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var p: terminal.osc.Parser = .init(alloc);
+    defer p.deinit();
+    p.nextSlice("7501;state=blocked:kind=permission");
+    const report = p.end('\x1b').?.program_status.report;
+    const owned = try apprt.action.ProgramStatus.Owned.create(alloc, report);
+    defer owned.destroy();
+
+    const msg: Message.ProgramStatus = .{ .report = owned };
+    const off = msg.action(false);
+    try testing.expectEqual(apprt.action.ProgramStatus.Event.report, off.event);
+    try testing.expect(off.report == &owned.report);
+    try testing.expect(!off.desktop_notifications);
+    try testing.expect(off.cval().desktop_notifications == false);
+    try testing.expect(msg.action(true).desktop_notifications);
+
+    const reset: Message.ProgramStatus = .reset;
+    try testing.expect(reset.action(false).report == null);
+    try testing.expect(!reset.action(false).desktop_notifications);
+}
+
+test "program status: the reset keybinding is a full reset for the records" {
+    const testing = std.testing;
+    try testing.expect(Message.ProgramStatus.userReset(true).? == .reset);
+    try testing.expect(Message.ProgramStatus.userReset(false) == null);
 }

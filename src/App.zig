@@ -525,12 +525,18 @@ fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !vo
     // We want to ensure our window is still active. Window messages
     // are quite rare and we normally don't have many windows so we do
     // a simple linear search here.
-    if (self.hasSurface(surface)) {
-        try surface.handleMessage(msg);
-    }
+    try deliverSurfaceMessage(self.hasSurface(surface), surface, msg);
+}
 
-    // Window was not found, it probably quit before we handled the message.
-    // Not a problem.
+/// Hand `msg` to `surface` if it is still alive. If it is not, it probably
+/// quit before we handled the message, which is not a problem, but a
+/// message can own memory (a program status report's copy, a long pwd).
+fn deliverSurfaceMessage(alive: bool, surface: anytype, msg: apprt.surface.Message) !void {
+    if (!alive) {
+        msg.deinit();
+        return;
+    }
+    try surface.handleMessage(msg);
 }
 
 fn hasSurface(self: *const App, surface: *const Surface) bool {
@@ -1000,3 +1006,25 @@ pub const Wasm = if (!builtin.target.isWasm()) struct {} else struct {
     //     }
     // }
 };
+
+test "a surface message for a surface that is gone is released" {
+    // A pane can close while a message it was sent sits in the mailbox.
+    // Some messages own memory, and the testing allocator fails this test
+    // if dropping one for a gone surface leaks it.
+    const testing = std.testing;
+    const terminal = @import("terminal/main.zig");
+    const alloc = testing.allocator;
+
+    var p: terminal.osc.Parser = .init(alloc);
+    defer p.deinit();
+    p.nextSlice("7501;state=working");
+    const report = p.end('\x1b').?.program_status.report;
+    const owned = try apprt.action.ProgramStatus.Owned.create(alloc, report);
+
+    const Never = struct {
+        fn handleMessage(_: @This(), _: apprt.surface.Message) !void {
+            return error.Delivered;
+        }
+    };
+    try deliverSurfaceMessage(false, Never{}, .{ .program_status = .{ .report = owned } });
+}

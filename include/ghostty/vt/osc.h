@@ -71,6 +71,16 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_OSC_COMMAND_ITERM2_MULTIPART_IMAGE = 28,
   GHOSTTY_OSC_COMMAND_ITERM2_REPORT_CELL_SIZE = 29,
   GHOSTTY_OSC_COMMAND_PROMPT_REPORT = 30,
+
+  /**
+   * A program status report or support query (OSC 7501), which a program
+   * sends to say what it is doing, such as working or waiting on the user.
+   *
+   * The OSC parser only identifies this command. To receive the report's
+   * contents, use a terminal with GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS
+   * instead (see GhosttyTerminalProgramStatus).
+   */
+  GHOSTTY_OSC_COMMAND_PROGRAM_STATUS = 31,
   GHOSTTY_OSC_COMMAND_TYPE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyOscCommandType;
 

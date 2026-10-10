@@ -54,6 +54,7 @@ internal sealed class FakePaneHost : IPaneHost
     public event EventHandler<LeafPane>? LeafFocused;
     public event EventHandler? LastLeafClosed;
     public event EventHandler<TabProgressState>? ProgressChanged;
+    public event EventHandler<TabProgramStatus>? ProgramStatusChanged;
     public event EventHandler? LayoutChanged { add { } remove { } }
 
     public void RaiseProgressChanged(TabProgressState state)

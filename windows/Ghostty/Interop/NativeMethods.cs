@@ -574,6 +574,16 @@ internal static partial class NativeMethods
     internal static void AppSetFocus(GhosttyApp app, bool focused)
         => AppSetFocusNative(app, focused ? (byte)1 : (byte)0);
 
+    // Opt in to the program status protocol (OSC 7501). While on, every
+    // surface answers the `OSC 7501 ; ?` support query and performs the
+    // program status action; the core's default is off, and an embedder
+    // that does not act on reports must not claim support. Process-wide;
+    // the bootstrap host calls it with the app handle right after
+    // creation, before any surface can ask.
+    [LibraryImport(Dll, EntryPoint = "ghostty_app_set_program_status")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void AppSetProgramStatus(GhosttyApp app, byte enabled);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_app_set_color_scheme")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void AppSetColorScheme(GhosttyApp app, GhosttyColorScheme scheme);

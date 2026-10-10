@@ -339,6 +339,28 @@ internal sealed class TabModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// The worst OSC 7501 state across this tab's panes: what a program
+    /// in any of them last reported, worst-first, with a done retiring
+    /// once its pane was looked at. None means no pane has anything to
+    /// show. In-memory only; set by the manager from the pane host's
+    /// aggregate, and rendered by both strips as a small state glyph.
+    /// </summary>
+    public TabProgramStatus ProgramStatus
+    {
+        get;
+        set { if (field != value) { field = value; Raise(Args.ProgramStatus); } }
+    } = TabProgramStatus.None;
+
+    /// <summary>
+    /// Set once at startup by a build whose richer presentation replaces
+    /// the baseline glyph (the pro family's agents feature renders the
+    /// stacked indicator cards instead). Static because it describes the
+    /// build, not any one tab; the strips honor it by standing the glyph
+    /// down, so the two presentations never stack.
+    /// </summary>
+    internal static bool ProgramStatusPresentationClaimed;
+
+    /// <summary>
     /// True when nothing has touched this tab for the idle window (see
     /// <see cref="TabIdleTracker"/>): the strip dims the row and shows a
     /// moon glyph. Written by the tracker's sweep (and its eager clear on
@@ -650,6 +672,7 @@ internal sealed class TabModel : INotifyPropertyChanged
         internal static readonly PropertyChangedEventArgs Progress = new(nameof(TabModel.Progress));
         internal static readonly PropertyChangedEventArgs Color = new(nameof(TabModel.Color));
         internal static readonly PropertyChangedEventArgs BellRinging = new(nameof(TabModel.BellRinging));
+        internal static readonly PropertyChangedEventArgs ProgramStatus = new(nameof(TabModel.ProgramStatus));
         internal static readonly PropertyChangedEventArgs IsIdle = new(nameof(TabModel.IsIdle));
         internal static readonly PropertyChangedEventArgs IsPinned = new(nameof(TabModel.IsPinned));
         internal static readonly PropertyChangedEventArgs Group = new(nameof(TabModel.Group));

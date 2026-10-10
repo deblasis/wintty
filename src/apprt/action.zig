@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const build_config = @import("../build_config.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const apprt = @import("../apprt.zig");
@@ -386,6 +387,11 @@ pub const Action = union(Key) {
     /// relative offset: -1 for one group left, +1 for one group right.
     move_group: MoveGroup,
 
+    /// A program status protocol (OSC 7501) report, full reset, or new
+    /// shell prompt. Only performed while the embedder opted in; see
+    /// `ProgramStatus`.
+    program_status: ProgramStatus,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -466,6 +472,9 @@ pub const Action = union(Key) {
         pin_tab,
         unpin_tab,
         move_group,
+
+        // Program status protocol (OSC 7501). Appended for the same reason.
+        program_status,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -1096,6 +1105,183 @@ pub const SearchSelected = struct {
             .selected = if (self.selected) |s| @intCast(s) else -1,
         };
     }
+};
+
+/// A program status protocol (OSC 7501) event for one surface.
+///
+/// The core keeps no records. The apprt keeps one record per id and applies
+/// the specification's lifetime rules:
+/// https://www.superlogical.com/rex/docs/build/program-status
+///
+/// This action is only performed while the embedder has opted in with
+/// `ghostty_app_set_program_status`. Until then the core ignores reports and
+/// leaves the support query unanswered.
+pub const ProgramStatus = struct {
+    event: Event,
+
+    /// The report, for `.report` only. Borrowed for the duration of the
+    /// action, including its strings.
+    report: ?*const Report = null,
+
+    /// The surface's `desktop-notifications` setting. The core does not
+    /// notify for a report itself; an apprt that turns a report into a
+    /// desktop notification honours this, as the core does for OSC 9.
+    desktop_notifications: bool = true,
+
+    /// Sync with: ghostty_action_program_status_event_e
+    pub const Event = enum(c_int) {
+        /// A valid report, including `clear`. See `report`.
+        report,
+
+        /// A full reset (RIS). Remove every record.
+        reset,
+
+        /// A new shell prompt began (OSC 133 A). Remove `working` and
+        /// `blocked` records; `done` and `error` survive.
+        prompt_start,
+
+        test "ghostty.h ProgramStatus.Event" {
+            try lib.checkGhosttyHEnum(Event, "GHOSTTY_ACTION_PROGRAM_STATUS_EVENT_");
+        }
+    };
+
+    /// Sync with: ghostty_action_program_status_state_e
+    pub const State = enum(c_int) {
+        idle,
+        working,
+        done,
+        blocked,
+        @"error",
+        clear,
+
+        test "ghostty.h ProgramStatus.State" {
+            try lib.checkGhosttyHEnum(State, "GHOSTTY_ACTION_PROGRAM_STATUS_STATE_");
+        }
+    };
+
+    /// What a blocked program needs. `none` when absent, unknown, or the
+    /// state is not `blocked`.
+    ///
+    /// Sync with: ghostty_action_program_status_kind_e
+    pub const Kind = enum(c_int) {
+        none,
+        permission,
+        question,
+        auth,
+
+        test "ghostty.h ProgramStatus.Kind" {
+            try lib.checkGhosttyHEnum(Kind, "GHOSTTY_ACTION_PROGRAM_STATUS_KIND_");
+        }
+    };
+
+    /// One report, already validated and decoded by the parser. Text the
+    /// program did not send is empty, never null. `title` and `message`
+    /// carry no control characters but are untrusted text.
+    ///
+    /// Sync with: ghostty_action_program_status_report_s
+    pub const Report = extern struct {
+        state: State,
+        kind: Kind,
+        /// 0 through 100, or -1 when absent (indeterminate).
+        progress: i8,
+        id: [*]const u8,
+        id_len: usize,
+        app: [*]const u8,
+        app_len: usize,
+        title: [*]const u8,
+        title_len: usize,
+        message: [*]const u8,
+        message_len: usize,
+
+        pub fn idSlice(self: *const Report) []const u8 {
+            return self.id[0..self.id_len];
+        }
+        pub fn appSlice(self: *const Report) []const u8 {
+            return self.app[0..self.app_len];
+        }
+        pub fn titleSlice(self: *const Report) []const u8 {
+            return self.title[0..self.title_len];
+        }
+        pub fn messageSlice(self: *const Report) []const u8 {
+            return self.message[0..self.message_len];
+        }
+    };
+
+    /// Sync with: ghostty_action_program_status_s
+    pub const C = extern struct {
+        event: Event,
+        desktop_notifications: bool,
+        report: ?*const Report,
+    };
+
+    pub fn cval(self: ProgramStatus) C {
+        return .{
+            .event = self.event,
+            .desktop_notifications = self.desktop_notifications,
+            .report = self.report,
+        };
+    }
+
+    /// A report copied out of the parser's buffer so it can cross from the
+    /// pty read thread to the app thread. Heap allocated so `report`'s
+    /// pointers into `buf` stay put.
+    pub const Owned = struct {
+        alloc: Allocator,
+        report: Report,
+        buf: [buf_len]u8,
+
+        const osc_ps = terminal.osc.program_status;
+        const buf_len = osc_ps.max_id_bytes +
+            osc_ps.max_app_bytes +
+            osc_ps.max_title_bytes +
+            osc_ps.max_msg_bytes;
+
+        pub fn create(
+            alloc: Allocator,
+            src: terminal.osc.Command.ProgramStatus.Report,
+        ) Allocator.Error!*Owned {
+            const self = try alloc.create(Owned);
+            self.alloc = alloc;
+
+            var w: std.Io.Writer = .fixed(&self.buf);
+            const id = src.readOption(.id) orelse "";
+            const app = src.readOption(.app) orelse "";
+            // Every field is within the parser's limits and `buf` holds the
+            // sum of them, so none of these writes can fail.
+            w.writeAll(id) catch unreachable;
+            w.writeAll(app) catch unreachable;
+            src.writeText(.title, &w) catch unreachable;
+            const title_end = w.end;
+            src.writeText(.msg, &w) catch unreachable;
+            const msg_end = w.end;
+
+            const app_start = id.len;
+            const title_start = app_start + app.len;
+            self.report = .{
+                .state = switch (src.state) {
+                    inline else => |tag| @field(State, @tagName(tag)),
+                },
+                // The parser only reads a kind for blocked.
+                .kind = if (src.readOption(.kind)) |k| switch (k) {
+                    inline else => |tag| @field(Kind, @tagName(tag)),
+                } else .none,
+                .progress = if (src.readOption(.progress)) |p| @intCast(p) else -1,
+                .id = &self.buf,
+                .id_len = id.len,
+                .app = self.buf[app_start..].ptr,
+                .app_len = app.len,
+                .title = self.buf[title_start..].ptr,
+                .title_len = title_end - title_start,
+                .message = self.buf[title_end..].ptr,
+                .message_len = msg_end - title_end,
+            };
+            return self;
+        }
+
+        pub fn destroy(self: *Owned) void {
+            self.alloc.destroy(self);
+        }
+    };
 };
 
 /// sync with ghostty_action_close_tab_mode_e in ghostty.h

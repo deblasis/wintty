@@ -69,6 +69,24 @@ public class GhosttyActionTagHeaderParityTests
         AssertMatchesHeader<GhosttySplitDirection>(
             "ghostty_action_split_direction_e", "GHOSTTY_SPLIT_DIRECTION_");
 
+    // The program status payload enums, both directions like the rest: a
+    // member appended upstream would silently fall into the handler's
+    // final branch otherwise.
+    [Fact]
+    public void ProgramStatusEvent_Ordinals_Match_Header() =>
+        AssertMatchesHeader<ProgramStatusEventKind>(
+            "ghostty_action_program_status_event_e", "GHOSTTY_ACTION_PROGRAM_STATUS_EVENT_");
+
+    [Fact]
+    public void ProgramStatusState_Ordinals_Match_Header() =>
+        AssertMatchesHeader<ProgramStatusState>(
+            "ghostty_action_program_status_state_e", "GHOSTTY_ACTION_PROGRAM_STATUS_STATE_");
+
+    [Fact]
+    public void ProgramStatusKind_Ordinals_Match_Header() =>
+        AssertMatchesHeader<ProgramStatusKind>(
+            "ghostty_action_program_status_kind_e", "GHOSTTY_ACTION_PROGRAM_STATUS_KIND_");
+
     [Fact]
     public void GotoSplit_Ordinals_Match_Header() =>
         AssertMatchesHeader<GhosttyGotoSplit>(

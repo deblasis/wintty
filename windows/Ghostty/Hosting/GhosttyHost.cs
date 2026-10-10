@@ -252,6 +252,11 @@ internal sealed partial class GhosttyHost : IDisposable
         };
 
         _app = NativeMethods.AppNew(runtime, _config);
+        // The app acts on OSC 7501 reports (the tab's program status
+        // glyph), so it claims support before any surface can ask. A core
+        // without the export is older than this app: refuse to start
+        // rather than run half-protocol.
+        NativeMethods.AppSetProgramStatus(_app, 1);
     }
 
     /// <summary>
@@ -1175,6 +1180,22 @@ internal sealed partial class GhosttyHost : IDisposable
                     return 1;
                 }
 
+                case GhosttyActionTag.ProgramStatus:
+                {
+                    // ghostty_action_program_status_s at +8, with the
+                    // report's strings borrowed for this callback only:
+                    // copy them on the libghostty thread, before the
+                    // enqueue, the way the desktop notification does.
+                    if (!Ghostty.Core.Interop.ProgramStatusActionDecoder.TryDecode(actionPtr + 8, out var programStatus))
+                        return 0;
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
+                        c.RaiseProgramStatus(programStatus);
+                    });
+                    return 1;
+                }
+
                 case GhosttyActionTag.DesktopNotification:
                 {
                     // ghostty_action_desktop_notification_s:
@@ -1217,6 +1238,12 @@ internal sealed partial class GhosttyHost : IDisposable
                     _dispatcher.TryEnqueue(() =>
                     {
                         if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
+                        // The program whose reports the pane was carrying
+                        // is gone. Its working and blocked states die with
+                        // it; a done or error it reported right before
+                        // exiting still waits to be seen (the spec keeps
+                        // those until viewed), so this is not a reset.
+                        c.RetireEphemeralProgramStatus();
                         // c.SurfaceCommandText is the text the surface was
                         // created to run; the policy decides how much of it
                         // a toast may show (deblasis/wintty#1193).

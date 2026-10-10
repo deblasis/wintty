@@ -24,6 +24,7 @@ internal sealed partial class VerticalTabNavRow : Grid
     private readonly FontIcon _home;
     private readonly FontIcon _bell;
     private readonly FontIcon _idle;
+    private readonly FontIcon _status;
     private readonly Button _close;
     private readonly FontIcon _closeGlyph;
     private Border? _coDragAccent;
@@ -75,6 +76,22 @@ internal sealed partial class VerticalTabNavRow : Grid
             Margin = new Thickness(0, 0, 4, 0),
             Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed,
         };
+
+        // Program status (OSC 7501): the state glyph the tab's programs
+        // earn, worst across its panes, leading the badges. Collapsed
+        // while nothing reports, and stood down when a richer
+        // presentation claims the slot.
+        _status = new FontIcon
+        {
+            Glyph = TabProgramStatusChrome.ProgramStatusGlyph(tab.ProgramStatus),
+            FontSize = 10,
+            Foreground = TabProgramStatusChrome.BrushFor(tab.ProgramStatus),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+            Visibility = StatusGlyphVisible(tab),
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            _status, TabProgramStatusChrome.AutomationLabel(tab.ProgramStatus));
 
         // The idle moon: shown while the tab has been untouched
         // (TabIdleTracker), hidden whenever a bell is up -- the bell owns
@@ -146,6 +163,7 @@ internal sealed partial class VerticalTabNavRow : Grid
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
         };
+        badges.Children.Add(_status);
         badges.Children.Add(_idle);
         badges.Children.Add(_bell);
         Grid.SetColumn(_home, 0);
@@ -236,6 +254,11 @@ internal sealed partial class VerticalTabNavRow : Grid
         ApplyTooltip(tab);
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
         _idle.Visibility = IdleBadgeVisible(tab);
+        _status.Glyph = TabProgramStatusChrome.ProgramStatusGlyph(tab.ProgramStatus);
+        _status.Foreground = TabProgramStatusChrome.BrushFor(tab.ProgramStatus);
+        _status.Visibility = StatusGlyphVisible(tab);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            _status, TabProgramStatusChrome.AutomationLabel(tab.ProgramStatus));
         // The idle dim rides the title, not the whole row: close stays
         // full-strength so an idle tab still reads as closable.
         _title.Opacity = tab.IsIdle ? IdleOpacity : 1.0;
@@ -261,6 +284,13 @@ internal sealed partial class VerticalTabNavRow : Grid
     /// </summary>
     private static Visibility IdleBadgeVisible(TabModel tab)
         => tab.IsIdle && !tab.BellRinging
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    /// <summary>Whether the program status glyph shows: a state exists,
+    /// and no richer presentation has claimed the slot.</summary>
+    private static Visibility StatusGlyphVisible(TabModel tab)
+        => TabProgramStatusChrome.Visible(tab)
             ? Visibility.Visible
             : Visibility.Collapsed;
 

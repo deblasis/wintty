@@ -139,6 +139,8 @@ pub const Action = union(Key) {
     /// The handler accumulates chunks across OSCs and dispatches a
     /// kitty graphics command on the terminator.
     iterm2_multipart_image: osc.Command.Iterm2MultipartEvent,
+    /// Program status protocol (OSC 7501): a report or the support query.
+    program_status: ProgramStatus,
 
     pub const Key = lib.Enum(
         lib.target,
@@ -242,6 +244,7 @@ pub const Action = union(Key) {
             "kitty_dnd",
             "iterm2_image_transmit",
             "iterm2_multipart_image",
+            "program_status",
         },
     );
 
@@ -464,6 +467,8 @@ pub const Action = union(Key) {
     pub const KittyClipboard = osc.Command.KittyClipboardProtocol;
 
     pub const KittyDnd = osc.Command.KittyDndProtocol;
+
+    pub const ProgramStatus = osc.Command.ProgramStatus;
 };
 
 /// Returns a type that can process a stream of tty control characters.
@@ -2742,6 +2747,10 @@ pub fn Stream(comptime H: type) type {
                     // cwd is empty, so the schema settles it rather than
                     // this switch.
                     self.handler.vt(.report_pwd, .{ .url = v.cwd });
+                },
+
+                .program_status => |v| {
+                    self.handler.vt(.program_status, v);
                 },
 
                 .conemu_sleep,

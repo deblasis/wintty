@@ -1277,6 +1277,23 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .program_status => |v| {
+            // The owned report lives until the action returns; the apprt
+            // copies what it keeps.
+            defer switch (v) {
+                .report => |r| r.destroy(),
+                .reset, .prompt_start => {},
+            };
+            const action = v.action(self.config.desktop_notifications);
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .program_status,
+                action,
+            ) catch |err| {
+                log.warn("apprt failed to report program status err={}", .{err});
+            };
+        },
+
         .selection_scroll_tick => |active| {
             self.selection_scroll_active = active;
             try self.selectionScrollTick();
@@ -5482,9 +5499,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .reset => {
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
-            self.renderer_state.terminal.fullReset();
+            {
+                self.renderer_state.mutex.lockUncancelable(global.io());
+                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.terminal.fullReset();
+            }
+            // The records go with the reset, as they do for a program's RIS.
+            if (apprt.surface.Message.ProgramStatus.userReset(
+                termio.program_status.enabled.load(.acquire),
+            )) |event| try self.handleMessage(.{ .program_status = event });
         },
 
         .start_search => {
@@ -7344,4 +7367,30 @@ test "queueIo frees allocated writes in readonly mode" {
         .alloc = testing.allocator,
         .data = data,
     } }, .unlocked);
+}
+
+test "program status: the surface passes its own setting and resets the records" {
+    // Source pins for the two call sites the helper tests cannot see
+    // (apprt.surface.Message.ProgramStatus.action and userReset are tested
+    // there). Each needle is split so this test's own text cannot match it.
+    const src = @embedFile("Surface.zig");
+    const testing = std.testing;
+
+    // The action carries this surface's desktop-notifications setting.
+    const action_call = "v.action(" ++ "self.config.desktop_notifications);";
+    try testing.expect(std.mem.indexOf(u8, src, action_call) != null);
+
+    // The reset keybinding: after its fullReset, inside the same arm, the
+    // records go too.
+    const arm_start = std.mem.indexOf(u8, src, "        .reset" ++ " => {\n") orelse
+        return error.TestUnexpectedResult;
+    const arm_end = std.mem.indexOfPos(u8, src, arm_start, "        .start_search" ++ " => {") orelse
+        return error.TestUnexpectedResult;
+    const arm = src[arm_start..arm_end];
+    const reset = std.mem.indexOf(u8, arm, ".terminal.full" ++ "Reset();") orelse
+        return error.TestUnexpectedResult;
+    const follow = std.mem.indexOf(u8, arm, "Message.ProgramStatus.user" ++ "Reset(") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(follow > reset);
+    try testing.expect(std.mem.indexOf(u8, arm[follow..], "self.handle" ++ "Message(.{ .program_status = event })") != null);
 }

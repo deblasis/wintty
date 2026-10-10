@@ -33,6 +33,15 @@ internal interface IPaneHost
     /// <summary>Raised when the last leaf in the tree closes.</summary>
     event EventHandler? LastLeafClosed;
 
+    /// <summary>Raised when the worst OSC 7501 state across every leaf
+    /// changes (a program in any pane reported, cleared, reset, or a
+    /// done was viewed, or a leaf joined or left the tree). Unlike
+    /// <see cref="ProgressChanged"/> this is every leaf, not the active
+    /// one: a blocked background pane is exactly what a tab headline
+    /// exists to carry. Carries <see cref="Ghostty.Core.Tabs.TabProgramStatus.None"/>
+    /// when no pane has anything to show.</summary>
+    event EventHandler<Ghostty.Core.Tabs.TabProgramStatus>? ProgramStatusChanged;
+
     /// <summary>Raised when the active leaf reports a progress state
     /// change via OSC 9;4. Only the active leaf's progress is
     /// forwarded — background panes update their own

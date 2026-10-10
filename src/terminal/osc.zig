@@ -19,6 +19,7 @@ const encoding = @import("osc/encoding.zig");
 
 pub const color = parsers.color;
 pub const semantic_prompt = parsers.semantic_prompt;
+pub const program_status = parsers.program_status;
 
 const log = std.log.scoped(.osc);
 
@@ -193,6 +194,11 @@ pub const Command = union(Key) {
     /// record is wider than this union's size budget.
     prompt_report: *const parsers.prompt_report.Report,
 
+    /// Program status protocol (OSC 7501). A program reports what it is
+    /// doing, such as working or waiting on the user, or asks whether the
+    /// terminal supports the protocol. See `ProgramStatus`.
+    program_status: ProgramStatus,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     /// iTerm2 OSC 1337 File= inline image payload + parsed geometry hints.
@@ -322,6 +328,8 @@ pub const Command = union(Key) {
 
     pub const KittyDesktopNotification = parsers.kitty_desktop_notification.OSC;
 
+    pub const ProgramStatus = parsers.program_status.Command;
+
     // NOTE: `GhosttyOscCommandType` in include/ghostty/vt/osc.h is this list,
     // and has to be updated in lockstep. Nothing checks that today:
     // lib.checkGhosttyHEnum only covers include/ghostty.h, so a value added
@@ -362,6 +370,7 @@ pub const Command = union(Key) {
             "iterm2_multipart_image",
             "iterm2_report_cell_size",
             "prompt_report",
+            "program_status",
         },
     );
 
@@ -529,6 +538,9 @@ pub const Parser = struct {
         @"55",
         @"66",
         @"72",
+        @"75",
+        @"750",
+        @"7501",
         @"77",
         @"99",
         @"104",
@@ -618,6 +630,7 @@ pub const Parser = struct {
             .iterm2_multipart_image,
             .iterm2_report_cell_size,
             .prompt_report,
+            .program_status,
             => {},
         }
 
@@ -949,7 +962,14 @@ pub const Parser = struct {
                 // just fails to happen. An inline image that exceeds the
                 // budget looked exactly like one that was never sent.
                 error.WriteFailed => {
-                    log.warn(
+                    // A program can send over-long program status reports
+                    // as fast as it can write; warn for those would flood
+                    // the log, so they go to debug like the parser's own
+                    // rejections.
+                    if (self.state == .@"7501") log.debug(
+                        "OSC sequence was dropped, state={s} captured={d} limit={d}",
+                        .{ @tagName(self.state), cap.trailing().len, cap.max_bytes },
+                    ) else log.warn(
                         "OSC sequence was dropped, state={s} captured={d} limit={d}",
                         .{ @tagName(self.state), cap.trailing().len, cap.max_bytes },
                     );
@@ -1112,7 +1132,29 @@ pub const Parser = struct {
             .@"7" => switch (c) {
                 ';' => self.captureTrailing(.fixed),
                 '2' => self.state = .@"72",
+                '5' => self.state = .@"75",
                 '7' => self.state = .@"77",
+                else => self.state = .invalid,
+            },
+
+            .@"75" => switch (c) {
+                '0' => self.state = .@"750",
+                else => self.state = .invalid,
+            },
+
+            .@"750" => switch (c) {
+                '1' => self.state = .@"7501",
+                else => self.state = .invalid,
+            },
+
+            // A report can be no longer than the specification's sequence
+            // limit, so the capture stops there: a program that never ends
+            // the sequence costs a pane a few KiB, not the general ceiling.
+            .@"7501" => switch (c) {
+                ';' => self.captureTrailingMax(
+                    .allocating,
+                    parsers.program_status.max_body_bytes + 1,
+                ),
                 else => self.state = .invalid,
             },
 
@@ -1297,7 +1339,14 @@ pub const Parser = struct {
 
             .@"77" => null,
 
+            // Prefixes of 7501, not OSCs themselves.
+            .@"75",
+            .@"750",
+            => null,
+
             .@"99" => parsers.kitty_desktop_notification.parse(self, terminator_ch),
+
+            .@"7501" => parsers.program_status.parse(self, terminator_ch),
 
             .@"133" => parsers.semantic_prompt.parse(self, terminator_ch),
 
@@ -1589,4 +1638,50 @@ test "OSC 9001: conhost's shell-type announce is recognized and ignored" {
     for (input_bel) |ch| bel.next(ch);
     try testing.expectEqual(Parser.State.@"9001", bel.state);
     try testing.expect(bel.end('\x07') == null);
+}
+
+test "OSC 7501: the capture stops at the body limit" {
+    // A report can never be longer than the specification's sequence
+    // limit, so its capture is bounded there rather than at the parser's
+    // general ceiling: a program that never ends the sequence costs a pane
+    // a few KiB, not megabytes.
+    const testing = std.testing;
+    const limit = parsers.program_status.max_body_bytes + 1;
+
+    const big = try testing.allocator.alloc(u8, 64 * 1024);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+
+    // In bulk.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.nextSlice("7501;state=idle:");
+        p.nextSlice(big);
+        try testing.expectEqual(Parser.State.invalid, p.state);
+        try testing.expect(p.capture.?.writer.buffer.len <= limit);
+        try testing.expect(p.end(null) == null);
+    }
+
+    // And a byte at a time.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        for ("7501;state=idle:") |c| p.next(c);
+        for (big[0..8192]) |c| p.next(c);
+        try testing.expectEqual(Parser.State.invalid, p.state);
+        try testing.expect(p.capture.?.writer.buffer.len <= limit);
+        try testing.expect(p.end(null) == null);
+    }
+
+    // The largest legal report still fits.
+    {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        const fill = parsers.program_status.max_body_bytes - "state=idle:x=".len;
+        p.nextSlice("7501;state=idle:x=");
+        p.nextSlice(big[0..fill]);
+        try testing.expect(p.state != .invalid);
+        try testing.expect(p.end('\x1b') != null);
+    }
 }
