@@ -145,4 +145,28 @@ public class SurfaceCreationDriveWiringTests
         Assert.True(removal.SpanStart < add.SpanStart,
             "OnLoaded's removal is only legal as the first half of the re-arm");
     }
+
+    /// <summary>
+    /// The subscription is armed at CONSTRUCTION as well. Loaded delivery
+    /// lags the first layout pass under rapid split churn (the pane is
+    /// added, measured and arranged while its Loaded event is still
+    /// queued), and a subscription armed only at Loaded then misses the
+    /// pass that sized the panel: a measured, attached pane waits
+    /// surface-less for whichever pass happens to come next, which the
+    /// birth floor reads as a dead newborn. Armed at construction the
+    /// handler fires at whichever pass first sizes the panel, before or
+    /// after Loaded; a detached control gets no passes, so arming early
+    /// is inert until the pane enters a tree.
+    /// </summary>
+    [Fact]
+    public void CreationSubscription_IsArmedAtConstruction()
+    {
+        var ctor = Terminal().Root.DescendantNodes()
+            .OfType<ConstructorDeclarationSyntax>()
+            .Single(c => c.Identifier.ValueText == "TerminalControl");
+        Assert.Contains(ctor.Body!.DescendantNodesAndSelf()
+            .OfType<AssignmentExpressionSyntax>(),
+            a => a.IsKind(SyntaxKind.AddAssignmentExpression)
+                 && a.Left.ToString() == "Panel.LayoutUpdated");
+    }
 }

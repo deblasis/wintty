@@ -924,6 +924,33 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             currentParent.Children.Add(subGrid);
         }
 
+        // Settle the splice's layout synchronously, and then re-invalidate
+        // for one async pass. The splice removed and re-added the divided
+        // pane's element, and the motion adapters' geometry sweep - which
+        // kills a standing reveal flight on that pane at its new rect and
+        // recommits from the held insets - rides a LayoutUpdated tick. That
+        // flight's engine session does not survive the dispatcher turns
+        // between this return and the framework's own async pass (the
+        // reparent's queued Unloaded delivers there; a split landing inside
+        // the first frame of the previous birth loses the kill every time,
+        // and a paced one loses it to the same race), so the sweep for the
+        // KILL must run while this stack still owns the transition. One
+        // synchronous pass right here runs every LayoutUpdated observer
+        // that only needs the post-splice geometry - the sweep above all -
+        // before any queued event can deliver.
+        //
+        // Everything that arms ON the tree-change raise keeps the async
+        // rhythm instead: the newborn's reveal resolve and its
+        // first-layout surface creation arm on events (the pane motion
+        // change, the newborn's Loaded) that are still queued at this
+        // instant, so consuming the splice's own invalidation here would
+        // leave them waiting on nothing. The InvalidateMeasure below
+        // guarantees the async pass still comes, once those events have
+        // delivered - the same pass the framework would have run without
+        // the settle, at the same point in the event order.
+        UpdateLayout();
+        InvalidateMeasure();
+
         // The split's fade: the geometry snapped above (the splice is in
         // place), and the new pane fades in over the cap while its surface
         // spawns. Off is the plain cut: no board is built and the pane
