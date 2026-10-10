@@ -1000,6 +1000,21 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // over live cells again.
         BellOverlay.BorderThickness = gutter;
 
+        // Arm the one-shot creation subscription HERE, at construction,
+        // not only in OnLoaded. Loaded delivery lags the first layout
+        // pass under rapid split churn (the pane is added, measured and
+        // arranged while its Loaded event is still queued), and the
+        // subscription armed only at Loaded then misses the pass that
+        // sized the panel - a measured, attached pane waits surface-less
+        // for the next pass that happens to come (or the 250 ms
+        // fallback), which the birth floor reads as a dead pane. Armed
+        // at construction the handler simply fires at whichever pass
+        // first sizes the panel, before or after Loaded. A detached
+        // control gets no layout passes, so arming early is inert until
+        // the pane enters a tree, and OnLoaded's idempotent re-arm (the
+        // -=/+= pair) keeps reparent size pushes exactly as they were.
+        Panel.LayoutUpdated += OnFirstLayoutUpdated;
+
         ApplyGutterBrush();
     }
 
