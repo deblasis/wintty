@@ -86,8 +86,11 @@ The comma-wrap binds the whole line array as ONE item, Where-Object runs
 once over the file-as-object, and WriteAllLines writes the stringified
 file as a single line; the leading `#` makes that line a comment, so the
 scan sees an effectively empty script. Running the real scan on that
-1-line mutant returns 11 failures, every one of them an absence rule
-over the empty script and none of them the owned-tree rule:
+1-line mutant returns 11 failures, all of them absence echoes over the
+empty script - note the owned-tree row's own Rule text ('mints no owned
+state tree') IS among them, so rule-text firing alone would NOT
+distinguish the shapes; it is the PARSE gate that catches the old shape
+(4 parse errors on the 1-line mutant, 0 on the repaired 641-line edit):
 
 ```
 weak-old-shape.ps1 declares no [scriptblock]$BeforeTeardown parameter

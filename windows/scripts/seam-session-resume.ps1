@@ -579,7 +579,7 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
                     # PRODUCT_EXIT and seam-pipe failures keep their own
                     # classes; only a served op's own error is recast.
                     if ($probe -notlike 'PRODUCT_FAIL*') { throw }
-                    throw "PRODUCT_FAIL: pane-sessions is served but the probe errored: $probe"
+                    throw "PRODUCT_FAIL: the pane-sessions probe errored (served-ness unconfirmed - the error may predate the daemon seeing the op): $probe"
                 }
                 if ($null -eq $sessions.PSObject.Properties['sessions']) {
                     throw 'PRODUCT_FAIL: pane-sessions is served but answers with no sessions field'
