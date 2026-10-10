@@ -9,21 +9,25 @@
     Why a sibling of seam-initial-size.ps1 and not rows in it: that harness's
     Invoke-Run hardcodes window-save-state=never and a fresh state tree per
     launch, and every row it has depends on both. A resume needs the opposite
-    lifecycle -- window-save-state=always plus ONE owned tree shared across two
-    launches (save, kill, restore) -- so threading it through Invoke-Run would
-    tangle every existing row. This file reuses its row vocabulary instead (the
-    `& $Body` scenario pattern, settle budgets, results.json rows, PRODUCT_FAIL
-    semantics, exit 0/2/1) and mirrors its oracles (copied, not shared: a shared
-    helper would couple the two harnesses' edits).
+    policy -- window-save-state=always -- plus a FRESH owned tree per pair:
+    the save and its restore share one tree (save, kill, restore), but no
+    pair boots on another's session.json -- so threading it through
+    Invoke-Run would tangle every existing row. This file reuses its row
+    vocabulary instead (the `& $Body` scenario pattern, settle budgets,
+    results.json rows, PRODUCT_FAIL semantics, exit 0/2/1) and mirrors its
+    oracles (copied, not shared: a shared helper would couple the two
+    harnesses' edits).
 
     What each row proves, honestly:
       resume-cold[+@daemon]  session 1 builds two tabs and the debounced persist
-        writes session.json under the owned tree; session 1 is killed (no clean
-        shutdown -- the kill is why the config is `always`: `default` would not
-        restore a dirty file); session 2 relaunches on the SAME owned tree and
-        must show BOTH tabs before opening anything (a fresh launch would show
-        one), each pane live with its marker on screen inside the cmd budget
-        and judged by the birth oracles (floor born+settled, equality, wrap).
+        writes session.json under the pair's own owned tree; session 1 is
+        killed (no clean shutdown -- the kill is why the config is `always`:
+        `default` would not restore a dirty file); session 2 relaunches on
+        the SAME pair tree and must show BOTH tabs before opening anything (a
+        fresh launch would show one), each pane live with its marker on
+        screen inside the cmd budget and judged by the birth oracles (floor
+        born+settled, equality, wrap). The tree dies with the pair, so no
+        later pair boots on its session.json.
       resume-cold-fallback[+@daemon]  same, but session 2's config withdraws
         the second profile: the registry must no longer resolve it (asserted),
         and the tab must still come back through the saved fallback command
@@ -410,27 +414,47 @@ $savedEnv = @{}
 foreach ($n in 'WINTTY_STATE_BASE', 'WINTTY_STATE_BASE_TOKEN') {
     $savedEnv[$n] = if (Test-Path "Env:$n") { (Get-Item "Env:$n").Value } else { $null }
 }
-# One owned tree for the whole run: both phases adopt it (path AND token),
-# so the restore reads the save's session.json. Under temp, so the guard's
-# state rule holds; the token keeps a pane's shell from adopting it.
-$owned = New-WinttyOwnedStateBase
+# A FRESH owned tree per pair, not one for the run: a save and its restore
+# share one tree, but no pair sees another's session.json. With
+# window-save-state=always ANY boot on a tree holding session.json restores
+# (SessionGate Always) and the restore's own persist re-saves at once
+# (SessionManager debounce), so a shared tree hands the next save a restore
+# (its open-profile then lands a third tab). Fresh trees keep each pair's
+# cold proof honest. Under temp, so the guard's state rule holds; the token
+# keeps a pane's shell from adopting it.
+function Remove-ResumeOwned($owned, [string]$Tag, [string[]]$Rows) {
+    # A failed pair keeps its session file; it is the only record of what
+    # the save wrote and what the restore read.
+    $failed = @($script:Results | Where-Object {
+            $r = $_
+            (-not $r.ok) -and (@($Rows | Where-Object { $r.name -like "$_*" }).Count -gt 0)
+        })
+    if ($failed.Count -gt 0) {
+        Copy-Item -LiteralPath (Join-Path $owned.Path 'Wintty') -Destination (Join-Path $OutDir "resume-state-$Tag") -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $owned.Path -Recurse -Force -ErrorAction SilentlyContinue
+}
 try {
     if ($Scenario -in @('all', 'cold')) {
         foreach ($mode in @('local', 'daemon')) {
             $daemon = ($mode -eq 'daemon')
-            $save = $null
+            $suffix = if ($daemon) { '@daemon' } else { '' }
+            # The cold pair on its own tree: the save and its restore share
+            # it, and nothing else ever boots on it.
+            $ownedCold = New-WinttyOwnedStateBase
             try {
-                $save = Invoke-SavePhase $mode $owned.Path $owned.Token
-            }
-            catch {
-                $suffix = if ($daemon) { '@daemon' } else { '' }
-                $msg = "$($_.Exception.Message)"
-                $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
-                Add-Result "resume-cold$suffix" $false $class "save phase: $msg"
-                Add-Result "resume-cold-fallback$suffix" $false $class "save phase failed, so the fallback restore never ran: $msg"
-                continue
-            }
-            $base = @"
+                $save = $null
+                try {
+                    $save = Invoke-SavePhase $mode $ownedCold.Path $ownedCold.Token
+                }
+                catch {
+                    $msg = "$($_.Exception.Message)"
+                    $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+                    Add-Result "resume-cold$suffix" $false $class "save phase: $msg"
+                    Add-Result "resume-cold-fallback$suffix" $false $class "save phase failed, so the fallback restore never ran: $msg"
+                    continue
+                }
+                $base = @"
 windows-single-instance = false
 window-save-state = always
 mux-attach = $($daemon ? 'true' : 'false')
@@ -440,13 +464,19 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
 profile.vanishing.name = Vanishing
 profile.vanishing.command = cmd.exe /d /c echo $MarkerVanish & ping -n 120 127.0.0.1 > nul
 "@
-            # The plain cold restore: the same config, so both profiles
-            # resolve and both tabs come back by id.
-            Invoke-RestorePhase "resume-cold$($save.Suffix)" $mode $owned.Path $owned.Token $base $true $save.Active
-            # The fallback restore: the config no longer stages `vanishing`.
-            # Same owned tree (the save's file still names it), so the tab
-            # can only come back through its saved fallback command.
-            $withdrawn = @"
+                # The plain cold restore: the same config, so both profiles
+                # resolve and both tabs come back by id.
+                Invoke-RestorePhase "resume-cold$($save.Suffix)" $mode $ownedCold.Path $ownedCold.Token $base $true $save.Active
+            }
+            finally {
+                Remove-ResumeOwned $ownedCold "cold$suffix" @("resume-cold$suffix", "resume-save-teardown$suffix")
+            }
+            # The fallback pair on its own tree: a fresh save, then a restore
+            # whose config no longer stages `vanishing`, so the tab can only
+            # come back through its saved fallback command.
+            $ownedFallback = New-WinttyOwnedStateBase
+            try {
+                $withdrawn = @"
 windows-single-instance = false
 window-save-state = always
 mux-attach = $($daemon ? 'true' : 'false')
@@ -454,32 +484,34 @@ default-profile = idle
 profile.idle.name = Idle
 profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > nul
 "@
-            # Fresh save before the fallback restore: the plain restore above
-            # re-armed the file dirty and re-saved both tabs, which is the
-            # same shape -- but an explicit save keeps the row independent of
-            # row order. (It reuses the save phase; its own markers re-render.)
-            try {
-                $save2 = Invoke-SavePhase $mode $owned.Path $owned.Token
+                try {
+                    $save2 = Invoke-SavePhase $mode $ownedFallback.Path $ownedFallback.Token
+                }
+                catch {
+                    $msg = "$($_.Exception.Message)"
+                    $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+                    Add-Result "resume-cold-fallback$suffix" $false $class "save phase: $msg"
+                    continue
+                }
+                Invoke-RestorePhase "resume-cold-fallback$suffix" $mode $ownedFallback.Path $ownedFallback.Token $withdrawn $false $save2.Active
             }
-            catch {
-                $msg = "$($_.Exception.Message)"
-                $class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
-                Add-Result "resume-cold-fallback$($save.Suffix)" $false $class "save phase: $msg"
-                continue
+            finally {
+                Remove-ResumeOwned $ownedFallback "fallback$suffix" @("resume-cold-fallback$suffix", "resume-save-teardown$suffix")
             }
-            Invoke-RestorePhase "resume-cold-fallback$($save.Suffix)" $mode $owned.Path $owned.Token $withdrawn $false $save2.Active
         }
     }
 
     if ($Scenario -in @('all', 'hot')) {
         # HOT: the daemon already holds the session; the client only displays
         # it. Staged only in daemon mode (mux-attach=true): a local-only hot
-        # row would be a contradiction in terms.
+        # row would be a contradiction in terms. Its own tree, like every
+        # pair above: no scenario boots on another's session.json.
+        $ownedHot = New-WinttyOwnedStateBase
         $s = $null
         try {
             Assert-NoWinttyFrom -ExePath $ExePath -Context 'seam-session-resume hot'
-            $env:WINTTY_STATE_BASE = $owned.Path
-            $env:WINTTY_STATE_BASE_TOKEN = $owned.Token
+            $env:WINTTY_STATE_BASE = $ownedHot.Path
+            $env:WINTTY_STATE_BASE_TOKEN = $ownedHot.Token
             $config = @"
 windows-single-instance = false
 window-save-state = always
@@ -492,7 +524,7 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
             # -PrivateStateBase: the hot launch adopts the owned tree too, or
             # its probe runs on a minted tree and proves nothing about it.
             $s = Start-SeamSession -ExePath $ExePath -ConfigText $config -BeforeTeardown $BeforeTeardown
-            if ($s.StateBase -ne $owned.Path) { throw "HARNESS: Start-SeamSession did not adopt the owned tree (saw '$($s.StateBase)', wanted '$($owned.Path)')" }
+            if ($s.StateBase -ne $ownedHot.Path) { throw "HARNESS: Start-SeamSession did not adopt the owned tree (saw '$($s.StateBase)', wanted '$($ownedHot.Path)')" }
             $script:Current = $s
             Invoke-Scenario 'resume-hot@daemon' {
                 # The proof this row owes: the daemon held the session BEFORE
@@ -522,6 +554,7 @@ profile.idle.command = cmd.exe /d /c echo $MarkerCold & ping -n 120 127.0.0.1 > 
                 }
                 if ($s.Proc) { [void]$s.Proc.WaitForExit(20000) }
             }
+            Remove-ResumeOwned $ownedHot 'hot-daemon' @('resume-hot@daemon')
         }
     }
 }
@@ -530,13 +563,6 @@ finally {
         if ($null -ne $savedEnv[$n]) { Set-Item "Env:$n" $savedEnv[$n] }
         else { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
     }
-    # A failed run keeps the session file; it is the only record of what the
-    # save wrote and what the restore read.
-    $failed = @($script:Results | Where-Object { -not $_.ok })
-    if ($failed.Count -gt 0) {
-        Copy-Item -LiteralPath (Join-Path $owned.Path 'Wintty') -Destination (Join-Path $OutDir 'resume-state') -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item -LiteralPath $owned.Path -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # The scenario ledger: one row per scenario per mode, the shape the
