@@ -3542,10 +3542,17 @@ internal static class TestSeam
             if (_events.Count < 256) _events.Add((state, QpcMs()));
             if (state == "activated") Activated++;
             else Deactivated++;
+            _focusNow = state == "activated";
         }
 
+        // Tracked beside the counters, not derived from the bounded events
+        // list: past the 256th transition the list stops growing while the
+        // activation state keeps changing, and a derived read would freeze
+        // at event #256's state forever.
+        private bool _focusNow;
+
         /// <summary>The last activation state the window reached.</summary>
-        public bool FocusNow => _events.Count > 0 && _events[^1].State == "activated";
+        public bool FocusNow => _focusNow;
 
         public IReadOnlyList<(string State, long Ms)> Events => _events;
 
@@ -3680,8 +3687,11 @@ internal static class TestSeam
         }
 
         json.WriteEndArray();
-        if (state.LoadedMs is { } loadedMs) json.WriteNumber("loadedMs", loadedMs);
-        if (state.FirstRenderMs is { } renderMs) json.WriteNumber("firstRenderMs", renderMs);
+        // Explicit zeros, not omitted keys: the spec lists both fields, and
+        // harnesses should not have to distinguish absence from
+        // not-yet-observed.
+        json.WriteNumber("loadedMs", state.LoadedMs is { } loadedMs ? loadedMs : 0);
+        json.WriteNumber("firstRenderMs", state.FirstRenderMs is { } renderMs ? renderMs : 0);
 
         // A full-window login gate an edition may add to the root grid,
         // matched by type name so the seam compiles the same everywhere:
