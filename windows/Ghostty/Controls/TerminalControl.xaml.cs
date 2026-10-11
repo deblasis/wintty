@@ -131,6 +131,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private bool _surfaceCreated;
     private bool _surfaceDisposed;
 
+    // The panel size the last layout pass reported to the creation gate,
+    // and whether one has. Creation waits for a size the layout repeats
+    // (see CreationMeasureSettled), so the gate keeps the previous pass's
+    // measurement to compare against.
+    private Windows.Foundation.Size _lastCreationMeasure;
+    private bool _hasCreationMeasure;
+
     // A surface that libghostty could not create (renderer device init
     // failed: a GPU-less machine or a cold-composition boot window) is a
     // "not yet", not a verdict. The creation retries on this timer and, if
@@ -1542,14 +1549,52 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         }
     }
 
+    /// <summary>
+    /// Whether the panel's measurement has settled: the same size on two
+    /// consecutive layout passes. The first sizing pass can carry a
+    /// transient (the launch pane's 4 px pre-DWM-settle overshoot); a size
+    /// that repeats is a size the arrange has committed to, and creating
+    /// the surface there is what keeps the pty's creation pixels equal to
+    /// the pane's settled ones (#1159). The comparison carries a
+    /// half-DIP tolerance: sub-pixel jitter between identical arranges is
+    /// not movement, while the smallest real settle step the window takes
+    /// is whole pixels. UI thread only (a layout handler).
+    /// </summary>
+    private bool CreationMeasureSettled()
+    {
+        var measure = new Windows.Foundation.Size(Panel.ActualWidth, Panel.ActualHeight);
+        if (_hasCreationMeasure
+            && System.Math.Abs(measure.Width - _lastCreationMeasure.Width) <= 0.5
+            && System.Math.Abs(measure.Height - _lastCreationMeasure.Height) <= 0.5)
+        {
+            return true;
+        }
+
+        _lastCreationMeasure = measure;
+        _hasCreationMeasure = true;
+        return false;
+    }
+
     private void OnFirstLayoutUpdated(object? sender, object e)
     {
         if (!_surfaceCreated)
         {
-            // Nothing to size yet: create the surface at this pass's size,
-            // or wait for a pass that gives the panel one. A creation the
-            // device refused returns false too and leaves this subscription
-            // in place; the retry timer drives the next attempts.
+            // Nothing to size yet: create the surface at a measurement the
+            // layout has SETTLED on - the same size on two consecutive
+            // passes - or wait for a pass that has. The first sizing pass
+            // can carry a transient the window's own settle has not
+            // finished (the launch pane measured 4 px tall before the DWM
+            // settle completes, a sub-cell delta that never re-renders the
+            // grid but leaves the pty's creation pixels unequal to the
+            // pane's settled ones - the #1159 equality). A size that
+            // repeats is a size the arrange has committed to; a size still
+            // moving means the settle is still running and creating now
+            // would re-open the ghost-size class. The 250 ms fallback
+            // below remains the backstop for a pane whose size never gets
+            // a second pass to repeat in. A creation the device refused
+            // returns false and leaves this subscription in place; the
+            // retry timer drives the next attempts.
+            if (!CreationMeasureSettled()) return;
             TrySettleSurfaceCreation();
             return;
         }

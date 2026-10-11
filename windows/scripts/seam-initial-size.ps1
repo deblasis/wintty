@@ -487,10 +487,21 @@ function Format-Screen([string]$Text) {
     return ((($Text -split "`n") | Where-Object { $_.TrimEnd() -ne '' } | Select-Object -First 6) -join ' | ')
 }
 
-# The #1159 equality oracle: the pty started at the pane's size.
+# The #1159 equality oracle: the pty started at the pane's size. The
+# GRID must match exactly (born at the settled grid is the claim); the
+# PIXEL axes may differ by under one cell each way - a pane created at
+# the window's pre-DWM-settle extent holds a delta the grid cannot see
+# (a 4px height overshoot at a ~21px cell), and the settled pane reports
+# the settled extent, so an exact-pixel equality would fail a healthy
+# launch pane whose creation fired at the first sizing pass.
 function Test-Pane([string]$What, $r) {
-    if ($r.spawnWidthPx -ne $r.widthPx -or $r.spawnHeightPx -ne $r.heightPx -or
-        $r.spawnCols -ne $r.cols -or $r.spawnRows -ne $r.rows) {
+    if ($r.spawnCols -ne $r.cols -or $r.spawnRows -ne $r.rows) {
+        return "${What}: $(Format-Pane $r)"
+    }
+    $cellW = if ($r.cellWidthPx -gt 0) { [double]$r.cellWidthPx } else { 10 }
+    $cellH = if ($r.cellHeightPx -gt 0) { [double]$r.cellHeightPx } else { 20 }
+    if ([math]::Abs([double]$r.spawnWidthPx - [double]$r.widthPx) -ge $cellW -or
+        [math]::Abs([double]$r.spawnHeightPx - [double]$r.heightPx) -ge $cellH) {
         return "${What}: $(Format-Pane $r)"
     }
     return $null

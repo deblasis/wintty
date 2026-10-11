@@ -169,4 +169,40 @@ public class SurfaceCreationDriveWiringTests
             a => a.IsKind(SyntaxKind.AddAssignmentExpression)
                  && a.Left.ToString() == "Panel.LayoutUpdated");
     }
+
+    /// <summary>
+    /// The creation branch waits for a SETTLED measurement: the same
+    /// panel size on two consecutive layout passes, through the
+    /// CreationMeasureSettled gate. Arming at construction lets the
+    /// handler fire at the first sizing pass, and the first pass can
+    /// carry a transient the window's settle has not finished (the
+    /// launch pane's 4 px pre-DWM overshoot - sub-cell, so the grid
+    /// never changes, but the pty's creation pixels no longer equal the
+    /// pane's settled ones and the #1159 equality reds). The gate before
+    /// the settle call is what keeps early arming from creating at a
+    /// still-moving size; the 250 ms fallback stays the backstop for a
+    /// size that never gets a second pass.
+    /// </summary>
+    [Fact]
+    public void CreationBranch_WaitsForASettledMeasure()
+    {
+        var handler = Terminal().Method("OnFirstLayoutUpdated").Body!;
+
+        var gate = Assert.Single(handler.DescendantNodesAndSelf()
+            .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "CreationMeasureSettled");
+        var create = Assert.Single(handler.DescendantNodesAndSelf()
+            .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "TrySettleSurfaceCreation");
+
+        Assert.True(gate.SpanStart < create.SpanStart,
+            "the settle-gate must run before the creation attempt, or the first pass's transient size becomes the pty's creation size");
+
+        // And the gate refuses: the guard is an if-statement that returns
+        // while the measurement is still moving, not a fire-and-forget
+        // check whose answer changes nothing.
+        Assert.Contains(handler.DescendantNodesAndSelf()
+            .OfType<IfStatementSyntax>(),
+            s => s.Condition.ToString().Contains("!CreationMeasureSettled()"));
+    }
 }
