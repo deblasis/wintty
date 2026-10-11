@@ -261,15 +261,13 @@ pub const Option = enum {
 ///   meant for one record never falls back to the root record. For
 ///   `state=clear`, that would remove every record.
 /// - An id, title or msg value contains a byte outside the value
-///   alphabet. The whole-report discard in this bullet and the one
-///   above is deliberately stricter than the spec's malformed-pair
-///   clause, which skips the pair: skipping would let a malformed
-///   value steer a clear toward the wrong record, so this parser
-///   refuses the report instead.
-/// - An id, title or msg value contains a byte outside the value
 ///   alphabet. Such a value can be neither a valid id nor valid base64,
 ///   and skipping it would read the pair as absent -- the clear-root
-///   fallback again -- so it discards the report too.
+///   fallback again -- so it discards the report too. That whole-report
+///   discard is deliberately stricter than the spec's malformed-pair
+///   clause, which would skip the pair: skipping would let a malformed
+///   value steer a clear toward the wrong record, so this parser
+///   refuses the report instead.
 /// - `title` or `msg` isn't valid base64, or decodes to text that isn't
 ///   UTF-8 or contains a control character.
 pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*OSCCommand {
