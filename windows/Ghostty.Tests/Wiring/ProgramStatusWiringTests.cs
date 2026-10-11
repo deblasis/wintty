@@ -103,8 +103,8 @@ public class ProgramStatusWiringTests
         // VerticalTabNavRow.Refresh, which the strip drives from an
         // AotBinding: the property must be INSIDE that binding's watched
         // list, or the glyph is computed once at row construction and
-        // then moves only when an unrelated property happens to raise
-        // (panel finding: a background tab's blocked agent never showed).
+        // then moves only when an unrelated property happens to raise;
+        // a background tab's blocked agent would otherwise never show.
         // Structural, not a string count: the parsed binding whose
         // callback refreshes the row must carry the property.
         var strip = ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
@@ -127,7 +127,7 @@ public class ProgramStatusWiringTests
         // A pinned tab is still a tab: its blocked agent must read on
         // the square exactly as it reads on a body row or the horizontal
         // strip, or the pin would hide the one state that asks for the
-        // user (panel LOW, resolved by carrying the glyph).
+        // user; the pinned row carries the glyph for the same reason.
         var pinned = ShellSource.Load("Tabs.VerticalTabPinnedRow.cs").Root.ToString();
         Assert.Contains("TabProgramStatusChrome.ProgramStatusGlyph(", pinned);
         Assert.Contains("tab.ProgramStatus", pinned);
