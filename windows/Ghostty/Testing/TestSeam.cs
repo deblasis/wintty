@@ -1944,6 +1944,30 @@ internal static class TestSeam
                 // login-gate state an edition may add.
                 return WindowEventsJson(window, op);
 
+            case "notices":
+                // #1114's read-only half: the shared notice queue the
+                // service holds, and the InfoBars every open window's
+                // NotificationHost rendered from it, keyed by the host's
+                // own stable AutomationIds.
+                return NoticesJson(window, op);
+
+            case "command":
+            {
+                // #1114's driving half: run a palette command by its id,
+                // through the palette's own source refresh and the item's
+                // own Execute, without opening the palette UI.
+                var id = ArgString(args, "id");
+                if (id is null) return Error(op, "id is required");
+                var palette = window.TestSeamPaletteVm;
+                if (palette is null) return Error(op, "no command palette view model");
+                if (!palette.TestSeamTryExecuteById(id))
+                    return Error(op, $"no palette command '{id}'");
+                // Most palette commands defer their work by one turn; the
+                // ack waits for it, then answers with the usual state.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+                return OkWithState(window, manager, op);
+            }
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
@@ -3736,6 +3760,96 @@ internal static class TestSeam
                 yield return descendant;
             }
         }
+    }
+
+    // ---- notices (#1114) -------------------------------------------------
+
+    private static string NoticesJson(MainWindow window, string op)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+
+            json.WriteStartArray("active");
+            if (App.NotificationService is { } service)
+            {
+                foreach (var notice in service.Active)
+                {
+                    json.WriteStartObject();
+                    json.WriteString("key", notice.DedupKey);
+                    json.WriteString("title", notice.Title);
+                    json.WriteString("message", notice.Message);
+                    if (notice.AutoDismissAfter is { } after)
+                        json.WriteNumber("autoDismissMs", after.TotalMilliseconds);
+                    json.WriteBoolean("focusOnShow", notice.FocusOnShow);
+                    json.WriteEndObject();
+                }
+            }
+
+            json.WriteEndArray();
+
+            // Every window the tracker has seen and that is still open --
+            // the served one, the quick terminal, and any later regular
+            // windows -- each with the bars its NotificationHost rendered.
+            json.WriteStartArray("windows");
+            for (var i = 0; i < TrackedWindows.Count; i++)
+            {
+                var tracked = TrackedWindows[i];
+                json.WriteStartObject();
+                json.WriteNumber("index", i);
+                json.WriteBoolean("seam", ReferenceEquals(tracked.Window, window));
+                json.WriteBoolean(
+                    "lastActive", ReferenceEquals(tracked.Window, App.LastRegularWindow));
+                json.WriteBoolean("quick", tracked.IsQuick);
+                json.WriteStartArray("bars");
+                if (tracked.Window.Content is Microsoft.UI.Xaml.FrameworkElement root)
+                {
+                    foreach (var node in SelfAndDescendants(root))
+                    {
+                        if (node is not Microsoft.UI.Xaml.Controls.InfoBar bar) continue;
+                        if (Microsoft.UI.Xaml.Automation.AutomationProperties
+                                .GetAutomationId(bar) is not { } automationId
+                            || !automationId.StartsWith("Notice_", StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        json.WriteStartObject();
+                        json.WriteString("key", automationId["Notice_".Length..]);
+                        json.WriteString("title", bar.Title);
+                        json.WriteString("message", bar.Message);
+                        json.WriteBoolean("open", bar.IsOpen);
+                        json.WriteBoolean("hasFocus", InfoBarHasFocus(bar));
+                        json.WriteEndObject();
+                    }
+                }
+
+                json.WriteEndArray();
+                json.WriteEndObject();
+            }
+
+            json.WriteEndArray();
+            json.WriteEndObject();
+        });
+
+    /// <summary>
+    /// Whether the bar, or something inside it, holds keyboard focus: the
+    /// same walk-up-from-FocusManager idiom NotificationHost.BarHasFocus
+    /// uses, restated here because that one is private.
+    /// </summary>
+    private static bool InfoBarHasFocus(Microsoft.UI.Xaml.Controls.InfoBar bar)
+    {
+        if (bar.XamlRoot is null) return false;
+        var node = Microsoft.UI.Xaml.Input.FocusManager
+            .GetFocusedElement(bar.XamlRoot) as Microsoft.UI.Xaml.DependencyObject;
+        for (; node is not null;
+             node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+        {
+            if (ReferenceEquals(node, bar)) return true;
+        }
+
+        return false;
     }
 #endif
 

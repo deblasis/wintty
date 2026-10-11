@@ -204,6 +204,25 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         _allCommands = _sources.SelectMany(s => s.GetCommands()).ToList();
     }
 
+/// <summary>
+/// The test seam's command op runs a palette command by its id without
+/// opening the palette UI: refresh every source the way the palette does
+/// when it opens, then find the item and run its own Execute. Returns
+/// false when no command matches. Mirrors <see cref="TryExecuteById"/>
+/// (which is DEMO-only) but queries a fresh local list, so the live
+/// command list a pinned palette may be showing is never overwritten.
+/// </summary>
+internal bool TestSeamTryExecuteById(string id)
+{
+    foreach (var source in _sources)
+        source.Refresh();
+
+    var cmd = _sources.SelectMany(s => s.GetCommands()).FirstOrDefault(c => c.Id == id);
+    if (cmd is null) return false;
+    cmd.Execute(cmd);
+    return true;
+}
+
 #if DEMO
     /// <summary>
     /// Find a command by its <see cref="CommandItem.Id"/> across all sources and
