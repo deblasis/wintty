@@ -430,7 +430,7 @@ internal static class TestSeam
     /// </remarks>
     private static bool IsObserver(string op)
         => op is "layout-frame" or "surface-state" or "selected-paint"
-            or "window-events";
+            or "window-events" or "sessiond-events";
 
     /// <summary>
     /// The one marshal: every command, whatever it touches, runs on the
@@ -1943,6 +1943,15 @@ internal static class TestSeam
                 // Loaded, the first terminal's FirstRender, and the
                 // login-gate state an edition may add.
                 return WindowEventsJson(window, op);
+
+            case "sessiond-events":
+                // The daemon lifecycle log: every event the sessiond
+                // client recorded, on the same shared clock as
+                // window-events. On a plain fork build nothing records
+                // (the client lives in the tier overlays), so the answer
+                // says wired:false and the log is empty -- the readout
+                // shape is the contract the overlay wires into.
+                return SessiondEventsJson(op);
 
             case "notices":
                 // #1114's read-only half: the shared notice queue the
@@ -3851,6 +3860,60 @@ internal static class TestSeam
 
         return false;
     }
+
+    // ---- sessiond-events (#1815's wiring surface) ------------------------
+    //
+    // The daemon lifecycle events (connection transitions, attach/detach,
+    // save/restore, shutdown-for-upgrade, the user-facing [wintty]
+    // notices) all originate in the tier overlays' Sessions client, which
+    // does not exist in a plain fork build. This is the fork-side half:
+    // the recording surface the overlay wires into (TestSeamSessiondEvents
+    // below, callable from any assembly) and this read-only observer. On
+    // a plain fork build the log stays empty and wired reads false -- the
+    // shape is the contract, and the gap list is in the round's report.
+
+    private static readonly object SessiondGate = new();
+    private static readonly List<(long Ms, string Kind, string? SessionId, string? Detail)>
+        SessiondLog = new();
+    private static bool _sessiondWired;
+
+    private static string SessiondEventsJson(string op)
+    {
+        lock (SessiondGate)
+        {
+            return Json(json =>
+            {
+                json.WriteStartObject();
+                json.WriteBoolean("ok", true);
+                json.WriteString("op", op);
+                json.WriteNumber("qpcMs", QpcMs());
+                json.WriteBoolean("wired", _sessiondWired);
+                json.WriteStartArray("events");
+                foreach (var (ms, kind, sessionId, detail) in SessiondLog)
+                {
+                    json.WriteStartObject();
+                    json.WriteNumber("ms", ms);
+                    json.WriteString("kind", kind);
+                    if (sessionId is not null) json.WriteString("sessionId", sessionId);
+                    if (detail is not null) json.WriteString("detail", detail);
+                    json.WriteEndObject();
+                }
+
+                json.WriteEndArray();
+                json.WriteEndObject();
+            });
+        }
+    }
+
+    internal static void RecordSessiondEvent(string kind, string? sessionId, string? detail)
+    {
+        lock (SessiondGate)
+        {
+            if (SessiondLog.Count >= 512) SessiondLog.RemoveAt(0);
+            SessiondLog.Add((QpcMs(), kind, sessionId, detail));
+            _sessiondWired = true;
+        }
+    }
 #endif
 
     // ---- outside the build gate ---------------------------------------
@@ -3904,3 +3967,20 @@ internal sealed class TestSeamDragOutcome
         return this;
     }
 }
+
+#if TESTSEAM
+/// <summary>
+/// The public face of the seam's sessiond-event recorder, so the tier
+/// overlays' Sessions client -- a separate assembly -- can feed the
+/// sessiond-events observer without the app granting it internals.
+/// Vocabulary, all optional beyond the kind: connecting, connected, down,
+/// attach, detach, save, restore, shutdown-for-upgrade, notice (detail
+/// carries the user-facing text). Thread-safe; bounded; inert in a build
+/// without the seam.
+/// </summary>
+public static class TestSeamSessiondEvents
+{
+    public static void Record(string kind, string? sessionId = null, string? detail = null)
+        => TestSeam.RecordSessiondEvent(kind, sessionId, detail);
+}
+#endif
