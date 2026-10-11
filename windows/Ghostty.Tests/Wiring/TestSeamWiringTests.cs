@@ -38,61 +38,11 @@ public class TestSeamWiringTests
     /// Assert that <paramref name="span"/> sits inside this file's one
     /// <c>#if TESTSEAM</c> region.
     ///
-    /// This is the guard that says a shipping build carries none of it.
-    /// ShellSource parses with TESTSEAM defined -- it must, or every scan
-    /// below would be reading an empty file -- so the code is visible here
-    /// and the directives survive as trivia. Reading the directives back is
-    /// the only way to check, from a parse that sees the region, that the
-    /// region exists at all.
+    /// The rule itself lives in <see cref="SeamBuildGate"/>, shared with the
+    /// other seam test files; this is the local spelling.
     /// </summary>
     private static void AssertInsideTheBuildGate(SyntaxNode root, TextSpan span, string what)
-    {
-        var directives = root.DescendantTrivia()
-            .Where(t => t.IsKind(SyntaxKind.IfDirectiveTrivia)
-                        || t.IsKind(SyntaxKind.EndIfDirectiveTrivia)
-                        || t.IsKind(SyntaxKind.ElseDirectiveTrivia)
-                        || t.IsKind(SyntaxKind.ElifDirectiveTrivia))
-            .OrderBy(t => t.SpanStart)
-            .ToList();
-
-        var opens = directives
-            .Where(t => t.IsKind(SyntaxKind.IfDirectiveTrivia)
-                        && ((IfDirectiveTriviaSyntax)t.GetStructure()!)
-                            .Condition.ToString() == "TESTSEAM")
-            .ToList();
-        Assert.True(
-            opens.Count == 1,
-            $"expected exactly one '#if TESTSEAM' region, found {opens.Count}. "
-            + "The seam's absence from a shipping build is what that region is for.");
-
-        // Walk to the #endif that closes it, counting nesting, so an unrelated
-        // conditional inside the region cannot be mistaken for the close.
-        var open = opens[0];
-        var depth = 0;
-        TextSpan? close = null;
-        foreach (var t in directives.Where(t => t.SpanStart >= open.SpanStart))
-        {
-            if (t.IsKind(SyntaxKind.IfDirectiveTrivia)) depth++;
-            else if (t.IsKind(SyntaxKind.EndIfDirectiveTrivia))
-            {
-                depth--;
-                if (depth == 0) { close = t.Span; break; }
-            }
-            else if (depth == 1)
-            {
-                // An #else or #elif would leave a branch this parse cannot
-                // see, and ShellSource.Load already refuses that; catching it
-                // here names the reason.
-                Assert.Fail($"the '#if TESTSEAM' region has an {t.Kind()}, which "
-                    + "splits it into a branch the wiring scans cannot read");
-            }
-        }
-        Assert.True(close is not null, "the '#if TESTSEAM' region is never closed");
-        Assert.True(
-            span.Start > open.Span.End && span.End < close!.Value.Start,
-            $"{what} is outside the '#if TESTSEAM' region, so a shipping build "
-            + "would still carry it");
-    }
+        => SeamBuildGate.AssertInsideTheBuildGate(root, span, what);
 
     private static void CtorCallsTestSeamStart()
     {
@@ -338,13 +288,21 @@ public class TestSeamWiringTests
             .OfType<BlockSyntax>().SelectMany(b => b.Statements).First());
         Assert.Equal("!_inputAllowed", keyFirst.Condition.ToString());
 
+        // ui-liveness is the fourth gated op: its echo arm types markers
+        // into live shells through the same path, and the refusal is the
+        // first thing its case does (pinned in its own file).
+        var liveness = source.Case("ExecuteOnUiThreadAsync", "\"ui-liveness\"");
+        var livenessFirst = Assert.IsType<IfStatementSyntax>(liveness.Statements
+            .OfType<BlockSyntax>().SelectMany(b => b.Statements).First());
+        Assert.Equal("!_inputAllowed", livenessFirst.Condition.ToString());
+
         // And nothing else in the seam consults it, so the gate is exactly
-        // those three ops wide and cannot have quietly become the gate for
+        // those four ops wide and cannot have quietly become the gate for
         // everything.
         var mentions = source.Root.DescendantNodes()
             .OfType<IdentifierNameSyntax>()
             .Count(i => i.Identifier.ValueText == "_inputAllowed");
-        Assert.Equal(4, mentions); // the one write, the three reads
+        Assert.Equal(5, mentions); // the one write, the four reads
     }
 
     /// <summary>

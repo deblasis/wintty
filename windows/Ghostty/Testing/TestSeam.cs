@@ -957,6 +957,92 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "ui-liveness":
+            {
+                // The all-panes liveness walk: every LIVE pane in the active
+                // tab answers for itself -- visible through its whole
+                // ancestor chain, effectively opaque (an ancestor left at
+                // partial opacity fails the pane, not just the pane's own
+                // property), non-zero sized, hit-testable over its own slot,
+                // and echoing typed input back through the shell's real
+                // in-process path. The defect class is a pane that sits
+                // empty and unresponsive while everything around it passes:
+                // a pane whose surface never came up answers no echo and no
+                // hit over its own slot, so the walk reds exactly there.
+                // The echo types markers into live shells, so the whole op
+                // sits behind send-text's own opt-in: a harness that only
+                // moves chrome must not be able to make a shell type.
+                if (!_inputAllowed)
+                    return Error(op, $"ui-liveness is off; set {InputEnvVar}=1 to arm it (its echo types into live shells)");
+                if (manager.ActiveTab is null)
+                    return Error(op, "no active tab");
+                var host = (Panes.PaneHost)manager.ActiveTab.PaneHost;
+                var leaves = host.TestSeamLeaves;
+                // A walk over zero panes would read as "every pane answered
+                // every arm" to a judge that only checks failure fields, so
+                // a dead tree or a torn-down tab refuses instead of
+                // answering green.
+                if (leaves.Count == 0)
+                    return Error(op, "no live panes to walk: the liveness answer refuses a vacuous walk");
+
+                // The deliberate defect, when asked for: the topmost visual
+                // ancestor below the window, at a partial opacity for THIS
+                // walk only -- the shape a leaked fade or a half-applied
+                // cover leaves behind, applied where the composite arm
+                // exists to catch it. Restored in the finally below, so a
+                // walk that threw still puts the ancestor back.
+                double? seeded = null;
+                Microsoft.UI.Xaml.FrameworkElement? defectTarget = null;
+                var defectBefore = 1.0;
+                if (args.TryGetProperty("seedAncestorOpacity", out var seedEl))
+                {
+                    // Strict parse: a misspelled seed that silently walked
+                    // clean would be indistinguishable from an unseeded one.
+                    if (seedEl.ValueKind != JsonValueKind.Number
+                        || !seedEl.TryGetDouble(out var seed)
+                        || seed < 0.0 || seed > 1.0
+                        || Math.Abs(seed - 1.0) <= 0.001)
+                    {
+                        return Error(op,
+                            "seedAncestorOpacity needs a number in [0,1] below 1; 1 is the unseeded walk");
+                    }
+
+                    var seedWalk = (Microsoft.UI.Xaml.DependencyObject)leaves[0].Terminal();
+                    while (Microsoft.UI.Xaml.Media.VisualTreeHelper
+                            .GetParent(seedWalk) is { } parent)
+                    {
+                        if (parent is Microsoft.UI.Xaml.FrameworkElement parentFe)
+                        {
+                            defectTarget = parentFe;
+                        }
+
+                        seedWalk = parent;
+                    }
+
+                    if (defectTarget is null)
+                    {
+                        return Error(op,
+                            "cannot seed the ancestor-opacity defect: the pane has no ancestor below the window");
+                    }
+
+                    defectBefore = defectTarget.Opacity;
+                    defectTarget.Opacity = seed;
+                    seeded = seed;
+                }
+
+                try
+                {
+                    return await UiLivenessJsonAsync(window, op, host, leaves, seeded);
+                }
+                finally
+                {
+                    if (defectTarget is not null)
+                    {
+                        defectTarget.Opacity = defectBefore;
+                    }
+                }
+            }
+
             case "tab-labels":
             {
                 // What the shell reported and what the strip drew, per tab.
@@ -3040,6 +3126,333 @@ internal static class TestSeam
             }
         }
         return stable >= 3;
+    }
+
+    /// <summary>One pane's answers, one row per live leaf.</summary>
+    private sealed class UiLivenessRow
+    {
+        public required int Leaf;
+        public required bool SurfaceLive;
+        public required bool VisibleAll;
+        public required double CompositeOpacity;
+        public required double Width;
+        public required double Height;
+        public required bool HitSelf;
+        public required bool Echoed;
+        public required bool EchoRetried;
+        public required double EchoMs;
+    }
+
+    /// <summary>
+    /// Walks of this op that have already failed a pane's echo: the pane
+    /// stays a finding on later walks without re-costing each one the full
+    /// echo budget, because the seam serves ops one at a time and an
+    /// oracle that stalls behind a dead pane is itself a defect. A pane
+    /// that echoes again clears itself. Keyed by leaf index, positional in
+    /// <c>PaneTree.Leaves</c> order: a remembered index naming a different
+    /// pane after a split or close only ever shortens that pane's probe.
+    /// </summary>
+    private static readonly HashSet<int> _uiLivenessDeadEcho = new();
+
+    /// <summary>
+    /// The uniqueness behind every echo marker this op sends: a marker
+    /// unique per pane per walk, so a stale echo from an earlier walk can
+    /// never answer for this one.
+    /// </summary>
+    private static long _uiLivenessStamp;
+
+    /// <summary>
+    /// The walk behind the ui-liveness op: per live pane the composite
+    /// visibility and opacity through EVERY visual ancestor, the pane's own
+    /// size, a hit-test over its own slot resolving its own subtree, and a
+    /// typed-input echo round trip through the shell's real in-process
+    /// input path; beside the rows, the dispatcher's own round trip and
+    /// the presentation clock's tick count over the walk's whole window.
+    ///
+    /// The echo arm is conditional on the cheap arms: a pane that already
+    /// failed its surface, hit, visibility, opacity or size is dead on
+    /// those arms' evidence, and paying it the echo budget as well would
+    /// only slow the red. A pane remembered dead from an earlier walk is
+    /// re-probed at a shorter budget instead, and clears itself if the
+    /// input path came back.
+    /// </summary>
+    private static async Task<string> UiLivenessJsonAsync(
+        MainWindow window, string op, Panes.PaneHost host,
+        IReadOnlyList<Core.Panes.LeafPane> leaves, double? seeded)
+    {
+        // The dispatcher arm: one Low-priority round trip, the same pump
+        // every seam op rides, timed. A judge holds this against a budget
+        // of its own; what the measurement owes is that it is of the
+        // dispatcher the ops themselves wait on.
+        var dispatcherSw = System.Diagnostics.Stopwatch.StartNew();
+        await WaitForLowPriorityAsync(window.DispatcherQueue);
+        dispatcherSw.Stop();
+        var dispatcherTurnMs = dispatcherSw.Elapsed.TotalMilliseconds;
+
+        // The presentation clock over the walk, as evidence: an idle pane
+        // renders through its own swap chain, so the composition clock
+        // legitimately stands still between animations. Subscribed for the
+        // walk and retired in the finally, because the event is static and
+        // a leak here would pin a closed window's handler forever.
+        var frames = 0;
+        void OnUiLivenessFrame(object sender, object e) => frames++;
+        Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += OnUiLivenessFrame;
+
+        var stamp = _uiLivenessStamp++;
+        var rows = new List<UiLivenessRow>();
+        try
+        {
+            for (var i = 0; i < leaves.Count; i++)
+            {
+                var terminal = leaves[i].Terminal();
+                var surfaceLive = terminal.TestSeamHasSurface;
+
+                // The composite arm: the product of every Opacity between
+                // the pane and the top of the visual tree, and Visible
+                // through every ancestor. The pane's own Opacity of 1 says
+                // nothing about what the eye gets when an ancestor above it
+                // is at partial opacity -- the shape a leaked fade or a
+                // half-applied cover leaves behind.
+                var visibleAll = terminal.Visibility
+                    == Microsoft.UI.Xaml.Visibility.Visible;
+                var composite = terminal.Opacity;
+                for (var node = (Microsoft.UI.Xaml.DependencyObject)terminal;
+                    Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node) is { } parent;
+                    node = parent)
+                {
+                    if (parent is Microsoft.UI.Xaml.FrameworkElement parentFe)
+                    {
+                        composite *= parentFe.Opacity;
+                        if (parentFe.Visibility != Microsoft.UI.Xaml.Visibility.Visible)
+                        {
+                            visibleAll = false;
+                        }
+                    }
+                }
+
+                // The hit arm: the centre of the pane's own slot through the
+                // real hit-test, resolved to THIS pane's terminal subtree.
+                // The centre, not a corner -- a corner can sit on a
+                // neighbour's splitter while the pane's own slot is dead.
+                // Carries a bounded retry: a tree that just rebuilt (a
+                // split, a restore) can legitimately sit a few frames from
+                // its arrange, and a transitional miss is not the dead hit
+                // region this arm exists to catch.
+                var hitSelf = false;
+                for (var hitAttempt = 0; hitAttempt < 5 && !hitSelf; hitAttempt++)
+                {
+                    var rects = host.TestSeamLeafRects;
+                    if (i < rects.Count)
+                    {
+                        var rect = rects[i];
+                        if (rect.Width > 1 && rect.Height > 1)
+                        {
+                            var center = new Windows.Foundation.Point(
+                                rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+                            foreach (var hit in Microsoft.UI.Xaml.Media.VisualTreeHelper
+                                         .FindElementsInHostCoordinates(center, host))
+                            {
+                                for (var node = (Microsoft.UI.Xaml.DependencyObject?)hit;
+                                    node is not null && !hitSelf;
+                                    node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+                                {
+                                    if (ReferenceEquals(node, terminal))
+                                    {
+                                        hitSelf = true;
+                                    }
+                                }
+
+                                if (hitSelf)
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!hitSelf && hitAttempt < 4)
+                    {
+                        await WaitForLowPriorityAsync(window.DispatcherQueue);
+                    }
+                }
+
+                // The echo arm: a marker unique to this pane and this walk,
+                // typed through the shell's real input path and read back
+                // out of the cell grid. A first send can be swallowed by a
+                // focus transition, so one re-send happens before the path
+                // is called dead -- "swallowed once" and "dead" are
+                // different findings, and echoRetried carries the swallow
+                // as evidence.
+                var marker = $"ZL{i}x{stamp}";
+                var echoKnown = _uiLivenessDeadEcho.Contains(i);
+                var echoed = false;
+                var echoRetried = false;
+                var echoMs = 0.0;
+                if (echoKnown)
+                {
+                    // Remembered dead: re-probe at the short budget. A pane
+                    // whose input path came back clears itself here.
+                    if (surfaceLive && terminal.TestSeamSendText(marker))
+                    {
+                        var probeBy = DateTime.UtcNow.AddMilliseconds(600);
+                        while (DateTime.UtcNow < probeBy)
+                        {
+                            await WaitForLowPriorityAsync(window.DispatcherQueue);
+                            if (UiLivenessSurfaceTextContains(terminal, marker))
+                            {
+                                echoed = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (echoed)
+                    {
+                        _uiLivenessDeadEcho.Remove(i);
+                    }
+                }
+                else if (surfaceLive
+                    && hitSelf
+                    && visibleAll
+                    && Math.Abs(composite - 1.0) <= 0.001
+                    && terminal.ActualWidth > 0
+                    && terminal.ActualHeight > 0
+                    && terminal.TestSeamSendText(marker))
+                {
+                    var echoSw = System.Diagnostics.Stopwatch.StartNew();
+                    var echoBy = DateTime.UtcNow.AddMilliseconds(1500);
+                    while (DateTime.UtcNow < echoBy)
+                    {
+                        await WaitForLowPriorityAsync(window.DispatcherQueue);
+                        if (UiLivenessSurfaceTextContains(terminal, marker))
+                        {
+                            echoed = true;
+                            break;
+                        }
+                    }
+
+                    if (!echoed)
+                    {
+                        echoRetried = true;
+                        var retryMarker = marker + "r";
+                        _ = terminal.TestSeamSendText(retryMarker);
+                        echoBy = DateTime.UtcNow.AddMilliseconds(1500);
+                        while (DateTime.UtcNow < echoBy)
+                        {
+                            await WaitForLowPriorityAsync(window.DispatcherQueue);
+                            if (UiLivenessSurfaceTextContains(terminal, retryMarker))
+                            {
+                                echoed = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    echoSw.Stop();
+                    echoMs = echoSw.Elapsed.TotalMilliseconds;
+                    if (!echoed)
+                    {
+                        _uiLivenessDeadEcho.Add(i);
+                    }
+                }
+
+                rows.Add(new UiLivenessRow
+                {
+                    Leaf = i,
+                    SurfaceLive = surfaceLive,
+                    VisibleAll = visibleAll,
+                    CompositeOpacity = composite,
+                    Width = terminal.ActualWidth,
+                    Height = terminal.ActualHeight,
+                    HitSelf = hitSelf,
+                    Echoed = echoed,
+                    EchoRetried = echoRetried,
+                    EchoMs = echoMs,
+                });
+            }
+        }
+        finally
+        {
+            Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnUiLivenessFrame;
+        }
+
+        return Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            json.WriteNumber("dispatcherTurnMs",
+                Math.Round(dispatcherTurnMs, 1));
+            json.WriteNumber("framesTicked", frames);
+            json.WriteNumber("paneCount", rows.Count);
+            if (seeded is { } seededOpacity)
+            {
+                json.WriteNumber("seededAncestorOpacity", seededOpacity);
+            }
+
+            json.WriteStartArray("panes");
+            foreach (var row in rows)
+            {
+                json.WriteStartObject();
+                json.WriteNumber("leaf", row.Leaf);
+                json.WriteBoolean("surfaceLive", row.SurfaceLive);
+                json.WriteBoolean("visibleAll", row.VisibleAll);
+                json.WriteNumber("compositeOpacity",
+                    Math.Round(row.CompositeOpacity, 3));
+                json.WriteNumber("width", Math.Round(row.Width, 1));
+                json.WriteNumber("height", Math.Round(row.Height, 1));
+                json.WriteBoolean("hitSelf", row.HitSelf);
+                json.WriteBoolean("echoed", row.Echoed);
+                json.WriteBoolean("echoRetried", row.EchoRetried);
+                json.WriteNumber("echoMs", Math.Round(row.EchoMs, 1));
+                json.WriteEndObject();
+            }
+
+            json.WriteEndArray();
+            json.WriteEndObject();
+        });
+    }
+
+    /// <summary>
+    /// Whether the pane's cell grid carries <paramref name="marker"/> on any
+    /// one row: the readback half of the echo arm. libghostty's own view of
+    /// the screen, the same read screen-text serves, so an echo that never
+    /// landed in the grid cannot be hidden by anything the pane draws over
+    /// it.
+    /// </summary>
+    private static bool UiLivenessSurfaceTextContains(
+        Controls.TerminalControl terminal, string marker)
+    {
+        if (terminal.SurfaceHandle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var grid = Interop.NativeMethods.SurfaceReadCells(
+            new Interop.GhosttySurface(terminal.SurfaceHandle));
+        if (grid is null)
+        {
+            return false;
+        }
+
+        var g = grid.Value;
+        var sb = new System.Text.StringBuilder(g.Cols + 1);
+        for (var y = 0; y < g.Rows; y++)
+        {
+            sb.Clear();
+            for (var x = 0; x < g.Cols; x++)
+            {
+                var cp = g.Cells[y * g.Cols + x].Codepoint;
+                sb.Append(cp == 0 ? ' ' : (char)cp);
+            }
+
+            if (sb.ToString().Contains(marker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 #endif
 
