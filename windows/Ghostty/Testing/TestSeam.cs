@@ -124,6 +124,13 @@ internal static class TestSeam
     /// </summary>
     internal static void Start(MainWindow window)
     {
+        // Window-event tracking (#1117) runs for EVERY window before the
+        // one-seam gate: the observer must see the served regular window
+        // and the quick terminal alike, and the quick terminal can be
+        // built long after the seam's single server settled on the first
+        // window. Tracking is inert until an op reads it.
+        TrackWindowForEvents(window);
+
         // The gate reads before anything else happens, and it demands a real
         // session token: an unset, empty, "0", "1" or "true" value is off.
         var sessionToken = Environment.GetEnvironmentVariable(EnvVar);
@@ -421,7 +428,9 @@ internal static class TestSeam
     /// harnesses read their assertions off it, so the pass is part of its
     /// contract; layout-frame is new and owes no one that.
     /// </remarks>
-    private static bool IsObserver(string op) => op is "layout-frame" or "surface-state" or "selected-paint";
+    private static bool IsObserver(string op)
+        => op is "layout-frame" or "surface-state" or "selected-paint"
+            or "window-events";
 
     /// <summary>
     /// The one marshal: every command, whatever it touches, runs on the
@@ -1926,6 +1935,14 @@ internal static class TestSeam
                 // log was armed, each as it stood the moment it applied.
                 ArmConfigChangeLog(window);
                 return ConfigStateJson(window, op, applied: null);
+
+            case "window-events":
+                // #1117's observer: what the served window and the quick
+                // terminal have done since their constructors ran --
+                // activation history on the shared QPC clock, content
+                // Loaded, the first terminal's FirstRender, and the
+                // login-gate state an edition may add.
+                return WindowEventsJson(window, op);
 
             default:
                 return Error(op, $"unknown op '{op}'");
@@ -3453,6 +3470,272 @@ internal static class TestSeam
         }
 
         return false;
+    }
+
+    // ---- window-events (#1117) ------------------------------------------
+    //
+    // One tracked state per MainWindow, hooked in Start before the one-seam
+    // gate so the quick terminal is seen the moment it is built. Everything
+    // here runs on the UI thread (ctor hooks, activation events, op reads),
+    // so the list needs no lock; the sessiond recorder below is the one
+    // surface off-thread callers touch, and it locks.
+
+    /// <summary>
+    /// The per-window activation/liveness history the window-events op
+    /// reads. Bounded: a window activated thousands of times keeps its
+    /// first 256 events plus the two counters, which is the shape a
+    /// harness asserts on (counts and the early sequence), not unbounded
+    /// growth an idle spinner could produce.
+    /// </summary>
+    private sealed class TrackedWindowState
+    {
+        public readonly MainWindow Window;
+        public readonly bool IsQuick;
+        private readonly List<(string State, long Ms)> _events = new();
+        public int Activated;
+        public int Deactivated;
+        public long? LoadedMs;
+        public long? FirstRenderMs;
+        private bool _firstRenderHooked;
+
+        public TrackedWindowState(MainWindow window)
+        {
+            Window = window;
+            IsQuick = window.IsQuickTerminal;
+        }
+
+        public void Append(string state)
+        {
+            if (_events.Count < 256) _events.Add((state, QpcMs()));
+            if (state == "activated") Activated++;
+            else Deactivated++;
+        }
+
+        /// <summary>The last activation state the window reached.</summary>
+        public bool FocusNow => _events.Count > 0 && _events[^1].State == "activated";
+
+        public IReadOnlyList<(string State, long Ms)> Events => _events;
+
+        /// <summary>
+        /// The content root Loaded, then the first terminal's FirstRender.
+        /// The first hook attempt runs at Loaded; reads try again lazily in
+        /// case no terminal existed yet, so a quick terminal built later
+        /// still gets its first render. A render that happened before any
+        /// hook existed is out of reach -- the control exposes no "already
+        /// rendered" bit -- and reads as null, never as a guess.
+        /// </summary>
+        public void MarkLoaded()
+        {
+            LoadedMs ??= QpcMs();
+            HookFirstRender();
+        }
+
+        public void HookFirstRender()
+        {
+            if (_firstRenderHooked || FirstRenderMs is not null) return;
+            var terminal = FirstTerminalIn(Window.Content as Microsoft.UI.Xaml.FrameworkElement);
+            if (terminal is null) return;
+            _firstRenderHooked = true;
+            terminal.FirstRender += OnFirstRender;
+
+            void OnFirstRender(object? sender, EventArgs e)
+            {
+                terminal.FirstRender -= OnFirstRender;
+                FirstRenderMs ??= QpcMs();
+            }
+        }
+    }
+
+    private static readonly List<TrackedWindowState> TrackedWindows = new();
+
+    private static void TrackWindowForEvents(MainWindow window)
+    {
+        foreach (var tracked in TrackedWindows)
+        {
+            if (ReferenceEquals(tracked.Window, window)) return;
+        }
+
+        var state = new TrackedWindowState(window);
+        TrackedWindows.Add(state);
+        window.Closed += (_, _) => TrackedWindows.Remove(state);
+        // WinUI's Window has ONE event for both directions: Activated fires
+        // on every activation-state change and the args say which way
+        // (WindowActivationState). There is no Deactivated to subscribe to.
+        window.Activated += (_, e) => state.Append(
+            e.WindowActivationState == Microsoft.UI.Xaml.WindowActivationState.Deactivated
+                ? "deactivated"
+                : "activated");
+        if (window.Content is Microsoft.UI.Xaml.FrameworkElement root)
+        {
+            if (root.IsLoaded) state.MarkLoaded();
+            else root.Loaded += OnRootLoaded;
+
+            void OnRootLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+            {
+                root.Loaded -= OnRootLoaded;
+                state.MarkLoaded();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The clock every events readout shares: QPC milliseconds via
+    /// Stopwatch, the same time base in every process on the machine, so
+    /// an out-of-process recorder's stamps line up with these without
+    /// translation (#1117's stated purpose).
+    /// </summary>
+    internal static long QpcMs()
+        => (long)(System.Diagnostics.Stopwatch.GetTimestamp()
+            * (1000.0 / System.Diagnostics.Stopwatch.Frequency));
+
+    private static string WindowEventsJson(MainWindow window, string op)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            json.WriteNumber("qpcMs", QpcMs());
+
+            var served = TrackedWindows.FirstOrDefault(
+                t => ReferenceEquals(t.Window, window));
+            if (served is null)
+            {
+                // The op window predates tracking (an old build's seam) or
+                // the state was pruned: say so rather than answering zeros.
+                json.WriteNull("served");
+            }
+            else
+            {
+                json.WritePropertyName("served");
+                WriteWindowEventState(json, served, quickExtras: false);
+            }
+
+            // The quick terminal is the first tracked quick window that is
+            // still open; null until one was ever built.
+            var quick = TrackedWindows.FirstOrDefault(t => t.IsQuick);
+            if (quick is null)
+            {
+                json.WriteNull("quickTerminal");
+            }
+            else
+            {
+                json.WritePropertyName("quickTerminal");
+                WriteWindowEventState(json, quick, quickExtras: true);
+            }
+
+            json.WriteEndObject();
+        });
+
+    private static void WriteWindowEventState(
+        Utf8JsonWriter json, TrackedWindowState state, bool quickExtras)
+    {
+        state.HookFirstRender();
+        json.WriteStartObject();
+        json.WriteNumber("hwnd",
+            WinRT.Interop.WindowNative.GetWindowHandle(state.Window));
+        json.WriteBoolean("focus", state.FocusNow);
+        json.WriteBoolean("contentLoaded", state.LoadedMs is not null);
+        json.WriteNumber("activated", state.Activated);
+        json.WriteNumber("deactivated", state.Deactivated);
+        json.WriteStartArray("events");
+        foreach (var (windowState, ms) in state.Events)
+        {
+            json.WriteStartObject();
+            json.WriteString("state", windowState);
+            json.WriteNumber("ms", ms);
+            json.WriteEndObject();
+        }
+
+        json.WriteEndArray();
+        if (state.LoadedMs is { } loadedMs) json.WriteNumber("loadedMs", loadedMs);
+        if (state.FirstRenderMs is { } renderMs) json.WriteNumber("firstRenderMs", renderMs);
+
+        // A full-window login gate an edition may add to the root grid,
+        // matched by type name so the seam compiles the same everywhere:
+        // any direct child of the root whose type name carries "Gate".
+        var gate = GateOf(state.Window);
+        json.WriteStartObject("gate");
+        json.WriteBoolean("attached", gate.Attached);
+        json.WriteBoolean("visible", gate.Attached && gate.Visible);
+        json.WriteEndObject();
+
+        if (quickExtras)
+        {
+            var appWindow = state.Window.AppWindow;
+            json.WriteBoolean("visible", appWindow?.IsVisible ?? false);
+            var cloaked = false;
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(state.Window);
+            if (DwmGetWindowAttribute(
+                    hwnd, DwmwaCloaked, out var cloakValue, sizeof(int)) == 0)
+            {
+                cloaked = cloakValue != 0;
+            }
+
+            json.WriteBoolean("cloaked", cloaked);
+            if (appWindow is not null)
+            {
+                json.WriteStartObject("rect");
+                json.WriteNumber("x", appWindow.Position.X);
+                json.WriteNumber("y", appWindow.Position.Y);
+                json.WriteNumber("w", appWindow.Size.Width);
+                json.WriteNumber("h", appWindow.Size.Height);
+                json.WriteEndObject();
+            }
+        }
+
+        json.WriteEndObject();
+    }
+
+    private const int DwmwaCloaked = 14;
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(
+        nint hwnd, int attribute, out int value, int size);
+
+    private static (bool Attached, bool Visible) GateOf(MainWindow window)
+    {
+        if (window.Content is not Microsoft.UI.Xaml.Controls.Panel panel) return (false, false);
+        foreach (var child in panel.Children)
+        {
+            if (child.GetType().Name.Contains("Gate", StringComparison.Ordinal))
+            {
+                return (true, child.Visibility == Microsoft.UI.Xaml.Visibility.Visible);
+            }
+        }
+
+        return (false, false);
+    }
+
+    /// <summary>
+    /// The first terminal control in the realized tree, depth-first: the
+    /// window's first pane. Used only to hook FirstRender; a tree with no
+    /// terminal yet answers null and the caller tries again later.
+    /// </summary>
+    private static Ghostty.Controls.TerminalControl? FirstTerminalIn(
+        Microsoft.UI.Xaml.FrameworkElement? root)
+    {
+        if (root is null) return null;
+        foreach (var node in SelfAndDescendants(root))
+        {
+            if (node is Ghostty.Controls.TerminalControl terminal) return terminal;
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<Microsoft.UI.Xaml.DependencyObject> SelfAndDescendants(
+        Microsoft.UI.Xaml.DependencyObject node)
+    {
+        yield return node;
+        var children = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(node);
+        for (var i = 0; i < children; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, i);
+            foreach (var descendant in SelfAndDescendants(child))
+            {
+                yield return descendant;
+            }
+        }
     }
 #endif
 
