@@ -5025,8 +5025,8 @@ pub fn softReset(self: *Terminal) void {
     self.flags.modify_other_keys_2 = false;
     self.setCursorStyle(.default);
 
-    // xterm resets the palette for DECSTR as well as RIS, as OSC 104
-    // with no arguments would. Dynamic colors (OSC 10-19) are kept.
+    // xterm resets the palette for DECSTR, as OSC 104 with no arguments
+    // would. Dynamic colors (OSC 10-19) are kept.
     if (self.colors.palette.mask.count() > 0) {
         self.colors.palette.resetAll();
         self.flags.dirty.palette = true;
@@ -15955,6 +15955,19 @@ test "Terminal: softReset palette" {
     try testing.expectEqual(0, t.colors.palette.mask.count());
     try testing.expectEqual(color.default[1], t.colors.palette.current[1]);
     try testing.expectEqual(color.default[200], t.colors.palette.current[200]);
+}
+
+test "Terminal: softReset restores configured cursor defaults" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    t.setDefaultCursorStyle(.bar);
+    t.setDefaultCursorBlink(true);
+    t.setCursorStyle(.steady_block);
+    t.softReset();
+
+    try testing.expectEqual(Screen.CursorStyle.bar, t.screens.active.cursor.cursor_style);
+    try testing.expect(t.modes.get(.cursor_blinking));
 }
 
 // https://github.com/mitchellh/ghostty/issues/272
