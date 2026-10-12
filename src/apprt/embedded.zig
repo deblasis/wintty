@@ -1246,6 +1246,14 @@ pub const Surface = struct {
         };
     }
 
+    pub fn addEvent(self: *Surface, x: f32, y: f32, kind: f32) void {
+        self.core_surface.addEvent(x, y, kind);
+    }
+
+    pub fn clearEvents(self: *Surface) void {
+        self.core_surface.clearEvents();
+    }
+
     pub fn updateContentScale(self: *Surface, x: f64, y: f64) void {
         // We are an embedded API so the caller can send us all sorts of
         // garbage. We want to make sure that the float values are valid
@@ -3142,6 +3150,17 @@ pub const CAPI = struct {
     /// Update the focused state of a surface.
     export fn ghostty_surface_set_focus(surface: *Surface, focused: bool) void {
         surface.focusCallback(focused);
+    }
+
+    /// Send a host event to custom shaders. Coordinates are in surface pixels
+    /// and kind is interpreted by the embedder. The renderer records shader time.
+    export fn ghostty_surface_add_event(surface: *Surface, x: f32, y: f32, kind: f32) void {
+        surface.addEvent(x, y, kind);
+    }
+
+    /// Forget every host event.
+    export fn ghostty_surface_clear_events(surface: *Surface) void {
+        surface.clearEvents();
     }
 
     /// Update the occlusion state of a surface.

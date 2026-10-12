@@ -22,6 +22,13 @@ pub const Message = union(enum) {
     /// and still have focus.
     visible: bool,
 
+    /// A host event for custom shaders: a position in surface pixels and a
+    /// kind chosen by the embedder. The renderer stamps it with shader time.
+    event: struct { x: f32, y: f32, kind: f32 },
+
+    /// Forget every host event.
+    clear_events,
+
     /// The surface went deep-idle: trim what exists only to make the next
     /// frame cheap. One-directional like the termio-side message -- waking
     /// rebuilds lazily and needs no signal.

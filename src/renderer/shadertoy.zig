@@ -9,6 +9,8 @@ const global = @import("../global.zig");
 
 const log = std.log.scoped(.shadertoy);
 
+pub const max_host_events = 128;
+
 /// The uniform struct used for shadertoy shaders.
 pub const Uniforms = extern struct {
     resolution: [3]f32 align(16),
@@ -38,7 +40,30 @@ pub const Uniforms = extern struct {
     cursor_text: [4]f32 align(16),
     selection_background_color: [4]f32 align(16),
     selection_foreground_color: [4]f32 align(16),
+    /// Host events: surface-pixel x/y, embedder-defined kind, and shader time.
+    /// Only the packed prefix selected by event_count is valid.
+    events: [max_host_events][4]f32 align(16),
+    event_count: i32 align(4),
 };
+
+pub fn clearHostEvents(uniforms: *Uniforms) void {
+    uniforms.events = @splat(@as([4]f32, .{ 0, 0, -1, 0 }));
+    uniforms.event_count = 0;
+}
+
+pub fn appendHostEvent(
+    uniforms: *Uniforms,
+    x: f32,
+    y: f32,
+    kind: f32,
+    shader_time: f32,
+) bool {
+    const count: usize = @intCast(uniforms.event_count);
+    if (count >= uniforms.events.len) return false;
+    uniforms.events[count] = .{ x, y, kind, shader_time };
+    uniforms.event_count += 1;
+    return true;
+}
 
 /// The target to load shaders for.
 pub const Target = enum { glsl, msl, hlsl };
@@ -301,6 +326,62 @@ test "zioshade compiles focus shader to all targets" {
     try testing.expect(std.mem.startsWith(u8, glsl, "#version 430"));
 }
 
+test "host shader events preserve capacity clear and uniform layout" {
+    const testing = std.testing;
+
+    var uniforms: Uniforms = undefined;
+    clearHostEvents(&uniforms);
+    try testing.expectEqual(@as(i32, 0), uniforms.event_count);
+    for (uniforms.events) |event| {
+        try testing.expectEqual(@as(f32, -1), event[2]);
+    }
+
+    for (0..max_host_events) |i| {
+        const value: f32 = @floatFromInt(i);
+        try testing.expect(appendHostEvent(&uniforms, value, value + 1, 7, value + 2));
+    }
+    try testing.expect(!appendHostEvent(&uniforms, 999, 999, 999, 999));
+    try testing.expectEqual(@as(i32, max_host_events), uniforms.event_count);
+    try testing.expectEqual(@as([4]f32, .{ 0, 1, 7, 2 }), uniforms.events[0]);
+    try testing.expectEqual(
+        @as([4]f32, .{ 127, 128, 7, 129 }),
+        uniforms.events[max_host_events - 1],
+    );
+
+    try testing.expectEqual(@as(usize, 0), @offsetOf(Uniforms, "events") % 16);
+    try testing.expectEqual(
+        @offsetOf(Uniforms, "events") + @sizeOf(@TypeOf(uniforms.events)),
+        @offsetOf(Uniforms, "event_count"),
+    );
+    try testing.expectEqual(@as(usize, 0), @sizeOf(Uniforms) % 16);
+
+    clearHostEvents(&uniforms);
+    try testing.expectEqual(@as(i32, 0), uniforms.event_count);
+}
+
+test "zioshade compiles host event uniforms to all targets" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const src = try testGlslZ(alloc, test_host_events);
+    defer alloc.free(src);
+
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, src, .fragment);
+    defer alloc.free(hlsl);
+    try testing.expect(hlsl.len > 0);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(b0)") != null);
+
+    const msl = try zioshade.compileGlslToMsl(alloc, src, .fragment);
+    defer alloc.free(msl);
+    try testing.expect(msl.len > 0);
+    try testing.expect(std.mem.indexOf(u8, msl, "[[buffer(1)]]") != null);
+
+    const glsl = try zioshade.compileGlslToGlsl(alloc, src, .fragment);
+    defer alloc.free(glsl);
+    try testing.expect(glsl.len > 0);
+    try testing.expect(std.mem.startsWith(u8, glsl, "#version 430"));
+}
+
 test "zioshade loadFromFile compiles a real shader file from disk to HLSL" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -343,3 +424,9 @@ test "zioshade rejects invalid shader" {
 const test_crt = @embedFile("shaders/test_shadertoy_crt.glsl");
 const test_invalid = @embedFile("shaders/test_shadertoy_invalid.glsl");
 const test_focus = @embedFile("shaders/test_shadertoy_focus.glsl");
+const test_host_events =
+    \\void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    \\    vec4 event = iEventCount > 0 ? iEvents[0] : vec4(0.0);
+    \\    fragColor = vec4(event.xyz / max(iResolution.xyx, vec3(1.0)), 1.0);
+    \\}
+;

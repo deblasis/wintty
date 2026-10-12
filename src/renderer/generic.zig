@@ -982,6 +982,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .cursor_text = @splat(0),
                     .selection_background_color = @splat(0),
                     .selection_foreground_color = @splat(0),
+                    .events = @splat(@as([4]f32, .{ 0, 0, -1, 0 })),
+                    .event_count = 0,
                 },
                 .bg_image_buffer = undefined,
 
@@ -1501,6 +1503,36 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Callback when the focus changes for the terminal this is rendering.
         ///
         /// Must be called on the render thread.
+        fn customShaderNow(self: *Self) f32 {
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
+            const first = self.first_frame_time orelse return 0;
+            const ns: f32 = @floatFromInt(first.durationTo(now).nanoseconds);
+            return ns / std.time.ns_per_s;
+        }
+
+        /// Append a host event without overwriting earlier events. The embedder
+        /// owns capacity policy and can clear the packed list when appropriate.
+        pub fn addEvent(self: *Self, x: f32, y: f32, kind: f32) void {
+            self.draw_mutex.lockUncancelable(global.io());
+            defer self.draw_mutex.unlock(global.io());
+
+            if (!shadertoy.appendHostEvent(
+                &self.custom_shader_uniforms,
+                x,
+                y,
+                kind,
+                self.customShaderNow(),
+            )) {
+                log.warn("host event ignored: all {} slots are in use", .{shadertoy.max_host_events});
+            }
+        }
+
+        pub fn clearEvents(self: *Self) void {
+            self.draw_mutex.lockUncancelable(global.io());
+            defer self.draw_mutex.unlock(global.io());
+            shadertoy.clearHostEvents(&self.custom_shader_uniforms);
+        }
+
         pub fn setFocus(self: *Self, focus: bool) !void {
             assert(self.focused != focus);
 

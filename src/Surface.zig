@@ -1008,6 +1008,21 @@ pub fn draw(self: *Surface) !void {
     try self.renderer.drawFrame(true);
 }
 
+/// Send a host event to custom shaders and request a redraw so the event is
+/// visible even while the terminal is otherwise idle. Safe on the main thread.
+pub fn addEvent(self: *Surface, x: f32, y: f32, kind: f32) void {
+    _ = self.pushRendererMailbox(.{
+        .event = .{ .x = x, .y = y, .kind = kind },
+    });
+    self.queueRender() catch {};
+}
+
+/// Remove all host events from custom shaders.
+pub fn clearEvents(self: *Surface) void {
+    _ = self.pushRendererMailbox(.clear_events);
+    self.queueRender() catch {};
+}
+
 /// Write raw VT bytes into this surface's terminal, as if they came
 /// from the PTY. Used by in-process features (theme picker) that
 /// render into the terminal without a subprocess.

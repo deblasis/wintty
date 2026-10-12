@@ -1421,6 +1421,12 @@ GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
+// Append a host-defined custom-shader event. Coordinates are in surface
+// pixels; kind is interpreted by the embedding application. The renderer
+// stores the event with the current shader time in iEvents.
+GHOSTTY_API void ghostty_surface_add_event(ghostty_surface_t, float, float, float);
+// Remove all host-defined custom-shader events from iEvents.
+GHOSTTY_API void ghostty_surface_clear_events(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_idle(ghostty_surface_t, bool);
 GHOSTTY_API bool ghostty_surface_go_dormant(ghostty_surface_t);

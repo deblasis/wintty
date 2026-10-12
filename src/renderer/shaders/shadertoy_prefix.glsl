@@ -28,6 +28,10 @@ layout(binding = 1, std140) uniform Globals {
     uniform vec3  iCursorText;
     uniform vec3  iSelectionForegroundColor;
     uniform vec3  iSelectionBackgroundColor;
+    // Host-provided events: x, y, kind, and the iTime when received.
+    // Only entries [0, iEventCount) are valid; the capacity is 128.
+    uniform vec4  iEvents[128];
+    uniform int   iEventCount;
 };
 
 #define CURSORSTYLE_BLOCK        0

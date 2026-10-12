@@ -18,6 +18,11 @@ which declares the uniforms:
   styles, `iCursorVisible`
 - `iPalette[256]`, background/foreground/selection colors
 - `iMouse`, `iDate`, `iFocus`
+- `iEvents[128]`, a packed list of host events as
+  `(surfaceX, surfaceY, kind, eventTime)`, and `iEventCount`, the number of
+  valid entries. The embedding application defines `kind`; `eventTime` uses
+  the same clock as `iTime`. Hosts append or clear the list through the public
+  surface API, and events beyond the fixed capacity are ignored.
 
 Coordinate convention on wintty: `fragCoord` has its origin at the
 top-left and +Y points down.

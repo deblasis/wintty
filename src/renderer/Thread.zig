@@ -456,6 +456,9 @@ fn drainMailbox(self: *Thread) !void {
                 self.compression.wake(self);
             },
 
+            .event => |v| self.renderer.addEvent(v.x, v.y, v.kind),
+            .clear_events => self.renderer.clearEvents(),
+
             .focus => |v| focus: {
                 // If our state didn't change we do nothing.
                 if (self.flags.focused == v) break :focus;
