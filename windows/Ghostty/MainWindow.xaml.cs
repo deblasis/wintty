@@ -652,6 +652,28 @@ public sealed partial class MainWindow : Window
 
         Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
 
+        // Spawn at the final size (#1808): the window's creation default
+        // (1200x800 physical) must never be the size anything computes
+        // from. The shell grid, the splash's follow and every layout
+        // measure below this point all read the window, and a window
+        // that is born wrong-sized and corrected a few hundred lines
+        // later leaves a birth window in which the first grid can be
+        // computed for the default rect and never fully invalidated -
+        // the founder's update-relaunch caught exactly that blend. The
+        // same selection the late block makes runs HERE, before the
+        // host, the factory or any tab exists; the late block re-applies
+        // the same values idempotently and performs the maximized show
+        // this early pass deliberately defers (nothing shows the window
+        // before its content exists).
+        _windowState = WindowState.Load();
+        if (!IsQuickTerminal)
+        {
+            if (restore is { Tabs.Count: > 0 })
+                ApplyGeometry(restore!.Geometry, applyMaximized: false);
+            else
+                RestoreWindowPlacement(applyMaximized: false);
+        }
+
         _configService = configService;
 
         // Position is load-bearing, so this does not belong down with the
@@ -947,7 +969,6 @@ public sealed partial class MainWindow : Window
             _tabManager, a => DispatcherQueue.TryEnqueue(() => a()),
             onIdleFlip: (tab, idle) => tab.PaneHost.SetSurfaceIdle(idle));
         _idleTracker.Start();
-        _windowState = WindowState.Load();
         if (IsQuickTerminal)
         {
             // The quick terminal is built hidden: App activates it once, so its
@@ -5165,7 +5186,7 @@ public sealed partial class MainWindow : Window
     /// Validates that at least part of the window is visible on a
     /// current monitor (handles monitor disconnects, DPI changes).
     /// </summary>
-    private void RestoreWindowPlacement() =>
+    private void RestoreWindowPlacement(bool applyMaximized = true) =>
         ApplyGeometry(new Ghostty.Core.Session.WindowGeometry
         {
             X = _windowState.WindowX,
@@ -5173,7 +5194,7 @@ public sealed partial class MainWindow : Window
             Width = _windowState.WindowWidth,
             Height = _windowState.WindowHeight,
             Maximized = _windowState.WindowMaximized,
-        });
+        }, applyMaximized);
 
     /// <summary>
     /// Apply a saved geometry to this window, validating that at least
@@ -5181,7 +5202,9 @@ public sealed partial class MainWindow : Window
     /// disconnects, DPI changes). Shared by the window-state.json restore
     /// path and the session restore path.
     /// </summary>
-    private void ApplyGeometry(Ghostty.Core.Session.WindowGeometry geometry)
+    private void ApplyGeometry(
+        Ghostty.Core.Session.WindowGeometry geometry,
+        bool applyMaximized = true)
     {
         // Shared with the pre-XAML splash, which sizes itself to cover this
         // window and must accept and reject exactly the same saved rects.
@@ -5209,7 +5232,10 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new Windows.Graphics.SizeInt32(width, height));
         AppWindow.Move(new Windows.Graphics.PointInt32(x, y));
 
-        if (geometry.Maximized)
+        // The early spawn-at-final-size pass defers the show: a window
+        // that has no content yet must not appear, and the late block's
+        // idempotent re-application performs this show instead.
+        if (applyMaximized && geometry.Maximized)
             PInvoke.ShowWindow(new HWND(WindowNative.GetWindowHandle(this)), SHOW_WINDOW_CMD.SW_SHOWMAXIMIZED);
     }
 
