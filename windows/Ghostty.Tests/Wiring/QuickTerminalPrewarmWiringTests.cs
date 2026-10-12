@@ -63,18 +63,41 @@ public class QuickTerminalPrewarmWiringTests
             "CloakUntilFirstShow() must be a statement of the quick-terminal branch itself, "
                 + "not nested under another condition.");
 
-        // Regular windows still restore their placement, and only from the
-        // else side of the quick-terminal branch.
+        // Regular windows still restore their placement, and only from
+        // spans a quick terminal cannot take. Two shapes carry that law.
+        // One is the else side of the quick-terminal branch. The other is
+        // the spawn-at-final-size pass, which applies the same selection
+        // before the host exists -- a position the late else arm cannot
+        // span, since an else starts below its own if -- so it excludes
+        // the quick terminal with a negated guard instead. A guard of
+        // exactly `if (!IsQuickTerminal)`, standing directly in the
+        // constructor body, is unreachable for the quick terminal by its
+        // condition alone, no weaker than the else arm; a placement call
+        // anywhere else in the constructor reddens here.
         var placements = ctor.Body.Calls("ApplyGeometry")
             .Concat(ctor.Body.Calls("RestoreWindowPlacement"))
             .ToList();
         Assert.NotEmpty(placements);
         Assert.NotNull(quick.Else);
+        var nonQuickGuards = ctor.Body.Statements
+            .OfType<IfStatementSyntax>()
+            .Where(i => i.Condition is PrefixUnaryExpressionSyntax
+            {
+                OperatorToken.ValueText: "!",
+                Operand: IdentifierNameSyntax { Identifier.ValueText: "IsQuickTerminal" }
+            })
+            .ToList();
+        // The then-part only, never the whole statement: the negated
+        // guard's else arm (and any else-if chained off it) DOES run for
+        // the quick terminal, and a placement call there must stay red.
         Assert.All(placements, call => Assert.True(
-            quick.Else!.Span.Contains(call.Span),
+            quick.Else!.Span.Contains(call.Span)
+                || nonQuickGuards.Any(g => g.Statement.Span.Contains(call.Span)),
             $"'{call}' is reachable for the quick terminal. window-state.json is the "
                 + "regular window's placement, and applying it parks the hidden quick "
-                + "terminal on top of that window."));
+                + "terminal on top of that window. Saved placement belongs in the "
+                + "quick-terminal branch's else arm, or in the then-part of an "
+                + "if (!IsQuickTerminal) guard of the constructor body."));
 
         // The cloak is DWMWA_CLOAK, switched on, and remembered for Show().
         var cloak = win.Method("CloakUntilFirstShow");
