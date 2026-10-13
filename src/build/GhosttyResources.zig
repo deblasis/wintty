@@ -4,6 +4,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Config = @import("Config.zig");
 const samePath = @import("install_paths.zig").samePath;
+const terminfo_paths = @import("../terminfo/paths.zig");
 const RunStep = std.Build.Step.Run;
 const SharedDeps = @import("SharedDeps.zig");
 
@@ -57,9 +58,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     // Terminfo
     terminfo: {
         const terminfo_share_dir = if (os_tag == .freebsd)
-            "site-terminfo"
+            terminfo_paths.freebsd_db_dir
         else
-            "terminfo";
+            terminfo_paths.db_dir;
 
         // Encode our terminfo
         const run = b.addRunArtifact(build_data_exe);
@@ -89,9 +90,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             const source_install = b.addInstallFile(
                 source,
                 if (os_tag == .freebsd)
-                    "share/site-terminfo/ghostty.terminfo"
+                    "share/" ++ terminfo_paths.freebsd_db_dir ++ "/" ++ terminfo_paths.source_file
                 else
-                    "share/terminfo/ghostty.terminfo",
+                    "share/" ++ terminfo_paths.db_dir ++ "/" ++ terminfo_paths.source_file,
             );
 
             try steps.append(b.allocator, &source_install.step);
@@ -502,10 +503,27 @@ fn addLinuxAppResources(
 /// stayed green while shipping an app with a findable tree and no scripts in
 /// it. `installPath` now composes both halves, and these are composed the same
 /// way before comparison, so the two sides cannot drift apart again.
+///
+/// The terminfo entry is `share/` plus the sentinel `os/resourcesdir.zig`
+/// detects the tree by, spelled in `terminfo/paths.zig` from the terminfo
+/// table's own names. The comptime block below refuses a literal here that
+/// stops matching it.
 const windows_required = [_][]const u8{
     "share/terminfo/ghostty.terminfo",
     "share/ghostty/shell-integration",
 };
+
+comptime {
+    if (!std.mem.eql(
+        u8,
+        windows_required[0],
+        "share/" ++ terminfo_paths.windows_sentinel,
+    )) {
+        @compileError("windows_required[0] must be share/ plus terminfo/paths.zig's " ++
+            "windows_sentinel: it is the install path of the file " ++
+            "os/resourcesdir.zig detects the Windows resources tree by");
+    }
+}
 
 /// Fail the configure step unless every resource a Windows build has to ship
 /// is both produced and attached to the install step.

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const global = @import("../global.zig");
+const terminfo_paths = @import("../terminfo/paths.zig");
 
 const log = std.log.scoped(.resources_dir);
 
@@ -18,11 +19,20 @@ const share_dir = if (builtin.target.os.tag == .freebsd) "local/share" else "sha
 /// nothing about what a child could read out of it.
 /// `termio.Exec.terminfoHasEntry` carries that difference when it picks a
 /// TERM.
+///
+/// The leaves come from `terminfo/paths.zig`, derived from the terminfo
+/// table's own names, so a rename in the table moves these with it.
 const sentinels = switch (builtin.target.os.tag) {
-    .windows => .{"terminfo/ghostty.terminfo"},
-    .macos => .{"terminfo/78/xterm-ghostty"},
-    .freebsd => .{ "site-terminfo/g/ghostty", "site-terminfo/x/xterm-ghostty" },
-    else => .{ "terminfo/g/ghostty", "terminfo/x/xterm-ghostty" },
+    .windows => .{terminfo_paths.windows_sentinel},
+    .macos => .{terminfo_paths.db_dir ++ "/" ++ terminfo_paths.macos_compiled_leaf},
+    .freebsd => .{
+        terminfo_paths.freebsd_db_dir ++ "/" ++ terminfo_paths.compiled_leaves[0],
+        terminfo_paths.freebsd_db_dir ++ "/" ++ terminfo_paths.compiled_leaves[1],
+    },
+    else => .{
+        terminfo_paths.db_dir ++ "/" ++ terminfo_paths.compiled_leaves[0],
+        terminfo_paths.db_dir ++ "/" ++ terminfo_paths.compiled_leaves[1],
+    },
 };
 
 pub const ResourcesDir = struct {

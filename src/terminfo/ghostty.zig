@@ -1,5 +1,6 @@
 const std = @import("std");
 const Source = @import("Source.zig");
+const paths = @import("paths.zig");
 
 /// Ghostty's terminfo entry.
 pub const ghostty: Source = .{
@@ -391,6 +392,24 @@ pub const ghostty: Source = .{
         .{ .name = "sc", .value = .{ .string = "\\E7" } },
     },
 };
+
+// The two names that survive outside this table are spelled in
+// terminfo/paths.zig, which builds the installed file names, the database
+// leaves and the resources-dir sentinels from them. Renaming the entry here
+// without moving that file would leave the table detected and installed
+// under paths that no longer come from it, so the drift is a compile error.
+comptime {
+    if (!std.mem.eql(u8, ghostty.names[0], paths.term_name)) @compileError(
+        "terminfo/paths.zig term_name no longer matches the terminfo table's " ++
+            "first name (the TERM value); update it so the install paths and " ++
+            "resources-dir sentinels follow the table",
+    );
+    if (!std.mem.eql(u8, ghostty.names[1], paths.preferred_name)) @compileError(
+        "terminfo/paths.zig preferred_name no longer matches the terminfo " ++
+            "table's preferred name; update it so the install paths and " ++
+            "resources-dir sentinels follow the table",
+    );
+}
 
 /// A content-derived version of the encoded terminfo source.
 pub const version = version: {
