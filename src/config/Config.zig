@@ -94,26 +94,26 @@ pub const compatibility = std.StaticStringMap(
 
     // Ghostty 1.2 removed the `hidden` value from `gtk-tabs-location` and
     // moved it to `window-show-tab-bar`.
-    .{ "gtk-tabs-location", compatGtkTabsLocation },
+    compatEntry("gtk-tabs-location", compatGtkTabsLocation),
 
     // Ghostty 1.2 lets you set `cell-foreground` and `cell-background`
     // to match the cell foreground and background colors, respectively.
     // This can be used with `cursor-color` and `cursor-text` to recreate
     // this behavior. This applies to selection too.
-    .{ "cursor-invert-fg-bg", compatCursorInvertFgBg },
-    .{ "selection-invert-fg-bg", compatSelectionInvertFgBg },
+    compatEntry("cursor-invert-fg-bg", compatCursorInvertFgBg),
+    compatEntry("selection-invert-fg-bg", compatSelectionInvertFgBg),
 
     // Ghostty 1.2 merged `bold-is-bright` into the new `bold-color`
     // by setting the value to "bright".
-    .{ "bold-is-bright", compatBoldIsBright },
+    compatEntry("bold-is-bright", compatBoldIsBright),
 
     // Ghostty 1.2 removed the "desktop" option and renamed it to "detect".
     // The semantics also changed slightly but this is the correct mapping.
-    .{ "gtk-single-instance", compatGtkSingleInstance },
+    compatEntry("gtk-single-instance", compatGtkSingleInstance),
 
     // Ghostty 1.3 rename the "window" option to "new-window".
     // See: https://github.com/ghostty-org/ghostty/pull/9764
-    .{ "macos-dock-drop-behavior", compatMacOSDockDropBehavior },
+    compatEntry("macos-dock-drop-behavior", compatMacOSDockDropBehavior),
 
     // Ghostty 1.4 renamed `scrollback-limit` to `scrollback-limit-bytes`
     // when `scrollback-limit-lines` was added so the units are explicit.
@@ -123,7 +123,7 @@ pub const compatibility = std.StaticStringMap(
     // clipboard (on supported operating systems), the system clipboard, or
     // both. The semantics also changed but this is the correct mapping.
     // See: https://github.com/ghostty-org/ghostty/pull/12604
-    .{ "copy-on-select", compatCopyOnSelect },
+    compatEntry("copy-on-select", compatCopyOnSelect),
 });
 
 /// Set Ghostty's graphical user interface language to a language other than the
@@ -6473,142 +6473,218 @@ pub fn parseManuallyHook(
     return true;
 }
 
+/// One entry of the `compatibility` map, written from the single key
+/// literal: the map is keyed by it and the handler is instantiated with
+/// it, so a handler can never be bound under a key it does not expect
+/// (see `compatKey`). The key must not name a Config field the parser
+/// already accepts, or the handler would never run.
+fn compatEntry(
+    comptime key: []const u8,
+    comptime factory: anytype,
+) struct { []const u8, cli.CompatibilityHandler(Config) } {
+    return .{ key, factory(key) };
+}
+
+/// Compile-time tie between a compatibility handler and the key it is
+/// bound to in the `compatibility` map: `bound` is the map key the
+/// handler is instantiated with, `expected` is the key the handler was
+/// written for. A rename on either side fails the build here instead of
+/// leaving a runtime assert or a dead compatibility path.
+fn compatKey(
+    comptime expected: []const u8,
+    comptime bound: []const u8,
+) void {
+    if (!std.mem.eql(u8, bound, expected)) @compileError(
+        "compatibility handler bound to key \"" ++ bound ++
+            "\" but expects \"" ++ expected ++ "\"",
+    );
+}
+
 fn compatGtkTabsLocation(
-    self: *Config,
-    alloc: Allocator,
-    key: []const u8,
-    value: ?[]const u8,
-) bool {
-    _ = alloc;
-    assert(std.mem.eql(u8, key, "gtk-tabs-location"));
+    comptime key: []const u8,
+) cli.CompatibilityHandler(Config) {
+    comptime compatKey("gtk-tabs-location", key);
 
-    if (std.mem.eql(u8, value orelse "", "hidden")) {
-        self.@"window-show-tab-bar" = .never;
-        return true;
-    }
+    return struct {
+        fn compat(
+            self: *Config,
+            alloc: Allocator,
+            _: []const u8,
+            value: ?[]const u8,
+        ) bool {
+            _ = alloc;
 
-    return false;
+            if (std.mem.eql(u8, value orelse "", "hidden")) {
+                self.@"window-show-tab-bar" = .never;
+                return true;
+            }
+
+            return false;
+        }
+    }.compat;
 }
 
 fn compatGtkSingleInstance(
-    self: *Config,
-    alloc: Allocator,
-    key: []const u8,
-    value: ?[]const u8,
-) bool {
-    _ = alloc;
-    assert(std.mem.eql(u8, key, "gtk-single-instance"));
+    comptime key: []const u8,
+) cli.CompatibilityHandler(Config) {
+    comptime compatKey("gtk-single-instance", key);
 
-    if (std.mem.eql(u8, value orelse "", "desktop")) {
-        self.@"gtk-single-instance" = .detect;
-        return true;
-    }
+    return struct {
+        fn compat(
+            self: *Config,
+            alloc: Allocator,
+            _: []const u8,
+            value: ?[]const u8,
+        ) bool {
+            _ = alloc;
 
-    return false;
+            if (std.mem.eql(u8, value orelse "", "desktop")) {
+                self.@"gtk-single-instance" = .detect;
+                return true;
+            }
+
+            return false;
+        }
+    }.compat;
 }
 
 fn compatCursorInvertFgBg(
-    self: *Config,
-    alloc: Allocator,
-    key: []const u8,
-    value_: ?[]const u8,
-) bool {
-    _ = alloc;
-    assert(std.mem.eql(u8, key, "cursor-invert-fg-bg"));
+    comptime key: []const u8,
+) cli.CompatibilityHandler(Config) {
+    comptime compatKey("cursor-invert-fg-bg", key);
 
-    // We don't do anything if the value is unset, which is technically
-    // not EXACTLY the same as prior behavior since it would fallback
-    // to doing whatever cursor-color/cursor-text were set to, but
-    // I don't want to store what that is separately so this is close
-    // enough.
-    //
-    // Realistically, these fields were mutually exclusive so anyone
-    // relying on that behavior should just upgrade to the new
-    // cursor-color/cursor-text fields.
-    const set = cli.args.parseBool(value_ orelse "t") catch return false;
-    if (set) {
-        self.@"cursor-color" = .@"cell-foreground";
-        self.@"cursor-text" = .@"cell-background";
-    }
+    return struct {
+        fn compat(
+            self: *Config,
+            alloc: Allocator,
+            _: []const u8,
+            value_: ?[]const u8,
+        ) bool {
+            _ = alloc;
 
-    return true;
+            // We don't do anything if the value is unset, which is technically
+            // not EXACTLY the same as prior behavior since it would fallback
+            // to doing whatever cursor-color/cursor-text were set to, but
+            // I don't want to store what that is separately so this is close
+            // enough.
+            //
+            // Realistically, these fields were mutually exclusive so anyone
+            // relying on that behavior should just upgrade to the new
+            // cursor-color/cursor-text fields.
+            const set = cli.args.parseBool(value_ orelse "t") catch return false;
+            if (set) {
+                self.@"cursor-color" = .@"cell-foreground";
+                self.@"cursor-text" = .@"cell-background";
+            }
+
+            return true;
+        }
+    }.compat;
 }
 
 fn compatSelectionInvertFgBg(
-    self: *Config,
-    alloc: Allocator,
-    key: []const u8,
-    value_: ?[]const u8,
-) bool {
-    _ = alloc;
-    assert(std.mem.eql(u8, key, "selection-invert-fg-bg"));
+    comptime key: []const u8,
+) cli.CompatibilityHandler(Config) {
+    comptime compatKey("selection-invert-fg-bg", key);
 
-    const set = cli.args.parseBool(value_ orelse "t") catch return false;
-    if (set) {
-        self.@"selection-foreground" = .@"cell-background";
-        self.@"selection-background" = .@"cell-foreground";
-    }
+    return struct {
+        fn compat(
+            self: *Config,
+            alloc: Allocator,
+            _: []const u8,
+            value_: ?[]const u8,
+        ) bool {
+            _ = alloc;
 
-    return true;
+            const set = cli.args.parseBool(value_ orelse "t") catch return false;
+            if (set) {
+                self.@"selection-foreground" = .@"cell-background";
+                self.@"selection-background" = .@"cell-foreground";
+            }
+
+            return true;
+        }
+    }.compat;
 }
 
 fn compatBoldIsBright(
-    self: *Config,
-    alloc: Allocator,
-    key: []const u8,
-    value_: ?[]const u8,
-) bool {
-    _ = alloc;
-    assert(std.mem.eql(u8, key, "bold-is-bright"));
+    comptime key: []const u8,
+) cli.CompatibilityHandler(Config) {
+    comptime compatKey("bold-is-bright", key);
 
-    const isset = cli.args.parseBool(value_ orelse "t") catch return false;
-    if (isset) {
-        self.@"bold-color" = .bright;
-    }
+    return struct {
+        fn compat(
+            self: *Config,
+            alloc: Allocator,
+            _: []const u8,
+            value_: ?[]const u8,
+        ) bool {
+            _ = alloc;
 
-    return true;
+            const isset = cli.args.parseBool(value_ orelse "t") catch return false;
+            if (isset) {
+                self.@"bold-color" = .bright;
+            }
+
+            return true;
+        }
+    }.compat;
 }
 
 fn compatMacOSDockDropBehavior(
-    self: *Config,
-    alloc: Allocator,
-    key: []const u8,
-    value: ?[]const u8,
-) bool {
-    _ = alloc;
-    assert(std.mem.eql(u8, key, "macos-dock-drop-behavior"));
+    comptime key: []const u8,
+) cli.CompatibilityHandler(Config) {
+    comptime compatKey("macos-dock-drop-behavior", key);
 
-    if (std.mem.eql(u8, value orelse "", "window")) {
-        self.@"macos-dock-drop-behavior" = .@"new-window";
-        return true;
-    }
+    return struct {
+        fn compat(
+            self: *Config,
+            alloc: Allocator,
+            _: []const u8,
+            value: ?[]const u8,
+        ) bool {
+            _ = alloc;
 
-    return false;
+            if (std.mem.eql(u8, value orelse "", "window")) {
+                self.@"macos-dock-drop-behavior" = .@"new-window";
+                return true;
+            }
+
+            return false;
+        }
+    }.compat;
 }
 
 fn compatCopyOnSelect(
-    self: *Config,
-    alloc: Allocator,
-    key: []const u8,
-    value: ?[]const u8,
-) bool {
-    _ = alloc;
-    assert(std.mem.eql(u8, key, "copy-on-select"));
+    comptime key: []const u8,
+) cli.CompatibilityHandler(Config) {
+    comptime compatKey("copy-on-select", key);
 
-    if (std.mem.eql(u8, value orelse "", "true")) {
-        self.@"copy-on-select" = switch (builtin.os.tag) {
-            .linux, .freebsd => .primary,
-            else => .clipboard,
-        };
-        return true;
-    }
+    return struct {
+        fn compat(
+            self: *Config,
+            alloc: Allocator,
+            _: []const u8,
+            value: ?[]const u8,
+        ) bool {
+            _ = alloc;
 
-    if (std.mem.eql(u8, value orelse "", "false")) {
-        self.@"copy-on-select" = .none;
-        return true;
-    }
+            if (std.mem.eql(u8, value orelse "", "true")) {
+                self.@"copy-on-select" = switch (builtin.os.tag) {
+                    .linux, .freebsd => .primary,
+                    else => .clipboard,
+                };
+                return true;
+            }
 
-    return false;
+            if (std.mem.eql(u8, value orelse "", "false")) {
+                self.@"copy-on-select" = .none;
+                return true;
+            }
+
+            return false;
+        }
+    }.compat;
 }
 
 /// Add a diagnostic message to the config with the given string.
