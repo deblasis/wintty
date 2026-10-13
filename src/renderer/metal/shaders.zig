@@ -10,6 +10,10 @@ const Pipeline = @import("Pipeline.zig");
 
 const log = std.log.scoped(.metal);
 
+const mirrors = @import("../shader_mirrors.zig");
+
+const metal_source = @embedFile("../shaders/shaders.metal");
+
 const pipeline_descs: []const struct { [:0]const u8, PipelineDescription } =
     &.{
         .{ "bg_color", .{
@@ -331,6 +335,62 @@ pub const BgImage = extern struct {
         };
     };
 };
+
+comptime {
+    // The vertex shader reads CellText.bools as raw bits through these
+    // enum members, so each packed field needs its exact mask there.
+    @setEvalBranchQuota(200000);
+    for (std.meta.fields(@FieldType(CellText, "bools")), 0..) |field, bit| {
+        if (std.mem.startsWith(u8, field.name, "_")) continue;
+        mirrors.expectMirrored(
+            metal_source,
+            mirrors.upper(field.name),
+            std.fmt.comptimePrint("{d}u", .{@as(u32, 1) << @as(u5, @intCast(bit))}),
+            "shaders.metal CellTextBools vs metal.CellText",
+        );
+    }
+
+    // The info byte packs Info as position[3:0], fit[5:4], repeat[6]:
+    // position ordinals go in unshifted, fit ordinals shifted by 4.
+    mirrors.expectMirrored(
+        metal_source,
+        "BG_IMAGE_POSITION",
+        "15u",
+        "shaders.metal BgImagePosition mask vs metal.BgImage",
+    );
+    for (@typeInfo(BgImage.Info.Position).@"enum".fields) |field| {
+        mirrors.expectMirrored(
+            metal_source,
+            "BG_IMAGE_" ++ mirrors.upper(field.name),
+            std.fmt.comptimePrint("{d}u", .{field.value}),
+            "shaders.metal BgImagePosition vs metal.BgImage",
+        );
+    }
+    mirrors.expectMirrored(
+        metal_source,
+        "BG_IMAGE_FIT",
+        "3u << 4",
+        "shaders.metal BgImageFit mask vs metal.BgImage",
+    );
+    for (@typeInfo(BgImage.Info.Fit).@"enum".fields) |field| {
+        const metal_name = if (std.mem.eql(u8, field.name, "none"))
+            "NO_FIT"
+        else
+            mirrors.upper(field.name);
+        mirrors.expectMirrored(
+            metal_source,
+            "BG_IMAGE_" ++ metal_name,
+            std.fmt.comptimePrint("{d}u << 4", .{field.value}),
+            "shaders.metal BgImageFit vs metal.BgImage",
+        );
+    }
+    mirrors.expectMirrored(
+        metal_source,
+        "BG_IMAGE_REPEAT",
+        "1u << 6",
+        "shaders.metal BgImageRepeat bit vs metal.BgImage",
+    );
+}
 
 /// Initialize the MTLLibrary. A MTLLibrary is a collection of shaders.
 fn initLibrary(device: objc.Object) !objc.Object {

@@ -6,6 +6,9 @@
 //! if drift is suspected.
 const std = @import("std");
 const math = @import("../../math.zig");
+const mirrors = @import("../shader_mirrors.zig");
+
+const hlsl_source = @embedFile("../shaders/hlsl/shaders.hlsl");
 
 /// GPU uniform values for the cell shaders.
 pub const Uniforms = extern struct {
@@ -108,4 +111,21 @@ comptime {
     std.debug.assert(@offsetOf(Image, "dest_size") == 32);
     std.debug.assert(@sizeOf(BgImage) == 8);
     std.debug.assert(@offsetOf(BgImage, "info") == 4);
+
+    // The pixel shader reads CellText.bools as raw bits through these
+    // defines, so each packed field needs its exact mask there.
+    @setEvalBranchQuota(200000);
+    for (std.meta.fields(@FieldType(CellText, "bools")), 0..) |field, bit| {
+        if (std.mem.startsWith(u8, field.name, "_")) continue;
+        mirrors.expectMirrored(
+            hlsl_source,
+            mirrors.upper(field.name),
+            std.fmt.comptimePrint("{d}u", .{@as(u32, 1) << @as(u5, @intCast(bit))}),
+            "shaders.hlsl CellText.bools vs directx12.CellText",
+        );
+    }
+
+    // No BgImage.Info position/fit check: the HLSL bg_image pipeline takes
+    // the info byte but never decodes it, so shaders.hlsl declares no
+    // BG_IMAGE_* constants to check against.
 }

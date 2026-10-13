@@ -9,6 +9,11 @@ const global = @import("../global.zig");
 
 const log = std.log.scoped(.shadertoy);
 
+const cursor = @import("cursor.zig");
+const mirrors = @import("shader_mirrors.zig");
+
+const prefix_source = @embedFile("shaders/shadertoy_prefix.glsl");
+
 /// The uniform struct used for shadertoy shaders.
 pub const Uniforms = extern struct {
     resolution: [3]f32 align(16),
@@ -39,6 +44,43 @@ pub const Uniforms = extern struct {
     selection_background_color: [4]f32 align(16),
     selection_foreground_color: [4]f32 align(16),
 };
+
+comptime {
+    @setEvalBranchQuota(200000);
+
+    // generic.zig writes cursor.Style ordinals straight into
+    // iCurrentCursorStyle / iPreviousCursorStyle and the prefix hands the
+    // same values back as defines, so every style needs its exact copy.
+    for (@typeInfo(cursor.Style).@"enum".fields) |field| {
+        mirrors.expectMirrored(
+            prefix_source,
+            "CURSORSTYLE_" ++ mirrors.upper(field.name),
+            std.fmt.comptimePrint("{d}", .{field.value}),
+            "shadertoy_prefix.glsl CURSORSTYLE defines vs cursor.Style",
+        );
+    }
+
+    // The Globals block and Uniforms are one block: one member per field,
+    // and the std140 layout the shader sees must keep matching the extern
+    // struct GenericRenderer writes byte-for-byte. The palette is the one
+    // array: 256 vec3 entries, so its std140 stride is 16 bytes.
+    mirrors.expectBlockMemberCount(
+        prefix_source,
+        "Globals",
+        std.meta.fields(Uniforms).len,
+        "shadertoy_prefix.glsl Globals block vs shadertoy.Uniforms",
+    );
+    mirrors.expectSize(Uniforms, 4496, "shadertoy.Uniforms vs std140 Globals block");
+    mirrors.expectOffset(Uniforms, "sample_rate", 192, "shadertoy.Uniforms vs std140 Globals block");
+    mirrors.expectOffset(Uniforms, "current_cursor", 208, "shadertoy.Uniforms vs std140 Globals block");
+    mirrors.expectOffset(Uniforms, "palette", 304, "shadertoy.Uniforms vs std140 Globals block");
+    mirrors.expectOffset(Uniforms, "selection_foreground_color", 4480, "shadertoy.Uniforms vs std140 Globals block");
+    mirrors.expectSize(
+        @FieldType(Uniforms, "palette"),
+        256 * 16,
+        "shadertoy.Uniforms palette stride vs std140 vec3[256]",
+    );
+}
 
 /// The target to load shaders for.
 pub const Target = enum { glsl, msl, hlsl };
@@ -209,8 +251,7 @@ fn logCompileDiagnostics(alloc: Allocator, glsl: [:0]const u8, path: []const u8)
 /// will convert the ShaderToy shader into a valid GLSL shader that can be
 /// compiled and linked.
 pub fn glslFromShader(writer: *std.Io.Writer, src: []const u8) !void {
-    const prefix = @embedFile("shaders/shadertoy_prefix.glsl");
-    try writer.writeAll(prefix);
+    try writer.writeAll(prefix_source);
     try writer.writeAll("\n\n");
     try writer.writeAll(src);
 }
