@@ -92,8 +92,25 @@ pub const ModeState = struct {
         // See VT520/VT525 Programmer Information, "Erase Color" and DECRQM/DECRPM:
         // https://web.mit.edu/dosathena/doc/www/ek-vt520-rm.pdf
 
-        if (!tag.ansi and tag.value == 117) {
-            return .{ .tag = tag, .state = .permanently_reset };
+        if (!tag.ansi) {
+            inline for (permanently_reset_dec_modes) |v| {
+                // The short-circuit below bypasses the mode table, so a
+                // permanently-reset DEC mode must never appear in entries:
+                // CSI h/l would toggle it while DECRQM keeps reporting
+                // permanently reset.
+                comptime for (entries) |entry| {
+                    if (!entry.ansi and entry.value == v) @compileError(
+                        std.fmt.comptimePrint(
+                            "DEC mode {} is reported as permanently reset " ++
+                                "and must not be in the mode table",
+                            .{v},
+                        ),
+                    );
+                };
+                if (tag.value == v) {
+                    return .{ .tag = tag, .state = .permanently_reset };
+                }
+            }
         }
         const mode = modeFromInt(tag.value, tag.ansi) orelse return .{
             .tag = tag,
@@ -290,6 +307,12 @@ pub fn defaultConfigurable(mode: Mode) bool {
         },
     }
 }
+
+/// DEC private modes whose behavior Ghostty fixes to one state. getReport
+/// reports these as permanently reset without consulting the mode table,
+/// and its comptime check keeps them out of entries: a mode that CSI h/l
+/// could toggle must not report itself permanently reset.
+const permanently_reset_dec_modes = [_]u16{117};
 
 /// The full list of available entries. For documentation see how
 /// they're used within Ghostty or google their values. It is not
