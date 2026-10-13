@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const com = @import("com.zig");
 
 const d3d12 = @import("d3d12.zig");
+const dxgi = @import("dxgi.zig");
 const renderer = @import("../../renderer.zig");
 const gpu_data = @import("gpu_data.zig");
 const Pipeline = @import("Pipeline.zig");
@@ -330,26 +331,63 @@ const bg_image_input_elements = [_]d3d12.D3D12_INPUT_ELEMENT_DESC{
     },
 };
 
-// Cross-reference input layout byte offsets against GPU data struct offsets.
-// gpu_data.zig already asserts struct sizes; these verify the input element
-// descriptions stay in sync with the struct layout.
+// Cross-reference each input element table against the GPU data struct it
+// feeds: one element per field, at the field's byte offset, as wide as the
+// field. gpu_data.zig already pins the struct sizes; this catches the drift
+// those asserts cannot see, a struct field with no element feeding it to
+// the shader (CellText keeps 2 spare bytes at its tail, so a new field
+// compiles cleanly and silently never reaches the shader).
 comptime {
-    // CellText: last element (bools) must match struct offset
-    std.debug.assert(cell_text_input_elements[0].AlignedByteOffset == @offsetOf(CellText, "glyph_pos"));
-    std.debug.assert(cell_text_input_elements[1].AlignedByteOffset == @offsetOf(CellText, "glyph_size"));
-    std.debug.assert(cell_text_input_elements[2].AlignedByteOffset == @offsetOf(CellText, "bearings"));
-    std.debug.assert(cell_text_input_elements[3].AlignedByteOffset == @offsetOf(CellText, "grid_pos"));
-    std.debug.assert(cell_text_input_elements[4].AlignedByteOffset == @offsetOf(CellText, "color"));
-    std.debug.assert(cell_text_input_elements[5].AlignedByteOffset == @offsetOf(CellText, "atlas"));
-    std.debug.assert(cell_text_input_elements[6].AlignedByteOffset == @offsetOf(CellText, "bools"));
-    // Image: last element (dest_size) must match struct offset
-    std.debug.assert(image_input_elements[0].AlignedByteOffset == @offsetOf(Image, "grid_pos"));
-    std.debug.assert(image_input_elements[1].AlignedByteOffset == @offsetOf(Image, "cell_offset"));
-    std.debug.assert(image_input_elements[2].AlignedByteOffset == @offsetOf(Image, "source_rect"));
-    std.debug.assert(image_input_elements[3].AlignedByteOffset == @offsetOf(Image, "dest_size"));
-    // BgImage: info element must match struct offset
-    std.debug.assert(bg_image_input_elements[0].AlignedByteOffset == @offsetOf(BgImage, "opacity"));
-    std.debug.assert(bg_image_input_elements[1].AlignedByteOffset == @offsetOf(BgImage, "info"));
+    checkLayout(CellText, &cell_text_input_elements);
+    checkLayout(Image, &image_input_elements);
+    checkLayout(BgImage, &bg_image_input_elements);
+}
+
+/// Bytes of instance data one element of `format` carries. Every format
+/// the input layouts use is listed; anything else is a compile error so a
+/// new format must come with its byte size.
+fn formatByteSize(format: dxgi.DXGI_FORMAT) usize {
+    return switch (format) {
+        .R8_UINT => 1,
+        .R8G8B8A8_UNORM,
+        .R16G16_UINT,
+        .R16G16_SINT,
+        .R32_FLOAT,
+        => 4,
+        .R32G32_FLOAT,
+        .R32G32_UINT,
+        => 8,
+        .R32G32B32A32_FLOAT => 16,
+        else => |f| @compileError(std.fmt.comptimePrint(
+            "DXGI format {s} is not in formatByteSize; add it with its byte size",
+            .{@tagName(f)},
+        )),
+    };
+}
+
+/// Assert `elements` describes exactly the fields of `T`: element i must
+/// sit at the byte offset of field i and its format must be as wide as the
+/// field, so a field cannot be added to a struct without an element that
+/// feeds it, nor an element added with no field behind it.
+fn checkLayout(comptime T: type, comptime elements: []const d3d12.D3D12_INPUT_ELEMENT_DESC) void {
+    const fields = @typeInfo(T).@"struct".fields;
+    if (elements.len != fields.len)
+        @compileError(std.fmt.comptimePrint(
+            "{s} has {d} fields but its input layout lists {d} elements; every field must be fed to the shader",
+            .{ @typeName(T), fields.len, elements.len },
+        ));
+    inline for (elements, fields, 0..) |elem, field, i| {
+        if (elem.AlignedByteOffset != @offsetOf(T, field.name))
+            @compileError(std.fmt.comptimePrint(
+                "{s} input element {d} ({s}) is at byte {d} but the field {s} sits at byte {d}",
+                .{ @typeName(T), i, elem.SemanticName, elem.AlignedByteOffset, field.name, @offsetOf(T, field.name) },
+            ));
+        if (formatByteSize(elem.Format) != @sizeOf(field.type))
+            @compileError(std.fmt.comptimePrint(
+                "{s} input element {d} ({s}) feeds {d} bytes but the field {s} is {d} bytes",
+                .{ @typeName(T), i, elem.SemanticName, formatByteSize(elem.Format), field.name, @sizeOf(field.type) },
+            ));
+    }
 }
 
 pub const Shaders = struct {
@@ -618,18 +656,6 @@ test "shader bytecode fields exist" {
     _ = shader_bytecode.image_ps;
     _ = shader_bytecode.bg_image_vs;
     _ = shader_bytecode.bg_image_ps;
-}
-
-test "cell_text_input_elements count" {
-    try std.testing.expectEqual(@as(usize, 7), cell_text_input_elements.len);
-}
-
-test "image_input_elements count" {
-    try std.testing.expectEqual(@as(usize, 4), image_input_elements.len);
-}
-
-test "bg_image_input_elements count" {
-    try std.testing.expectEqual(@as(usize, 2), bg_image_input_elements.len);
 }
 
 test "Shaders struct fields" {

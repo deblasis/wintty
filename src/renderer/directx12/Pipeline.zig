@@ -275,6 +275,50 @@ pub const post_root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
     },
 };
 
+/// Assert root parameter `index` of `params` is of type `want`, with a
+/// message that names both, so the index constants cannot drift from the
+/// arrays they index.
+fn expectParamType(
+    comptime params: []const d3d12.D3D12_ROOT_PARAMETER1,
+    comptime index: comptime_int,
+    comptime want: d3d12.D3D12_ROOT_PARAMETER_TYPE,
+) void {
+    const got = params[index].ParameterType;
+    if (got != want)
+        @compileError(std.fmt.comptimePrint(
+            "root parameter {d} is {s} but must be {s}; the root_param_* indices must match the root signature layout",
+            .{ index, @tagName(got), @tagName(want) },
+        ));
+}
+
+// The root parameter index constants, against the arrays they index.
+// RenderPass binds root_param_cbv and root_param_sampler_table against both
+// signatures, so each must land on the same parameter type in both;
+// root_param_buffer_srv and root_param_srv_table_t1 exist only in the main
+// signature and must stay past the end of the post one, which is what makes
+// it safe that post-process steps never bind them (RenderPass.zig, the
+// NOTE at its buffer SRV bind).
+comptime {
+    expectParamType(&main_root_params, root_param_cbv, .CBV);
+    expectParamType(&post_root_params, root_param_cbv, .CBV);
+    expectParamType(&main_root_params, root_param_srv_table, .DESCRIPTOR_TABLE);
+    expectParamType(&post_root_params, root_param_srv_table, .DESCRIPTOR_TABLE);
+    expectParamType(&main_root_params, root_param_sampler_table, .DESCRIPTOR_TABLE);
+    expectParamType(&post_root_params, root_param_sampler_table, .DESCRIPTOR_TABLE);
+    expectParamType(&main_root_params, root_param_buffer_srv, .SRV);
+    expectParamType(&main_root_params, root_param_srv_table_t1, .DESCRIPTOR_TABLE);
+    if (root_param_buffer_srv < post_root_params.len)
+        @compileError(std.fmt.comptimePrint(
+            "root_param_buffer_srv ({d}) must stay past the end of post_root_params ({d} parameters): the post root signature has no buffer SRV and post steps never bind one",
+            .{ root_param_buffer_srv, post_root_params.len },
+        ));
+    if (root_param_srv_table_t1 < post_root_params.len)
+        @compileError(std.fmt.comptimePrint(
+            "root_param_srv_table_t1 ({d}) must stay past the end of post_root_params ({d} parameters): the post root signature has no t1 table",
+            .{ root_param_srv_table_t1, post_root_params.len },
+        ));
+}
+
 /// Root signature for custom post-process shaders.
 /// zioshade applies binding_shift -1 during SPIR-V to HLSL, so binding=1
 /// lands in register(b0) in the generated HLSL.
@@ -464,20 +508,6 @@ test "Pipeline default is empty" {
     const p: Pipeline = .{};
     try std.testing.expect(p.pso == null);
     try std.testing.expect(p.root_signature == null);
-}
-
-test "root parameter indices" {
-    try std.testing.expectEqual(@as(u32, 0), root_param_cbv);
-    try std.testing.expectEqual(@as(u32, 1), root_param_srv_table);
-    try std.testing.expectEqual(@as(u32, 2), root_param_sampler_table);
-}
-
-test "root_param_buffer_srv index" {
-    try std.testing.expectEqual(@as(u32, 3), root_param_buffer_srv);
-}
-
-test "root_param_srv_table_t1 index" {
-    try std.testing.expectEqual(@as(u32, 4), root_param_srv_table_t1);
 }
 
 test "SRV table: every texture table is one descriptor wide, at the register it is indexed by" {

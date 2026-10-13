@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
+const build_config = @import("../build_config.zig");
 const wuffs = @import("wuffs");
 const terminal = @import("../terminal/main.zig");
 const global = @import("../global.zig");
@@ -22,16 +23,26 @@ const log = std.log.scoped(.renderer_image);
 const TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Mirror of directx12/Texture.zig TEXTURE_DATA_PITCH_ALIGNMENT. Kept
-/// local so the budget math stays renderer-agnostic; the comptime
-/// block below catches drift on DX12 builds, and on backends without
-/// the constant (Metal/OpenGL) the assert is skipped.
+/// local so the budget math stays renderer-agnostic; the comptime block
+/// below catches drift on DX12 builds. The other backends have no
+/// row-pitch requirement, so there is nothing to compare.
 const TEXTURE_UPLOAD_PITCH_ALIGNMENT: u64 = 256;
 
 comptime {
-    if (@hasDecl(Texture, "TEXTURE_DATA_PITCH_ALIGNMENT")) {
-        std.debug.assert(
-            TEXTURE_UPLOAD_PITCH_ALIGNMENT == Texture.TEXTURE_DATA_PITCH_ALIGNMENT,
-        );
+    // Gate on the renderer backend, not @hasDecl: with a hasDecl gate, a
+    // rename on the DX12 side silently dropped the comparison and let the
+    // budget drift. On DX12 the decl must exist and must match.
+    switch (build_config.renderer) {
+        .directx12 => {
+            if (!@hasDecl(Texture, "TEXTURE_DATA_PITCH_ALIGNMENT"))
+                @compileError("the dx12 Texture must declare TEXTURE_DATA_PITCH_ALIGNMENT for image.zig's upload budget mirror");
+            if (TEXTURE_UPLOAD_PITCH_ALIGNMENT != Texture.TEXTURE_DATA_PITCH_ALIGNMENT)
+                @compileError(std.fmt.comptimePrint(
+                    "image.zig TEXTURE_UPLOAD_PITCH_ALIGNMENT ({d}) must equal Texture.TEXTURE_DATA_PITCH_ALIGNMENT ({d})",
+                    .{ TEXTURE_UPLOAD_PITCH_ALIGNMENT, Texture.TEXTURE_DATA_PITCH_ALIGNMENT },
+                ));
+        },
+        else => {},
     }
 }
 
