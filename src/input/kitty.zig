@@ -1,3 +1,4 @@
+const std = @import("std");
 const key = @import("key.zig");
 
 /// A single entry in the kitty keymap data. There are only ~100 entries
@@ -136,6 +137,40 @@ const raw_entries: []const RawEntry = &.{
     .{ .alt_left, 57443, 'u', true },
     .{ .alt_right, 57449, 'u', true },
 };
+
+comptime {
+    @setEvalBranchQuota(100_000);
+
+    // key_encode takes the first entry per key, so a duplicate key here
+    // would silently shadow every later entry for that key.
+    for (raw_entries, 0..) |a, ai| {
+        for (raw_entries[ai + 1 ..]) |b| {
+            if (a[0] == b[0]) @compileError(std.fmt.comptimePrint(
+                "kitty: duplicate raw_entries entry for {s}; the first entry would shadow this one",
+                .{@tagName(a[0])},
+            ));
+        }
+    }
+
+    // Every key that reports itself as a modifier must be in the table with
+    // modifier=true, or it would encode as a plain key.
+    for (@typeInfo(key.Key).@"enum".fields) |field| {
+        const k: key.Key = @enumFromInt(field.value);
+        if (!k.modifier()) continue;
+
+        var found = false;
+        for (raw_entries) |raw| {
+            if (raw[0] == k and raw[3]) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) @compileError(std.fmt.comptimePrint(
+            "kitty: modifier key {s} must have a raw_entries entry with modifier=true",
+            .{field.name},
+        ));
+    }
+}
 
 test {
     // To force comptime to test it

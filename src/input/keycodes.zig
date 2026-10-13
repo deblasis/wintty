@@ -39,133 +39,137 @@ pub const Entry = struct {
     code: []const u8, // W3C DOM code, static memory
 };
 
-/// A map from code to key. This isn't meant to be used at runtime
-/// (though it could), so it isn't exported. It used to build the
-/// key value for Entry.
+/// The raw code-to-key pairs. This isn't meant to be used at runtime;
+/// the map below is what builds the key value for Entry. It exists as its
+/// own table so the comptime checks at the bottom of this file can verify
+/// the pairs against raw_entries.
+const code_to_key_pairs = [_]struct { []const u8, Key }{
+    .{ "KeyA", .key_a },
+    .{ "KeyB", .key_b },
+    .{ "KeyC", .key_c },
+    .{ "KeyD", .key_d },
+    .{ "KeyE", .key_e },
+    .{ "KeyF", .key_f },
+    .{ "KeyG", .key_g },
+    .{ "KeyH", .key_h },
+    .{ "KeyI", .key_i },
+    .{ "KeyJ", .key_j },
+    .{ "KeyK", .key_k },
+    .{ "KeyL", .key_l },
+    .{ "KeyM", .key_m },
+    .{ "KeyN", .key_n },
+    .{ "KeyO", .key_o },
+    .{ "KeyP", .key_p },
+    .{ "KeyQ", .key_q },
+    .{ "KeyR", .key_r },
+    .{ "KeyS", .key_s },
+    .{ "KeyT", .key_t },
+    .{ "KeyU", .key_u },
+    .{ "KeyV", .key_v },
+    .{ "KeyW", .key_w },
+    .{ "KeyX", .key_x },
+    .{ "KeyY", .key_y },
+    .{ "KeyZ", .key_z },
+    .{ "Digit1", .digit_1 },
+    .{ "Digit2", .digit_2 },
+    .{ "Digit3", .digit_3 },
+    .{ "Digit4", .digit_4 },
+    .{ "Digit5", .digit_5 },
+    .{ "Digit6", .digit_6 },
+    .{ "Digit7", .digit_7 },
+    .{ "Digit8", .digit_8 },
+    .{ "Digit9", .digit_9 },
+    .{ "Digit0", .digit_0 },
+    .{ "Enter", .enter },
+    .{ "Escape", .escape },
+    .{ "Backspace", .backspace },
+    .{ "Tab", .tab },
+    .{ "Space", .space },
+    .{ "Minus", .minus },
+    .{ "Equal", .equal },
+    .{ "BracketLeft", .bracket_left },
+    .{ "BracketRight", .bracket_right },
+    .{ "Backslash", .backslash },
+    .{ "Semicolon", .semicolon },
+    .{ "Quote", .quote },
+    .{ "Backquote", .backquote },
+    .{ "Comma", .comma },
+    .{ "Period", .period },
+    .{ "Slash", .slash },
+    .{ "CapsLock", .caps_lock },
+    .{ "F1", .f1 },
+    .{ "F2", .f2 },
+    .{ "F3", .f3 },
+    .{ "F4", .f4 },
+    .{ "F5", .f5 },
+    .{ "F6", .f6 },
+    .{ "F7", .f7 },
+    .{ "F8", .f8 },
+    .{ "F9", .f9 },
+    .{ "F10", .f10 },
+    .{ "F11", .f11 },
+    .{ "F12", .f12 },
+    .{ "F13", .f13 },
+    .{ "F14", .f14 },
+    .{ "F15", .f15 },
+    .{ "F16", .f16 },
+    .{ "F17", .f17 },
+    .{ "F18", .f18 },
+    .{ "F19", .f19 },
+    .{ "F20", .f20 },
+    .{ "F21", .f21 },
+    .{ "F22", .f22 },
+    .{ "F23", .f23 },
+    .{ "F24", .f24 },
+    .{ "PrintScreen", .print_screen },
+    .{ "ScrollLock", .scroll_lock },
+    .{ "Pause", .pause },
+    .{ "Insert", .insert },
+    .{ "Home", .home },
+    .{ "PageUp", .page_up },
+    .{ "Delete", .delete },
+    .{ "End", .end },
+    .{ "Copy", .copy },
+    .{ "Cut", .cut },
+    .{ "Paste", .paste },
+    .{ "PageDown", .page_down },
+    .{ "ArrowRight", .arrow_right },
+    .{ "ArrowLeft", .arrow_left },
+    .{ "ArrowDown", .arrow_down },
+    .{ "ArrowUp", .arrow_up },
+    .{ "NumLock", .num_lock },
+    .{ "NumpadDivide", .numpad_divide },
+    .{ "NumpadMultiply", .numpad_multiply },
+    .{ "NumpadSubtract", .numpad_subtract },
+    .{ "NumpadAdd", .numpad_add },
+    .{ "NumpadEnter", .numpad_enter },
+    .{ "Numpad1", .numpad_1 },
+    .{ "Numpad2", .numpad_2 },
+    .{ "Numpad3", .numpad_3 },
+    .{ "Numpad4", .numpad_4 },
+    .{ "Numpad5", .numpad_5 },
+    .{ "Numpad6", .numpad_6 },
+    .{ "Numpad7", .numpad_7 },
+    .{ "Numpad8", .numpad_8 },
+    .{ "Numpad9", .numpad_9 },
+    .{ "Numpad0", .numpad_0 },
+    .{ "NumpadDecimal", .numpad_decimal },
+    .{ "NumpadEqual", .numpad_equal },
+    .{ "ContextMenu", .context_menu },
+    .{ "ControlLeft", .control_left },
+    .{ "ShiftLeft", .shift_left },
+    .{ "AltLeft", .alt_left },
+    .{ "MetaLeft", .meta_left },
+    .{ "ControlRight", .control_right },
+    .{ "ShiftRight", .shift_right },
+    .{ "AltRight", .alt_right },
+    .{ "MetaRight", .meta_right },
+};
+
+/// A map from code to key, built from `code_to_key_pairs`.
 const code_to_key = code_to_key: {
     @setEvalBranchQuota(5000);
-    break :code_to_key std.StaticStringMap(Key).initComptime(.{
-        .{ "KeyA", .key_a },
-        .{ "KeyB", .key_b },
-        .{ "KeyC", .key_c },
-        .{ "KeyD", .key_d },
-        .{ "KeyE", .key_e },
-        .{ "KeyF", .key_f },
-        .{ "KeyG", .key_g },
-        .{ "KeyH", .key_h },
-        .{ "KeyI", .key_i },
-        .{ "KeyJ", .key_j },
-        .{ "KeyK", .key_k },
-        .{ "KeyL", .key_l },
-        .{ "KeyM", .key_m },
-        .{ "KeyN", .key_n },
-        .{ "KeyO", .key_o },
-        .{ "KeyP", .key_p },
-        .{ "KeyQ", .key_q },
-        .{ "KeyR", .key_r },
-        .{ "KeyS", .key_s },
-        .{ "KeyT", .key_t },
-        .{ "KeyU", .key_u },
-        .{ "KeyV", .key_v },
-        .{ "KeyW", .key_w },
-        .{ "KeyX", .key_x },
-        .{ "KeyY", .key_y },
-        .{ "KeyZ", .key_z },
-        .{ "Digit1", .digit_1 },
-        .{ "Digit2", .digit_2 },
-        .{ "Digit3", .digit_3 },
-        .{ "Digit4", .digit_4 },
-        .{ "Digit5", .digit_5 },
-        .{ "Digit6", .digit_6 },
-        .{ "Digit7", .digit_7 },
-        .{ "Digit8", .digit_8 },
-        .{ "Digit9", .digit_9 },
-        .{ "Digit0", .digit_0 },
-        .{ "Enter", .enter },
-        .{ "Escape", .escape },
-        .{ "Backspace", .backspace },
-        .{ "Tab", .tab },
-        .{ "Space", .space },
-        .{ "Minus", .minus },
-        .{ "Equal", .equal },
-        .{ "BracketLeft", .bracket_left },
-        .{ "BracketRight", .bracket_right },
-        .{ "Backslash", .backslash },
-        .{ "Semicolon", .semicolon },
-        .{ "Quote", .quote },
-        .{ "Backquote", .backquote },
-        .{ "Comma", .comma },
-        .{ "Period", .period },
-        .{ "Slash", .slash },
-        .{ "CapsLock", .caps_lock },
-        .{ "F1", .f1 },
-        .{ "F2", .f2 },
-        .{ "F3", .f3 },
-        .{ "F4", .f4 },
-        .{ "F5", .f5 },
-        .{ "F6", .f6 },
-        .{ "F7", .f7 },
-        .{ "F8", .f8 },
-        .{ "F9", .f9 },
-        .{ "F10", .f10 },
-        .{ "F11", .f11 },
-        .{ "F12", .f12 },
-        .{ "F13", .f13 },
-        .{ "F14", .f14 },
-        .{ "F15", .f15 },
-        .{ "F16", .f16 },
-        .{ "F17", .f17 },
-        .{ "F18", .f18 },
-        .{ "F19", .f19 },
-        .{ "F20", .f20 },
-        .{ "F21", .f21 },
-        .{ "F22", .f22 },
-        .{ "F23", .f23 },
-        .{ "F24", .f24 },
-        .{ "PrintScreen", .print_screen },
-        .{ "ScrollLock", .scroll_lock },
-        .{ "Pause", .pause },
-        .{ "Insert", .insert },
-        .{ "Home", .home },
-        .{ "PageUp", .page_up },
-        .{ "Delete", .delete },
-        .{ "End", .end },
-        .{ "Copy", .copy },
-        .{ "Cut", .cut },
-        .{ "Paste", .paste },
-        .{ "PageDown", .page_down },
-        .{ "ArrowRight", .arrow_right },
-        .{ "ArrowLeft", .arrow_left },
-        .{ "ArrowDown", .arrow_down },
-        .{ "ArrowUp", .arrow_up },
-        .{ "NumLock", .num_lock },
-        .{ "NumpadDivide", .numpad_divide },
-        .{ "NumpadMultiply", .numpad_multiply },
-        .{ "NumpadSubtract", .numpad_subtract },
-        .{ "NumpadAdd", .numpad_add },
-        .{ "NumpadEnter", .numpad_enter },
-        .{ "Numpad1", .numpad_1 },
-        .{ "Numpad2", .numpad_2 },
-        .{ "Numpad3", .numpad_3 },
-        .{ "Numpad4", .numpad_4 },
-        .{ "Numpad5", .numpad_5 },
-        .{ "Numpad6", .numpad_6 },
-        .{ "Numpad7", .numpad_7 },
-        .{ "Numpad8", .numpad_8 },
-        .{ "Numpad9", .numpad_9 },
-        .{ "Numpad0", .numpad_0 },
-        .{ "NumpadDecimal", .numpad_decimal },
-        .{ "NumpadEqual", .numpad_equal },
-        .{ "ContextMenu", .context_menu },
-        .{ "ControlLeft", .control_left },
-        .{ "ShiftLeft", .shift_left },
-        .{ "AltLeft", .alt_left },
-        .{ "MetaLeft", .meta_left },
-        .{ "ControlRight", .control_right },
-        .{ "ShiftRight", .shift_right },
-        .{ "AltRight", .alt_right },
-        .{ "MetaRight", .meta_right },
-    });
+    break :code_to_key std.StaticStringMap(Key).initComptime(&code_to_key_pairs);
 };
 
 /// The codes for the table from the Chromium data set. These are ALL the
@@ -669,5 +673,71 @@ pub const raw_entries: []const RawEntry = &.{
     .{ 0x0c02a2, 0x00cc, 0x00d4, 0x0000, 0xffff, "" },
     .{ 0x0c02d0, 0x0279, 0x0281, 0x0000, 0xffff, "" },
 };
+
+comptime {
+    @setEvalBranchQuota(1_000_000);
+
+    // Every pair in code_to_key_pairs must be the W3C spelling of its key
+    // and must have a raw_entries row, or the platform entries built above
+    // silently disagree with key.zig or carry a code no platform defines.
+    for (code_to_key_pairs) |pair| {
+        const code = pair[0];
+        const k = pair[1];
+        if (!std.mem.eql(u8, code, k.w3c()))
+            @compileError(std.fmt.comptimePrint(
+                "keycodes: code \"{s}\" does not match the W3C form of {s}, which is \"{s}\"",
+                .{ code, @tagName(k), k.w3c() },
+            ));
+
+        var found = false;
+        for (raw_entries) |raw| {
+            if (std.mem.eql(u8, raw[5], code)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) @compileError(std.fmt.comptimePrint(
+            "keycodes: code \"{s}\" is mapped in code_to_key but has no raw_entries row",
+            .{code},
+        ));
+    }
+
+    // A nonzero native code must map to at most one key per platform column,
+    // or native-to-key reverse lookups become ambiguous. 0 is "no native
+    // code" outside the Mac column and 0xffff is the Mac column's marker
+    // for a key the platform does not have.
+    //
+    // The mapped keys are computed once up front: resolving them inside the
+    // nested loop below exceeds the evaluation branch quota.
+    var mapped: [raw_entries.len]?Key = undefined;
+    for (raw_entries, 0..) |raw, i| mapped[i] = mappedKey(raw[5]);
+
+    for (
+        .{ 1, 2, 3, 4 },
+        .{ "evdev", "xkb", "win", "mac" },
+    ) |col, col_name| {
+        for (mapped, 0..) |ma, ai| {
+            const ka = ma orelse continue;
+            const native = raw_entries[ai][col];
+            if (native == 0 or native == 0xffff) continue;
+            for (mapped[ai + 1 ..], ai + 1..) |mb, bi| {
+                const kb = mb orelse continue;
+                if (raw_entries[bi][col] == native and ka != kb) @compileError(std.fmt.comptimePrint(
+                    "keycodes: native code {d} in the {s} column maps to both {s} and {s}",
+                    .{ native, col_name, @tagName(ka), @tagName(kb) },
+                ));
+            }
+        }
+    }
+}
+
+/// Returns the key mapped to a W3C code, if any. Only used at comptime by
+/// the checks above; runtime callers go through `entries`.
+fn mappedKey(code: []const u8) ?Key {
+    for (code_to_key_pairs) |pair| {
+        if (std.mem.eql(u8, pair[0], code)) return pair[1];
+    }
+    return null;
+}
 
 test {}

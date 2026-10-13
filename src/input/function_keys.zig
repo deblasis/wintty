@@ -68,6 +68,32 @@ pub const modifiers: []const key.Mods = &.{
     .{ .shift = true, .alt = true, .ctrl = true, .super = true },
 };
 
+// The mode value for these sequences is index + 2, i.e. the xterm modifier
+// code is index + 1, whose bits are shift=1, alt=2, ctrl=4, super=8. The
+// table must stay in exactly that order or every generated sequence
+// encodes the wrong modifiers.
+comptime {
+    if (modifiers.len != 15)
+        @compileError("function_keys.modifiers must have exactly 15 entries: " ++
+            "every combination of shift, alt, ctrl and super");
+
+    @setEvalBranchQuota(10_000);
+    for (modifiers, 0..) |mods, i| {
+        const code: u16 = @intCast(i + 1);
+        if (mods.shift != ((code & 1) != 0) or
+            mods.alt != ((code & 2) != 0) or
+            mods.ctrl != ((code & 4) != 0) or
+            mods.super != ((code & 8) != 0))
+        {
+            @compileError(std.fmt.comptimePrint(
+                "function_keys.modifiers[{d}] must be the xterm modifier code {d} " ++
+                    "(bitmask: shift=1, alt=2, ctrl=4, super=8)",
+                .{ i, code },
+            ));
+        }
+    }
+}
+
 /// This is the array of entries for the PC style function keys as mapped to
 /// our set of possible key codes. Not every key has any entries.
 pub const KeyEntryArray = std.EnumArray(key.Key, []const Entry);
