@@ -651,12 +651,11 @@ pub const Key = enum(c_int) {
             .numpad_up => cimgui.c.ImGuiKey_UpArrow,
             .numpad_down => cimgui.c.ImGuiKey_DownArrow,
             .numpad_page_up => cimgui.c.ImGuiKey_PageUp,
-            .numpad_page_down => cimgui.c.ImGuiKey_PageUp,
+            .numpad_page_down => cimgui.c.ImGuiKey_PageDown,
             .numpad_home => cimgui.c.ImGuiKey_Home,
             .numpad_end => cimgui.c.ImGuiKey_End,
             .numpad_insert => cimgui.c.ImGuiKey_Insert,
             .numpad_delete => cimgui.c.ImGuiKey_Delete,
-            .numpad_begin => cimgui.c.ImGuiKey_NamedKey_BEGIN,
 
             .shift_left => cimgui.c.ImGuiKey_LeftShift,
             .control_left => cimgui.c.ImGuiKey_LeftCtrl,
@@ -688,6 +687,9 @@ pub const Key = enum(c_int) {
             .kana_mode,
             .non_convert,
             .numpad_separator,
+            // ImGui has no Begin key. Its enum range marker
+            // ImGuiKey_NamedKey_BEGIN aliases ImGuiKey_Tab.
+            .numpad_begin,
             .numpad_backspace,
             .numpad_clear,
             .numpad_clear_entry,
