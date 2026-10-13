@@ -94,8 +94,26 @@ pub const ModeState = struct {
         // See VT520/VT525 Programmer Information, "Erase Color" and DECRQM/DECRPM:
         // https://web.mit.edu/dosathena/doc/www/ek-vt520-rm.pdf
 
-        if (!tag.ansi and tag.value == 117) {
-            return .{ .tag = tag, .state = .permanently_reset };
+        // These unimplemented DEC private modes report fixed reset, matching
+        // xterm: DECHCCM (60), DECECM (117). Report permanently_reset instead
+        // of not_recognized so DECRQM callers hear "unsupported" rather than
+        // "unknown".
+        if (!tag.ansi) {
+            switch (tag.value) {
+                inline 60, 117 => |v| {
+                    comptime for (entries) |entry| {
+                        if (!entry.ansi and entry.value == v) @compileError(
+                            std.fmt.comptimePrint(
+                                "DEC private mode {} is in the mode table and " ++
+                                    "must not be reported as permanently reset",
+                                .{v},
+                            ),
+                        );
+                    };
+                    return .{ .tag = tag, .state = .permanently_reset };
+                },
+                else => {},
+            }
         }
 
         // These unimplemented ANSI modes report fixed reset, matching
@@ -539,6 +557,24 @@ test "getReport unsupported ANSI modes permanently reset" {
 
     // An unlisted ANSI mode is still unknown, not permanently reset.
     const unknown = state.getReport(.{ .value = 9, .ansi = true });
+    try testing.expectEqual(Report.State.not_recognized, unknown.state);
+}
+
+test "getReport unsupported DEC modes permanently reset" {
+    const state: ModeState = .{};
+    // DECHCCM, DECECM.
+    for ([_]u16{ 60, 117 }) |value| {
+        // None of these may gain a settable mode table entry without
+        // leaving this list first.
+        try testing.expect(modeFromInt(value, false) == null);
+        const report = state.getReport(.{ .value = value, .ansi = false });
+        try testing.expectEqual(Report.State.permanently_reset, report.state);
+        try testing.expectEqual(false, report.tag.ansi);
+        try testing.expectEqual(value, report.tag.value);
+    }
+
+    // An unlisted DEC mode is still unknown, not permanently reset.
+    const unknown = state.getReport(.{ .value = 61, .ansi = false });
     try testing.expectEqual(Report.State.not_recognized, unknown.state);
 }
 
