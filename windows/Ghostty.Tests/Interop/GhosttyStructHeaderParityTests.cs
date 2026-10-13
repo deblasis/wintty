@@ -196,22 +196,24 @@ public class GhosttyStructHeaderParityTests
             "ghostty_surface_config_s", aggregates: SurfaceConfigAggregates);
 
     // embedded.zig asserts Surface.Options' offsets at compile time, against
-    // numbers written in the source. Those numbers are only as good as their
-    // agreement with the header, so read them back and compare. Every field
-    // of the struct has to be asserted there: a field the comptime block
-    // does not name is a field the Zig side could move unnoticed.
+    // an expected-layout table written in the source. Those numbers are only
+    // as good as their agreement with the header, so read the table back and
+    // compare. Every field of the struct has to have a row there: a field
+    // the table does not name is a field the Zig side could move unnoticed.
     [Fact]
     public void SurfaceConfig_ZigComptimeLayout_Matches_Header()
     {
         var zig = LoadResource(EmbeddedZigResource);
         var layout = CLayoutOf("ghostty_surface_config_s", SurfaceConfigAggregates);
 
-        var offsets = Regex.Matches(zig, @"@offsetOf\(Options, ""(?<name>\w+)""\) != (?<value>\d+)")
-            .ToDictionary(m => m.Groups["name"].Value, m => int.Parse(m.Groups["value"].Value));
-        var size = Regex.Match(zig, @"@sizeOf\(Options\) != (?<value>\d+)");
+        var offsets = ZigLayoutTable(zig, "expected_options_layout");
+        var call = Regex.Match(
+            zig,
+            @"assertHeaderLayout\(\s*Options,\s*expected_options_layout,\s*(?<size>\d+),\s*""(?<header>\w+)""");
 
-        Assert.True(size.Success, "embedded.zig no longer asserts @sizeOf(Options)");
-        Assert.Equal(layout.Size, int.Parse(size.Groups["value"].Value));
+        Assert.True(call.Success, "embedded.zig no longer asserts Options against the header");
+        Assert.Equal("ghostty_surface_config_s", call.Groups["header"].Value);
+        Assert.Equal(layout.Size, int.Parse(call.Groups["size"].Value));
 
         var problems = new List<string>();
         foreach (var field in layout.Fields)
@@ -227,6 +229,29 @@ public class GhosttyStructHeaderParityTests
         Assert.True(problems.Count == 0,
             "Surface.Options in src/apprt/embedded.zig does not match ghostty_surface_config_s:\n" +
             string.Join("\n", problems));
+    }
+
+    // The layout tables in embedded.zig are `.{ .name = "...", .offset = N }`
+    // rows in a tuple named <tableName>. Scoped to that one tuple: the file
+    // also carries tables for ghostty_platform_windows_s, whose fields are
+    // not ghostty_surface_config_s fields and must not be swept in here.
+    private static IReadOnlyDictionary<string, int> ZigLayoutTable(string zig, string tableName)
+    {
+        var marker = "const " + tableName + " = .{";
+        var start = zig.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"embedded.zig has no layout table named {tableName}");
+        var open = start + marker.Length;
+        var close = zig.IndexOf("};", open, StringComparison.Ordinal);
+        Assert.True(close > open, $"layout table {tableName} is never closed; the scan is broken");
+
+        var rows = Regex.Matches(
+                zig[open..close],
+                @"\.name = ""(?<name>\w+)"", \.offset = (?<value>\d+)")
+            .ToDictionary(m => m.Groups["name"].Value, m => int.Parse(m.Groups["value"].Value));
+        Assert.True(
+            rows.Count > 0,
+            $"layout table {tableName} parsed to no rows; the scan is broken, not the struct");
+        return rows;
     }
 
     // The platform union is a union of structs, one of them with a nested

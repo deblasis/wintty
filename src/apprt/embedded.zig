@@ -391,6 +391,38 @@ pub const App = struct {
     }
 };
 
+/// Holds a C ABI struct to the offsets the header struct it mirrors
+/// declares: `expected` is one (name, offset) row per field of T, read
+/// from the header, and `size` is the header's sizeof. The row count is
+/// held to the field count, so a field added in tail padding fails too,
+/// and each row is held to @offsetOf, so a moved or widened field fails
+/// with the field and the header struct named.
+fn assertHeaderLayout(
+    comptime T: type,
+    comptime expected: anytype,
+    comptime size: usize,
+    comptime header_struct: []const u8,
+) void {
+    const fields = @typeInfo(T).@"struct".fields;
+    if (expected.len != fields.len) @compileError(std.fmt.comptimePrint(
+        "{s} has {d} fields but its layout table has {d} rows; every " ++
+            "field of {s} needs exactly one row",
+        .{ @typeName(T), fields.len, expected.len, header_struct },
+    ));
+    inline for (expected) |row| {
+        const actual = @offsetOf(T, row.name);
+        if (actual != row.offset) @compileError(std.fmt.comptimePrint(
+            "{s}.{s} is at offset {d} but {s} has it at {d}; the two " ++
+                "layouts must agree",
+            .{ @typeName(T), row.name, actual, header_struct, row.offset },
+        ));
+    }
+    if (@sizeOf(T) != size) @compileError(std.fmt.comptimePrint(
+        "{s} is {d} bytes but {s} is {d}; the two layouts must agree",
+        .{ @typeName(T), @sizeOf(T), header_struct, size },
+    ));
+}
+
 /// Platform-specific configuration for libghostty.
 pub const Platform = union(PlatformTag) {
     macos: MacOS,
@@ -455,6 +487,47 @@ pub const Platform = union(PlatformTag) {
             },
         },
     };
+
+    // C.windows is declared twice: here and as ghostty_platform_windows_s
+    // in include/ghostty.h. Nothing links them, so a field added on one
+    // side compiles cleanly and reads the wrong bytes at run time. These
+    // are the header's offsets on 64-bit targets, one row per field, and
+    // the comptime block below holds them to the real layout. The nested
+    // shared_texture gets its own table: a field appended to it can absorb
+    // into padding without moving any offset or size above it.
+    const expected_windows_layout = .{
+        .{ .name = "hwnd", .offset = 0 },
+        .{ .name = "swap_chain_panel", .offset = 8 },
+        .{ .name = "shared_texture", .offset = 16 },
+    };
+    const expected_shared_texture_layout = .{
+        .{ .name = "enabled", .offset = 0 },
+        .{ .name = "width", .offset = 4 },
+        .{ .name = "height", .offset = 8 },
+    };
+
+    comptime {
+        if (@sizeOf(usize) == 8) {
+            assertHeaderLayout(
+                @FieldType(C, "windows"),
+                expected_windows_layout,
+                32,
+                "ghostty_platform_windows_s",
+            );
+            assertHeaderLayout(
+                @FieldType(@FieldType(C, "windows"), "shared_texture"),
+                expected_shared_texture_layout,
+                12,
+                "ghostty_platform_windows_s.shared_texture",
+            );
+        } else {
+            @compileError(
+                "the embedded apprt layout checks against include/ghostty.h " ++
+                    "assume a 64-bit target; a non-64-bit build would skip " ++
+                    "them, which must not happen silently",
+            );
+        }
+    }
 
     /// Initialize a Platform a tag and configuration from the C ABI.
     pub fn init(tag_int: c_int, c_platform: C) !Platform {
@@ -643,30 +716,46 @@ pub const Surface = struct {
     // include/ghostty.h, and for the Windows app as GhosttySurfaceConfig in
     // windows/Ghostty.Core/Interop/GhosttySurfaceConfig.cs. Nothing links
     // them, so a field added in a different place on one side compiles
-    // cleanly and reads the wrong bytes at run time. These are the header's
-    // offsets on 64-bit targets. GhosttyStructHeaderParityTests reads the
-    // numbers below back and holds them to the header, and holds the C#
-    // struct to the header too, so the three agree or a build or a test
-    // fails.
+    // cleanly and reads the wrong bytes at run time. The table below is the
+    // header's offsets on 64-bit targets, one row per field, and the
+    // comptime block holds it to the real layout: the row count is held to
+    // the field count, so a field added in tail padding fails too.
+    // GhosttyStructHeaderParityTests reads the table back and holds it to
+    // the header, and holds the C# struct to the header too, so the three
+    // agree or a build or a test fails.
+    const expected_options_layout = .{
+        .{ .name = "platform_tag", .offset = 0 },
+        .{ .name = "platform", .offset = 8 },
+        .{ .name = "userdata", .offset = 40 },
+        .{ .name = "scale_factor", .offset = 48 },
+        .{ .name = "font_size", .offset = 56 },
+        .{ .name = "working_directory", .offset = 64 },
+        .{ .name = "command", .offset = 72 },
+        .{ .name = "env_vars", .offset = 80 },
+        .{ .name = "env_var_count", .offset = 88 },
+        .{ .name = "initial_input", .offset = 96 },
+        .{ .name = "wait_after_command", .offset = 104 },
+        .{ .name = "context", .offset = 108 },
+        .{ .name = "custom_shader", .offset = 112 },
+        .{ .name = "width", .offset = 120 },
+        .{ .name = "height", .offset = 124 },
+        .{ .name = "close_on_clean_exit", .offset = 128 },
+    };
+
     comptime {
         if (@sizeOf(usize) == 8) {
-            if (@offsetOf(Options, "platform_tag") != 0) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "platform") != 8) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "userdata") != 40) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "scale_factor") != 48) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "font_size") != 56) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "working_directory") != 64) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "command") != 72) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "env_vars") != 80) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "env_var_count") != 88) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "initial_input") != 96) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "wait_after_command") != 104) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "context") != 108) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "custom_shader") != 112) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "width") != 120) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "height") != 124) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@offsetOf(Options, "close_on_clean_exit") != 128) @compileError("Options layout drifted from ghostty_surface_config_s");
-            if (@sizeOf(Options) != 136) @compileError("Options layout drifted from ghostty_surface_config_s");
+            assertHeaderLayout(
+                Options,
+                expected_options_layout,
+                136,
+                "ghostty_surface_config_s",
+            );
+        } else {
+            @compileError(
+                "the embedded apprt layout checks against include/ghostty.h " ++
+                    "assume a 64-bit target; a non-64-bit build would skip " ++
+                    "them, which must not happen silently",
+            );
         }
     }
 
