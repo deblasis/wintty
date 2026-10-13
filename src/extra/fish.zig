@@ -4,6 +4,7 @@ const std = @import("std");
 const Config = @import("../config/Config.zig");
 const Action = @import("../cli.zig").ghostty.Action;
 const help_strings = @import("help_strings");
+const names = @import("names.zig");
 
 /// A fish completions configuration that contains all the available commands
 /// and options.
@@ -47,11 +48,11 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l ");
         try writer.writeAll(field.name);
         try writer.writeAll(if (field.type != bool) " -r" else " ");
-        if (std.mem.startsWith(u8, field.name, "font-family"))
+        if (std.mem.startsWith(u8, field.name, names.font_family))
             try writer.writeAll(" -f  -a \"(ghostty +list-fonts | grep '^[A-Z]')\"")
-        else if (std.mem.eql(u8, "theme", field.name))
+        else if (std.mem.eql(u8, names.theme, field.name))
             try writer.writeAll(" -f -a \"(ghostty +list-themes | sed -E 's/^(.*) \\(.*\\$/\\1/')\"")
-        else if (std.mem.eql(u8, "working-directory", field.name))
+        else if (std.mem.eql(u8, names.working_directory, field.name))
             try writer.writeAll(" -f -k -a \"(__fish_complete_directories)\"")
         else {
             try writer.writeAll(if (field.type != Config.RepeatablePath) " -f" else " -F");
@@ -105,8 +106,8 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     }
 
     for (@typeInfo(Action).@"enum".fields) |field| {
-        if (std.mem.eql(u8, "help", field.name)) continue;
-        if (std.mem.eql(u8, "version", field.name)) continue;
+        if (std.mem.eql(u8, names.help_action, field.name)) continue;
+        if (std.mem.eql(u8, names.version_action, field.name)) continue;
 
         const options = @field(Action, field.name).options();
         for (@typeInfo(options).@"struct".fields) |opt| {
@@ -116,7 +117,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
             try writer.writeAll(if (opt.type != bool) " -r" else "");
 
             // special case +validate_config --config-file
-            if (std.mem.eql(u8, "config-file", opt.name)) {
+            if (std.mem.eql(u8, names.config_file, opt.name)) {
                 try writer.writeAll(" -F");
             } else try writer.writeAll(" -f");
 
