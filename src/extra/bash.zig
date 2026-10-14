@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Config = @import("../config/Config.zig");
 const Action = @import("../cli.zig").ghostty.Action;
+const names = @import("names.zig");
 
 /// A bash completions configuration that contains all the available commands
 /// and options.
@@ -114,11 +115,11 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         if (field.name[0] == '_') continue;
         try writer.writeAll(pad3 ++ "--" ++ field.name ++ ") ");
 
-        if (std.mem.startsWith(u8, field.name, "font-family"))
+        if (std.mem.startsWith(u8, field.name, names.font_family))
             try writer.writeAll("_fonts ;;")
-        else if (std.mem.eql(u8, "theme", field.name))
+        else if (std.mem.eql(u8, names.theme, field.name))
             try writer.writeAll("_themes ;;")
-        else if (std.mem.eql(u8, "working-directory", field.name))
+        else if (std.mem.eql(u8, names.working_directory, field.name))
             try writer.writeAll("_dirs ;;")
         else if (field.type == Config.RepeatablePath)
             try writer.writeAll("_files ;;")
@@ -237,14 +238,14 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
                             try writer.writeAll(compgenSuffix);
                         },
                         else => {
-                            if (std.mem.eql(u8, "config-file", opt.name)) {
+                            if (std.mem.eql(u8, names.config_file, opt.name)) {
                                 try writer.writeAll("return ;;");
                             } else try writer.writeAll("return;;");
                         },
                     }
                 },
                 else => {
-                    if (std.mem.eql(u8, "config-file", opt.name)) {
+                    if (std.mem.eql(u8, names.config_file, opt.name)) {
                         try writer.writeAll("_files ;;");
                     } else try writer.writeAll("return;;");
                 },
