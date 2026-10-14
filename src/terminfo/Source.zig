@@ -65,6 +65,11 @@ pub fn encode(self: Source, writer: *std.Io.Writer) !void {
     }
 }
 
+/// The capability names XTGETTCAP answers without the table defining them:
+/// TN is the terminal's name, Co its color count, RGB says the color strings
+/// carry 8 bits per component.
+const synthesized_keys = [_][]const u8{ "TN", "Co", "RGB" };
+
 /// Returns a StaticStringMap for all of the capabilities in this terminfo.
 /// The value is the value that should be sent as a response to XTGETTCAP.
 /// Important: the value is the FULL response included the escape sequences.
@@ -75,14 +80,65 @@ pub fn encode(self: Source, writer: *std.Io.Writer) !void {
 pub fn xtgettcapMap(comptime self: Source) std.StaticStringMap([:0]const u8) {
     const KV = struct { []const u8, [:0]const u8 };
 
-    // We have all of our capabilities plus To, TN, and RGB which aren't
+    // TN, Co and RGB are synthesized below and the table's own names become
+    // map keys as they are, so a table that defines a synthesized name
+    // itself, or names one of its capabilities twice, would put two answers
+    // under one XTGETTCAP query. The map cannot represent that, so both are
+    // compile errors. The uniqueness check is quadratic in the table size.
+    comptime {
+        @setEvalBranchQuota(4_000_000);
+        for (self.capabilities) |cap| {
+            for (synthesized_keys) |key| {
+                if (std.mem.eql(u8, cap.name, key)) @compileError(
+                    std.fmt.comptimePrint(
+                        "capability {s} is answered by XTGETTCAP itself (TN, Co, " ++
+                            "RGB); the terminfo table must not define it",
+                        .{key},
+                    ),
+                );
+            }
+        }
+        for (self.capabilities, 0..) |cap, i| {
+            for (self.capabilities[i + 1 ..]) |other| {
+                if (std.mem.eql(u8, cap.name, other.name)) @compileError(
+                    std.fmt.comptimePrint(
+                        "capability {s} is defined twice in the terminfo table; " ++
+                            "XTGETTCAP would carry two answers for one query",
+                        .{cap.name},
+                    ),
+                );
+            }
+        }
+    }
+
+    // Co is not its own fact: it is the table's own colors count, so the
+    // XTGETTCAP answer and the compiled terminfo cannot disagree.
+    const colors: u32 = colors: {
+        for (self.capabilities) |cap| {
+            if (std.mem.eql(u8, cap.name, "colors")) {
+                switch (cap.value) {
+                    .numeric => |v| break :colors v,
+                    .boolean, .canceled, .string => @compileError(
+                        "XTGETTCAP answers Co from the table's colors capability, " ++
+                            "so colors must be numeric",
+                    ),
+                }
+            }
+        }
+        @compileError(
+            "XTGETTCAP answers Co from the table's colors capability, so the " ++
+                "terminfo table must define a numeric colors capability",
+        );
+    };
+
+    // We have all of our capabilities plus TN, Co, and RGB which aren't
     // in the capabilities list but are query-able.
     const len = self.capabilities.len + 3;
     var kvs: [len]KV = @splat(.{ "", "" });
 
     // We first build all of our entries with raw K=V pairs.
     kvs[0] = .{ "TN", self.names[0] };
-    kvs[1] = .{ "Co", "256" };
+    kvs[1] = .{ "Co", std.fmt.comptimePrint("{d}", .{colors}) };
     kvs[2] = .{ "RGB", "8" };
     for (self.capabilities, 3..) |cap, i| {
         kvs[i] = .{
@@ -199,6 +255,18 @@ test "xtgettcap map" {
     try testing.expectEqualStrings(
         "\x1bP1+r616D\x1b\\",
         map.get(hexencode("am")).?,
+    );
+    try testing.expectEqualStrings(
+        "\x1bP1+r544E=67686F73747479\x1b\\",
+        map.get(hexencode("TN")).?,
+    );
+    try testing.expectEqualStrings(
+        "\x1bP1+r436F=323536\x1b\\",
+        map.get(hexencode("Co")).?,
+    );
+    try testing.expectEqualStrings(
+        "\x1bP1+r524742=38\x1b\\",
+        map.get(hexencode("RGB")).?,
     );
     try testing.expectEqualStrings(
         "\x1bP1+r6B78=7F\x1b\\",
