@@ -310,7 +310,30 @@ public class ThemeFlipWiringTests
         // the same way every other input that can move the ground owes it.
         var handler = Window().Method("OnWindowThemeChanged");
         Assert.NotEmpty(handler.Calls("ApplyTheme"));
-        Assert.NotEmpty(handler.Calls("RefreshBackdropChrome"));
+
+        // Unconditional, and exactly once: the push rides no guard. The
+        // call's innermost enclosing block must be the handler's own body
+        // (an if/try/using would interpose its own block), and no return
+        // may sit above it. `if (false) { RefreshBackdropChrome(); }` and
+        // an early return both keep a presence-only pin green.
+        var repaints = handler.Calls("RefreshBackdropChrome");
+        Assert.True(repaints.Count == 1,
+            $"expected exactly one RefreshBackdropChrome call, found {repaints.Count}");
+        var call = repaints[0];
+
+        var body = handler.Body!;
+        var innermostBlock = call.Ancestors().OfType<BlockSyntax>().First();
+        Assert.True(innermostBlock == body,
+            "RefreshBackdropChrome sits inside a guard; the landing push must be unconditional");
+
+        var callStatement = call.Ancestors().OfType<StatementSyntax>().First();
+        var seenCall = false;
+        foreach (var statement in body.Statements)
+        {
+            if (statement.Span.Contains(callStatement.Span)) { seenCall = true; break; }
+            Assert.IsNotType<ReturnStatementSyntax>(statement);
+        }
+        Assert.True(seenCall, "RefreshBackdropChrome not found among the body's statements");
     }
 
     [Fact]
@@ -339,17 +362,18 @@ public class ThemeFlipWiringTests
         Assert.NotEmpty(method.Calls("RefreshShellInactiveInk"));
         Assert.NotEmpty(method.AssignsTo("_stripBackdropPacked"));
         Assert.NotEmpty(method.Calls("RefreshTabColors"));
-    }
 
-    [Fact]
-    public void RecolorTabText_TheDefaultInactiveTitlesScoreAgainstThePushedGround()
-    {
-        // What the ground push is for: the default path's unselected titles
-        // are derived from the pushed value, so a stale push is a stale ink.
-        var method = Host().Method("RecolorTabText");
-        var call = method.Call("MutedInkBrush");
-        Assert.Contains("_stripBackdropPacked",
-            call.ArgumentList.Arguments[0].ToString(), StringComparison.Ordinal);
+        // Both ink passes must FOLLOW the early-return guard, not merely
+        // exist: hoisting either above `if (!groundChanged) return;` turns
+        // the memo into paint-on-every-push and repaints nothing when the
+        // ground did move past a caller that skipped.
+        var guard = Assert.Single(method.Body!.Statements.OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.ToString().Contains("groundChanged", StringComparison.Ordinal)
+                        && i.Statement.ToString().Contains("return", StringComparison.Ordinal)));
+        foreach (var pass in method.Calls("RefreshShellInactiveInk")
+                     .Concat(method.Calls("RefreshTabColors")))
+            Assert.True(guard.Span.Start < pass.Span.Start,
+                $"{pass.CalleeText()} sits above the groundChanged guard");
     }
 
     [Fact]
@@ -360,5 +384,62 @@ public class ThemeFlipWiringTests
         // handler's push stops being the fix and this file's premise needs
         // another look.
         Assert.NotEmpty(Manager().Method("OnConfigChanged").CallsEndingWith("TryEnqueue"));
+    }
+
+    // The handler body is half the fix; the two subscription lines that
+    // carry the flip into it are the other half. A dropped or
+    // lambda-replaced subscription reintroduces the stale ground with every
+    // body fact above still green, so both wires are pinned as assignment
+    // nodes: an IdentifierNameSyntax right-hand side refuses the lambda
+    // shape a text match would wave through.
+
+    [Fact]
+    public void MainWindow_TheLandingHandlerIsSubscribedToTheManager()
+    {
+        var hits = Window().Root.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.AddAssignmentExpression)
+                        && a.Left is MemberAccessExpressionSyntax m
+                        && m.Expression.ToString() == "_themeManager"
+                        && m.Name.Identifier.ValueText == "ThemeChanged"
+                        && a.Right is IdentifierNameSyntax id
+                        && id.Identifier.ValueText == "OnWindowThemeChanged")
+            .ToList();
+        Assert.True(hits.Count == 1,
+            $"expected exactly one _themeManager.ThemeChanged += OnWindowThemeChanged, "
+                + $"found {hits.Count}");
+    }
+
+    [Fact]
+    public void WindowThemeManager_TheConfigDrivenSubscriptionIsLive()
+    {
+        // Add-only: Dispose's -= is the teardown of the same wire and must
+        // not count, so the kind is pinned, not just the operands.
+        var hits = Manager().Root.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.AddAssignmentExpression)
+                        && a.Left is MemberAccessExpressionSyntax m
+                        && m.Expression.ToString() == "_configService"
+                        && m.Name.Identifier.ValueText == "ConfigChanged"
+                        && a.Right is IdentifierNameSyntax id
+                        && id.Identifier.ValueText == "OnConfigChanged")
+            .ToList();
+        Assert.True(hits.Count == 1,
+            $"expected exactly one _configService.ConfigChanged += OnConfigChanged, "
+                + $"found {hits.Count}");
+    }
+
+    [Fact]
+    public void ResolveAndNotifyIfChanged_TheResolvePrecedesTheAnnouncement()
+    {
+        // The announcement is only honest with the freshly resolved answer:
+        // OnWindowThemeChanged's push reads _themeManager.IsDarkMode, so a
+        // swap that invokes first would push the outgoing polarity's ground
+        // exactly when the handler exists to fix that.
+        var method = Manager().Method("ResolveAndNotifyIfChanged");
+        var resolve = Assert.Single(method.Calls("Resolve"));
+        var announce = Assert.Single(method.CallsEndingWith("ThemeChanged?.Invoke"));
+        Assert.True(resolve.Span.Start < announce.Span.Start,
+            "ThemeChanged is invoked before Resolve()");
     }
 }

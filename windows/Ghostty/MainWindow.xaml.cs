@@ -4404,11 +4404,6 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// ShellThemeService.ThemeChanged handler. Re-applies the shell
-    /// theme (caption buttons, tab hosts, title text) and refreshes
-    /// the single RootGrid.Background source of truth.
-    /// </summary>
-    /// <summary>
     /// WindowThemeManager.ThemeChanged handler. Named (not an anonymous
     /// lambda) so it reads consistently with the other config-driven
     /// handlers; ApplyTheme is itself _isClosed-gated and the manager nulls
@@ -4522,6 +4517,11 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    /// <summary>
+    /// ShellThemeService.ThemeChanged handler. Re-applies the shell
+    /// theme (caption buttons, tab hosts, title text) and refreshes
+    /// the single RootGrid.Background source of truth.
+    /// </summary>
     private void OnShellThemeChanged()
     {
         // Same teardown race as ApplyTheme: ShellThemeService routes its
