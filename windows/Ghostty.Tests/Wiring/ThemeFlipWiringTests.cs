@@ -281,4 +281,84 @@ public class ThemeFlipWiringTests
                 $"{writer.Identifier.ValueText} writes TabView resources without marking them dirty");
         }
     }
+
+    // ------------------------------------------------------------------
+    // The resolved-theme landing. A theme preview applies its palette
+    // synchronously, but WindowThemeManager resolves the light/dark answer
+    // (window-theme unset means "auto", which reads the background's
+    // luminance) on a LATER dispatcher turn, and only announces it when it
+    // actually flipped. The horizontal strip's unselected titles are a
+    // cached brush scored against a ground estimate that blends that
+    // polarity, and nothing re-pushes the ground when the flip lands: the
+    // titles kept the ink picked for the outgoing polarity on a strip whose
+    // surface ApplyTheme had just darkened. A second dark theme re-derived
+    // the ink through the synchronous config pass, which is why going to
+    // another dark theme and back fixed it. The vertical strip never saw
+    // it: its unselected rows follow the element theme's own resources, so
+    // the same flip re-resolves them for free.
+    // ------------------------------------------------------------------
+
+    private static ShellSource Window() => ShellSource.Load("MainWindow.xaml.cs");
+    private static ShellSource Manager() => ShellSource.Load("Services.WindowThemeManager.cs");
+
+    [Fact]
+    public void OnWindowThemeChanged_TheLandedPolarityRepaintsTheGround()
+    {
+        // The landing handler is the only place the deferred flip arrives,
+        // and ApplyTheme alone flips surfaces. The ink's ground reaches the
+        // strips only through RefreshBackdropChrome, so the handler owes it
+        // the same way every other input that can move the ground owes it.
+        var handler = Window().Method("OnWindowThemeChanged");
+        Assert.NotEmpty(handler.Calls("ApplyTheme"));
+        Assert.NotEmpty(handler.Calls("RefreshBackdropChrome"));
+    }
+
+    [Fact]
+    public void RefreshBackdropChrome_StillReachesTheStripsGroundPush()
+    {
+        // The chain the repaint above rides. Breaking any link silently
+        // turns the handler's push into a no-op.
+        var window = Window();
+        Assert.NotEmpty(
+            window.Method("RefreshBackdropChrome").Calls("ApplyVerticalTitleBarChrome"));
+        Assert.NotEmpty(
+            window.Method("ApplyVerticalTitleBarChrome").Calls("ApplyChromeSeparators"));
+        Assert.NotEmpty(
+            window.Method("ApplyChromeSeparators").CallsEndingWith("SetChromeGround"));
+    }
+
+    [Fact]
+    public void SetChromeGround_TheChangedArmRepaintsTheTitles()
+    {
+        // The push only re-derives ink when the ground actually moved, and
+        // both arms must reach an ink pass: the shell path through
+        // RefreshShellInactiveInk, the default path by landing the ground
+        // and re-running the pass that reads it.
+        var method = Host().Method("SetChromeGround");
+        Assert.NotEmpty(method.AssignsTo("_chromeGroundPacked"));
+        Assert.NotEmpty(method.Calls("RefreshShellInactiveInk"));
+        Assert.NotEmpty(method.AssignsTo("_stripBackdropPacked"));
+        Assert.NotEmpty(method.Calls("RefreshTabColors"));
+    }
+
+    [Fact]
+    public void RecolorTabText_TheDefaultInactiveTitlesScoreAgainstThePushedGround()
+    {
+        // What the ground push is for: the default path's unselected titles
+        // are derived from the pushed value, so a stale push is a stale ink.
+        var method = Host().Method("RecolorTabText");
+        var call = method.Call("MutedInkBrush");
+        Assert.Contains("_stripBackdropPacked",
+            call.ArgumentList.Arguments[0].ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WindowThemeManager_TheConfigDrivenResolveIsDeferred()
+    {
+        // The deferral that makes the landing a separate turn from the
+        // config fan-out. If the resolve ever moves inline, the landing
+        // handler's push stops being the fix and this file's premise needs
+        // another look.
+        Assert.NotEmpty(Manager().Method("OnConfigChanged").CallsEndingWith("TryEnqueue"));
+    }
 }

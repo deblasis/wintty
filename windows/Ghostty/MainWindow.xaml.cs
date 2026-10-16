@@ -4414,7 +4414,20 @@ public sealed partial class MainWindow : Window
     /// handlers; ApplyTheme is itself _isClosed-gated and the manager nulls
     /// the event on dispose, so no teardown guard is needed here.
     /// </summary>
-    private void OnWindowThemeChanged(bool isDark) => ApplyTheme();
+    private void OnWindowThemeChanged(bool isDark)
+    {
+        ApplyTheme();
+        // The manager resolves its light/dark answer on a deferred turn, so
+        // this lands after the config fan-out already repainted the chrome
+        // from the new palette. ApplyTheme flips the surfaces the element
+        // theme resolves, but the strips score their unselected titles
+        // against a ground estimate that blends this polarity, and only the
+        // ground push re-derives that ink: without it, a light theme
+        // previewed onto a dark one kept the outgoing dark ink on the
+        // darkened strip until some unrelated pass happened to re-derive
+        // it, which is why switching to a second dark theme fixed it.
+        RefreshBackdropChrome();
+    }
 
     /// <summary>
     /// UISettings.ColorValuesChanged handler: an OS light/dark flip, accent
