@@ -182,10 +182,12 @@ public sealed partial class MainWindow
 
     // A fault in the dialog path must not be unobserved: the bare discard
     // left a dead confirmation as pure silence. Same shape as TabHost's own
-    // async close handler.
+    // async close handler. A teardown cancellation is a normal death, not a
+    // fault, so it stays silent.
     private async void ObserveRowClose(Task close)
     {
         try { await close; }
+        catch (OperationCanceledException) { return; }
         catch (Exception ex) { _logger.LogError(ex, "the strip-row close-tab request faulted"); }
     }
 

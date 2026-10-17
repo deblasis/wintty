@@ -234,6 +234,13 @@ public class FrameChordWiringTests
 
         Assert.Single(rowAction.CallsEndingWith("RequestCloseTabAsync").ToList(), _ => true);
 
+        // ...and it names the ROW's tab. A count-only pin survives the
+        // argument being swapped for the active tab: the chord would close
+        // whichever tab is active, dialog and all, with every guard green.
+        Assert.Equal(
+            "tab",
+            rowAction.CallEndingWith("RequestCloseTabAsync").ArgExpression(0).ToString());
+
         // No second policy: no direct manager close, no surface write.
         Assert.Empty(rowAction.Calls("CloseTab"));
         Assert.Empty(rowAction.CallsEndingWith("SurfaceBindingAction").ToList());
