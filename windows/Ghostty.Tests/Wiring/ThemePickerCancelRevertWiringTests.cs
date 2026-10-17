@@ -102,6 +102,31 @@ public class ThemePickerCancelRevertWiringTests
     /// <summary>The process-wide preview apply's member name.</summary>
     private const string PreviewApply = "ApplyThemePreview";
 
+    /// <summary>The record a capture builds for a cancel to restore.</summary>
+    private const string ColorsType = "ThemePreviewColors";
+
+    /// <summary>
+    /// The one field of that record whose value is a mutable array, and the
+    /// member every shell capture reads it from.
+    /// </summary>
+    private const string PaletteMember = "AnsiPalette";
+
+    /// <summary>The copy call the capture must make on that field.</summary>
+    private const string CloneMember = "Clone";
+
+    /// <summary>
+    /// Every shell capture of the live colours: the pipe server's, the
+    /// window's, and the command palette target's. All three sit in the
+    /// WinUI layer and cannot be loaded into a test host, so what is pinned
+    /// is the shape of the copy itself.
+    /// </summary>
+    private static readonly (string File, string Method)[] CaptureSites =
+    {
+        ("Ghostty.Services.ThemePreviewService.cs", "CaptureColors"),
+        ("Ghostty.MainWindow.xaml.cs", "CapturePreviewColors"),
+        ("Ghostty.Services.PaletteThemeTarget.cs", "CaptureColors"),
+    };
+
     private static ShellSource Window() => ShellSource.Load(MainWindowFile);
 
     /// <summary>
@@ -700,5 +725,84 @@ public class ThemePickerCancelRevertWiringTests
             $"{PreviewApply} may only be named by App, by the service that implements it, and by "
             + $"{MainWindowFile}'s {ApplyMethod}, which records the apply against the session "
             + "first. Found: " + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// Every capture of the live colours copies the palette rather than
+    /// holding the array itself.
+    ///
+    /// <see cref="ColorsType"/> carries four values and one array, and the
+    /// array is the trap: the shell's live palette is a single array that
+    /// <c>ApplyThemeColors</c> overwrites in place with Array.Copy on every
+    /// preview apply. A capture handed that array holds the thing being
+    /// overwritten, so it keeps mutating as the user browses, and the cancel
+    /// restores the last theme previewed -- the four values put back
+    /// correctly while the sixteen ANSI colours stay wrong, which is exactly
+    /// the shape of the defect. The session copies again at store time (and
+    /// is unit-tested for it there, where a real type can be had); this pin
+    /// is the capture boundary's own guarantee that what it builds already
+    /// outlives the preview that follows it, so no future consumer has to
+    /// know the array was ever live.
+    ///
+    /// Matched on the parsed argument node, not on text: the fifth argument
+    /// must unwrap to a zero-argument Clone call whose receiver names
+    /// <see cref="PaletteMember"/>. A substring would accept a comment
+    /// naming Clone, a Clone of some other array, or the old bare member.
+    /// </summary>
+    [Fact]
+    public void EveryPreviewCaptureCopiesThePalette()
+    {
+        foreach (var (file, captureMethod) in CaptureSites)
+        {
+            var method = ShellSource.Load(file).Method(captureMethod);
+
+            // Both spellings count: an explicit `new ThemePreviewColors(...)`
+            // and the target-typed `new(...)` the capture sites actually use.
+            var creations = method.DescendantNodes()
+                .OfType<BaseObjectCreationExpressionSyntax>()
+                .Where(n =>
+                    (n is ObjectCreationExpressionSyntax written
+                        && LastSegment(written.Type.ToString()) == ColorsType)
+                    || (n is ImplicitObjectCreationExpressionSyntax inferred
+                        && inferred.FirstAncestorOrSelf<MethodDeclarationSyntax>() is { } owner
+                        && LastSegment(owner.ReturnType.ToString()) == ColorsType))
+                .ToList();
+            Assert.True(
+                creations.Count == 1,
+                $"expected one {ColorsType} construction in {file}'s {captureMethod}, found "
+                    + $"{creations.Count}; the audit below reads the palette argument off it");
+
+            var arguments = creations[0].ArgumentList.Arguments;
+            Assert.True(
+                arguments.Count == 5,
+                $"expected the record's five arguments in {captureMethod}, found {arguments.Count}");
+
+            // `(uint[])`-style casts are expected around the Clone and carry
+            // nothing to audit; the call under them is the claim.
+            var palette = arguments[4].Expression;
+            while (palette is CastExpressionSyntax cast) palette = cast.Expression;
+
+            Assert.True(
+                palette is InvocationExpressionSyntax,
+                $"{captureMethod}'s palette argument must be a copy call, not the live member; "
+                    + "found '" + palette + "'");
+            var clone = (InvocationExpressionSyntax)palette;
+            Assert.True(
+                clone.Expression is MemberAccessExpressionSyntax,
+                $"expected a member call in {captureMethod}, found '" + clone.Expression + "'");
+            var callee = (MemberAccessExpressionSyntax)clone.Expression;
+
+            Assert.True(
+                callee.Name.Identifier.ValueText == CloneMember
+                    && clone.ArgumentList.Arguments.Count == 0,
+                $"{captureMethod} must copy the palette with a zero-argument {CloneMember} call, "
+                    + "found '" + clone + "'. The capture outlives the preview that follows it, "
+                    + "and the preview overwrites " + PaletteMember + " in place");
+            Assert.True(
+                callee.Expression.ToString().EndsWith(PaletteMember, StringComparison.Ordinal),
+                $"{captureMethod} must copy the live palette ({PaletteMember}), found '"
+                    + callee.Expression + "'. A copy of anything else snapshots the wrong array "
+                    + "and the cancel still restores the last theme previewed");
+        }
     }
 }

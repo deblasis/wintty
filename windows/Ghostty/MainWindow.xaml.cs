@@ -6252,7 +6252,10 @@ public sealed partial class MainWindow : Window
         _configService.BackgroundColor,
         _configService.CursorColor,
         _configService.CursorTextColor,
-        _configService.AnsiPalette);
+        // Copied, not referenced: ApplyThemeColors overwrites AnsiPalette in
+        // place on every preview, so the snapshot must hold its own array or
+        // the close restores the last theme previewed.
+        (uint[])_configService.AnsiPalette.Clone());
 
     /// <summary>
     /// The surface the picker is installed on is being freed. Close the picker

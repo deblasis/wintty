@@ -31,7 +31,10 @@ internal sealed class PaletteThemeTarget : IThemePreviewTarget
         _config.BackgroundColor,
         _config.CursorColor,
         _config.CursorTextColor,
-        _config.AnsiPalette);
+        // Copied, not referenced: ApplyThemeColors overwrites AnsiPalette in
+        // place on every preview, so the snapshot must hold its own array or
+        // a cancel restores the last theme previewed.
+        (uint[])_config.AnsiPalette.Clone());
 
     public bool ApplyPreview(string themeName) => _config.PreviewTheme(themeName);
 

@@ -317,7 +317,11 @@ internal sealed partial class ThemePreviewService : IDisposable
         _configService.BackgroundColor,
         _configService.CursorColor,
         _configService.CursorTextColor,
-        _configService.AnsiPalette);
+        // Copied, not referenced: ApplyThemeColors writes every preview into
+        // AnsiPalette in place (Array.Copy), so a capture holding that array
+        // would mutate with each preview and a cancel would restore the last
+        // theme previewed instead of what was here first.
+        (uint[])_configService.AnsiPalette.Clone());
 
     // The three session verbs, each dispatched. The session is UI-thread
     // state -- the inline picker drives it from the keystroke that opened the
