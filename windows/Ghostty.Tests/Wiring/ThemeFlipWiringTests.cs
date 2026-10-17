@@ -304,36 +304,36 @@ public class ThemeFlipWiringTests
     [Fact]
     public void OnWindowThemeChanged_TheLandedPolarityRepaintsTheGround()
     {
-        // The landing handler is the only place the deferred flip arrives,
-        // and ApplyTheme alone flips surfaces. The ink's ground reaches the
-        // strips only through RefreshBackdropChrome, so the handler owes it
-        // the same way every other input that can move the ground owes it.
+        // The landing handler is the only place the deferred flip arrives.
+        // Both pushes are pinned to the same shape: exactly one call each,
+        // and each is a top-level expression statement of the handler's own
+        // body. A braced `if (false) { ... }`, a braceless
+        // `if (isDark) push();`, a lambda wrap and an early return above --
+        // braced, bare or nested -- all interpose another node or another
+        // exit, and all of them must fail here.
         var handler = Window().Method("OnWindowThemeChanged");
-        Assert.NotEmpty(handler.Calls("ApplyTheme"));
-
-        // Unconditional, and exactly once: the push rides no guard. The
-        // call's innermost enclosing block must be the handler's own body
-        // (an if/try/using would interpose its own block), and no return
-        // may sit above it. `if (false) { RefreshBackdropChrome(); }` and
-        // an early return both keep a presence-only pin green.
-        var repaints = handler.Calls("RefreshBackdropChrome");
-        Assert.True(repaints.Count == 1,
-            $"expected exactly one RefreshBackdropChrome call, found {repaints.Count}");
-        var call = repaints[0];
-
         var body = handler.Body!;
-        var innermostBlock = call.Ancestors().OfType<BlockSyntax>().First();
-        Assert.True(innermostBlock == body,
-            "RefreshBackdropChrome sits inside a guard; the landing push must be unconditional");
 
-        var callStatement = call.Ancestors().OfType<StatementSyntax>().First();
-        var seenCall = false;
-        foreach (var statement in body.Statements)
+        foreach (var callee in new[] { "ApplyTheme", "RefreshBackdropChrome" })
         {
-            if (statement.Span.Contains(callStatement.Span)) { seenCall = true; break; }
-            Assert.IsNotType<ReturnStatementSyntax>(statement);
+            var calls = handler.Calls(callee);
+            Assert.True(calls.Count == 1,
+                $"expected exactly one {callee} call, found {calls.Count}");
+            var call = calls[0];
+
+            // Top-level: the statement the call sits in must be a direct
+            // child of the body. A braceless if or a lambda wrap keeps the
+            // call's own span inside the body's, so containment walks pass
+            // them; the parent chain cannot.
+            Assert.IsType<ExpressionStatementSyntax>(call.Parent);
+            var callStatement = (StatementSyntax)call.Parent;
+            Assert.Same(body, callStatement.Parent);
+
+            // Unreachable-from-the-top: ANY return anywhere in the body
+            // that closes before the call starts skips it, nested or not.
+            Assert.Empty(body.DescendantNodes().OfType<ReturnStatementSyntax>()
+                .Where(r => r.Span.End <= callStatement.Span.Start));
         }
-        Assert.True(seenCall, "RefreshBackdropChrome not found among the body's statements");
     }
 
     [Fact]
@@ -351,29 +351,51 @@ public class ThemeFlipWiringTests
     }
 
     [Fact]
-    public void SetChromeGround_TheChangedArmRepaintsTheTitles()
+    public void SetChromeGround_TheInkPassesRunOnEveryPush()
     {
-        // The push only re-derives ink when the ground actually moved, and
-        // both arms must reach an ink pass: the shell path through
-        // RefreshShellInactiveInk, the default path by landing the ground
-        // and re-running the pass that reads it.
+        // The invariant: the ink passes are UNCONDITIONAL, the ground's
+        // landing write is the one conditional. The polarity behind the
+        // estimate can flip without moving the value (a tint-opacity near
+        // 1.0 rounds the base's contribution away, so a light->dark pair
+        // with the same background lands byte-identical) while the strip's
+        // surface still repaints, so gating the re-derivation on the memo
+        // is the stale ink back.
         var method = Host().Method("SetChromeGround");
         Assert.NotEmpty(method.AssignsTo("_chromeGroundPacked"));
-        Assert.NotEmpty(method.Calls("RefreshShellInactiveInk"));
-        Assert.NotEmpty(method.AssignsTo("_stripBackdropPacked"));
-        Assert.NotEmpty(method.Calls("RefreshTabColors"));
 
-        // Both ink passes must FOLLOW the early-return guard, not merely
-        // exist: hoisting either above `if (!groundChanged) return;` turns
-        // the memo into paint-on-every-push and repaints nothing when the
-        // ground did move past a caller that skipped.
-        var guard = Assert.Single(method.Body!.Statements.OfType<IfStatementSyntax>()
-            .Where(i => i.Condition.ToString().Contains("groundChanged", StringComparison.Ordinal)
-                        && i.Statement.ToString().Contains("return", StringComparison.Ordinal)));
-        foreach (var pass in method.Calls("RefreshShellInactiveInk")
-                     .Concat(method.Calls("RefreshTabColors")))
-            Assert.True(guard.Span.Start < pass.Span.Start,
-                $"{pass.CalleeText()} sits above the groundChanged guard");
+        var passes = method.Calls("RefreshShellInactiveInk")
+            .Concat(method.Calls("RefreshTabColors"))
+            .ToList();
+        Assert.True(passes.Count == 2,
+            $"expected one ink pass per arm, found {passes.Count}");
+
+        // Unconditional at the top: nothing may return before the first
+        // pass runs.
+        var firstPass = passes.MinBy(p => p.Span.Start)!;
+        Assert.Empty(method.Body!.DescendantNodes().OfType<ReturnStatementSyntax>()
+            .Where(r => r.Span.End <= firstPass.Span.Start));
+
+        // And no `groundChanged`-conditioned if may hold a return: that is
+        // the old `if (!groundChanged) return;` guard, in braced or
+        // braceless form, restored over either arm.
+        Assert.Empty(method.Body!.DescendantNodes().OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.DescendantNodesAndSelf()
+                            .OfType<IdentifierNameSyntax>()
+                            .Any(id => id.Identifier.ValueText == "groundChanged")
+                        && i.Statement.DescendantNodes()
+                            .OfType<ReturnStatementSyntax>()
+                            .Any()));
+
+        // The ground's landing stays the one conditional write, with the
+        // polarity pinned at the node: the condition is exactly the
+        // `groundChanged` identifier. A substring match waved the inverted
+        // `if (!groundChanged)` through; a node match cannot.
+        var landing = Assert.Single(method.AssignsTo("_stripBackdropPacked"));
+        var landingIf = landing.Ancestors().OfType<IfStatementSyntax>().First();
+        var condition = Assert.IsType<IdentifierNameSyntax>(landingIf.Condition);
+        Assert.Equal("groundChanged", condition.Identifier.ValueText);
+        Assert.True(landingIf.Statement.Span.Contains(landing.Span),
+            "the ground write is not the conditional arm of the groundChanged if");
     }
 
     [Fact]

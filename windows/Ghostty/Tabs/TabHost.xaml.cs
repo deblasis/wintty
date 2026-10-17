@@ -4104,8 +4104,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // a window chrome truth composed from the same inputs the
         // separators read, and the strip must not re-derive it.
         _highContrast = highContrast;
-        if (!groundChanged) return;
 
+        // The ink passes run on EVERY push, changed ground or not. The
+        // polarity behind the estimate can flip without moving the value:
+        // at a tint-opacity near 1.0 the Fluent base's contribution rounds
+        // away, so a light->dark theme pair with the same background lands
+        // on a byte-identical estimate while the strip's surface still
+        // repaints under the flip. Stillness of the memo is about the
+        // estimate, not about the answer, and skipping the pass on it is
+        // how the unselected titles kept the outgoing ink. The pass is
+        // pure and idempotent; a genuine no-op re-applies the same brush.
         if (_shellActiveTextBrush is not null)
         {
             RefreshShellInactiveInk();
@@ -4119,7 +4127,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // it -- the preset tints and the field's flight -- are both scored
         // against the terminal instead of the strip. The vertical strip has
         // taken its ground from here since the same bug was fixed there.
-        _stripBackdropPacked = groundRgb;
+        // The write is all that stays behind the changed memo: re-landing
+        // the same value buys nothing, and the consumers below re-derive
+        // from it either way.
+        if (groundChanged) _stripBackdropPacked = groundRgb;
         RefreshTabColors();
         // RefreshTabColors walks _itemByModel; chips live in _chipByGroup and
         // are never re-chromed by it. Without this a folded run's chip keeps
