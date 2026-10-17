@@ -115,17 +115,10 @@ public class ThemePickerCancelRevertWiringTests
     private const string CloneMember = "Clone";
 
     /// <summary>
-    /// Every shell capture of the live colours: the pipe server's, the
-    /// window's, and the command palette target's. All three sit in the
-    /// WinUI layer and cannot be loaded into a test host, so what is pinned
-    /// is the shape of the copy itself.
+    /// The one safe alternative to a copy at the capture: the fresh
+    /// allocation ConfigService's resolve path builds its colours from.
     /// </summary>
-    private static readonly (string File, string Method)[] CaptureSites =
-    {
-        ("Ghostty.Services.ThemePreviewService.cs", "CaptureColors"),
-        ("Ghostty.MainWindow.xaml.cs", "CapturePreviewColors"),
-        ("Ghostty.Services.PaletteThemeTarget.cs", "CaptureColors"),
-    };
+    private const string FreshPaletteCall = "GetAllPaletteColors";
 
     private static ShellSource Window() => ShellSource.Load(MainWindowFile);
 
@@ -728,8 +721,8 @@ public class ThemePickerCancelRevertWiringTests
     }
 
     /// <summary>
-    /// Every capture of the live colours copies the palette rather than
-    /// holding the array itself.
+    /// Every shell construction of the preview colours builds the palette
+    /// either as a copy or as a fresh allocation, never as the live array.
     ///
     /// <see cref="ColorsType"/> carries four values and one array, and the
     /// array is the trap: the shell's live palette is a single array that
@@ -744,21 +737,36 @@ public class ThemePickerCancelRevertWiringTests
     /// outlives the preview that follows it, so no future consumer has to
     /// know the array was ever live.
     ///
-    /// Matched on the parsed argument node, not on text: the fifth argument
-    /// must unwrap to a zero-argument Clone call whose receiver names
-    /// <see cref="PaletteMember"/>. A substring would accept a comment
-    /// naming Clone, a Clone of some other array, or the old bare member.
+    /// A census, not a roll of known sites: a hardcoded list of capture
+    /// methods is green the day a fourth site enters with the bare member
+    /// and the suite never notices. Every shell source is swept for
+    /// constructions of the record, and each palette argument must be one
+    /// of exactly two shapes: a zero-argument <see cref="CloneMember"/> call
+    /// on a receiver naming <see cref="PaletteMember"/> (the receiver is
+    /// matched on its suffix, so a namespace-qualified or field-renamed
+    /// spelling of the same member still counts), or
+    /// <see cref="FreshPaletteCall"/>, which allocates a fresh array per
+    /// call and is how the config resolve path builds its colours. Anything
+    /// else fails with the file and site named. This inherits the corpus
+    /// sweep's blind spot: a construction inside a conditional region no
+    /// parse here sees is invisible to it, the same as for every other
+    /// AllShellSources rule.
+    ///
+    /// Matched on the parsed argument node, not on text: a substring would
+    /// accept a comment naming Clone, a Clone of some other array, or the
+    /// old bare member.
     /// </summary>
     [Fact]
     public void EveryPreviewCaptureCopiesThePalette()
     {
-        foreach (var (file, captureMethod) in CaptureSites)
-        {
-            var method = ShellSource.Load(file).Method(captureMethod);
+        var copied = 0;
+        var offenders = new List<string>();
 
+        foreach (var (resource, root) in ShellSource.AllShellSources())
+        {
             // Both spellings count: an explicit `new ThemePreviewColors(...)`
             // and the target-typed `new(...)` the capture sites actually use.
-            var creations = method.DescendantNodes()
+            var creations = root.DescendantNodes()
                 .OfType<BaseObjectCreationExpressionSyntax>()
                 .Where(n =>
                     (n is ObjectCreationExpressionSyntax written
@@ -767,42 +775,61 @@ public class ThemePickerCancelRevertWiringTests
                         && inferred.FirstAncestorOrSelf<MethodDeclarationSyntax>() is { } owner
                         && LastSegment(owner.ReturnType.ToString()) == ColorsType))
                 .ToList();
-            Assert.True(
-                creations.Count == 1,
-                $"expected one {ColorsType} construction in {file}'s {captureMethod}, found "
-                    + $"{creations.Count}; the audit below reads the palette argument off it");
 
-            var arguments = creations[0].ArgumentList.Arguments;
-            Assert.True(
-                arguments.Count == 5,
-                $"expected the record's five arguments in {captureMethod}, found {arguments.Count}");
+            foreach (var creation in creations)
+            {
+                var line = creation.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+                var site = resource + ":" + line + " ("
+                    + (creation.FirstAncestorOrSelf<MethodDeclarationSyntax>()
+                        ?.Identifier.ValueText ?? "<no method>") + ")";
 
-            // `(uint[])`-style casts are expected around the Clone and carry
-            // nothing to audit; the call under them is the claim.
-            var palette = arguments[4].Expression;
-            while (palette is CastExpressionSyntax cast) palette = cast.Expression;
+                var arguments = creation.ArgumentList.Arguments;
+                if (arguments.Count != 5)
+                {
+                    offenders.Add(site + " builds " + ColorsType + " with "
+                        + arguments.Count + " arguments, expected the record's five");
+                    continue;
+                }
 
-            Assert.True(
-                palette is InvocationExpressionSyntax,
-                $"{captureMethod}'s palette argument must be a copy call, not the live member; "
-                    + "found '" + palette + "'");
-            var clone = (InvocationExpressionSyntax)palette;
-            Assert.True(
-                clone.Expression is MemberAccessExpressionSyntax,
-                $"expected a member call in {captureMethod}, found '" + clone.Expression + "'");
-            var callee = (MemberAccessExpressionSyntax)clone.Expression;
+                // `(uint[])`-style casts are expected around the copy and
+                // carry nothing to audit; the call under them is the claim.
+                var palette = arguments[4].Expression;
+                while (palette is CastExpressionSyntax cast) palette = cast.Expression;
 
-            Assert.True(
-                callee.Name.Identifier.ValueText == CloneMember
-                    && clone.ArgumentList.Arguments.Count == 0,
-                $"{captureMethod} must copy the palette with a zero-argument {CloneMember} call, "
-                    + "found '" + clone + "'. The capture outlives the preview that follows it, "
-                    + "and the preview overwrites " + PaletteMember + " in place");
-            Assert.True(
-                callee.Expression.ToString().EndsWith(PaletteMember, StringComparison.Ordinal),
-                $"{captureMethod} must copy the live palette ({PaletteMember}), found '"
-                    + callee.Expression + "'. A copy of anything else snapshots the wrong array "
-                    + "and the cancel still restores the last theme previewed");
+                if (palette is InvocationExpressionSyntax { ArgumentList.Arguments.Count: 0 } copy
+                    && copy.Expression is MemberAccessExpressionSyntax member
+                    && member.Name.Identifier.ValueText == CloneMember
+                    && member.Expression.ToString()
+                        .EndsWith(PaletteMember, StringComparison.Ordinal))
+                {
+                    copied++;
+                    continue;
+                }
+
+                if (palette is InvocationExpressionSyntax { ArgumentList.Arguments.Count: 0 } fresh
+                    && (fresh.Expression.ToString() == FreshPaletteCall
+                        || fresh.Expression.ToString()
+                            .EndsWith("." + FreshPaletteCall, StringComparison.Ordinal)))
+                {
+                    copied++;
+                    continue;
+                }
+
+                offenders.Add(site + " builds the palette as '" + palette
+                    + "'. It must be a zero-argument " + CloneMember + " of " + PaletteMember
+                    + " -- the preview overwrites that array in place, so a capture holding it "
+                    + "restores the last theme previewed -- or a " + FreshPaletteCall
+                    + " fresh allocation");
+            }
         }
+
+        Assert.True(
+            copied > 0,
+            "the census found no safe " + ColorsType + " constructions in the shell corpus; "
+                + "this rule stopped matching and would pass over any number of aliased captures");
+        Assert.True(
+            offenders.Count == 0,
+            "every shell capture of the preview colours must build the palette by value. Found: "
+                + string.Join("; ", offenders));
     }
 }
