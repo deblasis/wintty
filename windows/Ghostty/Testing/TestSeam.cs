@@ -2885,6 +2885,15 @@ internal static class TestSeam
         json.WriteStartObject("state");
         json.WriteBoolean("vertical", window.TestSeamVerticalTabs);
         json.WriteBoolean("switching", window.TestSeamLayoutSwitching);
+        // Chrome theme state: what the root and both tab hosts actually
+        // resolved to, not what pixels say. A translucent backdrop makes
+        // pixel inference read the desktop behind the window, so the state
+        // is reported directly.
+        json.WriteStartObject("chrome");
+        json.WriteString("root", window.TestSeamRootTheme);
+        json.WriteString("horizontal", window.TestSeamHorizontalThemeState);
+        json.WriteString("vertical", window.TestSeamVerticalThemeState);
+        json.WriteEndObject();
         json.WriteNumber("active", manager.IndexOf(manager.ActiveTab));
         json.WriteNumber("paneWidth",
             window.TestSeamVerticalStrip?.TestSeamPaneWidth ?? 0);

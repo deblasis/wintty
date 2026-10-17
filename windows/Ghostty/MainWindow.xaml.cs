@@ -140,6 +140,25 @@ public sealed partial class MainWindow : Window
     /// <summary>This window's palette theme browse, for the seam's settle wait.</summary>
     internal Ghostty.Core.Themes.PaletteThemeBrowse? TestSeamThemeBrowse => _paletteThemeBrowse;
 
+    /// <summary>
+    /// Declared and resolved theme of the window root, for the seam's
+    /// chrome readout. A window-theme defect is only diagnosable when a
+    /// driver can read what each layer actually resolved to rather than
+    /// infer it from pixels, which a translucent backdrop confounds.
+    /// Spelled "requested/actual"; actual is Default until the element
+    /// joins a live tree.
+    /// </summary>
+    internal string TestSeamRootTheme
+        => Content is FrameworkElement fe
+            ? $"{fe.RequestedTheme}/{fe.ActualTheme}"
+            : "no-content";
+
+    /// <summary>Both tab hosts' theme states, same readout shape.</summary>
+    internal string TestSeamHorizontalThemeState
+        => _horizontalTabHost?.TestSeamThemeState ?? "no-host";
+    internal string TestSeamVerticalThemeState
+        => _verticalTabHost?.TestSeamThemeState ?? "no-host";
+
     internal bool TestSeamVerticalTabs => _verticalTabsVisible;
     internal bool TestSeamLayoutSwitching => _layout.IsSwitching;
 

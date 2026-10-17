@@ -388,6 +388,13 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     }
 
     /// <summary>
+    /// Declared and resolved theme of this host and its strip, for the
+    /// seam's chrome readout, same shape as the horizontal host's.
+    /// </summary>
+    internal string TestSeamThemeState
+        => $"{RequestedTheme}/{ActualTheme} strip:{_strip.RequestedTheme}/{_strip.ActualTheme}";
+
+    /// <summary>
     /// Colour for the lines between rows and the surface they are calibrated
     /// against, or null for the paths that separate by shade already.
     /// </summary>
