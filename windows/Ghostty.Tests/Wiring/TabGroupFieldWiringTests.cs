@@ -254,11 +254,22 @@ public sealed class TabGroupFieldWiringTests
     public void Horizontal_TheWashNeverLandsOnTheSelectedHandle()
     {
         var chrome = ShellSource.Load(HorizontalStrip).Method("ApplyTabChrome");
-        var wash = Assert.Single(chrome.Calls("TabColorBrush.FromPackedArgb"));
+        // The wash reaches the handle through the ground-memoized brush
+        // (GroupWashBrush), so the pin follows the assignment rather than
+        // the producer call: whichever producer stands on the right, the
+        // wash lands on the unselected handle or nowhere.
+        var wash = Assert.Single(chrome.Calls("GroupWashBrush"));
 
         var assignment = wash.FirstAncestorOrSelf<AssignmentExpressionSyntax>();
         Assert.NotNull(assignment);
         Assert.Equal("normalHandle", assignment!.Left.ToString());
+
+        // And the producer itself answers the ground-keyed brush only: no
+        // path from it reaches the selected handle.
+        var producer = ShellSource.Load(HorizontalStrip).Method("GroupWashBrush");
+        Assert.Empty(producer.Body!.DescendantNodes()
+            .OfType<IdentifierNameSyntax>()
+            .Where(id => id.Identifier.ValueText == "selectedHandle"));
     }
 
     // ---- the terminals -------------------------------------------------

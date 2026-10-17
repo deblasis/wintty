@@ -2321,8 +2321,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // is what makes it read as continuous with the pane below it.
             if (tab.Group is not null)
             {
-                normalHandle = TabColorBrush.FromPackedArgb(
-                    TabGroupField.WashArgb(_stripBackdropPacked));
+                normalHandle = GroupWashBrush();
                 washedByField = true;
             }
             // Every item carries the selected key, not only the selected one.
@@ -4098,7 +4097,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     internal void SetChromeGround(uint groundRgb, bool highContrast)
     {
-        var groundChanged = _chromeGroundPacked != groundRgb;
         _chromeGroundPacked = groundRgb;
         // The motion gate's High Contrast half rides the same push: it is
         // a window chrome truth composed from the same inputs the
@@ -4113,7 +4111,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // repaints under the flip. Stillness of the memo is about the
         // estimate, not about the answer, and skipping the pass on it is
         // how the unselected titles kept the outgoing ink. The pass is
-        // pure and idempotent; a genuine no-op re-applies the same brush.
+        // pure and idempotent, and with the ink brush memoized on the
+        // ground a genuine no-op re-applies the one cached brush rather
+        // than allocating another.
         if (_shellActiveTextBrush is not null)
         {
             RefreshShellInactiveInk();
@@ -4127,10 +4127,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // it -- the preset tints and the field's flight -- are both scored
         // against the terminal instead of the strip. The vertical strip has
         // taken its ground from here since the same bug was fixed there.
-        // The write is all that stays behind the changed memo: re-landing
-        // the same value buys nothing, and the consumers below re-derive
-        // from it either way.
-        if (groundChanged) _stripBackdropPacked = groundRgb;
+        // The landed value itself is written unconditionally for the same
+        // reason: the memo's stillness is never proof of the answer.
+        _stripBackdropPacked = groundRgb;
         RefreshTabColors();
         // RefreshTabColors walks _itemByModel; chips live in _chipByGroup and
         // are never re-chromed by it. Without this a folded run's chip keeps
@@ -4232,6 +4231,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private static uint PackColor(Windows.UI.Color c) =>
         ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
+    private SolidColorBrush? _mutedInkBrush;
+    private uint _mutedInkGround;
+
     /// <summary>
     /// The strip's muted-ink answer for a ground: the better pole at the
     /// preferred alpha where that clears AA, else the muting ladder stepped
@@ -4241,12 +4243,48 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// exception is the idle dim: an idle title's element opacity re-mutes
     /// this ink below the floor, an #884-class defect outside #936's
     /// measured set.
+    ///
+    /// Memoized on the packed ground it was derived from: an ink pass on an
+    /// unchanged ground re-applies the one brush instead of allocating
+    /// another. UI-thread-only by construction: every writer of the pair
+    /// and every reader of the brushes sits on the dispatcher (the passes
+    /// run from MainWindow's UI-thread chrome pushes and this strip's own
+    /// UI-thread handlers), so the memo is touched without synchronization
+    /// and never across threads. The brush is immutable once created and a
+    /// ground change derives a NEW one before re-keying, so a cached
+    /// instance is never mutated.
     /// </summary>
-    private static SolidColorBrush MutedInkBrush(uint ground)
+    private SolidColorBrush MutedInkBrush(uint ground)
     {
-        var ink = ThemeResolution.ReadableMutedForeground(ground, InactiveInkAlpha);
-        return new SolidColorBrush(Windows.UI.Color.FromArgb(ink.Alpha,
-            (byte)(ink.Pole >> 16), (byte)(ink.Pole >> 8), (byte)ink.Pole));
+        if (_mutedInkBrush is null || _mutedInkGround != ground)
+        {
+            var ink = ThemeResolution.ReadableMutedForeground(ground, InactiveInkAlpha);
+            _mutedInkBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(ink.Alpha,
+                (byte)(ink.Pole >> 16), (byte)(ink.Pole >> 8), (byte)ink.Pole));
+            _mutedInkGround = ground;
+        }
+        return _mutedInkBrush;
+    }
+
+    private SolidColorBrush? _groupWashBrush;
+    private uint _groupWashGround;
+
+    /// <summary>
+    /// The group field's wash, memoized on the packed ground it is mixed
+    /// against, on the same terms as the muted ink: UI-thread-only by
+    /// construction (the one caller runs inside the strip's chrome pass),
+    /// immutable once created, and a ground change derives a new brush
+    /// before re-keying.
+    /// </summary>
+    private SolidColorBrush GroupWashBrush()
+    {
+        if (_groupWashBrush is null || _groupWashGround != _stripBackdropPacked)
+        {
+            _groupWashBrush = TabColorBrush.FromPackedArgb(
+                TabGroupField.WashArgb(_stripBackdropPacked));
+            _groupWashGround = _stripBackdropPacked;
+        }
+        return _groupWashBrush;
     }
 
     private ElementTheme _cachedTheme = ElementTheme.Default;

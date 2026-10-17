@@ -3604,8 +3604,9 @@ public sealed partial class MainWindow : Window
     /// doubled edge rather than a clearer one. See
     /// <see cref="LegibleChromeAccent"/>.
     ///
-    /// Idempotent and brush-cached, so every input that can move the ground
-    /// may call it.
+    /// Idempotent, and the strips memoize their ink against the ground they
+    /// are handed, so every input that can move the ground may call it: a
+    /// re-push with an unchanged value re-applies the same cached brush.
     /// </summary>
     private void ApplyChromeSeparators()
     {

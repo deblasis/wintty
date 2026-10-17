@@ -305,35 +305,12 @@ public class ThemeFlipWiringTests
     public void OnWindowThemeChanged_TheLandedPolarityRepaintsTheGround()
     {
         // The landing handler is the only place the deferred flip arrives.
-        // Both pushes are pinned to the same shape: exactly one call each,
-        // and each is a top-level expression statement of the handler's own
-        // body. A braced `if (false) { ... }`, a braceless
-        // `if (isDark) push();`, a lambda wrap and an early return above --
-        // braced, bare or nested -- all interpose another node or another
-        // exit, and all of them must fail here.
+        // Both pushes are pinned through the shared shape checker: exactly
+        // one call each, a direct top-level statement of the handler's own
+        // body, with no return anywhere above it.
         var handler = Window().Method("OnWindowThemeChanged");
-        var body = handler.Body!;
-
         foreach (var callee in new[] { "ApplyTheme", "RefreshBackdropChrome" })
-        {
-            var calls = handler.Calls(callee);
-            Assert.True(calls.Count == 1,
-                $"expected exactly one {callee} call, found {calls.Count}");
-            var call = calls[0];
-
-            // Top-level: the statement the call sits in must be a direct
-            // child of the body. A braceless if or a lambda wrap keeps the
-            // call's own span inside the body's, so containment walks pass
-            // them; the parent chain cannot.
-            Assert.IsType<ExpressionStatementSyntax>(call.Parent);
-            var callStatement = (StatementSyntax)call.Parent;
-            Assert.Same(body, callStatement.Parent);
-
-            // Unreachable-from-the-top: ANY return anywhere in the body
-            // that closes before the call starts skips it, nested or not.
-            Assert.Empty(body.DescendantNodes().OfType<ReturnStatementSyntax>()
-                .Where(r => r.Span.End <= callStatement.Span.Start));
-        }
+            CallShape.TopLevelCall(handler, callee);
     }
 
     [Fact]
@@ -353,49 +330,53 @@ public class ThemeFlipWiringTests
     [Fact]
     public void SetChromeGround_TheInkPassesRunOnEveryPush()
     {
-        // The invariant: the ink passes are UNCONDITIONAL, the ground's
-        // landing write is the one conditional. The polarity behind the
+        // The invariant: the ink passes are unconditional and the ground's
+        // landed value is written before they run. The polarity behind the
         // estimate can flip without moving the value (a tint-opacity near
         // 1.0 rounds the base's contribution away, so a light->dark pair
         // with the same background lands byte-identical) while the strip's
-        // surface still repaints, so gating the re-derivation on the memo
-        // is the stale ink back.
+        // surface still repaints, so any ground-conditioned skip is the
+        // stale ink back.
         var method = Host().Method("SetChromeGround");
-        Assert.NotEmpty(method.AssignsTo("_chromeGroundPacked"));
 
         var passes = method.Calls("RefreshShellInactiveInk")
             .Concat(method.Calls("RefreshTabColors"))
             .ToList();
         Assert.True(passes.Count == 2,
             $"expected one ink pass per arm, found {passes.Count}");
-
-        // Unconditional at the top: nothing may return before the first
-        // pass runs.
         var firstPass = passes.MinBy(p => p.Span.Start)!;
-        Assert.Empty(method.Body!.DescendantNodes().OfType<ReturnStatementSyntax>()
-            .Where(r => r.Span.End <= firstPass.Span.Start));
+        CallShape.NoReturnBefore(method.Body!, firstPass);
 
-        // And no `groundChanged`-conditioned if may hold a return: that is
-        // the old `if (!groundChanged) return;` guard, in braced or
-        // braceless form, restored over either arm.
-        Assert.Empty(method.Body!.DescendantNodes().OfType<IfStatementSyntax>()
-            .Where(i => i.Condition.DescendantNodesAndSelf()
-                            .OfType<IdentifierNameSyntax>()
-                            .Any(id => id.Identifier.ValueText == "groundChanged")
-                        && i.Statement.DescendantNodes()
-                            .OfType<ReturnStatementSyntax>()
-                            .Any()));
+        CallShape.NoGroundConditionedSkip(method);
+        CallShape.GroundWritePrecedesFirstPass(method);
+    }
 
-        // The ground's landing stays the one conditional write, with the
-        // polarity pinned at the node: the condition is exactly the
-        // `groundChanged` identifier. A substring match waved the inverted
-        // `if (!groundChanged)` through; a node match cannot.
-        var landing = Assert.Single(method.AssignsTo("_stripBackdropPacked"));
-        var landingIf = landing.Ancestors().OfType<IfStatementSyntax>().First();
-        var condition = Assert.IsType<IdentifierNameSyntax>(landingIf.Condition);
-        Assert.Equal("groundChanged", condition.Identifier.ValueText);
-        Assert.True(landingIf.Statement.Span.Contains(landing.Span),
-            "the ground write is not the conditional arm of the groundChanged if");
+    [Fact]
+    public void TheGroundKeyedBrushes_AreMemoizedOnThePackedGround()
+    {
+        // Compare-then-refresh, with the key pinned at the node: each memo
+        // is assigned the ground it was derived from, inside the same arm
+        // that derives the brush. A broken cache (the key write skipped)
+        // fails the Single, and a key that ignores the ground (any right
+        // side but the ground itself) fails the equality, so a cached
+        // answer can only ever be refreshed by a ground that moved.
+        var ink = Host().Method("MutedInkBrush");
+        var inkGuard = Assert.Single(ink.Body!.Statements.OfType<IfStatementSyntax>());
+        var inkCondition = inkGuard.Condition.DescendantNodesAndSelf()
+            .OfType<IdentifierNameSyntax>()
+            .Select(id => id.Identifier.ValueText)
+            .ToList();
+        Assert.Contains("_mutedInkGround", inkCondition);
+        Assert.Contains("ground", inkCondition);
+        Assert.Equal("ground",
+            Assert.Single(inkGuard.AssignsTo("_mutedInkGround")).Right.ToString());
+        Assert.NotEmpty(inkGuard.AssignsTo("_mutedInkBrush"));
+
+        var wash = Host().Method("GroupWashBrush");
+        var washGuard = Assert.Single(wash.Body!.Statements.OfType<IfStatementSyntax>());
+        Assert.Equal("_stripBackdropPacked",
+            Assert.Single(washGuard.AssignsTo("_groupWashGround")).Right.ToString());
+        Assert.NotEmpty(washGuard.AssignsTo("_groupWashBrush"));
     }
 
     [Fact]
@@ -464,4 +445,95 @@ public class ThemeFlipWiringTests
         Assert.True(resolve.Span.Start < announce.Span.Start,
             "ThemeChanged is invoked before Resolve()");
     }
+}
+
+/// <summary>
+/// The shared unconditionality checker behind the theme-flip facts. One
+/// implementation, many pinned shapes: every guard shape this file has to
+/// reject -- braced or braceless wraps, lambda assignments, returns above a
+/// call in any nesting, ground-conditioned skips, reordered writes -- must
+/// fail exactly one of these checks, or a future shape walks through.
+/// </summary>
+internal static class CallShape
+{
+    // (1) The call is a direct top-level ExpressionStatement of the method
+    // body. A braced if/try/using/lock/switch interposes its own block; a
+    // braceless if or an expression-lambda assignment interposes itself.
+    // Containment walks pass all of them; the parent chain cannot.
+    // (2) No return anywhere in the body's subtree -- else clauses
+    // included -- closes before the call starts.
+    public static void TopLevelCall(MethodDeclarationSyntax method, string callee)
+    {
+        var body = method.Body!;
+        var calls = method.Calls(callee);
+        Assert.True(calls.Count == 1,
+            $"expected exactly one {callee} call in {method.Identifier.ValueText}, "
+                + $"found {calls.Count}");
+        var call = calls[0];
+
+        Assert.IsType<ExpressionStatementSyntax>(call.Parent);
+        var callStatement = (StatementSyntax)call.Parent;
+        Assert.Same(body, callStatement.Parent);
+        NoReturnBefore(body, callStatement);
+    }
+
+    // (2) alone, for a call that legitimately lives inside an arm.
+    public static void NoReturnBefore(SyntaxNode scope, SyntaxNode call)
+    {
+        Assert.Empty(scope.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>()
+            .Where(r => r.Span.End <= call.Span.Start));
+    }
+
+    // (3) No if conditioned on the ground memo or the landed value -- any
+    // comparison shape, either identifier -- may hold a return or an ink
+    // pass in ANY arm: the statement, the else clause, or a braceless
+    // embedded statement. The pass-shaped `if (groundChanged)
+    // RefreshTabColors();` and the memo-shaped `if (_stripBackdropPacked ==
+    // groundRgb) return;` both live here, in braced, braceless and
+    // else-clause forms.
+    public static void NoGroundConditionedSkip(MethodDeclarationSyntax method)
+    {
+        var conditioned = method.Body!.DescendantNodes().OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.DescendantNodesAndSelf()
+                .OfType<IdentifierNameSyntax>()
+                .Any(id => id.Identifier.ValueText is "groundChanged"
+                    or "_stripBackdropPacked"));
+        foreach (var guard in conditioned)
+        {
+            Assert.Empty(GuardArmReturns(guard.Statement));
+            Assert.Empty(GuardArmPasses(guard.Statement));
+            if (guard.Else is { } elseClause)
+            {
+                Assert.Empty(GuardArmReturns(elseClause.Statement));
+                Assert.Empty(GuardArmPasses(elseClause.Statement));
+            }
+        }
+    }
+
+    // (4) The ground's landed value must precede the first pass that reads
+    // it. The shell arm's own pass legitimately runs before the default
+    // arm's landing (that arm exits first), so the readers that matter are
+    // the default arm's: a swap that lands the write after them scores
+    // them against the outgoing value.
+    public static void GroundWritePrecedesFirstPass(MethodDeclarationSyntax method)
+    {
+        var landing = Assert.Single(method.AssignsTo("_stripBackdropPacked"));
+        var readers = method.Calls("RefreshTabColors")
+            .Concat(method.Calls("RefreshGroupFieldWash"))
+            .ToList();
+        Assert.NotEmpty(readers);
+        var firstReader = readers.MinBy(p => p.Span.Start)!;
+        Assert.True(landing.Span.Start < firstReader.Span.Start,
+            "the ground write lands after the first pass that reads it");
+    }
+
+    // DescendantNodesAndSelf: a braceless embedded arm IS the return or
+    // the pass, and a bare `return;` has no descendants of its own.
+    private static IEnumerable<ReturnStatementSyntax> GuardArmReturns(StatementSyntax arm)
+        => arm.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>();
+
+    private static IEnumerable<InvocationExpressionSyntax> GuardArmPasses(StatementSyntax arm)
+        => arm.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() is "RefreshShellInactiveInk"
+                or "RefreshTabColors" or "RefreshGroupFieldWash");
 }
