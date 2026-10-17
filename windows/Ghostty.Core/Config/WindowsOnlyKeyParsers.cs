@@ -39,6 +39,26 @@ public static class WindowsOnlyKeyParsers
     }
 
     /// <summary>
+    /// Invariant float clamped to [0,1]; null when the text is empty or does
+    /// not parse, so the caller's "key unset" fallback survives. Non-finite
+    /// values ("nan", "infinity": both parse cleanly) are rejected the same
+    /// way -- NaN survives the clamp by definition, and a non-finite opacity
+    /// reaching a consumer mixes its arithmetic into garbage with no signal.
+    /// </summary>
+    public static float? ParseFloatClamped(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return null;
+        if (!float.TryParse(
+                raw,
+                System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var result))
+            return null;
+        if (!float.IsFinite(result)) return null;
+        return Math.Clamp(result, 0f, 1f);
+    }
+
+    /// <summary>
     /// Invariant integer with inclusive clamp. Non-numeric (including
     /// unit suffixes like "220px") falls back. Empty/null falls back.
     /// </summary>

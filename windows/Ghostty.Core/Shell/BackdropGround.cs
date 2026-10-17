@@ -78,6 +78,15 @@ public static class BackdropGround
             return root & 0x00FFFFFFu;
 
         var tint = Math.Clamp(tintOpacity, 0.0, 1.0);
+
+        // NaN survives the clamp (documented Math.Clamp semantics) and would
+        // mix every channel below to NaN, which truncates to 0: the ground
+        // collapses to #000000 and the ink ladder quietly picks the white pole
+        // over a light desktop. An opacity that is not a number is no tint at
+        // all, so the documented default stands in. The infinities are already
+        // finite here -- the clamp lands them on the poles.
+        if (!double.IsFinite(tint)) tint = AcrylicTintResolver.DefaultTintOpacity;
+
         var r = Mix((paletteRgb >> 16) & 0xFF, (baseRgb >> 16) & 0xFF, tint);
         var g = Mix((paletteRgb >> 8) & 0xFF, (baseRgb >> 8) & 0xFF, tint);
         var b = Mix(paletteRgb & 0xFF, baseRgb & 0xFF, tint);

@@ -2570,13 +2570,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         catch (FormatException) { return null; }
     }
 
+    // The pure parser refuses the non-finite floats ("nan", "infinity") that
+    // parse cleanly and survive every clamp downstream; keeping the parse in
+    // Core is what ConfigFloatParseFiniteWiringTests pins.
     private static float? ParseFloat(string value)
-    {
-        if (string.IsNullOrEmpty(value)) return null;
-        return float.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var result)
-            ? Math.Clamp(result, 0f, 1f)
-            : null;
-    }
+        => WindowsOnlyKeyParsers.ParseFloatClamped(value);
 
     /// <summary>
     /// Parse a gradient point string: "x,y,#color,radius".

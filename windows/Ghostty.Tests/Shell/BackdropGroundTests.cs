@@ -204,4 +204,114 @@ public sealed class BackdropGroundTests
                 + $"{ThemeResolution.ContrastRatio(ground, ink):F2}:1");
         }
     }
+
+    /// <summary>
+    /// A tint opacity that is not a number must not be a number times the
+    /// palette. "nan" parses cleanly at the config boundary, survives
+    /// Math.Clamp by definition, and used to mix every channel of this
+    /// estimate to NaN, which truncates to 0: the ground collapsed to
+    /// 0x000000 and the ink ladder quietly handed back the white pole -- white
+    /// tab ink over a light desktop, with nothing anywhere signalling why.
+    /// A non-finite opacity now answers what an unset one would have.
+    /// </summary>
+    [Theory]
+    [InlineData(LightPalette)]
+    [InlineData(DarkPalette)]
+    public void A_nan_tint_opacity_does_not_blank_the_ground(uint palette)
+    {
+        var expected = BackdropGround.Estimate(palette, osDark: false, BackdropStyles.Frosted);
+        var ground = BackdropGround.Estimate(
+            palette, osDark: false, BackdropStyles.Frosted, float.NaN);
+
+        Assert.NotEqual(0x000000u, ground);
+        Assert.Equal(expected, ground);
+
+        // The symptom, at the consumer: the muted ink drawn on the estimate
+        // must be the one the sane ground earns, not the pole a blank ground
+        // forces (white, over a light row).
+        Assert.Equal(
+            ThemeResolution.ReadableMutedForeground(expected, 0xCC).Pole,
+            ThemeResolution.ReadableMutedForeground(ground, 0xCC).Pole);
+    }
+
+    /// <summary>
+    /// The infinities are already dealt with by the clamp, which lands them
+    /// on the poles. Pinned so the NaN fallback cannot be widened into
+    /// re-deciding them and silently moving behaviour somebody may rely on.
+    /// </summary>
+    [Theory]
+    [InlineData(double.PositiveInfinity, 1.0)]
+    [InlineData(double.NegativeInfinity, 0.0)]
+    public void An_infinite_tint_opacity_lands_on_its_clamp_pole(double tintOpacity, double pole)
+    {
+        Assert.Equal(
+            BackdropGround.Estimate(DarkPalette, osDark: false, BackdropStyles.Frosted, pole),
+            BackdropGround.Estimate(DarkPalette, osDark: false, BackdropStyles.Frosted, tintOpacity));
+        Assert.NotEqual(0x000000u,
+            BackdropGround.Estimate(DarkPalette, osDark: false, BackdropStyles.Frosted, tintOpacity));
+    }
+
+    /// <summary>
+    /// The non-finite fallback sits behind the clamp, where only NaN can
+    /// reach it, so every finite opacity must come out byte-identical to the
+    /// clamp-and-mix arithmetic this estimate has always had. The sweep is
+    /// that assertion: no finite input, however extreme, may move.
+    /// </summary>
+    [Fact]
+    public void Every_finite_tint_opacity_blends_exactly_as_before()
+    {
+        var opacities = new List<double>();
+        for (var o = -2.0; o <= 2.0; o += 0.05) opacities.Add(o);
+        opacities.AddRange(new[]
+        {
+            double.Epsilon, -double.Epsilon,
+            double.MinValue, double.MaxValue,
+            0.9999999999999999, 1.0000000000000002,
+            4.9e-324, -0.0,
+        });
+
+        var styles = new[]
+        {
+            BackdropStyles.Frosted, BackdropStyles.Solid,
+            BackdropStyles.Crystal, "something-nobody-has-added-yet",
+        };
+
+        foreach (var palette in new[] { LightPalette, DarkPalette, 0x808080u })
+        foreach (var osDark in new[] { true, false })
+        foreach (var style in styles)
+        foreach (var opacity in opacities)
+        {
+            var ground = BackdropGround.Estimate(palette, osDark, style, opacity);
+            var expected = ExpectedFinite(palette, osDark, style, opacity);
+            Assert.True(
+                ground == expected,
+                $"palette {palette:X6}, osDark {osDark}, style {style}, opacity {opacity}: "
+                + $"ground {ground:X6} != expected {expected:X6}");
+        }
+    }
+
+    /// <summary>
+    /// The arithmetic as it stood before the non-finite fallback, spelled out
+    /// here so the sweep has something independent to be identical to.
+    /// </summary>
+    private static uint ExpectedFinite(uint paletteRgb, bool osDark, string style, double tintOpacity)
+    {
+        if (style == BackdropStyles.Crystal)
+            return osDark ? BackdropGround.SystemBaseDark : BackdropGround.SystemBaseLight;
+
+        var root = RootBackgroundResolver.Resolve(
+            style, shellThemeEnabled: false, shellThemeBgArgb: 0, osDark);
+        if (root != RootBackgroundResolver.TransparentArgb)
+            return root & 0x00FFFFFFu;
+
+        var baseRgb = osDark ? BackdropGround.SystemBaseDark : BackdropGround.SystemBaseLight;
+        var tint = Math.Clamp(tintOpacity, 0.0, 1.0);
+        var r = Mix((paletteRgb >> 16) & 0xFF, (baseRgb >> 16) & 0xFF, tint);
+        var g = Mix((paletteRgb >> 8) & 0xFF, (baseRgb >> 8) & 0xFF, tint);
+        var b = Mix(paletteRgb & 0xFF, baseRgb & 0xFF, tint);
+        return (r << 16) | (g << 8) | b;
+
+        static uint Mix(uint over, uint under, double alpha)
+            => (uint)((alpha * over) + ((1.0 - alpha) * under) + 0.5);
+    }
 }

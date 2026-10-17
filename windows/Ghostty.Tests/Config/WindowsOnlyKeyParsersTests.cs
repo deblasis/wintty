@@ -47,6 +47,41 @@ public class WindowsOnlyKeyParsersTests
     }
 
     [Theory]
+    [InlineData("0.5", 0.5f)]
+    [InlineData("0", 0f)]
+    [InlineData("1", 1f)]
+    [InlineData("2", 1f)]           // clamped
+    [InlineData("-1", 0f)]          // clamped
+    [InlineData(" 0.25 ", 0.25f)]   // surrounding whitespace parses
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    [InlineData("junk", null)]
+    [InlineData("0.5f", null)]      // a type suffix is not invariant-parseable
+    public void ParseFloatClamped_Normalizes(string? raw, float? expected)
+    {
+        Assert.Equal(expected, WindowsOnlyKeyParsers.ParseFloatClamped(raw));
+    }
+
+    /// <summary>
+    /// "nan" and "infinity" parse cleanly as floats, and NaN survives
+    /// Math.Clamp by definition, so an accepted non-finite value flows on as
+    /// NaN and poisons every consumer downstream: BackdropGround.Estimate
+    /// mixed every channel to NaN, truncated to 0, and the tab strip quietly
+    /// picked white ink over a light desktop. Non-finite text is refused the
+    /// way malformed text is.
+    /// </summary>
+    [Theory]
+    [InlineData("nan")]
+    [InlineData("NaN")]
+    [InlineData("infinity")]
+    [InlineData("-infinity")]
+    [InlineData("+infinity")]
+    public void ParseFloatClamped_RejectsNonFinite(string raw)
+    {
+        Assert.Null(WindowsOnlyKeyParsers.ParseFloatClamped(raw));
+    }
+
+    [Theory]
     [InlineData(null, 220, 80, 600, 220)]
     [InlineData("", 220, 80, 600, 220)]
     [InlineData("300", 220, 80, 600, 300)]
