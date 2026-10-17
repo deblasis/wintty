@@ -2382,10 +2382,15 @@ pub const ReadThread = struct {
 
         fn read(self: *WindowsReader) WindowsRead {
             var n: windows.DWORD = 0;
+            // The read starts at CARRY_MAX so the handshake can keep a
+            // request prefix cut by a chunk seam in the head of this buffer,
+            // held back from the parser until the next read resolves it
+            // (see conpty_handshake.zig).
+            const capacity: windows.DWORD = @intCast(self.buf.len - conpty_handshake.CARRY_MAX);
             if (windows.exp.kernel32.ReadFile(
                 self.fd,
-                &self.buf,
-                self.buf.len,
+                self.buf[conpty_handshake.CARRY_MAX..].ptr,
+                capacity,
                 &n,
                 null,
             ) == windows.FALSE) {
@@ -2422,8 +2427,9 @@ pub const ReadThread = struct {
             // before the bytes reach the parser, rather than through the
             // parser's reply path, which needs the IO loop that may not be
             // running yet; the request leaves the stream so the parser does
-            // not answer it a second time.
-            const filtered = self.handshake.filter(self.buf[0..n]);
+            // not answer it a second time, and a prefix of it cut by the
+            // read seam is held back with it (see conpty_handshake.zig).
+            const filtered = self.handshake.filter(&self.buf, n);
             if (filtered.reply) writeHandshakeReply(self.reply_fd);
             return .{ .data = filtered.bytes };
         }
@@ -6763,7 +6769,10 @@ test "ReadThread windows: conpty's startup DA1 is answered on the pty input and 
     // The same handshake on a pty whose preamble arrived in two reads. A pipe
     // read returns what is available, not what a write produced, so the
     // request can straddle the seam; the reader has to carry the partial
-    // prefix, or conpty waits out its timeout and the pane sits blank.
+    // prefix, or conpty waits out its timeout and the pane sits blank. The
+    // cut-off introducer is held back rather than handed to the parser: a
+    // dangling `ESC [` would eat the next chunk's first byte as a sequence
+    // final unless the child's output opened with an ESC.
     var split: ReadThread.WindowsReader = .{
         .fd = out_read,
         .reply_fd = in_write,
@@ -6780,7 +6789,7 @@ test "ReadThread windows: conpty's startup DA1 is answered on the pty input and 
         null,
     ) != windows.FALSE);
     switch (split.read()) {
-        .data => |d| try testing.expectEqualStrings(head, d),
+        .data => |d| try testing.expectEqualStrings("\x1b[1t", d),
         else => return error.TestUnexpectedResult,
     }
 

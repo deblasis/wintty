@@ -3268,6 +3268,66 @@ test "DA1: what the parser answers is what the pty reader sends" {
     try testing.expectEqualStrings(conpty_handshake.DA1_REPLY, answered.items);
 }
 
+test "conpty handshake: a request split at the seam leaves the parser nothing to abort" {
+    // The reader-shaped composition: conpty's preamble cut mid-request the
+    // way a pipe read can deliver it, the reader's own filter over each
+    // chunk, and every filtered chunk handed to one real parser, in order.
+    // After the request the child's first output arrives, and it opens with
+    // ordinary text, not with an ESC: whatever the first chunk rode out with
+    // must not be sitting in the parser's CSI state, or the banner's first
+    // byte is consumed as a sequence final and never renders. Behind it run
+    // the two protocol subjects the recorded window exercised: an OSC 7 cwd
+    // the tab reports, and a DECRQM 2026 asked inside the batch that set it
+    // (the DECRPM report for set is 1; 2 is reset).
+    const testing = std.testing;
+
+    var th: TestHandler = undefined;
+    try th.init(testing.allocator);
+    defer th.deinit(testing.allocator);
+    th.useArena();
+
+    var hs: conpty_handshake.Handshake = .{};
+    var stream: terminal.Stream(*StreamHandler) = .init(.{ .handler = &th.handler });
+
+    // The reader's layout: the chunk lives at CARRY_MAX in the reader's
+    // buffer, with the reserved head behind it.
+    var buf: [conpty_handshake.CARRY_MAX + 128]u8 = undefined;
+
+    const head = "\x1b[1t\x1b[";
+    @memcpy(buf[conpty_handshake.CARRY_MAX..][0..head.len], head);
+    stream.nextSlice(hs.filter(&buf, head.len).bytes);
+
+    const rest = "cMicrosoft Windows [Version 10.0.26300.4605]\r\n" ++
+        "\x1b]7;file://mvt/C:/mvt-cwd-7\x1b\\" ++
+        "\x1b[?2026h\x1b[?2026$p";
+    @memcpy(buf[conpty_handshake.CARRY_MAX..][0..rest.len], rest);
+    const second = hs.filter(&buf, rest.len);
+    try testing.expect(second.reply);
+    stream.nextSlice(second.bytes);
+
+    // The banner reaches the screen whole.
+    const text = try th.handler.terminal.plainString(testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expect(
+        std.mem.indexOf(u8, text, "Microsoft Windows [Version 10.0.26300.4605]") != null,
+    );
+
+    // The request never reached the parser, so it answers DA1 zero times:
+    // the only pty write is the DECRPM report for the mode the batch set.
+    var answered: std.ArrayList(u8) = .empty;
+    defer answered.deinit(testing.allocator);
+    try th.ptyWrites(&answered, testing.allocator);
+    try testing.expectEqualStrings("\x1b[?2026;1$y", answered.items);
+
+    // The tab's cwd is the one the OSC 7 reported. The URL's host is
+    // deliberately not this machine's: on Windows the surface is one we
+    // spawned, and the host check is skipped by design.
+    if (comptime builtin.os.tag == .windows) {
+        const pwd = th.handler.terminal.getPwd() orelse "";
+        try testing.expectEqualStrings("C:\\mvt-cwd-7", pwd);
+    }
+}
+
 /// What one program status message carried, copied out so the owned report
 /// can be released the way a real surface releases it.
 const SeenProgramStatus = struct {
