@@ -72,6 +72,10 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     public FrameworkElement? TabElement(TabModel tab) => _strip.TabElement(tab);
 
+    // The strip resolves its own two row kinds (nav item, pinned square);
+    // this host is a sidebar and holds no pane content a walk could meet.
+    public TabModel? TabFromElement(DependencyObject source) => _strip.TabFromElement(source);
+
     public System.Collections.Generic.IReadOnlyList<Testing.TestSeamStripRow>
         TestSeamRows(FrameworkElement root) => _strip.TestSeamRows(root);
 

@@ -24,6 +24,15 @@ internal interface ITabHost
     /// </summary>
     FrameworkElement HostElement { get; }
 
+    /// <summary>
+    /// The tab whose strip row contains <paramref name="source"/>, or null
+    /// when the element is not inside one. Asked by the frame chord router
+    /// with the focused element, so a chord pressed on a row can name that
+    /// row's tab instead of the active one. Group headers, chrome and the
+    /// new-tab button answer null.
+    /// </summary>
+    TabModel? TabFromElement(DependencyObject source);
+
     /// <summary>The app-icon badge this host shows in its strip corner.</summary>
     FrameworkElement IconBadge { get; }
 

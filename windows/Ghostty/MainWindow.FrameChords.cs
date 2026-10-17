@@ -1,4 +1,5 @@
 using Ghostty.Core.Input;
+using Ghostty.Core.Tabs;
 using Ghostty.Panes;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -126,10 +127,53 @@ public sealed partial class MainWindow
             mods.HasFlag(VirtualKeyModifiers.Windows));
         if (action is null) return false;
 
+        // A chord the frame matched can still name a target the focus chain
+        // knows and the active leaf does not: with focus on a strip row,
+        // close_tab is about THAT row's tab, and handing it to the active
+        // leaf closed a pane of whichever tab happened to be active, past
+        // the close confirmation the row's own close button raises. Resolve
+        // row-scoped actions against the row first; the active surface
+        // stays the fallback for everything else.
+        if (FocusedStripRowTab() is { } rowTab && TryExecuteTabRowAction(action, rowTab))
+            return true;
+
         // The active surface performs it, which is also how the command
         // palette dispatches: libghostty runs the binding and sends the
         // apprt action back through PaneActionRequested into the router.
         return TryExecuteBindingAction(action);
+    }
+
+    /// <summary>
+    /// The tab whose strip row holds keyboard focus, or null when focus is
+    /// anywhere else. Asked of the live focus rather than of the active
+    /// tab: the row a chord was pressed on is the target, and it need not
+    /// be the active tab. Both hosts answer through one ITabHost member so
+    /// the router never learns what a row looks like in either strip.
+    /// </summary>
+    private TabModel? FocusedStripRowTab()
+        => Content?.XamlRoot is { } root
+           && FocusManager.GetFocusedElement(root) is DependencyObject focused
+            ? _tabHost.TabFromElement(focused)
+            : null;
+
+    /// <summary>
+    /// Actions whose target is the tab the chord was pressed ON. One arm
+    /// today: close_tab:this rides RequestCloseTabAsync, the strip's own
+    /// close entry, so TabCloseConfirmation (confirm-close-surface) and the
+    /// strip focus hand-back stay the one close policy. The sweep modes
+    /// (other, right) anchor on the active tab, not the row, so they stay
+    /// with the surface. This is the seam a command registry absorbs when
+    /// chord dispatch moves there.
+    /// </summary>
+    private bool TryExecuteTabRowAction(string action, TabModel tab)
+    {
+        if (action is "close_tab" or "close_tab:this")
+        {
+            _ = _tabHost.RequestCloseTabAsync(tab);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

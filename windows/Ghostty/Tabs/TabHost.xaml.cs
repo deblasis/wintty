@@ -120,6 +120,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
     public FrameworkElement? TabElement(TabModel tab)
         => _itemByModel.TryGetValue(tab, out var item) ? item : null;
 
+    // The TabView here is strip-only: a focused terminal lives in the
+    // sibling PaneHostContainer, so the walk up to a TabViewItem cannot
+    // meet a pane. A chip's Tag is its TabGroup, and `as` folds that to
+    // null: a chord on a chip is not about one tab.
+    public TabModel? TabFromElement(DependencyObject source)
+    {
+        if (VisualTreeHelperEx.FindAncestor<TabViewItem>(source) is not { } item) return null;
+        return item.Tag as TabModel;
+    }
+
     // ---- test seam accessors (WINTTY_TEST_SEAM=1) --------------------
     // Named TestSeam* like MainWindow's, so the seam's footprint on this
     // class is greppable and removable as one shape.
