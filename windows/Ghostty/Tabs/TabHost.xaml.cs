@@ -4240,6 +4240,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     private ElementTheme _cachedTheme = ElementTheme.Default;
 
+    /// <summary>
+    /// Declared and resolved theme of this host and its TabView, for the
+    /// seam's chrome readout: "host-requested/host-actual
+    /// tabview:requested/actual cached:cache". The TabView carries its own
+    /// XAML-level theme default, so its half of the pair is the one a
+    /// half-applied window-theme shows in; a driver that inferred the state
+    /// from pixels would read the backdrop instead.
+    /// </summary>
+    internal string TestSeamThemeState
+        => $"{RequestedTheme}/{ActualTheme} tabview:{TabViewControl.RequestedTheme}/{TabViewControl.ActualTheme} cached:{_cachedTheme}";
+
 
     /// <summary>
     /// Remove shell theme overrides so the TabView reverts to
