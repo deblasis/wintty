@@ -1,6 +1,9 @@
+using System;
+using System.Threading.Tasks;
 using Ghostty.Core.Input;
 using Ghostty.Core.Tabs;
 using Ghostty.Panes;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -161,19 +164,29 @@ public sealed partial class MainWindow
     /// today: close_tab:this rides RequestCloseTabAsync, the strip's own
     /// close entry, so TabCloseConfirmation (confirm-close-surface) and the
     /// strip focus hand-back stay the one close policy. The sweep modes
-    /// (other, right) anchor on the active tab, not the row, so they stay
-    /// with the surface. This is the seam a command registry absorbs when
-    /// chord dispatch moves there.
+    /// (other, right) have no apprt answer yet -- CloseTab lands on
+    /// CloseActiveProgressive with the mode dropped, so nothing sweeps
+    /// today; the row set here is what to revisit when they do. This is the
+    /// seam a command registry absorbs when chord dispatch moves there.
     /// </summary>
     private bool TryExecuteTabRowAction(string action, TabModel tab)
     {
         if (action is "close_tab" or "close_tab:this")
         {
-            _ = _tabHost.RequestCloseTabAsync(tab);
+            ObserveRowClose(_tabHost.RequestCloseTabAsync(tab));
             return true;
         }
 
         return false;
+    }
+
+    // A fault in the dialog path must not be unobserved: the bare discard
+    // left a dead confirmation as pure silence. Same shape as TabHost's own
+    // async close handler.
+    private async void ObserveRowClose(Task close)
+    {
+        try { await close; }
+        catch (Exception ex) { _logger.LogError(ex, "the strip-row close-tab request faulted"); }
     }
 
     /// <summary>
@@ -265,6 +278,18 @@ public sealed partial class MainWindow
     internal bool TestSeamFocusFrame()
         => FocusManager.FindFirstFocusableElement(_tabHost.HostElement) is Control control
         && control.Focus(FocusState.Programmatic)
+        && CurrentFrameChordFocus() == FrameChordFocus.Frame;
+
+    /// <summary>
+    /// Put focus on the ACTIVE TAB'S OWN strip row -- the element a click
+    /// on the row leaves focused. TestSeamFocusFrame takes the host's
+    /// first focusable, which is a row only sometimes: the horizontal
+    /// strip's first focusable sits in its chrome, and a driver that means
+    /// to press a row chord needs the row itself.
+    /// </summary>
+    internal bool TestSeamFocusTabRow()
+        => _tabManager.ActiveTab is { } tab
+        && _tabHost.TabElement(tab)?.Focus(FocusState.Programmatic) == true
         && CurrentFrameChordFocus() == FrameChordFocus.Frame;
 
     internal bool TestSeamFocusPane()

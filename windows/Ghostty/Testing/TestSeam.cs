@@ -1121,11 +1121,14 @@ internal static class TestSeam
             {
                 // Real focus, set the way a click sets it. "frame" lands on
                 // the first focusable element of the active tab host (a tab
-                // row); "pane" on the active leaf's terminal.
+                // row); "tab-row" lands on the active tab's row ITSELF,
+                // which the first-focusable walk only sometimes reaches;
+                // "pane" on the active leaf's terminal.
                 var target = ArgString(args, "target");
                 var moved = target switch
                 {
                     "frame" => window.TestSeamFocusFrame(),
+                    "tab-row" => window.TestSeamFocusTabRow(),
                     "pane" => window.TestSeamFocusPane(),
                     _ => false,
                 };

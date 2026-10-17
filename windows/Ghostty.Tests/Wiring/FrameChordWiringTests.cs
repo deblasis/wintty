@@ -182,6 +182,23 @@ public class FrameChordWiringTests
             claim[0].DescendantNodes().OfType<ReturnStatementSyntax>(),
             r => r.Expression?.ToString() == "true");
 
+        // The claim binds the resolution to the dispatch: the guard's
+        // pattern designates the row, and THAT designated row is the
+        // argument the row-targeted dispatch receives. A resolution whose
+        // result never reaches the dispatch is the same bug with more code.
+        var designation = Assert.Single(
+            claim[0].Condition.DescendantNodes().OfType<IsPatternExpressionSyntax>()
+                .Where(p => p.Expression.ToString() == "FocusedStripRowTab()")
+                .ToList(),
+            _ => true);
+        Assert.Equal("{ } rowTab", designation.Pattern.ToString());
+        var rowCall = Assert.Single(
+            claim[0].DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Where(i => i.CalleeText() == "TryExecuteTabRowAction")
+                .ToList(),
+            _ => true);
+        Assert.Equal("rowTab", rowCall.ArgExpression(1).ToString());
+
         // The active surface stays the fallback, and only the fallback: the
         // row guard stands before it, so a row-targeted chord can never
         // reach the leaf.
@@ -221,15 +238,42 @@ public class FrameChordWiringTests
         Assert.Empty(rowAction.Calls("CloseTab"));
         Assert.Empty(rowAction.CallsEndingWith("SurfaceBindingAction").ToList());
 
-        // Mode-exact: a prefix match would also catch close_tab:other and
-        // close_tab:right, which sweep relative to the ACTIVE tab and have
-        // no answer at a row.
+        // Mode-exact, and BOTH spellings: the bare tag is the defensive arm
+        // for a serialization that stops writing the default mode; a prefix
+        // match would also catch close_tab:other and close_tab:right, which
+        // sweep relative to the ACTIVE tab and have no answer at a row.
+        Assert.Contains(
+            rowAction.DescendantNodes().OfType<LiteralExpressionSyntax>(),
+            l => l.ToString() == "\"close_tab\"");
         Assert.Contains(
             rowAction.DescendantNodes().OfType<LiteralExpressionSyntax>(),
             l => l.ToString() == "\"close_tab:this\"");
         Assert.DoesNotContain(
             rowAction.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             i => i.CalleeText().EndsWith("StartsWith", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// One caller: the row-targeted dispatch is reachable only through the
+    /// frame router's claim. A second entry would close a tab without the
+    /// focus context the claim is the whole point of.
+    /// </summary>
+    [Fact]
+    public void TheRowTargetedDispatch_HasExactlyOneCaller()
+    {
+        var hits = ShellSource.AllFiles()
+            .SelectMany(s => s.Root.CallsEndingWith("TryExecuteTabRowAction")
+                .Select(c => (
+                    Tail: s.Name,
+                    Method: c.Ancestors().OfType<MethodDeclarationSyntax>()
+                        .FirstOrDefault()?.Identifier.ValueText ?? "?")))
+            .ToList();
+        Assert.True(
+            hits.Count == 1,
+            "TryExecuteTabRowAction must have exactly one caller (the frame "
+                + "router's claim in TryDispatchFrameChord); found " + hits.Count
+                + ": " + string.Join(", ", hits.Select(h => h.Tail + ":" + h.Method)));
+        Assert.Equal("TryDispatchFrameChord", hits[0].Method);
     }
 
     /// <summary>
@@ -257,5 +301,30 @@ public class FrameChordWiringTests
                 .Where(g => g.TypeArgumentList.ToString().Trim('<', '>') == "TabViewItem")
                 .ToList(),
             _ => true);
+
+        // ...and the DATA side, which is where a silent null would come
+        // from: the horizontal row answers only because the tab-item build
+        // assigns the tab to Tag. The item is identified as the one creation
+        // that binds a DataContext (the group chips carry their group on Tag
+        // and bind nothing), and that initializer has to carry the Tag too:
+        // a row without it answers null, which quietly falls the chord back
+        // to the active pane -- the planted bug on the default layout.
+        var tabHost = ShellSource.Load("Tabs.TabHost.xaml.cs");
+        var item = Assert.Single(
+            tabHost.Root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>()
+                .Where(o => o.Type.ToString() == "TabViewItem")
+                .Where(o => o.Initializer?.Expressions.OfType<AssignmentExpressionSyntax>()
+                    .Any(a => a.Left.ToString() == "DataContext") == true)
+                .ToList(),
+            _ => true);
+        var tagAssign = item.Initializer!.Expressions
+            .OfType<AssignmentExpressionSyntax>()
+            .FirstOrDefault(a => a.Left.ToString() == "Tag");
+        Assert.True(
+            tagAssign is not null && tagAssign.Right.ToString() == "tab",
+            "the horizontal tab item must carry its TabModel on Tag: the chord "
+                + "router resolves a focused row through TabFromElement, and a "
+                + "row without Tag answers null, which quietly falls the chord "
+                + "back to the active pane");
     }
 }

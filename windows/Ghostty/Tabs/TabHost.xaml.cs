@@ -610,6 +610,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 getSnapSource: GetSnapSource,
                 detachWithZone: DetachWithZone),
             DataContext = tab,
+            // The chord router resolves a focused row through this Tag; the
+            // group chips keep their group in the same slot, and every
+            // is-TabGroup guard reads a tab here as "not a chip".
+            Tag = tab,
         };
         ApplyItemAccessibleText(item, tab);
         // Hover anywhere on the run shows the label. The handlers
