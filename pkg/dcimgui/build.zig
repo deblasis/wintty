@@ -66,6 +66,8 @@ pub fn build(b: *std.Build) !void {
         try flags.appendSlice(b.allocator, &.{
             "-fno-sanitize=undefined",
             "-fno-sanitize-trap=undefined",
+            // MSVC 14.42+ STL rejects Zig's Clang 18 (STL1000).
+            "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
         });
     }
     if (freetype) try flags.appendSlice(b.allocator, &.{
