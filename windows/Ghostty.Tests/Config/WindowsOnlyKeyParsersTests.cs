@@ -57,6 +57,9 @@ public class WindowsOnlyKeyParsersTests
     [InlineData(null, null)]
     [InlineData("junk", null)]
     [InlineData("0.5f", null)]      // a type suffix is not invariant-parseable
+    // Overflow text parses to +/-Infinity: the old ParseFloat pole-clamped those to 1/0, this refuses as unset.
+    [InlineData("1e50", null)]
+    [InlineData("-1e50", null)]
     public void ParseFloatClamped_Normalizes(string? raw, float? expected)
     {
         Assert.Equal(expected, WindowsOnlyKeyParsers.ParseFloatClamped(raw));
