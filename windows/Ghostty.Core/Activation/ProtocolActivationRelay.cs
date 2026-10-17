@@ -16,6 +16,19 @@ namespace Ghostty.Core.Activation;
 /// handed to the first subscriber instead of being raised into an empty
 /// invocation list and lost.
 ///
+/// The latch is a SINGLE SLOT, last write wins: a URI noted while nobody is
+/// listening overwrites any URI latched before it, exactly the toast twin's
+/// contract. Routing is not a queue -- the activation is one launch's deep
+/// link, not a backlog, and a consumer arriving late acts on the newest
+/// activation it finds rather than replaying history.
+///
+/// Subscription order is therefore load-bearing: the first subscriber to
+/// arrive after a latch consumes it, and only that one. A subscriber wired
+/// earlier than the one that can actually act on a URI swallows every
+/// latched one. A window-scoped subscriber must Unsubscribe when its window
+/// closes (the teardown's <see cref="Reset"/> covers only process exit);
+/// a handler left attached roots the App for the life of the process.
+///
 /// Deliberately warm-path only. The cold start keeps the probe-fed local in
 /// <c>App.OnLaunched</c>, which the downstream router already consumes
 /// directly; noting the cold URI here too would deliver it twice once a
@@ -79,10 +92,13 @@ internal sealed class ProtocolActivationRelay
     }
 
     /// <summary>
-    /// Record a URI. Fans out when anyone is listening; latches otherwise.
+    /// Record a URI. Fans out when anyone is listening; latches otherwise
+    /// (single slot, last write wins -- see the type remarks).
     /// </summary>
     public void Note(Uri uri)
     {
+        ArgumentNullException.ThrowIfNull(uri);
+
         Action<Uri>? handlers;
         lock (_gate)
         {
@@ -110,6 +126,15 @@ internal sealed class ProtocolActivationRelay
     /// Drop every handler and any latched activation. For teardown: the relay
     /// outlives the objects that subscribe to it, so leaving handlers
     /// attached roots them for the life of the process.
+    ///
+    /// Does NOT stop a fan-out already in flight: <see cref="Note"/> snapshots
+    /// the handlers before it starts invoking them, deliberately, so that a
+    /// handler which unsubscribes cannot mutate the list being walked.
+    ///
+    /// There is no replay after this: a URI latched when nobody was
+    /// subscribed is gone, and a subscriber arriving later sees nothing.
+    /// Reset means the process is tearing down, and delivering a deep link
+    /// into objects being disposed is worse than dropping it.
     /// </summary>
     public void Reset()
     {

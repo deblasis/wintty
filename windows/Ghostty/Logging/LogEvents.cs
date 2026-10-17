@@ -117,6 +117,7 @@ internal static class LogEvents
         public const int LaunchDeferred    = 2908;
         public const int LaunchEvicted     = 2909;
         public const int ForwardTimedOut   = 2910;
+        public const int ProtocolActivationFailed = 2911;
     }
 
     // 3000-3099: Inspector

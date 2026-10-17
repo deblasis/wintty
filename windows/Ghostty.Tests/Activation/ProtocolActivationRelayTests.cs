@@ -83,11 +83,14 @@ public sealed class ProtocolActivationRelayTests
         Assert.Equal(1, calls);
     }
 
+    // The failure sink is captured, not asserted inside: an assertion inside
+    // a sink nobody invokes can never fail, which would make the test
+    // vacuous. The evidence is asserted AFTER the call.
     [Fact]
     public void AThrowingSubscriber_DoesNotCostTheLaterOnes_ItsUri()
     {
-        var relay = new ProtocolActivationRelay(
-            ex => Assert.IsType<InvalidOperationException>(ex));
+        var failures = new System.Collections.Generic.List<Exception>();
+        var relay = new ProtocolActivationRelay(failures.Add);
         var later = 0;
         relay.Subscribe(_ => throw new InvalidOperationException());
         relay.Subscribe(_ => later++);
@@ -95,6 +98,8 @@ public sealed class ProtocolActivationRelayTests
         relay.Note(Update);
 
         Assert.Equal(1, later);
+        var failure = Assert.Single(failures);
+        Assert.IsType<InvalidOperationException>(failure);
     }
 
     // The latch belongs to the first subscriber to arrive, throwing or not:
@@ -104,14 +109,35 @@ public sealed class ProtocolActivationRelayTests
     [Fact]
     public void AThrowingSubscriber_DuringAReplay_StillConsumesTheLatch()
     {
-        var relay = new ProtocolActivationRelay(
-            ex => Assert.IsType<InvalidOperationException>(ex));
+        var failures = new System.Collections.Generic.List<Exception>();
+        var relay = new ProtocolActivationRelay(failures.Add);
         relay.Note(Update);
         var later = 0;
         relay.Subscribe(_ => throw new InvalidOperationException());
         relay.Subscribe(_ => later++);
 
         Assert.Equal(0, later);
+        Assert.Null(relay.Pending);
+        var failure = Assert.Single(failures);
+        Assert.IsType<InvalidOperationException>(failure);
+    }
+
+    // The latch is a single slot, last write wins -- the toast twin's
+    // contract. Routing is not a queue: the consumer arriving late acts on
+    // the newest activation and the older one is gone deterministically.
+    [Fact]
+    public void Note_Twice_BeforeAnyoneSubscribes_LastWriteWins()
+    {
+        var older = new Uri("wintty://update?action=older");
+        var newer = new Uri("wintty://update?action=newer");
+        var relay = new ProtocolActivationRelay();
+        relay.Note(older);
+        relay.Note(newer);
+
+        var seen = new System.Collections.Generic.List<Uri>();
+        relay.Subscribe(seen.Add);
+
+        Assert.Equal(new[] { newer }, seen);
         Assert.Null(relay.Pending);
     }
 
@@ -120,6 +146,10 @@ public sealed class ProtocolActivationRelayTests
     [Fact]
     public void Subscribe_RefusesNull()
         => Assert.Throws<ArgumentNullException>(() => new ProtocolActivationRelay().Subscribe(null!));
+
+    [Fact]
+    public void Note_RefusesNull()
+        => Assert.Throws<ArgumentNullException>(() => new ProtocolActivationRelay().Note(null!));
 
     [Fact]
     public void Pending_IsNull_WhenNothingWasEverNoted()

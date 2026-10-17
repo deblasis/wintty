@@ -42,13 +42,19 @@ public sealed class ProtocolForwardWiringTests
             .Single(v => v.Identifier.ValueText == "forwardedUri");
         Assert.Equal(parse.ToString(), declarator.Initializer!.Value.ToString());
 
-        // The note sits inside an if on the parse result, whose then-branch
-        // is a bare return: a URI launch is not a window launch, so nothing
-        // in the branch may fall through to the window builder, the held
-        // session, or the jump list. Falling through is the defect: the
-        // forward degrades into a plain second window and the URI is gone.
+        // The note sits inside an if on the parse result AND on the absence
+        // of a forwarded -e command: a launch that carries a command is a
+        // window launch that happens to mention a URI, and keeps the base
+        // behaviour (a window running the tool). Only a launch that is ONLY
+        // a URI routes. The then-branch is a bare return: a URI launch is
+        // not a window launch, so nothing in the branch may fall through to
+        // the window builder, the held session, or the jump list. Falling
+        // through is the defect: the forward degrades into a plain second
+        // window and the URI is gone.
         var guard = note.Ancestors().OfType<IfStatementSyntax>().First();
-        Assert.Equal("forwardedUri is not null", guard.Condition.ToString());
+        Assert.Equal(
+            "forwardedUri is not null && forwardedCommand is null",
+            guard.Condition.ToString());
         var then = guard.Statement;
         Assert.Contains(then.DescendantNodes().OfType<ReturnStatementSyntax>(),
             r => r.Expression is null);
@@ -66,6 +72,28 @@ public sealed class ProtocolForwardWiringTests
         // reads its argv as a bare launch and opens a plain window.
         var jumplist = open.CallEndingWith("JumpListLaunch.Parse");
         Assert.True(parse.SpanStart < jumplist.SpanStart);
+    }
+
+    // Nothing between the liveness arm and the parse arm may return early.
+    // The parse arm is only reached through the fall-through of the arm
+    // above it, so a return in between (a re-added unconditional honour of
+    // the toast click, a misplaced restore) makes the URI routing
+    // unreachable for exactly the launches it exists for -- with every unit
+    // test still green, because the shape of the two surviving arms is
+    // unchanged.
+    [Fact]
+    public void NoEarlyReturn_SitsBetweenTheLivenessArm_AndTheParseArm()
+    {
+        var open = App.Method("OpenWindowFromLaunch");
+
+        var livenessIf = open.Call("AnyWindowHasToastSurface")
+            .Ancestors().OfType<IfStatementSyntax>().First();
+        var parse = open.CallEndingWith("ProtocolLaunch.ParseUri");
+
+        var early = open.DescendantNodes().OfType<ReturnStatementSyntax>()
+            .Where(r => r.SpanStart > livenessIf.Span.End && r.Span.End < parse.SpanStart)
+            .ToList();
+        Assert.Empty(early);
     }
 
     [Fact]
