@@ -60,18 +60,23 @@ pub const Handshake = struct {
     /// with an ESC. A hold only ever sits at the end of a chunk, so it
     /// never reorders the bytes read after it; one left holding at the
     /// window boundary flushes, and the parser answers whatever completes
-    /// past the window itself.
+    /// past the window itself. Stream end is the third disposition and
+    /// needs no code: EOF or child exit ends the read loop with the hold
+    /// still staged, and that keeps nothing back that could have rendered,
+    /// because a held proper prefix is a sequence introducer with no
+    /// continuation, which draws nothing whether the bytes that follow
+    /// abort it, the request it belongs to drops it, or no bytes ever come.
     carry: [CARRY_MAX]u8 = @splat(0),
     carry_len: usize = 0,
 
     pub const Result = struct {
-        /// The chunk with the request removed, a prefix of the input slice.
-        /// While the handshake is live, the bytes a seam cut off the front
-        /// of the request ride here at the head of the next result rather
-        /// than in the chunk they arrived in: the parser-visible stream is
-        /// the input minus the request, byte for byte, just measured from
-        /// one read later. The caller consumes a result before the next
-        /// call, and everything returned is a slice of `buf`.
+        /// The bytes this call hands the parser: the chunk with the request
+        /// removed, and, while the handshake is live, any prefix a previous
+        /// call withheld, riding at the front of the result it resolves
+        /// into. The parser-visible stream is the input minus the request,
+        /// byte for byte, just measured from one read later. The caller
+        /// consumes a result before the next call, and everything returned
+        /// is a slice of `buf`.
         bytes: []u8,
         /// Whether the caller owes conpty `DA1_REPLY` now.
         reply: bool,
@@ -114,7 +119,11 @@ pub const Handshake = struct {
             // everything after it are exactly what the parser would have
             // seen had conpty never asked.
             const span = buf[base .. CARRY_MAX + n];
-            std.mem.copyForwards(u8, span[i..], span[i + DA1_REQUEST.len ..]);
+            std.mem.copyForwards(
+                u8,
+                span[i .. span.len - DA1_REQUEST.len],
+                span[i + DA1_REQUEST.len .. span.len],
+            );
             return .{ .bytes = buf[base .. CARRY_MAX + n - DA1_REQUEST.len], .reply = true };
         }
 
@@ -349,4 +358,97 @@ test "conpty handshake: a hold outstanding at the window boundary flushes" {
     try testing.expect(!third.reply);
     try testing.expectEqualStrings("y", third.bytes);
     try testing.expect(hs.done);
+}
+
+test "conpty handshake: a read longer than the window keeps the bytes past it" {
+    // Production first reads are larger than the window: the reader drains
+    // up to 64 KB while the handshake can only scan the first 256 bytes, so
+    // the common chunk carries a tail the scan never reaches. A request
+    // found within the scanned span must be cut without dropping that tail:
+    // the result spans the whole read, one request shorter.
+    var hs: Handshake = .{};
+    const preamble = "\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h";
+    const banner = "!" ** 297;
+    const chunk = preamble ++ banner;
+    var buf: [CARRY_MAX + chunk.len]u8 = undefined;
+    @memcpy(buf[CARRY_MAX..][0..chunk.len], chunk);
+    const r = hs.filter(&buf, chunk.len);
+    try testing.expect(r.reply);
+    try testing.expectEqualStrings("\x1b[1t\x1b[?1004h\x1b[?9001h" ++ banner, r.bytes);
+    try testing.expect(hs.done);
+}
+
+test "conpty handshake: a hold flushed by a longer read keeps the bytes past it" {
+    // The same production shape with a hold outstanding: a chunk seam held
+    // `ESC [` near the window's end, and the next read is larger than the
+    // scan room that is left. Nothing can complete in the bytes the scan
+    // reaches, so the hold flushes with the whole read behind it, staged
+    // prefix first, in the order it was read.
+    var hs: Handshake = .{};
+    var head_buf: [CARRY_MAX + 250]u8 = undefined;
+    const head = "x" ** 248 ++ "\x1b[";
+    @memcpy(head_buf[CARRY_MAX..][0..head.len], head);
+    const first = hs.filter(&head_buf, head.len);
+    try testing.expect(!first.reply);
+    try testing.expectEqual(@as(usize, head.len - 2), first.bytes.len);
+    try testing.expect(!hs.done);
+
+    const tail = "y" ** 300;
+    var tail_buf: [CARRY_MAX + tail.len]u8 = undefined;
+    @memcpy(tail_buf[CARRY_MAX..][0..tail.len], tail);
+    const second = hs.filter(&tail_buf, tail.len);
+    try testing.expect(!second.reply);
+    try testing.expectEqualStrings("\x1b[" ++ tail, second.bytes);
+    try testing.expect(hs.done);
+}
+
+test "conpty handshake: every seam and one byte at a time deliver the same stream" {
+    // The security seat's sweep: however the pty splits the stream, at any
+    // one seam or one byte at a time, the parser-visible bytes are the
+    // input minus the request, byte for byte, and the reader owes conpty
+    // its one reply exactly once.
+    const input = "\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hPrompt> output";
+    const want = "\x1b[1t\x1b[?1004h\x1b[?9001hPrompt> output";
+
+    var split_at: usize = 0;
+    while (split_at <= input.len) : (split_at += 1) {
+        var hs: Handshake = .{};
+        var buf: [CARRY_MAX + input.len]u8 = undefined;
+        var acc: [CARRY_MAX + input.len]u8 = undefined;
+        var acc_len: usize = 0;
+        var replies: usize = 0;
+
+        @memcpy(buf[CARRY_MAX..][0..split_at], input[0..split_at]);
+        const first = hs.filter(&buf, split_at);
+        if (first.reply) replies += 1;
+        @memcpy(acc[acc_len..][0..first.bytes.len], first.bytes);
+        acc_len += first.bytes.len;
+
+        const rest_len = input.len - split_at;
+        @memcpy(buf[CARRY_MAX..][0..rest_len], input[split_at..]);
+        const second = hs.filter(&buf, rest_len);
+        if (second.reply) replies += 1;
+        @memcpy(acc[acc_len..][0..second.bytes.len], second.bytes);
+        acc_len += second.bytes.len;
+
+        try testing.expectEqualStrings(want, acc[0..acc_len]);
+        try testing.expectEqual(@as(usize, 1), replies);
+    }
+
+    // And the same stream one byte at a time, the shape of a pipe that
+    // delivers a write in single-byte reads.
+    var hs: Handshake = .{};
+    var buf: [CARRY_MAX + 1]u8 = undefined;
+    var acc: [CARRY_MAX + input.len]u8 = undefined;
+    var acc_len: usize = 0;
+    var replies: usize = 0;
+    for (input) |c| {
+        buf[CARRY_MAX] = c;
+        const r = hs.filter(&buf, 1);
+        if (r.reply) replies += 1;
+        @memcpy(acc[acc_len..][0..r.bytes.len], r.bytes);
+        acc_len += r.bytes.len;
+    }
+    try testing.expectEqualStrings(want, acc[0..acc_len]);
+    try testing.expectEqual(@as(usize, 1), replies);
 }
