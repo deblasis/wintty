@@ -1530,6 +1530,23 @@ public partial class App : Application
             return;
         }
 
+        // A wintty:// deep link -- the jump list's Install Pending Update
+        // task, a browser or shell launch -- forwarded by a secondary
+        // reaches here as the same --uri argv a cold start's probe scans
+        // for, and nothing before this point read it: falling through opened
+        // a plain window and dropped the URI. Route it the way the cold path
+        // does and do not go on to the window arms, because a URI launch is
+        // not a window launch. The router it is destined for is constructed
+        // after startup (and only in some build tiers), so the URI latches
+        // for it rather than being delivered inline. A live toast surface
+        // named on the same argv keeps its existing priority above.
+        var forwardedUri = Ghostty.Core.Activation.ProtocolLaunch.ParseUri(req.Args);
+        if (forwardedUri is not null)
+        {
+            ProtocolActivations.Note(forwardedUri);
+            return;
+        }
+
         var launch = Ghostty.Core.JumpList.JumpListLaunch.Parse(req.Args);
         if (launch.Action == Ghostty.Core.JumpList.JumpListAction.None)
         {
@@ -1602,6 +1619,20 @@ public partial class App : Application
     // consumer needs exists. App keeps only the WinRT wiring.
     internal static Ghostty.Core.Activation.ToastActivationRelay ToastActivations { get; }
         = new(ex => Ghostty.Logging.StaticLoggers.App.LogToastActivationFailed(ex));
+
+    /// <summary>
+    /// The protocol half of the same story <see cref="ToastActivations"/>
+    /// tells: a <c>wintty://</c> URI can arrive when the only consumer a
+    /// build has for it is not up yet. A cold start hands the probe's URI
+    /// straight to the downstream router; a launch forwarded by a secondary
+    /// arrives through the single-instance pipe instead, where the probe
+    /// never ran (it ran in the secondary that exited), so
+    /// <see cref="OpenWindowFromLaunch"/> latches the URI here for whoever
+    /// subscribes.
+    /// </summary>
+    internal static Ghostty.Core.Activation.ProtocolActivationRelay ProtocolActivations { get; }
+        = new(ex => System.Diagnostics.Debug.WriteLine(
+            $"[app] protocol activation handler failed: {ex.Message}"));
 
     /// <summary>
     /// Read what this process was activated for. Both kinds come off the same
@@ -2575,6 +2606,7 @@ public partial class App : Application
                     _toastInvokedSubscribed = false;
                 }
                 ToastActivations.Reset();
+                ProtocolActivations.Reset();
 
                 // Force-close the quake window. It does not participate
                 // in WindowsByRoot (so this branch fires when the last
