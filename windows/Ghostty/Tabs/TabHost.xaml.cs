@@ -4111,9 +4111,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // repaints under the flip. Stillness of the memo is about the
         // estimate, not about the answer, and skipping the pass on it is
         // how the unselected titles kept the outgoing ink. The pass is
-        // pure and idempotent, and with the ink brush memoized on the
-        // ground a genuine no-op re-applies the one cached brush rather
-        // than allocating another.
+        // idempotent, and with the ink brush memoized on the ground a
+        // genuine no-op re-applies the one cached brush rather than
+        // allocating another.
         if (_shellActiveTextBrush is not null)
         {
             RefreshShellInactiveInk();

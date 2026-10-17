@@ -390,4 +390,38 @@ public sealed class TabGroupFieldTests
         Assert.Equal(TabStripMotion.GapGlideMs, TabGroupField.GlideMs);
         Assert.Equal(TabStripMotion.FadeMs, TabGroupField.FadeMs);
     }
+
+    /// <summary>
+    /// Wash goldens over the memo battery's ground corpus: poles, the
+    /// Fluent bases the backdrop estimate lands on, the strip's default
+    /// guess, mid greys either side of the pole crossover, and the
+    /// catalogue theme backgrounds (Adwaita, Adwaita Dark, Afterglow).
+    /// The wash is a pure function of the ground -- (ramp byte &lt;&lt; 24)
+    /// | pole, the pole chosen by contrast at WashAlpha -- so each ground's
+    /// three states are three literals, and any drift in the derivation or
+    /// the constants shows up as a changed byte. The white/black pole split
+    /// across the two mid greys is the discriminating pair: it is where the
+    /// choice is closest.
+    /// </summary>
+    [Theory]
+    [InlineData("pure black", 0x000000u, 0x14FFFFFFu, 0x22FFFFFFu, 0x2EFFFFFFu)]
+    [InlineData("pure white, the Adwaita background", 0xFFFFFFu, 0x14000000u, 0x22000000u, 0x2E000000u)]
+    [InlineData("the Fluent light base", 0xF3F3F3u, 0x14000000u, 0x22000000u, 0x2E000000u)]
+    [InlineData("the Fluent dark base", 0x202020u, 0x14FFFFFFu, 0x22FFFFFFu, 0x2EFFFFFFu)]
+    [InlineData("the strip's own default ground guess", 0x0C0C0Cu, 0x14FFFFFFu, 0x22FFFFFFu, 0x2EFFFFFFu)]
+    [InlineData("mid grey, white pole side of the crossover", 0x747474u, 0x14FFFFFFu, 0x22FFFFFFu, 0x2EFFFFFFu)]
+    [InlineData("mid grey, black pole side of the crossover", 0x808080u, 0x14000000u, 0x22000000u, 0x2E000000u)]
+    [InlineData("the Adwaita Dark background", 0x1E1E1Eu, 0x14FFFFFFu, 0x22FFFFFFu, 0x2EFFFFFFu)]
+    [InlineData("the Afterglow background", 0x2F343Fu, 0x14FFFFFFu, 0x22FFFFFFu, 0x2EFFFFFFu)]
+    public void TheWashGoldens_AreTheRampOverThePole(
+        string name, uint ground, uint normal, uint hover, uint pressed)
+    {
+        Assert.Equal(normal, TabGroupField.WashArgb(ground));
+        Assert.Equal(hover, TabGroupField.WashArgbAt(ground, TabGroupField.WashHoverAlpha));
+        Assert.Equal(pressed, TabGroupField.WashArgbAt(ground, TabGroupField.WashPressedAlpha));
+
+        // Purity under a repeat: the memoized wash brush (GroupWashBrush)
+        // depends on this answer being a function of the ground alone.
+        Assert.Equal(normal, TabGroupField.WashArgb(ground));
+    }
 }

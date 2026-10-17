@@ -500,3 +500,101 @@ public sealed class ThemeResolutionTests
             ThemeResolution.ReadableMutedForeground(0x757575u, PreferredAlpha, 7.0));
     }
 }
+
+/// <summary>
+/// The memo battery: the ground corpus the strip's single-slot ink cache
+/// cycles, with the two properties the cache silently depends on and the
+/// one the user actually sees.
+///
+/// The single-slot memo is only sound if the derivation is a FUNCTION of
+/// the ground: same ground, same packed answer, under repeats and under
+/// A-&gt;B-&gt;A interleaving (the second invariant here). And whatever the
+/// memo hands back must be legible composited onto the ground it was asked
+/// for at the alpha the strips draw it with -- the user-visible half. The
+/// grounds span the poles, the Fluent bases the backdrop estimate lands
+/// on, the strip's own default guess, the mid greys either side of the
+/// pole crossover, and catalogue theme backgrounds (Adwaita, Adwaita Dark,
+/// Afterglow), named per row.
+/// </summary>
+public sealed class MutedInkMemoBatteryTests
+{
+    // TabHost.InactiveInkAlpha and VerticalTabStrip.InactiveInkAlpha: the
+    // alpha both strips draw their unselected titles with.
+    private const byte StripInkAlpha = 0xB3;
+
+    private static readonly (string Name, uint Ground)[] Battery =
+    {
+        ("pure black", 0x000000u),
+        ("pure white, the Adwaita background", 0xFFFFFFu),
+        ("the Fluent light base", 0xF3F3F3u),
+        ("the Fluent dark base", 0x202020u),
+        ("the strip's own default ground guess", 0x0C0C0Cu),
+        ("mid grey, white pole side of the crossover", 0x747474u),
+        ("mid grey, black pole side of the crossover", 0x808080u),
+        ("the Adwaita Dark background", 0x1E1E1Eu),
+        ("the Afterglow background", 0x2F343Fu),
+    };
+
+    public static TheoryData<string, uint> Grounds
+    {
+        get
+        {
+            var data = new TheoryData<string, uint>();
+            foreach (var (name, ground) in Battery)
+                data.Add(name, ground);
+            return data;
+        }
+    }
+
+    private static uint Packed((uint Pole, byte Alpha) ink)
+        => ((uint)ink.Alpha << 24) | ink.Pole;
+
+    /// <summary>
+    /// The user-visible invariant: the ink, composited onto the ground it
+    /// was asked for at the delivery alpha, clears AA. Scoring it against
+    /// any other ground -- the stale previous one, for instance, the shape
+    /// the original defect wore -- fails here on the pairs that cross the
+    /// pole crossover.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Grounds))]
+    public void TheMutedInk_IsLegibleOnItsOwnGround(string name, uint ground)
+    {
+        var (pole, alpha) = ThemeResolution.ReadableMutedForeground(ground, StripInkAlpha);
+        var delivered = ThemeResolution.CompositeOver(pole, alpha, ground);
+        var ratio = ThemeResolution.ContrastRatio(delivered, ground);
+        Assert.True(ratio >= 4.5,
+            $"{name}: muted ink on {ground:X6} delivers {ratio:N2}:1, under AA");
+    }
+
+    /// <summary>
+    /// The purity invariant the single-slot memo silently depends on:
+    /// repeated calls agree, and interleaving the whole battery in cycles
+    /// never changes any ground's packed answer. A derivation that reads
+    /// anything but its arguments -- ambient state, a previous call's
+    /// ground -- breaks one of these.
+    /// </summary>
+    [Fact]
+    public void TheMutedInk_IsPure_UnderRepeatsAndInterleaving()
+    {
+        foreach (var (_, ground) in Battery)
+        {
+            var first = Packed(ThemeResolution.ReadableMutedForeground(ground, StripInkAlpha));
+            var second = Packed(ThemeResolution.ReadableMutedForeground(ground, StripInkAlpha));
+            Assert.Equal(first, second);
+        }
+
+        var seen = new Dictionary<uint, uint>();
+        for (var round = 0; round < 3; round++)
+        {
+            foreach (var (_, ground) in Battery)
+            {
+                var packed = Packed(ThemeResolution.ReadableMutedForeground(ground, StripInkAlpha));
+                if (seen.TryGetValue(ground, out var prior))
+                    Assert.Equal(prior, packed);
+                else
+                    seen[ground] = packed;
+            }
+        }
+    }
+}
