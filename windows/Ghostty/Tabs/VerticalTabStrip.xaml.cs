@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
@@ -1408,33 +1409,47 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void ApplyItemTabColor(NavigationViewItem item, TabModel tab)
     {
         var selected = ReferenceEquals(tab, _manager.ActiveTab);
-        if (tab.Color != TabColor.None)
+        if (tab.Color != TabColor.None && !selected)
         {
             // Active row fill is SelectionRow (full strip width). Item bg
             // only tints inactive rows so we do not double-paint selected.
-            if (selected)
-                item.ClearValue(Control.BackgroundProperty);
-            else
-            {
-                item.Background = TabColorBrush.From(
-                    TabColorPalette.Background(tab.Color, selected: false));
-            }
+            var bg = TabColorBrush.From(
+                TabColorPalette.Background(tab.Color, selected: false));
+            if (!ReferenceEquals(item.Background, bg))
+                item.Background = bg;
         }
-        else
+        else if (item.Background is not null)
+        {
             item.ClearValue(Control.BackgroundProperty);
+        }
 
-        // MUXC can ignore NavView-level overrides until item resources are set.
-        item.Resources["NavigationViewItemBackgroundSelected"] = TransparentBrush;
-        item.Resources["NavigationViewItemBackgroundSelectedPointerOver"] = TransparentBrush;
-        item.Resources["NavigationViewItemBackgroundSelectedPressed"] = TransparentBrush;
+        // MUXC can ignore NavView-level overrides until item resources are
+        // set. Through the guarded door, like every per-item entry: bare
+        // same-instance rewrites are what MUXC's theme graph treats as a
+        // change (see ApplyItemForeground).
+        SetItemResourceIfChanged(item, "NavigationViewItemBackgroundSelected", TransparentBrush);
+        SetItemResourceIfChanged(item, "NavigationViewItemBackgroundSelectedPointerOver", TransparentBrush);
+        SetItemResourceIfChanged(item, "NavigationViewItemBackgroundSelectedPressed", TransparentBrush);
     }
 
     private SolidColorBrush ResolveInactiveTextBrush()
     {
         if (_shellInactiveTextBrush is not null)
             return _shellInactiveTextBrush;
-        return MutedInkBrush(_stripBackdropPacked);
+        return MutedInkFor(_stripBackdropPacked);
     }
+
+    // The cached door over the muted-ink scorer, and the one every per-pass
+    // caller reads through. Same reason TabColorBrush shares instances: the
+    // inactive ink lands in per-item resource entries the items' visual
+    // states resolve {ThemeResource} references through, and a fresh brush
+    // per pass orphans the previous resolved value for the next state
+    // change to trip over. The theme push at line ~289 keeps its
+    // own field, so this cache only needs the pass-rate shape.
+    private static readonly ConcurrentDictionary<uint, SolidColorBrush> MutedInkCache = new();
+
+    private static SolidColorBrush MutedInkFor(uint ground)
+        => MutedInkCache.GetOrAdd(ground, MutedInkBrush);
 
     /// <summary>
     /// The strip's muted-ink answer for a ground: the better pole at the
@@ -1453,12 +1468,18 @@ internal sealed partial class VerticalTabStrip : UserControl
             (byte)(ink.Pole >> 16), (byte)(ink.Pole >> 8), (byte)ink.Pole));
     }
 
+    private const string NavItemForegroundKey = "NavigationViewItemForeground";
+    private const string NavItemForegroundPointerOverKey = "NavigationViewItemForegroundPointerOver";
+    private const string NavItemForegroundSelectedKey = "NavigationViewItemForegroundSelected";
+    private const string NavItemForegroundSelectedPointerOverKey =
+        "NavigationViewItemForegroundSelectedPointerOver";
+
     private static readonly string[] NavItemForegroundKeys =
     [
-        "NavigationViewItemForeground",
-        "NavigationViewItemForegroundPointerOver",
-        "NavigationViewItemForegroundSelected",
-        "NavigationViewItemForegroundSelectedPointerOver",
+        NavItemForegroundKey,
+        NavItemForegroundPointerOverKey,
+        NavItemForegroundSelectedKey,
+        NavItemForegroundSelectedPointerOverKey,
     ];
 
     /// <summary>
@@ -1522,32 +1543,93 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private static void ApplyItemForeground(NavigationViewItem item, Brush? fg, bool active)
     {
-        item.ClearValue(NavigationViewItem.ForegroundProperty);
+        // These entries are half of what the item's own visual-state setters
+        // resolve {ThemeResource NavigationViewItemForeground*} through, and
+        // each state change MUXC runs -- a selection walk, the coalesced
+        // pointer-over flush -- re-resolves the references its deferred
+        // setters have cached. Removing or replacing an entry destroys the
+        // binding object the item's cached resolutions point at; the next
+        // state change then walks a reference whose value is already torn
+        // down, and faults inside CDependencyObject::SetParent -- reached
+        // identically through ChangeSelection and through the pointer flush
+        // alike.
+        //
+        // So the four keys are written ONCE, all holding one per-item brush,
+        // and after that only that brush's colour is mutated. A Color write
+        // is the one ink change MUXC's theme graph treats natively: no
+        // binding is created or destroyed, and the dependency-property write
+        // short-circuits when the colour did not move, so an unchanged pass
+        // performs no work at all. Both arms' keys carry the same instance,
+        // which is what the old code's removals approximated: the state that
+        // is not currently active simply never wins the selection walk.
+        if (fg is null)
+        {
+            if (item.Foreground is not null)
+                item.ClearValue(NavigationViewItem.ForegroundProperty);
+            if (item.Icon is FontIcon clearIcon && clearIcon.Foreground is not null)
+                clearIcon.ClearValue(FontIcon.ForegroundProperty);
+            return;
+        }
+
+        var ink = ItemInkBrush(item);
+        var target = fg is SolidColorBrush solid ? solid.Color : GetInkColor(fg);
+        if (ink.Color != target)
+            ink.Color = target;
+
         foreach (var key in NavItemForegroundKeys)
-            item.Resources.Remove(key);
+            SetItemResourceIfChanged(item, key, ink);
 
-        if (fg is not null)
+        if (!ReferenceEquals(item.Foreground, ink))
+            item.Foreground = ink;
+
+        if (item.Icon is FontIcon fi && !ReferenceEquals(fi.Foreground, ink))
+            fi.Foreground = ink;
+    }
+
+    // The per-item ink brush, created once and stored under a private key in
+    // the item's own resources so its lifetime is the item's. Every later
+    // pass mutates its colour in place; the four NavigationViewItemForeground*
+    // entries hold this instance for the item's whole life.
+    private static SolidColorBrush ItemInkBrush(NavigationViewItem item)
+    {
+        if (item.Resources.TryGetValue(ItemInkKey, out var existing)
+            && existing is SolidColorBrush brush)
         {
-            item.Foreground = fg;
-            if (active)
-            {
-                item.Resources["NavigationViewItemForegroundSelected"] = fg;
-                item.Resources["NavigationViewItemForegroundSelectedPointerOver"] = fg;
-            }
-            else
-            {
-                item.Resources["NavigationViewItemForeground"] = fg;
-                item.Resources["NavigationViewItemForegroundPointerOver"] = fg;
-            }
+            return brush;
         }
 
-        if (item.Icon is FontIcon fi)
+        var created = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+        item.Resources[ItemInkKey] = created;
+        return created;
+    }
+
+    private static readonly Windows.UI.Color FallbackInkColor =
+        Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
+
+    private static Windows.UI.Color GetInkColor(Brush brush)
+    {
+        if (brush is SolidColorBrush solid) return solid.Color;
+        return FallbackInkColor;
+    }
+
+    private const string ItemInkKey = "WinttyNavItemInk";
+
+    /// <summary>
+    /// The guarded door for per-item resource writes: an entry is written
+    /// only when it is missing or holds a different instance. Rewriting the
+    /// same instance under a live key is the one write MUXC's theme-reference
+    /// graph must never see -- the write that turns every cached
+    /// <c>{ThemeResource}</c> resolution on the item into a re-resolution
+    /// (see ApplyItemForeground).
+    /// </summary>
+    private static void SetItemResourceIfChanged(NavigationViewItem item, string key, Brush value)
+    {
+        if (item.Resources.TryGetValue(key, out var existing)
+            && ReferenceEquals(existing, value))
         {
-            if (fg is not null)
-                fi.Foreground = fg;
-            else
-                fi.ClearValue(FontIcon.ForegroundProperty);
+            return;
         }
+        item.Resources[key] = value;
     }
 
     /// <summary>

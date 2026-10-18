@@ -56,14 +56,18 @@ public sealed class StripInkGroundWiringTests
     /// <summary>
     /// Every place a strip draws its muted ink, found by the helper it calls
     /// rather than by the method it sits in: a rule naming methods would
-    /// quietly stop covering a third site the day one appears.
+    /// quietly stop covering a third site the day one appears. The cached
+    /// door (MutedInkFor) counts as a draw site: it hands out the same
+    /// scored answer, shared so the per-pass ink is never a fresh brush
+    /// orphaning a cached theme resolution.
     /// </summary>
     private static List<InvocationExpressionSyntax> MutedInkDraws(string file, int expected)
     {
         var draws = ShellSource.Load(file).Root.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
             .Where(c => c.CalleeText().EndsWith(
-                "MutedInkBrush", StringComparison.Ordinal))
+                "MutedInkBrush", StringComparison.Ordinal)
+                || c.CalleeText().EndsWith("MutedInkFor", StringComparison.Ordinal))
             .ToList();
 
         Assert.True(
