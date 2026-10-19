@@ -68,28 +68,89 @@ public class PaneCloseUndoSnapshotWiringTests
     [Fact]
     public void CloseLeaf_RunsNothingThatCouldCloseTheModel_AheadOfTheCapture()
     {
-        // Pins the prefix, not one callee: a close hidden behind a helper or
-        // another spelling before the capture would restore the defect while
-        // the later PaneTree.Close stays a harmless no-op. Only these calls
-        // may precede the capture.
+        // Pins the prefix, not one callee: a close hidden behind a helper,
+        // another spelling, a constructor, a property or an extension before
+        // the capture would restore the defect while the later
+        // PaneTree.Close stays a harmless no-op. The top-level statements
+        // ahead of the capture's `if (softClose)` are listed exactly; any
+        // new statement there is a deliberate decision, not an accident.
         var close = CloseLeaf();
         var capture = CloseCapture(close);
+        var gate = capture.Ancestors().OfType<IfStatementSyntax>().First();
 
-        var offenders = close.Body!.DescendantNodes().OfType<InvocationExpressionSyntax>()
+        var before = close.Body!.Statements
+            .TakeWhile(s => !ReferenceEquals(s, gate))
+            .Select(s => string.Concat(s.ToString().Where(ch => !char.IsWhiteSpace(ch))))
+            .ToList();
+
+        var expected = new[]
+        {
+            "SettlePaneFades();",
+            "if(!Core.Panes.PaneTree.Leaves(_root).Contains(leaf))return;",
+            "varzoomedBefore=_zoomedLeaf;",
+            "varpaneSurvives=!ReferenceEquals(_root,leaf);",
+            "varsoftClose=undoable&&paneSurvives&&_undoEnabled;",
+        };
+        Assert.True(
+            ReferenceEquals(gate.Parent, close.Body),
+            "the capture's `if (softClose)` must be a top-level statement of CloseLeaf");
+        Assert.Equal(expected, before);
+
+        // And belt and braces on the call names, by full receiver: nothing
+        // else may be invoked ahead of the capture.
+        var offenders = close.Body.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Where(c => c.SpanStart < capture.SpanStart)
             .Select(c => c.CalleeText())
             .Where(name => name != "SettlePaneFades"
                            && name != "ReferenceEquals"
                            && name != "Core.Panes.PaneTree.Leaves"
-                           && !name.EndsWith(".Contains", System.StringComparison.Ordinal))
+                           && name != "Core.Panes.PaneTree.Leaves(_root).Contains")
             .ToList();
-
         Assert.True(
             offenders.Count == 0,
             "calls ahead of CaptureForUndo(Close) in CloseLeaf that are not on the allowlist: "
             + string.Join(", ", offenders));
+        Assert.Empty(close.Body.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>()
+            .Where(c => c.SpanStart < capture.SpanStart));
     }
 
+    private static MethodDeclarationSyntax HostMethod(string name, int paramCount)
+    {
+        var found = ShellSource.Load("Panes.PaneHost.cs").Root.DescendantNodes()
+            .OfType<MethodDeclarationSyntax>()
+            .Where(m => m.Identifier.ValueText == name && m.ParameterList.Parameters.Count == paramCount)
+            .ToList();
+        Assert.True(found.Count == 1, $"expected one {paramCount}-parameter {name}, found {found.Count}");
+        return found[0];
+    }
+
+    [Fact]
+    public void Snapshot_CopiesTheLiveTree_ItDoesNotAliasIt()
+    {
+        // PaneTree.Close rewires the live tree in place, so a snapshot that
+        // held _root itself would be rewritten by the close it precedes.
+        var snapshot = HostMethod("Snapshot", 1);
+        var creation = Assert.Single(snapshot.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>());
+        var first = Assert.IsType<InvocationExpressionSyntax>(
+            creation.ArgumentList!.Arguments[0].Expression);
+        Assert.EndsWith("PaneTree.Clone", first.CalleeText());
+        Assert.Equal("_root", first.Arg(0));
+    }
+
+    [Fact]
+    public void CaptureForUndo_PushesTheSnapshotSynchronously()
+    {
+        // Deferring the push (a dispatcher callback, a lambda) would take the
+        // snapshot after the close has run.
+        var capture = HostMethod("CaptureForUndo", 1);
+        var push = Assert.Single(capture.Body!.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            c => c.CalleeText() == "_history.Push");
+        Assert.Equal("Snapshot(kind)", push.Arg(0));
+        Assert.Empty(push.Ancestors().TakeWhile(n => !ReferenceEquals(n, capture))
+            .Where(n => n is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax));
+        Assert.DoesNotContain(capture.Body.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            c => c.CalleeText().Contains("TryEnqueue"));
+    }
     [Fact]
     public void CloseLeaf_DecidesSoftClose_FromTheTreeAsItStands_AndUndoable()
     {
