@@ -8,6 +8,7 @@ const Action = @import("ghostty.zig").Action;
 const DiskCache = @import("ssh_cache.zig").DiskCache;
 const internal_os = @import("../os/main.zig");
 const terminfopkg = @import("../terminfo/main.zig");
+const terminfo_paths = @import("../terminfo/paths.zig");
 const global = @import("../global.zig");
 const terminfo_install = @import("../terminfo/install.zig");
 
@@ -268,7 +269,7 @@ fn runInner(
 
             if (cached) {
                 verbosePrint(opts, stderr, "dest: {s} (cached, skipping install)", .{dest});
-                break :session .{ .term = "xterm-ghostty" };
+                break :session .{ .term = terminfo_paths.term_name };
             } else {
                 verbosePrint(opts, stderr, "dest: {s} (not cached, will install)", .{dest});
             }
@@ -276,7 +277,7 @@ fn runInner(
             verbosePrint(opts, stderr, "dest: {s} (cache disabled, will install)", .{dest});
         }
 
-        stderr.print("Setting up xterm-ghostty terminfo on {s}...\n", .{dest}) catch {};
+        stderr.print("Setting up {s} terminfo on {s}...\n", .{ terminfo_paths.term_name, dest }) catch {};
         stderr.flush() catch {};
 
         installRemoteTerminfo(alloc, opts, stderr) catch |err| {
@@ -284,7 +285,7 @@ fn runInner(
             break :session .{ .term = "xterm-256color" };
         };
         break :session .{
-            .term = "xterm-ghostty",
+            .term = terminfo_paths.term_name,
             .to_cache = if (cache) |c| .{ .cache = c, .dest = dest } else null,
         };
     };

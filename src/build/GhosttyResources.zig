@@ -120,9 +120,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             const cap_install = b.addInstallFile(
                 out_source,
                 if (os_tag == .freebsd)
-                    "share/site-terminfo/ghostty.termcap"
+                    "share/" ++ terminfo_paths.freebsd_db_dir ++ "/" ++ terminfo_paths.preferred_name ++ ".termcap"
                 else
-                    "share/terminfo/ghostty.termcap",
+                    "share/" ++ terminfo_paths.db_dir ++ "/" ++ terminfo_paths.preferred_name ++ ".termcap",
             );
 
             try steps.append(b.allocator, &cap_install.step);

@@ -106,6 +106,16 @@
                       Link="Interop\Exports\main_c.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.main_c.zig" />
     <!--
+      The terminfo entry-name facts, for ThemeSearchPathTerminfoWiringTests:
+      the C# resources-tree sentinel probe must follow src/terminfo/paths.zig,
+      the one file that derives every install path and sentinel from the names.
+      ThemeSearchPath.cs itself arrives through the Ghostty.Core source
+      wildcard below.
+    -->
+    <EmbeddedResource Include="..\..\src\terminfo\paths.zig"
+                      Link="Terminfo\paths.zig"
+                      LogicalName="Ghostty.Tests.Terminfo.paths.zig" />
+    <!--
       src/Surface.zig, for FirstPaneCommandWiringTests' reload-side pin of
       the host-command wait-after-command rule. Deliberately NOT under the
       Interop.Exports prefix: the file declares no exports, and

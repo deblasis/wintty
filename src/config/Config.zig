@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const global = @import("../global.zig");
 const deepEqual = @import("../datastruct/comparison.zig").deepEqual;
+const terminfo_paths = @import("../terminfo/paths.zig");
 const fontpkg = @import("../font/main.zig");
 const inputpkg = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
@@ -4063,7 +4064,7 @@ else
 ///
 /// To set `TERM` on Windows regardless of that check, use
 /// `env-override = TERM=...`, which is applied afterwards and wins.
-term: []const u8 = "xterm-ghostty",
+term: []const u8 = terminfo_paths.term_name,
 
 /// String to send when we receive `ENQ` (`0x05`) from the command that we are
 /// running. Defaults to an empty string if not set.
@@ -6203,7 +6204,7 @@ pub fn finalize(self: *Config) !void {
     // Prevent setting TERM to an empty string
     if (self.term.len == 0) {
         // HACK: See comment above at definition
-        self.term = "xterm-ghostty";
+        self.term = terminfo_paths.term_name;
     }
 
     // The default for the working directory depends on the system.

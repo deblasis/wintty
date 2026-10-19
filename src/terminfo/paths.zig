@@ -23,7 +23,10 @@ pub const term_name = "xterm-ghostty";
 /// after it.
 pub const preferred_name = "ghostty";
 
-/// The names of the terminfo entry, in the order `ghostty.zig` lists them.
+/// The names of the terminfo entry that the paths need: the TERM name and
+/// the preferred name, the first two `ghostty.zig` lists. The table's
+/// remaining alias (the capitalized form, for case-insensitive lookups)
+/// names no file or directory and is deliberately not repeated here.
 pub const names = [_][]const u8{ term_name, preferred_name };
 
 /// The directory, relative to the resources share directory, that holds the
@@ -51,12 +54,18 @@ fn letterLeaf(comptime name: []const u8) []const u8 {
     return std.fmt.comptimePrint("{c}/{s}", .{ name[0], name });
 }
 
+/// The format of a hashed-layout leaf: the entry name's first character as
+/// two lowercase hex digits, then the name. Held here because
+/// `termio.Exec.terminfoHasEntry` derives the same shape at runtime for
+/// arbitrary entry names and formats it with this exact string.
+pub const hashed_leaf_format = "{x:0>2}/{s}";
+
 /// Where tic's hashed database layout puts an entry named `name`: the first
 /// character as two lowercase hex digits. This is what `tic -x` writes
 /// (measured: `78/xterm-ghostty`), and `termio.Exec.terminfoHasEntry`
 /// derives the same shape at runtime when it reads a database back.
 fn hashedLeaf(comptime name: []const u8) []const u8 {
-    return std.fmt.comptimePrint("{x:0>2}/{s}", .{ name[0], name });
+    return std.fmt.comptimePrint(hashed_leaf_format, .{ name[0], name });
 }
 
 /// The compiled database leaves, relative to the database directory, in the

@@ -22,6 +22,7 @@ const shell_integration = @import("shell_integration.zig");
 const wsl_shell_integration = @import("wsl_shell_integration.zig");
 const conpty_handshake = @import("conpty_handshake.zig");
 const terminfo_install = @import("../terminfo/install.zig");
+const terminfo_paths = @import("../terminfo/paths.zig");
 const terminfopkg = @import("../terminfo/main.zig");
 const DiskCache = @import("../cli/ssh-cache/DiskCache.zig");
 const terminal = @import("../terminal/main.zig");
@@ -2890,7 +2891,7 @@ fn execCommand(
 fn terminfoDir(buf: []u8, resources_dir: ?[]const u8) ?[]const u8 {
     const base = resources_dir orelse return null;
     const parent = std.fs.path.dirname(base) orelse return null;
-    return std.fmt.bufPrint(buf, "{s}/terminfo", .{parent}) catch null;
+    return std.fmt.bufPrint(buf, "{s}/" ++ terminfo_paths.db_dir, .{parent}) catch null;
 }
 
 /// Compose the terminal-identification environment a child is spawned with:
@@ -3253,7 +3254,7 @@ fn terminfoHasEntry(dir: []const u8, term: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(
         &buf,
-        "{s}/{x:0>2}/{s}",
+        "{s}/" ++ terminfo_paths.hashed_leaf_format,
         .{ dir, term[0], term },
     ) catch return false;
 
