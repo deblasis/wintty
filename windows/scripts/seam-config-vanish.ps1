@@ -1,25 +1,31 @@
 #requires -Version 7
 <#
-    A deleted config file, seam-actuated against the real ConfigService
-    (wintty#1155). auto-reload-config is left at its default, off, so there
-    is no file watcher: every look the service takes after a declined reload
-    is one it schedules for itself.
+    A deleted config file, seam-actuated against the real ConfigService.
+    auto-reload-config is left at its default, off, so there is no file
+    watcher: the watched file's deletion is concluded through load verdicts
+    alone, and what it causes is the missing-config notice and the settings
+    the session already had (wintty#1158). Absence of the file is not an
+    instruction any more, so a High Contrast ask over a deleted file stays
+    declined instead of healing onto a defaults config.
 
     Scenario 1, the watched file:
       1. launch on wintty/config.wintty with a background of its own;
       2. delete the file, then ask for a High Contrast palette ONCE, the
          call HighContrastMonitor makes (no OS flip);
-      3. within a few seconds, with nothing else touching the app, an
-         applied reload carries that palette: the live native background is
-         the palette's, and so is the service's HighContrastBackground;
+      3. the ask is declined, and STAYS declined: no applied reload carries
+         the palette within the window, and the live native background is
+         still the one the file had. The settings the session had keep
+         running;
       4. recreate the file with another background and reload once: that
-         background is live.
+         background is live. The reappearance, not the absence, is the
+         instruction.
 
     Scenario 2, one of two layered files (a user migrated from Ghostty):
       1. launch on ghostty/config.ghostty AND wintty/config.wintty;
       2. delete wintty/config.wintty, ask for the palette once;
       3. within a few seconds an applied reload carries it, and the running
-         config is the legacy file's.
+         config is the legacy file's: a count shrink past the floor is the
+         user's configuration as it now stands, and it still applies.
 
     Applied reloads are read from the seam's config-change log, recorded
     when each reload's ConfigChanged fan-out runs, because on a desktop with
@@ -28,12 +34,13 @@
     reload, and the log is where it is visible. The fan-out is posted, so
     the log cannot say whether the request's own reload declined; that is
     read from the op's answer, which is the live config right after it.
-    Each heal must also take at least -FloorAtLeastMs: a heal sooner than
-    the floor means the first report was believed.
+    Scenario 2's heal must also take at least -FloorAtLeastMs: a heal sooner
+    than the floor means the first report was believed.
 
     What it does not cover: the watcher path (auto-reload-config on), a
-    locked or unreadable file, and anything that needs the OS High Contrast
-    actually on.
+    locked or unreadable file, the missing-config notice's own banner (the
+    seam has no op that reads the notice queue), and anything that needs the
+    OS High Contrast actually on.
 
     Zero OS input is synthesized. The config root and the state base are
     temp directories of this run, single-instance is off, and cleanup stops
@@ -45,13 +52,14 @@
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
-    # How long an applied reload carrying the palette may take. The floor is
-    # 900ms and the shrink budget three 300ms looks; the rest is headroom
-    # for a loaded machine.
+    # How long an applied reload carrying the palette may take (scenario 2),
+    # and how long scenario 1 must STAY declined. The floor is 900ms and the
+    # shrink budget three 300ms looks; the rest is headroom for a loaded
+    # machine.
     [int]$HealWithinMs = 4000,
-    # The least a heal may take. The vanish floor is 900ms and the shrink
-    # budget three 300ms looks, so a heal sooner than this did not wait for
-    # either: the first report was believed, which is #1146.
+    # The least scenario 2's heal may take. The vanish floor is 900ms and
+    # the shrink budget three 300ms looks, so a heal sooner than this did
+    # not wait for either: the first report was believed, which is #1146.
     [int]$FloorAtLeastMs = 700
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
@@ -107,6 +115,30 @@ function Wait-PaletteApplied($s, [int]$Since, [string]$Background) {
     return $null
 }
 
+# The scenario 1 half, inverted for wintty#1158: for the whole window, no
+# applied reload carries the palette and the live native background stays
+# the deleted file's. Answers what actually happened if the ask healed
+# anyway, or $null when the decline held for the whole window.
+function Wait-PaletteStaysDeclined($s, [int]$Since, [string]$Original) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $HealWithinMs) {
+        $st = Seam $s @{ op = 'config-state' }
+        $changes = @($st.changes)
+        for ($i = $Since; $i -lt $changes.Count; $i++) {
+            if ($changes[$i].highContrastBackground -ne $null) {
+                return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; State = $st;
+                                          How = 'an applied reload carried the palette' }
+            }
+        }
+        if ($st.nativeBackground -ne $Original) {
+            return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; State = $st;
+                                      How = "the live background moved to $($st.nativeBackground)" }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    return $null
+}
+
 $baseConfig = @"
 windows-single-instance = false
 window-save-state = never
@@ -128,11 +160,15 @@ try {
     $asked = Seam $s $Hc
     Check 's1.toggle: the first reload is declined' (Test-Declined $asked) "native=$($asked.nativeBackground) hc=$($asked.highContrastBackground)"
 
-    $got = Wait-PaletteApplied $s $before $Hc.background
-    Check 's1.heal: one request lands with no further input' ($null -ne $got) $(
-        if ($got) { "after $($got.Ms)ms" } else { "no applied reload carried $($Hc.background) within ${HealWithinMs}ms" })
-    Check 's1.floor: the heal waited out the floor' ($null -ne $got -and $got.Ms -ge $FloorAtLeastMs) $(
-        if ($got) { "after $($got.Ms)ms, at least ${FloorAtLeastMs}ms required" } else { 'no heal to time' })
+    # The ask stays declined for the whole window, and the live background
+    # stays the deleted file's: the settings the session had keep running,
+    # and the palette is not healed onto a defaults config. An applied
+    # reload here would be the absence being treated as an instruction,
+    # which is the silent reset wintty#1158 removed.
+    $broke = Wait-PaletteStaysDeclined $s $before '#102030'
+    Check 's1.hold: the ask stays declined and the settings stand' ($null -eq $broke) $(
+        if ($broke) { "after $($broke.Ms)ms: $($broke.How)" }
+        else { "declined for the whole ${HealWithinMs}ms, background unchanged" })
 
     Seam $s @{ op = 'high-contrast'; off = $true } | Out-Null
     [System.IO.File]::WriteAllText($cfg, "windows-single-instance = false`nwindow-save-state = never`nbackground = #405060`n")

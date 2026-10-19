@@ -8,6 +8,17 @@ namespace Ghostty.Core.Config;
 /// and what a confirmed deletion causes.
 /// </summary>
 /// <remarks>
+/// <para>SINCE wintty#1158 a confirmed deletion causes a notice and nothing
+/// else. The accept used to be the door a reload carried an absence through
+/// the reload gate, applying a defaults config over the user's last-loaded
+/// settings; absence is not an instruction any more, and the gate has no
+/// vanish door at all. What is left here is the part only load verdicts can
+/// answer: proving a deletion on the paths that never see a file event
+/// (no watcher, which is the default; a lost event; a deleted directory),
+/// and the notice the user is shown when it is proven. On the watcher's
+/// own path the event-shape machine concludes first and this agrees with
+/// it through the same notice.</para>
+///
 /// <para>This lived in <c>ConfigService</c> until nothing could prove it:
 /// no test executes the shell, so the wiring was readable only as source
 /// shape, and the one call that restores the budget was guarded by a
@@ -49,9 +60,11 @@ public sealed class ConfigVanishProtocol
     /// DEFAULT configuration, since <c>auto-reload-config</c> is off, and it
     /// is the issue #676 lockout reached through its own fix
     /// (wintty#1155).</param>
-    /// <param name="onAccept">A deletion was confirmed: the session stops
-    /// claiming to run on files it can no longer vouch for. Runs only on
-    /// the far side of the floor.</param>
+    /// <param name="onAccept">A deletion was confirmed: the host tells the
+    /// user (the missing-config notice) and keeps the settings it had.
+    /// Runs exactly once per concluded question, on the far side of the
+    /// floor; later absences answer <see cref="ConfigVanishAction.Hold"/>
+    /// and reach nothing.</param>
     /// <param name="lookAgainAfter">Schedules one reload after the given
     /// delay and answers whether it did. Asked only when
     /// <paramref name="ask"/> scheduled nothing, with the time left until

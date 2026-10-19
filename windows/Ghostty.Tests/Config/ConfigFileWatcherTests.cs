@@ -34,6 +34,7 @@ public sealed class ConfigFileWatcherTests : IDisposable
     private readonly string _path;
     private readonly FakeTimer _timer = new();
     private readonly ListLogger _log = new();
+    private readonly ConfigFilePresence _presence = new();
     private bool _ignore;
     private int _ignoreChecks;
     private int _settled;
@@ -74,6 +75,7 @@ public sealed class ConfigFileWatcherTests : IDisposable
                 _contentAtSettle = File.ReadAllText(_path);
             },
             _log,
+            _presence,
             onVanished: () => Interlocked.Increment(ref _vanished));
         Assert.True(w.Start());
         return w;
@@ -199,13 +201,22 @@ public sealed class ConfigFileWatcherTests : IDisposable
     }
 
     /// <summary>
-    /// A settle that finds the file gone reports that, separately from an
-    /// edit. The host needs it: the config file being gone is what it
-    /// refuses reloads over, and without being told it is gone for good it
-    /// refuses them for the life of the process (issue #676).
+    /// A settle that lands under a delete the watcher SAW reports nothing
+    /// at all: the delete is the machine's pending, not an absence to
+    /// reload over. The shipped version reloaded here, and the load's
+    /// absence became the deletion dwell's first observation; a seen
+    /// delete is classified by its shape, and only the file's return
+    /// settles (wintty#1158).
     /// </summary>
+    /// <remarks>
+    /// The eventless absence, a delivery that finds the file gone with no
+    /// delete event ever seen, still reports, and
+    /// <see cref="A_tick_consumed_by_a_failed_rebuild_still_delivers"/> is
+    /// where that path runs: a deleted directory raises no file events, so
+    /// the machine has no better answer there.
+    /// </remarks>
     [Fact]
-    public void A_settle_with_the_file_gone_reports_it_vanished_and_not_settled()
+    public void A_settle_under_a_seen_delete_reports_nothing()
     {
         using var watcher = NewWatcher();
 
@@ -213,15 +224,15 @@ public sealed class ConfigFileWatcherTests : IDisposable
         _timer.Fire();
 
         Assert.Equal(0, _settled);
-        Assert.Equal(1, _vanished);
+        Assert.Equal(0, _vanished);
 
-        // And the file coming back is an edit, not another vanishing: the
-        // two are told apart at the same point.
+        // And the file coming back is an edit: its own event settles, and
+        // the settle finds the file.
         _timer.WaitForBurst(() => File.WriteAllText(_path, "font-size = 17\n"));
         _timer.Fire();
 
         Assert.Equal(1, _settled);
-        Assert.Equal(1, _vanished);
+        Assert.Equal(0, _vanished);
         Assert.Equal("font-size = 17\n", _contentAtSettle);
     }
 
@@ -229,10 +240,19 @@ public sealed class ConfigFileWatcherTests : IDisposable
     /// A tick that a pending rebuild consumes still delivers. While the
     /// watched directory is missing, that tick is the only thing still
     /// running on the watcher's schedule, and swallowing it leaves a
-    /// deleted directory unconfirmable: no delivery, no vanish report,
-    /// no asks, and every later reload declined for the life of the
-    /// process, which is the #676 lockout down the directory path.
+    /// deleted directory unconfirmable: the #676 lockout down the
+    /// directory path.
     /// </summary>
+    /// <remarks>
+    /// What the delivery REPORTS is the machine's to own: a recursive
+    /// directory delete raises the watched file's own delete report on this
+    /// platform, so the delete is usually the machine's pending and the
+    /// delivery says nothing. Whether those reports arrived decides which
+    /// way this deletion concludes (the machine's backstop, or the
+    /// protocol's floor on the eventless path), not whether it concludes.
+    /// The eventless report itself is pinned on its own, deterministically,
+    /// by <see cref="An_absence_whose_delete_was_suppressed_is_still_reported"/>.
+    /// </remarks>
     [Fact]
     public void A_tick_consumed_by_a_failed_rebuild_still_delivers()
     {
@@ -244,13 +264,45 @@ public sealed class ConfigFileWatcherTests : IDisposable
         Assert.True(_timer.Armed);
 
         // The rebuild fails because the directory is still missing, and
-        // the tick delivers anyway: the file is gone, and the host can
-        // only ask again if it is told.
+        // the tick delivers anyway.
         _timer.Fire();
-        Assert.Equal(1, _vanished);
+        Assert.Equal(0, _settled);
 
         // The retry chain survives the delivery.
         Assert.True(_timer.Armed);
+    }
+
+    /// <summary>
+    /// An absence whose delete was swallowed by the host's own suppression
+    /// bracket is still reported: no kind ever reached the machine, so the
+    /// delivery that finds the file gone is the eventless path, and the
+    /// eventless path reports. This is the deterministic pin for the
+    /// report the rebuild-tick test could only own conditionally.
+    /// </summary>
+    [Fact]
+    public void An_absence_whose_delete_was_suppressed_is_still_reported()
+    {
+        using var watcher = NewWatcher();
+
+        // The delete lands while the host is bracketing its own writes, so
+        // its event arms nothing and queues no kind. The wait is on the
+        // consult itself, so the event is a fact before the bracket lifts:
+        // an event still in flight when the flag dropped would be swallowed
+        // too, and the test below would pass for the wrong reason.
+        _ignore = true;
+        File.Delete(_path);
+        WaitUntil(() => Volatile.Read(ref _ignoreChecks) >= 1,
+            "the suppressed delete's event never arrived, so nothing was tested");
+        _ignore = false;
+
+        // The ask's delivery drains no kinds and finds the file gone: the
+        // machine has no better answer, and the absence is reported.
+        Assert.True(watcher.Resettle());
+        _timer.Fire();
+
+        Assert.Equal(1, _vanished);
+        Assert.Equal(0, _settled);
+        Assert.Equal(1, _log.Count(WatcherFileMissing));
     }
 
     /// <summary>
@@ -302,11 +354,13 @@ public sealed class ConfigFileWatcherTests : IDisposable
     }
 
     [Fact]
-    public void The_file_check_runs_in_the_delivery_not_on_the_timer()
+    public void The_kinds_and_the_file_check_run_in_the_delivery_not_on_the_timer()
     {
         // The delivery is queued, as the UI dispatcher queues it. The file
         // is present when the debounce fires and gone by the time the
         // delivery runs: the check that counts is the one next to the load.
+        // The kinds ride the same hop, so the delivery also answers with
+        // the machine's verdict, not the timer's.
         var queue = new Queue<Action>();
         using var watcher = NewWatcher(post: queue.Enqueue);
 
@@ -315,21 +369,22 @@ public sealed class ConfigFileWatcherTests : IDisposable
         Assert.Single(queue);
         Assert.Equal(0, _settled);
 
-        File.Move(_path, _path + "~");
+        // The rename-away lands while the delivery is still queued: its
+        // kind arrives before the delivery drains, so the machine has the
+        // delete in hand when the check finds the file gone.
+        _timer.WaitForBurst(() => File.Move(_path, _path + "~"));
         queue.Dequeue()();
 
         Assert.Equal(0, _settled);
         Assert.Equal(1, _log.Count(WatcherFileMissing));
 
-        // And the host is told the file is gone, in the middle of what is an
-        // ordinary atomic save. The debounce had already fired, so the quiet
-        // period it buys was spent before the move: this is the hop between
-        // the timer and the delivery, and a swap straddling it lands here.
-        //
-        // So one vanished report is not evidence of a deletion, and a host
-        // that treats it as one lowers what it knows mid save (issue #1146).
-        // The watcher cannot tell the two apart from here and does not try.
-        Assert.Equal(1, _vanished);
+        // And the host is told NOTHING about the absence, because the
+        // delete event in the same drain already owns it: a seen delete is
+        // the machine's pending, and reloading into it would hand a
+        // verdict-shaped question an answer the event already gave
+        // (wintty#1158; the eventless shape of this same straddle, with no
+        // kind in the drain, is the rebuild-tick test above).
+        Assert.Equal(0, _vanished);
     }
 
     [Fact]
@@ -504,7 +559,8 @@ public sealed class ConfigFileWatcherTests : IDisposable
             () => false,
             deliver => deliver(),
             () => Interlocked.Increment(ref _settled),
-            _log);
+            _log,
+            _presence);
         w.TestEnable = fsw => w.HandleWatcherError(fsw, new IOException("simulated ReadDirectoryChangesW failure"));
 
         Assert.False(w.Start());
@@ -532,7 +588,8 @@ public sealed class ConfigFileWatcherTests : IDisposable
             () => false,
             deliver => deliver(),
             () => { },
-            NullLogger<ConfigFileWatcher>.Instance);
+            NullLogger<ConfigFileWatcher>.Instance,
+            _presence);
         using (w)
             Assert.False(w.Start());
     }
@@ -589,7 +646,8 @@ public sealed class ConfigFileWatcherTests : IDisposable
                 seen = File.ReadAllText(_path);
                 Interlocked.Increment(ref settled);
             },
-            NullLogger<ConfigFileWatcher>.Instance);
+            NullLogger<ConfigFileWatcher>.Instance,
+            _presence);
         Assert.True(watcher.Start());
 
         Save(shape, "font-size = 19\n");
@@ -623,11 +681,12 @@ public sealed class ConfigFileWatcherTests : IDisposable
             () => false,
             deliver => deliver(),
             () => Interlocked.Increment(ref settled),
-            NullLogger<ConfigFileWatcher>.Instance);
+            NullLogger<ConfigFileWatcher>.Instance,
+            _presence);
         Assert.True(watcher.Start());
 
         for (var i = 0; i < 5; i++)
-            watcher.TestRaiseFileEvent();
+            watcher.TestRaiseEvent(ConfigFileEventKind.Changed);
 
         // One wait, bounded as a hang guard.
         WaitUntil(() => Volatile.Read(ref settled) >= 1,

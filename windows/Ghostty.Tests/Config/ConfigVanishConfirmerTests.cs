@@ -184,6 +184,55 @@ public class ConfigVanishConfirmerTests
     }
 
     /// <summary>
+    /// Settled is settled: after the accept, later absences answer Hold,
+    /// not a second accept. What a concluded deletion causes (since
+    /// wintty#1158, the notice) happens once per question, and a conclusion
+    /// that kept re-firing would re-raise the banner over every past-floor
+    /// absence for the life of the question.
+    /// </summary>
+    [Fact]
+    public void Later_absences_after_an_accept_answer_hold()
+    {
+        var clock = new Clock();
+        var confirmer = new ConfigVanishConfirmer(now: clock.Now);
+
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Armed));
+        clock.Advance(ConfigVanishConfirmer.DefaultFloor);
+        Assert.Equal(ConfigVanishAction.Accept, confirmer.Observe(1, Armed));
+
+        for (var i = 0; i < 3; i++)
+        {
+            clock.Advance(ConfigVanishConfirmer.DefaultFloor);
+            Assert.Equal(ConfigVanishAction.Hold, confirmer.Observe(1, Armed));
+        }
+    }
+
+    /// <summary>
+    /// The hold is the question's, not the session's: a load that found the
+    /// file resets it, and the next absence is a fresh question that can
+    /// conclude again on the far side of its own floor.
+    /// </summary>
+    [Fact]
+    public void A_reset_after_an_accept_opens_a_fresh_question()
+    {
+        var clock = new Clock();
+        var confirmer = new ConfigVanishConfirmer(now: clock.Now);
+
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Armed));
+        clock.Advance(ConfigVanishConfirmer.DefaultFloor);
+        Assert.Equal(ConfigVanishAction.Accept, confirmer.Observe(1, Armed));
+        clock.Advance(ConfigVanishConfirmer.DefaultFloor);
+        Assert.Equal(ConfigVanishAction.Hold, confirmer.Observe(1, Armed));
+
+        confirmer.Reset();
+
+        clock.Advance(ConfigVanishConfirmer.DefaultFloor);
+        Assert.Equal(ConfigVanishAction.Confirm, confirmer.Observe(1, Armed));
+        clock.Advance(ConfigVanishConfirmer.DefaultFloor);
+        Assert.Equal(ConfigVanishAction.Accept, confirmer.Observe(1, Armed));
+    }
+
+    /// <summary>
     /// A session claiming no config file has nothing to lose and nothing to
     /// confirm, so a report neither opens a stretch nor concludes one.
     /// </summary>

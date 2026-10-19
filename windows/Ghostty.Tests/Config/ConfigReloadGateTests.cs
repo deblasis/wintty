@@ -341,4 +341,35 @@ public class ConfigReloadGateTests
             expected,
             ConfigReloadGate.ShouldApplyEmptyRead(looksSoFar, maxLooks));
     }
+
+    /// <summary>
+    /// Exactly two keys carry a declined reload past the gate, and absence
+    /// is not one of them. The shrink key is the deletion of a layered file
+    /// the watcher cannot see, where what the load built is the user's
+    /// configuration as it now stands; the ask key is the user's own
+    /// load-defaults request from the missing-config notice, an instruction
+    /// because a person gave it.
+    /// </summary>
+    /// <remarks>
+    /// The third key this table used to need, the vanish confirmation, is
+    /// the whole of the wintty#1158 defect: it carried an absence past the
+    /// gate and applied a defaults config over the session's last-loaded
+    /// settings whenever a save's gap outlived the deletion dwell. A row
+    /// for it belongs here for the same reason the floor's margin test
+    /// does: a carry that comes back is caught here rather than in review.
+    /// </remarks>
+    [Theory]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, false)]
+    public void A_decline_is_carried_past_the_gate_by_two_keys_only(
+        bool isPersistentShrink,
+        bool defaultsRequested,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ConfigReloadGate.CarriesPastGate(isPersistentShrink, defaultsRequested));
+    }
 }

@@ -1,308 +1,86 @@
 using System;
-using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
+using System.Collections.Generic;
 using System.Threading;
 using Ghostty.Core.Config;
-using Microsoft.Extensions.Logging.Abstractions;
+using Ghostty.Core.Notifications;
 using Xunit;
 
 namespace Ghostty.Tests.Config;
 
 /// <summary>
-/// The vanish protocol end to end: a real <c>ConfigFileWatcher</c> on a
-/// real directory under %TEMP%, the session's own writes suppressed the
-/// way the service suppresses them, and every delivery driven by hand
-/// through the ask chain.
+/// The vanish protocol's no-watcher paths, end to end: load verdicts the
+/// only evidence, every look driven by hand through the ask chain, and a
+/// real <see cref="NotificationService"/> holding the banner a confirmed
+/// deletion raises.
 /// </summary>
 /// <remarks>
-/// The service wires exactly this and nothing executes the service, so
-/// these sequences lived only as source shape until the wiring moved into
-/// Ghostty.Core. Every assertion here runs the real thing: real file
-/// operations, the watcher's real debounce and delivery, real asks.
+/// <para>The service wires exactly this and nothing executes the service,
+/// so these sequences lived only as source shape until the wiring moved
+/// into Ghostty.Core. Every assertion here runs the real thing.</para>
 ///
-/// The watcher's EVENTS, though, are raised by hand through
-/// <see cref="ConfigFileWatcher.TestRaiseFileEvent"/> after each file
-/// operation, never by the file system: waiting for real events made every
-/// step here a race the machine could lose, and under load it did (issue
-/// #1161). The seam runs the exact path a real event runs, suppression
-/// consult included. To keep that guarantee honest the real
-/// FileSystemWatcher is built but never enabled here, so no real event
-/// can land beside the seam and re-arm the debounce after an assertion
-/// has already run. What real events add is covered in
-/// ConfigFileWatcherTests, which keeps the real FileSystemWatcher running.
+/// <para>Since wintty#1158 this protocol owns the paths that never see a
+/// file event: no watcher (the default, <c>auto-reload-config</c> off), a
+/// lost event, a deleted directory. On the watcher's own path the
+/// event-shape machine concludes first, and that wiring is driven in
+/// <c>ConfigWatcherEventShapeTests</c>; what a concluded deletion CAUSES
+/// is the same notice whichever way it was proven, so the onAccept here
+/// calls the notice source the same way the service's
+/// <c>OnVanishAccepted</c> does.</para>
 /// </remarks>
 public sealed class ConfigVanishProtocolTests : IDisposable
 {
-    private const string FileName = "config.wintty";
-
-    private readonly string _dir;
-    private readonly string _path;
-    private readonly FakeTimer _timer = new();
-    private readonly Queue<Action> _post = new();
-
-    // The service's _suppressWatcher: set around its own writes. The
-    // watcher consults it when each event arrives, so those writes raise
-    // events that arm nothing and settle nothing.
-    private volatile bool _ignore;
+    private readonly NotificationService _notifications = new();
 
     // The session's recorded count, what RecordDefaultFiles owns in the
-    // service: raised by an applied load, lowered to zero by an accept.
+    // service: raised by an applied load. A concluded deletion does not
+    // move it, because nothing is applied; it falls only when a reload
+    // that the session asked for (the notice's load-defaults action) or a
+    // shrink past the floor carries the gate.
     private int _count = 1;
     private int _accepted;
-    private int _settled;
-    private int _vanished;
-
-    private ConfigFileWatcher? _watcher;
-
-    public ConfigVanishProtocolTests()
-    {
-        _dir = Path.Combine(Path.GetTempPath(),
-            "wintty-testcfg-vanish-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_dir);
-        _path = Path.Combine(_dir, FileName);
-        File.WriteAllText(_path, "font-size = 12\n");
-    }
-
-    public void Dispose()
-    {
-        _watcher?.Dispose();
-        try { Directory.Delete(_dir, recursive: true); } catch { }
-    }
-
-    private string Tmp => Path.Combine(_dir, FileName + ".tmp");
+    private int _defaultsAsked;
 
     private TimeSpan _now = TimeSpan.FromHours(1);
 
-    /// <summary>
-    /// Move the test clock past the floor, which is what a real stretch of
-    /// absence does by taking wall time. Nothing here sleeps.
-    /// </summary>
+    private ConfigFilePresence? _presence;
+    private ConfigFileMissingNoticeSource? _source;
+
+    public void Dispose()
+    {
+        _presence = null;
+        _source = null;
+    }
+
     private void AdvancePastFloor() => _now += ConfigVanishConfirmer.DefaultFloor;
 
     /// <summary>
-    /// Wire the watcher to a protocol the way the service does, and hand
-    /// the protocol back: a host with no watcher still reloads, and a test
-    /// needs to be able to deliver that verdict without a delivery.
+    /// The wiring the service has, minus the shell: the protocol's accept
+    /// lands in the notice source exactly as OnVanishAccepted lands there,
+    /// with a machine it never hears from because nothing here raises a
+    /// file event.
     /// </summary>
-    private ConfigVanishProtocol Start(Func<bool>? ask = null, bool realEvents = false)
+    private ConfigVanishProtocol Start(
+        Func<bool>? ask = null,
+        List<TimeSpan>? looks = null)
     {
-        // The service's own wiring, verbatim. The protocol is driven by what
-        // a LOAD found and not by the delivery that prompted it, so each
-        // callback stands in for the reload it causes: a settled delivery
-        // reloads and the file reads, a vanished one reloads and it does
-        // not. ConfigService does exactly this, one level up, with the
-        // verdict coming from BuildLiveConfig.
-        var protocol = new ConfigVanishProtocol(
+        _presence = new ConfigFilePresence(now: () => _now);
+        _source = new ConfigFileMissingNoticeSource(
+            _presence,
+            notifications: () => _notifications,
+            scheduleBackstopPoll: _ => true,
+            loadDefaults: () => Interlocked.Increment(ref _defaultsAsked));
+        return new ConfigVanishProtocol(
             sessionDefaultFilesFound: () => _count,
-            ask: ask ?? (() => _watcher?.Resettle() == true),
+            ask: ask ?? (() => false),
             onAccept: () =>
             {
                 Interlocked.Increment(ref _accepted);
-                _count = 0;
+                _source.OnDeletionConfirmed();
             },
-            now: () => _now);
-        _watcher = new ConfigFileWatcher(
-            _path,
-            _timer,
-            TimeSpan.FromMilliseconds(300),
-            ignoreEvents: () => _ignore,
-            post: _post.Enqueue,
-            onSettled: () =>
-            {
-                protocol.Observed(ConfigFilesFound.Loaded);
-                Interlocked.Increment(ref _settled);
-            },
-            NullLogger<ConfigFileWatcher>.Instance,
-            onVanished: () =>
-            {
-                Interlocked.Increment(ref _vanished);
-                protocol.Observed(ConfigFilesFound.Absent);
-            });
-        // The real FileSystemWatcher is built but never enabled: every
-        // event here is raised by hand through TestRaiseFileEvent, and a
-        // real event landing beside the seam would re-arm the debounce
-        // behind the test's back, the exact race the seam exists to remove
-        // (issue #1161). TestEnable is the watcher's own test-only
-        // replacement for EnableRaisingEvents = true. The one member that
-        // needs the real stream, the deleted-directory rebuild, passes
-        // realEvents: true.
-        if (!realEvents) _watcher.TestEnable = _ => { };
-        Assert.True(_watcher.Start());
-        return protocol;
-    }
-
-    /// <summary>
-    /// Fire the debounce and run the one delivery it posted. Each tick
-    /// posts exactly one delivery, so a tick that posted none is a wedge,
-    /// not a lull.
-    /// </summary>
-    private void FireAndDeliver()
-    {
-        _timer.Fire();
-        Assert.Single(_post);
-        _post.Dequeue()();
-    }
-
-    /// <summary>
-    /// Run a file operation, then raise the event it causes through the
-    /// seam, synchronously. Replaces waiting for the real file system to
-    /// deliver the event: under load that wait was both the test's clock
-    /// and its verdict, and it failed both ways (issue #1161). The seam
-    /// makes the event a fact; whether it arms the debounce is then the
-    /// code's decision, which is what these tests are about.
-    /// </summary>
-    private void Seam(Action act)
-    {
-        act();
-        Assert.True(_watcher!.TestRaiseFileEvent(),
-            "the file operation's event was suppressed, so it armed nothing");
-    }
-
-    /// <summary>
-    /// Run a file operation whose events the session suppresses, and raise
-    /// the event through the seam anyway: the suppression consult inside
-    /// the seam is the point, since the assertion is that the suppressed
-    /// event armed nothing.
-    /// </summary>
-    private void SeamSuppressed(Action act)
-    {
-        act();
-        Assert.False(_watcher!.TestRaiseFileEvent(),
-            "a suppressed event armed the debounce");
-    }
-
-    /// <summary>
-    /// The app's own write, the ConfigFileEditor.WriteAtomic primitives:
-    /// it recreates the file from nothing, which is how the settings UI
-    /// returns a config a deletion took away, and its events are the
-    /// suppressed ones no settle ever sees.
-    /// </summary>
-    private void WriteLikeTheApp(string content)
-    {
-        Directory.CreateDirectory(_dir);
-        File.WriteAllText(Tmp, content);
-        File.Move(Tmp, _path, overwrite: true);
-    }
-
-    /// <summary>
-    /// The adversarial sequence the first cut of the protocol failed: a
-    /// real deletion spends the budget and is accepted; the file returns
-    /// through the app's OWN write, whose events are suppressed, so no
-    /// settle runs and the count comes back only through the reload the
-    /// write triggers; the next ordinary save then reports once from
-    /// inside its swap gap, and a stretch still open accepted that one
-    /// report at once, zeroing the count mid save. That is #1146
-    /// re-entered through the very state added to prevent it.
-    ///
-    /// It is also where driving the protocol by LOAD VERDICTS rather than
-    /// by watcher deliveries earns its keep: the app's own write raises
-    /// only suppressed events, so nothing settles, and a stretch that
-    /// ended on deliveries would still be open here.
-    /// </summary>
-    [Fact]
-    public void A_return_through_the_apps_own_write_leaves_no_stale_stretch()
-    {
-        var protocol = Start();
-
-        // 1. A real deletion, confirmed through the watcher's own
-        // deliveries: the report that opens the stretch, then the one
-        // past the floor.
-        Seam(() => File.Delete(_path));
-        FireAndDeliver();
-        Assert.Equal(0, _accepted);
-        Assert.True(_timer.Armed, "the ask scheduled no next delivery");
-
-        AdvancePastFloor();
-        FireAndDeliver();
-        Assert.Equal(1, _accepted);
-        Assert.Equal(0, _count);
-        Assert.False(_timer.Armed, "an accept asked again");
-
-        // 2. The file returns the way the settings UI returns it: the
-        // app's own write, bracketed by suppression, so its events arm
-        // nothing and no settle ever runs. The reload the write triggers
-        // is the app's own evidence the file is back: it records the
-        // count, and its VERDICT is what ends the open stretch.
-        _ignore = true;
-        // The write and the event it raises, together: the seam raises the
-        // event through the same path a real event takes and proves the
-        // suppression consult fired. This used to be Thread.Sleep(400), a
-        // wait whose only job was to let the suppressed events arrive
-        // before the assertions below, and which under load passed with the
-        // events still in flight, asserting nothing. The seam makes the
-        // consult synchronous, so the assertions can no longer pass
-        // vacuously.
-        SeamSuppressed(() => WriteLikeTheApp("font-size = 13\n"));
-        _count = 1;
-        Assert.False(protocol.Observed(ConfigFilesFound.Loaded));
-        _ignore = false;
-        Assert.Empty(_post);
-        Assert.False(_timer.Armed, "a suppressed write armed the watcher");
-
-        // 3. An external editor's ordinary save, with the delivery landing
-        // in the swap gap: the delete arms the debounce, the delivery runs
-        // before the rename lands. One report, mid save: the #1146 shape.
-        // The clock does not move: the widest save gap measured is 22ms,
-        // and the floor is 900ms. What would make this report conclude is
-        // not elapsed time here but the stretch from step 1 still being
-        // open, whose first observation is already a floor in the past.
-        Seam(() => File.Delete(_path));
-        Assert.True(_timer.Armed);
-        _timer.Fire();
-        Assert.Single(_post);
-        _post.Dequeue()();
-
-        // The stretch survived neither its own conclusion nor the return:
-        // the mid-save report opens a fresh one rather than accepting, the
-        // count stands, and an ask was actually scheduled.
-        Assert.Equal(1, _accepted);
-        Assert.Equal(1, _count);
-        Assert.True(_timer.Armed, "the fresh ask scheduled nothing");
-
-        // 4. The swap completes, and the settle that reports it is where
-        // the stretch ends the ordinary way.
-        Seam(() =>
-        {
-            File.WriteAllText(Tmp, "font-size = 14\n");
-            File.Move(Tmp, _path);
-        });
-        FireAndDeliver();
-        Assert.Equal(1, _settled);
-        Assert.Equal(1, _accepted);
-        Assert.Equal(1, _count);
-    }
-
-    /// <summary>
-    /// The ask is what keeps a real deletion moving: a report that cannot
-    /// yet conclude schedules the next delivery through the watcher's own
-    /// Resettle, so the question is revisited with nobody touching
-    /// anything and the stretch reaches the floor on its own. This is the
-    /// liveness the shell's wiring pins the ask to.
-    /// </summary>
-    [Fact]
-    public void A_real_deletion_concludes_through_the_watchers_own_deliveries()
-    {
-        Start();
-
-        Seam(() => File.Delete(_path));
-
-        // The first report opens the stretch and cannot conclude it: the
-        // floor is measured from this instant, so nothing has elapsed.
-        FireAndDeliver();
-        Assert.Equal(0, _accepted);
-        Assert.True(_timer.Armed, "the ask scheduled no next delivery");
-
-        // The stretch runs past the floor, which in a session is wall time
-        // and here is the test clock. Nothing sleeps.
-        AdvancePastFloor();
-        FireAndDeliver();
-
-        Assert.Equal(2, _vanished);
-        Assert.Equal(1, _accepted);
-        Assert.Equal(0, _count);
-        Assert.False(_timer.Armed, "an accept asked again");
+            now: () => _now,
+            lookAgainAfter: looks is null
+                ? null
+                : delay => { looks.Add(delay); return true; });
     }
 
     /// <summary>
@@ -313,9 +91,9 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     /// This is the half of the verdict rule that no deletion sequence can
     /// see. Every one of those starts from a real absence, so swapping which
     /// verdict opens a stretch breaks them for a reason that almost any
-    /// other broken rule also produces, and the swap has no test of its own.
-    /// Here the file never goes away, so a conclusion can only come from
-    /// treating a load that FOUND it as evidence that it is gone.
+    /// other broken rule also produces. Here the file never goes away, so a
+    /// conclusion can only come from treating a load that FOUND it as
+    /// evidence that it is gone.
     /// </remarks>
     [Fact]
     public void A_file_that_is_there_is_never_confirmed_gone()
@@ -355,45 +133,27 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     {
         var protocol = Start(ask: () => false);
 
-        Seam(() => File.Delete(_path));
-        FireAndDeliver();
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
 
         // Nothing was scheduled, so no delivery will revisit this. One
-        // report proves nothing either way, so the count still stands.
-        Assert.False(_timer.Armed);
+        // report proves nothing either way, so the count still stands and
+        // no banner is up.
         Assert.Equal(0, _accepted);
         Assert.Equal(1, _count);
+        Assert.False(_source!.NoticeShowing);
 
         // The next observation arrives the way it does when there is no
         // watcher at all: some other reload, a theme change or a settings
         // edit, builds the config and finds no default file. Past the
-        // floor, that is proof, and the session stops claiming the file.
+        // floor, that is proof, and what it proves lands in the notice:
+        // the settings stand, and the user is told.
         AdvancePastFloor();
         Assert.True(protocol.Observed(ConfigFilesFound.Absent));
         Assert.Equal(1, _accepted);
-        Assert.Equal(0, _count);
+        Assert.Equal(1, _count);
+        Assert.True(_source.NoticeShowing);
+        Assert.Single(_notifications.Active);
     }
-
-    /// <summary>
-    /// The protocol as a host with no watcher wires it: the default, since
-    /// <c>auto-reload-config</c> is off. The ask never schedules anything,
-    /// and every look it takes instead is recorded with its delay.
-    /// </summary>
-    private ConfigVanishProtocol NoWatcher(System.Collections.Generic.List<TimeSpan> looks) =>
-        new(
-            sessionDefaultFilesFound: () => _count,
-            ask: () => false,
-            onAccept: () =>
-            {
-                Interlocked.Increment(ref _accepted);
-                _count = 0;
-            },
-            now: () => _now,
-            lookAgainAfter: delay =>
-            {
-                looks.Add(delay);
-                return true;
-            });
 
     /// <summary>
     /// With no watcher, the reload that finds the file gone is enough on its
@@ -406,13 +166,15 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     /// reload somebody happened to cause, and the reload that opened it, a
     /// High Contrast toggle, was declined and lost: deleting the config file
     /// cost the user a second toggle, at least 900ms after the first
-    /// (wintty#1155).
+    /// (wintty#1155). What the look concludes into is now the notice, not an
+    /// applied defaults config: the toggle still declines, and the notice is
+    /// the way out of that, not a silent reset.
     /// </remarks>
     [Fact]
     public void With_no_watcher_one_reload_is_enough_because_the_protocol_looks_again()
     {
-        var looks = new System.Collections.Generic.List<TimeSpan>();
-        var protocol = NoWatcher(looks);
+        var looks = new List<TimeSpan>();
+        var protocol = Start(looks: looks);
 
         // The toggle's reload finds no file: an observation, not a proof.
         Assert.False(protocol.Observed(ConfigFilesFound.Absent));
@@ -425,7 +187,7 @@ public sealed class ConfigVanishProtocolTests : IDisposable
         _now += look;
         Assert.True(protocol.Observed(ConfigFilesFound.Absent));
         Assert.Equal(1, _accepted);
-        Assert.Equal(0, _count);
+        Assert.True(_source!.NoticeShowing);
         Assert.Single(looks);
     }
 
@@ -435,9 +197,9 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     /// source of reloads would only double the rebuilds.
     /// </summary>
     [Fact]
-    public void The_look_again_is_not_taken_when_the_watcher_took_the_ask()
+    public void The_look_again_is_not_taken_when_the_ask_was_taken()
     {
-        var looks = new System.Collections.Generic.List<TimeSpan>();
+        var looks = new List<TimeSpan>();
         var protocol = new ConfigVanishProtocol(
             sessionDefaultFilesFound: () => _count,
             ask: () => true,
@@ -462,8 +224,8 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     [Fact]
     public void A_fresh_stretch_times_its_look_from_its_own_first_observation()
     {
-        var looks = new System.Collections.Generic.List<TimeSpan>();
-        var protocol = NoWatcher(looks);
+        var looks = new List<TimeSpan>();
+        var protocol = Start(looks: looks);
 
         Assert.False(protocol.Observed(ConfigFilesFound.Absent));
         _now += TimeSpan.FromMilliseconds(600);
@@ -478,24 +240,24 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     }
 
     /// <summary>
-    /// No look once there is nothing left to lose. After an accepted
-    /// deletion the session count is zero, and every later reload finds the
-    /// same absence; a look scheduled from there would find it too and
-    /// schedule another, a reload every floor for the life of the process.
-    /// The same holds from startup under --no-config, where the count is
+    /// No look once the question is settled, and none once there is
+    /// nothing left to lose. After an accepted deletion the question is on
+    /// hold, and every later absence answers Hold without asking; a look
+    /// scheduled from there would reload for the life of the process. The
+    /// same holds from startup under --no-config, where the count is
     /// pinned at zero.
     /// </summary>
     [Fact]
-    public void No_look_is_scheduled_once_the_session_has_no_config_file()
+    public void No_look_is_scheduled_once_the_question_is_settled_or_unowned()
     {
-        var looks = new System.Collections.Generic.List<TimeSpan>();
-        var protocol = NoWatcher(looks);
+        var looks = new List<TimeSpan>();
+        var protocol = Start(looks: looks);
 
         Assert.False(protocol.Observed(ConfigFilesFound.Absent));
         _now += looks[0];
         Assert.True(protocol.Observed(ConfigFilesFound.Absent));
-        Assert.Equal(0, _count);
 
+        // Settled: the next absences are holds, and none of them asks.
         for (var i = 0; i < 3; i++)
         {
             _now += ConfigVanishConfirmer.DefaultFloor;
@@ -503,12 +265,58 @@ public sealed class ConfigVanishProtocolTests : IDisposable
         }
         Assert.Single(looks);
 
-        // And a session that never had one asks for nothing from the start.
-        var none = new System.Collections.Generic.List<TimeSpan>();
+        // A session that never had one asks for nothing from the start.
+        var none = new List<TimeSpan>();
         _count = 0;
-        var fresh = NoWatcher(none);
+        var fresh = Start(looks: none);
         Assert.False(fresh.Observed(ConfigFilesFound.Absent));
         Assert.Empty(none);
+    }
+
+    /// <summary>
+    /// The hold ends only when the file is seen again. A load that found a
+    /// file resets the question, so the next absence is a fresh one, with
+    /// its own floor and its own conclusion.
+    /// </summary>
+    /// <remarks>
+    /// This is the stale-stretch defence, on the only path that still has
+    /// stretches: an accepted question whose file returns must not make
+    /// the next save's first absence conclusive. It drove through the
+    /// watcher's deliveries before the event machine existed; the verdicts
+    /// are what carry it now.
+    /// </remarks>
+    [Fact]
+    public void An_accepted_question_holds_until_the_file_returns()
+    {
+        var looks = new List<TimeSpan>();
+        var protocol = Start(looks: looks);
+
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        _now += looks[0];
+        Assert.True(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(1, _accepted);
+        Assert.True(_source!.NoticeShowing);
+
+        // Absences keep answering hold: once.
+        AdvancePastFloor();
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(1, _accepted);
+
+        // The file returns: the verdict ends the question, and the reload
+        // that carried it applies, which is what takes the banner down in
+        // the service (the applied path calls OnReloadApplied). The verdict
+        // alone dismisses nothing.
+        Assert.False(protocol.Observed(ConfigFilesFound.Loaded));
+        _source!.OnReloadApplied();
+        Assert.False(_source.NoticeShowing);
+        Assert.Empty(_notifications.Active);
+
+        _now += TimeSpan.FromMilliseconds(100);
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(ConfigVanishConfirmer.DefaultFloor, looks[1]);
+        _now += looks[1];
+        Assert.True(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Equal(2, _accepted);
     }
 
     /// <summary>
@@ -520,8 +328,8 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     [Fact]
     public void A_look_mid_stretch_asks_only_for_what_is_left()
     {
-        var looks = new System.Collections.Generic.List<TimeSpan>();
-        var protocol = NoWatcher(looks);
+        var looks = new List<TimeSpan>();
+        var protocol = Start(looks: looks);
 
         Assert.False(protocol.Observed(ConfigFilesFound.Absent));
         _now += TimeSpan.FromMilliseconds(300);
@@ -548,8 +356,8 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     [Fact]
     public void A_clock_stepped_back_asks_for_no_look_past_the_floor()
     {
-        var looks = new System.Collections.Generic.List<TimeSpan>();
-        var protocol = NoWatcher(looks);
+        var looks = new List<TimeSpan>();
+        var protocol = Start(looks: looks);
 
         Assert.False(protocol.Observed(ConfigFilesFound.Absent));
         _now += TimeSpan.FromMilliseconds(400);
@@ -566,47 +374,17 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     }
 
     /// <summary>
-    /// With a watcher, a deletion concludes through deliveries a debounce
-    /// apart, and every one short of the floor has to ask for the next: one
-    /// that asked nothing would leave the watcher quiet and the question
-    /// waiting for an unrelated reload, the wintty#1155 symptom down the
-    /// watcher's path. The other watcher tests jump a whole floor in one
-    /// step, so they never see an intermediate delivery.
-    /// </summary>
-    [Fact]
-    public void With_a_watcher_every_delivery_short_of_the_floor_asks_for_the_next()
-    {
-        Start();
-        Seam(() => File.Delete(_path));
-        FireAndDeliver();
-
-        var step = TimeSpan.FromMilliseconds(300);
-        for (var i = 0; i < 2; i++)
-        {
-            _now += step;
-            FireAndDeliver();
-            Assert.Equal(0, _accepted);
-            Assert.True(_timer.Armed, "an intermediate delivery asked nothing");
-        }
-
-        _now += step;
-        FireAndDeliver();
-        Assert.Equal(1, _accepted);
-    }
-
-    /// <summary>
     /// A file that is there but will not open ends the stretch like one that
     /// reads. A lock, a sharing violation, an offline cloud placeholder or a
     /// scanner's hold all come back Unreadable, not Absent. Keeping the
     /// stretch open across one would let a later load in another save's gap
-    /// accept on that single observation, its first already a floor old,
-    /// and apply defaults mid save: #1146.
+    /// accept on that single observation, its first already a floor old.
     /// </summary>
     [Fact]
     public void An_unreadable_verdict_ends_the_stretch()
     {
-        var looks = new System.Collections.Generic.List<TimeSpan>();
-        var protocol = NoWatcher(looks);
+        var looks = new List<TimeSpan>();
+        var protocol = Start(looks: looks);
 
         Assert.False(protocol.Observed(ConfigFilesFound.Absent));
         _now += TimeSpan.FromMilliseconds(100);
@@ -617,138 +395,29 @@ public sealed class ConfigVanishProtocolTests : IDisposable
     }
 
     /// <summary>
-    /// The settle's reload proves a file is there, and that ends the
-    /// stretch: a run of absence interrupted by the file coming back
-    /// starts from nothing, not from where it left off. A stretch carried
-    /// across the return had the next save's first report accepted at
-    /// once, however long ago that first observation was, which is #1146
-    /// through stale state from the other direction.
+    /// A look that finds the question settled reaches nothing at all: no
+    /// second accept, no second banner, no ask. The settle answers through
+    /// the machine's or the protocol's own state, and the notice's dedup is
+    /// the second belt.
     /// </summary>
     [Fact]
-    public void A_settle_ends_the_stretch_so_the_next_one_starts_from_nothing()
+    public void An_accept_reaches_the_notice_once_per_episode()
     {
-        Start();
+        var protocol = Start();
 
-        // A stretch opened on a deletion, not yet past the floor.
-        Seam(() => File.Delete(_path));
-        FireAndDeliver();
-
-        // The file comes back, and the settle's reload finds it.
-        Seam(() => File.WriteAllText(_path, "font-size = 15\n"));
-        FireAndDeliver();
-        Assert.Equal(1, _settled);
-        Assert.Equal(0, _accepted);
-
-        // Time passes, as it does in any session. Were the stretch still
-        // open, this alone would make the next single report conclusive.
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
         AdvancePastFloor();
+        Assert.True(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Single(_notifications.Active);
 
-        // The next deletion is a fresh question: its first report proves
-        // nothing, however long the previous stretch ran.
-        Seam(() => File.Delete(_path));
-        FireAndDeliver();
-        Assert.Equal(0, _accepted);
+        // The user closes it. A later hold must not re-raise: the episode
+        // is over.
+        _notifications.Dismiss(_notifications.Active[0]);
+        Assert.Empty(_notifications.Active);
 
         AdvancePastFloor();
-        FireAndDeliver();
-        Assert.Equal(1, _accepted);
-    }
-
-    /// <summary>
-    /// A deleted watched DIRECTORY concludes too: its rebuild ticks fail
-    /// while it is missing, and each still delivers, which is what
-    /// carries the question to its answer. Without the delivery the
-    /// question stalls unconfirmed and every later reload declines for
-    /// the life of the process, the #676 lockout down the directory path.
-    /// </summary>
-    [Fact]
-    public void A_deleted_directory_concludes_through_its_rebuild_ticks()
-    {
-        // This member needs the real FileSystemWatcher: the Error event a
-        // deleted watched directory raises is what schedules the rebuild,
-        // so it is the one construction here that keeps the real stream
-        // enabled.
-        Start(realEvents: true);
-
-        Retry(() => Directory.Delete(_dir, recursive: true));
-        WaitUntil(() => _timer.Armed,
-            "the failed watcher scheduled no rebuild");
-
-        FireAndDeliver();
-        Assert.Equal(0, _accepted);
-        Assert.True(_timer.Armed, "the ask scheduled no next delivery");
-
-        AdvancePastFloor();
-        FireAndDeliver();
-
-        Assert.Equal(1, _accepted);
-        Assert.Equal(0, _count);
-    }
-
-    private static void WaitUntil(Func<bool> condition, string failure)
-    {
-        // Generous hang guard: the deadline exists so a broken condition
-        // fails instead of hanging the suite, not to measure the machine.
-        var sw = Stopwatch.StartNew();
-        while (!condition())
-        {
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(60), failure);
-            Thread.Sleep(10);
-        }
-    }
-
-    // Antivirus or the indexer can hold a handle for a moment.
-    private static void Retry(Action act)
-    {
-        var sw = Stopwatch.StartNew();
-        while (true)
-        {
-            try
-            {
-                act();
-                return;
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                       && sw.Elapsed < TimeSpan.FromSeconds(60))
-            {
-                Thread.Sleep(50);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Fires only when armed, as the real timer does, so a test cannot
-    /// settle an edit the watcher never scheduled.
-    /// </summary>
-    private sealed class FakeTimer : ISchedulerTimer
-    {
-        private volatile bool _armed;
-        private long _lastDelayTicks;
-
-        public Action? Callback { get; set; }
-        public bool Armed => _armed;
-        public bool Disposed { get; private set; }
-        public TimeSpan LastDelay => TimeSpan.FromTicks(Interlocked.Read(ref _lastDelayTicks));
-
-        public void Schedule(TimeSpan delay)
-        {
-            Interlocked.Exchange(ref _lastDelayTicks, delay.Ticks);
-            _armed = true;
-        }
-
-        public void Cancel() => _armed = false;
-
-        public void Dispose()
-        {
-            _armed = false;
-            Disposed = true;
-        }
-
-        public void Fire()
-        {
-            if (!_armed) return;
-            _armed = false;
-            Callback?.Invoke();
-        }
+        Assert.False(protocol.Observed(ConfigFilesFound.Absent));
+        Assert.Empty(_notifications.Active);
+        Assert.False(_source!.NoticeShowing);
     }
 }

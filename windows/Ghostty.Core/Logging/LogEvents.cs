@@ -34,6 +34,9 @@ internal static class LogEvents
         public const int ReloadDefaultFilesShrunk = 1020;
         public const int WriteSchedulerOutcomeErr = 1021;
         public const int GalleryShaderOverlaySkipped = 1022;
+        public const int MissingConfigNoticeShown = 1023;
+        public const int MissingConfigNoticeCleared = 1024;
+        public const int ReloadAppliedDefaultsRequest = 1025;
     }
 
     // 1100-1199: Frecency / command history

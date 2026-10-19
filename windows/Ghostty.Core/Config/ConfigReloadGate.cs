@@ -230,6 +230,26 @@ public static class ConfigReloadGate
             && stretchElapsed >= floor;
 
     /// <summary>
+    /// Whether a declined reload is carried past the gate and applied
+    /// anyway. There are exactly two keys, and absence is not one of them.
+    /// </summary>
+    /// <remarks>
+    /// <para>The two: a shrink that outlived the floor, which is a
+    /// deletion of a layered file the watcher cannot see, where what the
+    /// load built IS the user's configuration as it now stands; and the
+    /// user's own ask, the missing-config notice's load-defaults action,
+    /// which is an instruction precisely because a person gave it. The
+    /// rule is a disjunction of two one-bit facts, which is exactly why it
+    /// lives here and not inline: it used to have a third key, the vanish
+    /// confirmation, and that door applied a defaults config over the
+    /// user's last-loaded settings every time a save's gap outlived the
+    /// deletion dwell (wintty#1158). Absence of a file is a fact about the
+    /// disk, and facts about the disk are not instructions.</para>
+    /// </remarks>
+    public static bool CarriesPastGate(bool isPersistentShrink, bool defaultsRequested) =>
+        isPersistentShrink || defaultsRequested;
+
+    /// <summary>
     /// Whether this look read a default config file as empty in a way the
     /// session has not seen before: the empty count grew past the one the
     /// config in force was built from.

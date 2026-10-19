@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using Ghostty.Core.Logging;
@@ -30,11 +31,22 @@ namespace Ghostty.Core.Config;
 /// otherwise, so read the list above as the measured set rather than as
 /// every swap that exists.
 ///
-/// Two rules follow from that:
+/// Three rules follow from that:
 ///
 /// Every event kind re-arms the debounce, Deleted included, so the whole
 /// burst collapses into a single settle and nothing is reported between the
 /// two halves of a swap.
+///
+/// Every event's KIND rides with it, into the posted delivery, where the
+/// event-shape state machine (<see cref="ConfigFilePresence"/>) consumes
+/// the sequence: a delete whose file comes back is a save, at any delay,
+/// because the completing rename raises its own event; a delete whose file
+/// does not come back concludes past the machine's backstop and is the
+/// host's notice, not an instruction to reload anything. The shipped
+/// version had no kinds and timed a deletion on a 900ms floor measured
+/// between load verdicts, which a save whose gap outlived it, a network or
+/// synced profile's ordinary afternoon, converted into a silent reset to
+/// the defaults config (wintty#1158).
 ///
 /// A settle that finds the file missing reports no edit. The missing file is
 /// not the end of the save: the rename that completes it raises its own
@@ -42,21 +54,23 @@ namespace Ghostty.Core.Config;
 /// reports it. A reload in the gap would have loaded no user config at all,
 /// so this saves the host a rebuild it would only decline.
 ///
-/// It does report the absence, through <c>onVanished</c>, and that report is
-/// NOT evidence of a deletion on its own. The quiet period the debounce buys
-/// belongs to the settle, while the existence check runs later still, inside
-/// the posted delivery, so an ordinary atomic save reaches it whenever the
-/// swap straddles that hop. <c>onVanished</c> means "gone as of this
-/// delivery" and nothing more, and a host acting on one observation of it
-/// lowers what it knows in the middle of a save (issue #1146). It is
-/// reported at all because the host is otherwise left refusing every later
-/// reload to protect a save that is never going to land (issue #676).
+/// It still reports the eventless absence, through <c>onVanished</c>, and
+/// that report is NOT evidence of a deletion on its own. The quiet period
+/// the debounce buys belongs to the settle, while the existence check runs
+/// later still, inside the posted delivery, so an ordinary atomic save
+/// reaches it whenever the swap straddles that hop. It is reported at all
+/// because the host is otherwise left refusing every later reload to
+/// protect a save that is never going to land (issue #676): a delivery
+/// that finds the file gone with no delete event ever seen is the only
+/// "gone as of this delivery" the host cannot learn any other way, and one
+/// observation of it is still nothing (issue #1146). A seen delete reaches
+/// none of this: the machine owns that branch.
 ///
-/// It used to be load-bearing rather than an early-out, because libghostty's
-/// default-file loader answered "no config file" by writing its template, at
-/// the path the save was about to land on. The check and the load are two
-/// steps, so this could only narrow that window; closing it needed a loader
-/// that creates nothing, which is what
+/// The eventless report used to be load-bearing rather than an early-out,
+/// because libghostty's default-file loader answered "no config file" by
+/// writing its template, at the path the save was about to land on. The
+/// check and the load are two steps, so this could only narrow that
+/// window; closing it needed a loader that creates nothing, which is what
 /// <c>ghostty_config_load_default_files</c> now is (issue #676).
 ///
 /// The existence check runs where the config is loaded, not on the timer: a
@@ -107,8 +121,16 @@ public sealed partial class ConfigFileWatcher : IDisposable
     private readonly Action<Action> _post;
     private readonly Action _onSettled;
     private readonly Action? _onVanished;
+    private readonly ConfigFilePresence _presence;
     private readonly ILogger _logger;
     private readonly Lock _lock = new();
+
+    // The kinds of the events that arrived since the last delivery,
+    // oldest first, for the state machine to consume on the delivery's
+    // thread. Written under the lock from the file system's event
+    // handlers; drained inside the posted delivery.
+    private readonly Queue<ConfigFileEventKind> _pendingKinds = new();
+
     private FileSystemWatcher? _watcher;
     private bool _rebuildPending;
     private TimeSpan _rebuildDelay;
@@ -149,13 +171,19 @@ public sealed partial class ConfigFileWatcher : IDisposable
     /// <param name="onSettled">Called from inside the posted delivery, once
     /// per settled edit, only if the file exists at that moment.</param>
     /// <param name="onVanished">Called instead of <paramref name="onSettled"/>
-    /// when the delivery finds the file gone. It says "gone as of this
-    /// delivery" and no more than that: an ordinary atomic save reaches it
-    /// whenever the swap straddles the hop between the timer and the posted
-    /// delivery, which is measured rather than theoretical. Optional, and
-    /// the watcher does nothing else about it; the host decides what a
-    /// missing config file means and is expected to ask again before
-    /// treating one report as a deletion.</param>
+    /// when the delivery finds the file gone and the machine has no better
+    /// answer. Only the EVENTLESS absence reaches it: a save straddling the
+    /// hop between the timer and the posted delivery, an event an overflow
+    /// ate, a deleted directory. A seen delete reports nothing here, because
+    /// <paramref name="presence"/> is already classifying it; the host
+    /// decides what one eventless report means and is expected to ask again
+    /// before treating it as a deletion.</param>
+    /// <param name="presence">The event-shape state machine. Required: the
+    /// days of timing a deletion are over (wintty#1158). Fed the kinds of
+    /// every event inside the posted delivery, consulted before the delivery
+    /// reports anything, and told when a delivery finds the file there.
+    /// Consumed on the thread <paramref name="post"/> delivers to, like
+    /// everything the host does with its config.</param>
     public ConfigFileWatcher(
         string path,
         ISchedulerTimer timer,
@@ -164,6 +192,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
         Action<Action> post,
         Action onSettled,
         ILogger logger,
+        ConfigFilePresence presence,
         Action? onVanished = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
@@ -172,6 +201,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
         ArgumentNullException.ThrowIfNull(post);
         ArgumentNullException.ThrowIfNull(onSettled);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(presence);
 
         _path = path;
         _dir = Path.GetDirectoryName(path);
@@ -182,6 +212,7 @@ public sealed partial class ConfigFileWatcher : IDisposable
         _post = post;
         _onSettled = onSettled;
         _onVanished = onVanished;
+        _presence = presence;
         _logger = logger;
         _timer.Callback = OnTimerFired;
     }
@@ -272,22 +303,57 @@ public sealed partial class ConfigFileWatcher : IDisposable
         }
     }
 
-    private void OnFileEvent(object sender, FileSystemEventArgs e) => Rearm();
+    private void OnFileEvent(object sender, FileSystemEventArgs e) =>
+        Enqueue(KindOf(e.ChangeType));
 
-    private void OnFileRenamed(object sender, RenamedEventArgs e) => Rearm();
+    private void OnFileRenamed(object sender, RenamedEventArgs e) =>
+        // A rename carries its own kind, and the filter makes the test
+        // honest: the event is delivered when either name matches, so the
+        // NEW name is what says which half of a save this is. Onto the
+        // watched name is the completing half of an atomic save; away from
+        // it is the opening half of ReplaceFile or a backup-rename, which
+        // is a delete to everything downstream.
+        Enqueue(string.Equals(e.Name, _file, StringComparison.OrdinalIgnoreCase)
+            ? ConfigFileEventKind.Appeared
+            : ConfigFileEventKind.Deleted);
+
+    private static ConfigFileEventKind KindOf(WatcherChangeTypes changeType) =>
+        changeType == WatcherChangeTypes.Deleted ? ConfigFileEventKind.Deleted
+        : changeType == WatcherChangeTypes.Created ? ConfigFileEventKind.Appeared
+        : ConfigFileEventKind.Changed;
 
     /// <summary>
-    /// Test-only stand-in for a file system event: runs the exact path the
-    /// real <c>Changed</c>/<c>Created</c>/<c>Deleted</c>/<c>Renamed</c>
-    /// handlers run, including the suppression consult. Tests that drive the
-    /// debounce and delivery machinery with hand-raised events stay
-    /// deterministic on a loaded machine, where the events of one save can
-    /// be delivered spread wider than the debounce and one save then reports
-    /// as two (issue #1161). The real event stream itself keeps its own
-    /// coverage over the save shapes, with load-tolerant waits, in
-    /// ConfigFileWatcherTests.
+    /// Record one event's kind and arm the debounce, as the real handlers
+    /// do. Suppression is consulted when the event arrives, so a write the
+    /// host brackets with the flag contributes no kind and arms nothing.
     /// </summary>
-    internal bool TestRaiseFileEvent() => Rearm();
+    private bool Enqueue(ConfigFileEventKind kind)
+    {
+        if (_ignoreEvents()) return false;
+        lock (_lock)
+        {
+            if (_disposed) return false;
+            _pendingKinds.Enqueue(kind);
+            _timer.Schedule(_debounce);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Test-only stand-in for a file system event, with the kind the real
+    /// one would carry: runs the exact path the real
+    /// <c>Changed</c>/<c>Created</c>/<c>Deleted</c>/<c>Renamed</c> handlers
+    /// run, including the suppression consult and the kind's ride into the
+    /// delivery. Tests that drive the debounce, delivery and
+    /// classification machinery with hand-raised events stay deterministic
+    /// on a loaded machine, where the events of one save can be delivered
+    /// spread wider than the debounce and one save then reports as two
+    /// (issue #1161), and where the gap between a delete and its rename is
+    /// whatever the machine feels like (wintty#1158). The real event
+    /// stream itself keeps its own coverage over the save shapes, with
+    /// load-tolerant waits, in ConfigFileWatcherTests.
+    /// </summary>
+    internal bool TestRaiseEvent(ConfigFileEventKind kind) => Enqueue(kind);
 
     private void OnWatcherError(object sender, ErrorEventArgs e)
         => HandleWatcherError(sender, e.GetException());
@@ -480,21 +546,50 @@ public sealed partial class ConfigFileWatcher : IDisposable
             if (_disposed) return;
         }
 
+        // The kinds that arrived since the last delivery, in order: the
+        // machine classifies the sequence, on this thread, before anything
+        // is reported. A delete whose rename has already landed by the time
+        // this runs is a save before the existence check is ever asked.
+        foreach (var kind in DrainKinds())
+            _presence.Observe(kind);
+
         if (!File.Exists(_path))
         {
             LogSettledWithoutFile(_path);
-            // Gone as of now, which is all this can say. The debounce has
-            // already fired by the time this runs, so the quiet period it
-            // bought is behind us and an ordinary swap reaches here whenever
-            // it straddles the hop from the timer to this delivery. "Gone
-            // for good" and "gone for the next few milliseconds" look
-            // identical from this line; the host tells them apart by asking
-            // again, which is what OnConfigFileVanished does.
-            _onVanished?.Invoke();
+            // The machine's answer comes first. A delete it has seen (or a
+            // deletion it has concluded) owns this absence: there is
+            // nothing to load, and reloading would hand a verdict-shaped
+            // question an answer the event already gave. What remains for
+            // onVanished is the eventless absence, gone as of this delivery
+            // with no delete event ever seen: "gone for good" and "gone for
+            // the next few milliseconds" still look identical from there,
+            // and the host tells those apart by asking again.
+            if (_presence.AbsenceIsInstruction)
+                _onVanished?.Invoke();
             return;
         }
 
+        // The file is there now. That is live evidence, checked at this
+        // instant rather than buffered, and it resolves whatever the
+        // machine had open: a pending delete becomes a save, a concluded
+        // deletion reopens, and the settle below reloads what came back.
+        _presence.SeePresent();
         _onSettled();
+    }
+
+    /// <summary>The kinds queued since the last delivery, oldest first.
+    /// Under the lock, because events keep arriving from the watcher's own
+    /// threads while a delivery runs.</summary>
+    private IReadOnlyList<ConfigFileEventKind> DrainKinds()
+    {
+        lock (_lock)
+        {
+            if (_pendingKinds.Count == 0) return Array.Empty<ConfigFileEventKind>();
+            var kinds = new ConfigFileEventKind[_pendingKinds.Count];
+            for (var i = 0; i < kinds.Length; i++)
+                kinds[i] = _pendingKinds.Dequeue();
+            return kinds;
+        }
     }
 
     private static void DisposeQuietly(FileSystemWatcher? watcher)

@@ -10,19 +10,17 @@ namespace Ghostty.Tests.Wiring;
 /// The vanish shape issue #1150 was about is already pinned in
 /// <c>ConfigWatcherWiringTests</c>: the vanished handler reloads and records
 /// nothing of its own, and the protocol's accept records nothing either.
-/// What those pins read is the call text inside the accept lambda, so two
-/// walks past them live here: an accept that records through a helper of
-/// its own leaves no <c>RecordDefaultFiles</c> text inside the lambda to
-/// match, and a count write from anywhere new is a second writer the
-/// one-writer census never sees. Between the base pins and these two, the
-/// accept calls the logger and nothing else, and the count has exactly two
+/// What those pins used to read is the call text inside the accept lambda,
+/// so a walk past them lives here: since wintty#1158 the accept is a named
+/// handler (the census reads a body, not a lambda), it causes the log and
+/// the notice and nothing else, and the count still has exactly two
 /// recorders, neither of them handed an assumed constant.
 /// </summary>
 public class VanishCountWiringTests
 {
     private static ShellSource ConfigService() => ShellSource.Load("Services.ConfigService.cs");
 
-    private static InvocationExpressionSyntax[] AcceptCalls()
+    private static MethodDeclarationSyntax AcceptHandler()
     {
         var creation = Assert.Single(ConfigService().Root
             .DescendantNodes()
@@ -32,19 +30,36 @@ public class VanishCountWiringTests
         var onAccept = Assert.Single(creation.ArgumentList!.Arguments,
             a => a.NameColon?.Name.ToString() == "onAccept");
 
-        return onAccept.Expression.DescendantNodesAndSelf()
-            .OfType<InvocationExpressionSyntax>()
-            .ToArray();
+        var name = Assert.IsType<IdentifierNameSyntax>(onAccept.Expression)
+            .Identifier.ValueText;
+        return ConfigService().Method(name);
     }
 
+    /// <summary>
+    /// The accept causes exactly the account of it and the notice. The
+    /// shipped accept had a third effect - it was the key that carried an
+    /// absence past the gate and applied a defaults config - and a second
+    /// effect growing back beside these two is that defect returning
+    /// through a side door.
+    /// </summary>
     [Fact]
-    public void The_vanish_accept_calls_only_the_logger()
+    public void The_vanish_accept_logs_and_raises_the_notice_and_does_nothing_else()
     {
-        var call = Assert.Single(AcceptCalls());
+        var handler = AcceptHandler();
 
-        Assert.Equal(
-            "StaticLoggers.ConfigService.LogConfigFileVanished",
-            call.Expression.ToString());
+        var calls = handler.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Select(c => c.Expression.ToString())
+            .ToList();
+        Assert.Equal(2, calls.Count);
+        Assert.Contains("StaticLoggers.ConfigService.LogConfigFileVanished", calls);
+        Assert.Contains("_missingNoticeSource.OnDeletionConfirmed", calls);
+
+        // No count write, no config push, no gate reach: the notice source
+        // is the only thing an accept moves.
+        Assert.DoesNotContain(calls, c => c.Contains("RecordDefaultFiles", StringComparison.Ordinal));
+        Assert.DoesNotContain(calls, c => c.Contains("AppUpdateConfig", StringComparison.Ordinal));
+        Assert.DoesNotContain(calls, c => c.Contains("Reload", StringComparison.Ordinal));
     }
 
     [Fact]

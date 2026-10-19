@@ -809,6 +809,11 @@ public partial class App : Application
         // in the collection when the first NotificationHost binds.
         _notificationService = new Ghostty.Core.Notifications.NotificationService();
         NotificationService = _notificationService;
+        // The config service was built above, before this queue existed, so
+        // its missing-config notice (a concluded config-file deletion:
+        // wintty#1158) reaches the queue through this sink, read at show
+        // time rather than captured.
+        _configService.SetNoticeSink(() => _notificationService);
 
         // NO_COLOR handling. NO_COLOR (https://no-color.org) is a user-facing
         // convention telling color-aware programs to disable ANSI color; a

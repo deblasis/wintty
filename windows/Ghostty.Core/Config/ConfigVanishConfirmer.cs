@@ -12,8 +12,17 @@ public enum ConfigVanishAction
     /// <summary>Not yet proven. Keep the count, and look again.</summary>
     Confirm,
 
-    /// <summary>Proven gone. The session may stop claiming the file.</summary>
+    /// <summary>Proven gone. The host is told once: since wintty#1158 the
+    /// session's answer to a proven deletion is the missing-config notice
+    /// and the settings it already has, never an applied defaults config,
+    /// so an accept moves nothing by itself.</summary>
     Accept,
+
+    /// <summary>Already proven, and said so. The question is settled until
+    /// a load finds the file again: a settled question that kept asking
+    /// would reload for the life of the process, and one that kept
+    /// accepting would re-raise its conclusion over and over.</summary>
+    Hold,
 }
 
 /// <summary>
@@ -106,6 +115,7 @@ public sealed class ConfigVanishConfirmer
     private readonly Func<TimeSpan> _now;
 
     private bool _seen;
+    private bool _accepted;
     private TimeSpan _first;
 
     /// <param name="floor">Elapsed time that must separate the first
@@ -169,6 +179,12 @@ public sealed class ConfigVanishConfirmer
 
         if (sessionDefaultFilesFound <= 0) return ConfigVanishAction.Ignore;
 
+        // Settled is settled. The answer was reached on the far side of the
+        // floor, so no later observation can improve it, and acting on one
+        // again would re-raise the conclusion every past-floor absence for
+        // the life of the question. Only Reset answers it again.
+        if (_accepted) return ConfigVanishAction.Hold;
+
         var now = _now();
 
         // A clock that runs backwards cannot measure a floor. The default one
@@ -184,7 +200,11 @@ public sealed class ConfigVanishConfirmer
         // Measured from the first observation, so this is false for it
         // however long the stretch later runs. That is what makes a second
         // observation necessary, and it is the whole of the count.
-        if (now - _first >= _floor) return ConfigVanishAction.Accept;
+        if (now - _first >= _floor)
+        {
+            _accepted = true;
+            return ConfigVanishAction.Accept;
+        }
 
         // Only while still asking: accepting needs no further look.
         ask();
@@ -205,7 +225,11 @@ public sealed class ConfigVanishConfirmer
     /// This is also the whole defence against correlated sampling; see the
     /// class remarks before removing it.
     /// </remarks>
-    public void Reset() => _seen = false;
+    public void Reset()
+    {
+        _seen = false;
+        _accepted = false;
+    }
 
     private static TimeSpan MonotonicNow() => Stopwatch.GetElapsedTime(0);
 }
