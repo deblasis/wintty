@@ -15,10 +15,10 @@
       3. the ask is declined, and STAYS declined: no applied reload carries
          the palette within the window, and the live native background is
          still the one the file had. The settings the session had keep
-         running;
+         running, and the missing-config banner is up (the notices op);
       4. recreate the file with another background and reload once: that
-         background is live. The reappearance, not the absence, is the
-         instruction.
+         background is live, and the banner is down. The reappearance, not
+         the absence, is the instruction.
 
     Scenario 2, one of two layered files (a user migrated from Ghostty):
       1. launch on ghostty/config.ghostty AND wintty/config.wintty;
@@ -38,9 +38,8 @@
     than the floor means the first report was believed.
 
     What it does not cover: the watcher path (auto-reload-config on), a
-    locked or unreadable file, the missing-config notice's own banner (the
-    seam has no op that reads the notice queue), and anything that needs the
-    OS High Contrast actually on.
+    locked or unreadable file, the load-defaults action's own click, and
+    anything that needs the OS High Contrast actually on.
 
     Zero OS input is synthesized. The config root and the state base are
     temp directories of this run, single-instance is off, and cleanup stops
@@ -139,6 +138,24 @@ function Wait-PaletteStaysDeclined($s, [int]$Since, [string]$Original) {
     return $null
 }
 
+# Poll the notices op until a banner with $Key is up (Want $true) or gone
+# (Want $false), or the budget runs out. Answers what was on screen at the
+# last look.
+function Wait-Notice($s, [string]$Key, [bool]$Want) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $last = $null
+    while ($sw.ElapsedMilliseconds -lt $HealWithinMs) {
+        $n = Seam $s @{ op = 'notices' }
+        $last = $n
+        $up = @($n.notices | Where-Object { $_.dedupKey -eq $Key }).Count -gt 0
+        if ($up -eq $Want) {
+            return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; Seen = $up; Last = $n }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; Seen = $false; Last = $last }
+}
+
 $baseConfig = @"
 windows-single-instance = false
 window-save-state = never
@@ -170,10 +187,23 @@ try {
         if ($broke) { "after $($broke.Ms)ms: $($broke.How)" }
         else { "declined for the whole ${HealWithinMs}ms, background unchanged" })
 
+    # The conclusion is told, not silent: the missing-config banner is up,
+    # with the owner's copy and the load-defaults action.
+    $notice = Wait-Notice $s 'config-file-missing' $true
+    $up = @($notice.Last.notices | Where-Object { $_.dedupKey -eq 'config-file-missing' }) | Select-Object -First 1
+    Check 's1.notice: the missing-config banner is up' ($null -ne $up -and $up.title -eq 'Config file missing' -and $up.actions -ge 1) $(
+        if ($up) { "title=$($up.title) actions=$($up.actions), after $($notice.Ms)ms" }
+        else { "no config-file-missing banner within ${HealWithinMs}ms" })
+
     Seam $s @{ op = 'high-contrast'; off = $true } | Out-Null
     [System.IO.File]::WriteAllText($cfg, "windows-single-instance = false`nwindow-save-state = never`nbackground = #405060`n")
     $re = Seam $s @{ op = 'reload-config' }
     Check 's1.recreate: the new file applies on one reload' ($re.applied -and $re.nativeBackground -eq '#405060') "applied=$($re.applied) native=$($re.nativeBackground)"
+
+    # The banner's premise ended with the file coming back: it is down.
+    $gone = Wait-Notice $s 'config-file-missing' $false
+    Check 's1.cleared: the banner came down with the file' ($gone.Seen -eq $false) $(
+        if ($gone.Seen) { "still up after $($gone.Ms)ms" } else { "cleared after $($gone.Ms)ms" })
 
     Stop-SeamSession $s
     $s = $null

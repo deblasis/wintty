@@ -47,8 +47,9 @@ public sealed class ConfigWatcherEventShapeTests : IDisposable
     private readonly NotificationService _notifications = new();
     private readonly ListLogger _log = new();
 
-    // Event id from Ghostty.Core.Logging.LogEvents.Config.
+    // Event ids from Ghostty.Core.Logging.LogEvents.Config.
     private const int WatcherError = 1009;
+    private const int WatcherFileMissing = 1010;
 
     // The session's recorded count, what RecordDefaultFiles owns in the
     // service: the contract says a deletion never moves it.
@@ -521,6 +522,103 @@ public sealed class ConfigWatcherEventShapeTests : IDisposable
         Assert.False(_backstop.Armed, "a resolved pending left a poll armed");
     }
 
+    /// <summary>
+    /// A recreation the watcher never hears about, bracketed the way the
+    /// service brackets its own writes, still reaches the machine: the
+    /// bracket's LIFT is live evidence, checked against the disk, and a
+    /// pending delete it resolves never reaches its backstop. The shipped
+    /// wiring had no such lift, and the banner went up over a file that
+    /// was there.
+    /// </summary>
+    /// <remarks>
+    /// No <see cref="ConfigFileWatcher.TestRaiseEvent"/> and no
+    /// <c>Resettle</c>: the recreation produces no delivery, which is the
+    /// point. The only thing that can resolve the machine here is the
+    /// suppression lift's own existence check.
+    /// </remarks>
+    [Fact]
+    public void A_silent_recreation_while_a_delete_is_pending_never_reaches_the_backstop()
+    {
+        Start();
+
+        File.Delete(_path);
+        _watcher!.TestRaiseEvent(ConfigFileEventKind.Deleted);
+        Advance(TimeSpan.FromMilliseconds(300));
+
+        // The service's own write, no events of any kind raised.
+        File.WriteAllText(_path, "font-size = 17\n");
+        LiftWriteBracket();
+
+        Advance(ConfigFilePresence.DefaultBackstop);
+        Assert.False(_backstop.Armed, "a resolved pending left a poll armed");
+        Assert.False(_source!.NoticeShowing);
+    }
+
+    /// <summary>
+    /// The second-episode guarantee, through the same lift: a file that
+    /// comes back inside a write bracket resolves a concluded deletion
+    /// (the banner's premise ends), and the deletion after that is a fresh
+    /// episode that concludes and re-raises.
+    /// </summary>
+    [Fact]
+    public void A_bracketed_recreation_while_gone_keeps_the_next_deletion_concluding()
+    {
+        Start();
+
+        File.Delete(_path);
+        _watcher!.TestRaiseEvent(ConfigFileEventKind.Deleted);
+        Advance(TimeSpan.FromMilliseconds(300));
+        Advance(ConfigFilePresence.DefaultBackstop);
+        PollBackstop();
+        var first = Assert.Single(_notifications.Active);
+        _notifications.Dismiss(first);
+
+        File.WriteAllText(_path, "font-size = 18\n");
+        LiftWriteBracket();
+
+        File.Delete(_path);
+        _watcher.TestRaiseEvent(ConfigFileEventKind.Deleted);
+        Advance(TimeSpan.FromMilliseconds(300));
+        Advance(ConfigFilePresence.DefaultBackstop);
+        PollBackstop();
+
+        var second = Assert.Single(_notifications.Active);
+        Assert.NotSame(first, second);
+    }
+
+    /// <summary>
+    /// A Changed event alone is an ordinary edit: the settle fires, no
+    /// pending opens, no poll is armed, and no notice exists to show. The
+    /// classification must not read an edit as the front half of a
+    /// deletion.
+    /// </summary>
+    [Fact]
+    public void A_changed_event_alone_is_only_an_edit()
+    {
+        Start();
+
+        File.WriteAllText(_path, "font-size = 19\n");
+        Assert.True(_watcher!.TestRaiseEvent(ConfigFileEventKind.Changed));
+        Advance(TimeSpan.FromMilliseconds(300));
+
+        Assert.Equal(1, _settled);
+        Advance(ConfigFilePresence.DefaultBackstop);
+        Assert.False(_backstop.Armed, "an edit armed the backstop poll");
+        Assert.False(_source!.NoticeShowing);
+    }
+
+    /// <summary>
+    /// What the service's <c>SuppressWatcher(false)</c> runs: one existence
+    /// check, and a resolved machine when the file is there. The shipped
+    /// lift resolved nothing, which is the defect these two tests pin; the
+    /// service line itself is pinned in
+    /// <c>ConfigWatcherWiringTests.A_lifted_write_bracket_resolves_the_machine_on_live_evidence</c>.
+    /// </summary>
+    private void LiftWriteBracket()
+    {
+        if (File.Exists(_path)) _presence!.SeePresent();
+    }
+
     /// <summary>The machine concluding and the protocol agreeing land on
     /// ONE banner: the watcher path's conclusion is deduped against the
     /// eventless path's, whichever lands first.</summary>
@@ -594,11 +692,14 @@ public sealed class ConfigWatcherEventShapeTests : IDisposable
         // The rebuild fails while the directory is missing, and the tick
         // delivers anyway: that delivery is the liveness #676 hung on, and
         // under the machine it reports nothing, because the delete is
-        // already being classified.
+        // already being classified. The delivery itself is a fact, not an
+        // inference: the file check ran and said so.
         Advance(TimeSpan.FromMilliseconds(300));
         Assert.Equal(0, _accepted);
         Assert.Equal(0, _settled);
         Assert.True(_debounce.Armed, "the failed watcher stopped retrying");
+        Assert.True(_log.Count(WatcherFileMissing) >= 1,
+            "the tick's delivery never ran its file check");
 
         // Past the backstop, the deletion concludes and the notice goes up.
         // The settings stand.

@@ -36,14 +36,14 @@ public class VanishCountWiringTests
     }
 
     /// <summary>
-    /// The accept causes exactly the account of it and the notice. The
-    /// shipped accept had a third effect - it was the key that carried an
-    /// absence past the gate and applied a defaults config - and a second
-    /// effect growing back beside these two is that defect returning
-    /// through a side door.
+    /// The accept causes exactly the account of it, the notice, and one
+    /// self-heal look. The shipped accept had a fourth effect - it was the
+    /// key that carried an absence past the gate and applied a defaults
+    /// config - and a second effect growing back beside these three is
+    /// that defect returning through a side door.
     /// </summary>
     [Fact]
-    public void The_vanish_accept_logs_and_raises_the_notice_and_does_nothing_else()
+    public void The_vanish_accept_logs_raises_the_notice_and_schedules_one_look()
     {
         var handler = AcceptHandler();
 
@@ -51,9 +51,10 @@ public class VanishCountWiringTests
             .OfType<InvocationExpressionSyntax>()
             .Select(c => c.Expression.ToString())
             .ToList();
-        Assert.Equal(2, calls.Count);
+        Assert.Equal(3, calls.Count);
         Assert.Contains("StaticLoggers.ConfigService.LogConfigFileVanished", calls);
         Assert.Contains("_missingNoticeSource.OnDeletionConfirmed", calls);
+        Assert.Contains("_lookAgain.Schedule", calls);
 
         // No count write, no config push, no gate reach: the notice source
         // is the only thing an accept moves.

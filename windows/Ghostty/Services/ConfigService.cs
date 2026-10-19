@@ -926,6 +926,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         catch (Exception ex)
         {
             StaticLoggers.ConfigService.LogReloadFailed(ex);
+            if (loadDefaultsRequested)
+                StaticLoggers.ConfigService.LogLoadDefaultsRequestDropped(
+                    ConfigFilePath, "the config build failed");
             return false;
         }
 
@@ -946,7 +949,17 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // defaults config over the running one (wintty#1158); since then a
         // concluded deletion causes the notice and the settings stand, and
         // the one key left is the user's own load-defaults ask, read below.
+        //
+        // And the question is asked only where the machine has no better
+        // answer. With the watcher on, a pending or concluded delete owns
+        // the absence: feeding the question anyway let the 900ms clock
+        // conclude ahead of the machine's backstop and raise the banner
+        // over a save that had merely lost an event. The machine never
+        // leaves Present without events, so on the no-watcher paths the
+        // conjunct is true by construction and the verdicts remain the
+        // only evidence there is.
         _ = ConfigReloadGate.VerdictAndCountAgree(defaultFiles, defaultFilesFound)
+            && _presence.AbsenceIsInstruction
             && _vanishProtocol.Observed(defaultFiles);
 
         // An in-place save passes through a moment where the config file is
@@ -1101,6 +1114,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             StaticLoggers.ConfigService.LogReloadKeptRunningConfig(
                 ConfigFilePath,
                 "it read as empty, which a save rewriting the file in place passes through");
+            if (loadDefaultsRequested)
+                StaticLoggers.ConfigService.LogLoadDefaultsRequestDropped(
+                    ConfigFilePath, "the load read as empty, which is held");
 
             // The ask's return is deliberately unused: this budget counts
             // looks observed, not asks taken, so unlike the unreadable and
@@ -1134,6 +1150,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         {
             NativeMethods.ConfigFree(newConfig);
             _suppressWatcher = wasSuppressed;
+            if (loadDefaultsRequested)
+                StaticLoggers.ConfigService.LogLoadDefaultsRequestDropped(
+                    ConfigFilePath, "the app began shutting down");
             return false;
         }
 
@@ -1150,12 +1169,21 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // what the next one compares against.
         RecordDefaultFiles(defaultFilesFound, defaultFilesEmptyReads);
         _highContrast.MarkApplied(highContrastBuilt, attempted: highContrastWanted);
-        // An applied reload is the notice's premise ending, whatever the
-        // build found: the config in force now comes from the disk as it
-        // stands, so "still using the settings you had" is no longer the
-        // truth. Idempotent against the machine's own dismissal, which the
-        // reappearance's delivery raised before this reload was even asked.
-        _missingNoticeSource.OnReloadApplied();
+        // The notice ends on EVIDENCE the watched file is back, not on the
+        // apply: a shrink-carry apply (a layered file's deletion applied
+        // past the floor) leaves the watched file gone, and retiring the
+        // banner there would end it forever while its premise still held,
+        // with the machine's Gone state never re-raising it. One live
+        // existence check guards both halves, and the same check is the
+        // one chance to resolve the machine when the apply's own events
+        // were swallowed outside any bracket (wintty#1158). The user's own
+        // load-defaults ask dismisses through the action itself, which is
+        // why it needs no second door here.
+        if (File.Exists(ConfigFilePath))
+        {
+            _presence.SeePresent();
+            _missingNoticeSource.OnReloadApplied();
+        }
         try
         {
             CacheDiagnostics();
@@ -1344,6 +1372,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // A budget left spent here hands the next stretch of unreadability
         // a gave-up warning with no ask ever having been tried in it.
         //
+        // The write also produced no KINDS, so the event machine never
+        // heard it: a file this write recreated while a delete was pending
+        // or concluded is, to the machine, still gone, and the notice
+        // would go up over a file that is there. One live existence check
+        // at the lift is the evidence the machine gets, and it is live:
+        // checked now, not buffered (wintty#1158).
+        //
         // The vanish question is deliberately NOT touched: its stretches
         // open and close on load verdicts alone, and a write is not a
         // verdict.
@@ -1351,6 +1386,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         {
             _declinedReloadRetries = 0;
             _shrinkSince = null;
+            if (File.Exists(ConfigFilePath))
+                _presence.SeePresent();
         }
     }
 
@@ -2825,11 +2862,22 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// The carry is gone; the log stays, because it is the only account of
     /// WHY the app keeps running on settings that are no longer on disk,
     /// and the notice is the user-facing half of the same sentence.
+    ///
+    /// One self-heal look goes out with the banner. After the accept the
+    /// question is on hold and nothing asks again, so a file that comes
+    /// back silently (a Recycle-Bin restore, a sync client putting it
+    /// back) with no watcher would leave the banner up over a present
+    /// file until some unrelated reload happened along; the look gives
+    /// that restore one reload of its own. The look is clamped to the
+    /// floor like every look, and one that still finds nothing costs one
+    /// declined rebuild: the question stays on hold, with no ask behind
+    /// it, so there is no loop.
     /// </remarks>
     private void OnVanishAccepted()
     {
         StaticLoggers.ConfigService.LogConfigFileVanished(ConfigFilePath);
         _missingNoticeSource.OnDeletionConfirmed();
+        _lookAgain.Schedule(ConfigVanishConfirmer.DefaultFloor);
     }
 
     /// <summary>
@@ -3017,6 +3065,17 @@ internal static partial class ConfigServiceLogExtensions
                    Message = "[ConfigService] Applied the config as the disk now holds it, on the user's load-defaults ask: {Path}")]
     internal static partial void LogReloadAppliedDefaultsRequest(
         this ILogger<ConfigService> logger, string path);
+
+    // Warning: the user clicked load defaults and THIS reload could not
+    // honour it. The click's key is one-shot and already spent, so nothing
+    // else will act on the instruction, and the notice stays up over the
+    // answer the user asked for; without this line the ask dies
+    // unwitnessed.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.LoadDefaultsRequestDropped,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigService] The load-defaults ask was not honoured on this reload ({Reason}); click it again if the notice is still up: {Path}")]
+    internal static partial void LogLoadDefaultsRequestDropped(
+        this ILogger<ConfigService> logger, string reason, string path);
 
     // Information, and the account of a deletion the watcher cannot see:
     // the missing file is one of the layered candidates it does not watch,

@@ -37,6 +37,7 @@ internal static class LogEvents
         public const int MissingConfigNoticeShown = 1023;
         public const int MissingConfigNoticeCleared = 1024;
         public const int ReloadAppliedDefaultsRequest = 1025;
+        public const int LoadDefaultsRequestDropped = 1026;
     }
 
     // 1100-1199: Frecency / command history

@@ -71,10 +71,12 @@ public readonly record struct ConfigFilePresenceChange(
 /// <para>THE BACKSTOP, <see cref="DefaultBackstop"/>, is set against the
 /// same measurements the dwell's floor was: the widest absence window any
 /// save shape leaves on this platform is 22ms, so the backstop is ~454x
-/// that and ~11x the old 900ms floor. It can afford to be generous because
-/// it no longer decides anything about the session's config: misclassifying
-/// a slow save as a deletion costs a notice that the save's own
-/// reappearance takes back down, and the running config never moves.</para>
+/// that and ~11x the old 900ms floor. Those measurements are LOCAL save
+/// shapes; a sync provider can hold a rename past ten seconds, and the
+/// cost of that is a banner the save's own reappearance takes back down,
+/// never a wrong config in force. It can afford to be generous because it
+/// no longer decides anything about the session's config, so do not
+/// tighten it against the local figure alone.</para>
 ///
 /// <para>REPEATED deletes inside one pending do not re-arm the backstop:
 /// its clock starts at the first delete of the episode. A provider that

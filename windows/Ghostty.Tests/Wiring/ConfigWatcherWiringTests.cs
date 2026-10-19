@@ -438,8 +438,12 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void Lifting_the_write_suppression_frees_both_ask_budgets()
     {
+        // Anchored on the bracket's own polarity: the lift now also holds a
+        // File.Exists guard for the machine's resync, pinned on its own in
+        // A_lifted_write_bracket_resolves_the_machine_on_live_evidence.
         var guard = Assert.Single(ConfigService().Method("SuppressWatcher")
-            .DescendantNodes().OfType<IfStatementSyntax>());
+            .DescendantNodes().OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.ToString() == "!suppress"));
 
         Assert.Equal("!suppress", guard.Condition.ToString());
 
@@ -972,15 +976,35 @@ public class ConfigWatcherWiringTests
         var observed = Assert.Single(ConfigService().Method("Reload")
             .Calls("_vanishProtocol.Observed"));
 
-        // The gate's own agreement check, short-circuited in front of the
-        // call, with this load's verdict and count. Decomposed rather than
-        // matched as text, because a substring assertion here would accept
-        // the check sitting beside the call instead of guarding it.
-        var and = Assert.IsType<BinaryExpressionSyntax>(observed.Parent);
-        Assert.Equal(SyntaxKind.LogicalAndExpression, and.Kind());
-        Assert.Equal(observed.Span, and.Right.Span);
+        // The gate's own agreement check, short-circuiting in front of the
+        // call in the same && chain, with this load's verdict and count.
+        // The chain is flattened into its operand NODES rather than matched
+        // as text, because a substring assertion here would accept the
+        // check sitting beside the call instead of guarding it. The
+        // machine's no-better-answer conjunct lives in the same chain
+        // (pinned beside this test) and is deliberately not this guard.
+        var operands = new List<ExpressionSyntax>();
+        void Collect(ExpressionSyntax e)
+        {
+            if (e is BinaryExpressionSyntax b && b.Kind() == SyntaxKind.LogicalAndExpression)
+            {
+                Collect(b.Left);
+                Collect(b.Right);
+            }
+            else
+            {
+                operands.Add(e);
+            }
+        }
+        Collect((BinaryExpressionSyntax)observed.Parent!);
 
-        var agree = Assert.IsType<InvocationExpressionSyntax>(and.Left);
+        // The call is the chain's last operand, and the agreement check is
+        // its FIRST guard, ahead of the machine's conjunct in
+        // short-circuit order.
+        Assert.True(operands.Count >= 3, "the call is guarded by nothing");
+        Assert.True(operands[^1].Span == observed.Span,
+            "the Observed call is not the chain's final operand");
+        var agree = Assert.IsType<InvocationExpressionSyntax>(operands[0]);
         Assert.Equal("ConfigReloadGate.VerdictAndCountAgree", agree.Expression.ToString());
         Assert.Equal("defaultFiles", agree.ArgumentList.Arguments[0].ToString());
         Assert.Equal("defaultFilesFound", agree.ArgumentList.Arguments[1].ToString());
@@ -1199,25 +1223,6 @@ public class ConfigWatcherWiringTests
     }
 
     /// <summary>
-    /// An applied reload ends the notice: whatever the build found, the
-    /// config in force now comes from the disk as it stands, and "still
-    /// using the settings you had" has stopped being true.
-    /// </summary>
-    [Fact]
-    public void An_applied_reload_ends_the_notice()
-    {
-        var reload = ConfigService().Method("Reload");
-
-        var dismiss = Assert.Single(reload.Calls("_missingNoticeSource.OnReloadApplied"));
-
-        // After the count was recorded, which is the point the reload
-        // became an apply nothing can take back.
-        var record = Assert.Single(reload.Calls("RecordDefaultFiles"));
-        Assert.True(record.Span.End < dismiss.SpanStart,
-            "the notice ended before the reload had actually applied");
-    }
-
-    /// <summary>
     /// Teardown stops the backstop poll beside the watcher and the
     /// look-again: a poll firing into teardown is fenced by the shutdown
     /// flag, and this is the plan rather than the fence.
@@ -1254,5 +1259,135 @@ public class ConfigWatcherWiringTests
                 StringComparison.Ordinal));
         Assert.True(built.Span.End < set.SpanStart,
             "the notice sink was installed before the notice queue was built");
+    }
+
+    /// <summary>
+    /// A lift of the write bracket is live evidence: the service's own
+    /// writes raise no kinds, so a file recreated inside the bracket is
+    /// invisible to the machine until the lift checks the disk. One check,
+    /// resolving the machine when the file is there.
+    /// </summary>
+    [Fact]
+    public void A_lifted_write_bracket_resolves_the_machine_on_live_evidence()
+    {
+        var lift = Assert.Single(ConfigService().Method("SuppressWatcher")
+            .DescendantNodes().OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.ToString() == "!suppress"));
+
+        var see = Assert.Single(lift.Statement.Calls("_presence.SeePresent"));
+        var guard = Assert.IsType<IfStatementSyntax>(see.Ancestors()
+            .OfType<IfStatementSyntax>().First());
+        Assert.Equal("File.Exists(ConfigFilePath)", guard.Condition.ToString());
+    }
+
+    /// <summary>
+    /// The notice ends on EVIDENCE the watched file is back, not on the
+    /// apply: a shrink-carry apply (a layered file's deletion applied past
+    /// the floor) leaves the watched file gone, and an unconditional
+    /// dismissal there retired the banner forever while its premise still
+    /// held. One existence check guards both halves: the machine's resolve
+    /// and the banner's dismissal.
+    /// </summary>
+    [Fact]
+    public void The_notice_ends_on_evidence_the_file_is_back()
+    {
+        var applied = Assert.Single(ConfigService().Method("Reload")
+            .Calls("_missingNoticeSource.OnReloadApplied"));
+
+        var guard = Assert.IsType<IfStatementSyntax>(applied.Ancestors()
+            .OfType<IfStatementSyntax>().First());
+        Assert.Equal("File.Exists(ConfigFilePath)", guard.Condition.ToString());
+
+        // The same evidence resolves the machine, in the same guard: an
+        // apply whose events were swallowed outside any bracket is the one
+        // chance to notice the file came back.
+        var see = Assert.Single(guard.Statement.Calls("_presence.SeePresent"));
+        Assert.True(see.SpanStart < applied.SpanStart,
+            "the machine was resolved after the banner was dismissed");
+    }
+
+    /// <summary>
+    /// The vanish question is asked only where the machine has no better
+    /// answer. With the watcher on, a pending or concluded delete already
+    /// owns the absence, and feeding the question anyway let the 900ms
+    /// clock conclude ahead of the machine's backstop and raise the banner
+    /// over a save that had merely lost an event.
+    /// </summary>
+    /// <remarks>
+    /// The no-watcher path is untouched: the machine never leaves Present
+    /// without events, so the conjunct is true there by construction, and
+    /// load verdicts remain the only evidence there is.
+    /// </remarks>
+    [Fact]
+    public void The_vanish_question_is_asked_only_where_the_machine_has_no_better_answer()
+    {
+        var observed = Assert.Single(ConfigService().Method("Reload")
+            .Calls("_vanishProtocol.Observed"));
+
+        // The conjunct is an operand of the same && chain that gates on the
+        // verdict agreeing with its count, not a second, separate question.
+        var chain = Assert.IsType<BinaryExpressionSyntax>(observed.Ancestors()
+            .OfType<BinaryExpressionSyntax>()
+            .Last(b => b.Kind() == SyntaxKind.LogicalAndExpression));
+        var operands = new List<string>();
+        void Collect(ExpressionSyntax e)
+        {
+            if (e is BinaryExpressionSyntax b && b.Kind() == SyntaxKind.LogicalAndExpression)
+            {
+                Collect(b.Left);
+                Collect(b.Right);
+            }
+            else
+            {
+                operands.Add(e.ToString().Trim());
+            }
+        }
+        Collect(chain);
+
+        Assert.Contains("_presence.AbsenceIsInstruction", operands);
+        Assert.Contains("ConfigReloadGate.VerdictAndCountAgree(defaultFiles, defaultFilesFound)", operands);
+    }
+
+    /// <summary>
+    /// An accepted deletion schedules one self-heal look. After the accept
+    /// the question is on hold and nothing asks again, so a file that
+    /// comes back silently (a Recycle-Bin restore) with no watcher would
+    /// leave the banner up over a present file until some unrelated
+    /// reload; the look gives that restore one reload of its own, and a
+    /// look that still finds nothing costs one declined rebuild.
+    /// </summary>
+    [Fact]
+    public void An_accepted_deletion_schedules_one_self_heal_look()
+    {
+        var accepted = ConfigService().Method("OnVanishAccepted");
+
+        var look = Assert.Single(accepted.Calls("_lookAgain.Schedule"));
+        Assert.Equal("ConfigVanishConfirmer.DefaultFloor", look.Arg(0));
+    }
+
+    /// <summary>
+    /// A load-defaults ask the reload could not honour is reported, not
+    /// silently dropped: the click cleared the one-shot key, so nothing
+    /// else will act on it, and the user's instruction dying unwitnessed is
+    /// the kind of silence this service does not get away with.
+    /// </summary>
+    [Fact]
+    public void A_swallowed_load_defaults_ask_is_reported()
+    {
+        var reload = ConfigService().Method("Reload");
+
+        var drops = reload.Calls(
+            "StaticLoggers.ConfigService.LogLoadDefaultsRequestDropped");
+        Assert.Equal(3, drops.Count);
+
+        // Each drop is guarded by the ask the read at the top consumed: a
+        // decline that never had the ask must not log a dropped one.
+        foreach (var drop in drops)
+        {
+            var guard = drop.Ancestors().OfType<IfStatementSyntax>()
+                .First(i => i.Condition.ToString().Contains("loadDefaultsRequested",
+                    StringComparison.Ordinal));
+            Assert.True(guard.Span.Contains(drop.Span));
+        }
     }
 }

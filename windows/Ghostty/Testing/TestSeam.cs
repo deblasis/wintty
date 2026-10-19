@@ -1930,6 +1930,36 @@ internal static class TestSeam
                 ArmConfigChangeLog(window);
                 return ConfigStateJson(window, op, applied: null);
 
+            case "notices":
+                // The app's active in-window notices, one entry per banner,
+                // keyed the way the features key them. This is how a
+                // harness asserts the missing-config notice (a concluded
+                // config-file deletion's banner) without a screen to look
+                // at.
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    var active = App.NotificationService?.Active;
+                    json.WriteNumber("count", active?.Count ?? 0);
+                    json.WriteStartArray("notices");
+                    if (active is not null)
+                    {
+                        foreach (var notice in active)
+                        {
+                            json.WriteStartObject();
+                            json.WriteString("dedupKey", notice.DedupKey ?? "");
+                            json.WriteString("title", notice.Title);
+                            json.WriteString("message", notice.Message);
+                            json.WriteNumber("actions", notice.Actions.Count);
+                            json.WriteEndObject();
+                        }
+                    }
+                    json.WriteEndArray();
+                    json.WriteEndObject();
+                });
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }

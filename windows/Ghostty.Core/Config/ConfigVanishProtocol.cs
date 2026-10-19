@@ -16,8 +16,13 @@ namespace Ghostty.Core.Config;
 /// answer: proving a deletion on the paths that never see a file event
 /// (no watcher, which is the default; a lost event; a deleted directory),
 /// and the notice the user is shown when it is proven. On the watcher's
-/// own path the event-shape machine concludes first and this agrees with
-/// it through the same notice.</para>
+/// own path the caller gates this question on the machine having no
+/// better answer (its <c>AbsenceIsInstruction</c>): a delete the machine
+/// has seen is the machine's question, not this one, and feeding both let
+/// the floor conclude ahead of the backstop and raise the banner over a
+/// save that had merely lost an event. What reaches here is the eventless
+/// evidence: no watcher (the default), a lost event, a deleted
+/// directory.</para>
 ///
 /// <para>This lived in <c>ConfigService</c> until nothing could prove it:
 /// no test executes the shell, so the wiring was readable only as source
@@ -104,9 +109,12 @@ public sealed class ConfigVanishProtocol
     /// observation of the question, and anything else answers it.
     /// </summary>
     /// <returns>
-    /// Whether this verdict confirmed a deletion, so the caller can apply
-    /// the config it has just built rather than discarding one it has
-    /// proven correct.
+    /// Whether THIS call accepted a deletion: informational only, for a
+    /// host that logs or counts the conclusion. Since wintty#1158 an
+    /// accept causes the notice and nothing else, and no caller may read
+    /// it as permission to apply anything; the accept is answered once,
+    /// and later absences while the question holds answer false through
+    /// <see cref="ConfigVanishAction.Hold"/>.
     /// </returns>
     /// <remarks>
     /// One observation proves nothing: an ordinary save leaves the path
