@@ -38,8 +38,11 @@ public class PaneFadeWiringTests
                          && m.ParameterList.Parameters.Count == 2);
 
     private static IfStatementSyntax SoftCloseBranch(MethodDeclarationSyntax close) =>
+        // Two `if (softClose)` statements stand in CloseLeaf: the early one
+        // captures the undo snapshot before the model closes, and the later
+        // one is the retained-shell branch this helper means (the last).
         close.DescendantNodes().OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString() == "softClose");
+            .Last(i => i.Condition.ToString() == "softClose");
 
     // -- The split's fade-in ---------------------------------------------------
 

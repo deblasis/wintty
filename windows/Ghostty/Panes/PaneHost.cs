@@ -1261,15 +1261,31 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // exiting on its own) from yanking the user out of zoom.
         var zoomedBefore = _zoomedLeaf;
 
-        // Decide undoability now: only meaningful if a pane survives.
-        // PaneTree.Close is a pure model op (no visual side effects), so
-        // computing it up front to drive the teardown decision is safe.
-        var newRoot = PaneTree.Close(_root, leaf);
+        // Decide undoability now: only meaningful if a pane survives, and a
+        // pane survives unless the closed leaf IS the root. This is decided
+        // from the tree as it stands; PaneTree.Close is not called yet,
+        // because it rewires the live tree in place (see below).
+        //
         // Soft-close (retain the live shell for undo) only when undo is
         // enabled. With undo off, a surviving-pane close hard-tears-down the
         // shell immediately, matching upstream: a disabled undo timeout means
         // closed surfaces don't linger in the background.
-        var softClose = undoable && newRoot is not null && _undoEnabled;
+        var paneSurvives = !ReferenceEquals(_root, leaf);
+        var softClose = undoable && paneSurvives && _undoEnabled;
+
+        // Snapshot the tree WITH the leaf still present (and its shell
+        // alive) so undo can resurrect it. This has to happen before
+        // PaneTree.Close: Close mutates the live tree in place whenever the
+        // closed leaf's parent has a grandparent (any layout of three or
+        // more panes), so a snapshot taken after it would already lack the
+        // pane. The history entry retains the leaf; teardown is deferred to
+        // eviction.
+        if (softClose)
+            CaptureForUndo(Core.Panes.PaneOpKind.Close);
+
+        // The model close. From here the live tree no longer holds the leaf
+        // (in place for 3+ panes; via the returned root for 2).
+        var newRoot = PaneTree.Close(_root, leaf);
         // Whether this close's Changing already ran. The soft path reports
         // before anything visual starts; the hard path reports in the
         // tail, where it always has.
@@ -1286,11 +1302,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         if (softClose)
         {
-            // Snapshot the tree WITH the leaf still present (and its shell
-            // alive) so undo can resurrect it. The history entry retains
-            // the leaf; teardown is deferred to eviction.
-            CaptureForUndo(Core.Panes.PaneOpKind.Close);
-
             // The retained shell keeps the surface alive, but the leaf still
             // leaves the visual tree below, so a pane closed before its first
             // render would otherwise keep its glow orbiting a frozen rectangle
