@@ -216,11 +216,12 @@ public sealed class PaneCloseUndoSnapshotTests
     }
 
     [Fact]
-    public void ClosedLeaf_AfterUndo_IsLiveAgain_AndNotOrphanedByLaterEviction()
+    public void ClosedLeaf_AfterUndo_IsNotNamedByLaterEviction()
     {
-        // Undo puts the leaf back in the live tree; the host's orphan guard
-        // ("never dispose a leaf still on screen") then keeps it alive, and
-        // the redo entry (post-close state) does not own it.
+        // After undo the leaf is back in the live tree and the only entry
+        // left is the redo one (the post-close state), which does not hold
+        // it. Asserted on the raw Prune result, not a filtered copy, so a
+        // history that wrongly named the live leaf as an orphan would fail.
         var a = new LeafPane();
         var target = new LeafPane();
         var c = new LeafPane();
@@ -228,16 +229,63 @@ public sealed class PaneCloseUndoSnapshotTests
         var time = new FakeTimeProvider();
         var history = new PaneHistory(time, TimeSpan.FromSeconds(5));
 
-        var pre = SnapshotOf(root, target);
-        history.Push(pre);
+        history.Push(SnapshotOf(root, target));
         var live = PaneTree.Close(root, target)!;
         var restored = history.Undo(SnapshotOf(live, a))!;
-        var liveAfterUndo = PaneTree.Leaves(restored.Root).ToHashSet();
+        Assert.Contains(target, PaneTree.Leaves(restored.Root));
 
         time.Now += TimeSpan.FromSeconds(6);
-        var orphans = history.Prune(time.Now).Where(l => !liveAfterUndo.Contains(l)).ToList();
+        var orphans = history.Prune(time.Now);
 
-        Assert.Contains(target, liveAfterUndo);
-        Assert.Empty(orphans);
+        Assert.DoesNotContain(target, orphans);
+    }
+
+    [Fact]
+    public void ClosedLeaf_UndoThenRedoThenEviction_IsOrphanedSoItsShellGetsTornDown()
+    {
+        // close -> undo -> redo: the leaf is out of the live tree again and
+        // only the undo entry (the full pre-close state) holds it. When that
+        // entry expires the leaf is reported, and the host, which excludes
+        // live leaves, would tear its shell down.
+        var a = new LeafPane();
+        var target = new LeafPane();
+        var c = new LeafPane();
+        var root = Vs(a, Hs(target, c));
+        var time = new FakeTimeProvider();
+        var history = new PaneHistory(time, TimeSpan.FromSeconds(5));
+
+        history.Push(SnapshotOf(root, target));
+        var afterClose = PaneTree.Close(root, target)!;
+        var restored = history.Undo(SnapshotOf(afterClose, a))!;
+        var redone = history.Redo(SnapshotOf(restored.Root, target))!;
+        var live = PaneTree.Leaves(redone.Root).ToHashSet();
+        Assert.DoesNotContain(target, live);
+
+        time.Now += TimeSpan.FromSeconds(6);
+        var orphans = history.Prune(time.Now);
+
+        Assert.Contains(target, orphans);
+        Assert.Contains(target, orphans.Where(l => !live.Contains(l)));
+    }
+
+    [Fact]
+    public void Close_ReturnsNull_ExactlyWhenTheTargetIsTheRoot()
+    {
+        // The shell decides "a pane survives" as !ReferenceEquals(root, leaf)
+        // without calling Close; this is the equivalence that makes that
+        // sound, over every leaf of every layout and a lone root leaf.
+        var lone = new LeafPane();
+        Assert.Null(PaneTree.Close(lone, lone));
+
+        foreach (var layout in Layouts)
+        {
+            var count = layout.Build().Leaves.Length;
+            for (var i = 0; i < count; i++)
+            {
+                var (root, leaves) = layout.Build();
+                Assert.False(ReferenceEquals(root, leaves[i]));
+                Assert.NotNull(PaneTree.Close(root, leaves[i]));
+            }
+        }
     }
 }

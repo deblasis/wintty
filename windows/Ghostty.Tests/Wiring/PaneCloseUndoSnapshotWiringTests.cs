@@ -38,12 +38,25 @@ public class PaneCloseUndoSnapshotWiringTests
         return captures[0];
     }
 
+    private static InvocationExpressionSyntax ModelClose(MethodDeclarationSyntax close)
+    {
+        // Any spelling that ends in PaneTree.Close (qualified or not) counts,
+        // so a namespace-qualified call cannot hide from the ordering checks.
+        var closes = close.Body!.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("PaneTree.Close", System.StringComparison.Ordinal))
+            .ToList();
+        Assert.True(
+            closes.Count == 1,
+            $"CloseLeaf: expected exactly one call ending in PaneTree.Close, found {closes.Count}");
+        return closes[0];
+    }
+
     [Fact]
     public void CloseLeaf_CapturesTheUndoSnapshot_BeforePaneTreeClose()
     {
         var close = CloseLeaf();
         var capture = CloseCapture(close);
-        var modelClose = close.Call("PaneTree.Close");
+        var modelClose = ModelClose(close);
 
         Assert.True(
             capture.SpanStart < modelClose.SpanStart,
@@ -53,55 +66,81 @@ public class PaneCloseUndoSnapshotWiringTests
     }
 
     [Fact]
-    public void CloseLeaf_CallsPaneTreeCloseExactlyOnce()
+    public void CloseLeaf_RunsNothingThatCouldCloseTheModel_AheadOfTheCapture()
     {
-        // A second Close call (or one hidden in a helper the capture precedes)
-        // would let the ordering test above pass while the real mutation
-        // happens elsewhere.
+        // Pins the prefix, not one callee: a close hidden behind a helper or
+        // another spelling before the capture would restore the defect while
+        // the later PaneTree.Close stays a harmless no-op. Only these calls
+        // may precede the capture.
         var close = CloseLeaf();
-        Assert.Single(close.Body!.Calls("PaneTree.Close"));
-    }
+        var capture = CloseCapture(close);
 
-    [Fact]
-    public void CloseLeaf_DecidesSoftClose_WithoutTheClosedTree()
-    {
-        // softClose must be known before Close runs (the capture is gated on
-        // it), so its initializer cannot read the result of Close.
-        var close = CloseLeaf();
-        var decl = close.Body!.DescendantNodes().OfType<VariableDeclaratorSyntax>()
-            .Single(v => v.Identifier.ValueText == "softClose");
-        var modelClose = close.Call("PaneTree.Close");
+        var offenders = close.Body!.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.SpanStart < capture.SpanStart)
+            .Select(c => c.CalleeText())
+            .Where(name => name != "SettlePaneFades"
+                           && name != "ReferenceEquals"
+                           && name != "Core.Panes.PaneTree.Leaves"
+                           && !name.EndsWith(".Contains", System.StringComparison.Ordinal))
+            .ToList();
 
         Assert.True(
-            decl.Span.End <= modelClose.SpanStart,
-            "softClose must be decided before PaneTree.Close runs");
-        Assert.DoesNotContain("newRoot", decl.Initializer!.Value.ToString());
+            offenders.Count == 0,
+            "calls ahead of CaptureForUndo(Close) in CloseLeaf that are not on the allowlist: "
+            + string.Join(", ", offenders));
     }
 
     [Fact]
-    public void CloseLeaf_CaptureIsGatedOnSoftClose_AndSitsOutsideLaterBranches()
+    public void CloseLeaf_DecidesSoftClose_FromTheTreeAsItStands_AndUndoable()
+    {
+        // A pane survives unless the closed leaf IS the root. The decision
+        // must read the live tree without closing it, and softClose must be
+        // exactly undoable && survives && undo enabled: `paneSurvives = true`,
+        // dropping it, or inverting it each change what gets captured or torn
+        // down and must red here.
+        var close = CloseLeaf();
+        var decls = close.Body!.DescendantNodes().OfType<VariableDeclaratorSyntax>().ToList();
+        var survives = decls.Single(v => v.Identifier.ValueText == "paneSurvives");
+        var soft = decls.Single(v => v.Identifier.ValueText == "softClose");
+        var modelClose = ModelClose(close);
+
+        Assert.Equal("!ReferenceEquals(_root, leaf)", survives.Initializer!.Value.ToString());
+        Assert.Equal("undoable && paneSurvives && _undoEnabled", soft.Initializer!.Value.ToString());
+        Assert.True(
+            soft.Span.End <= modelClose.SpanStart,
+            "softClose must be decided before PaneTree.Close runs");
+    }
+
+    [Fact]
+    public void CloseLeaf_CaptureIsADirectStatementOfTheSoftCloseThenBody()
     {
         var close = CloseLeaf();
         var capture = CloseCapture(close);
 
-        var gate = capture.Ancestors().OfType<IfStatementSyntax>()
-            .FirstOrDefault(i => i.Condition.ToString() == "softClose");
-        Assert.True(gate is not null, "CaptureForUndo(Close) must sit inside `if (softClose)`");
-        // The gate is the capture's own block, not the later soft-close
-        // branch that runs after Close: a capture that moved into that
-        // branch would be after the mutation.
-        var modelClose = close.Call("PaneTree.Close");
+        // The capture is an expression statement (not a lambda body or an
+        // argument), directly in the then-body of `if (softClose)`: not its
+        // else, and not deferred.
+        var stmt = Assert.IsType<ExpressionStatementSyntax>(capture.Parent);
+        IfStatementSyntax? gate = stmt.Parent switch
+        {
+            IfStatementSyntax i when ReferenceEquals(i.Statement, stmt) => i,
+            BlockSyntax b when b.Parent is IfStatementSyntax i && ReferenceEquals(i.Statement, b) => i,
+            _ => null,
+        };
         Assert.True(
-            gate!.Span.End <= modelClose.SpanStart,
+            gate is not null && gate.Condition.ToString() == "softClose",
+            "CaptureForUndo(Close) must be a direct statement of the then-body of `if (softClose)`");
+        Assert.Null(gate!.Else);
+        Assert.True(
+            gate.Span.End <= ModelClose(close).SpanStart,
             "the `if (softClose)` that captures must end before PaneTree.Close");
     }
 
     [Fact]
-    public void CloseLeaf_NoLongerCallsTheClosePureOrClaimsTheSnapshotHasTheLeaf()
+    public void CloseLeaf_DoesNotDescribeTheModelCloseAsPure()
     {
-        // The two comments that hid the defect. Close is documented, and
-        // behaves, as a mutating op; the call site must not say otherwise.
-        var text = CloseLeaf().ToFullString();
-        Assert.DoesNotContain("pure model op", text);
+        // The comment that hid the defect. Close is documented, and behaves,
+        // as a mutating op; the call site must not say otherwise.
+        Assert.DoesNotContain("pure model op", CloseLeaf().ToFullString());
     }
 }

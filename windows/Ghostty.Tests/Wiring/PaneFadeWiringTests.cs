@@ -39,10 +39,19 @@ public class PaneFadeWiringTests
 
     private static IfStatementSyntax SoftCloseBranch(MethodDeclarationSyntax close) =>
         // Two `if (softClose)` statements stand in CloseLeaf: the early one
-        // captures the undo snapshot before the model closes, and the later
-        // one is the retained-shell branch this helper means (the last).
-        close.DescendantNodes().OfType<IfStatementSyntax>()
-            .Last(i => i.Condition.ToString() == "softClose");
+        // captures the undo snapshot ahead of the model close, and the one
+        // after PaneTree.Close is the retained-shell branch this helper means.
+        SoftBranchAfterModelClose(close);
+
+    internal static IfStatementSyntax SoftBranchAfterModelClose(MethodDeclarationSyntax close)
+    {
+        var branches = close.DescendantNodes().OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.ToString() == "softClose").ToList();
+        Assert.Equal(2, branches.Count);
+        var modelClose = close.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText().EndsWith("PaneTree.Close", StringComparison.Ordinal));
+        return branches.Single(i => i.SpanStart > modelClose.SpanStart);
+    }
 
     // -- The split's fade-in ---------------------------------------------------
 
