@@ -1386,11 +1386,14 @@ fn promptCaretClamp(
         i -= 1;
         const cell = &cells[i];
 
-        // Occupied: any visible content (glyph, grapheme, background)
-        // or part of a wide cluster. A blank counts as occupied when it
-        // has a visible background (the cell renders as a colored
-        // block); a foreground-only styled blank renders as nothing and
-        // stays clappable, which is what real themes emit.
+        // Occupied: any visible content (glyph, grapheme) or part of a
+        // wide cluster. A blank counts as occupied when it paints
+        // anything: a background (colored block), inverse video, or a
+        // decoration (underline/overline/strikethrough), mirroring what
+        // resolveCell and the draw loop paint; a foreground-only styled
+        // blank renders as nothing and stays clappable, which is what
+        // real themes emit. Hyperlinks are ignored: their paint depends
+        // on a renderer config this seam cannot see.
         var blank = cell.wide == .narrow and switch (cell.content_tag) {
             .codepoint => cp: {
                 const cp = cell.content.codepoint.data;
@@ -1400,7 +1403,12 @@ fn promptCaretClamp(
         };
         if (blank and cell.style_id != stylepkg.default_id) {
             const p = s.cursor.page_pin.node.page();
-            blank = p.styles.get(p.memory, cell.style_id).bg_color == .none;
+            const st = p.styles.get(p.memory, cell.style_id);
+            blank = st.bg_color == .none and
+                !st.flags.inverse and
+                st.flags.underline == .none and
+                !st.flags.overline and
+                !st.flags.strikethrough;
         }
         if (!blank) return if (i + 1 == x) null else @intCast(i + 1);
 
@@ -2432,7 +2440,7 @@ test "block caret does not clamp after explicit cursor positioning" {
     s.nextSlice(prompt_trailing_blank_stream);
     // CUP into the unwritten area of the prompt row: the blanks there are
     // not prompt cells, so the caret stays where the stream put it.
-    s.nextSlice("\x1b[1;8H");
+    s.nextSlice("\x1b[2;8H");
 
     var state: RenderState = .empty;
     defer state.deinit(alloc);
@@ -2452,7 +2460,7 @@ test "block caret does not clamp after explicit cursor positioning" {
     var s2 = t2.vtStream();
     defer s2.deinit();
     s2.nextSlice(prompt_trailing_blank_stream);
-    s2.nextSlice("\x1b[1;5H");
+    s2.nextSlice("\x1b[2;5H");
 
     var state2: RenderState = .empty;
     defer state2.deinit(alloc);
@@ -2506,7 +2514,7 @@ test "block caret does not clamp a stale prompt row after command start" {
     defer s.deinit();
     s.nextSlice(prompt_trailing_blank_stream);
     s.nextSlice("\x1b]133;C\x07"); // input ends, output starts
-    s.nextSlice("\x1b[1;6H"); // a redraw revisits the old prompt row
+    s.nextSlice("\x1b[2;6H"); // a redraw revisits the old prompt row
 
     var state: RenderState = .empty;
     defer state.deinit(alloc);
@@ -2612,7 +2620,7 @@ test "erase inside the run releases the clamp" {
     s.nextSlice(prompt_trailing_blank_stream);
     // Erase the prompt's blank: the cell is rewritten out of the prompt
     // semantic, breaking the run.
-    s.nextSlice("\x1b[1;5H");
+    s.nextSlice("\x1b[2;5H");
     s.nextSlice("\x1b[X");
 
     var state: RenderState = .empty;
@@ -2624,7 +2632,7 @@ test "erase inside the run releases the clamp" {
     try testing.expectEqual(4, state.cursor.viewport.?.x);
 
     // A redraw that parks the cursor past the broken run no longer clamps.
-    s.nextSlice("\x1b[1;6H");
+    s.nextSlice("\x1b[2;6H");
     try state.update(alloc, &t);
 
     try testing.expectEqual(5, state.cursor.active.x);
@@ -2677,6 +2685,34 @@ test "block caret does not clamp onto a background-colored prompt blank" {
     s.nextSlice("\x1b]133;A\x07");
     s.nextSlice("ab");
     s.nextSlice("\x1b[48;5;1m \x1b[0m"); // blank cell with a background color
+    s.nextSlice("\x1b]133;B\x07");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    try testing.expectEqual(3, state.cursor.active.x);
+    try testing.expectEqual(3, state.cursor.viewport.?.x);
+}
+
+test "block caret does not clamp onto a reverse-video prompt blank" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    // Inverse video paints the blank fully opaque (fg/bg swap), so it is
+    // a visible cell and the caret stays at the cursor.
+    var t = try Terminal.init(io, alloc, .{
+        .cols = 20,
+        .rows = 5,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b]133;A\x07");
+    s.nextSlice("ab");
+    s.nextSlice("\x1b[7m \x1b[0m"); // reverse-video blank cell
     s.nextSlice("\x1b]133;B\x07");
 
     var state: RenderState = .empty;
