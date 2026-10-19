@@ -484,8 +484,8 @@ pub fn performAllChainedAction(
         };
 
         // This slice is owned by the keybind set of the surface the
-        // binding came from, and that set has just been freed, so there
-        // is nothing left to read.
+        // binding came from, and a close or a config reload may have
+        // freed that set by now, so there is nothing left to read.
         if (action.endsChain()) break;
     }
 }

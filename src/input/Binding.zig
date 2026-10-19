@@ -1395,11 +1395,15 @@ pub const Action = union(enum) {
             .redo,
             => true,
 
-            // Everything else leaves the surface it ran on alive. The
+            // Everything else leaves the surface it ran on alive, and
+            // does not free or replace the keybind set a chain is
+            // borrowed from while the chain is still running. The
             // list is exhaustive on purpose, so a new action cannot
             // compile until it has been classified: one that can close
             // the surface has to join the arm above, however indirect
-            // its route to the close.
+            // its route to the close, and one that swaps the config
+            // out from under a live chain has to be named by
+            // endsChain, beside reload_config.
             .ignore,
             .unbind,
             .csi,
