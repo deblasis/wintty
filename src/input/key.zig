@@ -767,6 +767,14 @@ pub const Key = enum(c_int) {
         try testing.expect(!Key.digit_1.keypad());
     }
 
+    test "imguiKey numpad navigation" {
+        const testing = std.testing;
+        try testing.expect(Key.numpad_page_down.imguiKey().? == cimgui.c.ImGuiKey_PageDown);
+        try testing.expect(Key.numpad_page_up.imguiKey().? == cimgui.c.ImGuiKey_PageUp);
+        // ImGui has no Begin key; its enum range marker aliases Tab.
+        try testing.expectEqual(@as(?c_int, null), Key.numpad_begin.imguiKey());
+    }
+
     test "w3c" {
         // All our keys should convert to and from the W3C format.
         // We don't support every key in the W3C spec, so we only

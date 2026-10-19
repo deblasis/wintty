@@ -702,10 +702,11 @@ comptime {
         ));
     }
 
-    // A nonzero native code must map to at most one key per platform column,
-    // or native-to-key reverse lookups become ambiguous. 0 is "no native
-    // code" outside the Mac column and 0xffff is the Mac column's marker
-    // for a key the platform does not have.
+    // A native code must map to at most one key per platform column, or
+    // native-to-key reverse lookups become ambiguous. 0 means "no native
+    // code" everywhere but the Mac column, where it is kVK_ANSI_A and a
+    // real keycode; 0xffff is the Mac column's marker for a key the
+    // platform does not have.
     //
     // The mapped keys are computed once up front: resolving them inside the
     // nested loop below exceeds the evaluation branch quota.
@@ -716,10 +717,11 @@ comptime {
         .{ 1, 2, 3, 4 },
         .{ "evdev", "xkb", "win", "mac" },
     ) |col, col_name| {
+        const absent: u16 = if (col == 4) 0xffff else 0;
         for (mapped, 0..) |ma, ai| {
             const ka = ma orelse continue;
             const native = raw_entries[ai][col];
-            if (native == 0 or native == 0xffff) continue;
+            if (native == absent) continue;
             for (mapped[ai + 1 ..], ai + 1..) |mb, bi| {
                 const kb = mb orelse continue;
                 if (raw_entries[bi][col] == native and ka != kb) @compileError(std.fmt.comptimePrint(
