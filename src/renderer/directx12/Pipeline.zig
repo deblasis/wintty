@@ -291,6 +291,34 @@ fn expectParamType(
         ));
 }
 
+/// Assert root parameter `index` of `params` is a descriptor table whose
+/// first range is of kind `want` at shader register `want_base`. Both table
+/// slots hold DESCRIPTOR_TABLE parameters, and the two SRV tables differ
+/// only by register, so swapping array entries passes every type check
+/// while binding the wrong heap or the wrong texture table: the range kind
+/// and register are what actually tell them apart.
+fn expectTableRangeKind(
+    comptime params: []const d3d12.D3D12_ROOT_PARAMETER1,
+    comptime index: comptime_int,
+    comptime want: d3d12.D3D12_DESCRIPTOR_RANGE_TYPE,
+    comptime want_base: u32,
+    comptime what: []const u8,
+) void {
+    const p = params[index];
+    if (p.ParameterType != .DESCRIPTOR_TABLE)
+        @compileError(std.fmt.comptimePrint(
+            "root parameter {d} ({s}) is not a descriptor table",
+            .{ index, what },
+        ));
+    const range = p.u.DescriptorTable.pDescriptorRanges.?[0];
+    if (range.RangeType != want or range.BaseShaderRegister != want_base)
+        @compileError(std.fmt.comptimePrint(
+            "{s} (root parameter {d}) holds a {s} range at t{d} but must hold {s} at t{d}; " ++
+                "the root parameter arrays were swapped",
+            .{ what, index, @tagName(range.RangeType), range.BaseShaderRegister, @tagName(want), want_base },
+        ));
+}
+
 // The root parameter index constants, against the arrays they index.
 // RenderPass binds root_param_cbv and root_param_sampler_table against both
 // signatures, so each must land on the same parameter type in both;
@@ -307,6 +335,11 @@ comptime {
     expectParamType(&post_root_params, root_param_sampler_table, .DESCRIPTOR_TABLE);
     expectParamType(&main_root_params, root_param_buffer_srv, .SRV);
     expectParamType(&main_root_params, root_param_srv_table_t1, .DESCRIPTOR_TABLE);
+    expectTableRangeKind(&main_root_params, root_param_srv_table, .SRV, 0, "root_param_srv_table");
+    expectTableRangeKind(&post_root_params, root_param_srv_table, .SRV, 0, "root_param_srv_table");
+    expectTableRangeKind(&main_root_params, root_param_sampler_table, .SAMPLER, 0, "root_param_sampler_table");
+    expectTableRangeKind(&post_root_params, root_param_sampler_table, .SAMPLER, 0, "root_param_sampler_table");
+    expectTableRangeKind(&main_root_params, root_param_srv_table_t1, .SRV, 1, "root_param_srv_table_t1");
     if (root_param_buffer_srv < post_root_params.len)
         @compileError(std.fmt.comptimePrint(
             "root_param_buffer_srv ({d}) must stay past the end of post_root_params ({d} parameters): the post root signature has no buffer SRV and post steps never bind one",

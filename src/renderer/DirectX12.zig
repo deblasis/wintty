@@ -114,16 +114,26 @@ comptime {
         ));
     // srv_heap_capacity's floor from its comment, in code: the live set is
     // frame_count frame states x 4 textures (grayscale + color atlas + the
-    // two custom-shader targets) plus the background image, and the
-    // retiring worst case is 6 slots (two custom-shader target pairs and
-    // both atlases) for each of up to frame_count + 1 draws waiting on
-    // their fence.
+    // two custom-shader targets) plus the background image, the retiring
+    // worst case is 6 slots (two custom-shader target pairs and both
+    // atlases) for each of up to frame_count + 1 draws waiting on their
+    // fence, and a hide/show pair adds one whole generation (frame_count
+    // frame states x 4 textures) until the first frame after the show
+    // completes.
     const live = device.frame_count * 4 + 1;
     const retiring = 6 * (device.frame_count + 1);
-    if (srv_heap_capacity < live + retiring)
+    const generation = device.frame_count * 4;
+    if (srv_heap_capacity < live + retiring + generation)
         @compileError(std.fmt.comptimePrint(
-            "srv_heap_capacity ({d}) is below the worst transient of {d} (live {d} + retiring {d}) derived from device.frame_count; raise the capacity or shrink frame_count",
-            .{ srv_heap_capacity, live + retiring, live, retiring },
+            "srv_heap_capacity ({d}) is below the worst transient of {d} (live {d} + retiring {d} + hide/show generation {d}) derived from device.frame_count; raise the capacity or shrink frame_count",
+            .{ srv_heap_capacity, live + retiring + generation, live, retiring, generation },
+        ));
+    // The free mask is one bit per slot: a capacity past its width wraps
+    // into recycling live slots.
+    if (srv_heap_capacity > @bitSizeOf(u128))
+        @compileError(std.fmt.comptimePrint(
+            "srv_heap_capacity ({d}) exceeds the free mask's {d} bits; widen the mask or shrink the capacity",
+            .{ srv_heap_capacity, @bitSizeOf(u128) },
         ));
 }
 

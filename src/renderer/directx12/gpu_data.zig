@@ -113,6 +113,55 @@ pub const BgImage = extern struct {
 // every one, so the numbers live only in shaders.hlsl and drift on either
 // side is a compile error rather than a misrendered frame.
 
+/// `source` with line and block comments blanked, so a commented-out old
+/// packoffset or member never satisfies (or trips) a scan.
+fn hlslStripped(comptime source: []const u8) []const u8 {
+    comptime {
+        var out: [source.len]u8 = undefined;
+        var i: usize = 0;
+        while (i < source.len) {
+            if (source[i] == '/' and i + 1 < source.len and source[i + 1] == '/') {
+                while (i < source.len and source[i] != '\n') : (i += 1) out[i] = ' ';
+                continue;
+            }
+            if (source[i] == '/' and i + 1 < source.len and source[i + 1] == '*') {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                i += 2;
+                while (i < source.len) : (i += 1) {
+                    if (source[i] == '*' and i + 1 < source.len and source[i + 1] == '/') {
+                        out[i] = ' ';
+                        out[i + 1] = ' ';
+                        i += 2;
+                        break;
+                    }
+                    out[i] = ' ';
+                }
+                continue;
+            }
+            out[i] = source[i];
+            i += 1;
+        }
+        const frozen = out;
+        return &frozen;
+    }
+}
+
+/// The comment-stripped body of the `cbuffer Uniforms` declaration. Scoping
+/// to the body keeps other cbuffers and preprocessor blocks out of the
+/// scans, and every member line in it must carry an explicit packoffset:
+/// HLSL would happily default-pack an added member, which would not match
+/// the C layout the struct writes.
+fn hlslCbufferBody(comptime source: []const u8) []const u8 {
+    const stripped = comptime hlslStripped(source);
+    const open_marker = "cbuffer Uniforms";
+    const open = (std.mem.indexOf(u8, stripped, open_marker) orelse
+        @compileError("shaders.hlsl no longer declares cbuffer Uniforms")) + open_marker.len;
+    const close = std.mem.indexOfPos(u8, stripped, open, "}") orelse
+        @compileError("shaders.hlsl never closes cbuffer Uniforms");
+    return stripped[open..close];
+}
+
 /// Zig `Uniforms` field paired with the HLSL cbuffer field it must land on.
 /// The HLSL name carries a `_packed` suffix where several Zig fields or a
 /// packed struct share one 32-bit register component.
@@ -164,15 +213,29 @@ fn hlslPackoffset(source: []const u8, field: []const u8) ?usize {
     return null;
 }
 
-/// How many cbuffer fields `source` declares with a packoffset.
-fn hlslPackoffsetCount(source: []const u8) usize {
-    var n: usize = 0;
-    var rest = source;
-    while (std.mem.indexOf(u8, rest, ": packoffset(c")) |hit| {
-        n += 1;
-        rest = rest[hit + 1 ..];
+/// How many members the cbuffer body declares, failing the build when any
+/// of them lacks an explicit packoffset: HLSL would default-pack such a
+/// member, and the default packing does not match the C layout `Uniforms`
+/// writes.
+fn hlslPackoffsetCount(comptime body: []const u8) usize {
+    comptime {
+        var n: usize = 0;
+        var rest = body;
+        while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+            const line = std.mem.trim(u8, rest[0..nl], " \t\r");
+            rest = rest[nl + 1 ..];
+            if (line.len == 0) continue;
+            if (std.mem.indexOfScalar(u8, line, ';') == null) continue;
+            if (std.mem.indexOf(u8, line, ": packoffset(") == null)
+                @compileError(std.fmt.comptimePrint(
+                    "shaders.hlsl cbuffer member without an explicit packoffset: \"{s}\"; " ++
+                        "default packing does not match the C layout Uniforms writes",
+                    .{line},
+                ));
+            n += 1;
+        }
+        return n;
     }
-    return n;
 }
 
 /// The highest c-register any packoffset touches. A cbuffer spans whole
@@ -212,7 +275,7 @@ fn hlslBoolsMask(source: []const u8, field: []const u8) ?u64 {
 }
 
 comptime {
-    // The HLSL scans below walk the whole shader source per field; the
+    // The HLSL scans below walk the cbuffer body per field; the
     // default comptime branch quota does not cover that.
     @setEvalBranchQuota(1_000_000);
     std.debug.assert(@sizeOf(CellText) == 32);
@@ -225,19 +288,21 @@ comptime {
     // Uniforms must land byte for byte on the cbuffer packoffsets in
     // shaders.hlsl: GenericRenderer writes the struct straight into the
     // constant buffer the shaders read. The two count checks catch a field
-    // added on one side only, in either direction.
+    // added on one side only, in either direction, and the body scan
+    // refuses a member HLSL would default-pack.
+    const uniforms_cbuffer = hlslCbufferBody(hlsl_source);
     if (uniforms_hlsl_fields.len != @typeInfo(Uniforms).@"struct".fields.len)
         @compileError(std.fmt.comptimePrint(
             "Uniforms has {d} fields but uniforms_hlsl_fields maps {d} to HLSL cbuffer fields; every field needs a mapping",
             .{ @typeInfo(Uniforms).@"struct".fields.len, uniforms_hlsl_fields.len },
         ));
-    if (hlslPackoffsetCount(hlsl_source) != uniforms_hlsl_fields.len)
+    if (hlslPackoffsetCount(uniforms_cbuffer) != uniforms_hlsl_fields.len)
         @compileError(std.fmt.comptimePrint(
             "shaders.hlsl declares {d} cbuffer packoffset fields but uniforms_hlsl_fields maps {d}; a field was added on one side only",
-            .{ hlslPackoffsetCount(hlsl_source), uniforms_hlsl_fields.len },
+            .{ hlslPackoffsetCount(uniforms_cbuffer), uniforms_hlsl_fields.len },
         ));
     for (uniforms_hlsl_fields) |pair| {
-        const offset = hlslPackoffset(hlsl_source, pair[1]) orelse
+        const offset = hlslPackoffset(uniforms_cbuffer, pair[1]) orelse
             @compileError(std.fmt.comptimePrint(
                 "Uniforms.{s} maps to cbuffer field {s}, which shaders.hlsl does not declare",
                 .{ pair[0], pair[1] },
@@ -248,7 +313,7 @@ comptime {
                 .{ pair[0], @offsetOf(Uniforms, pair[0]), pair[1], offset },
             ));
     }
-    const hlsl_cbuffer_bytes = (hlslPackoffsetMaxRegister(hlsl_source) + 1) * 16;
+    const hlsl_cbuffer_bytes = (hlslPackoffsetMaxRegister(uniforms_cbuffer) + 1) * 16;
     if (@sizeOf(Uniforms) != hlsl_cbuffer_bytes)
         @compileError(std.fmt.comptimePrint(
             "Uniforms is {d} bytes but the shaders.hlsl cbuffer spans {d} bytes ({d} 16-byte registers)",
@@ -284,7 +349,7 @@ comptime {
     const wide_index = std.meta.fieldIndex(bools_ty, "cursor_wide") orelse
         @compileError("Uniforms.bools must keep a cursor_wide flag");
     const wide_mask: u64 = @as(u64, 1) << @intCast(8 * wide_index);
-    const shader_mask = hlslBoolsMask(hlsl_source, "cursor_wide") orelse
+    const shader_mask = hlslBoolsMask(hlslStripped(hlsl_source), "cursor_wide") orelse
         @compileError("shaders.hlsl must read cursor_wide as a bit of bools_packed");
     if (shader_mask != wide_mask)
         @compileError(std.fmt.comptimePrint(
