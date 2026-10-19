@@ -231,10 +231,64 @@ public class GhosttyStructHeaderParityTests
             string.Join("\n", problems));
     }
 
+    // The two Windows tables in embedded.zig are pinned to the Zig layout by
+    // its comptime asserts and, before this, to nothing else: unlike
+    // expected_options_layout nothing read them back against the header, so a
+    // field inserted into ghostty_platform_windows_s (or its nested struct)
+    // passed every build and test green while every offset after it read the
+    // wrong bytes across the FFI boundary. These hold both tables, and the
+    // sizes the comptime asserts name, to the header-computed layout.
+    [Fact]
+    public void PlatformWindows_ZigComptimeLayout_Matches_Header()
+    {
+        var zig = LoadResource(EmbeddedZigResource);
+        var (outer, inner) = WindowsLayout.Value;
+        var windowsOffsets = ZigLayoutTable(zig, "expected_windows_layout");
+        var sharedOffsets = ZigLayoutTable(zig, "expected_shared_texture_layout");
+
+        var windowsCall = Regex.Match(
+            zig,
+            @"assertHeaderLayout\(\s*@FieldType\(C, ""windows""\),\s*expected_windows_layout,\s*(?<size>\d+),\s*""(?<header>[^""]+)""");
+        var sharedCall = Regex.Match(
+            zig,
+            @"assertHeaderLayout\(\s*@FieldType\(@FieldType\(C, ""windows""\), ""shared_texture""\),\s*expected_shared_texture_layout,\s*(?<size>\d+),\s*""(?<header>[^""]+)""");
+
+        Assert.True(windowsCall.Success, "embedded.zig no longer asserts Windows.C against the header");
+        Assert.True(sharedCall.Success, "embedded.zig no longer asserts the nested shared_texture against the header");
+        Assert.Equal("ghostty_platform_windows_s", windowsCall.Groups["header"].Value);
+        Assert.Equal("ghostty_platform_windows_s.shared_texture", sharedCall.Groups["header"].Value);
+        Assert.Equal(outer.Size, int.Parse(windowsCall.Groups["size"].Value));
+        Assert.Equal(inner.Size, int.Parse(sharedCall.Groups["size"].Value));
+
+        var problems = new List<string>();
+        foreach (var field in outer.Fields)
+        {
+            if (!windowsOffsets.TryGetValue(field.Name, out var zigOffset))
+                problems.Add($"  embedded.zig does not assert the offset of {field.Name}");
+            else if (zigOffset != field.Offset)
+                problems.Add($"  embedded.zig puts {field.Name} at +{zigOffset}, the header at +{field.Offset}");
+        }
+        foreach (var field in inner.Fields)
+        {
+            if (!sharedOffsets.TryGetValue(field.Name, out var zigOffset))
+                problems.Add($"  embedded.zig does not assert the offset of shared_texture.{field.Name}");
+            else if (zigOffset != field.Offset)
+                problems.Add($"  embedded.zig puts shared_texture.{field.Name} at +{zigOffset}, the header at +{field.Offset}");
+        }
+        foreach (var name in windowsOffsets.Keys.Except(outer.Fields.Select(f => f.Name)))
+            problems.Add($"  embedded.zig asserts {name}, which ghostty_platform_windows_s does not have");
+        foreach (var name in sharedOffsets.Keys.Except(inner.Fields.Select(f => f.Name)))
+            problems.Add($"  embedded.zig asserts {name}, which the nested shared_texture does not have");
+
+        Assert.True(problems.Count == 0,
+            "the ghostty_platform_windows_s tables in src/apprt/embedded.zig do not match include/ghostty.h:\n" +
+            string.Join("\n", problems));
+    }
+
     // The layout tables in embedded.zig are `.{ .name = "...", .offset = N }`
     // rows in a tuple named <tableName>. Scoped to that one tuple: the file
-    // also carries tables for ghostty_platform_windows_s, whose fields are
-    // not ghostty_surface_config_s fields and must not be swept in here.
+    // carries several tables, and the fields of one struct must not be swept
+    // into another's comparison.
     private static IReadOnlyDictionary<string, int> ZigLayoutTable(string zig, string tableName)
     {
         var marker = "const " + tableName + " = .{";
@@ -254,17 +308,59 @@ public class GhosttyStructHeaderParityTests
         return rows;
     }
 
-    // The platform union is a union of structs, one of them with a nested
-    // anonymous struct, which the field scan does not model. Its size and
-    // alignment come from ghostty_platform_windows_s, the widest member:
-    // two pointers (16) then { bool, uint32_t, uint32_t } (12, aligned 4),
-    // 28 rounded up to the pointer alignment, 32. The managed union is held
-    // to the same numbers, and the fields after it are still computed from
-    // the header, so a change to the union moves them and fails the test.
+    // The platform union is a union of structs, which the field scan does not
+    // model. Its size and alignment come from ghostty_platform_windows_s, the
+    // widest member, and are computed from the header by the parse below
+    // rather than restated: two pointers (16) then the nested
+    // { bool, uint32_t, uint32_t } (12, aligned 4), 28 rounded up to the
+    // pointer alignment. The managed union is held to the same numbers, and
+    // the fields after it are still computed from the header, so a change to
+    // the union moves them and fails the test.
+    //
+    // Declared above WindowsLayout on purpose: static initializers run in
+    // textual order, and this one reads WindowsLayout.Value.
+    private static readonly Lazy<(CLayout Outer, CLayout SharedTexture)> WindowsLayout = new(() =>
+    {
+        var header = Header.Value;
+        Assert.DoesNotContain("#pragma pack", header, StringComparison.Ordinal);
+        var close = header.IndexOf("} ghostty_platform_windows_s;", StringComparison.Ordinal);
+        Assert.True(close >= 0, "ghostty_platform_windows_s not found in include/ghostty.h");
+        var open = header.LastIndexOf("typedef struct {", close, StringComparison.Ordinal);
+        Assert.True(open >= 0, "no struct body precedes ghostty_platform_windows_s in include/ghostty.h");
+        var body = header[(open + "typedef struct {".Length)..close];
+
+        // The one nested anonymous struct on the ABI surface: the field
+        // scanner is line-based, so the nested block is flattened into a
+        // synthetic field whose size and alignment come from parsing the
+        // inner body with the same scanner. The synthetic type is registered
+        // for this one parse only; nothing managed mirrors it and the
+        // Zig-table comparison never reads the aggregate's Managed slot.
+        var nested = Regex.Match(body, @"struct\s*\{(?<inner>[^}]*)\}\s*(?<name>\w+)\s*;");
+        Assert.True(nested.Success,
+            "ghostty_platform_windows_s no longer nests an anonymous struct; " +
+            "the flattening and the Zig tables need updating, not deleting.");
+        var inner = CLayoutOfBody(
+            nested.Groups["inner"].Value,
+            "ghostty_platform_windows_s.shared_texture");
+        var flattened = body.Replace(
+            nested.Value,
+            $"ghostty_platform_windows_shared_texture {nested.Groups["name"].Value};");
+        Assert.DoesNotContain("}", flattened, StringComparison.Ordinal);
+        var aggregates = new Dictionary<string, (int Size, int Align, Type Managed)>
+        {
+            ["ghostty_platform_windows_shared_texture"] = (inner.Size, inner.Align, typeof(object)),
+        };
+        var outer = CLayoutOfBody(flattened, "ghostty_platform_windows_s", aggregates);
+        return (outer, inner);
+    });
+
     private static readonly IReadOnlyDictionary<string, (int Size, int Align, Type Managed)> SurfaceConfigAggregates =
         new Dictionary<string, (int Size, int Align, Type Managed)>
         {
-            ["ghostty_platform_u"] = (32, 8, typeof(GhosttyPlatformUnion)),
+            ["ghostty_platform_u"] = (
+                WindowsLayout.Value.Outer.Size,
+                WindowsLayout.Value.Outer.Align,
+                typeof(GhosttyPlatformUnion)),
         };
 
     private const string EmbeddedZigResource = "Ghostty.Tests.Interop.Exports.apprt.embedded.zig";
@@ -395,7 +491,7 @@ public class GhosttyStructHeaderParityTests
 
     private sealed record CField(string Name, string Type, int Offset);
 
-    private sealed record CLayout(IReadOnlyList<CField> Fields, int Size);
+    private sealed record CLayout(IReadOnlyList<CField> Fields, int Size, int Align);
 
     // Standard x64 layout: each field is placed at the next offset that is a
     // multiple of its alignment, and the total is rounded up to the largest
@@ -403,10 +499,14 @@ public class GhosttyStructHeaderParityTests
     // so one table serves for both.
     private static CLayout CLayoutOf(
         string typedefName,
+        IReadOnlyDictionary<string, (int Size, int Align, Type Managed)>? aggregates = null) =>
+        CLayoutOfBody(StructBody(typedefName), typedefName, aggregates);
+
+    private static CLayout CLayoutOfBody(
+        string body,
+        string typedefName,
         IReadOnlyDictionary<string, (int Size, int Align, Type Managed)>? aggregates = null)
     {
-        var body = StructBody(typedefName);
-
         var fields = new List<CField>();
         var offset = 0;
         var maxAlign = 1;
@@ -444,7 +544,7 @@ public class GhosttyStructHeaderParityTests
             fields.Count > 0,
             $"parsed no fields out of {typedefName}; the scan is broken, not the struct");
 
-        return new CLayout(fields, Align(offset, maxAlign));
+        return new CLayout(fields, Align(offset, maxAlign), maxAlign);
     }
 
     private static int Align(int offset, int alignment) =>

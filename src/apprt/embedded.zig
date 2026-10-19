@@ -403,20 +403,36 @@ fn assertHeaderLayout(
     comptime size: usize,
     comptime header_struct: []const u8,
 ) void {
+    @setEvalBranchQuota(100000);
     const fields = @typeInfo(T).@"struct".fields;
+    // Walk the struct's fields, not the table's rows: a row count alone
+    // would let a duplicated row stand in for a field the table dropped.
+    inline for (fields) |field| {
+        var rows: usize = 0;
+        inline for (expected) |row| {
+            if (comptime std.mem.eql(u8, row.name, field.name)) rows += 1;
+        }
+        if (rows != 1) @compileError(std.fmt.comptimePrint(
+            "{s}.{s} appears in {d} rows of its layout table; every " ++
+                "field of {s} needs exactly one row",
+            .{ @typeName(T), field.name, rows, header_struct },
+        ));
+        const actual = @offsetOf(T, field.name);
+        inline for (expected) |row| {
+            if (comptime std.mem.eql(u8, row.name, field.name)) {
+                if (actual != row.offset) @compileError(std.fmt.comptimePrint(
+                    "{s}.{s} is at offset {d} but {s} has it at {d}; the two " ++
+                        "layouts must agree",
+                    .{ @typeName(T), field.name, actual, header_struct, row.offset },
+                ));
+            }
+        }
+    }
     if (expected.len != fields.len) @compileError(std.fmt.comptimePrint(
-        "{s} has {d} fields but its layout table has {d} rows; every " ++
-            "field of {s} needs exactly one row",
+        "{s} has {d} fields but its layout table has {d} rows; a row " ++
+            "names a field {s} does not have",
         .{ @typeName(T), fields.len, expected.len, header_struct },
     ));
-    inline for (expected) |row| {
-        const actual = @offsetOf(T, row.name);
-        if (actual != row.offset) @compileError(std.fmt.comptimePrint(
-            "{s}.{s} is at offset {d} but {s} has it at {d}; the two " ++
-                "layouts must agree",
-            .{ @typeName(T), row.name, actual, header_struct, row.offset },
-        ));
-    }
     if (@sizeOf(T) != size) @compileError(std.fmt.comptimePrint(
         "{s} is {d} bytes but {s} is {d}; the two layouts must agree",
         .{ @typeName(T), @sizeOf(T), header_struct, size },
