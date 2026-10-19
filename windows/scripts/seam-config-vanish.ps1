@@ -139,21 +139,25 @@ function Wait-PaletteStaysDeclined($s, [int]$Since, [string]$Original) {
 }
 
 # Poll the notices op until a banner with $Key is up (Want $true) or gone
-# (Want $false), or the budget runs out. Answers what was on screen at the
-# last look.
+# (Want $false), or the budget runs out. Seen answers "the wanted state was
+# observed"; on timeout it is the LAST observed state of the banner, so a
+# want-gone leg whose banner never cleared reports still-up and fails, and
+# a want-up leg reports never-seen and fails. Last carries the final
+# readout either way.
 function Wait-Notice($s, [string]$Key, [bool]$Want) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $last = $null
+    $lastUp = $false
     while ($sw.ElapsedMilliseconds -lt $HealWithinMs) {
         $n = Seam $s @{ op = 'notices' }
         $last = $n
-        $up = @($n.notices | Where-Object { $_.dedupKey -eq $Key }).Count -gt 0
-        if ($up -eq $Want) {
-            return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; Seen = $up; Last = $n }
+        $lastUp = @($n.notices | Where-Object { $_.dedupKey -eq $Key }).Count -gt 0
+        if ($lastUp -eq $Want) {
+            return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; Seen = $true; Last = $n }
         }
         Start-Sleep -Milliseconds 50
     }
-    return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; Seen = $false; Last = $last }
+    return [pscustomobject]@{ Ms = $sw.ElapsedMilliseconds; Seen = $lastUp; Last = $last }
 }
 
 $baseConfig = @"

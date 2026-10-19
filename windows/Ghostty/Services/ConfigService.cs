@@ -3075,7 +3075,7 @@ internal static partial class ConfigServiceLogExtensions
                    Level = LogLevel.Warning,
                    Message = "[ConfigService] The load-defaults ask was not honoured on this reload ({Reason}); click it again if the notice is still up: {Path}")]
     internal static partial void LogLoadDefaultsRequestDropped(
-        this ILogger<ConfigService> logger, string reason, string path);
+        this ILogger<ConfigService> logger, string path, string reason);
 
     // Information, and the account of a deletion the watcher cannot see:
     // the missing file is one of the layered candidates it does not watch,

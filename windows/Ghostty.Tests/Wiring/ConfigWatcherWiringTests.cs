@@ -1388,6 +1388,11 @@ public class ConfigWatcherWiringTests
                 .First(i => i.Condition.ToString().Contains("loadDefaultsRequested",
                     StringComparison.Ordinal));
             Assert.True(guard.Span.Contains(drop.Span));
+
+            // And in the file's (path, description) argument order: swapped,
+            // the Warning reads the path as the reason.
+            Assert.Equal("ConfigFilePath", drop.Arg(0));
+            Assert.StartsWith("\"", drop.Arg(1));
         }
     }
 }
