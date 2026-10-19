@@ -11,6 +11,7 @@ const mirrors = @import("../shader_mirrors.zig");
 
 const cell_text_v_source = @embedFile("../shaders/glsl/cell_text.v.glsl");
 const bg_image_v_source = @embedFile("../shaders/glsl/bg_image.v.glsl");
+const common_source = @embedFile("../shaders/glsl/common.glsl");
 
 const pipeline_descs: []const struct { [:0]const u8, PipelineDescription } =
     &.{
@@ -358,6 +359,43 @@ comptime {
         "1u << 6",
         "bg_image.v.glsl BgImage.Info repeat bit vs opengl.BgImage",
     );
+
+    // common.glsl carries the Globals block the vertex shaders include and
+    // the masks for its packed bools: pin the block to Uniforms member by
+    // member, and every mask to its bit. The packed spellings differ on
+    // purpose (a 2u16/4u8 field against one uint member) and are renamed
+    // here, which is also what documents them.
+    mirrors.expectBlockLayout(
+        common_source,
+        "Globals",
+        Uniforms,
+        .{
+            .{ "grid_size_packed_2u16", "grid_size" },
+            .{ "cursor_pos_packed_2u16", "cursor_pos" },
+            .{ "cursor_color_packed_4u8", "cursor_color" },
+            .{ "bg_color_packed_4u8", "bg_color" },
+            .{ "bools", "bools" },
+        },
+        "common.glsl Globals vs opengl.Uniforms",
+    );
+    for (std.meta.fields(@FieldType(Uniforms, "bools")), 0..) |field, bit| {
+        if (std.mem.startsWith(u8, field.name, "_")) continue;
+        mirrors.expectMirrored(
+            common_source,
+            mirrors.upper(field.name),
+            std.fmt.comptimePrint("{d}u", .{@as(u32, 1) << @as(u5, @intCast(bit))}),
+            "common.glsl Uniforms.bools vs opengl.Uniforms",
+        );
+    }
+    for (std.meta.fields(@FieldType(Uniforms, "padding_extend")), 0..) |field, bit| {
+        if (std.mem.startsWith(u8, field.name, "_")) continue;
+        mirrors.expectMirrored(
+            common_source,
+            "EXTEND_" ++ mirrors.upper(field.name),
+            std.fmt.comptimePrint("{d}u", .{@as(u32, 1) << @as(u5, @intCast(bit))}),
+            "common.glsl padding extend vs opengl.Uniforms",
+        );
+    }
 }
 
 /// Initialize our custom shader pipelines. The shaders argument is a

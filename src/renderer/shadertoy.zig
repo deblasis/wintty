@@ -60,21 +60,23 @@ comptime {
         );
     }
 
-    // The Globals block and Uniforms are one block: one member per field,
-    // and the std140 layout the shader sees must keep matching the extern
-    // struct GenericRenderer writes byte-for-byte. The palette is the one
-    // array: 256 vec3 entries, so its std140 stride is 16 bytes.
-    mirrors.expectBlockMemberCount(
+    // The Globals block and Uniforms are one block: same members, same
+    // order, same std140 offsets and total size, checked member by member
+    // against the block the shader declares, so a swap of two members or a
+    // rename on either side fails the build instead of misaligning the
+    // byte-for-byte upload. The palette is the one array: 256 vec3 entries,
+    // so its std140 stride is 16 bytes.
+    mirrors.expectBlockLayout(
         prefix_source,
         "Globals",
-        std.meta.fields(Uniforms).len,
-        "shadertoy_prefix.glsl Globals block vs shadertoy.Uniforms",
+        Uniforms,
+        .{
+            // The GLSL name follows shadertoy's iTimeCursorChange; the
+            // Zig field predates it and spells the words the other way.
+            .{ "iTimeCursorChange", "cursor_change_time" },
+        },
+        "shadertoy_prefix.glsl Globals vs shadertoy.Uniforms",
     );
-    mirrors.expectSize(Uniforms, 4496, "shadertoy.Uniforms vs std140 Globals block");
-    mirrors.expectOffset(Uniforms, "sample_rate", 192, "shadertoy.Uniforms vs std140 Globals block");
-    mirrors.expectOffset(Uniforms, "current_cursor", 208, "shadertoy.Uniforms vs std140 Globals block");
-    mirrors.expectOffset(Uniforms, "palette", 304, "shadertoy.Uniforms vs std140 Globals block");
-    mirrors.expectOffset(Uniforms, "selection_foreground_color", 4480, "shadertoy.Uniforms vs std140 Globals block");
     mirrors.expectSize(
         @FieldType(Uniforms, "palette"),
         256 * 16,

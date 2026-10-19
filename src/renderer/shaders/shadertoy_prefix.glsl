@@ -26,8 +26,8 @@ layout(binding = 1, std140) uniform Globals {
     uniform vec3  iForegroundColor;
     uniform vec3  iCursorColor;
     uniform vec3  iCursorText;
-    uniform vec3  iSelectionForegroundColor;
     uniform vec3  iSelectionBackgroundColor;
+    uniform vec3  iSelectionForegroundColor;
 };
 
 #define CURSORSTYLE_BLOCK        0
