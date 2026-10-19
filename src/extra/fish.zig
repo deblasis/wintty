@@ -49,9 +49,9 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         try writer.writeAll(field.name);
         try writer.writeAll(if (field.type != bool) " -r" else " ");
         if (std.mem.startsWith(u8, field.name, names.font_family))
-            try writer.writeAll(" -f  -a \"(ghostty +list-fonts | grep '^[A-Z]')\"")
+            try writer.writeAll(" -f  -a \"(ghostty +" ++ names.list_fonts_action ++ " | grep '^[A-Z]')\"")
         else if (std.mem.eql(u8, names.theme, field.name))
-            try writer.writeAll(" -f -a \"(ghostty +list-themes | sed -E 's/^(.*) \\(.*\\$/\\1/')\"")
+            try writer.writeAll(" -f -a \"(ghostty +" ++ names.list_themes_action ++ " | sed -E 's/^(.*) \\(.*\\$/\\1/')\"")
         else if (std.mem.eql(u8, names.working_directory, field.name))
             try writer.writeAll(" -f -k -a \"(__fish_complete_directories)\"")
         else {
@@ -200,4 +200,11 @@ test "getDescription" {
         const result = getDescription(input);
         try testing.expectEqualStrings(expected, result);
     }
+}
+
+test {
+    // The generators are reached only through build data in
+    // resource-installing builds; reference the completions here so
+    // `zig build test` also analyzes the comptime checks in names.zig.
+    _ = completions;
 }

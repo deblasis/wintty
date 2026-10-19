@@ -86,11 +86,11 @@ pub const compatibility = std.StaticStringMap(
     // doesn't support a specific radius value. The renaming is to let
     // one field be used for both platforms (macOS retained the ability
     // to set a radius).
-    .{ "background-blur-radius", cli.compatibilityRenamed(Config, "background-blur") },
+    compatRenamed("background-blur-radius", "background-blur"),
 
     // Ghostty 1.2 renamed all our adw options to gtk because we now have
     // a hard dependency on libadwaita.
-    .{ "adw-toolbar-style", cli.compatibilityRenamed(Config, "gtk-toolbar-style") },
+    compatRenamed("adw-toolbar-style", "gtk-toolbar-style"),
 
     // Ghostty 1.2 removed the `hidden` value from `gtk-tabs-location` and
     // moved it to `window-show-tab-bar`.
@@ -117,7 +117,7 @@ pub const compatibility = std.StaticStringMap(
 
     // Ghostty 1.4 renamed `scrollback-limit` to `scrollback-limit-bytes`
     // when `scrollback-limit-lines` was added so the units are explicit.
-    .{ "scrollback-limit", cli.compatibilityRenamed(Config, "scrollback-limit-bytes") },
+    compatRenamed("scrollback-limit", "scrollback-limit-bytes"),
 
     // Ghostty 1.4 updated "copy-on-select", allow copying to the selection
     // clipboard (on supported operating systems), the system clipboard, or
@@ -6476,13 +6476,30 @@ pub fn parseManuallyHook(
 /// One entry of the `compatibility` map, written from the single key
 /// literal: the map is keyed by it and the handler is instantiated with
 /// it, so a handler can never be bound under a key it does not expect
-/// (see `compatKey`). The key must not name a Config field the parser
-/// already accepts, or the handler would never run.
+/// (see `compatKey`). A handler only runs when parsing the key as a
+/// field fails first, so an entry is dead only if its key names a field
+/// the parser always accepts; the live-field entries here (copy-on-select,
+/// gtk-tabs-location, gtk-single-instance, macos-dock-drop-behavior) are
+/// kept for the values they removed.
 fn compatEntry(
     comptime key: []const u8,
     comptime factory: anytype,
 ) struct { []const u8, cli.CompatibilityHandler(Config) } {
     return .{ key, factory(key) };
+}
+
+/// One entry of the `compatibility` map for a plain rename, written from
+/// the single old-name literal like `compatEntry`: a renamed key is dead
+/// the moment the parser accepts it again, so that is checked here.
+fn compatRenamed(
+    comptime from: []const u8,
+    comptime to: []const u8,
+) struct { []const u8, cli.CompatibilityHandler(Config) } {
+    if (@hasField(Config, from)) @compileError(
+        "compatibility key \"" ++ from ++ "\" is also a Config field; " ++
+            "the rename handler would never run",
+    );
+    return .{ from, cli.compatibilityRenamed(Config, to) };
 }
 
 /// Compile-time tie between a compatibility handler and the key it is

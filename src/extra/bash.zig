@@ -58,13 +58,17 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\  _fonts() {
         \\    local IFS=$'\n'
         \\    COMPREPLY=()
-        \\    while read -r line; do COMPREPLY+=("$line"); done < <( compgen -P '"' -S '"' -W "$($ghostty +list-fonts | grep '^[A-Z]' )" -- "$cur")
+        \\    while read -r line; do COMPREPLY+=("$line"); done < <( compgen -P '"' -S '"' -W "$($ghostty +
+        ++ names.list_fonts_action ++
+        \\ | grep '^[A-Z]' )" -- "$cur")
         \\  }
         \\
         \\  _themes() {
         \\    local IFS=$'\n'
         \\    COMPREPLY=()
-        \\    while read -r line; do COMPREPLY+=("$line"); done < <( compgen -P '"' -S '"' -W "$($ghostty +list-themes | sed -E 's/^(.*) \(.*$/\1/')" -- "$cur")
+        \\    while read -r line; do COMPREPLY+=("$line"); done < <( compgen -P '"' -S '"' -W "$($ghostty +
+        ++ names.list_themes_action ++
+        \\ | sed -E 's/^(.*) \(.*$/\1/')" -- "$cur")
         \\  }
         \\
         \\  _files() {
@@ -335,4 +339,11 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\complete -o nospace -o bashdefault -F _ghostty ghostty
         \\
     );
+}
+
+test {
+    // The generators are reached only through build data in
+    // resource-installing builds; reference the completions here so
+    // `zig build test` also analyzes the comptime checks in names.zig.
+    _ = completions;
 }

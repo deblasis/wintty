@@ -29,13 +29,17 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         \\#compdef ghostty
         \\
         \\_fonts () {
-        \\  local font_list=$(ghostty +list-fonts | grep -Z '^[A-Z]')
+        \\  local font_list=$(ghostty +
+        ++ names.list_fonts_action ++
+        \\ | grep -Z '^[A-Z]')
         \\  local fonts=(${(f)font_list})
         \\  _describe -t fonts 'fonts' fonts
         \\}
         \\
         \\_themes() {
-        \\  local theme_list=$(ghostty +list-themes | sed -E 's/^(.*) \(.*$/\1/')
+        \\  local theme_list=$(ghostty +
+        ++ names.list_themes_action ++
+        \\ | sed -E 's/^(.*) \(.*$/\1/')
         \\  local themes=(${(f)theme_list})
         \\  _describe -t themes 'themes' themes
         \\}
@@ -229,4 +233,11 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         \\_ghostty "$@"
         \\
     );
+}
+
+test {
+    // The generators are reached only through build data in
+    // resource-installing builds; reference the completions here so
+    // `zig build test` also analyzes the comptime checks in names.zig.
+    _ = completions;
 }
