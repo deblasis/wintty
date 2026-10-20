@@ -4938,6 +4938,9 @@ test "request mode DECRQM ANSI responses" {
         // Unimplemented ANSI modes report permanently reset (xterm parity).
         .{ "\x1b[1$p", "\x1b[1;4$y" },
         .{ "\x1b[19$p", "\x1b[19;4$y" },
+        // Unimplemented DEC private modes report permanently reset (xterm parity).
+        .{ "\x1b[?60$p", "\x1b[?60;4$y" },
+        .{ "\x1b[?61$p", "\x1b[?61;4$y" },
     };
     inline for (cases) |case| {
         S.calls = 0;
