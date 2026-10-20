@@ -3035,25 +3035,38 @@ pub fn keyCallback(
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
-    // Setup our inspector event if we have an inspector.
+    // Setup our inspector event if we have an inspector. The allocator
+    // is captured here, before any binding runs: a closing action can
+    // free the surface (and every pointer self holds) before the defer
+    // below runs, and nothing may reach back into self after that.
+    const alloc = self.alloc;
     var insp_ev: ?inspectorpkg.KeyEvent = if (self.inspector != null) ev: {
         var copy = event;
         copy.utf8 = "";
-        if (event.utf8.len > 0) copy.utf8 = try self.alloc.dupe(u8, event.utf8);
+        if (event.utf8.len > 0) copy.utf8 = try alloc.dupe(u8, event.utf8);
         break :ev .{ .event = copy };
     } else null;
 
+    // Set right before returning, when a binding or the child-exited
+    // path closed this surface: from that point self is dead memory.
+    var surface_closed = false;
+
     // When we're done processing, we always want to add the event to
-    // the inspector.
+    // the inspector, unless a binding closed us out from under it.
     defer if (insp_ev) |ev| ev: {
+        if (surface_closed) {
+            ev.deinit(alloc);
+            break :ev;
+        }
+
         // We have to check for the inspector again because our keybinding
         // might close it.
         const insp = self.inspector orelse {
-            ev.deinit(self.alloc);
+            ev.deinit(alloc);
             break :ev;
         };
 
-        if (insp.recordKeyEvent(self.alloc, ev)) {
+        if (insp.recordKeyEvent(alloc, ev)) {
             self.queueRender() catch {};
         } else |err| {
             log.warn("error adding key event to inspector err={}", .{err});
@@ -3066,7 +3079,10 @@ pub fn keyCallback(
     if (try self.maybeHandleBinding(
         event,
         if (insp_ev) |*ev| ev else null,
-    )) |v| return v;
+    )) |v| {
+        if (v == .closed) surface_closed = true;
+        return v;
+    }
 
     // If we allow KAM and KAM is enabled then we do nothing.
     if (self.config.vt_kam_allowed) {
@@ -3177,6 +3193,8 @@ pub fn keyCallback(
         if (self.child_exited) {
             write_req.deinit();
             self.close();
+            // self is dead from here, exactly like a closing binding.
+            surface_closed = true;
             return .closed;
         }
 
