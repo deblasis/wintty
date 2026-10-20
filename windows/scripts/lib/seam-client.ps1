@@ -143,34 +143,214 @@ public static class SeamWin {
 '@ -ErrorAction SilentlyContinue
 }
 
-function Get-SeamWinUiWindows([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [SeamWin+EnumProc]{
-        param($h, $lp)
-        [uint32]$o = 0; [void][SeamWin]::GetWindowThreadProcessId($h, [ref]$o)
-        if ($o -ne $ProcId -or -not [SeamWin]::IsWindowVisible($h)) { return $true }
-        if ([SeamWin]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [SeamWin]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64 = $hwnd64; Title = [SeamWin]::TitleOf($h); Area = ($rc.W * $rc.Hh) })
-        return $true
+# The app under test runs on a private desktop: a desktop of its own in the
+# interactive window station, so nothing it shows or activates can appear on,
+# or take the foreground of, the desktop a person is using. The app keeps its
+# normal activating startup there. Window handles on another desktop answer
+# user32 reads only while that desktop is open, and GetWindowRect only from a
+# thread attached to it, so the window reads below run on a fresh thread per
+# desktop. Every launched process joins one job object per harness process,
+# created KILL_ON_JOB_CLOSE, so the app, its session daemon and its shells
+# die with the harness however it exits. A capture of a private desktop reads
+# black (DWM composes only the input desktop), and synthesized input reaches
+# only the input desktop, so Start-SeamSession launches there only when the
+# harness passes -PrivateDesktop. The desktop name prefix and the
+# AppDomain flags set in Start-SeamSession are shared with the release-side
+# launcher (wintty-release scripts/lib/app-launch.ps1).
+if (-not ('SeamDesk' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class SeamDesk {
+    public const string DesktopPrefix = "wintty-seam-";
+    const uint CREATE_SUSPENDED = 0x4, CREATE_NO_WINDOW = 0x08000000, CREATE_UNICODE_ENVIRONMENT = 0x400;
+    const uint GENERIC_ALL = 0x10000000, DESKTOP_READOBJECTS = 0x1, DESKTOP_ENUMERATE = 0x40;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFOW {
+        public int cb; public IntPtr lpReserved, lpDesktop, lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute;
+        public uint dwFlags; public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
     }
-    [void][SeamWin]::EnumWindows($cb, [IntPtr]::Zero)
+    [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+    [StructLayout(LayoutKind.Sequential)] struct BASIC_LIMIT {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize; public uint ActiveProcessLimit;
+        public UIntPtr Affinity; public uint PriorityClass, SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)] struct EXTENDED_LIMIT {
+        public BASIC_LIMIT Basic; public IO_COUNTERS Io;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFOW si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr h, uint code);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObjectW(IntPtr sa, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref EXTENDED_LIMIT info, int len);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateDesktopW(string name, IntPtr dev, IntPtr mode, uint flags, uint access, IntPtr sa);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr OpenDesktopW(string name, uint flags, bool inherit, uint access);
+    [DllImport("user32.dll", SetLastError = true)] static extern bool CloseDesktop(IntPtr h);
+    [DllImport("user32.dll", SetLastError = true)] static extern bool SetThreadDesktop(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
+    [UnmanagedFunctionPointer(CallingConvention.Winapi, CharSet = CharSet.Unicode)] delegate bool DeskProc(string name, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDesktopsW(IntPtr winsta, DeskProc cb, IntPtr l);
+    delegate bool WndProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumDesktopWindows(IntPtr d, WndProc cb, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+
+    static IntPtr _job;
+    static int _seq;
+    static readonly Dictionary<int, IntPtr> Desktops = new Dictionary<int, IntPtr>();
+
+    public class WinInfo {
+        public long Hwnd64; public string Desktop, Class, Title; public bool Visible; public int L, T, R, B;
+        public int W { get { return R - L; } }
+        public int Hh { get { return B - T; } }
+    }
+
+    public static string Quote(string arg) {
+        if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0) return arg;
+        var sb = new StringBuilder("\""); int slashes = 0;
+        foreach (var c in arg) {
+            if (c == '\\') { slashes++; continue; }
+            if (c == '"') { sb.Append('\\', slashes * 2 + 1); sb.Append('"'); slashes = 0; continue; }
+            sb.Append('\\', slashes); slashes = 0; sb.Append(c);
+        }
+        sb.Append('\\', slashes * 2); sb.Append('"'); return sb.ToString();
+    }
+
+    static IntPtr Job() {
+        if (_job != IntPtr.Zero) return _job;
+        var job = CreateJobObjectW(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW");
+        var info = new EXTENDED_LIMIT(); info.Basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, 9, ref info, Marshal.SizeOf(typeof(EXTENDED_LIMIT)))) {
+            var err = Marshal.GetLastWin32Error(); CloseHandle(job); throw new Win32Exception(err, "SetInformationJobObject");
+        }
+        _job = job; return job;
+    }
+
+    public static Process Start(string filePath, string[] args, string cwd, bool privateDesktop) {
+        var line = new StringBuilder(Quote(filePath));
+        foreach (var a in args ?? new string[0]) line.Append(' ').Append(Quote(a ?? ""));
+        IntPtr desk = IntPtr.Zero, deskPath = IntPtr.Zero;
+        var si = new STARTUPINFOW(); si.cb = Marshal.SizeOf(typeof(STARTUPINFOW));
+        if (privateDesktop) {
+            var name = DesktopPrefix + Process.GetCurrentProcess().Id + "-c" + Interlocked.Increment(ref _seq);
+            desk = CreateDesktopW(name, IntPtr.Zero, IntPtr.Zero, 0, GENERIC_ALL, IntPtr.Zero);
+            if (desk == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateDesktopW " + name);
+            deskPath = Marshal.StringToHGlobalUni("WinSta0\\" + name);
+            si.lpDesktop = deskPath;
+        }
+        PROCESS_INFORMATION pi; bool ok;
+        try {
+            ok = CreateProcessW(filePath, line, IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                IntPtr.Zero, string.IsNullOrEmpty(cwd) ? null : cwd, ref si, out pi);
+        } finally { if (deskPath != IntPtr.Zero) Marshal.FreeHGlobal(deskPath); }
+        if (!ok) {
+            var err = Marshal.GetLastWin32Error(); if (desk != IntPtr.Zero) CloseDesktop(desk);
+            throw new Win32Exception(err, "CreateProcessW failed for " + filePath);
+        }
+        try {
+            Process proc;
+            try {
+                if (!AssignProcessToJobObject(Job(), pi.hProcess)) throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject");
+                proc = Process.GetProcessById(pi.dwProcessId);
+                var unused = proc.Handle;
+                if (ResumeThread(pi.hThread) == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread");
+            } catch { TerminateProcess(pi.hProcess, 1); if (desk != IntPtr.Zero) CloseDesktop(desk); throw; }
+            if (desk != IntPtr.Zero) lock (Desktops) Desktops[proc.Id] = desk;
+            return proc;
+        } finally { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+    }
+
+    public static void Stop(Process proc) {
+        try { if (!proc.HasExited) proc.Kill(true); } catch (InvalidOperationException) { } catch (Win32Exception) { }
+        try { proc.WaitForExit(10000); } catch { }
+        IntPtr h; lock (Desktops) { if (!Desktops.TryGetValue(proc.Id, out h)) return; Desktops.Remove(proc.Id); }
+        CloseDesktop(h);
+    }
+
+    public static List<WinInfo> Windows(int pid) {
+        var names = new List<string>();
+        EnumDesktopsW(GetProcessWindowStation(), (n, p) => { names.Add(n); return true; }, IntPtr.Zero);
+        var hits = new List<WinInfo>();
+        foreach (var name in names) {
+            var d = OpenDesktopW(name, 0, false, DESKTOP_READOBJECTS | DESKTOP_ENUMERATE);
+            if (d == IntPtr.Zero) continue;
+            try {
+                var th = new Thread(() => {
+                    bool attached = SetThreadDesktop(d);
+                    EnumDesktopWindows(d, (h, l) => {
+                        uint owner; GetWindowThreadProcessId(h, out owner);
+                        if (owner != (uint)pid) return true;
+                        var cls = new StringBuilder(256); GetClassNameW(h, cls, 256);
+                        var ttl = new StringBuilder(512); GetWindowTextW(h, ttl, 512);
+                        RECT r = new RECT(); if (attached) GetWindowRect(h, out r);
+                        hits.Add(new WinInfo { Hwnd64 = h.ToInt64(), Desktop = name, Class = cls.ToString(), Title = ttl.ToString(),
+                            Visible = IsWindowVisible(h), L = r.L, T = r.T, R = r.R, B = r.B });
+                        return true;
+                    }, IntPtr.Zero);
+                });
+                th.Start(); th.Join();
+            } finally { CloseDesktop(d); }
+        }
+        return hits;
+    }
+}
+'@
+}
+
+# The one launch of the app under test (Start-SeamSession calls it; the
+# tests stand it in). Every process joins the harness's job object, so the
+# tree dies with the harness; -PrivateDesktop puts the app on a desktop of
+# its own (SeamDesk above). Returns the Process, its handle held from
+# before the resume so ExitCode reads after the exit.
+function Start-SeamAppProcess {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [switch]$PrivateDesktop
+    )
+    return [SeamDesk]::Start($FilePath, [string[]]@($ArgumentList), (Split-Path -Parent $FilePath), [bool]$PrivateDesktop)
+}
+
+function Get-SeamWinUiWindows([uint32]$ProcId) {
+    # Every desktop of the window station, so an app on a private desktop
+    # (Start-SeamSession -PrivateDesktop) is found as surely as one on the
+    # default desktop. Each hit carries the desktop it lives on.
+    $hits = [System.Collections.Generic.List[object]]::new()
+    foreach ($w in [SeamDesk]::Windows([int]$ProcId)) {
+        if (-not $w.Visible -or $w.Class -ne 'WinUIDesktopWin32WindowClass') { continue }
+        if ($w.W -lt 80 -or $w.Hh -lt 80) { continue }
+        $hits.Add([pscustomobject]@{ Hwnd64 = $w.Hwnd64; Title = $w.Title; Area = ($w.W * $w.Hh); Desktop = $w.Desktop })
+    }
     return $hits | Sort-Object Area -Descending
 }
 
 function Test-SeamSplashVisible([int]$ProcId) {
-    $script:seamSplashSeen = $false
-    $cb = [SeamWin+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner = 0; [void][SeamWin]::GetWindowThreadProcessId($hwnd, [ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        if ([SeamWin]::ClassOf($hwnd) -eq 'WinttySplash' -and [SeamWin]::IsWindowVisible($hwnd)) { $script:seamSplashSeen = $true }
-        return $true
+    foreach ($w in [SeamDesk]::Windows($ProcId)) {
+        if ($w.Class -eq 'WinttySplash' -and $w.Visible) { return $true }
     }
-    [void][SeamWin]::EnumWindows($cb, [IntPtr]::Zero)
-    return $script:seamSplashSeen
+    return $false
 }
 
 function Wait-SeamReady($proc) {
@@ -270,7 +450,13 @@ function Start-SeamSession(
     # above the session table (an extra file outside the config root, and
     # -PrivateStateBase with -SharedStateBase) launch nothing and leave no
     # session behind, so neither reaches a hook.
-    [scriptblock]$BeforeTeardown = $null
+    [scriptblock]$BeforeTeardown = $null,
+    # Run the app on a private desktop (SeamDesk above): nothing it shows or
+    # activates can reach the desktop a person is using. Not the default
+    # yet, because harnesses that synthesize input or sample pixels need the
+    # input desktop, which DWM composes and input reaches; without the
+    # switch the launch is the plain activating launch it always was.
+    [switch]$PrivateDesktop
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
@@ -428,25 +614,24 @@ function Start-SeamSession(
         throw "HARNESS: $refusal"
     }
 
-    $startArgs = @{
-        FilePath         = $session.ExePath
-        PassThru         = $true
-        WorkingDirectory = (Split-Path -Parent $session.ExePath)
-    }
-    if ($Arguments.Count -gt 0) { $startArgs.ArgumentList = $Arguments }
-    # Everything from here can throw -- Start-Process itself, on a missing or
+    # Everything from here can throw -- the launch itself, on a missing or
     # locked image, Wait-SeamReady on a window that never appears or a splash
     # that never drops, Wait-SeamPipe on a Release build with the seam
     # compiled out, Connect-SeamPipe on a timeout -- and the caller does not
     # hold the session yet, so ITS finally cannot clean up. Left alone that
     # strands a running Wintty, and Assert-NoWinttyFrom refuses beside it
     # without stopping it, so one orphan blocks every seam harness on this
-    # build until a human intervenes; a launch that failed at Start-Process
+    # build until a human intervenes; a launch that failed to start
     # stranded the temp root and ran no teardown hook at all, which is why
     # the launch itself sits inside this try. Tear down here and rethrow.
     try {
-        $proc = Start-Process @startArgs
+        # The flags tell wintty-release's run-health check which kind of
+        # desktop this process's launches ran on.
+        $proc = Start-SeamAppProcess -FilePath $session.ExePath -ArgumentList $Arguments -PrivateDesktop:$PrivateDesktop
+        if ($PrivateDesktop) { [AppDomain]::CurrentDomain.SetData('WinttySeamDesktopLaunch', $true) }
+        else { [AppDomain]::CurrentDomain.SetData('WinttyDefaultDesktopLaunch', $true) }
         $session.Proc = $proc
+        $session.PrivateDesktop = [bool]$PrivateDesktop
         $main = Wait-SeamReady $proc
         $session.Hwnd64 = [int64]$main.Hwnd64
 
@@ -532,8 +717,9 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session, [scriptblock]$BeforeTe
     # The process this session started, by its exact pid, first; then the
     # sweep for anything else it started (matched on start time AND this
     # exe's path, so an instance from any other exe is never touched).
-    if ($Session.Proc -and -not $Session.Proc.HasExited) {
-        try { $Session.Proc.Kill($true); [void]$Session.Proc.WaitForExit(3000) } catch { }
+    # SeamDesk.Stop kills the whole tree under it and closes its desktop.
+    if ($Session.Proc) {
+        try { [SeamDesk]::Stop($Session.Proc) } catch { }
     }
     try {
         Stop-WinttyStartedAfter -Since $Session.Stamp -ExePath $Session.ExePath

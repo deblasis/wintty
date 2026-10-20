@@ -233,7 +233,7 @@ function Invoke-WiringCases([string]$LibPath) {
     # anything launches.
     $pipeSet = FirstIndex '\$env:WINTTY_SESSIOND_PIPE\s*='
     $guard = FirstIndex 'Assert-WinttyCoexistence'
-    $launch = FirstIndex 'Start-Process @startArgs'
+    $launch = FirstIndex 'Start-SeamAppProcess -FilePath'
     if ($pipeSet -lt 0 -or $guard -lt 0 -or $launch -lt 0 -or
         -not ($pipeSet -lt $guard -and $guard -lt $launch)) {
         $failed.Add('the daemon pipe is not minted before the coexistence guard, ahead of the launch')
@@ -1050,8 +1050,8 @@ function Invoke-TeardownHookCases([string]$LibPath) {
             if ($case.Guard -eq 'refuse') { throw 'hook-case refusal' }
             return @{ Running = @() }
         }
-        function Start-Process {
-            param($FilePath, $PassThru, $WorkingDirectory, $ArgumentList)
+        function Start-SeamAppProcess {
+            param($FilePath, $ArgumentList, $PrivateDesktop)
             if ($case.Start -eq 'throw') { throw 'hook-case start failure' }
             # An app that has already exited, so the teardown's kill is a
             # no-op and the hook can still read the code.
@@ -1150,7 +1150,7 @@ function Invoke-TeardownHookCases([string]$LibPath) {
                 $failed.Add("guard refusal: the hook ran $(Ran 'start') times, not once")
             }
 
-            # ---- Start-Process itself throws: nothing leaks, hook once ----
+            # ---- the launch itself throws: nothing leaks, hook once ----
             $seen.Clear()
             $case.Start = 'throw'
             $got = ''
@@ -1810,8 +1810,8 @@ try {
             Layer   = 'hook'
         },
         @{
-            Name    = 'Start-Process outside the teardown try'
-            Break   = { param($lines) Move-LinesBefore $lines '^\s*\$proc = Start-Process @startArgs$' '^\s*try \{$' }
+            Name    = 'the launch outside the teardown try'
+            Break   = { param($lines) Move-LinesBefore $lines '^\s*\$proc = Start-SeamAppProcess ' '^\s*try \{$' }
             Layer   = 'hook'
         }
     )
@@ -1839,6 +1839,50 @@ try {
 }
 finally {
     Remove-Item $mutantRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---- layer 9: the private desktop (live, no Wintty) -------------------------
+# A console stand-in launched the way Start-SeamSession -PrivateDesktop
+# launches the app: its thread must run on a wintty-seam-* desktop, the
+# window reads must find windows there and not on this desktop, and
+# SeamDesk.Stop must take the whole tree and the desktop with it.
+. $SeamClientPath
+$deskRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("seam-desk-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force $deskRoot | Out-Null
+try {
+    $out = Join-Path $deskRoot 'out.txt'
+    $child = Join-Path $deskRoot 'child.ps1'
+    Set-Content -LiteralPath $child -Value @"
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class DeskProbe { [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId(); [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint t); [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool GetUserObjectInformationW(IntPtr h, int i, StringBuilder b, int n, out int need); public static string Name() { var b = new StringBuilder(256); int n; GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), 2, b, 512, out n); return b.ToString(); } }'
+`$g = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 300' -WindowStyle Hidden -PassThru
+Set-Content -LiteralPath '$out' -Value @("desk=`$([DeskProbe]::Name())", "grandchild=`$(`$g.Id)")
+Start-Sleep 300
+"@
+    $p = Start-SeamAppProcess -FilePath (Get-Command pwsh).Source -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $child) -PrivateDesktop
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not (Test-Path -LiteralPath $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    Start-Sleep -Milliseconds 500
+    $kv = @{}
+    foreach ($l in @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)) { $i = $l.IndexOf('='); if ($i -gt 0) { $kv[$l.Substring(0, $i)] = $l.Substring($i + 1) } }
+    Assert-True ("$($kv.desk)" -like 'wintty-seam-*') "the stand-in runs on a private desktop (it reports '$($kv.desk)')"
+    [SeamDesk]::Stop($p)
+    $gone = $false
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
+        $alive = @(Get-Process -Id $p.Id, ([int]$kv.grandchild) -ErrorAction SilentlyContinue)
+        if ($alive.Count -eq 0) { $gone = $true; break }
+        Start-Sleep -Milliseconds 300
+    }
+    Assert-True $gone 'SeamDesk.Stop took the stand-in and its grandchild'
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($w in [SeamDesk]::Windows($PID)) { $names.Add($w.Desktop) }
+    $text = [System.IO.File]::ReadAllText($SeamClientPath)
+    $fn = $text.Substring($text.IndexOf('function Get-SeamWinUiWindows'))
+    $fn = $fn.Substring(0, $fn.IndexOf("`nfunction ", 10))
+    Assert-True ($fn -notmatch 'EnumWindows' -and $fn -match '\[SeamDesk\]::Windows') 'Get-SeamWinUiWindows reads every desktop, not only this one'
+}
+finally {
+    Remove-Item $deskRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 if ($script:fails -gt 0) {
