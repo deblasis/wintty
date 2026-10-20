@@ -158,6 +158,13 @@ EXACT_RULES = {
     "src/config/wintty_theme.zig": ZIG_LEGS + (LEG_WIN,),
     "src/log_bridge.zig": ZIG_LEGS + (LEG_WIN,),
     "src/main_c.zig": ZIG_LEGS + (LEG_WIN,),
+    # Embedded by Ghostty.Tests.csproj (#1346): Surface.zig for
+    # FirstPaneCommandWiringTests' reload-side pin, paths.zig for the
+    # ThemeSearchPathTerminfoWiringTests sentinel probe. An edit with no
+    # C# edit is a windows-tests failure the src/ rule alone would never
+    # run.
+    "src/Surface.zig": ZIG_LEGS + (LEG_WIN,),
+    "src/terminfo/paths.zig": ZIG_LEGS + (LEG_WIN,),
     # The compiled-result half of the shipping gate. It is #if !DEBUG, so
     # editing it proves nothing until a Release run executes it.
     "windows/Ghostty.Tests/Demo/ShippingBuildGateTests.cs": (LEG_WIN, LEG_RELEASE_GATE),
