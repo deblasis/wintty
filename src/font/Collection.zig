@@ -1395,7 +1395,7 @@ test "adjusted sizes" {
 
 test "face metrics" {
     // The web canvas backend doesn't calculate face metrics, only cell metrics
-    if (options.backend != .web_canvas) return error.SkipZigTest;
+    if (options.backend == .web_canvas) return error.SkipZigTest;
 
     const testing = std.testing;
     const alloc = testing.allocator;
