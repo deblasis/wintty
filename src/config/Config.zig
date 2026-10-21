@@ -5091,7 +5091,7 @@ fn cliDisablesDefaultFilesArgv(
 
 /// Absolute path of `tmp` itself.
 fn testTmpRoot(alloc: Allocator, tmp: *std.testing.TmpDir) ![]const u8 {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(std.testing.io, &buf);
     return try alloc.dupe(u8, buf[0..n]);
 }
@@ -13504,7 +13504,7 @@ test "issue 228: empty foreground after theme defers to theme value" {
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
@@ -13544,7 +13544,7 @@ test "issue 228: empty selection-background after theme resets optional to null"
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
@@ -13580,7 +13580,7 @@ test "issue 228: empty cursor-color after theme resets optional to null" {
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
@@ -13614,7 +13614,7 @@ test "issue 228: empty palette after theme defers to theme palette" {
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
@@ -13655,7 +13655,7 @@ test "issue 228: theme foreground preserved when no empty foreground written" {
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
@@ -13692,7 +13692,7 @@ test "issue 228: non-empty foreground still overrides theme" {
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
@@ -13812,7 +13812,7 @@ test "issue 228: empty foreground via real config file defers to theme" {
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
-    var theme_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var theme_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const theme_path = theme_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &theme_buf)];
 
     {
@@ -13823,7 +13823,7 @@ test "issue 228: empty foreground via real config file defers to theme" {
         try writer.interface.writeAll("foreground =\n");
         try writer.end();
     }
-    var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cfg_path = cfg_buf[0..try td.dir.realPathFile(testing.io, "config", &cfg_buf)];
 
     var cfg = try Config.default(alloc);

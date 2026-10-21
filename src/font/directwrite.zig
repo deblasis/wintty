@@ -987,7 +987,7 @@ test "dwrite.dll is resolved from System32, not from the search order" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var root_w: [std.fs.max_path_bytes]u16 = undefined;
+    var root_w: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const root_len = GetEnvironmentVariableW(
         std.unicode.utf8ToUtf16LeStringLiteral("SystemRoot"),
         &root_w,
@@ -995,7 +995,7 @@ test "dwrite.dll is resolved from System32, not from the search order" {
     );
     if (root_len == 0 or root_len >= root_w.len) return error.SkipZigTest;
 
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len8 = std.unicode.utf16LeToUtf8(&root_buf, root_w[0..root_len]) catch
         return error.SkipZigTest;
     const source = try std.fs.path.join(alloc, &.{ root_buf[0..root_len8], "System32", "version.dll" });
@@ -1012,10 +1012,10 @@ test "dwrite.dll is resolved from System32, not from the search order" {
     // FIRST in the old bare-name order, so only a plant there can turn the
     // old loader red - a working-directory plant sits behind System32 and
     // guards nothing. This is the location a hijack actually uses.
-    var exe_w: [std.fs.max_path_bytes]u16 = undefined;
+    var exe_w: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const exe_len = GetModuleFileNameW(null, &exe_w, exe_w.len);
     if (exe_len == 0 or exe_len >= exe_w.len) return error.SkipZigTest;
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const exe_len8 = try std.unicode.utf16LeToUtf8(&exe_buf, exe_w[0..exe_len]);
     const exe_dir = std.fs.path.dirname(exe_buf[0..exe_len8]) orelse
         return error.SkipZigTest;
@@ -1025,17 +1025,17 @@ test "dwrite.dll is resolved from System32, not from the search order" {
         return error.SkipZigTest;
     defer std.Io.Dir.deleteFileAbsolute(testing.io, plant_exe) catch {};
 
-    var saved: [std.fs.max_path_bytes]u8 = undefined;
+    var saved: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const saved_len = try std.process.currentPath(testing.io, &saved);
     defer std.process.setCurrentPath(testing.io, saved[0..saved_len]) catch {};
     try std.process.setCurrentPath(testing.io, work_dir);
 
     // Resolves, and the module behind it is System32's, not the plant.
     const module = loadDWrite() orelse return error.TestExpectedEqual;
-    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    var wide: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const len = GetModuleFileNameW(module, &wide, wide.len);
     if (len == 0 or len >= wide.len) return error.TestExpectedEqual;
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path_len = try std.unicode.utf16LeToUtf8(&path_buf, wide[0..len]);
     const path = path_buf[0..path_len];
     try testing.expect(std.ascii.indexOfIgnoreCase(path, "\\System32\\") != null);

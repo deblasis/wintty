@@ -194,7 +194,7 @@ test "expandHomeWindows" {
     const allocator = testing.allocator;
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     const home_dir = try expandHomeWindows(&environ_map, "~/", &buf);
     // Joining `~` with `/` leaves the separator on the end, as on Unix.

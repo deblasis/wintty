@@ -356,7 +356,7 @@ test "zioshade loadFromFile compiles a real shader file from disk to HLSL" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "shader.glsl", .data = test_crt });
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try tmp.dir.realPathFile(testing.io, "shader.glsl", &path_buf)];
 
     const hlsl = try loadFromFile(alloc, path, .hlsl);

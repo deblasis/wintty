@@ -418,9 +418,9 @@ const WindowsPty = struct {
     /// directory, or the resulting UTF-16 path doesn't fit in
     /// `buf_out` (which must reserve room for a null terminator).
     fn adjacentConptyPathW(
-        buf_out: *[std.fs.max_path_bytes]u16,
+        buf_out: *[std.Io.Dir.max_path_bytes]u16,
     ) ?[:0]const u16 {
-        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const exe_len = std.process.executablePath(
             global.io(),
             &exe_buf,
@@ -428,7 +428,7 @@ const WindowsPty = struct {
         const exe_path = exe_buf[0..exe_len];
         const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
 
-        var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var dll_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dll_path = std.fmt.bufPrint(
             &dll_path_buf,
             "{s}\\conpty.dll",
@@ -461,7 +461,7 @@ const WindowsPty = struct {
             .close = windows.exp.kernel32.ClosePseudoConsole,
         };
 
-        var path_buf: [std.fs.max_path_bytes]u16 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u16 = undefined;
         const path_w = adjacentConptyPathW(&path_buf) orelse {
             log.warn("pty: no bundled conpty.dll alongside executable; using OS conhost (Kitty graphics and Sixel will not work)", .{});
             pseudo_console_api = fallback;
@@ -707,7 +707,7 @@ test {
 test "WindowsPty.adjacentConptyPathW: returns path ending in conpty.dll" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var buf: [std.fs.max_path_bytes]u16 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const path = WindowsPty.adjacentConptyPathW(&buf) orelse {
         // selfExePath can fail in exotic execution contexts; treat
         // that as "skip" rather than "fail" since the resolver itself
@@ -716,7 +716,7 @@ test "WindowsPty.adjacentConptyPathW: returns path ending in conpty.dll" {
     };
 
     // Convert back to UTF-8 to assert the suffix.
-    var utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var utf8_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const utf8_len = try std.unicode.utf16LeToUtf8(&utf8_buf, path);
     try std.testing.expect(std.mem.endsWith(u8, utf8_buf[0..utf8_len], "\\conpty.dll"));
 }
@@ -724,7 +724,7 @@ test "WindowsPty.adjacentConptyPathW: returns path ending in conpty.dll" {
 test "WindowsPty.adjacentConptyPathW: null-terminated slice" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var buf: [std.fs.max_path_bytes]u16 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const path = WindowsPty.adjacentConptyPathW(&buf) orelse return error.SkipZigTest;
 
     // The returned slice is a `[:0]const u16` — the u16 immediately

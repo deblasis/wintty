@@ -1365,7 +1365,7 @@ test "powershell" {
     try testing.expect(std.mem.indexOf(u8, argv[5], "ghostty.ps1") != null);
     try testing.expect(std.mem.startsWith(u8, argv[5], ". '"));
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
         try std.fmt.bufPrint(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_PS1").?,
@@ -1396,7 +1396,7 @@ test "powershell: user-supplied args are left untouched" {
     try testing.expect(command.? == .shell);
     try testing.expectEqualStrings("pwsh -NoLogo -NoProfile", command.?.shell);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
         try std.fmt.bufPrint(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_PS1").?,
@@ -1503,7 +1503,7 @@ fn setupCmd(
 
     // Forward slashes are fine for Clink on Windows, matching the other
     // setup functions' path style.
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const clink_dir = try std.fmt.bufPrint(
         &path_buf,
         "{s}/shell-integration/cmd",
@@ -1738,7 +1738,7 @@ test "cmd: CLINK_PATH includes the shell-integration cmd dir" {
     _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
 
     // Exact match: with no prior CLINK_PATH, ours is the sole entry.
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
         try std.fmt.bufPrint(&path_buf, "{s}/shell-integration/cmd", .{res.path}),
         env.get("CLINK_PATH") orelse return error.NoClinkPath,
@@ -2099,7 +2099,7 @@ const TmpPackagedResourcesDir = struct {
         errdefer tmp_dir.cleanup();
 
         for (shell_integration_files) |rel| {
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const sub_path = try std.fmt.bufPrint(
                 &buf,
                 "shell-integration/{s}",

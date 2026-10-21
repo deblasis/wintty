@@ -70,7 +70,7 @@ pub const Location = enum {
     fn bundledThemesDir(arena_alloc: Allocator) error{OutOfMemory}!?[]const u8 {
         if (comptime builtin.os.tag != .windows) return null;
 
-        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const exe: []const u8 = exe_buf[0 .. std.process.executablePath(
             global.io(),
             &exe_buf,

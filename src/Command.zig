@@ -1436,7 +1436,7 @@ test "Command: a batch target whose path needs quoting refuses to spawn" {
     var td = try TempDir.init();
     defer td.deinit();
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir_len = try td.dir.realPath(testing.io, &path_buf);
     const dir_path = try std.fmt.allocPrintSentinel(
         alloc,
@@ -1485,7 +1485,7 @@ test "Command: a batch file target's argument cannot run a second command" {
         .data = "@echo off\r\necho args: %*>batch.marker\r\n",
     });
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir_len = try td.dir.realPath(testing.io, &path_buf);
     const dir_path = try std.fmt.allocPrintSentinel(
         alloc,

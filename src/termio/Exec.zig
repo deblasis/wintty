@@ -2958,7 +2958,7 @@ fn setupTermEnvBy(
     comptime pathReadable: fn ([]const u8) bool,
     comptime hasEntry: fn ([]const u8, []const u8) bool,
 ) !void {
-    var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var terminfo_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = terminfoDir(&terminfo_buf, resources_dir);
 
     if (dir == null) {
@@ -3253,7 +3253,7 @@ fn terminfoHasEntry(dir: []const u8, term: []const u8) bool {
     // accessAbsolute.
     if (!std.fs.path.isAbsolute(dir)) return false;
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(
         &buf,
         "{s}/" ++ terminfo_paths.hashed_leaf_format,
@@ -5726,7 +5726,7 @@ test "maybeWrapGitBashWithWinpty windows: absolute bash with adjacent winpty is 
 test "terminfoDir derives the directory beside the resources dir" {
     const testing = std.testing;
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
         "/usr/share/terminfo",
         terminfoDir(&buf, "/usr/share/ghostty").?,
@@ -5736,7 +5736,7 @@ test "terminfoDir derives the directory beside the resources dir" {
 test "terminfoDir has nothing to derive from a bare resources dir" {
     const testing = std.testing;
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(terminfoDir(&buf, null) == null);
     try testing.expect(terminfoDir(&buf, "ghostty") == null);
 }
@@ -6108,7 +6108,7 @@ fn testResourcesTree(
     });
 
     if (entry) |name| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const sub_dir = try std.fmt.bufPrint(
             &buf,
             "share/terminfo/{x:0>2}",
@@ -6116,7 +6116,7 @@ fn testResourcesTree(
         );
         try tmp.dir.createDirPath(io, sub_dir);
 
-        var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const sub_path = try std.fmt.bufPrint(
             &file_buf,
             "share/terminfo/{x:0>2}/{s}",
@@ -6288,7 +6288,7 @@ test "setupTermEnv windows: a compiled entry does not open the gate under a driv
 
     // Our own reader agrees the entry is there, so what follows is about the
     // path and not about the file.
-    var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var terminfo_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = terminfoDir(&terminfo_buf, resources).?;
     try testing.expect(terminfoHasEntry(dir, "xterm-ghostty"));
 
@@ -6327,7 +6327,7 @@ test "setupTermEnvBy windows: a readable path with a compiled entry opens the ga
 
     try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
     try testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
-    var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var terminfo_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = terminfoDir(&terminfo_buf, resources).?;
     try testing.expectEqualStrings(dir, env.get("TERMINFO_DIRS").?);
     // The other name spelled out: terminfo_var would follow its own flip.
@@ -6385,7 +6385,7 @@ test "terminfoHasEntry is per name, not per database" {
     defer tmp.cleanup();
     const resources = try testResourcesTree(alloc, &tmp, "xterm-kitty");
 
-    var terminfo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var terminfo_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = terminfoDir(&terminfo_buf, resources).?;
 
     try testing.expect(terminfoHasEntry(dir, "xterm-kitty"));

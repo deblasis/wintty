@@ -35,7 +35,7 @@ pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
     // own default (unset -> $HOME) is the correct chain target, which leaving
     // GHOSTTY_ZSH_ZDOTDIR unset yields.
     {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const win = try std.fmt.bufPrint(&buf, "{s}/shell-integration/zsh", .{resource_dir});
         if (dirExists(win)) {
             if (try posix_path.windowsToWsl(alloc, win)) |wsl_path| {
@@ -48,7 +48,7 @@ pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
 
     // fish: prepend <resource_dir>/shell-integration to XDG_DATA_DIRS.
     {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const win = try std.fmt.bufPrint(&buf, "{s}/shell-integration", .{resource_dir});
         if (dirExists(win)) {
             if (try posix_path.windowsToWsl(alloc, win)) |wsl_dir| {
@@ -151,7 +151,7 @@ test "setup: injects zsh + fish env and registers WSLENV" {
 
     // ZDOTDIR -> /mnt form of <res>/shell-integration/zsh
     {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const zsh_win = try std.fmt.bufPrint(&buf, "{s}/shell-integration/zsh", .{res});
         const expected = (try posix_path.windowsToWsl(alloc, zsh_win)).?;
         defer alloc.free(expected);
@@ -160,7 +160,7 @@ test "setup: injects zsh + fish env and registers WSLENV" {
 
     // XDG_DATA_DIRS prefixed with the /mnt integration dir + Linux defaults.
     {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const integ_win = try std.fmt.bufPrint(&buf, "{s}/shell-integration", .{res});
         const integ = (try posix_path.windowsToWsl(alloc, integ_win)).?;
         defer alloc.free(integ);

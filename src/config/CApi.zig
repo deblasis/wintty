@@ -407,7 +407,7 @@ test "ghostty_config_load_default_files reports and counts, and creates nothing"
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
     const env = try Config.TestXdgConfigHome.set(alloc, root);
     defer env.restore(alloc);
@@ -499,7 +499,7 @@ test "ghostty_config_create_default_file writes one, and never over one that arr
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
     const env = try Config.TestXdgConfigHome.set(alloc, root);
     defer env.restore(alloc);
@@ -787,7 +787,7 @@ test "finalize: a command the user set is not marked defaulted" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "t3-theme", .data = "background = #123456\n" });
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
     const theme_arg = try std.fmt.allocPrint(
         alloc,
