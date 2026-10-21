@@ -292,5 +292,10 @@ public sealed class DefaultTermRegistrationTests
         {
             // Parent not empty: another root outlives this test.
         }
+        catch (InvalidOperationException)
+        {
+            // Another class's parallel root is still in the parent; its own
+            // cleanup takes the parent out when it is last.
+        }
     }
 }
