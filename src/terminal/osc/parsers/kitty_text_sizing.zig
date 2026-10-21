@@ -2,6 +2,7 @@
 //! Specification: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
 
 const std = @import("std");
+const meta_compat = @import("../../../meta_compat.zig");
 
 const assert = @import("../../../quirks.zig").inlineAssert;
 
@@ -268,7 +269,7 @@ test "OSC 66: overlong UTF-8" {
 
     var p: Parser = .init(null);
 
-    const input = "66;;" ++ "bobr" ** 1025;
+    const input = "66;;" ++ meta_compat.repeat("bobr", 1025);
     for (input) |ch| p.next(ch);
 
     try testing.expect(p.end('\x1b') == null);

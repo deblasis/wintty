@@ -711,7 +711,7 @@ const ShutdownUserData = struct {
 
     /// Longer than `Message.WriteReq`'s small size so the needle is
     /// heap allocated and a dropped message is a detectable leak.
-    const needle = "y" ** 512;
+    const needle = @as([512]u8, @splat('y'));
 
     thread: *Thread,
     queued: std.Io.Event = .unset,
@@ -806,7 +806,7 @@ test "search thread deinit frees messages left in the mailbox" {
     defer thread.deinit();
 
     // Longer than the small size so the needle is heap allocated.
-    const needle = "x" ** 512;
+    const needle = @as([512]u8, @splat('x'));
     _ = thread.mailbox.push(
         io,
         .{ .change_needle = try .init(

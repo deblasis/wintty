@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../src/meta_compat.zig");
 const c = @import("c.zig").c;
 const Error = @import("main.zig").Error;
 
@@ -84,7 +85,7 @@ pub const Property = enum {
 
     pub fn cval(self: Property) [:0]const u8 {
         @setEvalBranchQuota(10_000);
-        inline for (@typeInfo(Property).@"enum".fields) |field| {
+        inline for (meta_compat.enumFields(Property)) |field| {
             if (self == @field(Property, field.name)) {
                 // Build our string in a comptime context so it is a binary
                 // constant and not stack allocated.

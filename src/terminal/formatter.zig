@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const fastprint = @import("../fastprint.zig");
 const lib = @import("lib.zig");
@@ -411,13 +412,13 @@ pub const TerminalFormatter = struct {
         // simplicity we just emit them all before. If we make this more complex
         // later we should add test cases for it.
         if (self.opts.emit == .vt and self.extra.modes) {
-            inline for (@typeInfo(modespkg.Mode).@"enum".fields) |field| {
-                const mode: modespkg.Mode = @enumFromInt(field.value);
+            inline for (meta_compat.enumFields(modespkg.Mode)) |field| {
+                const mode: modespkg.Mode = @fromBackingInt(@intCast(field.value));
                 const current = self.terminal.modes.get(mode);
                 const default_val = @field(self.terminal.modes.default, field.name);
 
                 if (current != default_val) {
-                    const tag: modespkg.ModeTag = @bitCast(@intFromEnum(mode));
+                    const tag: modespkg.ModeTag = @bitCast(@backingInt(mode));
                     const prefix = if (tag.ansi) "" else "?";
                     const suffix = if (current) "h" else "l";
                     try writer.print("\x1b[{s}{d}{s}", .{ prefix, tag.value, suffix });

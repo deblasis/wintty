@@ -409,7 +409,7 @@ test "Mailbox: a push it has to give up frees the message" {
 
     // A write too large for the union is heap allocated, so
     // std.testing.allocator fails this test if the give-up path leaks it.
-    const data = "e" ** 128;
+    const data = @as([128]u8, @splat('e'));
     const msg = try termio.Message.writeReq(alloc, @as([]const u8, data));
     try testing.expect(msg == .write_alloc);
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
@@ -171,9 +172,9 @@ pub const LocationIterator = struct {
         location: Location,
         dir: []const u8,
     } {
-        const max = @typeInfo(Location).@"enum".fields.len;
+        const max = meta_compat.enumFields(Location).len;
         while (self.i < max) {
-            const location: Location = @enumFromInt(self.i);
+            const location: Location = @fromBackingInt(@intCast(self.i));
             self.i += 1;
             if (try location.dir(self.arena_alloc)) |dir|
                 return .{
@@ -381,8 +382,8 @@ test "theme: search order prefers the current config dir over the pre-rename one
     // install shadow a migrated one. Driving the iterator instead would
     // only assert against whatever directories the test machine happens to
     // have.
-    try testing.expect(@intFromEnum(Location.user) < @intFromEnum(Location.user_ghostty));
-    try testing.expect(@intFromEnum(Location.user_ghostty) < @intFromEnum(Location.resources));
+    try testing.expect(@backingInt(Location.user) < @backingInt(Location.user_ghostty));
+    try testing.expect(@backingInt(Location.user_ghostty) < @backingInt(Location.resources));
 }
 
 test "theme: the bundled floor reaches the install root and stops there" {

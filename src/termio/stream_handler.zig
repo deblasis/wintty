@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -2252,7 +2253,7 @@ pub const StreamHandler = struct {
                             .dynamic => |dynamic| try answer.print(
                                 color_report_fmt.dynamic_16,
                                 .{
-                                    @intFromEnum(dynamic),
+                                    @backingInt(dynamic),
                                     @as(u16, color.r) * 257,
                                     @as(u16, color.g) * 257,
                                     @as(u16, color.b) * 257,
@@ -2274,7 +2275,7 @@ pub const StreamHandler = struct {
                             .dynamic => |dynamic| try answer.print(
                                 color_report_fmt.dynamic_8,
                                 .{
-                                    @intFromEnum(dynamic),
+                                    @backingInt(dynamic),
                                     @as(u16, color.r),
                                     @as(u16, color.g),
                                     @as(u16, color.b),
@@ -3103,7 +3104,7 @@ test "stream handler refuses and frees an owned write at the backlog cap" {
     // Longer than WriteReq's inline capacity, so this is a .write_alloc
     // that owns its bytes. Refusing it has to free them: the testing
     // allocator fails the test if the drop path forgets.
-    const data: []const u8 = "\x1B]11;rgb:1111/2222/3333\x1B\\" ** 4;
+    const data: []const u8 = meta_compat.repeat("\x1B]11;rgb:1111/2222/3333\x1B\\", 4);
     const msg = try termio.Message.writeReq(testing.allocator, data);
     try testing.expect(msg == .write_alloc);
 

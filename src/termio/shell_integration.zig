@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -115,7 +116,7 @@ test "force shell" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
-    inline for (@typeInfo(Shell).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(Shell)) |field| {
         const shell = @field(Shell, field.name);
 
         var res: TmpResourcesDir = try .init(shell);
@@ -248,7 +249,7 @@ pub fn setupFeatures(
     features: config.ShellIntegrationFeatures,
     cursor_blink: bool,
 ) !void {
-    const fields = @typeInfo(@TypeOf(features)).@"struct".fields;
+    const fields = meta_compat.structFields(@TypeOf(features));
     const capacity: usize = capacity: {
         comptime var n: usize = fields.len - 1; // commas
         inline for (fields) |field| n += field.name.len;
@@ -2165,7 +2166,7 @@ test "packaged tree: the fixture matches what the build installs" {
 
     // Every shell in the enum must own at least one of those files, so a new
     // shell cannot be added with a directory nothing ever installs into.
-    inline for (@typeInfo(Shell).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(Shell)) |field| {
         var found = false;
         for (shell_integration_files) |rel| {
             if (std.mem.startsWith(u8, rel, field.name ++ "/")) found = true;

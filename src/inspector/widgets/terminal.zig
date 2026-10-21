@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const builtin = @import("builtin");
 const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -89,11 +90,7 @@ pub const Info = struct {
             };
 
             var title_buf: [128]u8 = undefined;
-            const title = std.fmt.bufPrintZ(
-                &title_buf,
-                "Screen: {t}",
-                .{entry.key},
-            ) catch "Screen";
+            const title = std.mem.printSentinel(&title_buf, "Screen: {t}", .{entry.key}, 0) catch "Screen";
 
             // Setup our next window so it has some size to it.
             const viewport = cimgui.c.ImGui_GetMainViewport();
@@ -217,7 +214,7 @@ fn screensTable(
         }
         {
             _ = cimgui.c.ImGui_TableSetColumnIndex(2);
-            cimgui.c.ImGui_PushIDInt(@intFromEnum(key));
+            cimgui.c.ImGui_PushIDInt(@backingInt(key));
             defer cimgui.c.ImGui_PopID();
             cimgui.c.ImGui_BeginDisabled(!is_initialized);
             defer cimgui.c.ImGui_EndDisabled();
@@ -588,7 +585,7 @@ fn modesTable(t: *Terminal) void {
         cimgui.c.ImGui_TableHeadersRow();
     }
 
-    inline for (@typeInfo(terminal.Mode).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(terminal.Mode)) |field| {
         @setEvalBranchQuota(6000);
         const tag: modes.ModeTag = @bitCast(@as(modes.ModeTag.Backing, field.value));
 

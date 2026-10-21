@@ -2,6 +2,7 @@
 //! Specification: https://sw.kovidgoyal.net/kitty/desktop-notifications/
 
 const std = @import("std");
+const meta_compat = @import("../../../meta_compat.zig");
 const lib = @import("../../lib.zig");
 
 const assert = @import("../../../quirks.zig").inlineAssert;
@@ -251,7 +252,7 @@ fn parsePackedStruct(comptime T: type, str: []const u8) T {
             }
         };
 
-        inline for (info.fields) |field| {
+        inline for (meta_compat.structFields(T)) |field| {
             comptime assert(field.type == bool);
             if (std.mem.eql(u8, field.name, part)) {
                 @field(result, field.name) = value;

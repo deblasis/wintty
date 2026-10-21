@@ -310,10 +310,10 @@ pub const SearchOverlay = extern struct {
     ) callconv(.c) ?[*:0]const u8 {
         if (!has_total or total == 0) return glib.ext.dupeZ(u8, "0/0");
         var buf: [32]u8 = undefined;
-        const label = std.fmt.bufPrintZ(&buf, "{}/{}", .{
+        const label = std.mem.printSentinel(&buf, "{}/{}", .{
             if (has_selected) selected + 1 else 0,
             total,
-        }) catch return null;
+        }, 0) catch return null;
         return glib.ext.dupeZ(u8, label);
     }
 

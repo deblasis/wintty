@@ -11,6 +11,7 @@
 const Config = @This();
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
 const assert = @import("../quirks.zig").inlineAssert;
@@ -3930,7 +3931,7 @@ else
 /// debug builds, `false` for all others.
 ///
 /// Available since: 1.1.0
-@"gtk-opengl-debug": bool = builtin.mode == .Debug,
+@"gtk-opengl-debug": bool = builtin.mode == .debug,
 
 /// If `true`, the Ghostty GTK application will run in single-instance mode:
 /// each new `ghostty` process launched will result in a new window if there is
@@ -4467,7 +4468,7 @@ test "config file with an over-long line keeps reading" {
     const alloc = testing.allocator;
 
     const data = "title = " ++
-        ("x" ** cli.args.LineIterator.MAX_LINE_SIZE) ++
+        (@as([cli.args.LineIterator.MAX_LINE_SIZE]u8, @splat('x'))) ++
         "\nfont-size = 20\n";
     var reader: std.Io.Reader = .fixed(data);
     var cfg = try Config.default(alloc);
@@ -5380,9 +5381,9 @@ test "DefaultFiles values are the ones ghostty.h publishes" {
     // against include/ghostty.h. @embedFile cannot reach the header from
     // here (it is outside the source package), so the three-way check lives
     // where the header is already in hand.
-    try testing.expectEqual(@as(c_int, -1), @intFromEnum(DefaultFiles.unreadable));
-    try testing.expectEqual(@as(c_int, 0), @intFromEnum(DefaultFiles.absent));
-    try testing.expectEqual(@as(c_int, 1), @intFromEnum(DefaultFiles.loaded));
+    try testing.expectEqual(@as(c_int, -1), @backingInt(DefaultFiles.unreadable));
+    try testing.expectEqual(@as(c_int, 0), @backingInt(DefaultFiles.absent));
+    try testing.expectEqual(@as(c_int, 1), @backingInt(DefaultFiles.loaded));
 }
 
 test "createDefaultFile writes nothing when the command line turns the default files off" {
@@ -5983,7 +5984,7 @@ pub fn changeConditionalState(
     // If the conditional state between the old and new is the same,
     // then we don't need to do anything.
     relevant: {
-        inline for (@typeInfo(conditional.Key).@"enum".fields) |field| {
+        inline for (meta_compat.enumFields(conditional.Key)) |field| {
             const key: conditional.Key = @field(conditional.Key, field.name);
 
             // Conditional set contains the keys that this config uses. So we
@@ -6031,7 +6032,7 @@ fn expandPaths(self: *Config, base: []const u8) !void {
     );
 
     // Expand all of our paths
-    inline for (@typeInfo(Config).@"struct".fields) |field| {
+    inline for (meta_compat.structFields(Config)) |field| {
         switch (field.type) {
             RepeatablePath, Path => {
                 try @field(self, field.name).expand(
@@ -6838,7 +6839,7 @@ pub fn clone(
     const alloc_arena = result._arena.?.allocator();
 
     // Copy our values
-    inline for (@typeInfo(Config).@"struct".fields) |field| {
+    inline for (meta_compat.structFields(Config)) |field| {
         if (!@hasField(Key, field.name)) continue;
         @field(result, field.name) = try cloneValue(
             alloc_arena,
@@ -6943,7 +6944,7 @@ pub fn changeIterator(old: *const Config, new: *const Config) ChangeIterator {
 pub fn changed(self: *const Config, new: *const Config, comptime key: Key) bool {
     // Get the field at comptime
     const field = comptime field: {
-        const fields = std.meta.fields(Config);
+        const fields = meta_compat.structFields(Config);
         for (fields) |field| {
             if (@field(Key, field.name) == key) {
                 break :field field;
@@ -6965,7 +6966,7 @@ pub const ChangeIterator = struct {
     i: usize = 0,
 
     pub fn next(self: *ChangeIterator) ?Key {
-        const fields = comptime std.meta.fields(Key);
+        const fields = meta_compat.enumFields(Key);
         while (self.i < fields.len) {
             switch (self.i) {
                 inline 0...(fields.len - 1) => |i| {
@@ -7745,7 +7746,7 @@ pub const Palette = struct {
     value: terminal.color.Palette = terminal.color.default,
 
     /// Keep track of which indexes were manually set by the user.
-    mask: terminal.color.PaletteMask = .initEmpty(),
+    mask: terminal.color.PaletteMask = .empty,
 
     /// ghostty_config_palette_s
     pub const C = extern struct {
@@ -11891,8 +11892,7 @@ pub const BackgroundBlur = union(enum) {
         )) |v| switch (v) {
             inline else => |tag| tag: {
                 // We can only parse void types
-                const info = std.meta.fieldInfo(BackgroundBlur, tag);
-                if (info.type != void) break :tag;
+                if (@FieldType(BackgroundBlur, @tagName(tag)) != void) break :tag;
                 self.* = @unionInit(
                     BackgroundBlur,
                     @tagName(tag),

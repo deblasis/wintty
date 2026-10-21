@@ -17013,7 +17013,7 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
         const page = s.pages.first.?.page();
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 0 },
-            .uri = "a" ** (pagepkg.string_bytes_default - 1),
+            .uri = @as([(pagepkg.string_bytes_default - 1)]u8, @splat('a')),
         });
         const rac = page.getRowAndCell(page.size.cols - 1, page.size.rows - 1);
         rac.row.wrap = true;
@@ -17037,7 +17037,7 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
         const page = s.pages.last.?.page();
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 1 },
-            .uri = "a" ** (pagepkg.string_bytes_default - 1),
+            .uri = @as([(pagepkg.string_bytes_default - 1)]u8, @splat('a')),
         });
         const rac = page.getRowAndCell(0, 0);
         rac.row.wrap_continuation = true;
@@ -17109,9 +17109,9 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     //  …B | <- B is hyperlinked with a 33-byte URI and 31-byte ID.
     //  +--+
 
-    const uri_a = "a" ** (pagepkg.string_bytes_default - 64);
-    const uri_b = "b" ** 33;
-    const id_b = "i" ** 31;
+    const uri_a = @as([(pagepkg.string_bytes_default - 64)]u8, @splat('a'));
+    const uri_b = @as([33]u8, @splat('b'));
+    const id_b = @as([31]u8, @splat('i'));
 
     // Hyperlink A in the bottom right of the first page. Mark the final
     // row as wrapped.

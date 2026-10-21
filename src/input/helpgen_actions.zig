@@ -3,6 +3,7 @@
 //! markdown for website) while maintaining consistent content.
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const KeybindAction = @import("Binding.zig").Action;
 const help_strings = @import("help_strings");
 
@@ -73,7 +74,7 @@ pub fn generate(
     var stream: std.Io.Writer.Allocating = .init(page_allocator);
     defer stream.deinit();
 
-    const fields = @typeInfo(KeybindAction).@"union".fields;
+    const fields = meta_compat.unionFields(KeybindAction);
     inline for (fields) |field| {
         if (field.name[0] == '_') continue;
 

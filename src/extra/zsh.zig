@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 
 const Config = @import("../config/Config.zig");
 const Action = @import("../cli.zig").ghostty.Action;
@@ -30,7 +31,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         \\
         \\_fonts () {
         \\  local font_list=$(ghostty +
-        ++ names.list_fonts_action ++
+    ++ names.list_fonts_action ++
         \\ | grep -Z '^[A-Z]')
         \\  local fonts=(${(f)font_list})
         \\  _describe -t fonts 'fonts' fonts
@@ -38,7 +39,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         \\
         \\_themes() {
         \\  local theme_list=$(ghostty +
-        ++ names.list_themes_action ++
+    ++ names.list_themes_action ++
         \\ | sed -E 's/^(.*) \(.*$/\1/')
         \\  local themes=(${(f)theme_list})
         \\  _describe -t themes 'themes' themes
@@ -50,7 +51,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
     try writer.writeAll("  _arguments \\\n");
     try writer.writeAll("    \"--help\" \\\n");
     try writer.writeAll("    \"--version\" \\\n");
-    for (@typeInfo(Config).@"struct".fields) |field| {
+    for (meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
         try writer.writeAll("    \"--");
         try writer.writeAll(field.name);
@@ -143,7 +144,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         // how to get 'commands'
         var count: usize = 0;
         const padding = "        ";
-        for (@typeInfo(Action).@"enum".fields) |field| {
+        for (meta_compat.enumFields(Action)) |field| {
             try writer.writeAll(padding ++ "'+");
             try writer.writeAll(field.name);
             try writer.writeAll("'\n");
@@ -169,14 +170,14 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
     );
     {
         const padding = "        ";
-        for (@typeInfo(Action).@"enum".fields) |field| {
+        for (meta_compat.enumFields(Action)) |field| {
             const options = @field(Action, field.name).options();
             // assumes options will never be created with only <_name> members
-            if (@typeInfo(options).@"struct".fields.len == 0) continue;
+            if (meta_compat.structFields(options).len == 0) continue;
 
             try writer.writeAll(padding ++ "(+" ++ field.name ++ ")\n");
             try writer.writeAll(padding ++ "  _arguments \\\n");
-            for (@typeInfo(options).@"struct".fields) |opt| {
+            for (meta_compat.structFields(options)) |opt| {
                 if (opt.name[0] == '_') continue;
 
                 try writer.writeAll(padding ++ "    '--");

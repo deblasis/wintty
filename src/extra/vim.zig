@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Config = @import("../config/Config.zig");
 
 /// This is the associated Vim file as named by the variable.
@@ -96,7 +97,7 @@ fn writeSyntax(writer: *std.Io.Writer) !void {
         \\syn keyword ghosttyConfigKeyword
     );
 
-    const config_fields = @typeInfo(Config).@"struct".fields;
+    const config_fields = meta_compat.structFields(Config);
     inline for (config_fields) |field| {
         if (field.name[0] == '_') continue;
         try writer.print("\n\t\\ {s}", .{field.name});

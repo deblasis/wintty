@@ -9,6 +9,7 @@
 const Texture = @This();
 
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const builtin = @import("builtin");
 
 const d3d12 = @import("d3d12.zig");
@@ -839,7 +840,7 @@ test "Texture.Options.retire has no default" {
     // The found flag is the anti-vacuity half: rename the field and the
     // loop would otherwise match nothing and pass.
     var found = false;
-    inline for (@typeInfo(Options).@"struct".fields) |field| {
+    inline for (meta_compat.structFields(Options)) |field| {
         if (comptime std.mem.eql(u8, field.name, "retire")) {
             found = true;
             try std.testing.expect(field.default_value_ptr == null);

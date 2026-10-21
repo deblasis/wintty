@@ -80,7 +80,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     //
     // Note: we ALWAYS want to allocate here because the result is always
     // freed, do not try to use internal_os.getenv or posix getenv.
-    if (comptime builtin.mode != .Debug) env: {
+    if (comptime builtin.mode != .debug) env: {
         const dir = global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR") catch |err| switch (err) {
             error.EnvironmentVariableMissing => break :env,
             else => return err,
@@ -116,7 +116,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
 
     // If terminfo detection failed in debug builds (somehow),
     // fallback and use the provided resources dir.
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         if (global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
             if (validResourcesDir(dir)) return .{ .app_path = dir };
 

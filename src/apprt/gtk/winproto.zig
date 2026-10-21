@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 
@@ -33,7 +34,7 @@ pub const App = union(Protocol) {
         app_id: [:0]const u8,
         config: *const Config,
     ) !App {
-        inline for (@typeInfo(App).@"union".fields) |field| {
+        inline for (meta_compat.unionFields(App)) |field| {
             if (try field.type.init(
                 alloc,
                 gdk_display,
@@ -119,7 +120,7 @@ pub const Window = union(Protocol) {
     ) !Window {
         return switch (app.*) {
             inline else => |*v, tag| {
-                inline for (@typeInfo(Window).@"union".fields) |field| {
+                inline for (meta_compat.unionFields(Window)) |field| {
                     if (comptime std.mem.eql(
                         u8,
                         field.name,

@@ -906,11 +906,7 @@ pub const Handler = struct {
         // Values are hex-encoded uppercase, matching the static map. The
         // buffer fits any name allowed above, so the print cannot fail.
         var buf: [max_tn_response_bytes]u8 = undefined;
-        self.writePty(std.fmt.bufPrintZ(
-            &buf,
-            "\x1bP1+r" ++ encoded_tn_key ++ "={X}\x1b\\",
-            .{name},
-        ) catch unreachable);
+        self.writePty(std.mem.printSentinel(&buf, "\x1bP1+r" ++ encoded_tn_key ++ "={X}\x1b\\", .{name}, 0) catch unreachable);
     }
 
     fn bell(self: *Handler) void {
@@ -1746,10 +1742,10 @@ pub const Handler = struct {
                 const pos = self.cursorReportPos();
 
                 var buf: [64]u8 = undefined;
-                const resp = std.fmt.bufPrintZ(&buf, "\x1B[{};{}R", .{
+                const resp = std.mem.printSentinel(&buf, "\x1B[{};{}R", .{
                     pos.y + 1,
                     pos.x + 1,
-                }) catch return;
+                }, 0) catch return;
                 self.writePty(resp);
             },
 
@@ -1759,10 +1755,10 @@ pub const Handler = struct {
                 const pos = self.cursorReportPos();
 
                 var buf: [64]u8 = undefined;
-                const resp = std.fmt.bufPrintZ(&buf, "\x1B[?{};{};1R", .{
+                const resp = std.mem.printSentinel(&buf, "\x1B[?{};{};1R", .{
                     pos.y + 1,
                     pos.x + 1,
-                }) catch return;
+                }, 0) catch return;
                 self.writePty(resp);
             },
 
@@ -1807,11 +1803,7 @@ pub const Handler = struct {
     fn reportXtversion(self: *Handler) void {
         const version = if (self.effects.xtversion) |func| func(self) else "";
         var buf: [288]u8 = undefined;
-        const resp = std.fmt.bufPrintZ(
-            &buf,
-            "\x1BP>|{s}\x1B\\",
-            .{if (version.len > 0) version else "libghostty"},
-        ) catch return;
+        const resp = std.mem.printSentinel(&buf, "\x1BP>|{s}\x1B\\", .{if (version.len > 0) version else "libghostty"}, 0) catch return;
         self.writePty(resp);
     }
 
@@ -1967,9 +1959,9 @@ pub const Handler = struct {
     fn queryKittyKeyboard(self: *Handler) void {
         // Max response is "\x1b[?31u\x00" (7 bytes): the flags are a u5 (max 31).
         var buf: [32]u8 = undefined;
-        const resp = std.fmt.bufPrintZ(&buf, "\x1b[?{}u", .{
+        const resp = std.mem.printSentinel(&buf, "\x1b[?{}u", .{
             self.terminal.screens.active.kitty_keyboard.current().int(),
-        }) catch return;
+        }, 0) catch return;
         self.writePty(resp);
     }
 
@@ -2196,7 +2188,7 @@ pub const Handler = struct {
                 .background,
                 .cursor,
                 => {
-                    try writer.print("\x1b]{d};", .{@intFromEnum(dynamic)});
+                    try writer.print("\x1b]{d};", .{@backingInt(dynamic)});
                     try c.encodeRgb16(writer);
                     try writer.writeAll(terminator.string());
                 },
@@ -3205,7 +3197,7 @@ test "XTGETTCAP TN responses" {
         std.fmt.bytesToHex("xterm-256color", .upper) ++ "\x1B\\");
 
     // A maximum-length name is still reported in full.
-    const max_name = "a" ** Handler.max_terminfo_name_bytes;
+    const max_name = @as([Handler.max_terminfo_name_bytes]u8, @splat('a'));
     s.handler.terminfo_name = max_name;
     s.nextSlice(tn_query);
     try S.expectResponse("\x1BP1+r" ++ std.fmt.bytesToHex("TN", .upper) ++ "=" ++
@@ -3219,7 +3211,7 @@ test "XTGETTCAP TN responses" {
         std.fmt.bytesToHex("256", .upper) ++ "\x1B\\");
 
     // As are names beyond the maximum length.
-    s.handler.terminfo_name = "a" ** (Handler.max_terminfo_name_bytes + 1);
+    s.handler.terminfo_name = @as([(Handler.max_terminfo_name_bytes + 1)]u8, @splat('a'));
     s.nextSlice(tn_query);
     try testing.expectEqual(@as(usize, 0), S.calls);
     try testing.expect(!s.handler.semantic_failure);
@@ -7335,7 +7327,7 @@ test "paste: large text streams to the pty in chunks" {
 
     // Two full chunks and a partial one with the frame, never the
     // whole thing at once.
-    const data = "x" ** 10_000;
+    const data = @as([10_000]u8, @splat('x'));
     try testing.expect(try handler.paste(.{
         .contents = .{ .memory = &.{.{ .mime = "text/plain", .data = data }} },
     }));

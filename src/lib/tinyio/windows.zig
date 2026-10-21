@@ -702,7 +702,7 @@ test "windows: path conversion" {
 
     // Encoding errors are path errors.
     try testing.expectError(error.BadPathName, pathToNt(cwd, "bad\xff", &p));
-    try testing.expectError(error.NameTooLong, pathToNt(cwd, "a" ** (windows.PATH_MAX_WIDE + 1), &p));
+    try testing.expectError(error.NameTooLong, pathToNt(cwd, @as([(windows.PATH_MAX_WIDE + 1)]u8, @splat('a')), &p));
 }
 
 test "windows: realPath resolves through symlinks" {

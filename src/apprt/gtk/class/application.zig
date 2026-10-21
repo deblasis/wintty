@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const meta_compat = @import("../../../meta_compat.zig");
 const assert = @import("../../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const adw = @import("adw");
@@ -1480,7 +1481,7 @@ pub const Application = extern struct {
         const priv = self.private();
         assert(priv.signal_source == null);
         priv.signal_source = glibunix.signalAdd(
-            @intFromEnum(std.posix.SIG.USR2),
+            @backingInt(std.posix.SIG.USR2),
             handleSigusr2,
             self,
         );
@@ -1785,11 +1786,7 @@ pub const Application = extern struct {
         };
 
         var body_buf: [512]u8 = undefined;
-        const body = std.fmt.bufPrintZ(
-            &body_buf,
-            "{s}: {s}",
-            .{ label, detail },
-        ) catch return;
+        const body = std.mem.printSentinel(&body_buf, "{s}: {s}", .{ label, detail }, 0) catch return;
 
         Action.desktopNotification(self, .app, .{
             .title = std.mem.span(i18n._("Global keybind unavailable")),
@@ -2239,7 +2236,7 @@ const Action = struct {
         ) callconv(.c) void {
             defer dialog.unref();
 
-            if (response_id != @intFromEnum(gtk.ResponseType.accept)) return;
+            if (response_id != @backingInt(gtk.ResponseType.accept)) return;
 
             const file = dialog.as(gtk.FileChooser).getFile() orelse {
                 log.warn("inspector export dialog returned no file", .{});
@@ -2391,7 +2388,7 @@ const Action = struct {
                     .previous => .previous,
                     .next => .next,
                     .last => .last,
-                    else => .{ .n = @intCast(@intFromEnum(tab)) },
+                    else => .{ .n = @intCast(@backingInt(tab)) },
                 });
             },
         }
@@ -3337,7 +3334,7 @@ fn setGtkEnv(config: *const CoreConfig) std.Io.Writer.Error!void {
         var buf: [1024]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         var first: bool = true;
-        inline for (@typeInfo(@TypeOf(gdk_debug)).@"struct".fields) |field| {
+        inline for (meta_compat.structFields(@TypeOf(gdk_debug))) |field| {
             if (@field(gdk_debug, field.name)) {
                 if (!first) try writer.writeAll(",");
                 try writer.writeAll(field.name);
@@ -3354,7 +3351,7 @@ fn setGtkEnv(config: *const CoreConfig) std.Io.Writer.Error!void {
         var buf: [1024]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         var first: bool = true;
-        inline for (@typeInfo(@TypeOf(gdk_disable)).@"struct".fields) |field| {
+        inline for (meta_compat.structFields(@TypeOf(gdk_disable))) |field| {
             if (@field(gdk_disable, field.name)) {
                 if (!first) try writer.writeAll(",");
                 try writer.writeAll(field.name);

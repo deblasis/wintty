@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 
 /// The type of action associated with a mouse event. This is different
 /// from ButtonState because button state is simply the current state
@@ -33,7 +34,7 @@ pub const Button = enum(c_int) {
     /// densely packed array indexed by this enum needs `max + 1` elements.
     pub const max = max: {
         var cur = 0;
-        for (@typeInfo(Self).@"enum".fields) |field| {
+        for (meta_compat.enumFields(Self)) |field| {
             if (field.value > cur) cur = field.value;
         }
 

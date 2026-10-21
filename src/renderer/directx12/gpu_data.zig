@@ -5,6 +5,7 @@
 //! file but do not cross-reference the Metal definitions; verify manually
 //! if drift is suspected.
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const math = @import("../../math.zig");
 const mirrors = @import("../shader_mirrors.zig");
 
@@ -291,10 +292,10 @@ comptime {
     // added on one side only, in either direction, and the body scan
     // refuses a member HLSL would default-pack.
     const uniforms_cbuffer = hlslCbufferBody(hlsl_source);
-    if (uniforms_hlsl_fields.len != @typeInfo(Uniforms).@"struct".fields.len)
+    if (uniforms_hlsl_fields.len != meta_compat.structFields(Uniforms).len)
         @compileError(std.fmt.comptimePrint(
             "Uniforms has {d} fields but uniforms_hlsl_fields maps {d} to HLSL cbuffer fields; every field needs a mapping",
-            .{ @typeInfo(Uniforms).@"struct".fields.len, uniforms_hlsl_fields.len },
+            .{ meta_compat.structFields(Uniforms).len, uniforms_hlsl_fields.len },
         ));
     if (hlslPackoffsetCount(uniforms_cbuffer) != uniforms_hlsl_fields.len)
         @compileError(std.fmt.comptimePrint(
@@ -344,7 +345,7 @@ comptime {
     // block of its own so a layout failure above does not mask these.
     @setEvalBranchQuota(1_000_000);
     const bools_ty = @FieldType(Uniforms, "bools");
-    if (@sizeOf(bools_ty) != @typeInfo(bools_ty).@"struct".fields.len)
+    if (@sizeOf(bools_ty) != meta_compat.structFields(bools_ty).len)
         @compileError("Uniforms.bools must stay one byte per flag: shaders.hlsl reads the flags as bytes of one uint");
     const wide_index = std.meta.fieldIndex(bools_ty, "cursor_wide") orelse
         @compileError("Uniforms.bools must keep a cursor_wide flag");

@@ -44,7 +44,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     // OS-specific
     switch (cfg.target.result.os.tag) {
         .windows => {
-            exe.subsystem = .Windows;
+            exe.subsystem = .windows;
             exe.root_module.addWin32ResourceFile(.{
                 .file = b.path("dist/windows/ghostty.rc"),
             });
@@ -85,9 +85,9 @@ fn checkNixShell(exe: *std.Build.Step.Compile, cfg: *const Config) !void {
     // If we're in a nix shell, not a problem
     if (cfg.env.get("IN_NIX_SHELL") != null) return;
 
-    try exe.step.addError(
-        "\x1b[" ++ color_map.get("yellow").? ++
-            "\x1b[" ++ color_map.get("d").? ++
+    std.log.warn("{s}", .{
+        "\x1b[33m" ++
+            "\x1b[2m" ++
             \\Detected building on and for NixOS outside of the Nix shell environment.
             \\
             \\The resulting ghostty binary will likely fail on launch because it is
@@ -103,8 +103,7 @@ fn checkNixShell(exe: *std.Build.Step.Compile, cfg: *const Config) !void {
             \\
         ++
             "\x1b[0m",
-        .{},
-    );
+    });
 }
 
 /// ANSI escape codes for colored log output

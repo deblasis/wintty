@@ -38,7 +38,7 @@ test "OSC 0: longer than buffer" {
 
     var p: Parser = .init(null);
 
-    const input = "0;" ++ "a" ** (Parser.MAX_BUF + 2);
+    const input = "0;" ++ @as([(Parser.MAX_BUF + 2)]u8, @splat('a'));
     for (input) |ch| p.next(ch);
 
     try testing.expect(p.end(null) == null);
@@ -50,7 +50,7 @@ test "OSC 0: one shorter than buffer length" {
     var p: Parser = .init(null);
 
     const prefix = "0;";
-    const title = "a" ** (Parser.MAX_BUF - 1);
+    const title = @as([(Parser.MAX_BUF - 1)]u8, @splat('a'));
     const input = prefix ++ title;
     for (input) |ch| p.next(ch);
 
@@ -65,7 +65,7 @@ test "OSC 0: exactly at buffer length" {
     var p: Parser = .init(null);
 
     const prefix = "0;";
-    const title = "a" ** Parser.MAX_BUF;
+    const title = @as([Parser.MAX_BUF]u8, @splat('a'));
     const input = prefix ++ title;
     for (input) |ch| p.next(ch);
 

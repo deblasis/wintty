@@ -3,6 +3,7 @@
 const Binding = @This();
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.keybind);
 const assert = @import("../quirks.zig").inlineAssert;
@@ -286,13 +287,13 @@ pub fn lessThan(_: void, lhs: Binding, rhs: Binding) bool {
 
     const lhs_key: c_int = blk: {
         switch (lhs.trigger.key) {
-            .physical => break :blk @intFromEnum(lhs.trigger.key.physical),
+            .physical => break :blk @backingInt(lhs.trigger.key.physical),
             .unicode => break :blk @intCast(lhs.trigger.key.unicode),
         }
     };
     const rhs_key: c_int = blk: {
         switch (rhs.trigger.key) {
-            .physical => break :blk @intFromEnum(rhs.trigger.key.physical),
+            .physical => break :blk @backingInt(rhs.trigger.key.physical),
             .unicode => break :blk @intCast(rhs.trigger.key.unicode),
         }
     };
@@ -1309,7 +1310,7 @@ pub const Action = union(enum) {
         if (action.len == 0) return Error.InvalidFormat;
 
         const actionInfo = @typeInfo(Action).@"union";
-        inline for (actionInfo.fields) |field| {
+        inline for (meta_compat.unionFields(Action)) |field| {
             if (std.mem.eql(u8, action, field.name)) {
                 // If the field type is void we expect no value
                 switch (field.type) {
@@ -1636,7 +1637,7 @@ pub const Action = union(enum) {
     pub fn Scoped(comptime s: Scope) type {
         @setEvalBranchQuota(100_000);
 
-        const all_fields = @typeInfo(Action).@"union".fields;
+        const all_fields = meta_compat.unionFields(Action);
 
         // Find all fields that are app-scoped
         var i: comptime_int = 0;
@@ -1919,7 +1920,7 @@ pub const Trigger = struct {
 
             // Check if its a modifier
             const modsInfo = @typeInfo(key.Mods).@"struct";
-            inline for (modsInfo.fields) |field| {
+            inline for (meta_compat.structFields(key.Mods)) |field| {
                 if (field.type == bool) {
                     if (std.mem.eql(u8, part, field.name)) {
                         // Repeat not allowed
@@ -1954,7 +1955,7 @@ pub const Trigger = struct {
 
             // Check if its a key
             const keysInfo = @typeInfo(key.Key).@"enum";
-            inline for (keysInfo.fields) |field| {
+            inline for (meta_compat.enumFields(key.Key)) |field| {
                 if (!std.mem.eql(u8, field.name, "unidentified")) {
                     if (std.mem.eql(u8, part, field.name)) {
                         const keyval = @field(key.Key, field.name);
@@ -2171,7 +2172,7 @@ pub const Trigger = struct {
         // then I don't want to handle this.
         var buffer: [1]u21 = undefined;
         const slice = uucode.get(.case_folding_full, cp).with(&buffer, cp);
-        var array: [3]u21 = [_]u21{0} ** 3;
+        var array: [3]u21 = @splat(0);
         @memcpy(array[0..slice.len], slice);
         return array;
     }

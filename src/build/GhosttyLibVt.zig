@@ -1,6 +1,7 @@
 const GhosttyLibVt = @This();
 
 const std = @import("std");
+const install_prefix = @import("install_prefix.zig");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const RunStep = std.Build.Step.Run;
@@ -451,14 +452,14 @@ fn initLibApple(
         "/bin/ln",
         "-sf",
         real_name,
-        b.getInstallPath(.lib, soname),
+        install_prefix.installPath(b, .lib, soname),
     });
     soname_install.step.dependOn(&artifact_install.step);
     const unversioned_install = b.addSystemCommand(&.{
         "/bin/ln",
         "-sf",
         soname,
-        b.getInstallPath(.lib, "libghostty-vt.dylib"),
+        install_prefix.installPath(b, .lib, "libghostty-vt.dylib"),
     });
     unversioned_install.step.dependOn(&soname_install.step);
 
@@ -529,7 +530,7 @@ fn pkgConfigFiles(
             \\Libs: -L${{libdir}} -lghostty-vt
             \\Libs.private: {s}
             \\Requires.private: {s}
-        , .{ b.install_prefix, zig.version, libs_private, requires_private })),
+        , .{ install_prefix.placeholder, zig.version, libs_private, requires_private })),
         .static = wf.add("libghostty-vt-static.pc", b.fmt(
             \\prefix={s}
             \\includedir=${{prefix}}/include
@@ -544,7 +545,7 @@ fn pkgConfigFiles(
             \\Libs.private: {s}
             \\Requires.private: {s}
         , .{
-            b.install_prefix,
+            install_prefix.placeholder,
             zig.version,
             staticLibraryName(os_tag),
             libs_private,
@@ -612,7 +613,7 @@ pub fn xcframework(
 
     return XCFrameworkStep.create(b, .{
         .name = "ghostty-vt",
-        .out_path = b.pathJoin(&.{ b.install_prefix, "lib/ghostty-vt.xcframework" }),
+        .out_path = b.pathJoin(&.{ install_prefix.placeholder, "lib/ghostty-vt.xcframework" }),
         .libraries = libraries[0..lib_count],
     });
 }

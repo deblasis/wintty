@@ -1,6 +1,7 @@
 const GhosttyResources = @This();
 
 const std = @import("std");
+const install_prefix = @import("install_prefix.zig");
 const assert = std.debug.assert;
 const Config = @import("Config.zig");
 const samePath = @import("install_paths.zig").samePath;
@@ -146,10 +147,10 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
                 else => mkdir_step.addArgs(&.{ "mkdir", "-p" }),
             }
 
-            mkdir_step.addArg(b.fmt(
-                "{s}/share/{s}",
-                .{ b.install_path, terminfo_share_dir },
-            ));
+            mkdir_step.addDirectoryArg(.{ .relative = .{
+                .base = .install_prefix,
+                .sub_path = b.fmt("share/{s}", .{terminfo_share_dir}),
+            } });
 
             try steps.append(b.allocator, &mkdir_step.step);
 
@@ -159,7 +160,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             const copy_step = RunStep.create(b, "copy terminfo db");
             copy_step.addArgs(&.{ "cp", "-R" });
             copy_step.addFileArg(path);
-            copy_step.addArg(b.fmt("{s}/share", .{b.install_path}));
+            copy_step.addDirectoryArg(.{ .relative = .{ .base = .install_prefix, .sub_path = "share" } });
             copy_step.step.dependOn(&mkdir_step.step);
             try steps.append(b.allocator, &copy_step.step);
         }
@@ -324,21 +325,21 @@ fn addLinuxAppResources(
 
     const name = b.fmt("Ghostty{s}", .{
         switch (cfg.optimize) {
-            .Debug, .ReleaseSafe => " (Debug)",
-            .ReleaseFast, .ReleaseSmall => "",
+            .debug, .safe => " (Debug)",
+            .fast, .small => "",
         },
     });
 
     const app_id = b.fmt("com.mitchellh.ghostty{s}", .{
         switch (cfg.optimize) {
-            .Debug, .ReleaseSafe => "-debug",
-            .ReleaseFast, .ReleaseSmall => "",
+            .debug, .safe => "-debug",
+            .fast, .small => "",
         },
     });
 
     const exe_abs_path = b.fmt(
         "{s}/bin/ghostty",
-        .{b.install_prefix},
+        .{install_prefix.placeholder},
     );
 
     // The templates that we will process. The templates are in
@@ -542,7 +543,7 @@ pub fn assertWindowsInstall(self: *const GhosttyResources, b: *std.Build) !void 
         // Composed the same way the steps are, so the comparison is between
         // two absolute locations rather than between two path fragments whose
         // bases might differ.
-        const want = b.getInstallPath(.prefix, required);
+        const want = install_prefix.installPath(b, .prefix, required);
 
         var wired = false;
         for (self.windows) |step| {
@@ -585,9 +586,9 @@ pub fn assertWindowsInstall(self: *const GhosttyResources, b: *std.Build) !void 
 /// `make`, so this is the location that will actually be written.
 fn installPath(b: *std.Build, step: *std.Build.Step) ?[]const u8 {
     if (step.cast(std.Build.Step.InstallFile)) |s|
-        return b.getInstallPath(s.dir, s.dest_rel_path);
+        return install_prefix.installPath(b, s.dir, s.dest_rel_path);
     if (step.cast(std.Build.Step.InstallDir)) |s|
-        return b.getInstallPath(s.options.install_dir, s.options.install_subdir);
+        return install_prefix.installPath(b, s.options.install_dir, s.options.install_subdir);
     return null;
 }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const options = @import("build_options");
 const assert = @import("../quirks.zig").inlineAssert;
 const indexOf = @import("index_of.zig").indexOf;
@@ -209,7 +210,7 @@ test "decode no escape" {
 
     // TODO: many more test cases
     {
-        const str = "hello" ** 128;
+        const str = meta_compat.repeat("hello", 128);
         try testing.expectEqual(DecodeResult{
             .consumed = str.len,
             .decoded = str.len,
@@ -224,8 +225,8 @@ test "decode ASCII to escape" {
 
     // TODO: many more test cases
     {
-        const prefix = "hello" ** 64;
-        const str = prefix ++ "\x1b" ++ ("world" ** 64);
+        const prefix = meta_compat.repeat("hello", 64);
+        const str = prefix ++ "\x1b" ++ meta_compat.repeat("world", 64);
         try testing.expectEqual(DecodeResult{
             .consumed = prefix.len,
             .decoded = prefix.len,

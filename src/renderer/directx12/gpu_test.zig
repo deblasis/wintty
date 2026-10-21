@@ -5,6 +5,7 @@
 //! create/use/destroy cycles. They only run on Windows -- on other
 //! platforms they're skipped.
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const builtin = @import("builtin");
 const global = @import("../../global.zig");
 
@@ -857,7 +858,7 @@ test "Texture: replaceRegion updates sub-region" {
     defer tex.deinit();
 
     // Replace a 2x2 sub-region (16 bytes = 2*2*4 bpp).
-    const region_data = [_]u8{0xFF} ** (2 * 2 * 4);
+    const region_data: [2 * 2 * 4]u8 = @splat(0xFF);
     tex.replaceRegion(1, 1, 2, 2, &region_data) catch return;
 
     // Execute the copy commands and wait for GPU to finish.
@@ -1501,7 +1502,7 @@ test "post pipeline: scanline shader leaves row periodicity" {
             .Format = .UNKNOWN,
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
             .Layout = .ROW_MAJOR,
-            .Flags = @enumFromInt(@as(u32, 0)),
+            .Flags = @fromBackingInt(@intCast(@as(u32, 0))),
         };
         _ = dev.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COPY_DEST, null, &d3d12.ID3D12Resource.IID, @ptrCast(&readback));
     }
@@ -1664,7 +1665,7 @@ test "buffer.Options.retire has no default" {
     // The found flag keeps the loop from passing vacuously if the field is
     // ever renamed.
     var found = false;
-    inline for (@typeInfo(buffer_mod.Options).@"struct".fields) |field| {
+    inline for (meta_compat.structFields(buffer_mod.Options)) |field| {
         if (comptime std.mem.eql(u8, field.name, "retire")) {
             found = true;
             try std.testing.expect(field.default_value_ptr == null);
@@ -2461,7 +2462,7 @@ const CoverageRig = struct {
     fn init(self: *CoverageRig) !void {
         if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
         // The debug layer is the oracle, and only Debug builds enable it.
-        if (comptime builtin.mode != .Debug) return error.SkipZigTest;
+        if (comptime builtin.mode != .debug) return error.SkipZigTest;
         const alloc = std.testing.allocator;
 
         self.api = .{ .allocator = alloc };
@@ -3194,7 +3195,7 @@ fn debugLayerQueue(device: *d3d12.ID3D12Device, comptime test_name: []const u8) 
     }
     releaseCom(debug);
     std.debug.print("debug layer installed but not enabled on the device: \"{s}\"\n", .{test_name});
-    return error.DebugLayerNotEnabled;
+    return error.debugLayerNotEnabled;
 }
 
 /// How many stored messages are CORRUPTION or ERROR severity, printing
@@ -3256,7 +3257,7 @@ const msg_command_list_closed: u32 = 547;
 // moves its texture out of the state it was created in.
 test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    if (comptime builtin.mode != .debug) return error.SkipZigTest; // the debug layer is the oracle
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -3340,7 +3341,7 @@ test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
 // reports at submission.
 test "DirectX12: textures written after creation keep the debug layer quiet" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    if (comptime builtin.mode != .debug) return error.SkipZigTest; // the debug layer is the oracle
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -3394,12 +3395,12 @@ test "DirectX12: textures written after creation keep the debug layer quiet" {
         grown.deinit();
         grown = g;
         api.updateTextureCommandList(&grown);
-        const big = [_]u8{7} ** (8 * 8);
+        const big: [8 * 8]u8 = @splat(7);
         try grown.replaceRegion(0, 0, 8, 8, &big);
         try std.testing.expect(!grown.takeUploadDropped());
 
         // An image created with its data inside the frame.
-        const img_px = [_]u8{9} ** (4 * 4 * 4);
+        const img_px: [4 * 4 * 4]u8 = @splat(9);
         const im = try Texture.init(api.imageTextureOptions(.rgba, false), 4, 4, &img_px);
         image.deinit();
         image = im;
@@ -3440,7 +3441,7 @@ test "DirectX12: textures written after creation keep the debug layer quiet" {
 // freed reports each of them as deleted while in use.
 test "Frame: teardown after a completed frame leaves the debug layer quiet" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    if (comptime builtin.mode != .debug) return error.SkipZigTest; // the debug layer is the oracle
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
     const R = @import("../generic.zig").Renderer(DirectX12);
@@ -3517,7 +3518,7 @@ test "Frame: teardown after a completed frame leaves the debug layer quiet" {
 // tearing down a closed one: nothing at all in the info queue.
 test "Frame: teardown of a list that is still recording is quiet" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest;
+    if (comptime builtin.mode != .debug) return error.SkipZigTest;
     var dev = Device.init(.{ .shared_texture = .{ .width = 16, .height = 16 } }, .{}) catch
         return error.SkipZigTest;
     defer dev.deinit();

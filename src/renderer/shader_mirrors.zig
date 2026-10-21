@@ -8,6 +8,7 @@
 //! line, change the live one) would ship drift green.
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 
 /// `src` with line and block comments blanked. The comment characters are
 /// replaced with spaces so offsets inside the remainder keep their spacing;
@@ -251,14 +252,14 @@ pub fn expectBlockLayout(
 ) void {
     const stripped = comptime stripComments(src);
     const members = comptime blockMembers(stripped, block, what);
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = meta_compat.structFields(T);
 
     if (members.len != fields.len) {
         @compileError(std.fmt.comptimePrint(
             "shader mirror drift in {s}: uniform block {s} declares {d} members " ++
                 "({s}) but {s} has {d} fields ({s}); the two are one block",
             .{
-                what, block, members.len, memberNames(members), @typeName(T),
+                what,       block,         members.len, memberNames(members), @typeName(T),
                 fields.len, fieldNames(T),
             },
         ));
@@ -366,7 +367,7 @@ fn memberNames(comptime members: []const Member) []const u8 {
 fn fieldNames(comptime T: type) []const u8 {
     comptime {
         var out: []const u8 = "";
-        for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+        for (meta_compat.structFields(T), 0..) |f, i| {
             if (i > 0) out = out ++ ", ";
             out = out ++ f.name;
         }

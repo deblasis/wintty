@@ -24,7 +24,7 @@ pub fn detect(b: *std.Build) !Version {
     var discard_code: u8 = 0;
     const branch: []const u8 = b: {
         const tmp: []u8 = b.runAllowFail(
-            &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "rev-parse", "--abbrev-ref", "HEAD" },
+            &[_][]const u8{ "git", "-C", b.root.root_dir.path orelse ".", "rev-parse", "--abbrev-ref", "HEAD" },
             &discard_code,
             .ignore,
         ) catch |err| switch (err) {
@@ -38,7 +38,7 @@ pub fn detect(b: *std.Build) !Version {
 
     const short_hash = short_hash: {
         const output = b.runAllowFail(
-            &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "-c", "log.showSignature=false", "log", "--pretty=format:%h", "-n", "1" },
+            &[_][]const u8{ "git", "-C", b.root.root_dir.path orelse ".", "-c", "log.showSignature=false", "log", "--pretty=format:%h", "-n", "1" },
             &discard_code,
             .ignore,
         ) catch |err| switch (err) {
@@ -70,7 +70,7 @@ pub fn detect(b: *std.Build) !Version {
     // accepts stays Config.init's call.
     var tag_code: u8 = 0;
     const tag = b.runAllowFail(
-        &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "describe", "--exact-match", "--tags", "--match", "v*", "--match", "tip", "--exclude", "*/*" },
+        &[_][]const u8{ "git", "-C", b.root.root_dir.path orelse ".", "describe", "--exact-match", "--tags", "--match", "v*", "--match", "tip", "--exclude", "*/*" },
         &tag_code,
         .ignore,
     ) catch |err| switch (err) {
@@ -87,7 +87,7 @@ pub fn detect(b: *std.Build) !Version {
     _ = b.runAllowFail(&[_][]const u8{
         "git",
         "-C",
-        b.build_root.path orelse ".",
+        b.root.root_dir.path orelse ".",
         "diff",
         "--quiet",
         "--exit-code",

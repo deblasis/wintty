@@ -964,10 +964,10 @@ test "IID values" {
 }
 
 test "enum values" {
-    try std.testing.expectEqual(@intFromEnum(DWRITE_FONT_WEIGHT.NORMAL), 400);
-    try std.testing.expectEqual(@intFromEnum(DWRITE_FONT_WEIGHT.BOLD), 700);
-    try std.testing.expectEqual(@intFromEnum(DWRITE_FONT_STYLE.NORMAL), 0);
-    try std.testing.expectEqual(@intFromEnum(DWRITE_FONT_STYLE.ITALIC), 2);
+    try std.testing.expectEqual(@backingInt(DWRITE_FONT_WEIGHT.NORMAL), 400);
+    try std.testing.expectEqual(@backingInt(DWRITE_FONT_WEIGHT.BOLD), 700);
+    try std.testing.expectEqual(@backingInt(DWRITE_FONT_STYLE.NORMAL), 0);
+    try std.testing.expectEqual(@backingInt(DWRITE_FONT_STYLE.ITALIC), 2);
 }
 
 test "DWRITE_UNICODE_RANGE size" {

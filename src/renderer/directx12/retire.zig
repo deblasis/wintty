@@ -304,7 +304,7 @@ const test_vtable: d3d12.ID3D12Resource.VTable = .{
 /// `n` stand-in resources, each a bare vtable pointer whose Release only
 /// decrements `test_live`.
 fn fakeResources(comptime n: usize) [n]d3d12.ID3D12Resource {
-    return [_]d3d12.ID3D12Resource{.{ .vtable = &test_vtable }} ** n;
+    return @as([n]d3d12.ID3D12Resource, @splat(.{ .vtable = &test_vtable }));
 }
 
 test "Retirement: a retire alone releases nothing" {

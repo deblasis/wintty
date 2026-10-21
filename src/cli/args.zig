@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const mem = std.mem;
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = mem.Allocator;
@@ -566,7 +567,7 @@ pub fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
     const value = if (colon_idx < v.len) v[colon_idx + 1 ..] else "";
 
     // Find the field in the union that matches the tag.
-    inline for (info.fields) |field| {
+    inline for (meta_compat.unionFields(T)) |field| {
         if (mem.eql(u8, field.name, tag_str)) {
             // Special case void types where we don't need a value.
             if (field.type == void) {
@@ -621,7 +622,7 @@ pub fn parseAutoStruct(
 
     // Keep track of which fields were set so we can error if a required
     // field was not set.
-    const FieldSet = std.StaticBitSet(info.fields.len);
+    const FieldSet = std.StaticBitSet(meta_compat.unionFields(T).len);
     var fields_set: FieldSet = .initEmpty();
 
     // We split each value by "," allowing for quoting and escaping.
@@ -653,7 +654,7 @@ pub fn parseAutoStruct(
             break :value value;
         };
 
-        inline for (info.fields, 0..) |field, i| {
+        inline for (meta_compat.unionFields(T), 0..) |field, i| {
             if (std.mem.eql(u8, field.name, key)) {
                 try parseIntoField(T, alloc, &result, key, value);
                 fields_set.set(i);
@@ -666,7 +667,7 @@ pub fn parseAutoStruct(
     }
 
     // Ensure all required fields are set
-    inline for (info.fields, 0..) |field, i| {
+    inline for (meta_compat.unionFields(T), 0..) |field, i| {
         if (!fields_set.isSet(i)) {
             @field(result, field.name) = default: {
                 // If we're given a default value then we inherit those.
@@ -696,7 +697,7 @@ pub fn parsePackedStruct(comptime T: type, v: []const u8) !T {
     // turn on or off all of the struct's fields.
     bools: {
         const b = parseBool(v) catch break :bools;
-        inline for (info.fields) |field| {
+        inline for (meta_compat.unionFields(T)) |field| {
             assert(field.type == bool);
             @field(result, field.name) = b;
         }
@@ -718,7 +719,7 @@ pub fn parsePackedStruct(comptime T: type, v: []const u8) !T {
             }
         };
 
-        inline for (info.fields) |field| {
+        inline for (meta_compat.unionFields(T)) |field| {
             assert(field.type == bool);
             if (std.mem.eql(u8, field.name, part)) {
                 @field(result, field.name) = value;
@@ -1545,7 +1546,7 @@ pub const LineIterator = struct {
 
     /// This is the buffer where we store the current entry that
     /// is formatted to be compatible with the parse function.
-    entry: [MAX_LINE_SIZE]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 2)),
+    entry: [MAX_LINE_SIZE]u8 = [_]u8{ '-', '-' } ++ (@as([(MAX_LINE_SIZE - 2)]u8, @splat(0))),
 
     /// The line number of a line we skipped because it was too long to
     /// fit in `entry`. Read (and cleared) by `skippedDiagnostic` so that
@@ -1849,7 +1850,7 @@ test "LineIterator with buffered and primed reader" {
 test "LineIterator skips a line that is too long" {
     const testing = std.testing;
 
-    const long = "A=" ++ ("x" ** LineIterator.MAX_LINE_SIZE);
+    const long = "A=" ++ (@as([LineIterator.MAX_LINE_SIZE]u8, @splat('x')));
 
     // Over-long line in the middle of the file.
     {

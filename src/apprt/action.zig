@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const build_config = @import("../build_config.zig");
 const assert = @import("../quirks.zig").inlineAssert;
@@ -492,7 +493,7 @@ pub const Action = union(Key) {
 
     /// Sync with: ghostty_action_u
     pub const CValue = cvalue: {
-        const key_fields = @typeInfo(Key).@"enum".fields;
+        const key_fields = meta_compat.enumFields(Key);
         var names: [key_fields.len][]const u8 = undefined;
         var types: [key_fields.len]type = undefined;
         var attrs: [key_fields.len]std.builtin.Type.UnionField.Attributes = undefined;
@@ -533,7 +534,7 @@ pub const Action = union(Key) {
 
     /// Returns the value type for the given key.
     pub fn Value(comptime key: Key) type {
-        inline for (@typeInfo(Action).@"union".fields) |field| {
+        inline for (meta_compat.unionFields(Action)) |field| {
             const field_key = @field(Key, field.name);
             if (field_key == key) return field.type;
         }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const help_strings = @import("help_strings");
 const actionpkg = @import("action.zig");
@@ -121,7 +122,7 @@ pub const Action = enum {
             // If help is requested, then we use some comptime trickery
             // to find this action in the help strings and output that.
             help_error => err: {
-                inline for (@typeInfo(Action).@"enum".fields) |field| {
+                inline for (meta_compat.enumFields(Action)) |field| {
                     // Future note: for now we just output the help text directly
                     // to stdout. In the future we can style this much prettier
                     // for all commands by just changing this one place.

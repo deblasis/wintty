@@ -2001,7 +2001,7 @@ test "wouldExceedBudget true when in_flight already over budget" {
 }
 
 test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .pending" {
-    var data: [16]u8 = .{0} ** 16;
+    var data: [16]u8 = @splat(0);
     const img: Image = .{ .pending = .{
         .width = 2,
         .height = 2,
@@ -2035,7 +2035,7 @@ test "Image.estimatedUploadStagingBytes returns 0 for .ready" {
 
 test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .replace" {
     if (comptime @hasField(Texture, "pending_staging_bytes")) {
-        var data: [16]u8 = .{0} ** 16;
+        var data: [16]u8 = @splat(0);
         const img: Image = .{ .replace = .{
             .texture = .{},
             .pending = .{
@@ -2064,7 +2064,7 @@ test "Image.pendingStagingBytes returns texture.pending_staging_bytes for .ready
 }
 
 test "Image.pendingStagingBytes returns 0 for .pending (no texture yet)" {
-    var data: [4]u8 = .{0} ** 4;
+    var data: [4]u8 = @splat(0);
     const img: Image = .{ .pending = .{
         .width = 1,
         .height = 1,

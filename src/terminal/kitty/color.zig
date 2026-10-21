@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const lib = @import("../lib.zig");
 const terminal = @import("../main.zig");
 const RGB = terminal.color.RGB;
@@ -42,7 +43,7 @@ pub const Special = enum {
 };
 
 pub const Kind = union(enum) {
-    pub const max: usize = std.math.maxInt(u8) + @typeInfo(Special).@"enum".fields.len;
+    pub const max: usize = std.math.maxInt(u8) + meta_compat.enumFields(Special).len;
 
     palette: u8,
     special: Special,

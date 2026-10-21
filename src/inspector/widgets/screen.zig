@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const builtin = @import("builtin");
 const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -246,7 +247,7 @@ fn keyboardTable(
 
     if (kitty_flags.int() != 0) {
         const Flags = @TypeOf(kitty_flags);
-        inline for (@typeInfo(Flags).@"struct".fields) |field| {
+        inline for (meta_compat.structFields(Flags)) |field| {
             {
                 const value = @field(kitty_flags, field.name);
 

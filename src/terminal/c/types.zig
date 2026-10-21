@@ -5,6 +5,7 @@
 //! C headers directly, most notably WebAssembly hosts. Its format is defined
 //! by `types.schema.json`.
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const builtin = @import("builtin");
 const build_options = @import("terminal_options");
 const lib = @import("../lib.zig");
@@ -451,8 +452,8 @@ const Json = struct {
                     try writeMappedUnionFields(decl, jws);
                 } else {
                     const fields = switch (decl.kind) {
-                        .@"struct" => @typeInfo(decl.T).@"struct".fields,
-                        .@"union" => @typeInfo(decl.T).@"union".fields,
+                        .@"struct" => meta_compat.structFields(decl.T),
+                        .@"union" => meta_compat.unionFields(decl.T),
                         else => unreachable,
                     };
                     inline for (fields) |field| {
@@ -475,7 +476,7 @@ const Json = struct {
                 try jws.write(decl.prefix);
                 try jws.objectField("values");
                 try jws.beginObject();
-                inline for (@typeInfo(decl.T).@"enum".fields) |field| {
+                inline for (meta_compat.enumFields(decl.T)) |field| {
                     try writeEnumObjectField(decl.name, field.name, jws);
                     try jws.write(field.value);
                 }
@@ -511,7 +512,7 @@ const Json = struct {
         comptime Layout: type,
         jws: *std.json.Stringify,
     ) std.Io.Writer.Error!void {
-        inline for (@typeInfo(Layout.Zig).@"struct".fields) |field| {
+        inline for (meta_compat.structFields(Layout.Zig)) |field| {
             const field_tag = @field(Layout.Field, field.name);
             const name = comptime Layout.fieldName(field_tag) orelse continue;
             const options = Layout.fieldOptions(field_tag);
@@ -556,7 +557,7 @@ const Json = struct {
 
         const tag_options = Layout.fieldOptions(UnionLayout.tag_field);
         const tag_type_name = tag_options.type_name orelse publicTypeName(UnionLayout.Tag);
-        inline for (@typeInfo(UnionLayout.Tag).@"enum".fields) |tag| {
+        inline for (meta_compat.enumFields(UnionLayout.Tag)) |tag| {
             try writeEnumObjectField(tag_type_name, tag.name, jws);
             const arm = UnionLayout.arm(@field(UnionLayout.Tag, tag.name)) orelse {
                 try jws.write(null);
@@ -616,7 +617,7 @@ const Json = struct {
     ) std.Io.Writer.Error!void {
         const FieldNames = decl.union_field_names_T.?;
         const Tag = @FieldType(FieldNames, "tag");
-        const tag_fields = @typeInfo(Tag).@"enum".fields;
+        const tag_fields = meta_compat.enumFields(Tag);
 
         inline for (tag_fields, 0..) |field, i| {
             const name = comptime FieldNames.cFieldRename(@field(Tag, field.name)) orelse continue;
@@ -635,7 +636,7 @@ const Json = struct {
     ) bool {
         const FieldNames = decl.union_field_names_T.?;
         const Tag = @FieldType(FieldNames, "tag");
-        const tag_fields = @typeInfo(Tag).@"enum".fields;
+        const tag_fields = meta_compat.enumFields(Tag);
         const T = @FieldType(decl.T, tag_fields[index].name);
 
         inline for (tag_fields[0..index]) |previous| {
@@ -771,7 +772,7 @@ const Json = struct {
         const Tag = @FieldType(decl.T, tagged.tag_field);
         try jws.objectField("arms");
         try jws.beginObject();
-        inline for (@typeInfo(Tag).@"enum".fields) |field| {
+        inline for (meta_compat.enumFields(Tag)) |field| {
             try writeEnumObjectField(publicTypeName(Tag), field.name, jws);
             if (comptime taggedArm(decl, field.name)) |arm| try jws.write(arm) else try jws.write(null);
         }
@@ -912,7 +913,7 @@ test "manifest describes enums, arrays, and tagged unions" {
 
     const data = manifest_types.get("GhosttyRenderStateData").?.object;
     try std.testing.expectEqualStrings("enum", data.get("kind").?.string);
-    try std.testing.expectEqual(@as(i64, @intFromEnum(render.Data.dirty)), data.get("values").?.object.get("DIRTY").?.integer);
+    try std.testing.expectEqual(@as(i64, @backingInt(render.Data.dirty)), data.get("values").?.object.get("DIRTY").?.integer);
 
     const colors = manifest_types.get("GhosttyRenderStateColors").?.object;
     const palette = colors.get("fields").?.object.get("palette").?.object;
@@ -972,7 +973,7 @@ test "manifest describes the complete packed cell layout" {
     try std.testing.expectEqualStrings("u64", descriptor.get("underlying").?.string);
 
     const bits = descriptor.get("bits").?.object;
-    inline for (@typeInfo(page.Cell.CLayout.Zig).@"struct".fields) |field| {
+    inline for (meta_compat.structFields(page.Cell.CLayout.Zig)) |field| {
         const field_tag = @field(page.Cell.CLayout.Field, field.name);
         const name = comptime page.Cell.CLayout.fieldName(field_tag);
         if (name) |public_name| {
@@ -1011,7 +1012,7 @@ test "manifest describes the complete packed cell layout" {
 
     const rgb = arms.get("BG_COLOR_RGB").?.object;
     const Rgb = @FieldType(Content, "color_rgb");
-    inline for (@typeInfo(Rgb).@"struct".fields) |field|
+    inline for (meta_compat.structFields(Rgb)) |field|
         try expectPackedArmField(rgb, field.name, Rgb, field.name, "u8");
 }
 

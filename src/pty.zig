@@ -374,25 +374,25 @@ const WindowsPty = struct {
     /// published `pseudo_console_api`.
     const OnceState = enum(u8) { uninitialized, in_progress, done };
     var pseudo_console_api_state: std.atomic.Value(u8) = .init(
-        @intFromEnum(OnceState.uninitialized),
+        @backingInt(OnceState.uninitialized),
     );
 
     fn pseudoConsoleApiOnce() void {
         // Fast path: the result is already published.
         if (pseudo_console_api_state.load(.acquire) ==
-            @intFromEnum(OnceState.done)) return;
+            @backingInt(OnceState.done)) return;
 
         // Try to claim the initialization slot.
         if (pseudo_console_api_state.cmpxchgStrong(
-            @intFromEnum(OnceState.uninitialized),
-            @intFromEnum(OnceState.in_progress),
+            @backingInt(OnceState.uninitialized),
+            @backingInt(OnceState.in_progress),
             .acq_rel,
             .acquire,
         )) |_| {
             // Someone else claimed it. Resolution is a handful of syscalls
             // done once per process, so spinning here is bounded and rare.
             while (pseudo_console_api_state.load(.acquire) !=
-                @intFromEnum(OnceState.done))
+                @backingInt(OnceState.done))
             {
                 std.atomic.spinLoopHint();
             }
@@ -400,7 +400,7 @@ const WindowsPty = struct {
         }
 
         resolvePseudoConsoleApi();
-        pseudo_console_api_state.store(@intFromEnum(OnceState.done), .release);
+        pseudo_console_api_state.store(@backingInt(OnceState.done), .release);
     }
 
     out_pipe: windows.HANDLE,
@@ -510,14 +510,10 @@ const WindowsPty = struct {
 
         var pipe_path_buf: [128]u8 = undefined;
         var pipe_path_buf_w: [128]u16 = undefined;
-        const pipe_path = std.fmt.bufPrintZ(
-            &pipe_path_buf,
-            "\\\\.\\pipe\\LOCAL\\ghostty-pty-{d}-{d}",
-            .{
-                windows.GetCurrentProcessId(),
-                pipe_name_counter.fetchAdd(1, .monotonic),
-            },
-        ) catch unreachable;
+        const pipe_path = std.mem.printSentinel(&pipe_path_buf, "\\\\.\\pipe\\LOCAL\\ghostty-pty-{d}-{d}", .{
+            windows.GetCurrentProcessId(),
+            pipe_name_counter.fetchAdd(1, .monotonic),
+        }, 0) catch unreachable;
 
         const pipe_path_w_len = std.unicode.utf8ToUtf16Le(
             &pipe_path_buf_w,

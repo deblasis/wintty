@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const testing = std.testing;
 const Target = @import("target.zig").Target;
 
@@ -77,7 +78,7 @@ pub fn TaggedUnion(
                 .c => {},
             }
 
-            const tag_fields = @typeInfo(Tag).@"enum".fields;
+            const tag_fields = meta_compat.enumFields(Tag);
             var names: [tag_fields.len + 1][]const u8 = undefined;
             var types: [tag_fields.len + 1]type = undefined;
             var attrs: [tag_fields.len + 1]std.builtin.Type.UnionField.Attributes = undefined;
@@ -140,7 +141,7 @@ pub fn TaggedUnion(
 /// Options for generating the C representation of a tagged union.
 pub fn TaggedUnionOptions(comptime Union: type) type {
     const Tag = @typeInfo(Union).@"union".tag_type.?;
-    const tag_fields = @typeInfo(Tag).@"enum".fields;
+    const tag_fields = meta_compat.enumFields(Tag);
     const FieldRenames: type = field_renames: {
         const default_rename: ?[]const u8 = null;
 

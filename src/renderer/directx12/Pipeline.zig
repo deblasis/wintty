@@ -419,7 +419,7 @@ pub fn init(opts: Options) !Pipeline {
         .DestBlendAlpha = .ZERO,
         .BlendOpAlpha = .ADD,
         .LogicOp = .NOOP,
-        .RenderTargetWriteMask = @intFromEnum(d3d12.D3D12_COLOR_WRITE_ENABLE.ALL),
+        .RenderTargetWriteMask = @backingInt(d3d12.D3D12_COLOR_WRITE_ENABLE.ALL),
     };
 
     const premul_blend = d3d12.D3D12_RENDER_TARGET_BLEND_DESC{
@@ -432,7 +432,7 @@ pub fn init(opts: Options) !Pipeline {
         .DestBlendAlpha = .INV_SRC_ALPHA,
         .BlendOpAlpha = .ADD,
         .LogicOp = .NOOP,
-        .RenderTargetWriteMask = @intFromEnum(d3d12.D3D12_COLOR_WRITE_ENABLE.ALL),
+        .RenderTargetWriteMask = @backingInt(d3d12.D3D12_COLOR_WRITE_ENABLE.ALL),
     };
 
     const active_blend = switch (opts.blend) {
@@ -584,8 +584,8 @@ test "SRV table: every texture table is one descriptor wide, at the register it 
 }
 
 test "BlendMode values" {
-    try std.testing.expectEqual(@as(u1, 0), @intFromEnum(BlendMode.none));
-    try std.testing.expectEqual(@as(u1, 1), @intFromEnum(BlendMode.premultiplied_alpha));
+    try std.testing.expectEqual(@as(u1, 0), @backingInt(BlendMode.none));
+    try std.testing.expectEqual(@as(u1, 1), @backingInt(BlendMode.premultiplied_alpha));
 }
 
 test "deinit on default pipeline is safe" {

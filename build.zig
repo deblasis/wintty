@@ -1,4 +1,5 @@
 const std = @import("std");
+const install_prefix = @import("src/build/install_prefix.zig");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const buildpkg = @import("src/build/main.zig");
@@ -28,7 +29,7 @@ pub fn build(b: *std.Build) !void {
     // If we have a VERSION file (present in source tarballs) then we
     // use that as the version source of truth. Otherwise we fall back
     // to what is in the build.zig.zon.
-    const file_version: ?[]const u8 = if (b.build_root.handle.readFileAlloc(
+    const file_version: ?[]const u8 = if (b.root.root_dir.handle.readFileAlloc(
         b.graph.io,
         "VERSION",
         b.allocator,
@@ -184,10 +185,9 @@ pub fn build(b: *std.Build) !void {
         type_schema_test.addFileArg(shared.output);
         test_lib_vt_schema_step.dependOn(&type_schema_test.step);
     } else {
-        try test_lib_vt_schema_step.addError(
+        test_lib_vt_schema_step.dependOn(&b.addFail(
             "cannot execute the ABI manifest for a native freestanding target",
-            .{},
-        );
+        ).step);
     }
 
     // libghostty-vt static lib
@@ -331,7 +331,7 @@ pub fn build(b: *std.Build) !void {
     run: {
         if (config.app_runtime != .none) {
             const run_cmd = b.addRunArtifact(exe.exe);
-            if (b.args) |args| run_cmd.addArgs(args);
+            run_cmd.addPassthruArgs();
 
             // Set the proper resources dir so things like shell integration
             // work correctly. If we're running `zig build run` in Ghostty,
@@ -339,7 +339,7 @@ pub fn build(b: *std.Build) !void {
             // build.
             run_cmd.setEnvironmentVariable(
                 "GHOSTTY_RESOURCES_DIR",
-                b.getInstallPath(.prefix, "share/ghostty"),
+                install_prefix.installPath(b, .prefix, "share/ghostty"),
             );
 
             run_step.dependOn(&run_cmd.step);
@@ -398,11 +398,11 @@ pub fn build(b: *std.Build) !void {
             "--leak-check=full",
             "--error-exitcode=1",
             "--num-callers=50",
-            b.fmt("--suppressions={s}", .{b.pathFromRoot("valgrind.supp")}),
             "--gen-suppressions=all",
         });
+        run_cmd.addPrefixedFileArg("--suppressions=", b.path("valgrind.supp"));
         run_cmd.addArtifactArg(valgrind_exe.exe);
-        if (b.args) |args| run_cmd.addArgs(args);
+        run_cmd.addPassthruArgs();
         run_valgrind_step.dependOn(&run_cmd.step);
     }
 
@@ -444,7 +444,7 @@ pub fn build(b: *std.Build) !void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/build/test.zig"),
                 .target = b.graph.host,
-                .optimize = .Debug,
+                .optimize = .debug,
             }),
         });
         test_step.dependOn(&b.addRunArtifact(build_test).step);
@@ -460,7 +460,7 @@ pub fn build(b: *std.Build) !void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = config.baselineTarget(b.graph.io),
-                .optimize = .Debug,
+                .optimize = .debug,
                 .strip = false,
                 .omit_frame_pointer = false,
                 .unwind_tables = .sync,
@@ -477,11 +477,11 @@ pub fn build(b: *std.Build) !void {
         }
         // The test binary pins Debug above, so its dependencies stay Debug
         // too; -Doptimize and -Dvt-safe must not split the two apart.
-        _ = try deps.add(test_exe, .Debug);
+        _ = try deps.add(test_exe, .debug);
         const test_exe_install_step = installTestBinary(b, test_binaries_step, &test_binary_roots, test_exe);
         config.addPatchElf(test_exe, test_exe_install_step);
 
-        addGhosttyH(b, test_exe.root_module, config.baselineTarget(b.graph.io), .Debug);
+        addGhosttyH(b, test_exe.root_module, config.baselineTarget(b.graph.io), .debug);
 
         // Normal test running
         const test_run = b.addRunArtifact(test_exe);
@@ -529,9 +529,9 @@ pub fn build(b: *std.Build) !void {
             "--leak-check=full",
             "--error-exitcode=1",
             "--num-callers=50",
-            b.fmt("--suppressions={s}", .{b.pathFromRoot("valgrind.supp")}),
             "--gen-suppressions=all",
         });
+        valgrind_run.addPrefixedFileArg("--suppressions=", b.path("valgrind.supp"));
         valgrind_run.addArtifactArg(test_exe);
         config.addPatchElf(test_exe, &valgrind_run.step);
         test_valgrind_step.dependOn(&valgrind_run.step);
@@ -545,7 +545,7 @@ pub fn build(b: *std.Build) !void {
     if (i18n) |v| {
         translations_step.dependOn(v.update_step);
     } else {
-        try translations_step.addError("cannot update translations when i18n is disabled", .{});
+        translations_step.dependOn(&b.addFail("cannot update translations when i18n is disabled").step);
     }
 }
 
@@ -605,7 +605,7 @@ fn dxcTestDll(
         else => return null,
     };
 
-    const csproj = b.build_root.handle.readFileAlloc(
+    const csproj = b.root.root_dir.handle.readFileAlloc(
         b.graph.io,
         "windows/Ghostty/Ghostty.csproj",
         b.allocator,

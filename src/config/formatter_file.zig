@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const Config = @import("Config.zig");
 const Key = @import("key.zig").Key;
@@ -37,7 +38,7 @@ pub const FileFormatter = struct {
             null;
         defer if (default) |*v| v.deinit();
 
-        inline for (@typeInfo(Config).@"struct".fields) |field| {
+        inline for (meta_compat.structFields(Config)) |field| {
             if (field.name[0] == '_') continue;
 
             const value = @field(self.config, field.name);

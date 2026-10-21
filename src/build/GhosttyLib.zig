@@ -1,6 +1,7 @@
 const GhosttyLib = @This();
 
 const std = @import("std");
+const install_prefix = @import("install_prefix.zig");
 const builtin = @import("builtin");
 const RunStep = std.Build.Step.Run;
 const CombineArchivesStep = @import("CombineArchivesStep.zig");
@@ -303,7 +304,7 @@ fn pkgConfigFiles(
             \\Version: {f}
             \\Cflags: -I${{includedir}}
             \\Libs: -L${{libdir}} -lghostty
-        , .{ b.install_prefix, deps.config.version })),
+        , .{ install_prefix.placeholder, deps.config.version })),
         .static = wf.add("libghostty-static.pc", b.fmt(
             \\prefix={s}
             \\includedir=${{prefix}}/include
@@ -315,7 +316,7 @@ fn pkgConfigFiles(
             \\Version: {f}
             \\Cflags: -I${{includedir}}
             \\Libs: ${{libdir}}/{s}
-        , .{ b.install_prefix, deps.config.version, staticLibraryName(os_tag) })),
+        , .{ install_prefix.placeholder, deps.config.version, staticLibraryName(os_tag) })),
     };
 }
 

@@ -140,7 +140,7 @@ pub const Inspector = struct {
         // continuous rendering, taking down the whole app. The demo is only a
         // development aid and the rest of the inspector is unaffected, so we
         // skip it here rather than crash. The demo works on macOS/Linux.
-        if (comptime builtin.mode == .Debug and builtin.os.tag != .windows) {
+        if (comptime builtin.mode == .debug and builtin.os.tag != .windows) {
             if (self.show_demo_window) {
                 cimgui.c.ImGui_ShowDemoWindow(&self.show_demo_window);
             }
@@ -447,7 +447,7 @@ fn mouseTable(
 
             for (surface_mouse.click_state, 0..) |state, i| {
                 if (state != .press) continue;
-                const button: input.MouseButton = @enumFromInt(i);
+                const button: input.MouseButton = @fromBackingInt(@intCast(i));
                 cimgui.c.ImGui_SameLine();
                 cimgui.c.ImGui_Text("%s", @as([*]const u8, @ptrCast(switch (button) {
                     .unknown => "?",

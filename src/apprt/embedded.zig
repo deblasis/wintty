@@ -5,6 +5,7 @@
 //! Swift+XCode-based application.
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -404,7 +405,7 @@ fn assertHeaderLayout(
     comptime header_struct: []const u8,
 ) void {
     @setEvalBranchQuota(100000);
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = meta_compat.structFields(T);
     // Walk the struct's fields, not the table's rows: a row count alone
     // would let a duplicated row stand in for a field the table dropped.
     inline for (fields) |field| {
@@ -620,7 +621,7 @@ pub const Surface = struct {
     pending_key_text: if (builtin.os.tag == .windows)
         [128]u8
     else
-        void = if (builtin.os.tag == .windows) .{0} ** 128 else {},
+        void = if (builtin.os.tag == .windows) @splat(0) else {},
 
     /// Input redirect for in-process features (e.g., theme picker).
     input_redirect: if (builtin.os.tag == .windows)
@@ -1136,7 +1137,7 @@ pub const Surface = struct {
 
         const result = self.app.opts.read_clipboard(
             self.userdata,
-            @intCast(@intFromEnum(clipboard_type)),
+            @intCast(@backingInt(clipboard_type)),
             state_ptr,
             mimes.ptr,
             mimes.len,
@@ -1326,7 +1327,7 @@ pub const Surface = struct {
 
         self.app.opts.write_clipboard(
             self.userdata,
-            @intCast(@intFromEnum(clipboard_type)),
+            @intCast(@backingInt(clipboard_type)),
             array.ptr,
             array.len,
             confirm,
@@ -1946,7 +1947,7 @@ pub const Inspector = struct {
         self.dx12_surface = ptr;
 
         const dev = &ptr.dev;
-        const rtv_format: u32 = @intFromEnum(dxgi.DXGI_FORMAT.B8G8R8A8_UNORM);
+        const rtv_format: u32 = @backingInt(dxgi.DXGI_FORMAT.B8G8R8A8_UNORM);
         if (!self.initDirectX12(
             @ptrCast(dev.device),
             @ptrCast(dev.command_queue),

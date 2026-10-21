@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 
@@ -106,7 +107,7 @@ test "MessageData init alloc" {
     const alloc = testing.allocator;
 
     const Data = MessageData(u8, 10);
-    const input = "hello! " ** 100;
+    const input = meta_compat.repeat("hello! ", 100);
     const io = try Data.init(alloc, @as([]const u8, input));
     try testing.expect(io == .alloc);
     io.alloc.alloc.free(io.alloc.data);
@@ -118,7 +119,7 @@ test "MessageData small fits non-u8 sized data" {
 
     const len = 500;
     const Data = MessageData(u8, len);
-    const input: []const u8 = "X" ** len;
+    const input: []const u8 = @as([len]u8, @splat('X'));
     const io = try Data.init(alloc, input);
     try testing.expect(io == .small);
 }

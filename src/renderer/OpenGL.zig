@@ -194,7 +194,7 @@ fn prepareContext(getProcAddress: anytype) !void {
     try gl.enable(gl.c.GL_DEBUG_OUTPUT);
 
     // Register our debug message callback with the OpenGL context.
-    gl.glad.context.DebugMessageCallback.?(glDebugMessageCallback, null);
+    gl.glad.context.debugMessageCallback.?(glDebugMessageCallback, null);
 
     // Enable SRGB framebuffer for linear blending support.
     try gl.enable(gl.c.GL_FRAMEBUFFER_SRGB);

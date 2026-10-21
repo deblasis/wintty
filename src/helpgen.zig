@@ -3,6 +3,7 @@
 //! help, docs, website, etc.
 
 const std = @import("std");
+const meta_compat = @import("meta_compat.zig");
 const Config = @import("config/Config.zig");
 const Action = @import("cli/ghostty.zig").Action;
 const KeybindAction = @import("input/Binding.zig").Action;
@@ -25,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn genConfig(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
-    var ast = try std.zig.Ast.parse(alloc, @embedFile("config/Config.zig"), .zig);
+    var ast = try std.zig.Ast.parse(alloc, @embedFile("config/Config.zig"), .{});
     defer ast.deinit(alloc);
 
     try writer.writeAll(
@@ -35,7 +36,7 @@ fn genConfig(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (@typeInfo(Config).@"struct".fields) |field| {
+    inline for (comptime meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
         try genConfigField(alloc, writer, ast, field.name);
     }
@@ -79,13 +80,13 @@ fn genActions(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (@typeInfo(Action).@"enum".fields) |field| {
+    inline for (comptime meta_compat.enumFields(Action)) |field| {
         const action_file = comptime action_file: {
             const action = @field(Action, field.name);
             break :action_file action.file();
         };
 
-        var ast = try std.zig.Ast.parse(alloc, @embedFile(action_file), .zig);
+        var ast = try std.zig.Ast.parse(alloc, @embedFile(action_file), .{});
         defer ast.deinit(alloc);
         const tokens: []std.zig.Token.Tag = ast.tokens.items(.tag);
 
@@ -117,7 +118,7 @@ fn genActions(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
 }
 
 fn genKeybindActions(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
-    var ast = try std.zig.Ast.parse(alloc, @embedFile("input/Binding.zig"), .zig);
+    var ast = try std.zig.Ast.parse(alloc, @embedFile("input/Binding.zig"), .{});
     defer ast.deinit(alloc);
 
     try writer.writeAll(
@@ -127,7 +128,7 @@ fn genKeybindActions(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (@typeInfo(KeybindAction).@"union".fields) |field| {
+    inline for (comptime meta_compat.unionFields(KeybindAction)) |field| {
         if (field.name[0] == '_') continue;
         try genConfigField(alloc, writer, ast, field.name);
     }

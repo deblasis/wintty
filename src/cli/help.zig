@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const args = @import("args.zig");
 const Action = @import("ghostty.zig").Action;
@@ -63,7 +64,7 @@ pub fn run(alloc: Allocator) !u8 {
         \\
     );
 
-    inline for (@typeInfo(Action).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(Action)) |field| {
         try stdout.print("  +{s}\n", .{field.name});
     }
 

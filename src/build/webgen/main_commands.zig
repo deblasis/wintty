@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const Action = @import("../../cli/ghostty.zig").Action;
 const help_strings = @import("help_strings");
 
@@ -27,7 +28,7 @@ pub fn genActions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (@typeInfo(Action).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(Action)) |field| {
         const action = std.meta.stringToEnum(Action, field.name).?;
 
         switch (action) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const fastprint = @import("../fastprint.zig");
@@ -191,7 +192,7 @@ pub const Style = struct {
             .palette => |idx| palette: {
                 if (self.flags.bold) {
                     if (opts.bold) |_| {
-                        const bright_offset = @intFromEnum(color.Name.bright_black);
+                        const bright_offset = @backingInt(color.Name.bright_black);
                         if (idx < bright_offset) {
                             break :palette opts.palette[idx + bright_offset];
                         }
@@ -262,7 +263,7 @@ pub const Style = struct {
 
         var started = false;
 
-        inline for (std.meta.fields(Style)) |f| {
+        inline for (meta_compat.structFields(Style)) |f| {
             if (std.mem.eql(u8, f.name, "flags")) {
                 if (started) {
                     _ = try writer.write(", ");
@@ -272,7 +273,7 @@ pub const Style = struct {
 
                 started = false;
 
-                inline for (std.meta.fields(@TypeOf(self.flags))) |ff| {
+                inline for (meta_compat.structFields(@TypeOf(self.flags))) |ff| {
                     const v = @as(ff.type, @field(self.flags, ff.name));
                     const d = @as(ff.type, @field(dflt.flags, ff.name));
                     if (ff.type == bool) {
@@ -672,7 +673,7 @@ pub const Style = struct {
     comptime {
         assert(@sizeOf(PackedStyle) == 16);
         assert(std.meta.hasUniqueRepresentation(PackedStyle));
-        for (@typeInfo(PackedStyle.Data).@"union".fields) |field| {
+        for (meta_compat.unionFields(PackedStyle.Data)) |field| {
             assert(@bitSizeOf(field.type) == @bitSizeOf(PackedStyle.Data));
         }
     }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const testing = std.testing;
@@ -225,7 +226,7 @@ pub const Viewer = struct {
                 try writer.writeAll(@tagName(@as(TagType, self)));
                 try writer.writeAll(" = ");
 
-                inline for (info.fields) |u_field| {
+                inline for (meta_compat.unionFields(T)) |u_field| {
                     if (self == @field(TagType, u_field.name)) {
                         const value = @field(self, u_field.name);
                         switch (u_field.type) {
@@ -2436,7 +2437,7 @@ test "pane state ignores out of bounds scroll region" {
         .{
             .input = .{ .tmux = .{ .output = .{
                 .pane_id = 0,
-                .data = "\x0b" ** 30,
+                .data = @as([30]u8, @splat(0x0b)),
             } } },
             .check = (struct {
                 fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {

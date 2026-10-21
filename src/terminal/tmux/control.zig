@@ -4,6 +4,7 @@
 //! documentation.
 
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const assert = @import("../../quirks.zig").inlineAssert;
 const oni = @import("oniguruma");
@@ -583,7 +584,7 @@ pub const Notification = union(enum) {
             try writer.writeAll(@tagName(@as(TagType, self)));
             try writer.writeAll(" = ");
 
-            inline for (info.fields) |u_field| {
+            inline for (meta_compat.unionFields(T)) |u_field| {
                 if (self == @field(TagType, u_field.name)) {
                     const value = @field(self, u_field.name);
                     switch (u_field.type) {

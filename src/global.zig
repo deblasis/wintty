@@ -136,7 +136,7 @@ pub fn init(opts: InitOpts) !void {
         // can get easy memory leak detection in debug modes.
         if (builtin.link_libc) {
             if (switch (builtin.mode) {
-                .ReleaseSafe, .ReleaseFast => true,
+                .safe, .fast => true,
 
                 // We also use it if we can detect we're running under
                 // Valgrind since Valgrind only instruments the C allocator
@@ -538,7 +538,7 @@ test "initErrorText still explains an error with no wording of its own" {
 /// be one of these at any given moment. This is extracted into a dedicated
 /// struct because it is reused by main and the static C lib.
 pub const GlobalState = struct {
-    const GPA = std.heap.DebugAllocator(.{});
+    const GPA = std.heap.debugAllocator(.{});
 
     io_impl: std.Io.Threaded,
     gpa: ?GPA,

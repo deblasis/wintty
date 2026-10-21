@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const help_strings = @import("help_strings");
 const build_config = @import("../../build_config.zig");
 const Config = @import("../../config/Config.zig");
@@ -27,7 +28,7 @@ pub fn genConfig(writer: *std.Io.Writer, cli: bool) !void {
     );
 
     @setEvalBranchQuota(5000);
-    inline for (@typeInfo(Config).@"struct".fields) |field| {
+    inline for (meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
 
         try writer.writeAll("**`");
@@ -56,7 +57,7 @@ pub fn genActions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (@typeInfo(Action).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(Action)) |field| {
         const action = std.meta.stringToEnum(Action, field.name).?;
 
         switch (action) {

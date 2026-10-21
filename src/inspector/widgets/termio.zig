@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const cimgui = @import("dcimgui");
@@ -273,7 +274,7 @@ pub const Stream = struct {
                         var md_it = ev.metadata.iterator();
                         while (md_it.next()) |entry| {
                             var buf: [256]u8 = undefined;
-                            const key = std.fmt.bufPrintZ(&buf, "{s}", .{entry.key_ptr.*}) catch
+                            const key = std.mem.printSentinel(&buf, "{s}", .{entry.key_ptr.*}, 0) catch
                                 "<internal error>";
                             cimgui.c.ImGui_TableNextRow();
                             _ = cimgui.c.ImGui_TableNextColumn();
@@ -311,7 +312,7 @@ pub const Stream = struct {
                 );
                 defer cimgui.c.ImGui_EndTable();
 
-                inline for (@typeInfo(terminal.Parser.Action.Tag).@"enum".fields) |field| {
+                inline for (meta_compat.enumFields(terminal.Parser.Action.Tag)) |field| {
                     const tag = @field(terminal.Parser.Action.Tag, field.name);
                     if (tag == .apc_put or tag == .dcs_put) continue;
 
@@ -561,7 +562,7 @@ const VTEvent = struct {
         var it = self.metadata.iterator();
         while (it.next()) |entry| {
             var buf: [256]u8 = undefined;
-            const key = std.fmt.bufPrintZ(&buf, "{s}", .{entry.key_ptr.*}) catch continue;
+            const key = std.mem.printSentinel(&buf, "{s}", .{entry.key_ptr.*}, 0) catch continue;
             if (cimgui.c.ImGuiTextFilter_PassFilter(
                 filter,
                 key.ptr,

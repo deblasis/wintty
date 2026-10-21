@@ -5,6 +5,7 @@
 const Parser = @This();
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const testing = std.testing;
 const table = @import("parse_table.zig").table;
 const osc = @import("osc.zig");
@@ -151,7 +152,7 @@ pub const Action = union(enum) {
             try writer.writeAll(@tagName(@as(TagType, self)));
             try writer.writeAll(" = ");
 
-            inline for (info.fields) |u_field| {
+            inline for (meta_compat.unionFields(T)) |u_field| {
                 // If this is the active field...
                 if (self == @field(TagType, u_field.name)) {
                     const value = @field(self, u_field.name);
@@ -275,7 +276,7 @@ pub fn resetToGround(self: *Parser) void {
 /// Up to 3 actions may need to be executed -- in order -- representing
 /// the state exit, transition, and entry actions.
 pub fn next(self: *Parser, c: u8) [3]?Action {
-    const effect = table[c][@intFromEnum(self.state)];
+    const effect = table[c][@backingInt(self.state)];
 
     // log.info("next: {x}", .{c});
 

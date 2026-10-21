@@ -37,12 +37,12 @@ pub const Pattern = opaque {
 
     pub fn get(self: *Pattern, prop: Property, id: u32) Error!Value {
         var val: c.struct__FcValue = undefined;
-        try @as(Result, @enumFromInt(c.FcPatternGet(
+        try @as(Result, @fromBackingInt(@intCast(c.FcPatternGet(
             self.cval(),
             prop.cval().ptr,
             @intCast(id),
             &val,
-        ))).toError();
+        )))).toError();
 
         return .init(&val);
     }
@@ -136,8 +136,8 @@ pub const Pattern = opaque {
             self.id += 1;
 
             return Entry{
-                .result = @enumFromInt(result),
-                .binding = @enumFromInt(binding),
+                .result = @fromBackingInt(@intCast(result)),
+                .binding = @fromBackingInt(@intCast(binding)),
                 .value = .init(&value),
             };
         }
@@ -151,7 +151,7 @@ test "create" {
     defer pat.destroy();
 
     try testing.expect(pat.add(.family, .{ .string = "monospace" }, false));
-    try testing.expect(pat.add(.weight, .{ .integer = @intFromEnum(Weight.bold) }, false));
+    try testing.expect(pat.add(.weight, .{ .integer = @backingInt(Weight.bold) }, false));
 
     {
         const val = try pat.get(.family, 0);

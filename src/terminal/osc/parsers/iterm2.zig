@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 
 const assert = @import("../../../quirks.zig").inlineAssert;
@@ -55,10 +56,10 @@ const Key = enum {
 const Map = std.StaticStringMapWithEql(Key, std.ascii.eqlIgnoreCase);
 const map: Map = .initComptime(
     map: {
-        const fields = @typeInfo(Key).@"enum".fields;
+        const fields = meta_compat.enumFields(Key);
         var tmp: [fields.len]struct { [:0]const u8, Key } = undefined;
         for (fields, 0..) |field, i| {
-            tmp[i] = .{ field.name, @enumFromInt(field.value) };
+            tmp[i] = .{ field.name, @fromBackingInt(@intCast(field.value)) };
         }
         break :map tmp;
     },

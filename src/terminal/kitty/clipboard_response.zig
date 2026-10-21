@@ -365,7 +365,7 @@ test "read success: chunking at read_chunk_size" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    const data = "z" ** (read_chunk_size + 1);
+    const data = @as([(read_chunk_size + 1)]u8, @splat('z'));
     var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
     try (ReadSuccess{

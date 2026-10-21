@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const build_options = @import("terminal_options");
 const assert = @import("../quirks.zig").inlineAssert;
 const LibEnum = @import("../lib/enum.zig").Enum;
@@ -101,7 +102,7 @@ fn initTable() [table_len]u16 {
 test {
     const testing = std.testing;
     const info = @typeInfo(Charset).@"enum";
-    inline for (info.fields) |field| {
+    inline for (meta_compat.enumFields(Charset)) |field| {
         // utf8 has no table
         if (@field(Charset, field.name) == .utf8) continue;
 

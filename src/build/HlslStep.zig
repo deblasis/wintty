@@ -4,6 +4,7 @@
 const HlslStep = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Step = std.Build.Step;
 const RunStep = std.Build.Step.Run;
 const LazyPath = std.Build.LazyPath;
@@ -42,12 +43,12 @@ pub fn create(b: *std.Build, opts: Options) ?*HlslStep {
         return null;
     };
 
+    // 0.17 removed custom build steps (`StepOptions.id`/`.custom`): the build
+    // graph is serialized to the maker process, so steps must be built-ins.
+    // Aggregate the per-shader Run steps by chaining them and exposing the last
+    // link as `step`; depending on it guarantees every shader was built.
     var outputs: std.StringHashMapUnmanaged(LazyPath) = .empty;
-    var step_wip = Step.init(.{
-        .id = .custom,
-        .name = "hlsl",
-        .owner = b,
-    });
+    var last_step: ?*Step = null;
 
     for (opts.shaders) |shader| {
         const run = RunStep.create(
@@ -67,15 +68,18 @@ pub fn create(b: *std.Build, opts: Options) ?*HlslStep {
         );
         run.addFileArg(shader.source);
 
+        if (last_step) |prev| run.step.dependOn(prev);
+        last_step = &run.step;
         outputs.put(b.allocator, shader.output_name, output) catch @panic("OOM");
-        step_wip.dependOn(&run.step);
     }
 
     self.* = .{
-        .step = b.allocator.create(Step) catch @panic("OOM"),
+        .step = last_step orelse {
+            std.log.warn("hlsl: no shaders requested", .{});
+            return null;
+        },
         .outputs = outputs,
     };
-    self.step.* = step_wip;
 
     return self;
 }
@@ -88,8 +92,12 @@ fn findDxc(b: *std.Build, arch: std.Target.Cpu.Arch) ?[]const u8 {
         else => return null,
     };
 
-    // Try the Windows SDK first.
-    if (findDxcInSdk(b, arch, arch_str)) |path| return path;
+    // The Windows SDK probe is Windows-host-only: on other hosts the SDK
+    // discovery walks registry-shaped paths that 0.17 asserts are absolute
+    // (measured: panic in Dir.openDirAbsolute during configure on macOS).
+    if (builtin.os.tag == .windows) {
+        if (findDxcInSdk(b, arch, arch_str)) |path| return path;
+    }
 
     // Fall back to PATH (e.g. Vulkan SDK ships dxc.exe).
     return findDxcInPath(b);

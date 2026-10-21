@@ -138,12 +138,12 @@ pub const Descriptor = struct {
         ));
         if (self.bold) assert(pat.add(
             .weight,
-            .{ .integer = @intFromEnum(fontconfig.Weight.bold) },
+            .{ .integer = @backingInt(fontconfig.Weight.bold) },
             false,
         ));
         if (self.italic) assert(pat.add(
             .slant,
-            .{ .integer = @intFromEnum(fontconfig.Slant.italic) },
+            .{ .integer = @backingInt(fontconfig.Slant.italic) },
             false,
         ));
 
@@ -152,7 +152,7 @@ pub const Descriptor = struct {
         // exclude non-monospace but helps prefer it.
         assert(pat.add(
             .spacing,
-            .{ .integer = @intFromEnum(fontconfig.Spacing.mono) },
+            .{ .integer = @backingInt(fontconfig.Spacing.mono) },
             false,
         ));
 
@@ -1576,11 +1576,7 @@ pub const Windows = struct {
             };
 
             var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const full_path = std.fmt.bufPrintZ(
-                &path_buf,
-                "{s}\\{s}",
-                .{ dir_path, name },
-            ) catch return null;
+            const full_path = std.mem.printSentinel(&path_buf, "{s}\\{s}", .{ dir_path, name }, 0) catch return null;
 
             const is_ttc = std.ascii.endsWithIgnoreCase(name, ".ttc");
             const max_faces: i32 = if (is_ttc) 16 else 1;
@@ -2006,7 +2002,7 @@ fn testDirectWriteHasFamily(dw: *const DirectWrite, family: [:0]const u8) bool {
 
 /// Test helper: the width Lucida Console ships at. Its one face is
 /// semi-condensed, which is what a regular request has to find.
-const testDirectWriteLucidaConsoleStretch = @intFromEnum(dwrite.DWRITE_FONT_STRETCH.SEMI_CONDENSED);
+const testDirectWriteLucidaConsoleStretch = @backingInt(dwrite.DWRITE_FONT_STRETCH.SEMI_CONDENSED);
 
 /// Test helper: whether the family ships a real face of `weight`. The faces
 /// come from IDWriteFontFamily::GetFont, so a simulation never counts.
@@ -2027,7 +2023,7 @@ fn testDirectWriteHasWeight(dw: *const DirectWrite, family: [:0]const u8, weight
         var dw_font: ?*dwrite.IDWriteFont = null;
         if (dwrite.FAILED(dw_family.?.GetFont(@intCast(i), &dw_font))) continue;
         defer _ = dw_font.?.Release();
-        if (@intFromEnum(dw_font.?.GetWeight()) == weight) return true;
+        if (@backingInt(dw_font.?.GetWeight()) == weight) return true;
     }
     return false;
 }
@@ -2047,8 +2043,8 @@ fn testDirectWriteFirstFace(dw: *const DirectWrite, desc: Descriptor) !?TestDire
     defer face.deinit();
     const f = face.dw.?.font;
     return .{
-        .weight = @intFromEnum(f.GetWeight()),
-        .stretch = @intFromEnum(f.GetStretch()),
+        .weight = @backingInt(f.GetWeight()),
+        .stretch = @backingInt(f.GetStretch()),
         .italic = f.GetStyle() != .NORMAL,
         .simulated = f.GetSimulations() != .NONE,
     };
@@ -2098,7 +2094,7 @@ fn testDirectWriteExpectFace(
         italic,
         want_weight,
         want_italic,
-        @intFromEnum(dwrite.DWRITE_FONT_STRETCH.NORMAL),
+        @backingInt(dwrite.DWRITE_FONT_STRETCH.NORMAL),
     );
 }
 

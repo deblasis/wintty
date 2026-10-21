@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
@@ -190,6 +191,6 @@ test "io message variants are all accounted for by the push give-up path" {
     // next idle transition or leaves the surface live, which is the
     // conservative direction and re-derivable from the state that asked
     // for it. Neither is a one-shot the way `.child_exited` is.
-    const fields = @typeInfo(Message).@"union".fields;
+    const fields = meta_compat.unionFields(Message);
     try std.testing.expectEqual(@as(usize, 21), fields.len);
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const Action = @import("Binding.zig").Action;
@@ -98,14 +99,14 @@ pub const defaults: []const Command = defaults: {
     @setEvalBranchQuota(100_000);
 
     var count: usize = 0;
-    for (@typeInfo(Action.Key).@"enum".fields) |field| {
+    for (meta_compat.enumFields(Action.Key)) |field| {
         const action = @field(Action.Key, field.name);
         count += actionCommands(action).len;
     }
 
     var result: [count]Command = undefined;
     var i: usize = 0;
-    for (@typeInfo(Action.Key).@"enum".fields) |field| {
+    for (meta_compat.enumFields(Action.Key)) |field| {
         const action = @field(Action.Key, field.name);
         const commands = actionCommands(action);
         for (commands) |cmd| {

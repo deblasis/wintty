@@ -1,5 +1,6 @@
 //! Fish completions.
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 
 const Config = @import("../config/Config.zig");
 const Action = @import("../cli.zig").ghostty.Action;
@@ -28,7 +29,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     {
         try writer.writeAll("set -l commands \"");
         var count: usize = 0;
-        for (@typeInfo(Action).@"enum".fields) |field| {
+        for (meta_compat.enumFields(Action)) |field| {
             if (count > 0) try writer.writeAll(" ");
             try writer.writeAll("+");
             try writer.writeAll(field.name);
@@ -42,7 +43,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     try writer.writeAll("complete -c ghostty -s e -l help -f\n");
     try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l version -f\n");
 
-    for (@typeInfo(Config).@"struct".fields) |field| {
+    for (meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
 
         try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l ");
@@ -96,7 +97,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     {
         try writer.writeAll("complete -c ghostty -n \"string match -q -- '+*' (commandline -pt)\" -f -a \"");
         var count: usize = 0;
-        for (@typeInfo(Action).@"enum".fields) |field| {
+        for (meta_compat.enumFields(Action)) |field| {
             if (count > 0) try writer.writeAll(" ");
             try writer.writeAll("+");
             try writer.writeAll(field.name);
@@ -105,12 +106,12 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         try writer.writeAll("\"\n");
     }
 
-    for (@typeInfo(Action).@"enum".fields) |field| {
+    for (meta_compat.enumFields(Action)) |field| {
         if (std.mem.eql(u8, names.help_action, field.name)) continue;
         if (std.mem.eql(u8, names.version_action, field.name)) continue;
 
         const options = @field(Action, field.name).options();
-        for (@typeInfo(options).@"struct".fields) |opt| {
+        for (meta_compat.structFields(options)) |opt| {
             if (opt.name[0] == '_') continue;
             try writer.writeAll("complete -c ghostty -n \"__fish_seen_subcommand_from +" ++ field.name ++ "\" -l ");
             try writer.writeAll(opt.name);

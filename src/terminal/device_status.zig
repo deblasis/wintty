@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const lib = @import("lib.zig");
 
 /// The color scheme reported in response to a CSI ? 996 n query.
@@ -17,11 +18,11 @@ pub const Visibility = lib.Enum(lib.target, &.{
 /// Maximum number of bytes that `encodeColorSchemeReport` will write.
 pub const max_color_scheme_report_encode_size = max: {
     var result: usize = 0;
-    for (@typeInfo(ColorScheme).@"enum".fields) |field| {
+    for (meta_compat.enumFields(ColorScheme)) |field| {
         var discarding: std.Io.Writer.Discarding = .init(&.{});
         encodeColorSchemeReport(
             &discarding.writer,
-            @enumFromInt(field.value),
+            @fromBackingInt(@intCast(field.value)),
         ) catch unreachable;
         result = @max(result, @as(usize, @intCast(discarding.count)));
     }
@@ -92,7 +93,7 @@ pub fn reqFromInt(v: u16, question: bool) ?Request {
         if (entry.value == v and entry.question == question) {
             const tag: Tag = .{ .question = question, .value = entry.value };
             const int: Tag.Backing = @bitCast(tag);
-            return @enumFromInt(int);
+            return @fromBackingInt(@intCast(int));
         }
     }
 

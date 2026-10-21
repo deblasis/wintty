@@ -10,6 +10,7 @@
 const SharedGridSet = @This();
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -190,7 +191,7 @@ fn collection(
         // A buffer we use to store the font names for logging.
         var name_buf: [256]u8 = undefined;
 
-        inline for (@typeInfo(Style).@"enum".fields) |field| {
+        inline for (meta_compat.enumFields(Style)) |field| {
             const style = @field(Style, field.name);
             for (key.descriptorsForStyle(style)) |desc| {
                 {
@@ -666,10 +667,10 @@ pub const Key = struct {
     comptime {
         // We assume this throughout this structure. If this changes
         // we may need to change this structure.
-        assert(@intFromEnum(Style.regular) == 0);
-        assert(@intFromEnum(Style.bold) == 1);
-        assert(@intFromEnum(Style.italic) == 2);
-        assert(@intFromEnum(Style.bold_italic) == 3);
+        assert(@backingInt(Style.regular) == 0);
+        assert(@backingInt(Style.bold) == 1);
+        assert(@backingInt(Style.italic) == 2);
+        assert(@backingInt(Style.bold_italic) == 3);
     }
 
     pub fn init(
@@ -800,7 +801,7 @@ pub const Key = struct {
         self: Key,
         style: Style,
     ) []const discovery.Descriptor {
-        const idx = @intFromEnum(style);
+        const idx = @backingInt(style);
         const start: usize = if (idx == 0) 0 else self.style_offsets[idx - 1];
         const end = self.style_offsets[idx];
         return self.descriptors[start..end];
@@ -818,7 +819,7 @@ pub const Key = struct {
         autoHash(hasher, self.metric_modifiers.count());
         autoHash(hasher, self.freetype_load_flags);
         if (self.metric_modifiers.count() > 0) {
-            inline for (@typeInfo(Metrics.Key).@"enum".fields) |field| {
+            inline for (meta_compat.enumFields(Metrics.Key)) |field| {
                 const key = @field(Metrics.Key, field.name);
                 if (self.metric_modifiers.get(key)) |value| {
                     autoHash(hasher, key);

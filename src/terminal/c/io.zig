@@ -6,6 +6,7 @@
 //! enough state to map failures back to distinct C result codes.
 
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const assert = std.debug.assert;
 const lib = @import("../lib.zig");
 
@@ -630,7 +631,7 @@ test "WriterAdapter buffered batches small writes" {
     try adapter.interface.flush();
     try std.testing.expectEqual(@as(usize, 1), context.calls);
     try std.testing.expectEqualStrings(
-        "ab" ** 16,
+        meta_compat.repeat("ab", 16),
         context.data[0..context.len],
     );
     try std.testing.expectEqual(@as(usize, 32), adapter.offset);
@@ -671,7 +672,7 @@ test "WriterAdapter buffered splats and large writes" {
     try adapter.interface.flush();
 
     try std.testing.expectEqualStrings(
-        " " ** 40 ++ "0123456789abcdef0" ++ "xy",
+        @as([40]u8, @splat(' ')) ++ "0123456789abcdef0" ++ "xy",
         context.data[0..context.len],
     );
     try std.testing.expectEqual(

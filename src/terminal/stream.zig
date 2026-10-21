@@ -1455,7 +1455,7 @@ pub fn Stream(comptime H: type) type {
                 return;
             }
 
-            const c0: ansi.C0 = @enumFromInt(c);
+            const c0: ansi.C0 = @fromBackingInt(@intCast(c));
             if (comptime debug) log.info("execute: {f}", .{c0});
             switch (c0) {
                 // We ignore SOH/STX: https://github.com/microsoft/terminal/issues/10786
@@ -1746,7 +1746,7 @@ pub fn Stream(comptime H: type) type {
 
                     const mode_: ?csi.EraseLine = switch (input.params.len) {
                         0 => .right,
-                        1 => if (input.params[0] < 3) @enumFromInt(input.params[0]) else null,
+                        1 => if (input.params[0] < 3) @fromBackingInt(@intCast(input.params[0])) else null,
                         else => null,
                     };
 
@@ -3547,7 +3547,7 @@ test "stream: cursor right (CUF)" {
 
 test "stream: dec set mode (SM) and reset mode (RM)" {
     const H = struct {
-        mode: modes.Mode = @as(modes.Mode, @enumFromInt(1)),
+        mode: modes.Mode = @as(modes.Mode, @fromBackingInt(@intCast(1))),
 
         pub fn vt(
             self: *@This(),
@@ -3556,7 +3556,7 @@ test "stream: dec set mode (SM) and reset mode (RM)" {
         ) void {
             switch (action) {
                 .set_mode => self.mode = value.mode,
-                .reset_mode => self.mode = @as(modes.Mode, @enumFromInt(1)),
+                .reset_mode => self.mode = @as(modes.Mode, @fromBackingInt(@intCast(1))),
                 else => {},
             }
         }
@@ -3567,11 +3567,11 @@ test "stream: dec set mode (SM) and reset mode (RM)" {
     try testing.expectEqual(@as(modes.Mode, .origin), s.handler.mode);
 
     s.nextSlice("\x1B[?6l");
-    try testing.expectEqual(@as(modes.Mode, @enumFromInt(1)), s.handler.mode);
+    try testing.expectEqual(@as(modes.Mode, @fromBackingInt(@intCast(1))), s.handler.mode);
 
-    s.handler.mode = @as(modes.Mode, @enumFromInt(1));
+    s.handler.mode = @as(modes.Mode, @fromBackingInt(@intCast(1)));
     s.nextSlice("\x1B[6 h");
-    try testing.expectEqual(@as(modes.Mode, @enumFromInt(1)), s.handler.mode);
+    try testing.expectEqual(@as(modes.Mode, @fromBackingInt(@intCast(1))), s.handler.mode);
 }
 
 test "stream: ansi set mode (SM) and reset mode (RM)" {
@@ -4313,9 +4313,9 @@ test "stream: osc bulk path matches per-byte path" {
         // Invalid OSC number.
         "\x1b]999;junk\x07",
         // Exceeds the fixed buffer: allocating capture.
-        "\x1b]52;c;" ++ "y" ** 3000 ++ "\x1b\\",
+        "\x1b]52;c;" ++ @as([3000]u8, @splat('y')) ++ "\x1b\\",
         // Exceeds the fixed buffer: overflow, no dispatch.
-        "\x1b]0;" ++ "x" ** 3000 ++ "\x07",
+        "\x1b]0;" ++ @as([3000]u8, @splat('x')) ++ "\x07",
     };
 
     for (cases) |case| {

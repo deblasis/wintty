@@ -4,6 +4,7 @@
 const Exec = @This();
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -3582,7 +3583,7 @@ test "wslDistroSlug always yields a valid DiskCache key" {
         " -weird- ", // leading/trailing junk
         "My_Distro_",
         "....", // all non-alnum
-        "" ++ ("x" ** 100), // over-long label
+        "" ++ (@as([100]u8, @splat('x'))), // over-long label
         "",
     };
     inline for (names) |name| {
@@ -3594,7 +3595,7 @@ test "wslDistroSlug always yields a valid DiskCache key" {
     try testing.expectEqualStrings("Ubuntu-24-04", wslDistroSlug(&buf, "Ubuntu-24.04"));
     try testing.expectEqualStrings("Ubuntu", wslDistroSlug(&buf, "Ubuntu "));
     try testing.expectEqualStrings("wsl", wslDistroSlug(&buf, "...."));
-    try testing.expect(wslDistroSlug(&buf, "" ++ ("x" ** 100)).len == 63);
+    try testing.expect(wslDistroSlug(&buf, "" ++ (@as([100]u8, @splat('x')))).len == 63);
 }
 
 /// When no wrap applies the input `args` slice is returned unchanged.
@@ -6173,13 +6174,13 @@ test "termDecision refuses for the right reason and says which" {
     // Every reason has its own sentence, so the log line can be acted on. A
     // new variant with no sentence, or one copied from its neighbour, fails
     // here rather than shipping an unactionable warning.
-    inline for (@typeInfo(TermDecision.Refusal).@"enum".fields) |a| {
-        const ra: TermDecision.Refusal = @enumFromInt(a.value);
+    inline for (meta_compat.enumFields(TermDecision.Refusal)) |a| {
+        const ra: TermDecision.Refusal = @fromBackingInt(@intCast(a.value));
         try testing.expect(ra.explain().len > 0);
 
-        inline for (@typeInfo(TermDecision.Refusal).@"enum".fields) |b| {
+        inline for (meta_compat.enumFields(TermDecision.Refusal)) |b| {
             if (a.value == b.value) continue;
-            const rb: TermDecision.Refusal = @enumFromInt(b.value);
+            const rb: TermDecision.Refusal = @fromBackingInt(@intCast(b.value));
             try testing.expect(!std.mem.eql(u8, ra.explain(), rb.explain()));
         }
     }

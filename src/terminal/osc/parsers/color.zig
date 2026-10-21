@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../../meta_compat.zig");
 const lib = @import("../../lib.zig");
 const Allocator = std.mem.Allocator;
 
@@ -471,7 +472,7 @@ test "OSC 4:" {
     }
 
     // Test every special color
-    for (0..@typeInfo(SpecialColor).@"enum".fields.len) |i| {
+    for (0..meta_compat.enumFields(SpecialColor).len) |i| {
         const special = std.enums.fromInt(SpecialColor, i) orelse return error.InvalidEnumValue;
 
         // Simple color set
@@ -503,7 +504,7 @@ test "OSC 5:" {
     const alloc = testing.allocator;
 
     // Test every special color
-    for (0..@typeInfo(SpecialColor).@"enum".fields.len) |i| {
+    for (0..meta_compat.enumFields(SpecialColor).len) |i| {
         const special = std.enums.fromInt(SpecialColor, i) orelse return error.InvalidEnumValue;
 
         // Simple color set
@@ -613,7 +614,7 @@ test "OSC 104:" {
     }
 
     // Test every special color
-    for (0..@typeInfo(SpecialColor).@"enum".fields.len) |i| {
+    for (0..meta_compat.enumFields(SpecialColor).len) |i| {
         const special = std.enums.fromInt(SpecialColor, i) orelse return error.InvalidEnumValue;
 
         // Simple color set
@@ -698,7 +699,7 @@ test "OSC 10: OSC 11: OSC 12: OSC: 13: OSC 14: OSC 15: OSC: 16: OSC 17: OSC 18: 
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    inline for (@typeInfo(DynamicColor).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(DynamicColor)) |field| {
         const color = @field(DynamicColor, field.name);
         const op = @field(Operation, std.fmt.comptimePrint(
             "osc_{d}",
@@ -758,7 +759,7 @@ test "OSC 110: OSC 111: OSC 112: OSC: 113: OSC 114: OSC 115: OSC: 116: OSC 117: 
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    inline for (@typeInfo(DynamicColor).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(DynamicColor)) |field| {
         const color = @field(DynamicColor, field.name);
         const op = @field(Operation, std.fmt.comptimePrint(
             "osc_1{d}",

@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Action = @import("ghostty.zig").Action;
@@ -121,7 +122,7 @@ fn runArgs(
         var exit: bool = false;
         outer: for (opts._diagnostics.items()) |diagnostic| {
             if (diagnostic.location != .cli) continue :outer;
-            inner: inline for (@typeInfo(Options).@"struct".fields) |field| {
+            inner: inline for (meta_compat.structFields(Options)) |field| {
                 if (field.name[0] == '_') continue :inner;
                 if (std.mem.eql(u8, field.name, diagnostic.key)) {
                     try stderr.print("config error: {f}\n", .{diagnostic});
@@ -152,7 +153,7 @@ fn runArgs(
     // action-specific argument.
     if (!config._diagnostics.empty()) {
         outer: for (config._diagnostics.items()) |diagnostic| {
-            inner: inline for (@typeInfo(Options).@"struct".fields) |field| {
+            inner: inline for (meta_compat.structFields(Options)) |field| {
                 if (field.name[0] == '_') continue :inner;
                 if (std.mem.eql(u8, field.name, diagnostic.key) and (diagnostic.location == .none or diagnostic.location == .cli)) continue :outer;
             }

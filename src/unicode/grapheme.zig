@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const table = @import("props_table.zig").table;
 const uucode = @import("uucode");
 
@@ -171,8 +172,8 @@ const Precompute = struct {
         @setEvalBranchQuota(20_000);
         const info = @typeInfo(uucode.types.GraphemeBreakNoControl).@"enum";
         for (0..uucode.grapheme.BreakState.table_len) |state_int| {
-            for (info.fields) |field1| {
-                for (info.fields) |field2| {
+            for (meta_compat.enumFields(uucode.types.GraphemeBreakNoControl)) |field1| {
+                for (meta_compat.enumFields(uucode.types.GraphemeBreakNoControl)) |field2| {
                     var state: uucode.grapheme.BreakState = .fromTableIndex(state_int);
 
                     const key: Key = .{

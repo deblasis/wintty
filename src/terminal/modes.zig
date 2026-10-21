@@ -185,7 +185,7 @@ fn getPacked(values: *const ModePacked, mode: Mode) bool {
 pub const ModePacked = packed_struct: {
     const StructField = std.builtin.Type.StructField;
     var names: [entries.len][]const u8 = undefined;
-    var types = [_]type{bool} ** entries.len;
+    var types: [entries.len]type = @splat(bool);
     var attrs: [entries.len]StructField.Attributes = undefined;
 
     for (entries, &names, &attrs) |entry, *name, *attr| {
@@ -219,7 +219,7 @@ pub const ModeTag = packed struct(u16) {
     ansi: bool = false,
 
     pub fn fromMode(mode: Mode) ModeTag {
-        return @bitCast(@intFromEnum(mode));
+        return @bitCast(@backingInt(mode));
     }
 
     test "order" {
@@ -250,7 +250,7 @@ pub fn modeFromInt(v: u16, ansi: bool) ?Mode {
         if (entries_disabled[idx]) return null;
     }
 
-    return @enumFromInt(int);
+    return @fromBackingInt(@intCast(int));
 }
 
 /// The tag of every entry, in the same order as `entries`. Looking up
@@ -329,7 +329,7 @@ pub const Report = struct {
         try writer.print("\x1B[{s}{};{}$y", .{
             if (self.tag.ansi) "" else "?",
             self.tag.value,
-            @intFromEnum(self.state),
+            @backingInt(self.state),
         });
     }
 };

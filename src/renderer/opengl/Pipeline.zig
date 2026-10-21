@@ -2,6 +2,7 @@
 const Self = @This();
 
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const gl = @import("opengl");
 
@@ -84,7 +85,7 @@ fn autoAttribute(
         .constant => std.math.maxInt(gl.c.GLuint),
     };
 
-    inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
+    inline for (meta_compat.structFields(T), 0..) |field, i| {
         try vaobind.enableAttribArray(i);
         try vaobind.attributeBinding(i, 0);
         try vaobind.bindingDivisor(i, divisor);

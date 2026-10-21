@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const assert = @import("../../quirks.zig").inlineAssert;
 const math = @import("../../math.zig");
@@ -72,8 +73,8 @@ const PipelineCollection = t: {
     const StructField = std.builtin.Type.StructField;
 
     var names: [pipeline_descs.len][]const u8 = undefined;
-    var types = [_]type{Pipeline} ** pipeline_descs.len;
-    var attrs = [_]StructField.Attributes{.{ .@"align" = @alignOf(Pipeline) }} ** pipeline_descs.len;
+    var types: [pipeline_descs.len]type = @splat(Pipeline);
+    var attrs: [pipeline_descs.len]StructField.Attributes = @splat(.{ .@"align" = @alignOf(Pipeline) });
 
     for (pipeline_descs, &names) |pipeline, *name| {
         name.* = pipeline[0];
@@ -327,7 +328,7 @@ comptime {
         "15u",
         "bg_image.v.glsl BgImage.Info position mask vs opengl.BgImage",
     );
-    for (@typeInfo(BgImage.Info.Position).@"enum".fields) |field| {
+    for (meta_compat.enumFields(BgImage.Info.Position)) |field| {
         mirrors.expectMirrored(
             bg_image_v_source,
             "BG_IMAGE_" ++ mirrors.upper(field.name),
@@ -341,7 +342,7 @@ comptime {
         "3u << 4",
         "bg_image.v.glsl BgImage.Info fit mask vs opengl.BgImage",
     );
-    for (@typeInfo(BgImage.Info.Fit).@"enum".fields) |field| {
+    for (meta_compat.enumFields(BgImage.Info.Fit)) |field| {
         const glsl_name = if (std.mem.eql(u8, field.name, "none"))
             "NO_FIT"
         else

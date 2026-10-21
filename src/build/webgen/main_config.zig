@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const Config = @import("../../config/Config.zig");
 const help_strings = @import("help_strings");
 
@@ -179,7 +180,7 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
     );
 
     @setEvalBranchQuota(200_000);
-    const fields = @typeInfo(Config).@"struct".fields;
+    const fields = meta_compat.structFields(Config);
     inline for (fields, 0..) |field, i| {
         if (field.name[0] == '_') continue;
         if (!@hasDecl(help_strings.Config, field.name)) continue;

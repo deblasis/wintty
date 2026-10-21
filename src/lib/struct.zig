@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const testing = std.testing;
 const Target = @import("target.zig").Target;
 
@@ -20,11 +21,11 @@ pub fn Struct(
         .zig => Zig,
         .c => c: {
             const info = @typeInfo(Zig).@"struct";
-            var names: [info.fields.len][]const u8 = undefined;
-            var types: [info.fields.len]type = undefined;
-            var attrs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+            var names: [meta_compat.structFields(Zig).len][]const u8 = undefined;
+            var types: [meta_compat.structFields(Zig).len]type = undefined;
+            var attrs: [meta_compat.structFields(Zig).len]std.builtin.Type.StructField.Attributes = undefined;
 
-            for (info.fields, &names, &types, &attrs) |field, *name, *ty, *attr| {
+            for (meta_compat.structFields(Zig), &names, &types, &attrs) |field, *name, *ty, *attr| {
                 name.* = field.name;
                 ty.* = field.type;
                 attr.* = .{

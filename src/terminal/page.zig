@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const build_options = @import("terminal_options");
 const lib = @import("../lib/main.zig");
@@ -371,7 +372,7 @@ pub const Page = struct {
     /// disabled or the target is freestanding. This uses the libc allocator.
     pub inline fn assertIntegrity(self: *const Page) void {
         if (comptime build_options.slow_runtime_safety and builtin.os.tag != .freestanding) {
-            var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+            var debug_allocator: std.heap.debugAllocator(.{}) = .init;
             defer _ = debug_allocator.deinit();
             const alloc = debug_allocator.allocator();
             self.verifyIntegrity(alloc) catch |err| {
@@ -2771,7 +2772,7 @@ test "Page.layout can take a maxed capacity" {
     // overflow. This simplifies some of our handling downstream of the
     // call (relevant to: https://github.com/ghostty-org/ghostty/issues/10258)
     var cap: Capacity = undefined;
-    inline for (@typeInfo(Capacity).@"struct".fields) |field| {
+    inline for (meta_compat.structFields(Capacity)) |field| {
         @field(cap, field.name) = std.math.maxInt(field.type);
     }
 

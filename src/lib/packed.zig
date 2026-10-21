@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const testing = std.testing;
 
 /// Metadata for a field in a packed layout.
@@ -37,7 +38,7 @@ pub fn Packed(
         // I know this is an insane amount of validation but getting
         // this correct is critical to C APIs working so we go overboard.
         comptime {
-            for (info.fields, 0..) |field, i| {
+            for (meta_compat.structFields(T), 0..) |field, i| {
                 const field_options = @field(options.fields, field.name);
                 if (field_options.omit) {
                     if (field_options.name != null or
@@ -77,7 +78,7 @@ pub fn Packed(
                 }
 
                 const public_name = field_options.name orelse field.name;
-                for (info.fields[0..i]) |previous| {
+                for (meta_compat.structFields(T)[0..i]) |previous| {
                     const previous_options = @field(options.fields, previous.name);
                     if (previous_options.omit) continue;
                     const previous_name = previous_options.name orelse previous.name;
@@ -163,7 +164,7 @@ pub fn PackedTaggedUnion(
         pub const tag_field = tag_field_value;
 
         comptime {
-            for (tag_info.fields) |tag| {
+            for (meta_compat.enumFields(TagT)) |tag| {
                 const arm_value = @field(options.arms, tag.name) orelse continue;
                 switch (arm_value) {
                     inline else => |Layout, source| {
@@ -188,7 +189,7 @@ pub fn PackedTaggedUnionOptions(comptime Union: type, comptime Tag: type) type {
     const union_info = @typeInfo(Union).@"union";
     if (union_info.layout != .@"packed")
         @compileError("packed tagged union value must be a packed union");
-    const tag_fields = @typeInfo(Tag).@"enum".fields;
+    const tag_fields = meta_compat.enumFields(Tag);
     const Arm = PackedTaggedUnionArm(Union);
     const default_arm: ?Arm = null;
 
@@ -209,7 +210,7 @@ pub fn PackedTaggedUnionOptions(comptime Union: type, comptime Tag: type) type {
 }
 
 fn PackedTaggedUnionArm(comptime Union: type) type {
-    const fields = @typeInfo(Union).@"union".fields;
+    const fields = meta_compat.unionFields(Union);
     const Tag = std.meta.FieldEnum(Union);
 
     var names: [fields.len][]const u8 = undefined;

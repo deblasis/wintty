@@ -1,6 +1,7 @@
 const Metrics = @This();
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 
 /// Recommended cell width and height for a monospace grid using this font.
@@ -432,7 +433,7 @@ inline fn addFloatToInt(int: *u32, float: f64) void {
 
 /// Clamp all metrics to their allowable range.
 fn clamp(self: *Metrics) void {
-    inline for (std.meta.fields(Metrics)) |field| {
+    inline for (meta_compat.structFields(Metrics)) |field| {
         if (@hasDecl(Minimums, field.name)) {
             @field(self, field.name) = @max(
                 @field(self, field.name),
@@ -588,7 +589,7 @@ pub const Modifier = union(enum) {
 
 /// Key is an enum of all the available metrics keys.
 pub const Key = key: {
-    const field_infos = std.meta.fields(Metrics);
+    const field_infos = meta_compat.structFields(Metrics);
     var names: [field_infos.len][]const u8 = undefined;
     var raw_values: [field_infos.len]comptime_int = undefined;
     var count: usize = 0;

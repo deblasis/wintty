@@ -39,6 +39,7 @@
 const program_status = @This();
 
 const std = @import("std");
+const meta_compat = @import("../../../meta_compat.zig");
 const lib = @import("../../lib.zig");
 const osc = @import("../../osc.zig");
 const encoding = @import("../encoding.zig");
@@ -110,7 +111,7 @@ pub const query_reply = "?:states=" ++
 fn names(comptime E: type, comptime skip: []const E) []const u8 {
     comptime {
         var result: []const u8 = "";
-        for (@typeInfo(E).@"enum".fields) |field| {
+        for (meta_compat.enumFields(E)) |field| {
             const value = @field(E, field.name);
             if (std.mem.indexOfScalar(E, skip, value) != null) continue;
             if (result.len > 0) result = result ++ ",";
@@ -654,7 +655,7 @@ test "OSC 7501: ids" {
     var p: Parser = .init(testing.allocator);
     defer p.deinit();
 
-    const max_segment = "a" ** max_id_segment_bytes;
+    const max_segment = @as([max_id_segment_bytes]u8, @splat('a'));
     const valid = [_][]const u8{
         "a",
         "build/test",
@@ -682,7 +683,7 @@ test "OSC 7501: ids" {
         "a=b",
         max_segment ++ "a",
         "a/b/c/d/e/f/g/h/i",
-        ("a" ** 31 ++ "/") ** 4 ++ "a",
+        meta_compat.repeat("a/", 4) ++ "a",
     };
     for (invalid) |id| {
         p.reset();
@@ -746,8 +747,8 @@ test "OSC 7501: discarded reports" {
 
     // 192 bytes of title and 2048 bytes of message are the most allowed.
     // "QUFB" decodes to "AAA" and "QUE" to "AA".
-    const title = "QUFB" ** (max_title_encoded_bytes / 4);
-    const msg = "QUFB" ** (max_msg_bytes / 3) ++ "QUE";
+    const title = meta_compat.repeat("QUFB", max_title_encoded_bytes / 4);
+    const msg = meta_compat.repeat("QUFB", max_msg_bytes / 3) ++ "QUE";
     const fill = max_sequence_bytes - "\x1b]7501;state=idle:".len - "\x1b\\".len;
 
     const cases = [_]struct { []const u8, bool }{
@@ -759,22 +760,22 @@ test "OSC 7501: discarded reports" {
         .{ "7501;state=IDLE", false },
 
         // A key that is too long, even one we don't know.
-        .{ "7501;state=idle:" ++ "a" ** max_key_bytes ++ "=1", true },
-        .{ "7501;state=idle:" ++ "a" ** (max_key_bytes + 1) ++ "=1", false },
+        .{ "7501;state=idle:" ++ @as([max_key_bytes]u8, @splat('a')) ++ "=1", true },
+        .{ "7501;state=idle:" ++ @as([(max_key_bytes + 1)]u8, @splat('a')) ++ "=1", false },
 
         // An app that is too long, even if a later pair replaces it.
-        .{ "7501;state=idle:app=" ++ "a" ** (max_app_bytes + 1), false },
-        .{ "7501;state=idle:app=" ++ "a" ** (max_app_bytes + 1) ++ ":app=ok", false },
+        .{ "7501;state=idle:app=" ++ @as([(max_app_bytes + 1)]u8, @splat('a')), false },
+        .{ "7501;state=idle:app=" ++ @as([(max_app_bytes + 1)]u8, @splat('a')) ++ ":app=ok", false },
 
         // Text at its limits and one step over.
         .{ "7501;state=idle:title=" ++ title, true },
         .{ "7501;state=idle:title=" ++ title ++ "QUFB", false },
         .{ "7501;state=idle:msg=" ++ msg, true },
-        .{ "7501;state=idle:msg=" ++ "QUFB" ** (max_msg_bytes / 3 + 1), false },
+        .{ "7501;state=idle:msg=" ++ meta_compat.repeat("QUFB", max_msg_bytes / 3 + 1), false },
 
         // The whole sequence, including the terminator.
-        .{ "7501;state=idle:" ++ "x" ** fill, true },
-        .{ "7501;state=idle:" ++ "x" ** (fill + 1), false },
+        .{ "7501;state=idle:" ++ @as([fill]u8, @splat('x')), true },
+        .{ "7501;state=idle:" ++ @as([(fill + 1)]u8, @splat('x')), false },
 
         // Out-of-alphabet id, title and msg: skipped values used to
         // read as absent, so a clear with a bad id fell back to the root

@@ -119,7 +119,7 @@ pub fn dispatch(
     const ud_int = cb_user_data.load(.acquire);
     const ud: ?*anyopaque = if (ud_int == 0) null else @ptrFromInt(ud_int);
 
-    const level_int: u32 = @intFromEnum(levelToExport(level));
+    const level_int: u32 = @backingInt(levelToExport(level));
 
     // Render the message into a stack buffer using a fixed Writer.
     // std.Io.Writer.fixed keeps the bytes it successfully wrote in
@@ -233,7 +233,7 @@ test "dispatch routes level, scope, and formatted message" {
     dispatch(.info, .test_scope, "hello {d}", .{42});
 
     try testing.expectEqual(@as(usize, 1), state.called);
-    try testing.expectEqual(@as(u32, @intFromEnum(Level.info)), state.level);
+    try testing.expectEqual(@as(u32, @backingInt(Level.info)), state.level);
     try testing.expectEqualStrings("test_scope", state.scope[0..state.scope_len]);
     try testing.expectEqualStrings("hello 42", state.message[0..state.message_len]);
 }
@@ -327,7 +327,7 @@ test "dispatch truncates an oversized message with a suffix" {
     // buffer: max_message_bytes + 16 copies of 'A'. After truncation
     // the rendered length must equal buf.len and the tail must be
     // truncated_suffix.
-    const big = "A" ** (max_message_bytes + 16);
+    const big = @as([(max_message_bytes + 16)]u8, @splat('A'));
     dispatch(.info, .s, big, .{});
 
     try testing.expectEqual(@as(usize, 1), Big.called);

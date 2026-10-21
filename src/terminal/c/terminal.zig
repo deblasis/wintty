@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const testing = std.testing;
 const build_options = @import("terminal_options");
 const lib = @import("../lib.zig");
@@ -666,15 +667,15 @@ const Effects = struct {
         // because all our types are non-exhaustive enums.
 
         const n: usize = @min(c_attrs.primary.num_features, 64);
-        for (0..n) |i| wrapper.effects.da_features_buf[i] = @enumFromInt(c_attrs.primary.features[i]);
+        for (0..n) |i| wrapper.effects.da_features_buf[i] = @fromBackingInt(@intCast(c_attrs.primary.features[i]));
 
         return .{
             .primary = .{
-                .conformance_level = @enumFromInt(c_attrs.primary.conformance_level),
+                .conformance_level = @fromBackingInt(@intCast(c_attrs.primary.conformance_level)),
                 .features = wrapper.effects.da_features_buf[0..n],
             },
             .secondary = .{
-                .device_type = @enumFromInt(c_attrs.secondary.device_type),
+                .device_type = @fromBackingInt(@intCast(c_attrs.secondary.device_type)),
                 .firmware_version = c_attrs.secondary.firmware_version,
                 .rom_cartridge = c_attrs.secondary.rom_cartridge,
             },
@@ -726,7 +727,7 @@ const Effects = struct {
         const func = wrapper.effects.progress_report orelse return;
         const c_report: ProgressReport = .{
             .size = @sizeOf(ProgressReport),
-            .state = @enumFromInt(@intFromEnum(report.state)),
+            .state = @fromBackingInt(@intCast(@backingInt(report.state))),
             .progress = if (report.progress) |value| @intCast(value) else -1,
         };
         func(@ptrCast(wrapper), wrapper.effects.userdata, &c_report);
@@ -1441,8 +1442,8 @@ pub fn set(
     value: ?*const anyopaque,
 ) callconv(lib.calling_conv) Result {
     if (comptime std.debug.runtime_safety) {
-        _ = std.enums.fromInt(Option, @intFromEnum(option)) orelse {
-            log.warn("terminal_set invalid option value={d}", .{@intFromEnum(option)});
+        _ = std.enums.fromInt(Option, @backingInt(option)) orelse {
+            log.warn("terminal_set invalid option value={d}", .{@backingInt(option)});
             return .invalid_value;
         };
     }
@@ -1918,8 +1919,8 @@ pub fn get(
     out: ?*anyopaque,
 ) callconv(lib.calling_conv) Result {
     if (comptime std.debug.runtime_safety) {
-        _ = std.enums.fromInt(TerminalData, @intFromEnum(data)) orelse {
-            log.warn("terminal_get invalid data value={d}", .{@intFromEnum(data)});
+        _ = std.enums.fromInt(TerminalData, @backingInt(data)) orelse {
+            log.warn("terminal_get invalid data value={d}", .{@backingInt(data)});
             return .invalid_value;
         };
     }
@@ -2900,7 +2901,7 @@ test "get memory_usage" {
     var compression_result: CompressionResult = undefined;
     try testing.expectEqual(
         Result.success,
-        compress(t, @intFromEnum(CompressionMode.full), &compression_result),
+        compress(t, @backingInt(CompressionMode.full), &compression_result),
     );
     try testing.expectEqual(
         history.compression_supported,
@@ -3001,7 +3002,7 @@ test "compression invalid arguments" {
     );
     try testing.expectEqual(
         Result.invalid_value,
-        compress(null, @intFromEnum(CompressionMode.incremental), &compression_result),
+        compress(null, @backingInt(CompressionMode.incremental), &compression_result),
     );
 
     var t: Terminal = null;
@@ -3019,7 +3020,7 @@ test "compression invalid arguments" {
     );
     try testing.expectEqual(
         Result.invalid_value,
-        compress(t, @intFromEnum(CompressionMode.incremental), null),
+        compress(t, @backingInt(CompressionMode.incremental), null),
     );
     try testing.expectEqual(
         Result.invalid_value,
@@ -3064,7 +3065,7 @@ test "compression activity and incremental scheduling" {
             Result.success,
             compress(
                 t,
-                @intFromEnum(CompressionMode.incremental),
+                @backingInt(CompressionMode.incremental),
                 &compression_result,
             ),
         );
@@ -3086,7 +3087,7 @@ test "compression activity and incremental scheduling" {
 
     try testing.expectEqual(
         Result.success,
-        compress(t, @intFromEnum(CompressionMode.full), &compression_result),
+        compress(t, @backingInt(CompressionMode.full), &compression_result),
     );
     try testing.expectEqual(CompressionResult.complete, compression_result);
 }
@@ -6461,7 +6462,12 @@ test "set device_attributes callback primary" {
             out.* = .{
                 .primary = .{
                     .conformance_level = 64,
-                    .features = .{ 22, 52 } ++ .{0} ** 62,
+                    .features = blk: {
+                        var f: [64]u16 = @splat(0);
+                        f[0] = 22;
+                        f[1] = 52;
+                        break :blk f;
+                    },
                     .num_features = 2,
                 },
                 .secondary = .{
@@ -6512,7 +6518,11 @@ test "set device_attributes callback secondary" {
             out.* = .{
                 .primary = .{
                     .conformance_level = 62,
-                    .features = .{22} ++ .{0} ** 63,
+                    .features = blk: {
+                        var f: [64]u16 = @splat(0);
+                        f[0] = 22;
+                        break :blk f;
+                    },
                     .num_features = 1,
                 },
                 .secondary = .{
@@ -6563,7 +6573,7 @@ test "set device_attributes callback tertiary" {
             out.* = .{
                 .primary = .{
                     .conformance_level = 62,
-                    .features = .{0} ** 64,
+                    .features = @splat(0),
                     .num_features = 0,
                 },
                 .secondary = .{
@@ -7428,7 +7438,7 @@ fn expectHeaderEnum(
     defer map.deinit(alloc);
 
     var seen: usize = 0;
-    inline for (@typeInfo(T).@"enum".fields) |field| {
+    inline for (meta_compat.enumFields(T)) |field| {
         var c_name_buf: [128]u8 = undefined;
         var c_name: []const u8 = undefined;
         const renamed = for (renames) |r| {

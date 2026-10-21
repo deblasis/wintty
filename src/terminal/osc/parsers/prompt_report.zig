@@ -41,6 +41,7 @@
 //! field nobody checks.
 
 const std = @import("std");
+const meta_compat = @import("../../../meta_compat.zig");
 
 const Parser = @import("../../osc.zig").Parser;
 const Command = @import("../../osc.zig").Command;
@@ -807,13 +808,13 @@ test "OSC 7777: a maximal payload still fits the arena" {
     // compared, and an escaped value under a key this build does not know is
     // unescaped by `skipValue` and thrown away. So this payload escapes the
     // path, escapes an unknown key, and escapes that key's value.
-    const long = "C:\\\\" ++ ("\\u00fc" ** 36) ++ "\\\\dir";
+    const long = "C:\\\\" ++ meta_compat.repeat("\\u00fc", 36) ++ "\\\\dir";
     // "\u0066\u0075\u0074\u0075\u0072\u0065" is "future": a key no build
     // knows, spelled the most expensive way it can be spelled.
     const unknown_key = "\\u0066\\u0075\\u0074\\u0075\\u0072\\u0065";
     const json =
         \\{"v":1,"exit":0,"shell":"powershell","git_dirty":false,"git_head":"0123456789012345678901234567890123456789","git_branch":"release/some-longish-branch-name","
-    ++ unknown_key ++ "\":\"" ++ ("\\u00fc" ** 12) ++ "\",\"cwd\":\"" ++ long ++ "\"}";
+    ++ unknown_key ++ "\":\"" ++ meta_compat.repeat("\\u00fc", 12) ++ "\",\"cwd\":\"" ++ long ++ "\"}";
 
     // 505 of the 512 bytes the parser will accept, so the arena this exercises
     // is within seven bytes of the smallest it can ever be.

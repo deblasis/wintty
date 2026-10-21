@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 
 /// Options set by Zig build.zig and exposed via `terminal_options`.
 pub const Options = struct {
@@ -188,14 +189,14 @@ pub const Options = struct {
 
                 // The special name "all" refers to every feature.
                 if (std.mem.eql(u8, name, "all")) {
-                    inline for (@typeInfo(Features).@"struct".fields) |field| {
+                    inline for (comptime meta_compat.structFields(Features)) |field| {
                         @field(result, field.name) = enable;
                     }
                     continue;
                 }
 
                 var found = false;
-                inline for (@typeInfo(Features).@"struct".fields) |field| {
+                inline for (comptime meta_compat.structFields(Features)) |field| {
                     if (eqlName(name, field.name)) {
                         @field(result, field.name) = enable;
                         found = true;
@@ -297,7 +298,7 @@ pub const Options = struct {
 
         // Feature gates, emitted as flat bools (e.g. `options.snapshot`).
         const target = m.resolved_target.?.result;
-        inline for (@typeInfo(Features).@"struct".fields) |field| {
+        inline for (comptime meta_compat.structFields(Features)) |field| {
             var value = @field(self.features, field.name);
 
             // Kitty graphics is force-disabled on some targets; see

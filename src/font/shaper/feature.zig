@@ -344,9 +344,9 @@ test "FeatureList.fromString" {
     defer feats.deinit(testing.allocator);
     try testing.expectEqualSlices(
         Feature,
-        &(.{Feature{ .tag = "kern".*, .value = 1 }} ** 4 ++
-            .{Feature{ .tag = "kern".*, .value = 0 }} ** 3 ++
-            .{Feature{ .tag = "aalt".*, .value = 2 }} ** 2 ++
+        &(@as([4]Feature, @splat(Feature{ .tag = "kern".*, .value = 1 })) ++
+            @as([3]Feature, @splat(Feature{ .tag = "kern".*, .value = 0 })) ++
+            @as([2]Feature, @splat(Feature{ .tag = "aalt".*, .value = 2 })) ++
             .{Feature{ .tag = "last".*, .value = 1 }}),
         feats.features.items,
     );

@@ -1,6 +1,7 @@
 //! Inter-process Communication to a running Ghostty instance from a separate
 //! process.
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const lib = @import("../lib/main.zig");
@@ -185,7 +186,7 @@ pub const Action = union(enum) {
 
     /// Sync with: ghostty_ipc_action_u
     pub const CValue = cvalue: {
-        const key_fields = @typeInfo(Key).@"enum".fields;
+        const key_fields = meta_compat.enumFields(Key);
 
         var names: [key_fields.len][]const u8 = undefined;
         var types: [key_fields.len]type = undefined;
@@ -226,7 +227,7 @@ pub const Action = union(enum) {
 
     /// Returns the value type for the given key.
     pub fn Value(comptime key: Key) type {
-        inline for (@typeInfo(Action).@"union".fields) |field| {
+        inline for (meta_compat.unionFields(Action)) |field| {
             const field_key = @field(Key, field.name);
             if (field_key == key) return field.type;
         }

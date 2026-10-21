@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -51,7 +52,7 @@ comptime {
     // generic.zig writes cursor.Style ordinals straight into
     // iCurrentCursorStyle / iPreviousCursorStyle and the prefix hands the
     // same values back as defines, so every style needs its exact copy.
-    for (@typeInfo(cursor.Style).@"enum".fields) |field| {
+    for (meta_compat.enumFields(cursor.Style)) |field| {
         mirrors.expectMirrored(
             prefix_source,
             "CURSORSTYLE_" ++ mirrors.upper(field.name),

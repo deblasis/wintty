@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const testing = std.testing;
 
 pub const ParseError = error{
@@ -19,7 +20,7 @@ pub fn parseFormatStruct(
     delimiter: u8,
 ) ParseError!T {
     // Parse all our fields
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = meta_compat.structFields(T);
     var it = std.mem.splitScalar(u8, str, delimiter);
     var result: T = undefined;
     inline for (fields) |field| {
