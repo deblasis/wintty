@@ -76,21 +76,38 @@ public sealed class DeftermCanary
             Microsoft.Win32.RegistryView.Default);
         foreach (var path in WatchedKeys())
         {
-            using var key = baseKey.OpenSubKey(path);
-            if (key is null)
-            {
-                keys[path] = Array.Empty<(string, string?)>();
-                continue;
-            }
-
-            var values = key.GetValueNames()
-                .OrderBy(n => n, StringComparer.Ordinal)
-                .Select(n => (n, key.GetValue(n) as string))
-                .ToArray();
-            keys[path] = values;
+            // The whole subtree, not just the root's direct values: the
+            // engine writes LocalServer32 and InprocServer32 SUBKEYS,
+            // and a canary blind to subkeys is blind to exactly the
+            // dangerous writes.
+            CollectSubtree(baseKey, path, keys);
         }
 
         return new DeftermSnapshot(keys);
+    }
+
+    private static void CollectSubtree(
+        Microsoft.Win32.RegistryKey baseKey,
+        string path,
+        Dictionary<string, IReadOnlyList<(string Name, string? Value)>> keys)
+    {
+        using var key = baseKey.OpenSubKey(path);
+        if (key is null)
+        {
+            keys[path] = Array.Empty<(string, string?)>();
+            return;
+        }
+
+        var values = key.GetValueNames()
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .Select(n => (n, key.GetValue(n) as string))
+            .ToArray();
+        keys[path] = values;
+
+        foreach (var sub in key.GetSubKeyNames().OrderBy(n => n, StringComparer.Ordinal))
+        {
+            CollectSubtree(baseKey, path + @"\" + sub, keys);
+        }
     }
 
     /// <summary>
@@ -105,6 +122,11 @@ public sealed class DeftermCanary
             Microsoft.Win32.RegistryView.Default);
         using var key = baseKey.CreateSubKey(_paths.StartupSubkey);
         key.SetValue(name, value, Microsoft.Win32.RegistryValueKind.String);
+        // The second write class: a value inside a subkey, where the
+        // engine's dangerous writes (LocalServer32, InprocServer32,
+        // ProxyStubClsid32) live.
+        using var sub = key.CreateSubKey("KillProbeSub");
+        sub.SetValue(name, value, Microsoft.Win32.RegistryValueKind.String);
     }
 
     /// <summary>Restore the kill-test's probe value.</summary>
@@ -115,6 +137,8 @@ public sealed class DeftermCanary
             Microsoft.Win32.RegistryView.Default);
         using var key = baseKey.OpenSubKey(_paths.StartupSubkey, writable: true);
         key?.DeleteValue(name, throwOnMissingValue: false);
+        using var sub = key?.OpenSubKey("KillProbeSub", writable: true);
+        sub?.DeleteValue(name, throwOnMissingValue: false);
     }
 
     private string[] WatchedKeys()

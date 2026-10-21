@@ -50,8 +50,13 @@ public sealed class DeftermCanaryTests : IDisposable
         _canary.WriteStartupProbe("test-probe", "1");
         var withProbe = _canary.Snapshot();
         var delta = DeftermCanary.Diff(before, withProbe);
-        var line = Assert.Single(delta);
-        Assert.Contains("test-probe", line);
+        // Both write classes must show: the direct value and the value
+        // inside a subkey, because the engine's dangerous writes
+        // (LocalServer32, InprocServer32, ProxyStubClsid32) are subkey
+        // writes.
+        Assert.Contains(delta, l => l.EndsWith("+test-probe") && !l.Contains("KillProbeSub"));
+        Assert.Contains(delta, l => l.EndsWith("+test-probe") && l.Contains("KillProbeSub"));
+        Assert.Equal(2, delta.Count);
 
         _canary.DeleteStartupProbe("test-probe");
         Assert.Empty(DeftermCanary.Diff(before, _canary.Snapshot()));
