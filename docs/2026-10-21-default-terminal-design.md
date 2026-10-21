@@ -105,6 +105,24 @@ clients.
 15. Observed: COM class objects are per logon session, so a receiver
     registered in one session is not visible to activations originating in
     another; a real implementation runs where its user is.
+16. Observed, end to end: with a receiver whose COM types are public, whose
+    class factory answers the activation machinery's IClassFactory fetch
+    pattern, and which implements ITerminalHandoff3 plus the empty marker
+    interface IDefaultTerminalMarker ({746E6BC0-AB05-4E38-AB14-71E86763141F},
+    checked per the platform source's marker-check flag), the OS delivers
+    live EstablishPtyHandoff calls to a classically registered, running
+    receiver: all four handles present, in-call duplication works, the two
+    [out] pipe handles marshal back, a returned failure degrades the launch
+    safely. The marker is required by the platform source and present in the
+    verified recipe; its isolated necessity (recipe minus marker, instrument
+    fixed) is not separately tested.
+17. Observed: no system-wide registration of the handoff interface IIDs
+    exists; the only registered proxy/stub lives inside the Windows
+    Terminal package folder, which ACL-blocks LoadLibrary from any
+    non-packaged process (error 5 / 0x80070005). Shipping our own proxy copy
+    and registering it under HKCU is therefore load-bearing, not belt and
+    braces. A caller passing a NULL startupInfo pointer fails with
+    RPC_X_BAD_STUB_DATA.
 
 ## Design
 
@@ -240,6 +258,15 @@ against `CO_E_OBJISREG`); medium receivers with an existing primary stay
 secondary and host in their own window, which closes under the normal
 last-window rule. `+defterm-status` reports the actual registration state
 via a module-level flag, never the intended state.
+
+The COM object surface, per the machine-verified recipe: all COM-visible
+types public (a type nested in an internal class makes the runtime's QI
+refuse every custom IID, silently, while registration still reports
+success); the terminal object implements both ITerminalHandoff3 and the
+empty marker interface IDefaultTerminalMarker; the class factory answers
+the activation machinery's IClassFactory fetch pattern; and the caller's
+startupInfo pointer is always non-NULL (a NULL pointer fails the call with
+RPC_X_BAD_STUB_DATA).
 
 Elevation position: the warm case (running unelevated app, elevated client)
 hosts the session, matching the current Windows Terminal receiver, which
@@ -476,22 +503,12 @@ machine's real default-terminal state.
 
 ## Open verification items (VM, during implementation)
 
-The load-bearing open question: on build 26300, with the pair set, the
-console half activates reliably but the terminal half was never attempted at
-any COM-visible level, across every registration route (classic HKCU with
-the receiver's class object live in session 0 and in session 1; a packaged
-com:ExeServer declaration that a manual probe DCOM-launches successfully,
-both cold and with its class object live). The deciding logic sits inside
-the delegated console host, before any observable COM action. Current
-hypothesis under test: the host checks the terminal object for the empty
-marker interface `IDefaultTerminalMarker` ({746E6BC0-AB05-4E38-AB14-71E86763141F},
-referenced by the srvinit marker-check flag) and silently refuses objects
-that do not implement it; the receiver gained the interface and the retest
-is the next VM run. If the marker is not the gate, the next instruments are
-factory-level logging in the receiver and a process monitor on the delegated
-host.
-
-Also open: activation confirming the derived console CLSID;
+The terminal-half question is CLOSED: the full chain (pair, console
+delegation, terminal activation against a classically registered running
+receiver, live EstablishPtyHandoff with handles and marshaled pipes, safe
+degradation on failure) is verified end to end on build 26300. Remaining:
+the marker-isolated-necessity control (recipe minus the marker interface,
+one run); activation confirming the derived console CLSID;
 `ConptyPackPseudoConsole` present in the pinned conpty.dll; the proxy and
 OpenConsole pairing matrix (mixed NuGet plus zip versus a matched zip pair,
 with the matched-pair fallback); the resize golden bytes for the seam
