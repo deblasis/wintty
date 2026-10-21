@@ -297,7 +297,12 @@ public static partial class DefaultTermComServer
             return testCookie;
         }
 
-        var factory = new HandoffClassFactory(() => new TerminalHandoffObject(CreateHandoffService()));
+        // The creator is self-referencing on purpose: products created
+        // through it carry the same creator, so the factory-fetch
+        // pattern continued on a PRODUCT also yields serviced objects.
+        Func<TerminalHandoffObject>? creator = null;
+        creator = () => new TerminalHandoffObject(CreateHandoffService(), creator);
+        var factory = new HandoffClassFactory(creator);
         var unknown = Marshal.GetIUnknownForObject(factory);
         try
         {

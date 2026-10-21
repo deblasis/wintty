@@ -81,6 +81,38 @@ public sealed class DefaultTermComContractTests
         Assert.Equal(unchecked((int)0x80040110), hr); // CLASS_E_NOAGGREGATION
     }
 
+    [Fact]
+    public void ServicedProduct_FactoryContinuation_StaysServiced()
+    {
+        // If the activation machinery continues the fetch pattern past
+        // the registered factory (CreateInstance on the PRODUCT for
+        // IID_IUnknown), the product must hand out serviced objects, not
+        // bare placeholders. Discriminator: a serviced object refuses
+        // null [in] handles with E_INVALIDARG; a bare one returns E_FAIL
+        // for everything.
+        Func<TerminalHandoffService> makeService = () => new TerminalHandoffService(
+            TimeSpan.FromSeconds(5), 64, () => 0);
+        Func<TerminalHandoffObject>? creator = null;
+        creator = () => new TerminalHandoffObject(makeService(), creator);
+
+        var product = (IClassFactoryCom)creator();
+        var iidU = IidIUnknown;
+        var hr = product.CreateInstance(IntPtr.Zero, ref iidU, out var unk);
+        Assert.Equal(0, hr);
+        try
+        {
+            var handoff = (ITerminalHandoff3)Marshal.GetObjectForIUnknown(unk);
+            var hrCall = handoff.EstablishPtyHandoff(
+                out _, out _,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            Assert.Equal(unchecked((int)0x80070057), hrCall); // E_INVALIDARG
+        }
+        finally
+        {
+            Marshal.Release(unk);
+        }
+    }
+
     private static class Qi
     {
         public static void Succeeds(object obj, Guid iid, string because)

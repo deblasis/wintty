@@ -75,6 +75,7 @@ public sealed class TerminalHandoffObject :
     IClassFactoryCom
 {
     private readonly TerminalHandoffService? _service;
+    private readonly Func<TerminalHandoffObject>? _createServiced;
 
     /// <summary>
     /// The bare product the class factory hands out by default: no
@@ -88,11 +89,18 @@ public sealed class TerminalHandoffObject :
     /// <summary>
     /// The production product: the call contract runs on the in-call
     /// service, whose placement scheduler routes the session into the
-    /// queue.
+    /// queue. <paramref name="createServiced"/> is how this product
+    /// creates FURTHER products when the activation machinery continues
+    /// the factory-fetch pattern on the product itself: each activation
+    /// gets its own fresh service, exactly like the registered factory
+    /// gives it.
     /// </summary>
-    public TerminalHandoffObject(TerminalHandoffService service)
+    public TerminalHandoffObject(
+        TerminalHandoffService service,
+        Func<TerminalHandoffObject>? createServiced = null)
     {
         _service = service;
+        _createServiced = createServiced;
     }
 
     int ITerminalHandoff3.EstablishPtyHandoff(
@@ -134,7 +142,9 @@ public sealed class TerminalHandoffObject :
     }
 
     int IClassFactoryCom.CreateInstance(IntPtr outer, ref Guid iid, out IntPtr ppv) =>
-        HandoffClassFactory.CreateAndQuery(() => new TerminalHandoffObject(), outer, ref iid, out ppv);
+        HandoffClassFactory.CreateAndQuery(
+            () => _createServiced is null ? new TerminalHandoffObject() : _createServiced(),
+            outer, ref iid, out ppv);
 
     int IClassFactoryCom.LockServer(bool fLock) => 0;
 }
