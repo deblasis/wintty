@@ -193,6 +193,13 @@ public static partial class DefaultTermComServer
         (ReleaseOverride ?? ReleaseCom)();
     }
 
+    /// <summary>
+    /// The process-wide placement queue. The COM call path parks
+    /// handoffs here; the app attaches its surface host once a window
+    /// can adopt, and the queue drains to it.
+    /// </summary>
+    public static DefaultTermPlacementQueue PlacementQueue { get; } = new(16);
+
     private static Thread? _embeddingThread;
     private static readonly ManualResetEventSlim _embeddingShutdown = new(false);
 
@@ -290,7 +297,7 @@ public static partial class DefaultTermComServer
             return testCookie;
         }
 
-        var factory = new HandoffClassFactory(() => new TerminalHandoffObject());
+        var factory = new HandoffClassFactory(() => new TerminalHandoffObject(CreateHandoffService()));
         var unknown = Marshal.GetIUnknownForObject(factory);
         try
         {
@@ -319,11 +326,38 @@ public static partial class DefaultTermComServer
         }
     }
 
+    /// <summary>
+    /// One service per activated product object: the adoption budget of
+    /// the design, the session cap fed by the queue's parking count,
+    /// and the placement scheduler routed through the queue. The
+    /// handoff-received event fires for observability right before the
+    /// session parks.
+    /// </summary>
+    private static TerminalHandoffService CreateHandoffService()
+    {
+        var service = new TerminalHandoffService(
+            TimeSpan.FromSeconds(5),
+            64,
+            () => PlacementQueue.Pending);
+
+        service.Scheduler = (work, budget) =>
+        {
+            var request = new HandoffPlacementRequest(
+                service.CurrentArgs ?? new HandoffArgs(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero),
+                r => r == HandoffPlacementResult.Adopted ? 0 : unchecked((int)0x80004005));
+            RaiseHandoffReceived(request);
+            return PlacementQueue.ParkAndWait(request, budget);
+        };
+
+        return service;
+    }
+
     private static void DrainInFlight()
     {
-        // The queue (Task 9) settles its own in-flight items within
-        // their budgets on shutdown; until then there is nothing to
-        // drain beyond the queue's own disposal.
+        // Settle what parked: expired items complete with their failure
+        // result, parked-and-adoptable ones drain to the host if there
+        // is one. After this the queue is empty.
+        PlacementQueue.Drain();
     }
 
     private static void ReleaseCom()

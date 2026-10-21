@@ -22,16 +22,15 @@ public sealed class HandoffContractTests
     [Fact]
     public void NullHandles_Refused()
     {
-        using var pipe = new RealPipe();
         using var proc = CurrentProcessHandle();
 
         // Each field isolated: every other handle stays valid, so a
-        // refusal names the nulled field and nothing else.
-        RefusedNoPipes(new HandoffArgs(IntPtr.Zero, proc, proc, proc, proc, IntPtr.Zero));
-        RefusedNoPipes(new HandoffArgs(pipe.Read, IntPtr.Zero, proc, proc, proc, IntPtr.Zero));
-        RefusedNoPipes(new HandoffArgs(pipe.Read, proc, IntPtr.Zero, proc, proc, IntPtr.Zero));
-        RefusedNoPipes(new HandoffArgs(pipe.Read, proc, proc, IntPtr.Zero, proc, IntPtr.Zero));
-        RefusedNoPipes(new HandoffArgs(pipe.Read, proc, proc, proc, IntPtr.Zero, IntPtr.Zero));
+        // refusal names the nulled field and nothing else. The four [in]
+        // handles of the platform contract; the pipes are [out]s.
+        RefusedNoPipes(new HandoffArgs(IntPtr.Zero, proc, proc, proc, IntPtr.Zero));
+        RefusedNoPipes(new HandoffArgs(proc, IntPtr.Zero, proc, proc, IntPtr.Zero));
+        RefusedNoPipes(new HandoffArgs(proc, proc, IntPtr.Zero, proc, IntPtr.Zero));
+        RefusedNoPipes(new HandoffArgs(proc, proc, proc, IntPtr.Zero, IntPtr.Zero));
     }
 
     [Fact]
@@ -41,7 +40,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, proc, proc, proc, pipe.Write, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, pipe.Write, IntPtr.Zero));
 
         Assert.NotEqual(0, hr);
         Assert.Equal(0, service.PipesCreated);
@@ -54,7 +53,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService(inFlight: CapForTest);
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, proc, proc, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, proc, IntPtr.Zero));
 
         Assert.NotEqual(0, hr);
         Assert.Equal(0, service.PipesCreated);
@@ -67,7 +66,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, proc, proc, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, proc, IntPtr.Zero));
 
         Assert.Equal(0, hr);
         // The input pair and the output pair: two named-pipe pairs.
@@ -85,6 +84,10 @@ public sealed class HandoffContractTests
         Assert.NotEqual(0u, flags & 0x1); // PIPE_SERVER_END (0x1 in GetNamedPipeInfo's output): we keep the server end
         Assert.True(WriteOverlappedSucceeds(service.LastInWriteEnd),
             "the write end rejected an overlapped write");
+        // The far ends are what the call hands back as its [out] pipe
+        // parameters: they must exist on success.
+        Assert.True(service.LastConsoleInRead != IntPtr.Zero, "no console input end");
+        Assert.True(service.LastConsoleOutWrite != IntPtr.Zero, "no console output end");
     }
 
     [Fact]
@@ -98,7 +101,7 @@ public sealed class HandoffContractTests
         var service = NewService();
         try
         {
-            var hr = service.HandleCall(new HandoffArgs(pipe.Read, proc, proc, proc, proc, info.Ptr));
+            var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, proc, info.Ptr));
             Assert.Equal(0, hr);
         }
         finally
@@ -116,7 +119,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, proc, proc, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, proc, IntPtr.Zero));
 
         Assert.Equal(0, hr);
         Assert.Null(service.LastTitle);
@@ -129,7 +132,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, proc, proc, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, proc, IntPtr.Zero));
 
         Assert.Equal(0, hr);
         // The duplicates were made during the call and are still valid
@@ -142,12 +145,11 @@ public sealed class HandoffContractTests
     [Fact]
     public void FailureLattice_ReleasesExactlyWhatWasCreated()
     {
-        using var pipe = new RealPipe();
         using var proc = CurrentProcessHandle();
         var info = StartupInfoWithTitle("lattice title");
         try
         {
-            LatticeBody(info.Ptr, pipe.Read, proc);
+            LatticeBody(info.Ptr, proc);
         }
         finally
         {
@@ -155,9 +157,9 @@ public sealed class HandoffContractTests
         }
     }
 
-    private static void LatticeBody(IntPtr startupInfo, IntPtr consoleRead, NoCloseHandle proc)
+    private static void LatticeBody(IntPtr startupInfo, NoCloseHandle proc)
     {
-        var args = new HandoffArgs(consoleRead, proc, proc, proc, proc, startupInfo);
+        var args = new HandoffArgs(proc, proc, proc, proc, startupInfo);
 
         // Inject a failure at each intermediate in turn; every run must
         // leave zero live handles from this call.
@@ -182,7 +184,7 @@ public sealed class HandoffContractTests
         var service = NewService();
         service.Scheduler = (_, _) => HandoffPlacementResult.Timeout;
 
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, proc, proc, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, proc, IntPtr.Zero));
 
         Assert.Equal(EFail, hr);
         Assert.True(

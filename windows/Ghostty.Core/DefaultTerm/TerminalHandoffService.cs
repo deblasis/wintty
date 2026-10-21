@@ -12,12 +12,13 @@ public enum FaultPoint
 }
 
 /// <summary>
-/// The raw pointers of one EstablishPtyHandoff call. The console handle
-/// (the caller's input read side) plus signal, reference, server, and
-/// client, and the startup-info block pointer which may be NULL.
+/// The [in] parameters of one EstablishPtyHandoff call: the signal,
+/// reference, server and client handles, and the startup-info block
+/// pointer which may be NULL. The two pipe handles are [out]s the
+/// service fills via <see cref="TerminalHandoffService.LastConsoleInRead"/>
+/// and <see cref="TerminalHandoffService.LastConsoleOutWrite"/>.
 /// </summary>
 public sealed record HandoffArgs(
-    IntPtr ConsoleRead,
     IntPtr Signal,
     IntPtr Reference,
     IntPtr Server,
@@ -74,10 +75,29 @@ public sealed partial class TerminalHandoffService
     /// <summary>Injected fault point for the failure-lattice test.</summary>
     public FaultPoint Fault { get; set; }
 
+    /// <summary>
+    /// The args of the call in flight on this instance. The placement
+    /// scheduler runs inside HandleCall, so it is always set when the
+    /// scheduler reads it; null before and between calls.
+    /// </summary>
+    internal HandoffArgs? CurrentArgs { get; private set; }
+
     /// <summary>How many pipe pairs this call created (observable per call).</summary>
     public int PipesCreated { get; private set; }
 
     public IntPtr LastInWriteEnd { get; private set; }
+
+    /// <summary>
+    /// The console side's input read end: the far end of the input pair
+    /// that becomes the call's first [out] parameter on success.
+    /// </summary>
+    public IntPtr LastConsoleInRead { get; private set; }
+
+    /// <summary>
+    /// The console side's output write end: the far end of the output
+    /// pair that becomes the call's second [out] parameter on success.
+    /// </summary>
+    public IntPtr LastConsoleOutWrite { get; private set; }
 
     public string? LastTitle { get; private set; }
 
@@ -94,13 +114,16 @@ public sealed partial class TerminalHandoffService
         PreexistingHandleCount = _liveHandles.Count;
         PipesCreated = 0;
         LastInWriteEnd = IntPtr.Zero;
+        LastConsoleInRead = IntPtr.Zero;
+        LastConsoleOutWrite = IntPtr.Zero;
         LastTitle = null;
         LastIconPath = null;
         LastClientDuplicate = IntPtr.Zero;
 
+        CurrentArgs = args;
+
         // Validation before any effect.
-        if (args.ConsoleRead == IntPtr.Zero
-            || args.Signal == IntPtr.Zero
+        if (args.Signal == IntPtr.Zero
             || args.Reference == IntPtr.Zero
             || args.Server == IntPtr.Zero
             || args.Client == IntPtr.Zero)
@@ -139,6 +162,8 @@ public sealed partial class TerminalHandoffService
             _liveHandles.Add(consoleOutWrite);
             PipesCreated++;
             LastInWriteEnd = ourInWrite;
+            LastConsoleInRead = consoleInRead;
+            LastConsoleOutWrite = consoleOutWrite;
 
             // Synchronous in-call duplication of the [in] handles: the
             // stub closes the originals when this call returns, so
@@ -190,10 +215,17 @@ public sealed partial class TerminalHandoffService
                 return unchecked((int)0x80004005); // E_FAIL
             }
 
-            // Adopted: the surface owns the near ends from here. They
-            // leave this call's ledger without being closed here.
+            // Adopted: ownership transfers rather than closes. The far
+            // ends leave with the caller through the [out] parameters,
+            // the near ends and the duplicated [in] handles with the
+            // surface; nothing of this call stays in our ledger.
+            _liveHandles.Remove(consoleInRead);
+            _liveHandles.Remove(consoleOutWrite);
             _liveHandles.Remove(ourInWrite);
             _liveHandles.Remove(ourOutRead);
+            _liveHandles.Remove(signalDup);
+            _liveHandles.Remove(referenceDup);
+            _liveHandles.Remove(serverDup);
             _liveHandles.Remove(clientDup);
             return 0;
         }

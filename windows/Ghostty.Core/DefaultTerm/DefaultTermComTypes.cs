@@ -74,11 +74,27 @@ public sealed class TerminalHandoffObject :
     IDefaultTerminalMarker,
     IClassFactoryCom
 {
+    private readonly TerminalHandoffService? _service;
+
     /// <summary>
-    /// Task 6 placeholder body: the call contract lands with the
-    /// in-call service. Fails every call, which the host degrades
-    /// safely, and hands back closed pipe handles nobody can misuse.
+    /// The bare product the class factory hands out by default: no
+    /// service, so every call fails closed, which the host degrades
+    /// safely.
     /// </summary>
+    public TerminalHandoffObject()
+    {
+    }
+
+    /// <summary>
+    /// The production product: the call contract runs on the in-call
+    /// service, whose placement scheduler routes the session into the
+    /// queue.
+    /// </summary>
+    public TerminalHandoffObject(TerminalHandoffService service)
+    {
+        _service = service;
+    }
+
     int ITerminalHandoff3.EstablishPtyHandoff(
         out IntPtr inPipe,
         out IntPtr outPipe,
@@ -88,9 +104,33 @@ public sealed class TerminalHandoffObject :
         IntPtr client,
         IntPtr startupInfo)
     {
-        inPipe = IntPtr.Zero;
-        outPipe = IntPtr.Zero;
-        return unchecked((int)0x80004005); // E_FAIL
+        if (_service is null)
+        {
+            inPipe = IntPtr.Zero;
+            outPipe = IntPtr.Zero;
+            return unchecked((int)0x80004005); // E_FAIL, fail closed
+        }
+
+        var hr = _service.HandleCall(new HandoffArgs(
+            signal,
+            reference,
+            server,
+            client,
+            startupInfo));
+        if (hr == 0)
+        {
+            // The console side's far ends: the caller owns them from
+            // here, exactly as the [out] contract says.
+            inPipe = _service.LastConsoleInRead;
+            outPipe = _service.LastConsoleOutWrite;
+        }
+        else
+        {
+            inPipe = IntPtr.Zero;
+            outPipe = IntPtr.Zero;
+        }
+
+        return hr;
     }
 
     int IClassFactoryCom.CreateInstance(IntPtr outer, ref Guid iid, out IntPtr ppv) =>
