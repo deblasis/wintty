@@ -120,6 +120,7 @@ public sealed class DefaultTermRegistration
     private readonly string _openConsoleExePath;
     private readonly string _proxyDllPath;
     private readonly string[] _handoffIids;
+    private readonly DefaultTermCaptureStore? _store;
 
     /// <summary>
     /// Receives each subkey path immediately before the engine first writes
@@ -155,6 +156,17 @@ public sealed class DefaultTermRegistration
         string winttyExePath,
         string openConsoleExePath,
         string proxyDllPath)
+        : this(paths, identity, winttyExePath, openConsoleExePath, proxyDllPath, storePath: null)
+    {
+    }
+
+    public DefaultTermRegistration(
+        DefaultTermRegistryPaths paths,
+        IDefaultTermIdentityView identity,
+        string winttyExePath,
+        string openConsoleExePath,
+        string proxyDllPath,
+        string? storePath)
     {
         _paths = paths;
         _identity = identity;
@@ -164,6 +176,7 @@ public sealed class DefaultTermRegistration
         // The view's array is exposed; the engine keeps its own copy and
         // never mutates or aliases the caller's.
         _handoffIids = (string[])identity.HandoffIids.Clone();
+        _store = storePath is null ? null : new DefaultTermCaptureStore(storePath);
     }
 
     /// <summary>
@@ -200,6 +213,7 @@ public sealed class DefaultTermRegistration
         }
 
         using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        _store?.Save(CapturePrior(baseKey));
         var journal = new List<JournalEntry>();
         var observedSubkeys = new HashSet<string>(StringComparer.Ordinal);
 
@@ -294,11 +308,211 @@ public sealed class DefaultTermRegistration
         return EnableResult.Registered;
     }
 
-    /// <summary>Removes this build's selection. Lands with the disable path.</summary>
-    public DisableResult Disable() => throw new NotImplementedException();
+    /// <summary>
+    /// Removes this build's registration. Own-outright keys (the terminal
+    /// class and the capture store) always go. The shared group goes or is
+    /// restored only while its console binding still names this build's
+    /// binary; the selection is rewritten only when this build owns it,
+    /// to the captured prior when its binary is live and to the nil pair
+    /// otherwise. A non-owner never moves anything it did not write.
+    /// </summary>
+    public DisableResult Disable()
+    {
+        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
 
-    /// <summary>True while this build's selection survives a hostile reset. Lands with the ownership work.</summary>
-    public bool OwnsSelection() => throw new NotImplementedException();
+        // The prior is read before the store is deleted: the captured
+        // state drives the restore decisions below.
+        var prior = _store?.Load() ?? CapturedState.Nil;
+
+        // Step one, unconditional: this build's own-outright artifacts.
+        baseKey.DeleteSubKeyTree(_paths.ClsidSubkeyOf(_identity.TerminalClsid), throwOnMissingSubKey: false);
+        _store?.Delete();
+
+        var (selectionConsole, selectionTerminal) = ReadSelection(baseKey);
+        var ownsSelection =
+            Matches(selectionConsole, _identity.ConsoleClsid)
+            && Matches(selectionTerminal, _identity.TerminalClsid);
+        var groupOwned = GroupNamesOurBinary(baseKey);
+
+        if (!ownsSelection)
+        {
+            // Shadow-unwrite: the selection moved on, but a console
+            // binding this build wrote may still intercept its traffic.
+            if (groupOwned)
+            {
+                if (CorrespondsToPrior(prior, selectionTerminal) && PriorBinaryLive(prior))
+                {
+                    RestoreGroup(baseKey, prior);
+                }
+                else
+                {
+                    RemoveGroup(baseKey);
+                }
+            }
+
+            return DisableResult.NotRegistered;
+        }
+
+        // Owner: rewrite the selection first, then settle the group.
+        if (prior.HasSelectionPrior && PriorBinaryLive(prior))
+        {
+            using (var startup = baseKey.CreateSubKey(_paths.StartupSubkey))
+            {
+                startup.SetValue(DelegationConsoleValue, prior.PriorConsoleValue!, RegistryValueKind.String);
+                startup.SetValue(DelegationTerminalValue, prior.PriorTerminalValue!, RegistryValueKind.String);
+            }
+        }
+        else
+        {
+            using (var startup = baseKey.CreateSubKey(_paths.StartupSubkey))
+            {
+                startup.SetValue(DelegationConsoleValue, NilGuid, RegistryValueKind.String);
+                startup.SetValue(DelegationTerminalValue, NilGuid, RegistryValueKind.String);
+            }
+        }
+
+        if (groupOwned)
+        {
+            if (prior.SharedGroupValues.Count > 0)
+            {
+                RestoreGroup(baseKey, prior);
+            }
+            else
+            {
+                RemoveGroup(baseKey);
+            }
+        }
+
+        return DisableResult.Cleared;
+    }
+
+    /// <summary>True while the selection pair names this build's pair.</summary>
+    public bool OwnsSelection()
+    {
+        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        var (selectionConsole, selectionTerminal) = ReadSelection(baseKey);
+        return Matches(selectionConsole, _identity.ConsoleClsid)
+            && Matches(selectionTerminal, _identity.TerminalClsid);
+    }
+
+    private const string NilGuid = "{00000000-0000-0000-0000-000000000000}";
+
+    private CapturedState CapturePrior(RegistryKey baseKey)
+    {
+        var (priorConsole, priorTerminal) = ReadSelection(baseKey);
+        var hasSelectionPrior = priorConsole is not null || priorTerminal is not null;
+
+        string? priorBinary = null;
+        var shared = new List<CapturedSharedValue>();
+        shared.AddRange(CaptureSharedValues(
+            baseKey, _paths.ClsidSubkeyOf(_identity.ConsoleClsid) + "\\" + LocalServer32Subkey));
+        foreach (var entry in shared.Where(v =>
+                     v.Subkey == _paths.ClsidSubkeyOf(_identity.ConsoleClsid) + "\\" + LocalServer32Subkey
+                     && string.IsNullOrEmpty(v.Name)))
+        {
+            priorBinary = Unquote(entry.Value);
+        }
+
+        shared.AddRange(CaptureSharedValues(
+            baseKey, _paths.ClsidSubkeyOf(_identity.ProxyClsid) + "\\" + InprocServer32Subkey));
+        foreach (var iid in _handoffIids)
+        {
+            shared.AddRange(CaptureSharedValues(
+                baseKey, _paths.InterfaceSubkeyOf(iid) + "\\" + ProxyStubClsid32Subkey));
+        }
+
+        return new CapturedState(
+            hasSelectionPrior,
+            priorConsole,
+            priorTerminal,
+            priorBinary,
+            shared,
+            DateTimeOffset.UtcNow);
+    }
+
+    private static List<CapturedSharedValue> CaptureSharedValues(RegistryKey baseKey, string subkey)
+    {
+        var captured = new List<CapturedSharedValue>();
+        using var key = baseKey.OpenSubKey(subkey);
+        if (key is null)
+        {
+            return captured;
+        }
+
+        foreach (var name in key.GetValueNames())
+        {
+            if (key.GetValue(name) is string value)
+            {
+                captured.Add(new CapturedSharedValue(subkey, name, value));
+            }
+        }
+
+        return captured;
+    }
+
+    private (string? Console, string? Terminal) ReadSelection(RegistryKey baseKey)
+    {
+        using var startup = baseKey.OpenSubKey(_paths.StartupSubkey);
+        if (startup is null)
+        {
+            return (null, null);
+        }
+
+        return (
+            startup.GetValue(DelegationConsoleValue) as string,
+            startup.GetValue(DelegationTerminalValue) as string);
+    }
+
+    private bool GroupNamesOurBinary(RegistryKey baseKey)
+    {
+        using var server = baseKey.OpenSubKey(
+            _paths.ClsidSubkeyOf(_identity.ConsoleClsid) + "\\" + LocalServer32Subkey);
+        if (server?.GetValue(null) is not string command)
+        {
+            return false;
+        }
+
+        return string.Equals(
+            Unquote(command),
+            _openConsoleExePath,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool CorrespondsToPrior(CapturedState prior, string? selectionTerminal) =>
+        prior.HasSelectionPrior
+        && selectionTerminal is not null
+        && string.Equals(selectionTerminal, prior.PriorTerminalValue, StringComparison.OrdinalIgnoreCase);
+
+    private static bool PriorBinaryLive(CapturedState prior) =>
+        prior.PriorConsoleBinary is null
+        || File.Exists(prior.PriorConsoleBinary);
+
+    private void RemoveGroup(RegistryKey baseKey)
+    {
+        baseKey.DeleteSubKeyTree(_paths.ClsidSubkeyOf(_identity.ConsoleClsid), throwOnMissingSubKey: false);
+        baseKey.DeleteSubKeyTree(_paths.ClsidSubkeyOf(_identity.ProxyClsid), throwOnMissingSubKey: false);
+        foreach (var iid in _handoffIids)
+        {
+            baseKey.DeleteSubKeyTree(_paths.InterfaceSubkeyOf(iid), throwOnMissingSubKey: false);
+        }
+    }
+
+    private void RestoreGroup(RegistryKey baseKey, CapturedState prior)
+    {
+        foreach (var value in prior.SharedGroupValues)
+        {
+            using var key = baseKey.CreateSubKey(value.Subkey);
+            key.SetValue(value.Name, value.Value, RegistryValueKind.String);
+        }
+    }
+
+    private static string Unquote(string value)
+    {
+        var trimmed = value.Trim();
+        return trimmed.Length >= 2 && trimmed.StartsWith('"') && trimmed.EndsWith('"')
+            ? trimmed[1..^1]
+            : trimmed;
+    }
 
     private string[] SweepTargets()
     {
