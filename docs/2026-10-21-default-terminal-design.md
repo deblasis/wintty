@@ -1,9 +1,12 @@
 # Default Terminal registration and handoff: design
 
-Status: accepted design, pre-implementation. Everything normative in this
-document was verified against primary sources (the Windows Terminal
-repository's spec and sources, the shipped binaries, and two independent
-third-party implementations) during design review.
+Status: accepted design, pre-implementation, under machine verification on an
+isolated test VM (build 26300). Everything normative was verified against
+primary sources (the Windows Terminal repository's spec and sources, the
+shipped binaries, and two independent third-party implementations) during
+design review; facts marked "observed" below are additionally verified on
+the machine, with the terminal-half activation question still open (see the
+open items).
 
 ## Goals
 
@@ -77,6 +80,31 @@ clients.
 10. The OS Settings dropdown enumerates packaged MSIX AppExtension
     candidates only. An unpackaged app can be the default but will not
     appear in the dropdown.
+11. Observed: for a CLSID that exists in the packaged catalog, an HKCU
+    classic LocalServer32 registration of that CLSID is IGNORED for
+    default-terminal activation; packaged resolution wins, in both
+    directions and for both the console and terminal halves (tested with the
+    classic key present and absent). Classic registration matters only for
+    CLSIDs the catalog does not know.
+12. Observed: console delegation is per-session single-use (each interactive
+    console creation gets a fresh delegated console host instance; stale
+    instances linger and never capture later activations), and headless
+    sessions (services, ssh) skip delegation entirely, at the console half
+    already.
+13. Observed: when the terminal handoff does not happen, the delegated
+    console host silently renders the session itself; the client survives
+    and exits normally, and no DCOM or WER event is logged. Degradation is
+    real, silent, and client-safe.
+14. Observed: a sparse package with external location can carry a live COM
+    server registration for an external executable: declaring the class as a
+    com:ExeServer (class Id as a bare GUID, no braces; the com extension
+    requires the runFullTrust capability) makes DCOM launch the external
+    executable for a manual CoCreateInstance of that CLSID, and an exe
+    launched this way can CoRegisterClassObject without conflicting with the
+    package activation.
+15. Observed: COM class objects are per logon session, so a receiver
+    registered in one session is not visible to activations originating in
+    another; a real implementation runs where its user is.
 
 ## Design
 
@@ -448,12 +476,27 @@ machine's real default-terminal state.
 
 ## Open verification items (VM, during implementation)
 
-Activation confirms the derived console CLSID; `ConptyPackPseudoConsole` is
-present in the pinned conpty.dll; the proxy and OpenConsole pairing matrix
-(mixed NuGet plus zip versus a matched zip pair, with the matched-pair
-fallback); classic-versus-packaged COM precedence in both directions with
-the actual collision partner; the resize golden bytes for the seam fixture;
-the elevated matrix outcomes.
+The load-bearing open question: on build 26300, with the pair set, the
+console half activates reliably but the terminal half was never attempted at
+any COM-visible level, across every registration route (classic HKCU with
+the receiver's class object live in session 0 and in session 1; a packaged
+com:ExeServer declaration that a manual probe DCOM-launches successfully,
+both cold and with its class object live). The deciding logic sits inside
+the delegated console host, before any observable COM action. Current
+hypothesis under test: the host checks the terminal object for the empty
+marker interface `IDefaultTerminalMarker` ({746E6BC0-AB05-4E38-AB14-71E86763141F},
+referenced by the srvinit marker-check flag) and silently refuses objects
+that do not implement it; the receiver gained the interface and the retest
+is the next VM run. If the marker is not the gate, the next instruments are
+factory-level logging in the receiver and a process monitor on the delegated
+host.
+
+Also open: activation confirming the derived console CLSID;
+`ConptyPackPseudoConsole` present in the pinned conpty.dll; the proxy and
+OpenConsole pairing matrix (mixed NuGet plus zip versus a matched zip pair,
+with the matched-pair fallback); the resize golden bytes for the seam
+fixture; the elevated matrix outcomes; the Settings dropdown UI accepting
+the sparse entries and the selection writing the pair.
 
 ## Accepted residual risks
 
