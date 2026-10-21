@@ -59,18 +59,18 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
             try writer.writeAll(if (field.type != Config.RepeatablePath) " -f" else " -F");
             switch (@typeInfo(field.type)) {
                 .bool => {},
-                .@"enum" => |info| {
+                .@"enum" => {
                     try writer.writeAll(" -a \"");
-                    for (info.fields, 0..) |f, i| {
+                    for (meta_compat.enumFields(field.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
                     try writer.writeAll("\"");
                 },
-                .@"struct" => |info| {
-                    if (!@hasDecl(field.type, "parseCLI") and info.layout == .@"packed") {
+                .@"struct" => {
+                    if (!@hasDecl(field.type, "parseCLI") and @typeInfo(field.type).@"struct".layout == .@"packed") {
                         try writer.writeAll(" -a \"");
-                        for (info.fields, 0..) |f, i| {
+                        for (meta_compat.structFields(field.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name);
                             try writer.writeAll(" no-");
@@ -124,9 +124,9 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
 
             switch (@typeInfo(opt.type)) {
                 .bool => {},
-                .@"enum" => |info| {
+                .@"enum" => {
                     try writer.writeAll(" -a \"");
-                    for (info.fields, 0..) |f, i| {
+                    for (meta_compat.enumFields(opt.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -134,9 +134,9 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
                 },
                 .optional => |optional| {
                     switch (@typeInfo(optional.child)) {
-                        .@"enum" => |info| {
+                        .@"enum" => {
                             try writer.writeAll(" -a \"");
-                            for (info.fields, 0..) |f, i| {
+                            for (meta_compat.enumFields(optional.child), 0..) |f, i| {
                                 if (i > 0) try writer.writeAll(" ");
                                 try writer.writeAll(f.name);
                             }

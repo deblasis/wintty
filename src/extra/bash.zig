@@ -133,9 +133,9 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
             const compgenSuffix = "\" -- \"$cur\"; _add_spaces ;;";
             switch (@typeInfo(field.type)) {
                 .bool => try writer.writeAll("return ;;"),
-                .@"enum" => |info| {
+                .@"enum" => {
                     try writer.writeAll(compgenPrefix);
-                    for (info.fields, 0..) |f, i| {
+                    for (meta_compat.enumFields(field.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -224,9 +224,9 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
             const compgenSuffix = "\" -- \"$cur\"; _add_spaces ;;";
             switch (@typeInfo(opt.type)) {
                 .bool => try writer.writeAll("return ;;"),
-                .@"enum" => |info| {
+                .@"enum" => {
                     try writer.writeAll(compgenPrefix);
-                    for (info.fields, 0..) |f, i| {
+                    for (meta_compat.enumFields(opt.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -234,9 +234,9 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
                 },
                 .optional => |optional| {
                     switch (@typeInfo(optional.child)) {
-                        .@"enum" => |info| {
+                        .@"enum" => {
                             try writer.writeAll(compgenPrefix);
-                            for (info.fields, 0..) |f, i| {
+                            for (meta_compat.enumFields(optional.child), 0..) |f, i| {
                                 if (i > 0) try writer.writeAll(" ");
                                 try writer.writeAll(f.name);
                             }

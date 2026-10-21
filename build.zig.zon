@@ -20,14 +20,14 @@
         },
         .vaxis = .{
             // rockorager/libvaxis
-            .url = "https://deps.files.ghostty.org/vaxis-1dbbe575dff4586fe51e3217aa5c3fecdcbb6089.tar.gz",
-            .hash = "vaxis-0.6.0-BWNV_CrbCQCscGpzsAlR402rYQ_tV3aAl081c2iRRkka",
+            .url = "git+https://github.com/rockorager/libvaxis#zig-0.17",
+            .hash = "vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM",
             .lazy = true,
         },
         .z2d = .{
             // vancluever/z2d
-            .url = "https://deps.files.ghostty.org/z2d-7dbae85c81784dba9988320bf9543ed9a81350c8.tar.gz",
-            .hash = "z2d-0.12.1-j5P_Hsw8EQAKyZTQICCQnAH2xYkLDW8k9uefbsYdfPZ-",
+            .url = "git+https://github.com/vancluever/z2d#zig-0.17",
+            .hash = "z2d-0.13.0-j5P_HtSXEgDVle5Ou4WrYiI3iOpbkCxrZBPuQ-_QFcqz",
             .lazy = true,
         },
         .zig_objc = .{
