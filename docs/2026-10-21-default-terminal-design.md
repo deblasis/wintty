@@ -13,9 +13,13 @@ third-party implementations) during design review.
 2. Testing never mutates the developer machine's or CI host's real
    default-terminal state. CI runs on the developer machine, so this is one
    requirement, not two.
-3. An in-app settings card is the v1 surface. Appearing in the OS Settings
-   dropdown is a follow-up gated on a packaging feasibility spike (sparse
-   MSIX with external location); v1 does not depend on it.
+3. An in-app settings card is the v1 surface, and the editions also appear in
+   the OS Settings dropdown. The dropdown mechanism was verified by
+   experiment on an isolated Windows 11 test VM (build 26300): a sparse MSIX
+   package with external location, declaring the two default-terminal
+   app-extension contracts, is enumerated by the packaged AppExtension
+   catalog, once per package, with the declared CLSIDs, alongside Windows
+   Terminal's own entries; two packages install as two separate entries.
 
 Non-goals for v1: Windows 10 and pre-22621 Windows 11 (the OS ignores the
 selection keys there; the card is hidden below build 22621), rebuilding
@@ -309,6 +313,41 @@ OpenConsole.exe present, proxy present and identity-verified, single-instance
 on, no undeletable hostile key. Enable is atomic in effect: a failure at any
 write step rolls back to the captured prior state.
 
+### OS Settings dropdown presence
+
+Each edition ships one sparse MSIX package (identity name per edition,
+publisher = the release code-signing certificate subject) whose external
+location is the edition's install directory. The manifest declares the two
+contracts under the Application element's Extensions (package-level
+Extensions is rejected by schema), carries the edition's console and terminal
+CLSIDs as the app-extension properties, and sets
+`uap10:AllowExternalContent` (required: deployment refuses an external
+location without it). The package payload is only the manifest, the logo
+assets, and the public folder; it is packed with payload validation skipped
+(the declared executable lives outside the package by definition) and signed
+with the release certificate, so production installs need no special trust
+store steps (the experiment used a self-signed developer certificate plus a
+machine TrustedPeople import, which is test-rig mechanics, not product
+mechanics).
+
+Lifecycle follows the same runtime-scoped rule as the COM binding: enable
+installs the package per user (`Add-AppxPackage -ExternalLocation`), disable
+removes it (`Remove-AppxPackage`), and the uninstall action removes it as
+part of the sanctioned reset. The catalog observations that shape the
+consumer story: entries carry plain display strings (no resource indirection
+needed for visibility); the catalog does not dedupe (the consumer dedupes by
+package identity, which per-edition identities satisfy); enumeration order
+is not a stable contract and must not be relied on; the catalog API does not
+carry icons (the dropdown resolves package logos separately, which the
+shipped assets provide).
+
+Two things the experiment did not cover and the VM end-to-end matrix must:
+the Settings dropdown UI accepting these entries and the selection writing
+the `%%Startup` pair with the declared CLSIDs (the ownership model treats an
+OS-written selection as a legitimate selection event: startup re-validation
+already keys on pair equality, and the shadow-unwrite rule already covers
+ownership lost this way), and activation of the declared pair.
+
 ### Supply chain
 
 At pin time, SHA-256 of `OpenConsole.exe` (NuGet) and `OpenConsoleProxy.dll`
@@ -431,7 +470,9 @@ the elevated matrix outcomes.
   enforcement.
 - Cross-vendor version skew while enabled, bounded by IID-stable contracts,
   the pairing checks, and the coexistence leg.
-- Dropdown absence for unpackaged apps, pending the packaging spike.
+- Dropdown entries: the sparse-package mechanism is verified at the catalog
+  level; the Settings dropdown UI acceptance and selection-write behavior
+  are VM end-to-end legs, not yet exercised.
 - Inside the one activation-race window, a delegated session opens in its
   own window rather than the most recent window; forced by the
   no-forwarding rule, documented and VM-asserted.
