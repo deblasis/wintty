@@ -109,8 +109,8 @@ human) working in this repo uses the same contract:
   exactly one, because that class also holds facts that run in Debug.
   Windows-only, and nothing compiles: the target is invoked directly.
 - `just gitversion-selftest` - prove a tag outside the release namespace
-  cannot name a version. `sync-publish` tags each published snapshot
-  `series/vN` and Config.init panics on a tag it does not recognise, so
+  cannot name a version. The retired sync flow left `series/vN` tags on
+  the remote and Config.init panics on a tag it does not recognise, so
   the version lookup filters with `--match v* --match tip --exclude */*`.
   `--match` does not stop at a slash, so `--exclude` is what carries the
   namespace rule. This runs real `git describe` against a throwaway repo

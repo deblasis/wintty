@@ -4,7 +4,7 @@
 #
 # GitVersion.detect asks git which tag sits on HEAD. With no filter it answers
 # with whatever tag is there, and Config.init panics on a tag that is neither
-# `tip` nor `vX.Y.Z` -- so `just sync-publish`, which tags every published
+# `tip` nor `vX.Y.Z` -- so the retired sync flow, which tagged every published
 # snapshot `series/vN`, made the commit it had just published unbuildable.
 #
 # The filter is `--match v* --match tip --exclude */*`, and the reason it needs

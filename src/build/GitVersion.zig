@@ -57,8 +57,8 @@ pub fn detect(b: *std.Build) !Version {
     // Only a release tag names a version. With no filter this returns whatever
     // tag happens to sit on HEAD, and Config.init panics on a tag it does not
     // recognise -- so a tag in an unrelated namespace makes the commit
-    // unbuildable. This fork tags every published sync series/vN, which lands
-    // on exactly such a commit.
+    // unbuildable. The retired sync flow left series/vN tags on the remote,
+    // and a checkout at one lands on exactly such a commit.
     //
     // --match globs the tag name with refs/tags/ stripped, and it does NOT
     // stop at a slash: `v*` rejects series/v2 only because that name starts

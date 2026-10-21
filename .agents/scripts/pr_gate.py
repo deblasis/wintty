@@ -389,7 +389,7 @@ def record_base(rec, head, cwd, run=None):
 
 def delta_count(base, win, cwd, run=None):
     """How many commits windows advanced by since `base`, first-parent only:
-    PR squashes and sync-publish merges are what moved, and a plain count
+    PR squashes and upstream sync merges are what moved, and a plain count
     would drown in whatever upstream history a sync merged in. None means
     git could not answer, which the caller treats as cannot-verify."""
     run = run or git_run

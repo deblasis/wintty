@@ -28,7 +28,7 @@ hook); the guard closes none of those either.
 
 The delta is measured from the record's `base` (the merge base with
 origin/windows stamped when the record was written) to the current
-origin/windows head, first-parent only: sync-publish lands real merge
+origin/windows head, first-parent only: upstream syncs land real merge
 commits, and a plain walk would disappear into upstream's history. A
 record written before base recording exists is base-unknown; the base is
 then estimated at merge time, which equals the original base whenever the
@@ -255,7 +255,7 @@ def delta_between(base, win, git):
     """{commits, files}: what the branch gained between the record's base
     and the merge-time head. First-parent is required, not cosmetic: the
     commits that matter are the ones windows itself advanced by (PR
-    squashes, sync-publish merges), and a plain rev-list would walk every
+    squashes, upstream sync merges), and a plain rev-list would walk every
     upstream commit a sync merged in and drown the risk in noise."""
     out = git(["rev-list", "--first-parent", f"{base}..{win}"])
     if out.returncode != 0:

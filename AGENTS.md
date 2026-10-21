@@ -64,10 +64,11 @@ so a rebase costs a signoff of about a minute, never the ladder. Merging
 on the old green and filing the risk as a `resignoff-required` issue is
 no longer the default; it is the owner's override, `just merge-checked
 <pr> --carry-risk`, and an agent does not reach for it. The one
-deliberate exception is `just sync-publish`, which lands the upstream
-snapshot merge without a PR; in exchange it runs its own assertions at
-publish time: nothing windows merged may be missing from the replay, and
-work no PR reviewed may ride along unnamed or unacknowledged.
+deliberate exception is an upstream sync, which lands a merge of
+`upstream/main` into `windows` without a PR; in exchange the merge tree
+runs the full gate ladder before the push, and the conflict resolution
+is held to the same standard a PR review would demand: no fork behavior
+silently dropped, and no upstream change landed unaccounted for.
 
 The `resignoff-required` issues that exist are debt, not blockers: they
 are designed to sit until worked, and working them is the owner's loop
