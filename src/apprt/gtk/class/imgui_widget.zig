@@ -10,6 +10,7 @@ const gtk = @import("gtk");
 const global = @import("../../../global.zig");
 
 const input = @import("../../../input.zig");
+const imgui_keys = @import("../../imgui_keys.zig");
 const gresource = @import("../build/gresource.zig");
 
 const key = @import("../key.zig");
@@ -177,7 +178,7 @@ pub const ImguiWidget = extern struct {
 
         // If our keyval has a key, then we send that key event
         if (key.keyFromKeyval(keyval)) |inputkey| {
-            if (inputkey.imguiKey()) |imgui_key| {
+            if (imgui_keys.imguiKey(inputkey)) |imgui_key| {
                 cimgui.c.ImGuiIO_AddKeyEvent(io, imgui_key, action == .press);
             }
         }

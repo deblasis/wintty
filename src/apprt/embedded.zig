@@ -14,6 +14,7 @@ const crash = @import("../crash/main.zig");
 const font = @import("../font/main.zig");
 const global = @import("../global.zig");
 const input = @import("../input.zig");
+const imgui_keys = @import("imgui_keys.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
@@ -2139,7 +2140,7 @@ pub const Inspector = struct {
         cimgui.c.ImGuiIO_AddKeyEvent(io, cimgui.c.ImGuiKey_LeftSuper, mods.super);
 
         // Send our keypress
-        if (key.imguiKey()) |imgui_key| {
+        if (imgui_keys.imguiKey(key)) |imgui_key| {
             cimgui.c.ImGuiIO_AddKeyEvent(
                 io,
                 imgui_key,

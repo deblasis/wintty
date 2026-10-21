@@ -57,4 +57,8 @@ test {
     _ = runtime;
     _ = action;
     _ = structs;
+    // The ImGui key map's home file: not named by runtime containers
+    // anywhere, so without this its test never runs (plain-const
+    // imports pull nothing in).
+    _ = @import("apprt/imgui_keys.zig");
 }
