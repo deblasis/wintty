@@ -48,6 +48,7 @@ public enum ReceiverClassification
 /// </summary>
 public sealed record HandoffPlacementRequest(
     HandoffArgs Args,
+    AdoptedSessionHandles? Handles,
     Func<HandoffPlacementResult, int> Complete);
 
 /// <summary>
@@ -349,6 +350,7 @@ public static partial class DefaultTermComServer
         {
             var request = new HandoffPlacementRequest(
                 service.CurrentArgs ?? new HandoffArgs(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero),
+                service.LastHandles,
                 r => r == HandoffPlacementResult.Adopted ? 0 : unchecked((int)0x80004005));
             RaiseHandoffReceived(request);
             return PlacementQueue.ParkAndWait(request, budget);

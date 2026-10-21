@@ -126,6 +126,36 @@ public sealed class HandoffContractTests
     }
 
     [Fact]
+    public void AdoptedSession_TravelsWithItsHandles()
+    {
+        // The placement request is the ONLY carrier of an adopted
+        // session's handles: without LastHandles populated before the
+        // scheduler runs, the surface receives nothing it can run on
+        // and the six handles leak.
+        using var pipe = new RealPipe();
+        using var proc = CurrentProcessHandle();
+        AdoptedSessionHandles? seen = null;
+
+        var service = NewService();
+        service.Scheduler = (_, _) =>
+        {
+            seen = service.LastHandles;
+            return HandoffPlacementResult.Adopted;
+        };
+
+        var hr = service.HandleCall(new HandoffArgs(proc, proc, proc, proc, IntPtr.Zero));
+
+        Assert.Equal(0, hr);
+        Assert.NotNull(seen);
+        Assert.NotEqual(IntPtr.Zero, seen!.InWrite);
+        Assert.NotEqual(IntPtr.Zero, seen.OutRead);
+        Assert.NotEqual(IntPtr.Zero, seen.SignalDup);
+        Assert.NotEqual(IntPtr.Zero, seen.ReferenceDup);
+        Assert.NotEqual(IntPtr.Zero, seen.ServerDup);
+        Assert.NotEqual(IntPtr.Zero, seen.ClientDup);
+    }
+
+    [Fact]
     public void InCallDuplication_Synchronous()
     {
         using var pipe = new RealPipe();

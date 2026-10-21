@@ -36,6 +36,21 @@ public enum HandoffPlacementResult
 }
 
 /// <summary>
+/// The handles an adopted session runs on, handed to the surface that
+/// adopts it: the two near pipe ends (user input in, VT out) and the
+/// four duplicated [in] handles, plus the peeked title. Ownership of all
+/// six transfers with adoption; nothing here is closed by the service.
+/// </summary>
+public sealed record AdoptedSessionHandles(
+    IntPtr InWrite,
+    IntPtr OutRead,
+    IntPtr SignalDup,
+    IntPtr ReferenceDup,
+    IntPtr ServerDup,
+    IntPtr ClientDup,
+    string? Title);
+
+/// <summary>
 /// The in-call service behind TerminalHandoffObject: validate before any
 /// effect, create the two pipes with the write end overlapped-capable,
 /// duplicate the [in] handles synchronously (the stub closes the
@@ -74,6 +89,13 @@ public sealed partial class TerminalHandoffService
 
     /// <summary>Injected fault point for the failure-lattice test.</summary>
     public FaultPoint Fault { get; set; }
+
+    /// <summary>
+    /// The handles of the call in flight, populated right before the
+    /// adoption scheduler runs: the carrier the placement request takes
+    /// to the surface.
+    /// </summary>
+    public AdoptedSessionHandles? LastHandles { get; private set; }
 
     /// <summary>
     /// The args of the call in flight on this instance. The placement
@@ -116,6 +138,7 @@ public sealed partial class TerminalHandoffService
         LastInWriteEnd = IntPtr.Zero;
         LastConsoleInRead = IntPtr.Zero;
         LastConsoleOutWrite = IntPtr.Zero;
+        LastHandles = null;
         LastTitle = null;
         LastIconPath = null;
         LastClientDuplicate = IntPtr.Zero;
@@ -204,7 +227,16 @@ public sealed partial class TerminalHandoffService
 
             // Adoption with a bounded budget. The far ends go to the
             // console side as the [out] parameters of the COM call; the
-            // service keeps the near ends until the surface takes them.
+            // near ends and the duplicated [in] handles travel to the
+            // surface through LastHandles: the request's carrier.
+            LastHandles = new AdoptedSessionHandles(
+                InWrite: ourInWrite,
+                OutRead: ourOutRead,
+                SignalDup: signalDup,
+                ReferenceDup: referenceDup,
+                ServerDup: serverDup,
+                ClientDup: clientDup,
+                Title: LastTitle);
             var scheduler = Scheduler ?? DefaultAdopt;
             var placement = scheduler(
                 _ => HandoffPlacementResult.Adopted,

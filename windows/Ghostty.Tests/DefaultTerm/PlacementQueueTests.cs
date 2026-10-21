@@ -161,6 +161,7 @@ public sealed class PlacementQueueTests
         Action<HandoffPlacementResult>? observed = null) =>
         new(
             new HandoffArgs(1, 2, 3, 4, 5),
+            Handles: null,
             r =>
             {
                 observed?.Invoke(r);
