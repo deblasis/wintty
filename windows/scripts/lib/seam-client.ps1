@@ -154,9 +154,9 @@ public static class SeamWin {
 # die with the harness however it exits. A capture of a private desktop reads
 # black (DWM composes only the input desktop), and synthesized input reaches
 # only the input desktop, so Start-SeamSession launches there only when the
-# harness passes -PrivateDesktop. The desktop name prefix and the
-# AppDomain flags set in Start-SeamSession are shared with the release-side
-# launcher (wintty-release scripts/lib/app-launch.ps1).
+# harness passes -PrivateDesktop. The desktop name prefix and the AppDomain
+# flags set in Start-SeamSession below are the contract the harness repo's
+# own launcher shares, so both launch shapes stay interchangeable.
 if (-not ('SeamDesk' -as [type])) {
 Add-Type -TypeDefinition @'
 using System;
@@ -638,7 +638,7 @@ function Start-SeamSession(
     # stranded the temp root and ran no teardown hook at all, which is why
     # the launch itself sits inside this try. Tear down here and rethrow.
     try {
-        # The flags tell wintty-release's run-health check which kind of
+        # The flags tell the harness's run-health check which kind of
         # desktop this process's launches ran on.
         $proc = Start-SeamAppProcess -FilePath $session.ExePath -ArgumentList $Arguments -PrivateDesktop:$PrivateDesktop
         if ($PrivateDesktop) { [AppDomain]::CurrentDomain.SetData('WinttySeamDesktopLaunch', $true) }
