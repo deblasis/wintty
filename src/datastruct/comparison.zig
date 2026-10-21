@@ -1,6 +1,7 @@
 // The contents of this file is largely based on testing.zig from the Zig 0.15.1
 // stdlib, distributed under the MIT license, copyright (c) Zig contributors
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const testing = std.testing;
 
 /// A deep equality comparison function that works for most types. We
@@ -50,12 +51,12 @@ pub fn deepEqual(comptime T: type, old: T, new: T) bool {
             )) return false;
         } else return true,
 
-        .@"struct" => |info| {
+        .@"struct" => {
             if (@hasDecl(T, "equal")) return old.equal(new);
 
             // If a struct doesn't declare an "equal" function, we fall back
             // to a recursive field-by-field compare.
-            inline for (info.fields) |field_info| {
+            inline for (meta_compat.structFields(T)) |field_info| {
                 if (!deepEqual(
                     field_info.type,
                     @field(old, field_info.name),
@@ -73,7 +74,7 @@ pub fn deepEqual(comptime T: type, old: T, new: T) bool {
             const new_tag = std.meta.activeTag(new);
             if (old_tag != new_tag) return false;
 
-            inline for (info.fields) |field_info| {
+            inline for (meta_compat.unionFields(T)) |field_info| {
                 if (@field(tag_type, field_info.name) == old_tag) {
                     return deepEqual(
                         field_info.type,

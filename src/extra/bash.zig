@@ -20,7 +20,7 @@ pub const completions = comptimeGenerateBashCompletions();
 
 fn comptimeGenerateBashCompletions() []const u8 {
     comptime {
-        @setEvalBranchQuota(50000);
+        @setEvalBranchQuota(2_000_000);
         var counter: std.Io.Writer.Discarding = .init(&.{});
         try writeBashCompletions(&counter.writer);
 

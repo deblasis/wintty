@@ -13,7 +13,7 @@ const equals_required = "=-:::";
 
 fn comptimeGenerateZshCompletions() []const u8 {
     comptime {
-        @setEvalBranchQuota(50000);
+        @setEvalBranchQuota(2_000_000);
         var counter: std.Io.Writer.Discarding = .init(&.{});
         try writeZshCompletions(&counter.writer);
 
@@ -71,20 +71,20 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         } else {
             switch (@typeInfo(field.type)) {
                 .bool => {},
-                .@"enum" => |info| {
+                .@"enum" => {
                     try writer.writeAll(equals_required);
                     try writer.writeAll("(");
-                    for (info.fields, 0..) |f, i| {
+                    for (meta_compat.enumFields(field.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
                     try writer.writeAll(")");
                 },
-                .@"struct" => |info| {
+                .@"struct" => {
                     try writer.writeAll(equals_required);
-                    if (!@hasDecl(field.type, "parseCLI") and info.layout == .@"packed") {
+                    if (!@hasDecl(field.type, "parseCLI") and @typeInfo(field.type).@"struct".layout == .@"packed") {
                         try writer.writeAll("(");
-                        for (info.fields, 0..) |f, i| {
+                        for (meta_compat.structFields(field.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name);
                             try writer.writeAll(" no-");
@@ -185,10 +185,10 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
 
                 switch (@typeInfo(opt.type)) {
                     .bool => {},
-                    .@"enum" => |info| {
+                    .@"enum" => {
                         try writer.writeAll(equals_required);
                         try writer.writeAll("(");
-                        for (info.fields, 0..) |f, i| {
+                        for (meta_compat.enumFields(opt.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name);
                         }
@@ -197,9 +197,9 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
                     .optional => |optional| {
                         try writer.writeAll(equals_required);
                         switch (@typeInfo(optional.child)) {
-                            .@"enum" => |info| {
+                            .@"enum" => {
                                 try writer.writeAll("(");
-                                for (info.fields, 0..) |f, i| {
+                                for (meta_compat.enumFields(optional.child), 0..) |f, i| {
                                     if (i > 0) try writer.writeAll(" ");
                                     try writer.writeAll(f.name);
                                 }

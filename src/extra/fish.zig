@@ -13,7 +13,7 @@ pub const completions = comptimeGenerateCompletions();
 
 fn comptimeGenerateCompletions() []const u8 {
     comptime {
-        @setEvalBranchQuota(50000);
+        @setEvalBranchQuota(2_000_000);
         var counter: std.Io.Writer.Discarding = .init(&.{});
         try writeCompletions(&counter.writer);
 
