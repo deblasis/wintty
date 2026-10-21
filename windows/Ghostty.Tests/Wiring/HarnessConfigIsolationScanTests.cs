@@ -896,13 +896,16 @@ public class HarnessConfigIsolationScanTests
         Assert.True(Directory.Exists(scriptDir), "windows/scripts not found");
 
         var violations = new List<string>();
-        foreach (var file in EnumerateFilesRecursively(scriptDir, "*.ps1")
-                     .OrderBy(f => f, StringComparer.Ordinal))
+        // The selftest fixtures are config-fragment corpora for fuzz-suite's
+        // layer checks; none of them launches anything, so they are excluded
+        // BEFORE the corpus is asserted: an empty corpus of real scripts
+        // would sweep nothing green, and the scan silently stopped looking.
+        var scripts = EnumerateFilesRecursively(scriptDir, "*.ps1")
+            .Where(f => !f.Replace('\\', '/').Contains("/lib/fuzz-selftest/"))
+            .ToList();
+        Assert.NotEmpty(scripts);
+        foreach (var file in scripts.OrderBy(f => f, StringComparer.Ordinal))
         {
-            // The selftest fixtures are config-fragment corpora for
-            // fuzz-suite's layer checks; none of them launches anything.
-            if (file.Replace('\\', '/').Contains("/lib/fuzz-selftest/")) continue;
-
             var rel = Path.GetRelativePath(scriptDir, file);
             var name = Path.GetFileName(file);
             var lines = File.ReadAllLines(file);
@@ -1450,10 +1453,15 @@ public class HarnessConfigIsolationScanTests
         var scriptDir = Path.Combine(root, "windows", "scripts");
         var violations = new List<string>();
 
-        foreach (var file in EnumerateFilesRecursively(scriptDir, "*.ps1")
-                     .OrderBy(f => f, StringComparer.Ordinal))
+        // The fuzz-selftest fixtures are excluded BEFORE the corpus is
+        // asserted: an empty corpus of real scripts would sweep nothing
+        // green, and the scan silently stopped looking.
+        var scripts = EnumerateFilesRecursively(scriptDir, "*.ps1")
+            .Where(f => !f.Replace('\\', '/').Contains("/lib/fuzz-selftest/"))
+            .ToList();
+        Assert.NotEmpty(scripts);
+        foreach (var file in scripts.OrderBy(f => f, StringComparer.Ordinal))
         {
-            if (file.Replace('\\', '/').Contains("/lib/fuzz-selftest/")) continue;
             var rel = Path.GetRelativePath(scriptDir, file);
             var lines = File.ReadAllLines(file);
             var functions = FunctionBodies(lines);
