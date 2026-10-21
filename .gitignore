@@ -15,6 +15,8 @@
 # is the IconGen build tool and its tests.
 windows/**/bin/
 windows/**/obj/
+tools/**/bin/
+tools/**/obj/
 dist/windows/**/bin/
 dist/windows/**/obj/
 # MSBuild binary log, created by `dotnet build -bl` and some Visual
