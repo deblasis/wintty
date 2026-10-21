@@ -22,6 +22,17 @@
                 </ctrl:SettingsCard>
 
                 <ctrl:SettingsCard
+                    x:Name="DefaultTerminalCard"
+                    Header="Default terminal"
+                    Description="Open console programs in Wintty when Windows launches them. Requires one-instance mode; the toggle refuses with a reason when it is off.">
+                    <ToggleSwitch
+                        x:Name="DefaultTerminalToggle"
+                        OffContent="Off"
+                        OnContent="Default"
+                        Toggled="DefaultTerminalToggle_Toggled" />
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
                     Header="Follow High Contrast"
                     Description="When Windows High Contrast is on, restyle the terminal surface to match. Off keeps your configured colors."
                     ctrl:SettingsCard.ConfigKey="windows-high-contrast">

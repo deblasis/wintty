@@ -11,12 +11,36 @@ internal sealed partial class AdvancedPage : Page
     private readonly IConfigService _configService;
     private readonly ConfigService? _cs;
     private bool _loading = true;
+    private readonly Ghostty.Core.DefaultTerm.DefaultTerminalCardViewModel? _defaultTerminal;
+
+    /// <summary>
+    /// The default-terminal card's inputs: the real engine over the
+    /// per-user registration, the single-instance setting the way the
+    /// toggle above persists it, and the OS build for the floor check
+    /// that hides the card entirely below 22621.
+    /// </summary>
+    private static Ghostty.Core.DefaultTerm.DefaultTerminalCardViewModel? CreateDefaultTerminalCard(
+        ConfigService? configService)
+    {
+        if (configService is null)
+        {
+            return null;
+        }
+
+        return new Ghostty.Core.DefaultTerm.DefaultTerminalCardViewModel(
+            Ghostty.Core.DefaultTerm.DefaultTermBootstrap.CreateEngine(),
+            singleInstanceEnabled: () => WindowsOnlyKeyParsers.ParseBool(
+                configService.GetRawFileValue("windows-single-instance"),
+                defaultValue: false),
+            osBuild: () => Environment.OSVersion.Version.Build);
+    }
 
     public AdvancedPage(IConfigService configService, IConfigFileEditor editor)
     {
         _ = editor;
         _configService = configService;
         _cs = configService as ConfigService;
+        _defaultTerminal = CreateDefaultTerminalCard(_cs);
         InitializeComponent();
         LoadValues();
         _loading = false;
@@ -88,6 +112,17 @@ internal sealed partial class AdvancedPage : Page
         var quake = _cs.GetRawFileValue("quick-terminal-key");
         QuakeKeyBox.Text = string.IsNullOrWhiteSpace(quake) ? string.Empty : quake;
         _quakeKeyWritten = QuakeKeyBox.Text.Trim();
+
+        if (_defaultTerminal is not null)
+        {
+            _defaultTerminal.Refresh();
+            DefaultTerminalCard.Visibility =
+                _defaultTerminal.State == Ghostty.Core.DefaultTerm.DefaultTerminalCardState.UnavailableBelowFloor
+                    ? Visibility.Collapsed
+                    : Visibility.Visible;
+            DefaultTerminalToggle.IsOn =
+                _defaultTerminal.State == Ghostty.Core.DefaultTerm.DefaultTerminalCardState.IsDefault;
+        }
     }
 
     // Blur is not an edit: it fires on tab-through, on a click elsewhere, on
@@ -112,6 +147,19 @@ internal sealed partial class AdvancedPage : Page
         Ghostty.App.ConfigWriteScheduler?.Schedule(
             "windows-single-instance",
             SingleInstanceToggle.IsOn ? "true" : "false");
+    }
+
+    private void DefaultTerminalToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading || _defaultTerminal is null) return;
+
+        // The view model is the authority: the switch's own state is a
+        // guess until Toggle decides, and a refusal must snap it back.
+        _defaultTerminal.Toggle();
+        _loading = true;
+        DefaultTerminalToggle.IsOn =
+            _defaultTerminal.State == Ghostty.Core.DefaultTerm.DefaultTerminalCardState.IsDefault;
+        _loading = false;
     }
 
     private void HighContrastToggle_Toggled(object sender, RoutedEventArgs e)

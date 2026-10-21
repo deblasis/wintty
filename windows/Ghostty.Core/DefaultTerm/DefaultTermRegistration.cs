@@ -104,7 +104,7 @@ public enum DisableResult
 /// before the terminal value inside it.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class DefaultTermRegistration
+public sealed class DefaultTermRegistration : IDefaultTermEngine
 {
     public const string DelegationConsoleValue = "DelegationConsole";
     public const string DelegationTerminalValue = "DelegationTerminal";
