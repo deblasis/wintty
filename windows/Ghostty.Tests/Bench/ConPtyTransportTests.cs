@@ -14,6 +14,16 @@ public class ConPtyTransportTests
     // a budget tight enough to measure that is one that flakes on a busy
     // box. 60s still fails fast against the marshalling regression this
     // test exists for, which produces no output at all.
+    // The round-trip harness's per-iteration deadline is only exercisable
+    // against real ConPTY: it is evaluated between synchronous reads, and
+    // FakeTransport's scripted responder answers once per input READ, so
+    // once the scripted burst is drained the next read blocks forever and
+    // the deadline loop never re-runs. Real conhost keeps emitting VT
+    // state bytes, so reads keep returning and the deadline can fire. The
+    // throughput sibling is fake-covered (its deadline is a CTS cancelling
+    // a blocked ReadAsync). If scripted mode ever grows a
+    // streaming-responder variant, a fake-level round-trip deadline test
+    // becomes possible and should be added then.
     [SupportedOSPlatform("windows")]
     [Fact(Timeout = 90_000)]
     public async Task Transport_DeliversConhostOutputWithinSeconds()

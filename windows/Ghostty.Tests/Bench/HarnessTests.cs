@@ -85,18 +85,6 @@ public class HarnessTests
         }
     }
 
-    // Skipped: scripted-responder delivers one burst per input write; once
-    // that burst is drained, subsequent Reads block indefinitely, so the
-    // harness's per-iteration deadline (evaluated between Reads) never fires
-    // and the test would hang instead of exercising the TimeoutException
-    // path. Under real ConPTY the conhost keeps emitting VT state bytes so
-    // the deadline is exercised naturally. If scripted mode ever grows a
-    // streaming-responder variant, un-skip this.
-    [Fact(Skip = "scripted responder is one-shot per input write; deadline path is exercised by real ConPTY, not FakeTransport")]
-    public void SentinelRoundTrip_ThrowsOnPerIterationDeadline()
-    {
-    }
-
     [Fact]
     public void SentinelRoundTrip_ThrowsOnEndOfStream()
     {
