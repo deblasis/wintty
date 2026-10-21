@@ -122,6 +122,7 @@ internal sealed partial class AdvancedPage : Page
                     : Visibility.Visible;
             DefaultTerminalToggle.IsOn =
                 _defaultTerminal.State == Ghostty.Core.DefaultTerm.DefaultTerminalCardState.IsDefault;
+            ShowDefaultTerminalReason();
         }
     }
 
@@ -160,6 +161,19 @@ internal sealed partial class AdvancedPage : Page
         DefaultTerminalToggle.IsOn =
             _defaultTerminal.State == Ghostty.Core.DefaultTerm.DefaultTerminalCardState.IsDefault;
         _loading = false;
+        ShowDefaultTerminalReason();
+    }
+
+    /// <summary>
+    /// A refused or failed enable/disable surfaces its reason instead of
+    /// a toggle that silently snaps back; a clean state hides the row.
+    /// </summary>
+    private void ShowDefaultTerminalReason()
+    {
+        var reason = _defaultTerminal?.BlockedReason;
+        DefaultTerminalReason.Text = reason ?? string.Empty;
+        DefaultTerminalReason.Visibility =
+            string.IsNullOrEmpty(reason) ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void HighContrastToggle_Toggled(object sender, RoutedEventArgs e)

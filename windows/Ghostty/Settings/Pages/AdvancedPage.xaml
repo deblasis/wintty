@@ -25,11 +25,18 @@
                     x:Name="DefaultTerminalCard"
                     Header="Default terminal"
                     Description="Open console programs in Wintty when Windows launches them. Requires one-instance mode; the toggle refuses with a reason when it is off.">
-                    <ToggleSwitch
-                        x:Name="DefaultTerminalToggle"
-                        OffContent="Off"
-                        OnContent="Default"
-                        Toggled="DefaultTerminalToggle_Toggled" />
+                    <StackPanel>
+                        <ToggleSwitch
+                            x:Name="DefaultTerminalToggle"
+                            OffContent="Off"
+                            OnContent="Default"
+                            Toggled="DefaultTerminalToggle_Toggled" />
+                        <TextBlock
+                            x:Name="DefaultTerminalReason"
+                            TextWrapping="Wrap"
+                            Margin="0,8,0,0"
+                            Visibility="Collapsed" />
+                    </StackPanel>
                 </ctrl:SettingsCard>
 
                 <ctrl:SettingsCard
