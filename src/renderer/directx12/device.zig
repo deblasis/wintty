@@ -42,8 +42,9 @@ pub const frame_count: u32 = 3;
 // returns the existing device (AddRef'd) while any reference to it is
 // alive anywhere in the process, and costs 1.2-2.0s cold vs ~1ms once
 // warm. `warmup()` pays that cost on a background thread at app startup
-// (see App.zig's renderer.Renderer.API.warmup hook and DirectX12.zig's
-// forwarder) so the UI thread's first `Device.init` -- which otherwise
+// (discovered via @hasDecl(renderer.Device, "warmup") in App.zig; see
+// app_device.zig's forwarder) so the UI thread's first `Device.init` --
+// which otherwise
 // eats almost all of Surface.init's ~440ms of ~520ms measured cost --
 // finds the singleton already warm.
 //

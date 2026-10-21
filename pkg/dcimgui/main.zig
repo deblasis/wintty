@@ -76,10 +76,6 @@ extern fn ghostty_ImGui_ImplDX12_InitInfo_align() callconv(.c) usize;
 extern fn ghostty_ImGuiIO_size() callconv(.c) usize;
 extern fn ghostty_ImGuiStyle_size() callconv(.c) usize;
 
-// Internal API types and functions from dcimgui_internal.h
-// We declare these manually because the internal header contains bitfields
-// that Zig's cImport cannot translate.
-
 // Internal API types and functions from dcimgui_internal.h We declare these
 // manually because the internal header contains bitfields that translate-c has
 // trouble with.

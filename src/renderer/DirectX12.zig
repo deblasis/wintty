@@ -337,14 +337,6 @@ inline fn unpackScale(packed_scale: u64) struct { x: f32, y: f32 } {
 
 // --- GraphicsAPI contract: functions ---
 
-/// Detected via @hasDecl by App.zig and run on a background thread at app
-/// startup, well before the first surface's initGpu needs a device. Thin
-/// forwarder so the actual D3D12 warmup work (see device.zig) stays next
-/// to the code it warms.
-pub fn warmup() void {
-    device.warmup();
-}
-
 pub fn init(
     alloc: Allocator,
     app_device: *Device,
