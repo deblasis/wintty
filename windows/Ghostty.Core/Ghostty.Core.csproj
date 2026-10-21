@@ -162,9 +162,10 @@
         unparseable, so a build that never received real identity is inert
         by construction instead of behind a feature flag. A registration
         build overrides them with -p:DefaultTerminalClsid and
-        -p:DerivedConsoleClsid. Escaped like BuildLabel above so even a
-        malformed override stays a valid C# literal; an unparseable one
-        just keeps registration refused.
+        -p:DerivedConsoleClsid. The in-target Replace escaping covers the
+        default-property flow only: a global -p: override is emitted raw,
+        so it has to arrive already well-formed, and an unparseable one
+        keeps registration refused.
       -->
       <DefaultTerminalClsid Condition="'$(DefaultTerminalClsid)' == ''">{00000000-0000-0000-0000-000000000000}</DefaultTerminalClsid>
       <DefaultTerminalClsid>$(DefaultTerminalClsid.Replace('\','\\').Replace('"','\"'))</DefaultTerminalClsid>
