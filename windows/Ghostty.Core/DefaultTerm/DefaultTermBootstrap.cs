@@ -93,12 +93,24 @@ public static partial class DefaultTermBootstrap
     /// The production engine bound to this process's install layout:
     /// OpenConsole.exe and OpenConsoleProxy.dll sit beside this exe.
     /// </summary>
+    /// <summary>
+    /// The capture store's path, under the user's local app data so the
+    /// engine can restore a captured prior after an install move. The
+    /// subfolder follows the per-edition state directory channel when
+    /// one is published; dev builds share the generic folder.
+    /// </summary>
+    public static string DefaultStorePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Wintty",
+        "defterm-state.json");
+
     public static DefaultTermRegistration CreateEngine() => new(
         DefaultTermRegistryPaths.Production,
         DefaultTermIdentityView.Instance,
         Environment.ProcessPath ?? string.Empty,
         Path.Combine(AppContext.BaseDirectory, "OpenConsole.exe"),
-        Path.Combine(AppContext.BaseDirectory, "OpenConsoleProxy.dll"));
+        Path.Combine(AppContext.BaseDirectory, "OpenConsoleProxy.dll"),
+        DefaultStorePath);
 
     /// <summary>
     /// The feature is enabled when the selection names this build's own

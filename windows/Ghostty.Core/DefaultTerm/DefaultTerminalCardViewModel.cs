@@ -44,15 +44,18 @@ public sealed class DefaultTerminalCardViewModel
     private readonly IDefaultTermEngine _engine;
     private readonly Func<bool> _singleInstanceEnabled;
     private readonly Func<int> _osBuild;
+    private readonly Func<bool> _canRegister;
 
     public DefaultTerminalCardViewModel(
         IDefaultTermEngine engine,
         Func<bool> singleInstanceEnabled,
-        Func<int> osBuild)
+        Func<int> osBuild,
+        Func<bool>? canRegister = null)
     {
         _engine = engine;
         _singleInstanceEnabled = singleInstanceEnabled;
         _osBuild = osBuild;
+        _canRegister = canRegister ?? (() => DefaultTermIdentity.CanRegister);
         ToggleCommand = new CardToggleCommand(this);
         Refresh();
     }
@@ -75,8 +78,11 @@ public sealed class DefaultTerminalCardViewModel
     public void Refresh()
     {
         BlockedReason = null;
-        if (_osBuild() < MinimumOsBuild)
+        if (_osBuild() < MinimumOsBuild || !_canRegister())
         {
+            // Below the OS floor the OS ignores the keys; without real
+            // identity the build registers nothing. Either way the page
+            // collapses the row entirely.
             State = DefaultTerminalCardState.UnavailableBelowFloor;
             CanToggle = false;
             return;

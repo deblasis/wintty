@@ -123,6 +123,14 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
     private readonly DefaultTermCaptureStore? _store;
 
     /// <summary>
+    /// A nil terminal or console CLSID means this build never received
+    /// real identity: inert by construction, never a registrant.
+    /// </summary>
+    private bool IdentityIsPlaceholder() =>
+        _identity.TerminalClsid.Contains("00000000-0000-0000-0000-000000000000", StringComparison.OrdinalIgnoreCase)
+        || _identity.ConsoleClsid.Contains("00000000-0000-0000-0000-000000000000", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Receives each subkey path immediately before the engine first writes
     /// a value into it, in write order. Set it to audit the sequence; the
     /// selection key arriving last is the invariant the enable path holds.
@@ -207,6 +215,13 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
     /// </summary>
     public EnableResult Enable()
     {
+        if (IdentityIsPlaceholder())
+        {
+            return EnableResult.Failed(
+                EnableFailureKind.None,
+                "identity is placeholder: this build carries nil CLSIDs and registers nothing");
+        }
+
         if (IsRegistered())
         {
             return EnableResult.AlreadyRegistered;
@@ -341,6 +356,13 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
     /// </summary>
     public DisableResult Disable()
     {
+        if (IdentityIsPlaceholder())
+        {
+            // Nothing this build ever wrote is in the tree; refusing
+            // keeps a nil-identity build from touching shared keys.
+            return DisableResult.NotRegistered;
+        }
+
         using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
 
         // The prior is read before the store is deleted: the captured

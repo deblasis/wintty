@@ -17,7 +17,8 @@ public sealed class DefaultTerminalCardTests
         var vm = new DefaultTerminalCardViewModel(
             new FakeEngine(),
             singleInstanceEnabled: () => true,
-            osBuild: () => 22000);
+            osBuild: () => 22000,
+            canRegister: () => true);
 
         vm.Refresh();
 
@@ -37,7 +38,8 @@ public sealed class DefaultTerminalCardTests
         var vm = new DefaultTerminalCardViewModel(
             engine,
             singleInstanceEnabled: () => true,
-            osBuild: () => 22621);
+            osBuild: () => 22621,
+            canRegister: () => true);
 
         vm.Toggle();
 
@@ -55,7 +57,8 @@ public sealed class DefaultTerminalCardTests
         var vm = new DefaultTerminalCardViewModel(
             engine,
             singleInstanceEnabled: () => false,
-            osBuild: () => 22621);
+            osBuild: () => 22621,
+            canRegister: () => true);
 
         vm.Toggle();
 
@@ -72,7 +75,8 @@ public sealed class DefaultTerminalCardTests
         var vm = new DefaultTerminalCardViewModel(
             engine,
             singleInstanceEnabled: () => true,
-            osBuild: () => 22621);
+            osBuild: () => 22621,
+            canRegister: () => true);
 
         vm.Refresh();
         Assert.Equal(DefaultTerminalCardState.IsDefault, vm.State);
