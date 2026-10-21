@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Ghostty.Core;
 using Ghostty.Core.Config;
+using Ghostty.Core.DefaultTerm;
 using Ghostty.Core.Logging;
 using Ghostty.Core.SingleInstance;
 using Ghostty.Core.Version;
@@ -84,6 +86,15 @@ public static partial class Program
         /// coverage map names, and that is the change to make deliberately
         /// rather than as a side effect of adding a fallback.)</summary>
         ManagedUnhandled = 3,
+
+        /// <summary>An embedding launch (COM's <c>-Embedding</c>) whose
+        /// activation never arrived: the class object was revoked and the
+        /// process exited without a window. Distinct from Success so a
+        /// launcher can tell "started and served" from "nothing to serve";
+        /// the value lives on
+        /// <see cref="DefaultTermComServer.IdleEmbeddingExitCode"/> so the
+        /// default-terminal module owns the taxonomy entry.</summary>
+        EmbeddingIdle = DefaultTermComServer.IdleEmbeddingExitCode,
     }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
@@ -852,6 +863,32 @@ public static partial class Program
 
     static int MainImpl(string[] args)
     {
+        // COM's activation launch: the SCM started this process for a
+        // default-terminal handoff, which spells its flag both ways. The
+        // flag is stripped before anything else parses argv, and the
+        // class-object lifecycle moves to its dedicated MTA thread: this
+        // thread is STA, the handoff path is COM and needs no UI, and the
+        // registration must precede WinUI initialization. The launch then
+        // continues into the GUI below; one whose activation never
+        // arrives is exited with the idle taxonomy code.
+        if (DefaultTermBootstrap.IsEmbeddingLaunch(args))
+        {
+            var kept = new List<string>(args.Length);
+            foreach (var arg in args)
+            {
+                if (!arg.Equals("-Embedding", StringComparison.OrdinalIgnoreCase)
+                    && !arg.Equals("/Embedding", StringComparison.OrdinalIgnoreCase))
+                {
+                    kept.Add(arg);
+                }
+            }
+
+            args = kept.ToArray();
+            DefaultTermComServer.StartEmbeddingServer(
+                DefaultTermBootstrap.BuildContext(
+                    SingleInstanceRole.Secondary,
+                    DefaultTermBootstrap.IsFeatureEnabled()));
+        }
         // Resolve `ghostty` to native/ghostty.dll for every entry path,
         // before anything can P/Invoke into it. This is deliberately the
         // only registration in the process: SetDllImportResolver throws
@@ -1074,7 +1111,13 @@ public static partial class Program
         // unhandled-exception mirror still reach whoever started it from a
         // shell. The gate that used to live here existed because a
         // console-subsystem binary was handed a console it did not want.
-        return StartGui();
+        var guiExit = StartGui();
+
+        // The message loop ended: no new activation can be on its way.
+        // Revoke before draining so in-flight handoffs settle without a
+        // newcomer, then release COM.
+        DefaultTermComServer.Shutdown();
+        return guiExit;
     }
 
     /// <summary>
@@ -1617,6 +1660,17 @@ public static partial class Program
             // HWND exists and paints black. The splash covers that rect
             // until there is real content to reveal. It runs on its own
             // thread, so none of that work delays it.
+            // The permanent handoff class-object registration, attempted
+            // immediately after the election and before WinUI
+            // initialization. Every failed condition (not primary,
+            // feature off, unbound exe, elevated) leaves nothing
+            // registered; the +defterm-status probe reports the actual
+            // state, never the intended one.
+            DefaultTermComServer.TryRegisterPermanent(
+                DefaultTermBootstrap.BuildContext(
+                    _singleInstance.Role,
+                    DefaultTermBootstrap.IsFeatureEnabled()));
+
             if (_singleInstance.ShouldShowLaunchSplash)
             {
                 Ghostty.Shell.SplashWindow.Show();

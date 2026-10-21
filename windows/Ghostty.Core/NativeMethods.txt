@@ -70,3 +70,14 @@ PROCESS_ACCESS_RIGHTS
 // PROCESS_QUERY_LIMITED_INFORMATION right NtProcessInterop already takes.
 QueryFullProcessImageName
 PROCESS_NAME_FORMAT
+
+// token integrity for the default-terminal bootstrap
+// (DefaultTermBootstrap.ReadIntegrityLevel): the permanent class-object
+// registration refuses elevated instances, decided from the process's
+// own token.
+OpenProcessToken
+GetTokenInformation
+TOKEN_ACCESS_MASK
+TOKEN_INFORMATION_CLASS
+GetCurrentProcess
+CloseHandle

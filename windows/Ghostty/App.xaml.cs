@@ -1404,6 +1404,12 @@ public partial class App : Application
         // Dispose rather than leaving it to teardown, so the config file
         // watcher and the native config handle go now.
         _configService?.Dispose();
+
+        // This process holds at most the consumed transient of an
+        // embedding launch; revoke-drain-release it before the hard exit
+        // rather than letting the OS tear the class object down
+        // unobserved.
+        Ghostty.Core.DefaultTerm.DefaultTermComServer.Shutdown();
         Environment.Exit(0);
     }
 
