@@ -1,6 +1,7 @@
 const formatter = @This();
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const Key = @import("key.zig").Key;
 
@@ -97,7 +98,7 @@ pub fn formatEntry(
             // Packed structs we special case.
             .@"packed" => {
                 try writer.print("{s} = ", .{name});
-                inline for (info.fields, 0..) |field, i| {
+                inline for (meta_compat.structFields(T), 0..) |field, i| {
                     if (i > 0) try writer.print(",", .{});
                     try writer.print("{s}{s}", .{
                         if (!@field(value, field.name)) "no-" else "",

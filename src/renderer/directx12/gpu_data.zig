@@ -323,7 +323,7 @@ comptime {
 
     // The pixel shader reads CellText.bools as raw bits through these
     // defines, so each packed field needs its exact mask there.
-    for (std.meta.fields(@FieldType(CellText, "bools")), 0..) |field, bit| {
+    for (meta_compat.structFields(@FieldType(CellText, "bools")), 0..) |field, bit| {
         if (std.mem.startsWith(u8, field.name, "_")) continue;
         mirrors.expectMirrored(
             hlsl_source,

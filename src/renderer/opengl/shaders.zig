@@ -310,7 +310,7 @@ comptime {
     // The vertex shader reads CellText.bools as raw bits through these
     // constants, so each packed field needs its exact mask there.
     @setEvalBranchQuota(200000);
-    for (std.meta.fields(@FieldType(CellText, "bools")), 0..) |field, bit| {
+    for (meta_compat.structFields(@FieldType(CellText, "bools")), 0..) |field, bit| {
         if (std.mem.startsWith(u8, field.name, "_")) continue;
         mirrors.expectMirrored(
             cell_text_v_source,
@@ -379,7 +379,7 @@ comptime {
         },
         "common.glsl Globals vs opengl.Uniforms",
     );
-    for (std.meta.fields(@FieldType(Uniforms, "bools")), 0..) |field, bit| {
+    for (meta_compat.structFields(@FieldType(Uniforms, "bools")), 0..) |field, bit| {
         if (std.mem.startsWith(u8, field.name, "_")) continue;
         mirrors.expectMirrored(
             common_source,
@@ -388,7 +388,7 @@ comptime {
             "common.glsl Uniforms.bools vs opengl.Uniforms",
         );
     }
-    for (std.meta.fields(@FieldType(Uniforms, "padding_extend")), 0..) |field, bit| {
+    for (meta_compat.structFields(@FieldType(Uniforms, "padding_extend")), 0..) |field, bit| {
         if (std.mem.startsWith(u8, field.name, "_")) continue;
         mirrors.expectMirrored(
             common_source,

@@ -20,10 +20,9 @@ pub fn Struct(
     return switch (target) {
         .zig => Zig,
         .c => c: {
-            const info = @typeInfo(Zig).@"struct";
             var names: [meta_compat.structFields(Zig).len][]const u8 = undefined;
             var types: [meta_compat.structFields(Zig).len]type = undefined;
-            var attrs: [meta_compat.structFields(Zig).len]std.builtin.Type.StructField.Attributes = undefined;
+            var attrs: [meta_compat.structFields(Zig).len]std.lang.Type.Struct.FieldAttributes = undefined;
 
             for (meta_compat.structFields(Zig), &names, &types, &attrs) |field, *name, *ty, *attr| {
                 name.* = field.name;

@@ -170,7 +170,6 @@ const Precompute = struct {
         var result: [std.math.maxInt(u13) + 1]Value = undefined;
 
         @setEvalBranchQuota(20_000);
-        const info = @typeInfo(uucode.types.GraphemeBreakNoControl).@"enum";
         for (0..uucode.grapheme.BreakState.table_len) |state_int| {
             for (meta_compat.enumFields(uucode.types.GraphemeBreakNoControl)) |field1| {
                 for (meta_compat.enumFields(uucode.types.GraphemeBreakNoControl)) |field2| {

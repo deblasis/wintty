@@ -141,10 +141,10 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
                     }
                     try writer.writeAll(compgenSuffix);
                 },
-                .@"struct" => |info| {
-                    if (!@hasDecl(field.type, "parseCLI") and info.layout == .@"packed") {
+                .@"struct" => {
+                    if (!@hasDecl(field.type, "parseCLI") and @typeInfo(field.type).@"struct".layout == .@"packed") {
                         try writer.writeAll(compgenPrefix);
-                        for (info.fields, 0..) |f, i| {
+                        for (meta_compat.structFields(field.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name ++ " no-" ++ f.name);
                         }

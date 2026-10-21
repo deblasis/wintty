@@ -667,7 +667,7 @@ const VTEvent = struct {
             [:0]const u8,
             => try md.put("data", try alloc.dupeZ(u8, v)),
             else => |T| switch (@typeInfo(T)) {
-                .@"struct" => |info| inline for (info.fields) |field| {
+                .@"struct" => inline for (meta_compat.structFields(T)) |field| {
                     try encodeMetadataSingle(
                         alloc,
                         md,
@@ -679,7 +679,7 @@ const VTEvent = struct {
                 .@"union" => |info| {
                     const Tag = info.tag_type orelse @compileError("Unions must have a tag");
                     const tag_name = @tagName(@as(Tag, v));
-                    inline for (info.fields) |field| {
+                    inline for (meta_compat.unionFields(T)) |field| {
                         if (std.mem.eql(u8, field.name, tag_name)) {
                             if (field.type == void) {
                                 break try md.put("data", tag_name);
@@ -737,7 +737,7 @@ const VTEvent = struct {
             .@"union" => |u| {
                 const Tag = u.tag_type orelse @compileError("Unions must have a tag");
                 const tag_name = @tagName(@as(Tag, value));
-                inline for (u.fields) |field| {
+                inline for (meta_compat.unionFields(@TypeOf(value))) |field| {
                     if (std.mem.eql(u8, field.name, tag_name)) {
                         const s = if (field.type == void)
                             try alloc.dupeZ(u8, tag_name)

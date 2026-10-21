@@ -139,9 +139,9 @@ fn zigFloatClass(comptime T: type) bool {
         .bool => false,
         .vector => |v| @typeInfo(v.child) == .float,
         .array => |a| zigFloatClass(a.child),
-        .@"struct" => |s| blk: {
+        .@"struct" => blk: {
             var acc: ?bool = null;
-            inline for (s.fields) |field| {
+            inline for (meta_compat.structFields(T)) |field| {
                 const f = zigFloatClass(field.type);
                 if (acc == null) acc = f else if (acc.? != f) @compileError(
                     "mixed float and integer fields; the scanner cannot class " ++

@@ -152,7 +152,6 @@ pub fn PackedTaggedUnion(
         @compileError("packed tagged union value must be a packed union");
 
     const TagT = @FieldType(OwnerT, @tagName(tag_field_value));
-    const tag_info = @typeInfo(TagT).@"enum";
     const ArmT = PackedTaggedUnionArm(UnionT);
 
     return struct {

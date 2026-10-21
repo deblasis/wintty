@@ -101,7 +101,6 @@ fn initTable() [table_len]u16 {
 
 test {
     const testing = std.testing;
-    const info = @typeInfo(Charset).@"enum";
     inline for (meta_compat.enumFields(Charset)) |field| {
         // utf8 has no table
         if (@field(Charset, field.name) == .utf8) continue;

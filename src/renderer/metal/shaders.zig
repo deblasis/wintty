@@ -341,7 +341,7 @@ comptime {
     // The vertex shader reads CellText.bools as raw bits through these
     // enum members, so each packed field needs its exact mask there.
     @setEvalBranchQuota(200000);
-    for (std.meta.fields(@FieldType(CellText, "bools")), 0..) |field, bit| {
+    for (meta_compat.structFields(@FieldType(CellText, "bools")), 0..) |field, bit| {
         if (std.mem.startsWith(u8, field.name, "_")) continue;
         mirrors.expectMirrored(
             metal_source,
