@@ -123,9 +123,9 @@ pub fn yieldToDemand(self: *State, io: std.Io) void {
     const gen = self.handoff_gen.load(.monotonic);
     if (self.demand.load(.monotonic) == 0) return;
     io.futexWaitTimeout(
-        @TypeOf(self.handoff_gen),
-        &self.handoff_gen,
-        .init(gen),
+        u32,
+        &self.handoff_gen.raw,
+        gen,
         .{ .duration = .{ .raw = .fromNanoseconds(handoff_timeout_ns), .clock = .awake } },
     ) catch {};
 }

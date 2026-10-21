@@ -111,7 +111,7 @@ fn mainActionImpl(
 
 test {
     // Make sure we ref all our actions
-    inline for (meta_compat.enumFields(Action)) |field| {
+    inline for (comptime meta_compat.enumFields(Action)) |field| {
         const action = @field(Action, field.name);
         const Impl = Action.Struct(action);
         _ = Impl;

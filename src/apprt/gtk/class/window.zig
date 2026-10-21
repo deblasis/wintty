@@ -1369,7 +1369,7 @@ pub const Window = extern struct {
         if (priv.title_override) |v| glib.free(@ptrCast(@constCast(v)));
         priv.title_override = null;
 
-        if (title) |v| priv.title_override = glib.ext.dupeZ(u8, v);
+        if (title) |v| priv.title_override = glib.ext.dupeSentinel(u8, v, 0);
 
         self.as(gobject.Object).notifyByPspec(properties.@"title-override".impl.param_spec);
     }
@@ -1409,9 +1409,9 @@ pub const Window = extern struct {
         title_: ?[*:0]const u8,
         title_override_: ?[*:0]const u8,
     ) callconv(.c) ?[*:0]const u8 {
-        if (title_override_) |v| return glib.ext.dupeZ(u8, std.mem.span(v));
-        if (title_) |v| return glib.ext.dupeZ(u8, std.mem.span(v));
-        return glib.ext.dupeZ(u8, "Ghostty");
+        if (title_override_) |v| return glib.ext.dupeSentinel(u8, std.mem.span(v), 0);
+        if (title_) |v| return glib.ext.dupeSentinel(u8, std.mem.span(v), 0);
+        return glib.ext.dupeSentinel(u8, "Ghostty", 0);
     }
 
     fn closureSubtitle(
@@ -1424,7 +1424,7 @@ pub const Window = extern struct {
             .false => null,
             .@"working-directory" => pwd: {
                 const pwd = pwd_ orelse return null;
-                break :pwd glib.ext.dupeZ(u8, std.mem.span(pwd));
+                break :pwd glib.ext.dupeSentinel(u8, std.mem.span(pwd), 0);
             },
         };
     }

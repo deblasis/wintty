@@ -5771,7 +5771,7 @@ pub fn loadCliArgs(self: *Config, alloc_gpa: Allocator) !void {
             errdefer builder.deinit(arena_alloc);
             for (args) |arg_raw| {
                 const arg = std.mem.sliceTo(arg_raw, 0);
-                const copy = try arena_alloc.dupeZ(u8, arg);
+                const copy = try arena_alloc.dupeSentinel(u8, arg, 0);
                 try self._replay_steps.append(arena_alloc, .{ .arg = copy });
                 try builder.append(arena_alloc, copy);
             }
@@ -5984,7 +5984,7 @@ pub fn changeConditionalState(
     // If the conditional state between the old and new is the same,
     // then we don't need to do anything.
     relevant: {
-        inline for (meta_compat.enumFields(conditional.Key)) |field| {
+        inline for (comptime meta_compat.enumFields(conditional.Key)) |field| {
             const key: conditional.Key = @field(conditional.Key, field.name);
 
             // Conditional set contains the keys that this config uses. So we
@@ -6032,7 +6032,7 @@ fn expandPaths(self: *Config, base: []const u8) !void {
     );
 
     // Expand all of our paths
-    inline for (meta_compat.structFields(Config)) |field| {
+    inline for (comptime meta_compat.structFields(Config)) |field| {
         switch (field.type) {
             RepeatablePath, Path => {
                 try @field(self, field.name).expand(
@@ -6331,7 +6331,7 @@ pub fn finalize(self: *Config) !void {
 
                 log.info("default shell source=env value={s}", .{value});
 
-                const copy = try alloc.dupeZ(u8, value);
+                const copy = try alloc.dupeSentinel(u8, value, 0);
                 self.command = .{ .shell = copy };
 
                 // If we don't need the working directory, then we can exit now.
@@ -6502,7 +6502,7 @@ pub fn parseManuallyHook(
         errdefer command.deinit(alloc);
 
         while (iter.next()) |param| {
-            const copy = try alloc.dupeZ(u8, param);
+            const copy = try alloc.dupeSentinel(u8, param, 0);
             try self._replay_steps.append(alloc, .{ .arg = copy });
             try command.append(alloc, copy);
         }
@@ -6543,7 +6543,7 @@ pub fn parseManuallyHook(
     // Keep track of our input args for replay
     try self._replay_steps.append(
         alloc,
-        .{ .arg = try alloc.dupeZ(u8, arg) },
+        .{ .arg = try alloc.dupeSentinel(u8, arg, 0) },
     );
 
     // If we didn't find a special case, continue parsing normally
@@ -6839,7 +6839,7 @@ pub fn clone(
     const alloc_arena = result._arena.?.allocator();
 
     // Copy our values
-    inline for (meta_compat.structFields(Config)) |field| {
+    inline for (comptime meta_compat.structFields(Config)) |field| {
         if (!@hasField(Key, field.name)) continue;
         @field(result, field.name) = try cloneValue(
             alloc_arena,
@@ -6886,7 +6886,7 @@ fn cloneValue(
     // Do known named types first
     switch (T) {
         []const u8 => return try alloc.dupe(u8, src),
-        [:0]const u8 => return try alloc.dupeZ(u8, src),
+        [:0]const u8 => return try alloc.dupeSentinel(u8, src, 0),
 
         else => {},
     }
@@ -6966,7 +6966,7 @@ pub const ChangeIterator = struct {
     i: usize = 0,
 
     pub fn next(self: *ChangeIterator) ?Key {
-        const fields = meta_compat.enumFields(Key);
+        const fields = comptime meta_compat.enumFields(Key);
         while (self.i < fields.len) {
             switch (self.i) {
                 inline 0...(fields.len - 1) => |i| {
@@ -7064,7 +7064,7 @@ const Replay = struct {
             return switch (self) {
                 .@"-e" => self,
                 .diagnostic => |v| .{ .diagnostic = try v.clone(alloc) },
-                .arg => |v| .{ .arg = try alloc.dupeZ(u8, v) },
+                .arg => |v| .{ .arg = try alloc.dupeSentinel(u8, v, 0) },
                 .expand => |v| .{ .expand = try alloc.dupe(u8, v) },
                 .conditional_arg => |v| conditional: {
                     var conds = try alloc.alloc(Conditional, v.conditions.len);
@@ -7920,7 +7920,7 @@ pub const RepeatableString = struct {
             self.overwrite_next = false;
         }
 
-        const copy = try alloc.dupeZ(u8, value);
+        const copy = try alloc.dupeSentinel(u8, value, 0);
         try self.list.append(alloc, copy);
     }
 
@@ -7936,7 +7936,7 @@ pub const RepeatableString = struct {
             list.deinit(alloc);
         }
         for (self.list.items) |item| {
-            const copy = try alloc.dupeZ(u8, item);
+            const copy = try alloc.dupeSentinel(u8, item, 0);
             list.appendAssumeCapacity(copy);
         }
 
@@ -9502,10 +9502,10 @@ pub const Keybinds = struct {
             if (docs) {
                 try formatter.writer.writeAll("\n");
                 const name = @tagName(v);
-                inline for (@typeInfo(help_strings.KeybindAction).@"struct".decls) |decl| {
-                    if (std.mem.eql(u8, decl.name, name)) {
-                        const help = @field(help_strings.KeybindAction, decl.name);
-                        try formatter.writer.writeAll("# " ++ decl.name ++ "\n");
+                inline for (@typeInfo(help_strings.KeybindAction).@"struct".decl_names) |decl_name| {
+                    if (std.mem.eql(u8, decl_name, name)) {
+                        const help = @field(help_strings.KeybindAction, decl_name);
+                        try formatter.writer.writeAll("# " ++ decl_name ++ "\n");
                         var lines = std.mem.splitScalar(u8, help, '\n');
                         while (lines.next()) |line| {
                             try formatter.writer.writeAll("#   ");
@@ -10069,7 +10069,7 @@ pub const RepeatableCodepointMap = struct {
         const whitespace = " \t";
         const key = std.mem.trim(u8, input[0..eql_idx], whitespace);
         const value = std.mem.trim(u8, input[eql_idx + 1 ..], whitespace);
-        const valueZ = try alloc.dupeZ(u8, value);
+        const valueZ = try alloc.dupeSentinel(u8, value, 0);
 
         var p: UnicodeRangeParser = .{ .input = key };
         while (try p.next()) |range| {
@@ -10540,7 +10540,7 @@ pub const FontStyle = union(enum) {
             return;
         }
 
-        const nameZ = try alloc.dupeZ(u8, value);
+        const nameZ = try alloc.dupeSentinel(u8, value, 0);
         self.* = .{ .name = nameZ };
     }
 
@@ -10557,7 +10557,7 @@ pub const FontStyle = union(enum) {
     pub fn clone(self: Self, alloc: Allocator) Allocator.Error!Self {
         return switch (self) {
             .default, .false => self,
-            .name => |v| .{ .name = try alloc.dupeZ(u8, v) },
+            .name => |v| .{ .name = try alloc.dupeSentinel(u8, v, 0) },
         };
     }
 
@@ -12080,7 +12080,7 @@ pub const Theme = struct {
 
         // Set the value to the specified value directly.
         self.* = .{
-            .light = try alloc.dupeZ(u8, trimmed),
+            .light = try alloc.dupeSentinel(u8, trimmed, 0),
             .dark = self.light,
         };
     }
@@ -12091,18 +12091,18 @@ pub const Theme = struct {
 
         const light = expandHome(self.light, &buf);
         if (!std.mem.eql(u8, light, self.light))
-            self.light = try alloc.dupeZ(u8, light);
+            self.light = try alloc.dupeSentinel(u8, light, 0);
 
         const dark = expandHome(self.dark, &buf);
         if (!std.mem.eql(u8, dark, self.dark))
-            self.dark = try alloc.dupeZ(u8, dark);
+            self.dark = try alloc.dupeSentinel(u8, dark, 0);
     }
 
     /// Deep copy of the struct. Required by Config.
     pub fn clone(self: *const Theme, alloc: Allocator) Allocator.Error!Theme {
         return .{
-            .light = try alloc.dupeZ(u8, self.light),
-            .dark = try alloc.dupeZ(u8, self.dark),
+            .light = try alloc.dupeSentinel(u8, self.light, 0),
+            .dark = try alloc.dupeSentinel(u8, self.dark, 0),
         };
     }
 

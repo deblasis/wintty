@@ -116,7 +116,7 @@ test "force shell" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
-    inline for (meta_compat.enumFields(Shell)) |field| {
+    inline for (comptime meta_compat.enumFields(Shell)) |field| {
         const shell = @field(Shell, field.name);
 
         var res: TmpResourcesDir = try .init(shell);
@@ -249,7 +249,7 @@ pub fn setupFeatures(
     features: config.ShellIntegrationFeatures,
     cursor_blink: bool,
 ) !void {
-    const fields = meta_compat.structFields(@TypeOf(features));
+    const fields = comptime meta_compat.structFields(@TypeOf(features));
     const capacity: usize = capacity: {
         comptime var n: usize = fields.len - 1; // commas
         inline for (fields) |field| n += field.name.len;
@@ -415,8 +415,9 @@ fn setupBash(
     resource_dir: []const u8,
     env: *EnvMap,
 ) !?config.Command {
-    var stack_fallback = std.heap.stackFallback(4096, alloc);
-    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+    var stack_fallback_buf: [4096]u8 = undefined;
+        var stack_fallback: std.heap.BufferFirstAllocator = .init(@ptrCast(&stack_fallback_buf), alloc);
+    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
     defer cmd.deinit();
 
     // Iterator that yields each argument in the original command line.
@@ -522,7 +523,7 @@ fn setupBash(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return .{ .shell = try alloc.dupeZ(u8, cmd.buffer.written()) };
+    return .{ .shell = try alloc.dupeSentinel(u8, cmd.buffer.written(), 0) };
 }
 
 test "bash" {
@@ -1080,8 +1081,9 @@ fn setupNushell(
     // of the later checks abort the rest of our automatic integration.
     if (!try setupXdgDataDirs(alloc, resource_dir, env, false)) return null;
 
-    var stack_fallback = std.heap.stackFallback(4096, alloc);
-    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+    var stack_fallback_buf: [4096]u8 = undefined;
+        var stack_fallback: std.heap.BufferFirstAllocator = .init(@ptrCast(&stack_fallback_buf), alloc);
+    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
     defer cmd.deinit();
 
     // Iterator that yields each argument in the original command line.
@@ -1142,7 +1144,7 @@ fn setupNushell(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return .{ .shell = try alloc.dupeZ(u8, cmd.buffer.written()) };
+    return .{ .shell = try alloc.dupeSentinel(u8, cmd.buffer.written(), 0) };
 }
 
 test "nushell" {
@@ -1324,11 +1326,11 @@ fn setupPowerShell(
     // shipping a portable build rather than a problem here, and it is filed
     // as one.
     const argv = try alloc_arena.alloc([:0]const u8, 6);
-    argv[0] = try alloc_arena.dupeZ(u8, exe);
-    argv[1] = try alloc_arena.dupeZ(u8, "-NoExit");
-    argv[2] = try alloc_arena.dupeZ(u8, "-ExecutionPolicy");
-    argv[3] = try alloc_arena.dupeZ(u8, "RemoteSigned");
-    argv[4] = try alloc_arena.dupeZ(u8, "-Command");
+    argv[0] = try alloc_arena.dupeSentinel(u8, exe, 0);
+    argv[1] = try alloc_arena.dupeSentinel(u8, "-NoExit", 0);
+    argv[2] = try alloc_arena.dupeSentinel(u8, "-ExecutionPolicy", 0);
+    argv[3] = try alloc_arena.dupeSentinel(u8, "RemoteSigned", 0);
+    argv[4] = try alloc_arena.dupeSentinel(u8, "-Command", 0);
     argv[5] = dot_source;
 
     return .{ .direct = argv };
@@ -1909,8 +1911,9 @@ fn setupFish(
     if (!try setupXdgDataDirs(alloc, resource_dir, env, true)) return null;
 
     if (comptime builtin.os.tag == .windows) {
-        var stack_fallback = std.heap.stackFallback(4096, alloc);
-        var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+        var stack_fallback_buf: [4096]u8 = undefined;
+        var stack_fallback: std.heap.BufferFirstAllocator = .init(@ptrCast(&stack_fallback_buf), alloc);
+        var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
         defer cmd.deinit();
 
         // Preserve the original command line.
@@ -1941,7 +1944,7 @@ fn setupFish(
             "\"source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/fish/vendor_conf.d/ghostty-shell-integration.fish\"",
         );
 
-        return .{ .shell = try alloc.dupeZ(u8, try cmd.toOwnedSlice()) };
+        return .{ .shell = try alloc.dupeSentinel(u8, try cmd.toOwnedSlice(), 0) };
     }
 
     // Non-Windows: the XDG export above is sufficient (Linux/macOS fish).
@@ -2166,7 +2169,7 @@ test "packaged tree: the fixture matches what the build installs" {
 
     // Every shell in the enum must own at least one of those files, so a new
     // shell cannot be added with a directory nothing ever installs into.
-    inline for (meta_compat.enumFields(Shell)) |field| {
+    inline for (comptime meta_compat.enumFields(Shell)) |field| {
         var found = false;
         for (shell_integration_files) |rel| {
             if (std.mem.startsWith(u8, rel, field.name ++ "/")) found = true;

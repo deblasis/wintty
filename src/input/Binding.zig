@@ -1248,7 +1248,7 @@ pub const Action = union(enum) {
     }
 
     fn parseParameter(
-        comptime field: std.lang.Type.UnionField,
+        comptime field: meta_compat.Field,
         param: []const u8,
     ) !field.type {
         const field_info = @typeInfo(field.type);
@@ -1276,7 +1276,7 @@ pub const Action = union(enum) {
 
                 var it = std.mem.splitAny(u8, param, ",");
                 var value: field.type = undefined;
-                inline for (meta_compat.structFields(field.type)) |field_| {
+                inline for (comptime meta_compat.structFields(field.type)) |field_| {
                     const next = it.next() orelse return Error.InvalidFormat;
                     @field(value, field_.name) = switch (@typeInfo(field_.type)) {
                         .@"enum" => try parseEnum(field_.type, next),
@@ -1309,7 +1309,7 @@ pub const Action = union(enum) {
         // An action name is always required
         if (action.len == 0) return Error.InvalidFormat;
 
-        inline for (meta_compat.unionFields(Action)) |field| {
+        inline for (comptime meta_compat.unionFields(Action)) |field| {
             if (std.mem.eql(u8, action, field.name)) {
                 // If the field type is void we expect no value
                 switch (field.type) {
@@ -1636,13 +1636,13 @@ pub const Action = union(enum) {
     pub fn Scoped(comptime s: Scope) type {
         @setEvalBranchQuota(100_000);
 
-        const all_fields = meta_compat.unionFields(Action);
+        const all_fields = comptime meta_compat.unionFields(Action);
 
         // Find all fields that are app-scoped
         var i: comptime_int = 0;
         var names: [all_fields.len][]const u8 = undefined;
         var types: [all_fields.len]type = undefined;
-        var attrs: [all_fields.len]std.lang.Type.UnionField.Attributes = undefined;
+        var attrs: [all_fields.len]std.lang.Type.Union.FieldAttributes = undefined;
         var raw_values: [all_fields.len]comptime_int = undefined;
 
         for (all_fields) |field| {
@@ -1738,9 +1738,9 @@ pub const Action = union(enum) {
                     if (!info.is_tuple) {
                         @compileError("unhandled struct type: " ++ @typeName(Value));
                     } else {
-                        inline for (meta_compat.structFields(Value), 0..) |field, i| {
+                        inline for (comptime meta_compat.structFields(Value), 0..) |field, i| {
                             try formatValue(writer, @field(value, field.name));
-                            if (i + 1 < meta_compat.structFields(Value).len) try writer.writeAll(",");
+                            if (i + 1 < comptime meta_compat.structFields(Value).len) try writer.writeAll(",");
                         }
                     }
                 },
@@ -1918,7 +1918,7 @@ pub const Trigger = struct {
             rem = if (idx >= rem.len) "" else rem[idx + 1 ..];
 
             // Check if its a modifier
-            inline for (meta_compat.structFields(key.Mods)) |field| {
+            inline for (comptime meta_compat.structFields(key.Mods)) |field| {
                 if (field.type == bool) {
                     if (std.mem.eql(u8, part, field.name)) {
                         // Repeat not allowed
@@ -1952,7 +1952,7 @@ pub const Trigger = struct {
             }
 
             // Check if its a key
-            inline for (meta_compat.enumFields(key.Key)) |field| {
+            inline for (comptime meta_compat.enumFields(key.Key)) |field| {
                 if (!std.mem.eql(u8, field.name, "unidentified")) {
                     if (std.mem.eql(u8, part, field.name)) {
                         const keyval = @field(key.Key, field.name);

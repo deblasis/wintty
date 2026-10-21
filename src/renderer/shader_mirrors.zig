@@ -141,7 +141,7 @@ fn zigFloatClass(comptime T: type) bool {
         .array => |a| zigFloatClass(a.child),
         .@"struct" => blk: {
             var acc: ?bool = null;
-            inline for (meta_compat.structFields(T)) |field| {
+            inline for (comptime meta_compat.structFields(T)) |field| {
                 const f = zigFloatClass(field.type);
                 if (acc == null) acc = f else if (acc.? != f) @compileError(
                     "mixed float and integer fields; the scanner cannot class " ++
@@ -252,7 +252,7 @@ pub fn expectBlockLayout(
 ) void {
     const stripped = comptime stripComments(src);
     const members = comptime blockMembers(stripped, block, what);
-    const fields = meta_compat.structFields(T);
+    const fields = comptime meta_compat.structFields(T);
 
     if (members.len != fields.len) {
         @compileError(std.fmt.comptimePrint(

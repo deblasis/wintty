@@ -153,7 +153,7 @@ pub fn deinit(self: *const Self) void {
 }
 
 fn autoAttribute(T: type, attrs: objc.Object) void {
-    inline for (meta_compat.structFields(T), 0..) |field, i| {
+    inline for (comptime meta_compat.structFields(T), 0..) |field, i| {
         const offset = @offsetOf(T, field.name);
 
         const FT = switch (@typeInfo(field.type)) {

@@ -552,8 +552,9 @@ const Effects = struct {
         // Requests carry a handful of MIME types, so keep the common case
         // allocation-free. On OOM the request goes unanswered and the
         // handler replies with an empty clipboard.
-        var sfa = std.heap.stackFallback(128, wrapper.terminal.gpa());
-        const alloc = sfa.get();
+        var sfa_buf: [128]u8 = undefined;
+        var sfa: std.heap.BufferFirstAllocator = .init(@ptrCast(&sfa_buf), wrapper.terminal.gpa());
+        const alloc = sfa.allocator();
         const mimes = alloc.alloc(lib.String, read.mimes.len) catch {
             log.warn("out of memory converting clipboard read request", .{});
             return;
@@ -604,8 +605,9 @@ const Effects = struct {
         // allocation-free while supporting arbitrary multi-MIME replies.
         // On OOM we don't reply and the handler answers with an empty
         // clipboard.
-        var sfa = std.heap.stackFallback(256, ctx.wrapper.terminal.gpa());
-        const alloc = sfa.get();
+        var sfa_buf: [256]u8 = undefined;
+        var sfa: std.heap.BufferFirstAllocator = .init(@ptrCast(&sfa_buf), ctx.wrapper.terminal.gpa());
+        const alloc = sfa.allocator();
         const contents = alloc.alloc(clipboard.Content, c_contents.len) catch {
             log.warn("out of memory converting clipboard read reply", .{});
             return;
@@ -7438,7 +7440,7 @@ fn expectHeaderEnum(
     defer map.deinit(alloc);
 
     var seen: usize = 0;
-    inline for (meta_compat.enumFields(T)) |field| {
+    inline for (comptime meta_compat.enumFields(T)) |field| {
         var c_name_buf: [128]u8 = undefined;
         var c_name: []const u8 = undefined;
         const renamed = for (renames) |r| {

@@ -247,7 +247,7 @@ fn keyboardTable(
 
     if (kitty_flags.int() != 0) {
         const Flags = @TypeOf(kitty_flags);
-        inline for (meta_compat.structFields(Flags)) |field| {
+        inline for (comptime meta_compat.structFields(Flags)) |field| {
             {
                 const value = @field(kitty_flags, field.name);
 

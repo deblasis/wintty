@@ -34,7 +34,7 @@ pub const App = union(Protocol) {
         app_id: [:0]const u8,
         config: *const Config,
     ) !App {
-        inline for (meta_compat.unionFields(App)) |field| {
+        inline for (comptime meta_compat.unionFields(App)) |field| {
             if (try field.type.init(
                 alloc,
                 gdk_display,
@@ -120,7 +120,7 @@ pub const Window = union(Protocol) {
     ) !Window {
         return switch (app.*) {
             inline else => |*v, tag| {
-                inline for (meta_compat.unionFields(Window)) |field| {
+                inline for (comptime meta_compat.unionFields(Window)) |field| {
                     if (comptime std.mem.eql(
                         u8,
                         field.name,

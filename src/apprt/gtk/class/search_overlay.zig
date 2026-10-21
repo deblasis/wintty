@@ -308,13 +308,13 @@ pub const SearchOverlay = extern struct {
         has_total: bool,
         total: u64,
     ) callconv(.c) ?[*:0]const u8 {
-        if (!has_total or total == 0) return glib.ext.dupeZ(u8, "0/0");
+        if (!has_total or total == 0) return glib.ext.dupeSentinel(u8, "0/0", 0);
         var buf: [32]u8 = undefined;
         const label = std.mem.printSentinel(&buf, "{}/{}", .{
             if (has_selected) selected + 1 else 0,
             total,
         }, 0) catch return null;
-        return glib.ext.dupeZ(u8, label);
+        return glib.ext.dupeSentinel(u8, label, 0);
     }
 
     //---------------------------------------------------------------

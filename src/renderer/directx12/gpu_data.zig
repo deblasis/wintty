@@ -14,7 +14,7 @@ const hlsl_source = @embedFile("../shaders/hlsl/shaders.hlsl");
 
 /// GPU uniform values for the cell shaders.
 pub const Uniforms = extern struct {
-    projection_matrix: math.Mat align(16),
+    projection_matrix: [16]f32 align(16),
     screen_size: [2]f32 align(8),
     cell_size: [2]f32 align(8),
     grid_size: [2]u16 align(4),

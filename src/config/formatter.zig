@@ -98,7 +98,7 @@ pub fn formatEntry(
             // Packed structs we special case.
             .@"packed" => {
                 try writer.print("{s} = ", .{name});
-                inline for (meta_compat.structFields(T), 0..) |field, i| {
+                inline for (comptime meta_compat.structFields(T), 0..) |field, i| {
                     if (i > 0) try writer.print(",", .{});
                     try writer.print("{s}{s}", .{
                         if (!@field(value, field.name)) "no-" else "",

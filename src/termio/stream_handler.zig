@@ -1447,11 +1447,11 @@ pub const StreamHandler = struct {
         const req = try alloc.create(apprt.ClipboardRequest.KittyRead);
         const mimes = try alloc.alloc([:0]const u8, mimes_len);
         for (mimes_buf[0..mimes_len], mimes) |src, *dst| {
-            dst.* = try alloc.dupeZ(u8, src);
+            dst.* = try alloc.dupeSentinel(u8, src, 0);
         }
         const id = try alloc.dupe(u8, meta.id);
         const pw_owned = try alloc.dupe(u8, pw);
-        const name_owned = try alloc.dupeZ(u8, meta.name);
+        const name_owned = try alloc.dupeSentinel(u8, meta.name, 0);
         req.* = .{
             // The arena must be copied in last so it tracks every
             // allocation above.
@@ -1666,12 +1666,12 @@ pub const StreamHandler = struct {
             committed.contents.len,
         );
         for (committed.contents, contents) |src, *dst| dst.* = .{
-            .mime = try alloc.dupeZ(u8, src.mime),
-            .data = try alloc.dupeZ(u8, src.data),
+            .mime = try alloc.dupeSentinel(u8, src.mime, 0),
+            .data = try alloc.dupeSentinel(u8, src.data, 0),
         };
         const id = try alloc.dupe(u8, committed.id);
         const pw_owned = try alloc.dupe(u8, pw);
-        const name_owned = try alloc.dupeZ(u8, committed.name);
+        const name_owned = try alloc.dupeSentinel(u8, committed.name, 0);
         req.* = .{
             // The arena must be copied in last so it tracks every
             // allocation above.
@@ -1910,12 +1910,13 @@ pub const StreamHandler = struct {
         // We need the raw path, which might require unescaping. We try to
         // avoid making any heap allocations by using the stack first.
         var arena_alloc: std.heap.ArenaAllocator = .init(self.alloc);
-        var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
+        var stack_alloc_buf: [1024]u8 = undefined;
+        var stack_alloc: std.heap.BufferFirstAllocator = .init(@ptrCast(&stack_alloc_buf), arena_alloc.allocator());
         defer arena_alloc.deinit();
         // One `get()` for the whole function: it resets the stack buffer and
         // asserts on a second call, so asking twice both invalidates `path`
         // and aborts a safety-enabled build.
-        const salloc = stack_alloc.get();
+        const salloc = stack_alloc.allocator();
         const path = try uri.path.toRawMaybeAlloc(salloc);
 
         // On Windows the URL path is in the reporting shell's own vocabulary;
@@ -2178,7 +2179,7 @@ pub const StreamHandler = struct {
                             },
                         });
                     }
-                    mask.* = .initEmpty();
+                    mask.* = .empty;
                 },
 
                 .reset_special => log.warn(

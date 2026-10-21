@@ -496,7 +496,7 @@ pub const Action = union(Key) {
         const key_fields = meta_compat.enumFields(Key);
         var names: [key_fields.len][]const u8 = undefined;
         var types: [key_fields.len]type = undefined;
-        var attrs: [key_fields.len]std.builtin.Type.UnionField.Attributes = undefined;
+        var attrs: [key_fields.len]std.lang.Type.Union.FieldAttributes = undefined;
 
         for (key_fields, &names, &types, &attrs) |field, *name, *ty, *attr| {
             const action = @unionInit(Action, field.name, undefined);
@@ -534,7 +534,7 @@ pub const Action = union(Key) {
 
     /// Returns the value type for the given key.
     pub fn Value(comptime key: Key) type {
-        inline for (meta_compat.unionFields(Action)) |field| {
+        inline for (comptime meta_compat.unionFields(Action)) |field| {
             const field_key = @field(Key, field.name);
             if (field_key == key) return field.type;
         }

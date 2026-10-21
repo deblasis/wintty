@@ -85,7 +85,7 @@ fn autoAttribute(
         .constant => std.math.maxInt(gl.c.GLuint),
     };
 
-    inline for (meta_compat.structFields(T), 0..) |field, i| {
+    inline for (comptime meta_compat.structFields(T), 0..) |field, i| {
         try vaobind.enableAttribArray(i);
         try vaobind.attributeBinding(i, 0);
         try vaobind.bindingDivisor(i, divisor);

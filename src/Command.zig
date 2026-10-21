@@ -339,7 +339,7 @@ fn resolveWindowsProgram(arena: Allocator, path: [:0]const u8) !?[:0]u16 {
     // 1) The PATH-aware search CreateProcessW itself would run.
     const len = windows.exp.kernel32.SearchPathW(null, probe_w.ptr, null, buf.len, @ptrCast(&buf), null);
     if (len > 0 and len < buf.len) {
-        return try arena.dupeZ(u16, buf[0..len]);
+        return try arena.dupeSentinel(u16, buf[0..len], 0);
     }
 
     // 2) Well-known homes. Cheap existence probes; covers the default
@@ -364,7 +364,7 @@ fn resolveWindowsProgram(arena: Allocator, path: [:0]const u8) !?[:0]u16 {
         const full = candidate[0 .. dir.len + probe_w.len :0];
         const attrs = windows.exp.kernel32.GetFileAttributesW(full.ptr);
         if (attrs != windows.INVALID_FILE_ATTRIBUTES) {
-            return try arena.dupeZ(u16, full);
+            return try arena.dupeSentinel(u16, full, 0);
         }
     }
 

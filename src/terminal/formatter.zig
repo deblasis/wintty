@@ -412,7 +412,7 @@ pub const TerminalFormatter = struct {
         // simplicity we just emit them all before. If we make this more complex
         // later we should add test cases for it.
         if (self.opts.emit == .vt and self.extra.modes) {
-            inline for (meta_compat.enumFields(modespkg.Mode)) |field| {
+            inline for (comptime meta_compat.enumFields(modespkg.Mode)) |field| {
                 const mode: modespkg.Mode = @fromBackingInt(@intCast(field.value));
                 const current = self.terminal.modes.get(mode);
                 const default_val = @field(self.terminal.modes.default, field.name);

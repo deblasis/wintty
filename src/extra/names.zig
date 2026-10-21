@@ -50,7 +50,7 @@ fn checkedConfigFieldPrefix(comptime prefix: []const u8) []const u8 {
             "must be updated",
     );
     @setEvalBranchQuota(10000);
-    for (meta_compat.structFields(Config)) |field| {
+    for (comptime meta_compat.structFields(Config)) |field| {
         if (comptime std.mem.startsWith(u8, field.name, prefix)) return prefix;
     }
 
@@ -68,7 +68,7 @@ fn checkedAction(comptime name: []const u8) []const u8 {
 
 fn checkedActionOption(comptime name: []const u8) []const u8 {
     @setEvalBranchQuota(10000);
-    for (meta_compat.enumFields(Action)) |field| {
+    for (comptime meta_compat.enumFields(Action)) |field| {
         if (@hasField(@field(Action, field.name).options(), name)) return name;
     }
 

@@ -81,7 +81,7 @@ pub fn TaggedUnion(
             const tag_fields = meta_compat.enumFields(Tag);
             var names: [tag_fields.len + 1][]const u8 = undefined;
             var types: [tag_fields.len + 1]type = undefined;
-            var attrs: [tag_fields.len + 1]std.builtin.Type.UnionField.Attributes = undefined;
+            var attrs: [tag_fields.len + 1]std.lang.Type.Union.FieldAttributes = undefined;
 
             for (tag_fields, 0..) |field, i| {
                 const action = @unionInit(Union, field.name, undefined);
@@ -141,13 +141,13 @@ pub fn TaggedUnion(
 /// Options for generating the C representation of a tagged union.
 pub fn TaggedUnionOptions(comptime Union: type) type {
     const Tag = @typeInfo(Union).@"union".tag_type.?;
-    const tag_fields = meta_compat.enumFields(Tag);
+    const tag_fields = comptime meta_compat.enumFields(Tag);
     const FieldRenames: type = field_renames: {
         const default_rename: ?[]const u8 = null;
 
         var names: [tag_fields.len][]const u8 = undefined;
         var types: [tag_fields.len]type = undefined;
-        var attrs: [tag_fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        var attrs: [tag_fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
 
         for (tag_fields, 0..) |field, i| {
             names[i] = field.name;

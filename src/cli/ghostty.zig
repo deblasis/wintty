@@ -122,7 +122,7 @@ pub const Action = enum {
             // If help is requested, then we use some comptime trickery
             // to find this action in the help strings and output that.
             help_error => err: {
-                inline for (meta_compat.enumFields(Action)) |field| {
+                inline for (comptime meta_compat.enumFields(Action)) |field| {
                     // Future note: for now we just output the help text directly
                     // to stdout. In the future we can style this much prettier
                     // for all commands by just changing this one place.

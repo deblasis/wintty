@@ -152,7 +152,7 @@ pub const Action = union(enum) {
             try writer.writeAll(@tagName(@as(TagType, self)));
             try writer.writeAll(" = ");
 
-            inline for (meta_compat.unionFields(T)) |u_field| {
+            inline for (comptime meta_compat.unionFields(T)) |u_field| {
                 // If this is the active field...
                 if (self == @field(TagType, u_field.name)) {
                     const value = @field(self, u_field.name);
@@ -230,7 +230,7 @@ pub fn init() Parser {
     var result: Parser = .{
         .state = .ground,
         .intermediates_idx = 0,
-        .params_sep = .initEmpty(),
+        .params_sep = .empty,
         .params_idx = 0,
         .param_acc = 0,
         .param_acc_idx = 0,
@@ -268,7 +268,7 @@ pub fn resetToGround(self: *Parser) void {
     self.params_idx = 0;
     self.param_acc = 0;
     self.param_acc_idx = 0;
-    self.params_sep = .initEmpty();
+    self.params_sep = .empty;
     self.osc_parser.reset();
 }
 
@@ -447,7 +447,7 @@ noinline fn warnCsiSepMismatch(csi: Action.CSI) void {
 pub inline fn clear(self: *Parser) void {
     self.intermediates_idx = 0;
     self.params_idx = 0;
-    self.params_sep = .initEmpty();
+    self.params_sep = .empty;
     self.param_acc = 0;
     self.param_acc_idx = 0;
 }

@@ -120,9 +120,9 @@ pub fn checkGhosttyHEnum(
 
     const c = @import("ghostty.h");
 
-    var set: std.EnumSet(T) = .initFull();
+    var set: std.EnumSet(T) = .full;
 
-    const enum_fields = meta_compat.enumFields(T);
+    const enum_fields = comptime meta_compat.enumFields(T);
 
     inline for (enum_fields) |field| {
         const expected_name: *const [prefix.len + field.name.len]u8 = comptime e: {

@@ -66,7 +66,7 @@ pub const Command = union(enum) {
         switch (tag) {
             .shell => {
                 // We have a shell command, so we can just dupe it.
-                const copy = try alloc.dupeZ(u8, std.mem.trim(u8, str, " "));
+                const copy = try alloc.dupeSentinel(u8, std.mem.trim(u8, str, " "), 0);
                 self.* = .{ .shell = copy };
             },
 
@@ -80,7 +80,7 @@ pub const Command = union(enum) {
                     ' ',
                 );
                 while (args.next()) |arg| {
-                    const copy = try alloc.dupeZ(u8, arg);
+                    const copy = try alloc.dupeSentinel(u8, arg, 0);
                     try builder.append(alloc, copy);
                 }
 
@@ -118,7 +118,7 @@ pub const Command = union(enum) {
             cmd[host_direct_prefix.len..],
         );
         defer it.deinit();
-        while (it.next()) |arg| try args.append(alloc, try alloc.dupeZ(u8, arg));
+        while (it.next()) |arg| try args.append(alloc, try alloc.dupeSentinel(u8, arg, 0));
 
         if (args.items.len == 0) {
             args.deinit(alloc);
@@ -135,7 +135,7 @@ pub const Command = union(enum) {
         alloc: Allocator,
     ) Allocator.Error![:0]const u8 {
         return switch (self.*) {
-            .shell => |v| try alloc.dupeZ(u8, v),
+            .shell => |v| try alloc.dupeSentinel(u8, v, 0),
             .direct => |v| try std.mem.joinZ(alloc, " ", v),
         };
     }
@@ -194,10 +194,10 @@ pub const Command = union(enum) {
         alloc: Allocator,
     ) Allocator.Error!Self {
         return switch (self.*) {
-            .shell => |v| .{ .shell = try alloc.dupeZ(u8, v) },
+            .shell => |v| .{ .shell = try alloc.dupeSentinel(u8, v, 0) },
             .direct => |v| direct: {
                 const copy = try alloc.alloc([:0]const u8, v.len);
-                for (v, 0..) |arg, i| copy[i] = try alloc.dupeZ(u8, arg);
+                for (v, 0..) |arg, i| copy[i] = try alloc.dupeSentinel(u8, arg, 0);
                 break :direct .{ .direct = copy };
             },
         };

@@ -3334,7 +3334,7 @@ fn setGtkEnv(config: *const CoreConfig) std.Io.Writer.Error!void {
         var buf: [1024]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         var first: bool = true;
-        inline for (meta_compat.structFields(@TypeOf(gdk_debug))) |field| {
+        inline for (comptime meta_compat.structFields(@TypeOf(gdk_debug))) |field| {
             if (@field(gdk_debug, field.name)) {
                 if (!first) try writer.writeAll(",");
                 try writer.writeAll(field.name);
@@ -3351,7 +3351,7 @@ fn setGtkEnv(config: *const CoreConfig) std.Io.Writer.Error!void {
         var buf: [1024]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         var first: bool = true;
-        inline for (meta_compat.structFields(@TypeOf(gdk_disable))) |field| {
+        inline for (comptime meta_compat.structFields(@TypeOf(gdk_disable))) |field| {
             if (@field(gdk_disable, field.name)) {
                 if (!first) try writer.writeAll(",");
                 try writer.writeAll(field.name);

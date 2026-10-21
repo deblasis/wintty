@@ -371,7 +371,7 @@ fn formatByteSize(format: dxgi.DXGI_FORMAT) usize {
 /// field, so a field cannot be added to a struct without an element that
 /// feeds it, nor an element added with no field behind it.
 fn checkLayout(comptime T: type, comptime elements: []const d3d12.D3D12_INPUT_ELEMENT_DESC) void {
-    const fields = meta_compat.structFields(T);
+    const fields = comptime meta_compat.structFields(T);
     if (elements.len != fields.len)
         @compileError(std.fmt.comptimePrint(
             "{s} has {d} fields but its input layout lists {d} elements; every field must be fed to the shader",
@@ -440,7 +440,7 @@ pub const Shaders = struct {
     /// Release all PSOs that have been created so far.
     /// Used as errdefer cleanup during init.
     fn releasePipelines(pipelines: *Pipelines) void {
-        inline for (meta_compat.structFields(Pipelines)) |field| {
+        inline for (comptime meta_compat.structFields(Pipelines)) |field| {
             @field(pipelines, field.name).deinit();
         }
     }
@@ -630,7 +630,7 @@ pub const Shaders = struct {
         }
         self.post_pipelines = &.{};
 
-        inline for (meta_compat.structFields(Pipelines)) |field| {
+        inline for (comptime meta_compat.structFields(Pipelines)) |field| {
             @field(self.pipelines, field.name).deinit();
         }
         self.pipelines = .{};
@@ -713,12 +713,12 @@ test "pipeline deinit loop does not touch root_signature" {
     const sentinel: *d3d12.ID3D12RootSignature = @ptrFromInt(0xDEAD_BEF0);
     var pipelines: Shaders.Pipelines = .{};
 
-    inline for (meta_compat.structFields(Shaders.Pipelines)) |field| {
+    inline for (comptime meta_compat.structFields(Shaders.Pipelines)) |field| {
         @field(pipelines, field.name).root_signature = sentinel;
     }
 
     // Same loop as Shaders.deinit -- must not dereference root_signature.
-    inline for (meta_compat.structFields(Shaders.Pipelines)) |field| {
+    inline for (comptime meta_compat.structFields(Shaders.Pipelines)) |field| {
         @field(pipelines, field.name).deinit();
     }
 }

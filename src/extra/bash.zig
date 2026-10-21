@@ -102,7 +102,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    for (meta_compat.structFields(Config)) |field| {
+    for (comptime meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
         switch (field.type) {
             bool, ?bool => try writer.writeAll(pad2 ++ "config+=\" '--" ++ field.name ++ " '\"\n"),
@@ -116,7 +116,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    for (meta_compat.structFields(Config)) |field| {
+    for (comptime meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
         try writer.writeAll(pad3 ++ "--" ++ field.name ++ ") ");
 
@@ -135,7 +135,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
                 .bool => try writer.writeAll("return ;;"),
                 .@"enum" => {
                     try writer.writeAll(compgenPrefix);
-                    for (meta_compat.enumFields(field.type), 0..) |f, i| {
+                    for (comptime meta_compat.enumFields(field.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -144,7 +144,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
                 .@"struct" => {
                     if (!@hasDecl(field.type, "parseCLI") and @typeInfo(field.type).@"struct".layout == .@"packed") {
                         try writer.writeAll(compgenPrefix);
-                        for (meta_compat.structFields(field.type), 0..) |f, i| {
+                        for (comptime meta_compat.structFields(field.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name ++ " no-" ++ f.name);
                         }
@@ -171,10 +171,10 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    for (meta_compat.enumFields(Action)) |field| {
+    for (comptime meta_compat.enumFields(Action)) |field| {
         const options = @field(Action, field.name).options();
         // assumes options will never be created with only <_name> members
-        if (meta_compat.structFields(options).len == 0) continue;
+        if (comptime meta_compat.structFields(options).len == 0) continue;
 
         var buffer: [field.name.len]u8 = undefined;
         const bashName: []u8 = buffer[0..field.name.len];
@@ -185,7 +185,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
 
         {
             var count = 0;
-            for (meta_compat.structFields(options)) |opt| {
+            for (comptime meta_compat.structFields(options)) |opt| {
                 if (opt.name[0] == '_') continue;
                 if (count > 0) try writer.writeAll(" ");
                 switch (opt.type) {
@@ -204,9 +204,9 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    for (meta_compat.enumFields(Action)) |field| {
+    for (comptime meta_compat.enumFields(Action)) |field| {
         const options = @field(Action, field.name).options();
-        if (meta_compat.structFields(options).len == 0) continue;
+        if (comptime meta_compat.structFields(options).len == 0) continue;
 
         // bash doesn't allow variable names containing '-' so replace them
         var buffer: [field.name.len]u8 = undefined;
@@ -215,7 +215,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
 
         try writer.writeAll(pad3 ++ "+" ++ field.name ++ ")\n");
         try writer.writeAll(pad4 ++ "case $prev in\n");
-        for (meta_compat.structFields(options)) |opt| {
+        for (comptime meta_compat.structFields(options)) |opt| {
             if (opt.name[0] == '_') continue;
 
             try writer.writeAll(pad5 ++ "--" ++ opt.name ++ ") ");
@@ -226,7 +226,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
                 .bool => try writer.writeAll("return ;;"),
                 .@"enum" => {
                     try writer.writeAll(compgenPrefix);
-                    for (meta_compat.enumFields(opt.type), 0..) |f, i| {
+                    for (comptime meta_compat.enumFields(opt.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -236,7 +236,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
                     switch (@typeInfo(optional.child)) {
                         .@"enum" => {
                             try writer.writeAll(compgenPrefix);
-                            for (meta_compat.enumFields(optional.child), 0..) |f, i| {
+                            for (comptime meta_compat.enumFields(optional.child), 0..) |f, i| {
                                 if (i > 0) try writer.writeAll(" ");
                                 try writer.writeAll(f.name);
                             }
@@ -279,7 +279,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    for (meta_compat.enumFields(Action)) |field| {
+    for (comptime meta_compat.enumFields(Action)) |field| {
         try writer.writeAll(pad1 ++ "topLevel+=\" +" ++ field.name ++ "\"\n");
     }
 

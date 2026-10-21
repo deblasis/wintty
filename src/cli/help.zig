@@ -64,7 +64,7 @@ pub fn run(alloc: Allocator) !u8 {
         \\
     );
 
-    inline for (meta_compat.enumFields(Action)) |field| {
+    inline for (comptime meta_compat.enumFields(Action)) |field| {
         try stdout.print("  +{s}\n", .{field.name});
     }
 

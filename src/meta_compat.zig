@@ -8,16 +8,22 @@
 
 const std = @import("std");
 
+/// A field descriptor with the pre-0.17 `std.meta.FieldInfo` shape.
+pub const Field = struct {
+    name: [:0]const u8,
+    type: type,
+    default_value_ptr: ?*const anyopaque = null,
+    alignment: ?usize = null,
+    is_comptime: bool = false,
+};
+
 pub fn StructField(comptime T: type) type {
     _ = T;
-    return struct {
-        name: [:0]const u8,
-        type: type,
-        default_value_ptr: ?*const anyopaque,
-    };
+    return Field;
 }
 
 pub fn structFields(comptime T: type) []const StructField(T) {
+    @setEvalBranchQuota(200_000);
     const info = @typeInfo(T).@"struct";
     comptime var buf: [info.field_names.len]StructField(T) = undefined;
     inline for (info.field_names, info.field_types, 0..) |name, FieldTy, i| {
@@ -37,6 +43,7 @@ pub const EnumField = struct {
 };
 
 pub fn enumFields(comptime T: type) []const EnumField {
+    @setEvalBranchQuota(200_000);
     const info = @typeInfo(T).@"enum";
     comptime var buf: [info.field_names.len]EnumField = undefined;
     inline for (info.field_names, info.field_values, 0..) |name, value, i| {
@@ -44,6 +51,15 @@ pub fn enumFields(comptime T: type) []const EnumField {
     }
     const result = buf;
     return &result;
+}
+
+/// Fields of either a struct or a union, for generics that accept both.
+pub fn aggregateFields(comptime T: type) []const StructField(T) {
+    return switch (@typeInfo(T)) {
+        .@"struct" => structFields(T),
+        .@"union" => unionFields(T),
+        else => @compileError("aggregateFields: " ++ @typeName(T) ++ " is not an aggregate"),
+    };
 }
 
 /// `std.meta.fieldInfo(T, name).type` replacement for a comptime string name.
@@ -60,6 +76,9 @@ pub fn repeat(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
 
 /// Same array-of-fields shape for unions (0.17 made `Type.Union` SoA too).
 pub fn unionFields(comptime T: type) []const StructField(T) {
+    @setEvalBranchQuota(200_000);
+    if (@typeInfo(T) != .@"union")
+        @compileError("unionFields called on non-union " ++ @typeName(T));
     const info = @typeInfo(T).@"union";
     comptime var buf: [info.field_names.len]StructField(T) = undefined;
     inline for (info.field_names, info.field_types, 0..) |name, FieldTy, i| {

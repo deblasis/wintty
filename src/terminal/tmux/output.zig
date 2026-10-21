@@ -20,7 +20,7 @@ pub fn parseFormatStruct(
     delimiter: u8,
 ) ParseError!T {
     // Parse all our fields
-    const fields = meta_compat.structFields(T);
+    const fields = comptime meta_compat.structFields(T);
     var it = std.mem.splitScalar(u8, str, delimiter);
     var result: T = undefined;
     inline for (fields) |field| {
@@ -73,7 +73,7 @@ pub fn format(
 pub fn FormatStruct(comptime vars: []const Variable) type {
     var names: [vars.len][]const u8 = undefined;
     var types: [vars.len]type = undefined;
-    var attrs: [vars.len]std.builtin.Type.StructField.Attributes = undefined;
+    var attrs: [vars.len]std.lang.Type.Struct.FieldAttributes = undefined;
 
     for (vars, &names, &types, &attrs) |variable, *name, *ty, *attr| {
         name.* = @tagName(variable);

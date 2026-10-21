@@ -433,7 +433,7 @@ inline fn addFloatToInt(int: *u32, float: f64) void {
 
 /// Clamp all metrics to their allowable range.
 fn clamp(self: *Metrics) void {
-    inline for (meta_compat.structFields(Metrics)) |field| {
+    inline for (comptime meta_compat.structFields(Metrics)) |field| {
         if (@hasDecl(Minimums, field.name)) {
             @field(self, field.name) = @max(
                 @field(self, field.name),

@@ -27,7 +27,7 @@ const testing = std.testing;
 test "OSC unknown: prefix state names are the bytes consumed" {
     // beginUnknown recovers the consumed identifier from the prefix state's
     // name, so every prefix state must be reachable by feeding its name.
-    inline for (meta_compat.enumFields(Parser.State)) |field| {
+    inline for (comptime meta_compat.enumFields(Parser.State)) |field| {
         const state: Parser.State = @fromBackingInt(@intCast(field.value));
         switch (state) {
             .start, .invalid, .unknown, .unknown_truncated => {},

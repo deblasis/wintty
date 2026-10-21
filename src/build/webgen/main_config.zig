@@ -180,7 +180,7 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
     );
 
     @setEvalBranchQuota(200_000);
-    const fields = meta_compat.structFields(Config);
+    const fields = comptime meta_compat.structFields(Config);
     inline for (fields, 0..) |field, i| {
         if (field.name[0] == '_') continue;
         if (!@hasDecl(help_strings.Config, field.name)) continue;

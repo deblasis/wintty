@@ -36,7 +36,7 @@ pub const Transition = struct {
 /// Table is the type of the state transition table.
 fn genTableType(comptime optional: bool) type {
     const max_u8 = std.math.maxInt(u8);
-    const max_state = meta_compat.enumFields(State).len;
+    const max_state = comptime meta_compat.enumFields(State).len;
     const Elem = if (optional) ?Transition else Transition;
     return [max_u8 + 1][max_state]Elem;
 }
@@ -54,7 +54,7 @@ fn genTable() Table {
     }
 
     // anywhere transitions
-    inline for (meta_compat.enumFields(State)) |field| {
+    inline for (comptime meta_compat.enumFields(State)) |field| {
         const source: State = @fromBackingInt(@intCast(field.value));
 
         // anywhere => ground

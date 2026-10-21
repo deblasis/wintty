@@ -1038,7 +1038,7 @@ test "dwrite.dll is resolved from System32, not from the search order" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path_len = try std.unicode.utf16LeToUtf8(&path_buf, wide[0..len]);
     const path = path_buf[0..path_len];
-    try testing.expect(std.ascii.indexOfIgnoreCase(path, "\\System32\\") != null);
+    try testing.expect(std.ascii.findIgnoreCase(path, "\\System32\\") != null);
     try testing.expect(std.ascii.endsWithIgnoreCase(path, "\\dwrite.dll"));
 
     // And the factory is reachable through the same module, which a

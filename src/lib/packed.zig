@@ -114,15 +114,16 @@ pub fn Packed(
 /// Options for a packed struct. A field is generated for every field in `T`
 /// so unknown field names are rejected by normal Zig type checking.
 pub fn PackedOptions(comptime T: type) type {
-    const fields = packedStructInfo(T).fields;
+    const info = packedStructInfo(T);
+    const field_names = info.field_names;
     const default_options: FieldOptions = .{};
 
-    var names: [fields.len][]const u8 = undefined;
-    var types: [fields.len]type = undefined;
-    var attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    var names: [field_names.len][]const u8 = undefined;
+    var types: [field_names.len]type = undefined;
+    var attrs: [field_names.len]std.lang.Type.Struct.FieldAttributes = undefined;
 
-    for (fields, 0..) |field, i| {
-        names[i] = field.name;
+    for (field_names, 0..) |field_name, i| {
+        names[i] = field_name;
         types[i] = FieldOptions;
         attrs[i] = .{ .default_value_ptr = &default_options };
     }
@@ -188,13 +189,13 @@ pub fn PackedTaggedUnionOptions(comptime Union: type, comptime Tag: type) type {
     const union_info = @typeInfo(Union).@"union";
     if (union_info.layout != .@"packed")
         @compileError("packed tagged union value must be a packed union");
-    const tag_fields = meta_compat.enumFields(Tag);
+    const tag_fields = comptime meta_compat.enumFields(Tag);
     const Arm = PackedTaggedUnionArm(Union);
     const default_arm: ?Arm = null;
 
     var names: [tag_fields.len][]const u8 = undefined;
     var types: [tag_fields.len]type = undefined;
-    var attrs: [tag_fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    var attrs: [tag_fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
 
     for (tag_fields, 0..) |field, i| {
         names[i] = field.name;
@@ -209,12 +210,12 @@ pub fn PackedTaggedUnionOptions(comptime Union: type, comptime Tag: type) type {
 }
 
 fn PackedTaggedUnionArm(comptime Union: type) type {
-    const fields = meta_compat.unionFields(Union);
+    const fields = comptime meta_compat.unionFields(Union);
     const Tag = std.meta.FieldEnum(Union);
 
     var names: [fields.len][]const u8 = undefined;
     var types: [fields.len]type = undefined;
-    var attrs: [fields.len]std.builtin.Type.UnionField.Attributes = undefined;
+    var attrs: [fields.len]std.lang.Type.Union.FieldAttributes = undefined;
 
     for (fields, 0..) |field, i| {
         names[i] = field.name;

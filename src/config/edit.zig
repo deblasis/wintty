@@ -29,7 +29,7 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
 
     if (!config_path.exists) try createIfMissing(config_path.name);
 
-    return try alloc_gpa.dupeZ(u8, config_path.name);
+    return try alloc_gpa.dupeSentinel(u8, config_path.name, 0);
 }
 
 /// The path a caller should NAME, without the create: the same resolution
@@ -45,7 +45,7 @@ pub fn openPathNoCreate(alloc_gpa: Allocator) ![:0]const u8 {
     const alloc_arena = arena.allocator();
 
     const config_path = try configPath(alloc_arena);
-    return try alloc_gpa.dupeZ(u8, config_path.name);
+    return try alloc_gpa.dupeSentinel(u8, config_path.name, 0);
 }
 
 fn createIfMissing(name: []const u8) !void {

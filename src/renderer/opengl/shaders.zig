@@ -70,11 +70,11 @@ const PipelineDescription = struct {
 
 /// We create a type for the pipeline collection based on our desc array.
 const PipelineCollection = t: {
-    const StructField = std.builtin.Type.StructField;
+    const StructField = std.lang.Type.Struct;
 
     var names: [pipeline_descs.len][]const u8 = undefined;
     var types: [pipeline_descs.len]type = @splat(Pipeline);
-    var attrs: [pipeline_descs.len]StructField.Attributes = @splat(.{ .@"align" = @alignOf(Pipeline) });
+    var attrs: [pipeline_descs.len]StructField.FieldAttributes = @splat(.{ .@"align" = @alignOf(Pipeline) });
 
     for (pipeline_descs, &names) |pipeline, *name| {
         name.* = pipeline[0];

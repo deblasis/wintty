@@ -42,7 +42,7 @@ pub const FlatpakHostCommand = struct {
         clear_env: bool = false,
         /// Kill the sandbox when the caller disappears from the session bus
         watch_bus: bool = false,
-        _reserved: std.meta.Int(.unsigned, @bitSizeOf(c_uint) - 2) = 0,
+        _reserved: @Int(.unsigned, @bitSizeOf(c_uint) - 2) = 0,
     };
 
     /// Argv are the arguments to call on the host with argv[0] being
@@ -357,8 +357,8 @@ pub const FlatpakHostCommand = struct {
         if (self.env) |env| {
             var it = env.iterator();
             while (it.next()) |pair| {
-                const key = try arena.dupeZ(u8, pair.key_ptr.*);
-                const value = try arena.dupeZ(u8, pair.value_ptr.*);
+                const key = try arena.dupeSentinel(u8, pair.key_ptr.*, 0);
+                const value = try arena.dupeSentinel(u8, pair.value_ptr.*, 0);
                 gio_c.g_variant_builder_add(env_builder, "{ss}", key.ptr, value.ptr);
             }
         }
@@ -366,7 +366,7 @@ pub const FlatpakHostCommand = struct {
         // Build our args
         const args = try arena.alloc(?[*:0]u8, self.argv.len + 1);
         for (0.., self.argv) |i, arg| {
-            const argZ = try arena.dupeZ(u8, arg);
+            const argZ = try arena.dupeSentinel(u8, arg, 0);
             args[i] = argZ.ptr;
         }
         args[args.len - 1] = null;

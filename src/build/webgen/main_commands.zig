@@ -28,7 +28,7 @@ pub fn genActions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (meta_compat.enumFields(Action)) |field| {
+    inline for (comptime meta_compat.enumFields(Action)) |field| {
         const action = std.meta.stringToEnum(Action, field.name).?;
 
         switch (action) {

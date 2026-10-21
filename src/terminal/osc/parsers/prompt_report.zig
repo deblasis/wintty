@@ -369,7 +369,7 @@ fn nextString(
     // reason it is not a path character.
     for (s) |b| if (b < 0x20 or b == 0x7f) return null;
 
-    return alloc.dupeZ(u8, s) catch {
+    return alloc.dupeSentinel(u8, s, 0) catch {
         logArenaExhausted("a string copy");
         return null;
     };

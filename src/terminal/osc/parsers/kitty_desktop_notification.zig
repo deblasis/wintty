@@ -252,7 +252,7 @@ fn parsePackedStruct(comptime T: type, str: []const u8) T {
             }
         };
 
-        inline for (meta_compat.structFields(T)) |field| {
+        inline for (comptime meta_compat.structFields(T)) |field| {
             comptime assert(field.type == bool);
             if (std.mem.eql(u8, field.name, part)) {
                 @field(result, field.name) = value;

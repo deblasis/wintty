@@ -74,7 +74,7 @@ pub fn generate(
     var stream: std.Io.Writer.Allocating = .init(page_allocator);
     defer stream.deinit();
 
-    const fields = meta_compat.unionFields(KeybindAction);
+    const fields = comptime meta_compat.unionFields(KeybindAction);
     inline for (fields) |field| {
         if (field.name[0] == '_') continue;
 

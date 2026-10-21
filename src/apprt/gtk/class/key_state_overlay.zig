@@ -211,7 +211,7 @@ pub const KeyStateOverlay = extern struct {
             buf.writer.writeAll(s) catch return null;
         }
 
-        return glib.ext.dupeZ(u8, buf.written());
+        return glib.ext.dupeSentinel(u8, buf.written(), 0);
     }
 
     fn closureSequenceText(
@@ -229,7 +229,7 @@ pub const KeyStateOverlay = extern struct {
             buf.writer.writeAll(s) catch return null;
         }
 
-        return glib.ext.dupeZ(u8, buf.written());
+        return glib.ext.dupeSentinel(u8, buf.written(), 0);
     }
 
     //---------------------------------------------------------------

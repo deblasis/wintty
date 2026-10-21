@@ -277,7 +277,7 @@ fn commandString(
     command: @import("command.zig").Command,
 ) std.mem.Allocator.Error![:0]const u8 {
     switch (command) {
-        .shell => |v| return try alloc.dupeZ(u8, v),
+        .shell => |v| return try alloc.dupeSentinel(u8, v, 0),
         .direct => |argv| {
             var buf: std.ArrayList(u8) = .empty;
             errdefer buf.deinit(alloc);

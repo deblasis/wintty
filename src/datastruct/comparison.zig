@@ -56,7 +56,7 @@ pub fn deepEqual(comptime T: type, old: T, new: T) bool {
 
             // If a struct doesn't declare an "equal" function, we fall back
             // to a recursive field-by-field compare.
-            inline for (meta_compat.structFields(T)) |field_info| {
+            inline for (comptime meta_compat.structFields(T)) |field_info| {
                 if (!deepEqual(
                     field_info.type,
                     @field(old, field_info.name),
@@ -74,7 +74,7 @@ pub fn deepEqual(comptime T: type, old: T, new: T) bool {
             const new_tag = std.meta.activeTag(new);
             if (old_tag != new_tag) return false;
 
-            inline for (meta_compat.unionFields(T)) |field_info| {
+            inline for (comptime meta_compat.unionFields(T)) |field_info| {
                 if (@field(tag_type, field_info.name) == old_tag) {
                     return deepEqual(
                         field_info.type,

@@ -263,7 +263,7 @@ pub const Style = struct {
 
         var started = false;
 
-        inline for (meta_compat.structFields(Style)) |f| {
+        inline for (comptime meta_compat.structFields(Style)) |f| {
             if (std.mem.eql(u8, f.name, "flags")) {
                 if (started) {
                     _ = try writer.write(", ");
@@ -273,7 +273,7 @@ pub const Style = struct {
 
                 started = false;
 
-                inline for (meta_compat.structFields(@TypeOf(self.flags))) |ff| {
+                inline for (comptime meta_compat.structFields(@TypeOf(self.flags))) |ff| {
                     const v = @as(ff.type, @field(self.flags, ff.name));
                     const d = @as(ff.type, @field(dflt.flags, ff.name));
                     if (ff.type == bool) {

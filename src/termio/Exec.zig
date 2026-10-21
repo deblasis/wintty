@@ -1220,7 +1220,7 @@ const Subprocess = struct {
         const cwd: ?[:0]u8 = if (wsl_default_cwd)
             null
         else if (cfg.working_directory) |cwd|
-            try alloc.dupeZ(u8, cwd)
+            try alloc.dupeSentinel(u8, cwd, 0)
         else
             null;
         const spawn_args: []const [:0]const u8 = if (wsl_default_cwd)
@@ -2784,7 +2784,7 @@ fn execCommand(
                     defer iter.deinit();
 
                     while (iter.next()) |arg| {
-                        const copy = try alloc.dupeZ(u8, arg);
+                        const copy = try alloc.dupeSentinel(u8, arg, 0);
                         try args.append(alloc, copy);
                     }
 
@@ -2806,7 +2806,7 @@ fn execCommand(
                         std.ascii.eqlIgnoreCase(args.items[0], "cmd.exe"))
                     {
                         if (global.environ().getAlloc(alloc, "COMSPEC")) |comspec| {
-                            args.items[0] = try alloc.dupeZ(u8, comspec);
+                            args.items[0] = try alloc.dupeSentinel(u8, comspec, 0);
                         } else |_| {}
                     }
 
@@ -2852,7 +2852,7 @@ fn execCommand(
                         0,
                     )
                 else
-                    try alloc.dupeZ(u8, v);
+                    try alloc.dupeSentinel(u8, v, 0);
 
                 try args.append(alloc, cmd);
                 try args.append(alloc, "/C");
@@ -3626,7 +3626,7 @@ fn maybeWrapGitBashWithWinpty(
     };
 
     const out = try alloc.alloc([:0]const u8, args.len + 1);
-    out[0] = try alloc.dupeZ(u8, winpty);
+    out[0] = try alloc.dupeSentinel(u8, winpty, 0);
     @memcpy(out[1..], args);
     return out;
 }
@@ -6174,11 +6174,11 @@ test "termDecision refuses for the right reason and says which" {
     // Every reason has its own sentence, so the log line can be acted on. A
     // new variant with no sentence, or one copied from its neighbour, fails
     // here rather than shipping an unactionable warning.
-    inline for (meta_compat.enumFields(TermDecision.Refusal)) |a| {
+    inline for (comptime meta_compat.enumFields(TermDecision.Refusal)) |a| {
         const ra: TermDecision.Refusal = @fromBackingInt(@intCast(a.value));
         try testing.expect(ra.explain().len > 0);
 
-        inline for (meta_compat.enumFields(TermDecision.Refusal)) |b| {
+        inline for (comptime meta_compat.enumFields(TermDecision.Refusal)) |b| {
             if (a.value == b.value) continue;
             const rb: TermDecision.Refusal = @fromBackingInt(@intCast(b.value));
             try testing.expect(!std.mem.eql(u8, ra.explain(), rb.explain()));

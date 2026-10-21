@@ -38,7 +38,7 @@ pub const FileFormatter = struct {
             null;
         defer if (default) |*v| v.deinit();
 
-        inline for (meta_compat.structFields(Config)) |field| {
+        inline for (comptime meta_compat.structFields(Config)) |field| {
             if (field.name[0] == '_') continue;
 
             const value = @field(self.config, field.name);

@@ -191,7 +191,7 @@ fn collection(
         // A buffer we use to store the font names for logging.
         var name_buf: [256]u8 = undefined;
 
-        inline for (meta_compat.enumFields(Style)) |field| {
+        inline for (comptime meta_compat.enumFields(Style)) |field| {
             const style = @field(Style, field.name);
             for (key.descriptorsForStyle(style)) |desc| {
                 {
@@ -819,7 +819,7 @@ pub const Key = struct {
         autoHash(hasher, self.metric_modifiers.count());
         autoHash(hasher, self.freetype_load_flags);
         if (self.metric_modifiers.count() > 0) {
-            inline for (meta_compat.enumFields(Metrics.Key)) |field| {
+            inline for (comptime meta_compat.enumFields(Metrics.Key)) |field| {
                 const key = @field(Metrics.Key, field.name);
                 if (self.metric_modifiers.get(key)) |value| {
                     autoHash(hasher, key);

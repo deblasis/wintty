@@ -51,7 +51,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
     try writer.writeAll("  _arguments \\\n");
     try writer.writeAll("    \"--help\" \\\n");
     try writer.writeAll("    \"--version\" \\\n");
-    for (meta_compat.structFields(Config)) |field| {
+    for (comptime meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
         try writer.writeAll("    \"--");
         try writer.writeAll(field.name);
@@ -74,7 +74,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
                 .@"enum" => {
                     try writer.writeAll(equals_required);
                     try writer.writeAll("(");
-                    for (meta_compat.enumFields(field.type), 0..) |f, i| {
+                    for (comptime meta_compat.enumFields(field.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -84,7 +84,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
                     try writer.writeAll(equals_required);
                     if (!@hasDecl(field.type, "parseCLI") and @typeInfo(field.type).@"struct".layout == .@"packed") {
                         try writer.writeAll("(");
-                        for (meta_compat.structFields(field.type), 0..) |f, i| {
+                        for (comptime meta_compat.structFields(field.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name);
                             try writer.writeAll(" no-");
@@ -144,7 +144,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         // how to get 'commands'
         var count: usize = 0;
         const padding = "        ";
-        for (meta_compat.enumFields(Action)) |field| {
+        for (comptime meta_compat.enumFields(Action)) |field| {
             try writer.writeAll(padding ++ "'+");
             try writer.writeAll(field.name);
             try writer.writeAll("'\n");
@@ -170,14 +170,14 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
     );
     {
         const padding = "        ";
-        for (meta_compat.enumFields(Action)) |field| {
+        for (comptime meta_compat.enumFields(Action)) |field| {
             const options = @field(Action, field.name).options();
             // assumes options will never be created with only <_name> members
-            if (meta_compat.structFields(options).len == 0) continue;
+            if (comptime meta_compat.structFields(options).len == 0) continue;
 
             try writer.writeAll(padding ++ "(+" ++ field.name ++ ")\n");
             try writer.writeAll(padding ++ "  _arguments \\\n");
-            for (meta_compat.structFields(options)) |opt| {
+            for (comptime meta_compat.structFields(options)) |opt| {
                 if (opt.name[0] == '_') continue;
 
                 try writer.writeAll(padding ++ "    '--");
@@ -188,7 +188,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
                     .@"enum" => {
                         try writer.writeAll(equals_required);
                         try writer.writeAll("(");
-                        for (meta_compat.enumFields(opt.type), 0..) |f, i| {
+                        for (comptime meta_compat.enumFields(opt.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name);
                         }
@@ -199,7 +199,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
                         switch (@typeInfo(optional.child)) {
                             .@"enum" => {
                                 try writer.writeAll("(");
-                                for (meta_compat.enumFields(optional.child), 0..) |f, i| {
+                                for (comptime meta_compat.enumFields(optional.child), 0..) |f, i| {
                                     if (i > 0) try writer.writeAll(" ");
                                     try writer.writeAll(f.name);
                                 }

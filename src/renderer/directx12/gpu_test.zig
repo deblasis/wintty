@@ -1665,7 +1665,7 @@ test "buffer.Options.retire has no default" {
     // The found flag keeps the loop from passing vacuously if the field is
     // ever renamed.
     var found = false;
-    inline for (meta_compat.structFields(buffer_mod.Options)) |field| {
+    inline for (comptime meta_compat.structFields(buffer_mod.Options)) |field| {
         if (comptime std.mem.eql(u8, field.name, "retire")) {
             found = true;
             try std.testing.expect(field.default_value_ptr == null);

@@ -781,7 +781,7 @@ pub const Key = enum(c_int) {
         // We don't support every key in the W3C spec, so we only
         // check the enum fields.
         const testing = std.testing;
-        inline for (meta_compat.enumFields(Key)) |field| {
+        inline for (comptime meta_compat.enumFields(Key)) |field| {
             const key = @field(Key, field.name);
             const w3c_name = key.w3c();
             try testing.expectEqual(key, Key.fromW3C(w3c_name).?);

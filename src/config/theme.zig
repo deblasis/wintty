@@ -172,7 +172,7 @@ pub const LocationIterator = struct {
         location: Location,
         dir: []const u8,
     } {
-        const max = meta_compat.enumFields(Location).len;
+        const max = comptime meta_compat.enumFields(Location).len;
         while (self.i < max) {
             const location: Location = @fromBackingInt(@intCast(self.i));
             self.i += 1;

@@ -585,7 +585,7 @@ fn modesTable(t: *Terminal) void {
         cimgui.c.ImGui_TableHeadersRow();
     }
 
-    inline for (meta_compat.enumFields(terminal.Mode)) |field| {
+    inline for (comptime meta_compat.enumFields(terminal.Mode)) |field| {
         @setEvalBranchQuota(6000);
         const tag: modes.ModeTag = @bitCast(@as(modes.ModeTag.Backing, field.value));
 

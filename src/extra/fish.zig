@@ -29,7 +29,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     {
         try writer.writeAll("set -l commands \"");
         var count: usize = 0;
-        for (meta_compat.enumFields(Action)) |field| {
+        for (comptime meta_compat.enumFields(Action)) |field| {
             if (count > 0) try writer.writeAll(" ");
             try writer.writeAll("+");
             try writer.writeAll(field.name);
@@ -43,7 +43,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     try writer.writeAll("complete -c ghostty -s e -l help -f\n");
     try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l version -f\n");
 
-    for (meta_compat.structFields(Config)) |field| {
+    for (comptime meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
 
         try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l ");
@@ -61,7 +61,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
                 .bool => {},
                 .@"enum" => {
                     try writer.writeAll(" -a \"");
-                    for (meta_compat.enumFields(field.type), 0..) |f, i| {
+                    for (comptime meta_compat.enumFields(field.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -70,7 +70,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
                 .@"struct" => {
                     if (!@hasDecl(field.type, "parseCLI") and @typeInfo(field.type).@"struct".layout == .@"packed") {
                         try writer.writeAll(" -a \"");
-                        for (meta_compat.structFields(field.type), 0..) |f, i| {
+                        for (comptime meta_compat.structFields(field.type), 0..) |f, i| {
                             if (i > 0) try writer.writeAll(" ");
                             try writer.writeAll(f.name);
                             try writer.writeAll(" no-");
@@ -97,7 +97,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     {
         try writer.writeAll("complete -c ghostty -n \"string match -q -- '+*' (commandline -pt)\" -f -a \"");
         var count: usize = 0;
-        for (meta_compat.enumFields(Action)) |field| {
+        for (comptime meta_compat.enumFields(Action)) |field| {
             if (count > 0) try writer.writeAll(" ");
             try writer.writeAll("+");
             try writer.writeAll(field.name);
@@ -106,12 +106,12 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         try writer.writeAll("\"\n");
     }
 
-    for (meta_compat.enumFields(Action)) |field| {
+    for (comptime meta_compat.enumFields(Action)) |field| {
         if (std.mem.eql(u8, names.help_action, field.name)) continue;
         if (std.mem.eql(u8, names.version_action, field.name)) continue;
 
         const options = @field(Action, field.name).options();
-        for (meta_compat.structFields(options)) |opt| {
+        for (comptime meta_compat.structFields(options)) |opt| {
             if (opt.name[0] == '_') continue;
             try writer.writeAll("complete -c ghostty -n \"__fish_seen_subcommand_from +" ++ field.name ++ "\" -l ");
             try writer.writeAll(opt.name);
@@ -126,7 +126,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
                 .bool => {},
                 .@"enum" => {
                     try writer.writeAll(" -a \"");
-                    for (meta_compat.enumFields(opt.type), 0..) |f, i| {
+                    for (comptime meta_compat.enumFields(opt.type), 0..) |f, i| {
                         if (i > 0) try writer.writeAll(" ");
                         try writer.writeAll(f.name);
                     }
@@ -136,7 +136,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
                     switch (@typeInfo(optional.child)) {
                         .@"enum" => {
                             try writer.writeAll(" -a \"");
-                            for (meta_compat.enumFields(optional.child), 0..) |f, i| {
+                            for (comptime meta_compat.enumFields(optional.child), 0..) |f, i| {
                                 if (i > 0) try writer.writeAll(" ");
                                 try writer.writeAll(f.name);
                             }

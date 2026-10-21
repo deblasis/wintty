@@ -136,7 +136,7 @@ pub fn parse(
 
             // Add our diagnostic
             try dst._diagnostics.append(arena_alloc, .{
-                .key = try arena_alloc.dupeZ(u8, arg),
+                .key = try arena_alloc.dupeSentinel(u8, arg, 0),
                 .message = "invalid field",
                 .location = try diags.Location.fromIter(iter, arena_alloc),
             });
@@ -194,7 +194,7 @@ pub fn parse(
 
             // Add our diagnostic
             try dst._diagnostics.append(arena_alloc, .{
-                .key = try arena_alloc.dupeZ(u8, key),
+                .key = try arena_alloc.dupeSentinel(u8, key, 0),
                 .message = message,
                 .location = try diags.Location.fromIter(iter, arena_alloc),
             });
@@ -293,13 +293,12 @@ fn formatValues(
     writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
     @setEvalBranchQuota(2000);
-    const typeinfo = @typeInfo(T);
-    inline for (typeinfo.@"struct".fields) |f| {
+    inline for (comptime meta_compat.structFields(T)) |f| {
         if (std.mem.eql(u8, key, f.name)) {
             switch (@typeInfo(f.type)) {
-                .@"enum" => |e| {
+                .@"enum" => {
                     try writer.print(", valid values are: ", .{});
-                    inline for (e.fields, 0..) |field, i| {
+                    inline for (comptime meta_compat.enumFields(f.type), 0..) |field, i| {
                         if (i != 0) try writer.print(", ", .{});
                         try writer.print("{s}", .{field.name});
                     }
@@ -331,7 +330,7 @@ pub fn parseIntoField(
     const info = @typeInfo(T);
     assert(info == .@"struct");
 
-    inline for (info.@"struct".fields) |field| {
+    inline for (comptime meta_compat.structFields(T)) |field| {
         // Void-typed fields (platform-gated Config keys) have no value to set.
         if (comptime field.type == void) continue;
 
@@ -368,7 +367,7 @@ pub fn parseIntoField(
             if (canHaveDecls) {
                 if (@hasDecl(Field, "parseCLI")) {
                     const fnInfo = @typeInfo(@TypeOf(Field.parseCLI)).@"fn";
-                    switch (fnInfo.params.len) {
+                    switch (fnInfo.param_types.len) {
                         // 1 arg = (input) => output
                         1 => @field(dst, field.name) = try Field.parseCLI(value),
 
@@ -528,7 +527,7 @@ pub fn isEmptyScalarReset(comptime T: type, arg: []const u8) bool {
     const v = value orelse return false;
     if (v.len != 0) return false;
 
-    inline for (info.@"struct".fields) |field| {
+    inline for (comptime meta_compat.structFields(T)) |field| {
         if (comptime field.type == void) continue;
         if (field.name[0] != '_' and mem.eql(u8, field.name, key)) {
             // Optional fields reset to null, which is their correct "unset"
@@ -567,7 +566,7 @@ pub fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
     const value = if (colon_idx < v.len) v[colon_idx + 1 ..] else "";
 
     // Find the field in the union that matches the tag.
-    inline for (meta_compat.unionFields(T)) |field| {
+    inline for (comptime meta_compat.aggregateFields(T)) |field| {
         if (mem.eql(u8, field.name, tag_str)) {
             // Special case void types where we don't need a value.
             if (field.type == void) {
@@ -622,8 +621,8 @@ pub fn parseAutoStruct(
 
     // Keep track of which fields were set so we can error if a required
     // field was not set.
-    const FieldSet = std.StaticBitSet(meta_compat.unionFields(T).len);
-    var fields_set: FieldSet = .initEmpty();
+    const FieldSet = std.StaticBitSet(comptime meta_compat.aggregateFields(T).len);
+    var fields_set: FieldSet = .empty;
 
     // We split each value by "," allowing for quoting and escaping.
     var iter: CommaSplitter = .init(v);
@@ -654,7 +653,7 @@ pub fn parseAutoStruct(
             break :value value;
         };
 
-        inline for (meta_compat.unionFields(T), 0..) |field, i| {
+        inline for (comptime meta_compat.aggregateFields(T), 0..) |field, i| {
             if (std.mem.eql(u8, field.name, key)) {
                 try parseIntoField(T, alloc, &result, key, value);
                 fields_set.set(i);
@@ -667,7 +666,7 @@ pub fn parseAutoStruct(
     }
 
     // Ensure all required fields are set
-    inline for (meta_compat.unionFields(T), 0..) |field, i| {
+    inline for (comptime meta_compat.aggregateFields(T), 0..) |field, i| {
         if (!fields_set.isSet(i)) {
             @field(result, field.name) = default: {
                 // If we're given a default value then we inherit those.
@@ -697,7 +696,7 @@ pub fn parsePackedStruct(comptime T: type, v: []const u8) !T {
     // turn on or off all of the struct's fields.
     bools: {
         const b = parseBool(v) catch break :bools;
-        inline for (meta_compat.unionFields(T)) |field| {
+        inline for (comptime meta_compat.aggregateFields(T)) |field| {
             assert(field.type == bool);
             @field(result, field.name) = b;
         }
@@ -719,7 +718,7 @@ pub fn parsePackedStruct(comptime T: type, v: []const u8) !T {
             }
         };
 
-        inline for (meta_compat.unionFields(T)) |field| {
+        inline for (comptime meta_compat.aggregateFields(T)) |field| {
             assert(field.type == bool);
             if (std.mem.eql(u8, field.name, part)) {
                 @field(result, field.name) = value;

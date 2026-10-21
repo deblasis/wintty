@@ -28,7 +28,7 @@ pub fn genConfig(writer: *std.Io.Writer, cli: bool) !void {
     );
 
     @setEvalBranchQuota(5000);
-    inline for (meta_compat.structFields(Config)) |field| {
+    inline for (comptime meta_compat.structFields(Config)) |field| {
         if (field.name[0] == '_') continue;
 
         try writer.writeAll("**`");
@@ -57,7 +57,7 @@ pub fn genActions(writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (meta_compat.enumFields(Action)) |field| {
+    inline for (comptime meta_compat.enumFields(Action)) |field| {
         const action = std.meta.stringToEnum(Action, field.name).?;
 
         switch (action) {
@@ -96,7 +96,7 @@ pub fn genKeybindActions(writer: *std.Io.Writer) !void {
     std.debug.assert(info == .@"union");
 
     @setEvalBranchQuota(5000);
-    inline for (info.@"union".fields) |field| {
+    inline for (comptime meta_compat.unionFields(KeybindAction)) |field| {
         if (field.name[0] == '_') continue;
 
         try writer.writeAll("**`");

@@ -840,7 +840,7 @@ test "Texture.Options.retire has no default" {
     // The found flag is the anti-vacuity half: rename the field and the
     // loop would otherwise match nothing and pass.
     var found = false;
-    inline for (meta_compat.structFields(Options)) |field| {
+    inline for (comptime meta_compat.structFields(Options)) |field| {
         if (comptime std.mem.eql(u8, field.name, "retire")) {
             found = true;
             try std.testing.expect(field.default_value_ptr == null);

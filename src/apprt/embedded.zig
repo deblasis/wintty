@@ -351,7 +351,7 @@ pub const App = struct {
                     // error we just ignore it, since this only breaks a few minor things.
                     const alloc = self.core_app.alloc;
                     if (surface.rt_surface.title) |v| alloc.free(v);
-                    surface.rt_surface.title = alloc.dupeZ(u8, value.title) catch null;
+                    surface.rt_surface.title = alloc.dupeSentinel(u8, value.title, 0) catch null;
                 },
             },
 
@@ -405,7 +405,7 @@ fn assertHeaderLayout(
     comptime header_struct: []const u8,
 ) void {
     @setEvalBranchQuota(100000);
-    const fields = meta_compat.structFields(T);
+    const fields = comptime meta_compat.structFields(T);
     // Walk the struct's fields, not the table's rows: a row count alone
     // would let a duplicated row stand in for a field the table dropped.
     inline for (fields) |field| {
@@ -917,8 +917,8 @@ pub const Surface = struct {
                 const value = std.mem.sliceTo(env_var.value, 0);
                 try config.env.map.put(
                     alloc,
-                    try alloc.dupeZ(u8, key),
-                    try alloc.dupeZ(u8, value),
+                    try alloc.dupeSentinel(u8, key, 0),
+                    try alloc.dupeSentinel(u8, value, 0),
                 );
             }
         }
@@ -1168,8 +1168,9 @@ pub const Surface = struct {
             error.UnauthorizedPaste => {
                 // Convert the would-be contents so the permission
                 // prompt can display exactly what would be written.
-                var stack = std.heap.stackFallback(1024, alloc);
-                const conv_alloc = stack.get();
+                var stack_buf: [1024]u8 = undefined;
+        var stack: std.heap.BufferFirstAllocator = .init(@ptrCast(&stack_buf), alloc);
+                const conv_alloc = stack.allocator();
                 const contents = conv_alloc.alloc(
                     CAPI.ClipboardContent,
                     kitty.contents.len,
@@ -1220,8 +1221,9 @@ pub const Surface = struct {
 
         // Convert the C representations to the core types. Everything
         // remains borrowed from the caller for the duration of the call.
-        var stack = std.heap.stackFallback(1024, alloc);
-        const conv_alloc = stack.get();
+        var stack_buf: [1024]u8 = undefined;
+        var stack: std.heap.BufferFirstAllocator = .init(@ptrCast(&stack_buf), alloc);
+        const conv_alloc = stack.allocator();
 
         const raw_contents: []const CAPI.ClipboardContent =
             if (complete.contents) |v| v[0..complete.contents_len] else &.{};
@@ -3264,7 +3266,7 @@ pub const CAPI = struct {
     /// freed by the caller via ghostty_string_free.
     export fn ghostty_surface_tty_name(surface: *Surface) String {
         const tty_name = surface.core_surface.getProcessInfo(.tty_name) orelse return .empty;
-        const copy = surface.app.core_app.alloc.dupeZ(u8, tty_name) catch |err| {
+        const copy = surface.app.core_app.alloc.dupeSentinel(u8, tty_name, 0) catch |err| {
             log.err("error allocating tty name err={}", .{err});
             return .empty;
         };

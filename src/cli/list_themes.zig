@@ -1862,7 +1862,7 @@ const Preview = struct {
 
         // Notify the embedder that the theme was accepted.
         if (theme_callback) |cb| {
-            const name_z = self.allocator.dupeZ(u8, theme.theme) catch return;
+            const name_z = self.allocator.dupeSentinel(u8, theme.theme, 0) catch return;
             defer self.allocator.free(name_z);
             cb(name_z, true);
         }

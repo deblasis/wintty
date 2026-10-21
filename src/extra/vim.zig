@@ -97,7 +97,7 @@ fn writeSyntax(writer: *std.Io.Writer) !void {
         \\syn keyword ghosttyConfigKeyword
     );
 
-    const config_fields = meta_compat.structFields(Config);
+    const config_fields = comptime meta_compat.structFields(Config);
     inline for (config_fields) |field| {
         if (field.name[0] == '_') continue;
         try writer.print("\n\t\\ {s}", .{field.name});

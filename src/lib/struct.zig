@@ -24,7 +24,7 @@ pub fn Struct(
             var types: [meta_compat.structFields(Zig).len]type = undefined;
             var attrs: [meta_compat.structFields(Zig).len]std.lang.Type.Struct.FieldAttributes = undefined;
 
-            for (meta_compat.structFields(Zig), &names, &types, &attrs) |field, *name, *ty, *attr| {
+            for (comptime meta_compat.structFields(Zig), &names, &types, &attrs) |field, *name, *ty, *attr| {
                 name.* = field.name;
                 ty.* = field.type;
                 attr.* = .{

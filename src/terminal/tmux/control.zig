@@ -584,7 +584,7 @@ pub const Notification = union(enum) {
             try writer.writeAll(@tagName(@as(TagType, self)));
             try writer.writeAll(" = ");
 
-            inline for (meta_compat.unionFields(T)) |u_field| {
+            inline for (comptime meta_compat.unionFields(T)) |u_field| {
                 if (self == @field(TagType, u_field.name)) {
                     const value = @field(self, u_field.name);
                     switch (u_field.type) {

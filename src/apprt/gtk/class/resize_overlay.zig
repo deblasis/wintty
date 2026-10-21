@@ -173,7 +173,7 @@ pub const ResizeOverlay = extern struct {
         const priv = self.private();
         if (priv.label_text) |v| glib.free(@ptrCast(@constCast(v)));
         priv.label_text = null;
-        if (label) |v| priv.label_text = glib.ext.dupeZ(u8, v);
+        if (label) |v| priv.label_text = glib.ext.dupeSentinel(u8, v, 0);
         self.as(gobject.Object).notifyByPspec(properties.label.impl.param_spec);
     }
 
