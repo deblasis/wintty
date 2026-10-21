@@ -30,7 +30,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         \\
         \\_fonts () {
         \\  local font_list=$(ghostty +
-        ++ names.list_fonts_action ++
+    ++ names.list_fonts_action ++
         \\ | grep -Z '^[A-Z]')
         \\  local fonts=(${(f)font_list})
         \\  _describe -t fonts 'fonts' fonts
@@ -38,7 +38,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         \\
         \\_themes() {
         \\  local theme_list=$(ghostty +
-        ++ names.list_themes_action ++
+    ++ names.list_themes_action ++
         \\ | sed -E 's/^(.*) \(.*$/\1/')
         \\  local themes=(${(f)theme_list})
         \\  _describe -t themes 'themes' themes

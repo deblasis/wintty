@@ -59,7 +59,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\    local IFS=$'\n'
         \\    COMPREPLY=()
         \\    while read -r line; do COMPREPLY+=("$line"); done < <( compgen -P '"' -S '"' -W "$($ghostty +
-        ++ names.list_fonts_action ++
+    ++ names.list_fonts_action ++
         \\ | grep '^[A-Z]' )" -- "$cur")
         \\  }
         \\
@@ -67,7 +67,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\    local IFS=$'\n'
         \\    COMPREPLY=()
         \\    while read -r line; do COMPREPLY+=("$line"); done < <( compgen -P '"' -S '"' -W "$($ghostty +
-        ++ names.list_themes_action ++
+    ++ names.list_themes_action ++
         \\ | sed -E 's/^(.*) \(.*$/\1/')" -- "$cur")
         \\  }
         \\

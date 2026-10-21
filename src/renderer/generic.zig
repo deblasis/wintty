@@ -1670,7 +1670,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// Create or update the display link and match it to the current
         /// surface state.
-
         /// Create the display link if needed, then ask it to match the
         /// current surface state: bound to `display_id` if one is given,
         /// and running only while the surface is visible and has
