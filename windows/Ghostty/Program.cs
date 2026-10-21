@@ -1049,6 +1049,16 @@ public static partial class Program
                 Environment.Exit(0);
             }
 
+            // +defterm-status: the default-terminal module's headless
+            // probe. It needs no libghostty, so it runs before
+            // InitGhostty, prints the report with the machine-readable
+            // final line, and exits 0 healthy / 1 broken.
+            if (args.Length == 1 &&
+                (args[0] == "+defterm-status" || args[0] == "defterm-status"))
+            {
+                Environment.Exit(RunDeftermStatus());
+            }
+
             InitGhostty();
             RegisterThemeCallback();
             var exitCode = NativeMethods.CliRunAction();
@@ -1138,6 +1148,25 @@ public static partial class Program
     /// belt-and-braces for a path that resolved somewhere the root check
     /// did not predict.
     /// </summary>
+    private static int RunDeftermStatus()
+    {
+        var proxyPath = Path.Combine(AppContext.BaseDirectory, "OpenConsoleProxy.dll");
+        var probe = new DefaultTermStatusProbe(
+            DefaultTermIdentity.TerminalClsid,
+            DefaultTermIdentity.ConsoleClsid,
+            DefaultTermBootstrap.IsFeatureEnabled,
+            () => DefaultTermComServer.Kind,
+            () => File.Exists(proxyPath),
+            () => File.Exists(proxyPath)
+                ? "sha256:" + Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(
+                        File.ReadAllBytes(proxyPath))).ToLowerInvariant()
+                : null);
+        var report = probe.Report();
+        Console.WriteLine(probe.Render(report));
+        return DefaultTermStatusProbe.ExitCodeFor(report);
+    }
+
     private static void GuardTestConfigRoot(string[] args)
     {
         if (!Ghostty.Core.Config.TestConfigGuard.IsArmed) return;
