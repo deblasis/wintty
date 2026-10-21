@@ -84,18 +84,32 @@ pub const ModeState = struct {
     /// not correspond to a known mode, the report state is .not_recognized,
     /// except for the permanently-reset modes below.
     pub fn getReport(self: *const ModeState, tag: Report.Tag) Report {
-        // DECECM (Erase Color Mode, DEC private mode 117) controls whether erasing
-        // and scrolling use the default background or the active background color.
-        // Ghostty's behavior is fixed equivalent to DECECM reset, and DECRQM has a
-        // "permanently reset" response for recognized modes that cannot be changed.
-        // Report that instead of "not recognized" so applications can query and adapt
-        // to Ghostty's erase-color behavior.
+        // Unimplemented DEC private modes that xterm reports as fixed
+        // reset: DECHCCM (60) and DECVCCM (61) from VT level 3, DECECM
+        // (117) from level 5. Ghostty does not model VT levels, so these
+        // answer 4 unconditionally; 117 already did, since Ghostty's
+        // erase color behavior is fixed at its reset value. Report
+        // permanently_reset instead of not_recognized so DECRQM callers
+        // hear "unsupported" rather than "unknown".
         //
         // See VT520/VT525 Programmer Information, "Erase Color" and DECRQM/DECRPM:
         // https://web.mit.edu/dosathena/doc/www/ek-vt520-rm.pdf
-
-        if (!tag.ansi and tag.value == 117) {
-            return .{ .tag = tag, .state = .permanently_reset };
+        if (!tag.ansi) {
+            switch (tag.value) {
+                inline 60, 61, 117 => |v| {
+                    comptime for (entries) |entry| {
+                        if (!entry.ansi and entry.value == v) @compileError(
+                            std.fmt.comptimePrint(
+                                "DEC private mode {} is in the mode table and " ++
+                                    "must not be reported as permanently reset",
+                                .{v},
+                            ),
+                        );
+                    };
+                    return .{ .tag = tag, .state = .permanently_reset };
+                },
+                else => {},
+            }
         }
 
         // These unimplemented ANSI modes report fixed reset, matching
@@ -539,6 +553,24 @@ test "getReport unsupported ANSI modes permanently reset" {
 
     // An unlisted ANSI mode is still unknown, not permanently reset.
     const unknown = state.getReport(.{ .value = 9, .ansi = true });
+    try testing.expectEqual(Report.State.not_recognized, unknown.state);
+}
+
+test "getReport unsupported DEC modes permanently reset" {
+    const state: ModeState = .{};
+    // DECHCCM, DECVCCM, DECECM.
+    for ([_]u16{ 60, 61, 117 }) |value| {
+        // Must stay out of the mode table; getReport enforces the
+        // same at comptime.
+        try testing.expect(modeFromInt(value, false) == null);
+        const report = state.getReport(.{ .value = value, .ansi = false });
+        try testing.expectEqual(Report.State.permanently_reset, report.state);
+        try testing.expectEqual(false, report.tag.ansi);
+        try testing.expectEqual(value, report.tag.value);
+    }
+
+    // An unlisted DEC mode is still unknown, not permanently reset.
+    const unknown = state.getReport(.{ .value = 9999, .ansi = false });
     try testing.expectEqual(Report.State.not_recognized, unknown.state);
 }
 
