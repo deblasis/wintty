@@ -155,6 +155,22 @@
            stays a valid C# string literal in the generated source. -->
       <_WinttyBuildLabel>$(BuildLabel.Replace('\','\\').Replace('"','\"'))</_WinttyBuildLabel>
       <!--
+        Default-terminal identity, on the same channel as the version and
+        AUMID below. The nil GUID is the shipped default for a build that
+        registers nothing: DefaultTermIdentity reads these two constants
+        and refuses every registry write while either one is nil or
+        unparseable, so a build that never received real identity is inert
+        by construction instead of behind a feature flag. A registration
+        build overrides them with -p:DefaultTerminalClsid and
+        -p:DerivedConsoleClsid. Escaped like BuildLabel above so even a
+        malformed override stays a valid C# literal; an unparseable one
+        just keeps registration refused.
+      -->
+      <DefaultTerminalClsid Condition="'$(DefaultTerminalClsid)' == ''">{00000000-0000-0000-0000-000000000000}</DefaultTerminalClsid>
+      <DefaultTerminalClsid>$(DefaultTerminalClsid.Replace('\','\\').Replace('"','\"'))</DefaultTerminalClsid>
+      <DerivedConsoleClsid Condition="'$(DerivedConsoleClsid)' == ''">{00000000-0000-0000-0000-000000000000}</DerivedConsoleClsid>
+      <DerivedConsoleClsid>$(DerivedConsoleClsid.Replace('\','\\').Replace('"','\"'))</DerivedConsoleClsid>
+      <!--
         The Shell's identity key for this build. Windows groups taskbar
         buttons, jump lists and toasts by AUMID, so two installs sharing
         one string merge into a single app in the shell no matter how
@@ -179,6 +195,8 @@
       <_BuildInfoLines Include="    public const string WinttyVersion = &quot;$(_WinttyVersion)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string WinttyVersionString = &quot;$(_WinttyVersionString)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string WinttyCommit = &quot;$(_WinttyCommit)$(_WinttyCommitDirty)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string DefaultTerminalClsid = &quot;$(DefaultTerminalClsid)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string DerivedConsoleClsid = &quot;$(DerivedConsoleClsid)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string MsbuildConfig = &quot;$(Configuration)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string BuildLabel = &quot;$(_WinttyBuildLabel)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string AumId = &quot;$(_WinttyAumId)&quot;%3B"/>
