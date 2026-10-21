@@ -1214,6 +1214,13 @@ public partial class App : Application
         {
             HandleColdStartJumpList(coldLaunch);
         }
+        else if (Program.IsDeftermEmbeddingLaunch)
+        {
+            // A COM -Embedding launch opens no window of its own: its
+            // surfaces come from handoff placement, and a launch whose
+            // activation never arrives exits with the idle code instead
+            // of popping a window nobody asked for.
+        }
         else
         {
             // The first pane runs -e in the caller's directory, as a forwarded

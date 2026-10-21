@@ -149,6 +149,32 @@ public sealed class LifecycleWiringTests
         Assert.Equal(RegistrationKind.None, DefaultTermComServer.Kind);
     }
 
+    [Fact]
+    public void RegistrationFailure_IsNotFatal()
+    {
+        // A failed CoRegisterClassObject leaves nothing registered and
+        // never unwinds into the caller: an enabled install must still
+        // start the app when one COM call refuses.
+        DefaultTermComServer.Reset();
+        var diagnosed = new List<string>();
+        DefaultTermComServer.Diagnostic = diagnosed.Add;
+        DefaultTermComServer.RegisterOverride = (_, _) =>
+            throw new InvalidOperationException("CoRegisterClassObject refused");
+
+        DefaultTermComServer.TryRegisterPermanent(ValidPrimaryContext());
+
+        Assert.Equal(RegistrationKind.None, DefaultTermComServer.Kind);
+        Assert.Single(diagnosed);
+
+        var classification = DefaultTermComServer.ClassifyReceiver(
+            elevated: false, otherPrimaryExists: false);
+
+        // The upgrade failed the same non-fatal way: nothing registered,
+        // nothing thrown.
+        Assert.Equal(ReceiverClassification.UpgradedToPrimary, classification);
+        Assert.Equal(RegistrationKind.None, DefaultTermComServer.Kind);
+    }
+
     /// <summary>
     /// A context that satisfies every permanent-registration condition:
     /// election won, enabled, registrable edition, bound path, medium

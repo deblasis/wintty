@@ -31,6 +31,15 @@ public static partial class Program
         Environment.CurrentDirectory;
 
     /// <summary>
+    /// Whether this process was launched by COM for a default-terminal
+    /// handoff (<c>-Embedding</c>). Such a launch suppresses the default
+    /// first window: its surfaces come from handoff placement, and one
+    /// whose activation never arrives exits with the idle taxonomy code
+    /// rather than popping a window nobody asked for.
+    /// </summary>
+    internal static bool IsDeftermEmbeddingLaunch { get; private set; }
+
+    /// <summary>
     /// Exit codes for Wintty.exe. Distinct values let callers
     /// (launchers, tests, CI, <c>just run-win</c>) tell apart "refused
     /// to start" from "crashed mid-run". CLI actions
@@ -884,6 +893,7 @@ public static partial class Program
             }
 
             args = kept.ToArray();
+            IsDeftermEmbeddingLaunch = true;
             DefaultTermComServer.StartEmbeddingServer(
                 DefaultTermBootstrap.BuildContext(
                     SingleInstanceRole.Secondary,
@@ -1127,6 +1137,15 @@ public static partial class Program
         // Revoke before draining so in-flight handoffs settle without a
         // newcomer, then release COM.
         DefaultTermComServer.Shutdown();
+
+        // An embedding launch that never received an activation exits
+        // with the idle taxonomy code, distinguishing "launched for a
+        // handoff that never came" from every ordinary GUI exit.
+        if (IsDeftermEmbeddingLaunch && DefaultTermComServer.HandoffCount == 0)
+        {
+            return DefaultTermComServer.ExitIdleEmbedding();
+        }
+
         return guiExit;
     }
 
@@ -1695,10 +1714,51 @@ public static partial class Program
             // feature off, unbound exe, elevated) leaves nothing
             // registered; the +defterm-status probe reports the actual
             // state, never the intended one.
-            DefaultTermComServer.TryRegisterPermanent(
-                DefaultTermBootstrap.BuildContext(
-                    _singleInstance.Role,
-                    DefaultTermBootstrap.IsFeatureEnabled()));
+            //
+            // An embedding launch holds a consumed transient instead: it
+            // classifies after serving its activation (elevated
+            // receivers never keep a class object; medium receivers
+            // upgrade to permanent only with no other primary), which
+            // also defensively revokes the transient before any
+            // re-registration, explicit against CO_E_OBJISREG.
+            if (IsDeftermEmbeddingLaunch)
+            {
+                DefaultTermComServer.ClassifyReceiver(
+                    elevated: DefaultTermBootstrap.IsElevatedProcess,
+                    otherPrimaryExists:
+                        _singleInstance.Role == SingleInstanceRole.Secondary);
+            }
+            else
+            {
+                DefaultTermComServer.TryRegisterPermanent(
+                    DefaultTermBootstrap.BuildContext(
+                        _singleInstance.Role,
+                        DefaultTermBootstrap.IsFeatureEnabled()));
+            }
+
+            // Startup revalidation: shadow-unwrite a selection that
+            // moved elsewhere, repair bindings on an install move,
+            // self-disable when single-instance went off under an
+            // enabled registration. Every notice is surfaced, not just
+            // logged, because each one explains a state the user can
+            // otherwise only see as the feature silently not working.
+            try
+            {
+                var report = new DefaultTermRevalidator().Revalidate(
+                    new RevalidationInputs(
+                        DefaultTermBootstrap.CreateEngine(),
+                        DefaultTermBootstrap.PassesBoundPathCheck(),
+                        ReadSingleInstanceSetting()));
+                if (report.Notice is not null)
+                {
+                    WriteStderr($"{AppIdentity.LogTag} {report.Notice}");
+                }
+            }
+            catch (Exception e)
+            {
+                WriteStderr(
+                    $"{AppIdentity.LogTag} default-terminal revalidation failed: {e.Message}");
+            }
 
             if (_singleInstance.ShouldShowLaunchSplash)
             {

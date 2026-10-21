@@ -114,6 +114,15 @@ public static partial class DefaultTermBootstrap
 
     /// <summary>
     /// The feature is enabled when the selection names this build's own
+    /// <summary>
+    /// Whether this process runs above medium integrity. Elevated
+    /// receivers serve their activation and never hold a class object.
+    /// </summary>
+    public static bool IsElevatedProcess =>
+        ReadIntegrityLevel() != TokenIntegrity.Medium;
+
+    /// <summary>
+    /// The feature is enabled when the selection names this build's own
     /// pair: while it is disabled, nothing is exposed.
     /// </summary>
     public static bool IsFeatureEnabled() =>

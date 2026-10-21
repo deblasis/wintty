@@ -85,6 +85,12 @@ public static partial class DefaultTermComServer
     // Test seams. Null means the production step runs; a test sets a
     // recorder to drive the state machine without touching COM.
     internal static Func<Guid, RegistrationKind, uint>? RegisterOverride;
+
+    /// <summary>
+    /// Diagnostics sink for non-fatal COM failures; the app wires it to
+    /// its startup diagnostics.
+    /// </summary>
+    internal static Action<string>? Diagnostic;
     internal static Action<uint>? RevokeOverride;
     internal static Action? DrainOverride;
     internal static Action? ReleaseOverride;
@@ -100,7 +106,11 @@ public static partial class DefaultTermComServer
             return;
         }
 
-        Register(Parse(DefaultTermIdentity.TerminalClsid), RegistrationKind.Permanent);
+        if (Register(Parse(DefaultTermIdentity.TerminalClsid), RegistrationKind.Permanent) == 0)
+        {
+            return;
+        }
+
         lock (_gate)
         {
             Kind = RegistrationKind.Permanent;
@@ -114,6 +124,11 @@ public static partial class DefaultTermComServer
     public static uint RegisterTransient(Guid clsid)
     {
         var cookie = Register(clsid, RegistrationKind.Transient);
+        if (cookie == 0)
+        {
+            return 0;
+        }
+
         lock (_gate)
         {
             Kind = RegistrationKind.Transient;
@@ -146,7 +161,11 @@ public static partial class DefaultTermComServer
         }
 
         RevokeAll();
-        Register(Parse(DefaultTermIdentity.TerminalClsid), RegistrationKind.Permanent);
+        if (Register(Parse(DefaultTermIdentity.TerminalClsid), RegistrationKind.Permanent) == 0)
+        {
+            return ReceiverClassification.UpgradedToPrimary;
+        }
+
         lock (_gate)
         {
             Kind = RegistrationKind.Permanent;
@@ -264,8 +283,17 @@ public static partial class DefaultTermComServer
     /// Raise <see cref="HandoffReceived"/>; the COM call path uses this
     /// so the event has exactly one raise site.
     /// </summary>
-    internal static void RaiseHandoffReceived(HandoffPlacementRequest request) =>
+    /// <summary>
+    /// How many handoffs this process has received. An embedding launch
+    /// with zero exits with the idle taxonomy code.
+    /// </summary>
+    public static int HandoffCount { get; private set; }
+
+    internal static void RaiseHandoffReceived(HandoffPlacementRequest request)
+    {
+        HandoffCount++;
         HandoffReceived?.Invoke(request);
+    }
 
     internal static void Reset()
     {
@@ -276,9 +304,11 @@ public static partial class DefaultTermComServer
             _embeddingThread = null;
         }
 
+        HandoffCount = 0;
         _embeddingShutdown.Reset();
 
         RegisterOverride = null;
+        Diagnostic = null;
         RevokeOverride = null;
         DrainOverride = null;
         ReleaseOverride = null;
@@ -286,6 +316,22 @@ public static partial class DefaultTermComServer
     }
 
     private static uint Register(Guid clsid, RegistrationKind kind)
+    {
+        try
+        {
+            return RegisterStep(clsid, kind);
+        }
+        catch (Exception e)
+        {
+            // Non-fatal by design: whatever failed, nothing is
+            // registered, the app keeps starting, and the host degrades
+            // launches safely.
+            Diagnostic?.Invoke($"class-object registration failed for {clsid}: {e.Message}");
+            return 0;
+        }
+    }
+
+    private static uint RegisterStep(Guid clsid, RegistrationKind kind)
     {
         if (RegisterOverride is not null)
         {
@@ -315,8 +361,13 @@ public static partial class DefaultTermComServer
                 out var cookie);
             if (hr != 0)
             {
-                throw new InvalidOperationException(
+                // Non-fatal by design: an enabled install that fails one
+                // COM call still starts; nothing is registered, the
+                // probe reports the actual state, and the host degrades
+                // launches to conhost safely.
+                Diagnostic?.Invoke(
                     $"CoRegisterClassObject failed for {clsid}: 0x{hr:X8}");
+                return 0;
             }
 
             lock (_gate)
