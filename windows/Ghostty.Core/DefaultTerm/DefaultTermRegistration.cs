@@ -214,6 +214,29 @@ public sealed class DefaultTermRegistration
 
         using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
         _store?.Save(CapturePrior(baseKey));
+        return WriteRegistration(baseKey);
+    }
+
+    /// <summary>
+    /// Rewrites the whole registration without capturing priors: the
+    /// repair path for an enabled build whose install location moved.
+    /// Assumes the caller verified the selection is still ours.
+    /// </summary>
+    public void RepairBindings()
+    {
+        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        WriteRegistration(baseKey);
+    }
+
+    /// <summary>True while the shared console binding names this build's binary.</summary>
+    public bool ConsoleBindingIsOurs()
+    {
+        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        return GroupNamesOurBinary(baseKey);
+    }
+
+    private EnableResult WriteRegistration(RegistryKey baseKey)
+    {
         var journal = new List<JournalEntry>();
         var observedSubkeys = new HashSet<string>(StringComparer.Ordinal);
 
