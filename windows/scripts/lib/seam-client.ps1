@@ -173,6 +173,9 @@ public static class SeamDesk {
     const uint GENERIC_ALL = 0x10000000, DESKTOP_READOBJECTS = 0x1, DESKTOP_ENUMERATE = 0x40;
     const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
 
+    [StructLayout(LayoutKind.Sequential)] struct POWER_THROTTLING_STATE { public uint Version, ControlMask, StateMask; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessInformation(IntPtr proc, int cls, ref POWER_THROTTLING_STATE info, int size);
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFOW {
         public int cb; public IntPtr lpReserved, lpDesktop, lpTitle;
@@ -273,6 +276,16 @@ public static class SeamDesk {
             Process proc;
             try {
                 if (!AssignProcessToJobObject(Job(), pi.hProcess)) throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject");
+                // Same opt-out the release launcher applies: a process whose
+                // windows sit on a desktop that is not the input desktop is one
+                // Windows may power-throttle, and a throttled app's seam answers
+                // arrive late. EXECUTION_SPEED (1) and IGNORE_TIMER_RESOLUTION
+                // (4) controlled, both off (ProcessPowerThrottling = 4).
+                if (privateDesktop)
+                {
+                    var throttle = new POWER_THROTTLING_STATE { Version = 1, ControlMask = 0x1 | 0x4, StateMask = 0 };
+                    SetProcessInformation(pi.hProcess, 4, ref throttle, 12);
+                }
                 proc = Process.GetProcessById(pi.dwProcessId);
                 var unused = proc.Handle;
                 if (ResumeThread(pi.hThread) == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread");
