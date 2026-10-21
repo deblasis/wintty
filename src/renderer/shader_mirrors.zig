@@ -258,7 +258,7 @@ pub fn expectBlockLayout(
             "shader mirror drift in {s}: uniform block {s} declares {d} members " ++
                 "({s}) but {s} has {d} fields ({s}); the two are one block",
             .{
-                what, block, members.len, memberNames(members), @typeName(T),
+                what,       block,         members.len, memberNames(members), @typeName(T),
                 fields.len, fieldNames(T),
             },
         ));
