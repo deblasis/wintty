@@ -78,6 +78,20 @@ notify_state: NotifyState = .{},
 /// The options used to initialize this thread.
 opts: Options,
 
+/// Lifecycle, guarded by deinit's Debug assert: the thread must never
+/// be RUNNING when deinit is called - either its thread function
+/// returned (`.exited`, set at threadMain's defer, marginally before
+/// OS termination; joining first is still the caller's job) or it
+/// never started (the caller may deinit to drain the mailbox). A
+/// best-effort detector, not a proof: a spawned worker that has not
+/// yet run its first instruction still reads `.never_started`.
+/// Violating the contract under load corrupts state far from the
+/// cause (a closed loop handle, a poisoned mailbox) instead of
+/// failing at the violation, which is what the assert converts.
+lifecycle: std.atomic.Value(Lifecycle) = .init(.never_started),
+
+const Lifecycle = enum(u8) { never_started, running, exited };
+
 /// Initialize the thread. This does not START the thread. This only sets
 /// up all the internal state necessary prior to starting the thread. It
 /// is up to the caller to start the thread with the threadMain entrypoint.
@@ -116,6 +130,11 @@ pub fn init(alloc: Allocator, opts: Options) !Thread {
 /// Clean up the thread. This is only safe to call once the thread
 /// completes executing; the caller must join prior to this.
 pub fn deinit(self: *Thread) void {
+    if (builtin.mode == .Debug and self.lifecycle.load(.seq_cst) == .running) @panic(
+        "Thread.deinit while the thread is running: join the OS " ++
+            "thread first (teardown order is stop-notify, join, deinit)",
+    );
+
     self.refresh.deinit();
     self.wakeup.deinit();
     self.stop.deinit();
@@ -137,6 +156,14 @@ pub fn deinit(self: *Thread) void {
 
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread) void {
+    if (self.lifecycle.cmpxchgStrong(
+        .never_started,
+        .running,
+        .seq_cst,
+        .seq_cst,
+    ) != null) @panic("search thread started twice");
+    defer _ = self.lifecycle.cmpxchgStrong(.running, .exited, .seq_cst, .seq_cst);
+
     // Call child function so we can use errors...
     self.threadMain_() catch |err| {
         // In the future, we should expose this on the thread struct.
@@ -730,8 +757,10 @@ const ShutdownUserData = struct {
                     @as([]const u8, needle),
                 ) catch unreachable }, .forever);
 
-                // Stop without waking the mailbox drain.
-                ud.thread.stop.notify() catch unreachable;
+                // Stop without waking the mailbox drain. Production
+                // treats a failed stop-notify as a logged stall, not a
+                // crash; match that posture here.
+                ud.thread.stop.notify() catch {};
                 ud.queued.set(io);
             },
 
@@ -739,6 +768,20 @@ const ShutdownUserData = struct {
         }
     }
 };
+
+/// The teardown contract for a spawned search thread: notify stop,
+/// join, and only then may deinit run (see Thread.deinit). Every test
+/// that spawns the thread must reach this on every path, including
+/// failure unwinds, so `joined` makes the body's own call idempotent
+/// with the unwind defer.
+fn stopAndJoin(thread: *Thread, os_thread: *std.Thread, joined: *bool) void {
+    if (joined.*) return;
+    thread.stop.notify() catch |err| {
+        log.warn("stop notify failed, join may wait out a stall err={}", .{err});
+    };
+    os_thread.join();
+    joined.* = true;
+}
 
 test "search thread shutdown frees messages left in the mailbox" {
     const alloc = testing.allocator;
@@ -766,6 +809,8 @@ test "search thread shutdown frees messages left in the mailbox" {
         threadMain,
         .{&thread},
     );
+    var joined = false;
+    defer stopAndJoin(&thread, &os_thread, &joined);
 
     _ = thread.mailbox.push(
         io,
@@ -779,13 +824,25 @@ test "search thread shutdown frees messages left in the mailbox" {
 
     ud.queued.waitTimeout(io, .{ .duration = .{
         .clock = .awake,
-        .raw = .fromMilliseconds(5000),
+        .raw = .fromSeconds(60),
     } }) catch {
-        // The search never completed so the callback never ran. Stop the
-        // thread ourselves so this fails rather than hanging on join.
-        thread.stop.notify() catch {};
+        // Hang guard, not the oracle: a miss means the thread stalled;
+        // we join below so the failure is a verdict on the property,
+        // not on the deadline. A miss does not guarantee failure -
+        // the worker may publish between the miss and the stop notify.
+        // 60s is ~2000x the sub-100ms a healthy pass needs even under
+        // heavy load (waits stretch, they do not skip), so only a real
+        // stall pays it: 60s here plus the join, and both guards in
+        // this file stack to ~2 minutes for a hung pair. std.Thread
+        // has no timed join, so a worker that ignores a failed
+        // stop-notify can outlive that bound; nothing here can wedge
+        // that far and the notify failure is logged.
+        thread.stop.notify() catch |err| {
+            log.warn("stop notify failed, join may wait out a stall err={}", .{err});
+        };
     };
-    os_thread.join();
+    stopAndJoin(&thread, &os_thread, &joined);
+    try testing.expect(thread.lifecycle.load(.seq_cst) == .exited);
 
     try testing.expect(ud.pushed);
 }
@@ -843,6 +900,8 @@ test {
         threadMain,
         .{&thread},
     );
+    var joined = false;
+    defer stopAndJoin(&thread, &os_thread, &joined);
 
     // Start our search
     _ = thread.mailbox.push(
@@ -855,12 +914,14 @@ test {
     );
     try thread.wakeup.notify();
 
-    // Wait for completion
-    try ud.reset.waitTimeout(testing.io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } });
-
-    // Stop the thread
-    try thread.stop.notify();
-    os_thread.join();
+    // Wait for completion. Hang guard, not the oracle: a miss means
+    // the search stalled, and we join first so a miss yields a clean
+    // verdict either way (the asserts below fail only if the stall
+    // preceded publication) instead of unwinding into deinit with a
+    // live worker. Same 60s cost bound as the guard above.
+    ud.reset.waitTimeout(testing.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(60) } }) catch {};
+    stopAndJoin(&thread, &os_thread, &joined);
+    try testing.expect(thread.lifecycle.load(.seq_cst) == .exited);
 
     // 1 total matches
     try testing.expectEqual(1, ud.total);
