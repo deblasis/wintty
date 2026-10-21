@@ -283,6 +283,12 @@
           "xunit.extensibility.core": "[2.9.2]"
         }
       },
+      "defterm-canary": {
+        "type": "Project",
+        "dependencies": {
+          "Ghostty.Core": "[1.0.0, )"
+        }
+      },
       "ghostty.bench": {
         "type": "Project"
       },

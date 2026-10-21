@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Wintty.DeftermCanaryTool</RootNamespace>
+    <!-- Small tool: never sign, never publish. -->
+    <IsPackable>false</IsPackable>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\windows\Ghostty.Core\Ghostty.Core.csproj" />
+  </ItemGroup>
+
+</Project>
