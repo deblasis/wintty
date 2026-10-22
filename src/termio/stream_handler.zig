@@ -2818,9 +2818,12 @@ test "a reader parked on a full app mailbox lets go when teardown latches" {
     const elapsed_ms = start.untilNow(io, .awake).toMilliseconds();
     closer.join();
 
-    // Well under the budget, with room for a loaded build machine; the
-    // unfixed wait is 60 s.
-    try testing.expect(elapsed_ms < 5 * std.time.ms_per_s);
+    // The latch cuts the push budget to a single wake window (250 ms
+    // nominal); without it the push would wait out all 240 windows (60 s
+    // nominal). Machine load stretches both sides by the same factor, so a
+    // bound halfway between them separates the two states no matter how
+    // loaded the host is: only a latch that never fired can cross 30 s.
+    try testing.expect(elapsed_ms < 30 * std.time.ms_per_s);
     // Given up, not delivered: the queue is exactly as full as it was.
     try testing.expectEqual(queued, h.app_mailbox.len);
 }
