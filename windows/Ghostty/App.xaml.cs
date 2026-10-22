@@ -1240,7 +1240,7 @@ public partial class App : Application
                     workingDirectory: Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(
                         coldCommand, Program.LaunchWorkingDirectory),
                     initialCommand: initialCommand));
-            window.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
+            TrackWindowLifetime(window);
             _sessionManager.Track(window);
             window.Activate();
         }
@@ -1263,7 +1263,7 @@ public partial class App : Application
             _quakeWindow = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
                 isQuickTerminal: true);
-            _quakeWindow.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
+            TrackWindowLifetime(_quakeWindow);
             _quakeWindow.Activate();          // creates the HWND
             _quakeWindow.AppWindow.Hide();    // immediately hide
         }
@@ -1960,7 +1960,7 @@ public partial class App : Application
                 _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, ws,
                 showLaunchIcon: isFirstWindow);
             isFirstWindow = false;
-            restored.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
+            TrackWindowLifetime(restored);
             _sessionManager?.Track(restored);
             restored.Activate();
         }
@@ -2030,7 +2030,7 @@ public partial class App : Application
 
         var window = MainWindow.CreateForNewTab(
             _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, snapshot);
-        window.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
+        TrackWindowLifetime(window);
         _sessionManager?.Track(window);
         _sessionManager?.RequestPersist();
         window.Activate();
@@ -2088,7 +2088,7 @@ public partial class App : Application
 
         var restored = new MainWindow(
             _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, windowSession);
-        restored.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
+        TrackWindowLifetime(restored);
         // Track + persist so the reopened window is in the on-disk session
         // snapshot immediately, matching the new-window (OpenInNewWindow) path.
         _sessionManager?.Track(restored);
@@ -2529,9 +2529,34 @@ public partial class App : Application
 
     internal static bool AnyLiveWindow => Volatile.Read(ref _liveWindows) > 0;
 
+    /// <summary>
+    /// The ONE way a window joins the shared close handler: subscribe and
+    /// count in the same breath, so an increment can never be forgotten
+    /// beside a subscription (the count would drift and the embedding
+    /// lifetime could exit under a live window). Subscribe before the
+    /// window can raise Closed.
+    /// </summary>
+    internal void TrackWindowLifetime(MainWindow window)
+    {
+        window.Closed += OnAnyWindowClosedInternal;
+        Interlocked.Increment(ref _liveWindows);
+    }
+
     internal void OnAnyWindowClosedInternal(object sender, WindowEventArgs args)
     {
-        Interlocked.Decrement(ref _liveWindows);        // Use the XamlRoot captured at registration time (stored on the
+        // One-shot per window: detach first, so a re-raised Closed fires
+        // nobody and can never double-decrement the count into an
+        // under-count that would kill a live window at idle.
+        if (sender is MainWindow detaching)
+        {
+            detaching.Closed -= OnAnyWindowClosedInternal;
+        }
+
+        Interlocked.Decrement(ref _liveWindows);
+        System.Diagnostics.Debug.Assert(
+            _liveWindows >= 0,
+            "live-window count went negative: an increment site was missed");
+        // Use the XamlRoot captured at registration time (stored on the
         // MainWindow instance) rather than re-reading w.Content.XamlRoot
         // here. By the time Window.Closed fires in WinUI 3, Content may
         // already have a null XamlRoot, so re-reading would silently

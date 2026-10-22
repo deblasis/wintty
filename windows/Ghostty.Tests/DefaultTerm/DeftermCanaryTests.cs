@@ -90,8 +90,10 @@ public sealed class DeftermCanaryTests : IDisposable
     public void ScanGate_RealRootReferences_BannedInTestSources()
     {
         var root = RepoRoot();
+        // The whole test project, not only this module's folder: an
+        // escape into real state from any suite is the same escape.
         var testSources = Directory.GetFiles(
-            Path.Combine(root, "windows", "Ghostty.Tests", "DefaultTerm"),
+            Path.Combine(root, "windows", "Ghostty.Tests"),
             "*.cs", SearchOption.AllDirectories);
 
         Assert.NotEmpty(testSources);

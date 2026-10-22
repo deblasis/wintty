@@ -289,8 +289,11 @@ public static partial class DefaultTermComServer
             {
                 WaitForWindowOrSettle();
             }
+            // The oracle must affirmatively report "no window": a null
+            // or unwired oracle fails toward staying alive, never toward
+            // killing a possibly-windowed process.
             else if (HandoffCount == 0
-                     && AnyWindowExists?.Invoke() != true
+                     && AnyWindowExists?.Invoke() == false
                      && !_embeddingShutdown.IsSet)
             {
                 Environment.Exit(IdleEmbeddingExitCode);

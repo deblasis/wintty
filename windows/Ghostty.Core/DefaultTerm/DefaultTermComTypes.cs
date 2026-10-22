@@ -101,19 +101,7 @@ public sealed class TerminalHandoffObject :
     {
         _service = service;
         _createServiced = createServiced;
-        // The far ends arrive through the in-lock completion callback so
-        // this object never reads the service's per-call fields after
-        // HandleCall returns (a second call on the same object could be
-        // mid-flight by then and have reset them).
-        service.OnCallSucceeded = (inPipe, outPipe) =>
-        {
-            _lastInPipe = inPipe;
-            _lastOutPipe = outPipe;
-        };
     }
-
-    private IntPtr _lastInPipe;
-    private IntPtr _lastOutPipe;
 
     int ITerminalHandoff3.EstablishPtyHandoff(
         out IntPtr inPipe,
@@ -131,27 +119,19 @@ public sealed class TerminalHandoffObject :
             return unchecked((int)0x80004005); // E_FAIL, fail closed
         }
 
-        var hr = _service.HandleCall(new HandoffArgs(
+        // The far ends arrive as pure return values: nothing crosses
+        // the call's gate through shared fields, so a second concurrent
+        // call on this object can never swap or reset them. The caller
+        // owns them from here, exactly as the [out] contract says.
+        var result = _service.HandleCall(new HandoffArgs(
             signal,
             reference,
             server,
             client,
             startupInfo));
-        if (hr == 0)
-        {
-            // The console side's far ends, captured inside the call's
-            // gate: the caller owns them from here, exactly as the
-            // [out] contract says.
-            inPipe = _lastInPipe;
-            outPipe = _lastOutPipe;
-        }
-        else
-        {
-            inPipe = IntPtr.Zero;
-            outPipe = IntPtr.Zero;
-        }
-
-        return hr;
+        inPipe = result.InPipe;
+        outPipe = result.OutPipe;
+        return result.Hr;
     }
 
     int IClassFactoryCom.CreateInstance(IntPtr outer, ref Guid iid, out IntPtr ppv) =>

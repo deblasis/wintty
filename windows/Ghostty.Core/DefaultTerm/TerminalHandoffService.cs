@@ -12,6 +12,16 @@ public enum FaultPoint
 }
 
 /// <summary>
+/// One call's outcome: the HRESULT and, on success, the console side's
+/// far ends, delivered as pure values so nothing crosses the call-gate
+/// boundary through shared mutable fields.
+/// </summary>
+public readonly record struct HandoffCallResult(
+    int Hr,
+    IntPtr InPipe,
+    IntPtr OutPipe);
+
+/// <summary>
 /// The [in] parameters of one EstablishPtyHandoff call: the signal,
 /// reference, server and client handles, and the startup-info block
 /// pointer which may be NULL. The two pipe handles are [out]s the
@@ -94,13 +104,6 @@ public sealed partial class TerminalHandoffService
     public FaultPoint Fault { get; set; }
 
     /// <summary>
-    /// Receives the console-side far ends on a successful call, inside
-    /// the call gate immediately before return: the caller keeps no
-    /// reference to this instance's per-call fields afterwards.
-    /// </summary>
-    public Action<IntPtr, IntPtr>? OnCallSucceeded { get; set; }
-
-    /// <summary>
     /// The handles of the call in flight, populated right before the
     /// adoption scheduler runs: the carrier the placement request takes
     /// to the surface.
@@ -141,31 +144,32 @@ public sealed partial class TerminalHandoffService
 
     public int PreexistingHandleCount { get; private set; }
 
-    public int HandleCall(HandoffArgs args)
+    public HandoffCallResult HandleCall(HandoffArgs args)
     {
-        PreexistingHandleCount = _liveHandles.Count;
-        PipesCreated = 0;
-        LastInWriteEnd = IntPtr.Zero;
-        LastConsoleInRead = IntPtr.Zero;
-        LastConsoleOutWrite = IntPtr.Zero;
-        LastHandles = null;
-        LastTitle = null;
-        LastIconPath = null;
-        LastClientDuplicate = IntPtr.Zero;
-
         // One call at a time per object: every observable on this
         // instance is per-call state, and a hostile parallel caller
         // would otherwise receive another call's out-pipes. The cost is
         // latency for that pathological caller only; normal activation
-        // creates one object per call.
+        // creates one object per call. The per-call resets live INSIDE
+        // the gate with everything else that touches them: no shared
+        // field is ever written or read for the out-pipes outside it.
         lock (_callGate)
         {
             CurrentArgs = args;
+            PreexistingHandleCount = _liveHandles.Count;
+            PipesCreated = 0;
+            LastInWriteEnd = IntPtr.Zero;
+            LastConsoleInRead = IntPtr.Zero;
+            LastConsoleOutWrite = IntPtr.Zero;
+            LastHandles = null;
+            LastTitle = null;
+            LastIconPath = null;
+            LastClientDuplicate = IntPtr.Zero;
             return HandleCallSerialized(args);
         }
     }
 
-    private int HandleCallSerialized(HandoffArgs args)
+    private HandoffCallResult HandleCallSerialized(HandoffArgs args)
     {
         // Validation before any effect.
         if (args.Signal == IntPtr.Zero
@@ -173,7 +177,7 @@ public sealed partial class TerminalHandoffService
             || args.Server == IntPtr.Zero
             || args.Client == IntPtr.Zero)
         {
-            return unchecked((int)0x80070057); // E_INVALIDARG
+            return new HandoffCallResult(unchecked((int)0x80070057), IntPtr.Zero, IntPtr.Zero);
         }
 
         // The [in] pipe/file handles must be real pipe or file handles
@@ -181,17 +185,17 @@ public sealed partial class TerminalHandoffService
         // both process handles must belong to live processes.
         if (GetFileType(args.Signal) == 0 || GetFileType(args.Reference) == 0)
         {
-            return unchecked((int)0x80070057); // E_INVALIDARG
+            return new HandoffCallResult(unchecked((int)0x80070057), IntPtr.Zero, IntPtr.Zero);
         }
 
         if (GetProcessId(args.Server) == 0 || GetProcessId(args.Client) == 0)
         {
-            return unchecked((int)0x80070057); // E_INVALIDARG
+            return new HandoffCallResult(unchecked((int)0x80070057), IntPtr.Zero, IntPtr.Zero);
         }
 
         if (_inFlightSessions() >= _sessionCap)
         {
-            return unchecked((int)0x8007000E); // E_OUTOFMEMORY as the cap signal
+            return new HandoffCallResult(unchecked((int)0x8007000E), IntPtr.Zero, IntPtr.Zero);
         }
 
         try
@@ -274,7 +278,7 @@ public sealed partial class TerminalHandoffService
             if (placement != HandoffPlacementResult.Adopted)
             {
                 ReleaseThisCall();
-                return unchecked((int)0x80004005); // E_FAIL
+                return new HandoffCallResult(unchecked((int)0x80004005), IntPtr.Zero, IntPtr.Zero);
             }
 
             // Adopted: ownership transfers rather than closes. The far
@@ -289,18 +293,17 @@ public sealed partial class TerminalHandoffService
             _liveHandles.Remove(referenceDup);
             _liveHandles.Remove(serverDup);
             _liveHandles.Remove(clientDup);
-            OnCallSucceeded?.Invoke(LastConsoleInRead, LastConsoleOutWrite);
-            return 0;
+            return new HandoffCallResult(0, LastConsoleInRead, LastConsoleOutWrite);
         }
         catch (InjectedFaultException)
         {
             ReleaseThisCall();
-            return unchecked((int)0x80004005);
+            return new HandoffCallResult(unchecked((int)0x80004005), IntPtr.Zero, IntPtr.Zero);
         }
         catch (Exception e) when (e is InvalidOperationException or IOException)
         {
             ReleaseThisCall();
-            return unchecked((int)0x80004005);
+            return new HandoffCallResult(unchecked((int)0x80004005), IntPtr.Zero, IntPtr.Zero);
         }
     }
 

@@ -40,7 +40,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, pipe.Write, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, pipe.Write, IntPtr.Zero)).Hr;
 
         Assert.NotEqual(0, hr);
         Assert.Equal(0, service.PipesCreated);
@@ -53,7 +53,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService(inFlight: CapForTest);
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero)).Hr;
 
         Assert.NotEqual(0, hr);
         Assert.Equal(0, service.PipesCreated);
@@ -66,7 +66,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero)).Hr;
 
         Assert.Equal(0, hr);
         // The input pair and the output pair: two named-pipe pairs.
@@ -101,7 +101,7 @@ public sealed class HandoffContractTests
         var service = NewService();
         try
         {
-            var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, info.Ptr));
+            var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, info.Ptr)).Hr;
             Assert.Equal(0, hr);
         }
         finally
@@ -119,7 +119,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero)).Hr;
 
         Assert.Equal(0, hr);
         Assert.Null(service.LastTitle);
@@ -143,7 +143,7 @@ public sealed class HandoffContractTests
             return HandoffPlacementResult.Adopted;
         };
 
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero)).Hr;
 
         Assert.Equal(0, hr);
         Assert.NotNull(seen);
@@ -162,7 +162,7 @@ public sealed class HandoffContractTests
         using var proc = CurrentProcessHandle();
 
         var service = NewService();
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero)).Hr;
 
         Assert.Equal(0, hr);
         // The duplicates were made during the call and are still valid
@@ -198,7 +198,7 @@ public sealed class HandoffContractTests
         {
             var service = NewService();
             service.Fault = point;
-            var hr = service.HandleCall(args);
+            var hr = service.HandleCall(args).Hr;
             Assert.NotEqual(0, hr);
             Assert.True(
                 service.LiveHandleCount - service.PreexistingHandleCount == 0,
@@ -215,7 +215,7 @@ public sealed class HandoffContractTests
         var service = NewService();
         service.Scheduler = (_, _) => HandoffPlacementResult.Timeout;
 
-        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero));
+        var hr = service.HandleCall(new HandoffArgs(pipe.Read, pipe.Write, proc, proc, IntPtr.Zero)).Hr;
 
         Assert.Equal(EFail, hr);
         Assert.True(
@@ -226,7 +226,7 @@ public sealed class HandoffContractTests
     private static void RefusedNoPipes(HandoffArgs args)
     {
         var service = NewService();
-        var hr = service.HandleCall(args);
+        var hr = service.HandleCall(args).Hr;
         Assert.NotEqual(0, hr);
         Assert.Equal(0, service.PipesCreated);
     }

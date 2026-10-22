@@ -45,6 +45,22 @@ public sealed class DeftermWiringScanTests
         Assert.Contains("Shutdown()", program);
         Assert.Contains("AnyWindowExists", File.ReadAllText(
             Path.Combine(root, "windows", "Ghostty", "App.xaml.cs")));
+
+        // The live-window pairing is structural: the shared close
+        // handler is subscribed ONLY inside TrackWindowLifetime, which
+        // increments in the same breath, in both files that create
+        // windows. A future bare subscription or a forgotten increment
+        // trips this scan instead of drifting the count silently.
+        var app = File.ReadAllText(Path.Combine(root, "windows", "Ghostty", "App.xaml.cs"));
+        var main = File.ReadAllText(Path.Combine(root, "windows", "Ghostty", "MainWindow.xaml.cs"));
+        var helper = app.Substring(app.IndexOf("internal void TrackWindowLifetime"));
+        Assert.Contains("Interlocked.Increment(ref _liveWindows)", helper);
+        var subscribeCount = System.Text.RegularExpressions.Regex.Matches(
+            app + main, @"Closed \+= .*OnAnyWindowClosedInternal").Count;
+        var helperCalls = System.Text.RegularExpressions.Regex.Matches(
+            app + main, @"TrackWindowLifetime\(").Count;
+        Assert.Equal(1, subscribeCount); // the helper's own subscription
+        Assert.True(helperCalls >= 7, $"expected at least 7 helper call sites, found {helperCalls}");
     }
 
     private static string RepoRoot()
