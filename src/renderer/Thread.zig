@@ -1740,6 +1740,75 @@ test "deinit refuses to run while the thread is running" {
     try std.testing.expect(std.mem.indexOf(u8, src, entry) != null);
 }
 
+// The census above pins the refusal's text; this observes it firing. A
+// panic cannot be caught in-process, so the observation runs out of
+// process: the test below builds this suite with a filter that runs
+// only this probe and checks the process dies with the refusal message.
+test "deinit refusal probe" {
+    var probe_env = global.environMap() catch return error.SkipZigTest;
+    defer probe_env.deinit();
+    if (probe_env.get("WINTTY_TRIPWIRE_PROBE") == null) return error.SkipZigTest;
+
+    var t: Thread = undefined;
+    t.lifecycle = .init(.running);
+    t.deinit();
+}
+
+test "deinit refusal fires in a real run" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    // The probe build needs a repo tree: build.zig must sit in the
+    // test's cwd, which `zig build test` guarantees. From any other
+    // launch context skip: there is nothing to build.
+    {
+        var probe = try std.Io.Dir.cwd().openFile(io, "build.zig", .{});
+        probe.close(io);
+    }
+
+    var env = try global.environMap();
+    defer env.deinit();
+    try env.put("WINTTY_TRIPWIRE_PROBE", "1");
+
+    // A private prefix keeps the child's install from touching this
+    // binary's own zig-out while it is running.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const prefix = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    defer alloc.free(prefix);
+
+    // The child run can cost a minute on a cold cache (it builds this
+    // suite with a filter that selects only the probe test above); the
+    // panic itself is the expected outcome, so failure looks like a
+    // clean nonzero exit carrying the refusal message.
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            "zig",                                "build",
+            "test",                               "-Dapp-runtime=none",
+            "-Dtest-filter=deinit refusal probe", "--prefix",
+            prefix,                               "--summary",
+            "none",
+        },
+        .environ_map = &env,
+        .stderr = .pipe,
+        .stdout = .ignore,
+    });
+    const stderr_file = child.stderr orelse return error.SkipZigTest;
+    var read_buf: [64 * 1024]u8 = undefined;
+    var rd = stderr_file.reader(io, &read_buf);
+    var stderr_data: std.ArrayList(u8) = .empty;
+    defer stderr_data.deinit(alloc);
+    try rd.interface.appendRemaining(alloc, &stderr_data, .unlimited);
+    const term = try child.wait(io);
+
+    switch (term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => {},
+    }
+    try testing.expect(std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") != null);
+}
+
 // The safety net exists to bound a lost wakeup notify (#1036), and its
 // drain alone only bounds it for HIDDEN surfaces. Output never touches
 // the mailbox: the pty thread marks the terminal dirty and notifies
