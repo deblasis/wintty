@@ -2525,7 +2525,7 @@ public partial class App : Application
     // Live-window count for cross-thread readers (the default-terminal
     // embedding lifetime asks from its MTA thread): a counter, never a
     // collection enumeration, because the collections are UI-thread-only.
-    private static int _liveWindows;
+    internal static int _liveWindows;
 
     internal static bool AnyLiveWindow => Volatile.Read(ref _liveWindows) > 0;
 
