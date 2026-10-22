@@ -60,7 +60,11 @@ public sealed class DeftermWiringScanTests
         var helperCalls = System.Text.RegularExpressions.Regex.Matches(
             app + main, @"TrackWindowLifetime\(").Count;
         Assert.Equal(1, subscribeCount); // the helper's own subscription
-        Assert.True(helperCalls >= 7, $"expected at least 7 helper call sites, found {helperCalls}");
+        // Exact total: the regex also matches the helper's own
+        // definition, so seven call sites plus the definition is eight.
+        // A floor instead of an equality would let a deleted call site
+        // pass silently.
+        Assert.Equal(8, helperCalls);
     }
 
     private static string RepoRoot()
