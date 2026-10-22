@@ -1380,8 +1380,9 @@ test "renderer mailbox push wakes the thread when it cannot land" {
     // that runs; a healthy pass needs microseconds. The bound below is a
     // hang guard, not a budget: it only trips if this loop goes
     // unscheduled for a full minute, which machine load cannot do to a
-    // spinning thread. Worst case is 60 s and then a clean failure
-    // naming the lost wake.
+    // spinning thread; a whole-process suspension can, and that still
+    // fails cleanly with the same verdict. Worst case is 60 s and then
+    // a clean failure naming the lost wake.
     const start: std.Io.Timestamp = .now(io, .awake);
     while (woken == 0) {
         try loop.run(.no_wait);
@@ -1719,6 +1720,19 @@ test "no xev.Timer callback in this file returns .rearm" {
     // A scan that matched nothing would pass while proving nothing. Five is
     // what the file carries today; it may grow, and must not silently shrink.
     try std.testing.expect(found >= 5);
+}
+
+// The refusal below is a Debug-only panic, so a test cannot observe it
+// firing without crashing the runner. This census pins that the gate
+// and the refusal exist in deinit: deleting or weakening either keeps
+// the runner green only by failing here first. Split needles so the
+// test's own text cannot match itself.
+test "deinit refuses to run while the thread is running" {
+    const src = @embedFile("Thread.zig");
+    const gate = "builtin.mode == .Debug and self.lifecycle" ++ ".load(.seq_cst) == .running";
+    const refusal = "deinit while the thread is running: join the " ++ "OS ";
+    try std.testing.expect(std.mem.indexOf(u8, src, gate) != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, refusal) != null);
 }
 
 // The safety net exists to bound a lost wakeup notify (#1036), and its
