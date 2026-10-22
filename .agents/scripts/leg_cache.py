@@ -426,39 +426,50 @@ def csproj_out_of_tree(csproj_rel, text):
     includes from outside the tree its own routing already covers, and
     the include spellings refused by name.
 
-    The project's depth in the tree decides what an escape means: only a
-    literal path with exactly as many `..\\` levels as the project sits
-    deep can name a repo file. Fewer levels land inside windows/ or
-    dist/, which their prefix rules route whole. More leave the repo
-    entirely and cannot be routed, so they are refused rather than
-    skipped: a new spelling must not slip past as "not an include".
-    Globs, forward slashes and property expansions are refused for the
-    same reason, but only once an include escapes; a glob that stays
-    inside windows/ names no repo file and is left to the prefix rules."""
+    An include is classified on its whole shape, because MSBuild
+    accepts spellings that reach past the project directory without
+    starting with `..\\`: forward slashes (`../../src/x.zig`),
+    property prefixes (`$(MSBuildThisFileDirectory)..\\..\\src`),
+    absolute paths, and interior dot-dot segments all resolve out of
+    tree while a leading-segment count calls them in-tree. So there are
+    exactly three classes: a plain relative path (globs included) that
+    stays inside the project tree names no repo file and is left to the
+    prefix rules; an include that begins with exactly `up` leading
+    `..\\` segments followed by a `..`-free literal rest names a repo
+    file and is tracked; everything else -- every spelling that could
+    still leave the project directory -- is refused. Refused, not
+    skipped: a new spelling must not slip past the check as "not an
+    include"."""
     up = csproj_rel.count("/")
+    lead = "..\\" * up
     embeds, refused = [], []
     for inc in re.findall(r'Include="([^"]+)"', text):
-        if ".." not in inc:
+        abs_root = inc[1:2] == ":" or inc.startswith("\\")
+        if not abs_root and ".." not in inc:
+            # Plain relative path or glob inside the project tree.
             continue
-        levels, rest = 0, inc
-        while rest.startswith("..\\"):
-            rest = rest[3:]
-            levels += 1
-        if levels == 0 or levels < up:
-            # Inside windows/ or dist/, which their prefix rules route
-            # whole, glob or not; it cannot name a repo file.
+        if inc.startswith(lead):
+            # Exactly `up` leading levels: the only shape that can
+            # name a repo file, and only as a clean literal path.
+            rest = inc[len(lead):]
+            if any(c in inc for c in "*/$;") or "/" in inc or ".." in rest:
+                refused.append(inc)
+                continue
+            rel = rest.replace("\\", "/")
+            if rel.startswith(("windows/", "zig-out/")):
+                continue
+            embeds.append(rel)
             continue
-        # levels >= up: the include tries to name a repo file, so only a
-        # literal path with exactly `up` levels counts. Anything else --
-        # a glob, a forward slash, a property expansion, or an escape
-        # past the repo root -- is refused rather than skipped.
-        if levels > up or any(c in inc for c in "*/$;"):
-            refused.append(inc)
+        # Not a clean exactly-up escape. Fewer leading levels with a
+        # clean remainder stay inside windows/ or dist/, routed whole.
+        m = re.match(r"^(?:\.\.\\)+", inc)
+        after = m.end() if m else 0
+        levels = after // 3
+        if (not abs_root and levels < up and "/" not in inc
+                and ".." not in inc[after:]
+                and not any(c in inc for c in "$;")):
             continue
-        rel = rest.replace("\\", "/")
-        if rel.startswith(("windows/", "zig-out/")):
-            continue
-        embeds.append(rel)
+        refused.append(inc)
     return sorted(set(embeds)), refused
 
 
@@ -1131,6 +1142,33 @@ def self_test():
                and ctx0.embeds == ["src/extra.zig", "src/extra2.zig",
                                    "src/extra3.zig", "images/splash_extra.png"],
                "win-leg-inputs", str(ctx0.embeds))
+        # The refusal net must catch the spellings a leading-segment
+        # count misses: forward slashes, property prefixes, absolutes,
+        # interior dot-dots, over-escapes. Each reaches past the project
+        # tree by MSBuild's resolution; none may pass as not-an-include,
+        # and the in-tree glob and plain path must still be left alone.
+        esc_embeds, esc_refused = csproj_out_of_tree(
+            TESTS_CSPROJS[1],
+            '<Project>\n'
+            '  <EmbeddedResource Include="..\\..\\src\\fine.zig" />\n'
+            '  <EmbeddedResource Include="..\\..\\..\\src\\deep.zig" />\n'
+            '  <EmbeddedResource Include="..\\..\\src\\ok\\..\\..\\src\\interior.zig" />\n'
+            '  <EmbeddedResource Include="../../src/forward.zig" />\n'
+            '  <EmbeddedResource Include="$(MSBuildThisFileDirectory)..\\..\\src\\prop.zig" />\n'
+            '  <EmbeddedResource Include="C:\\abs\\x.zig" />\n'
+            '  <EmbeddedResource Include="..\\Ghostty\\**\\*.cs" />\n'
+            '  <Compile Include="Local\\Plain.cs" />\n'
+            '</Project>\n')
+        report(esc_embeds == ["src/fine.zig"]
+               and sorted(esc_refused) == sorted([
+                   "..\\..\\..\\src\\deep.zig",
+                   "..\\..\\src\\ok\\..\\..\\src\\interior.zig",
+                   "../../src/forward.zig",
+                   "$(MSBuildThisFileDirectory)..\\..\\src\\prop.zig",
+                   "C:\\abs\\x.zig",
+               ]),
+               "csproj-escape-spellings-refused",
+               f"embeds={esc_embeds} refused={sorted(esc_refused)}")
         recipes_hc, _ = parse_justfile("x: a b # not a dep\n    echo\n")
         report(recipes_hc["x"][1] == ["a", "b"], "header-comment-is-not-a-dependency",
                str(recipes_hc["x"][1]))
