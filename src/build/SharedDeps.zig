@@ -1141,6 +1141,8 @@ pub fn addSimd(
             // -fno-autolink also drops UCRT's /alternatename fallback.
             "-D_Avx2WmemEnabledWeakValue=_Avx2WmemEnabled",
             "-fno-autolink",
+            // MSVC 14.42+ STL rejects Zig's Clang 18 (STL1000).
+            "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
         });
 
         m.addCSourceFiles(.{

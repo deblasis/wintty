@@ -182,6 +182,8 @@ const HarfBuzzC = struct {
         var flag_builder: std.ArrayList([]const u8) = .empty;
         try flag_builder.appendSlice(self.builder.allocator, &.{
             "-DHAVE_STDBOOL_H",
+            // MSVC 14.42+ STL rejects Zig's Clang 18 (STL1000).
+            "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
         });
         // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
         // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
