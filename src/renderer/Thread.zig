@@ -1809,36 +1809,57 @@ test "deinit refusal fires in a real run" {
     });
     const stderr_file = child.stderr orelse return error.SkipZigTest;
 
-    // Bound the whole observation. A wedged child (a compiler hang, a
-    // stray grandchild holding the pipe) must fail this test with the
-    // command in the verdict, not hang the suite: the same rule the
-    // park-wait guards in this suite hold. The deadline is sized for a
-    // cold-cache nested build; a healthy run never approaches it. The
-    // watchdog kills only while the child is live: after wait() has
-    // returned, kill is documented to be a no-op.
+    // Bound the whole observation. A wedged child (a compiler hang) must
+    // fail this test with the command in the verdict, not hang the
+    // suite: the same rule the park-wait guards in this suite hold. The
+    // deadline is sized for a cold-cache nested build; a healthy run
+    // never approaches it. The watchdog polls a done flag instead of
+    // sleeping blind, so joining it below is prompt and it never
+    // outlives this frame; and when it does kill, the `killed` flag
+    // tells this frame to skip `wait` (kill's cleanup reaps the child;
+    // waiting again would trip Child.wait's live-id assert), while the
+    // kill's pipe cleanup is what releases the reader above.
     var child_done = std.atomic.Value(bool).init(false);
+    var child_killed = std.atomic.Value(bool).init(false);
     const Watchdog = struct {
         child: *std.process.Child,
         done: *std.atomic.Value(bool),
+        killed: *std.atomic.Value(bool),
         io: std.Io,
 
         fn run(self: *@This()) void {
-            std.Io.sleep(self.io, .fromSeconds(600), .awake) catch {};
+            var waited_ms: u64 = 0;
+            while (waited_ms < 600 * std.time.ms_per_s) {
+                if (self.done.load(.acquire)) return;
+                std.Io.sleep(self.io, .fromMilliseconds(250), .awake) catch {};
+                waited_ms += 250;
+            }
             if (self.done.load(.acquire)) return;
+            self.killed.store(true, .release);
             self.child.kill(self.io);
         }
     };
-    var watchdog_state = Watchdog{ .child = &child, .done = &child_done, .io = io };
+    var watchdog_state = Watchdog{
+        .child = &child,
+        .done = &child_done,
+        .killed = &child_killed,
+        .io = io,
+    };
     const watchdog = try std.Thread.spawn(.{}, Watchdog.run, .{&watchdog_state});
-    watchdog.detach();
+    defer {
+        child_done.store(true, .release);
+        watchdog.join();
+    }
 
     var read_buf: [64 * 1024]u8 = undefined;
     var rd = stderr_file.reader(io, &read_buf);
     var stderr_data: std.ArrayList(u8) = .empty;
     defer stderr_data.deinit(alloc);
     try rd.interface.appendRemaining(alloc, &stderr_data, .unlimited);
-    const term = try child.wait(io);
-    child_done.store(true, .release);
+    const term: std.process.Child.Term = if (child_killed.load(.acquire))
+        .{ .unknown = 0 }
+    else
+        try child.wait(io);
 
     switch (term) {
         .exited => |code| try testing.expect(code != 0),
