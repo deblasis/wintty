@@ -2251,6 +2251,9 @@ public sealed partial class MainWindow : Window
         var newWindow = CreateForNewTab(
             _configService, bootstrap, supervisor, loggerFactory, snapshot);
         newWindow.Closed += ((App)Application.Current).OnAnyWindowClosedInternal;
+        // Keep the cross-thread live-window count honest: this handler's
+        // close path decrements it.
+        System.Threading.Interlocked.Increment(ref App._liveWindows);
         // Track for session persistence (mirrors App.OnLaunched) so a window
         // opened mid-session is captured and restored.
         App.SessionManager?.Track(newWindow);
@@ -2345,6 +2348,9 @@ public sealed partial class MainWindow : Window
         // handler. WindowsByRoot insertion happens inside the new
         // window's own Content.Loaded handler.
         newWindow.Closed += ((App)Application.Current).OnAnyWindowClosedInternal;
+        // Keep the cross-thread live-window count honest: this handler's
+        // close path decrements it.
+        System.Threading.Interlocked.Increment(ref App._liveWindows);
         // Track for session persistence so a detached-to-new-window tab is
         // captured and restored.
         App.SessionManager?.Track(newWindow);
