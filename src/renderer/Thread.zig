@@ -1745,13 +1745,17 @@ test "deinit refuses to run while the thread is running" {
 // process: the test below builds this suite with a filter that runs
 // only this probe and checks the process dies with the refusal message.
 test "deinit refusal probe" {
-    var probe_env = global.environMap() catch return error.SkipZigTest;
-    defer probe_env.deinit();
-    if (probe_env.get("WINTTY_TRIPWIRE_PROBE") == null) return error.SkipZigTest;
+    if (!probeEnvSet()) return error.SkipZigTest;
 
     var t: Thread = undefined;
     t.lifecycle = .init(.running);
     t.deinit();
+}
+
+fn probeEnvSet() bool {
+    var probe_env = global.environMap() catch return false;
+    defer probe_env.deinit();
+    return probe_env.get("WINTTY_TRIPWIRE_PROBE") != null;
 }
 
 test "deinit refusal fires in a real run" {
@@ -1759,11 +1763,20 @@ test "deinit refusal fires in a real run" {
     const alloc = testing.allocator;
     const io = global.io();
 
+    // This test spawns the probe build; the probe env is the child's
+    // marker. If it is set here, this IS the child (or a manual probe
+    // run): skip, so a future test whose name contains the child's
+    // filter cannot recurse into another nested build. Unset the
+    // variable after any manual probe use; a leaked copy turns every
+    // later suite run red at the probe.
+    if (probeEnvSet()) return error.SkipZigTest;
+
     // The probe build needs a repo tree: build.zig must sit in the
     // test's cwd, which `zig build test` guarantees. From any other
     // launch context skip: there is nothing to build.
     {
-        var probe = try std.Io.Dir.cwd().openFile(io, "build.zig", .{});
+        var probe = std.Io.Dir.cwd().openFile(io, "build.zig", .{}) catch
+            return error.SkipZigTest;
         probe.close(io);
     }
 
@@ -1795,18 +1808,46 @@ test "deinit refusal fires in a real run" {
         .stdout = .ignore,
     });
     const stderr_file = child.stderr orelse return error.SkipZigTest;
+
+    // Bound the whole observation. A wedged child (a compiler hang, a
+    // stray grandchild holding the pipe) must fail this test with the
+    // command in the verdict, not hang the suite: the same rule the
+    // park-wait guards in this suite hold. The deadline is sized for a
+    // cold-cache nested build; a healthy run never approaches it. The
+    // watchdog kills only while the child is live: after wait() has
+    // returned, kill is documented to be a no-op.
+    var child_done = std.atomic.Value(bool).init(false);
+    const Watchdog = struct {
+        child: *std.process.Child,
+        done: *std.atomic.Value(bool),
+        io: std.Io,
+
+        fn run(self: *@This()) void {
+            std.Io.sleep(self.io, .fromSeconds(600), .awake) catch {};
+            if (self.done.load(.acquire)) return;
+            self.child.kill(self.io);
+        }
+    };
+    var watchdog_state = Watchdog{ .child = &child, .done = &child_done, .io = io };
+    const watchdog = try std.Thread.spawn(.{}, Watchdog.run, .{&watchdog_state});
+    watchdog.detach();
+
     var read_buf: [64 * 1024]u8 = undefined;
     var rd = stderr_file.reader(io, &read_buf);
     var stderr_data: std.ArrayList(u8) = .empty;
     defer stderr_data.deinit(alloc);
     try rd.interface.appendRemaining(alloc, &stderr_data, .unlimited);
     const term = try child.wait(io);
+    child_done.store(true, .release);
 
     switch (term) {
         .exited => |code| try testing.expect(code != 0),
         else => {},
     }
-    try testing.expect(std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") != null);
+    if (std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") == null) {
+        std.log.err("probe child never refused: term={any} cmd='zig build test -Dtest-filter=deinit refusal probe'", .{term});
+        return error.TestUnexpectedResult;
+    }
 }
 
 // The safety net exists to bound a lost wakeup notify (#1036), and its
