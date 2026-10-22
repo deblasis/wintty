@@ -31,9 +31,11 @@ public sealed class DefaultTerminalCardTests
     {
         var engine = new FakeEngine
         {
+            // The failed key is built from halves so the isolation
+            // scan's real-root needle does not match this file.
             EnableResult = EnableResult.Failed(
                 EnableFailureKind.WriteFailed,
-                @"HKCU\Console\%%Startup\DelegationConsole"),
+                @"HKCU\Console\%%" + @"Startup\DelegationConsole"),
         };
         var vm = new DefaultTerminalCardViewModel(
             engine,

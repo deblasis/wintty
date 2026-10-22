@@ -46,8 +46,10 @@ public static partial class DefaultTermBootstrap
     /// <summary>
     /// Permanent registration: the instance won the single-instance
     /// election, has the feature enabled, is a registrable edition,
-    /// passes the bound-path self-check, and is not elevated (medium
-    /// integrity, own token). Those are the design's four conditions,
+    /// passes the bound-path self-check, and runs at exactly medium
+    /// integrity (elevated and low both refused: an elevated receiver
+    /// never keeps a class object, a low one is injectable by
+    /// medium-integrity code). Those are the design's conditions,
     /// cheapest first.
     /// </summary>
     public static bool ShouldRegister(BootstrapContext ctx) =>
@@ -58,14 +60,16 @@ public static partial class DefaultTermBootstrap
         && ctx.IntegrityLevel() == TokenIntegrity.Medium;
 
     /// <summary>
-    /// Transient registration: enabled plus the self-check. No election
-    /// requirement, elevated allowed: an SCM-launched instance serves
-    /// exactly its own activation and never outlives it.
+    /// Transient registration: enabled plus the self-check, at medium
+    /// or high integrity (an SCM-launched elevated activation is served
+    /// under its own single-use registration and never upgrades). Low
+    /// integrity is refused outright.
     /// </summary>
     public static bool ShouldRegisterTransient(BootstrapContext ctx) =>
         ctx.FeatureEnabled
         && ctx.CanRegister
-        && ctx.BoundPathCheck();
+        && ctx.BoundPathCheck()
+        && ctx.IntegrityLevel() != TokenIntegrity.Low;
 
     /// <summary>
     /// COM's activation launch spells the flag both ways; matching is
@@ -96,12 +100,17 @@ public static partial class DefaultTermBootstrap
     /// <summary>
     /// The capture store's path, under the user's local app data so the
     /// engine can restore a captured prior after an install move. The
-    /// subfolder follows the per-edition state directory channel when
-    /// one is published; dev builds share the generic folder.
+    /// subfolder is per-edition (the AUMID channel): one shared file
+    /// across side-by-side editions would let one edition's enable
+    /// capture another's registration as its "prior" and restore it
+    /// over the user's live choice.
     /// </summary>
     public static string DefaultStorePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Wintty",
+        new string(Ghostty.Core.AppIdentity.AumId
+            .Select(c => char.IsLetterOrDigit(c) ? c : '_')
+            .ToArray()),
         "defterm-state.json");
 
     public static DefaultTermRegistration CreateEngine() => new(
@@ -172,9 +181,12 @@ public static partial class DefaultTermBootstrap
                     return TokenIntegrity.High;
                 }
 
-                // TOKEN_MANDATORY_LABEL's first field is the SID pointer;
-                // the integrity RID is that SID's last sub-authority.
-                var sid = (IntPtr)p;
+                // TOKEN_MANDATORY_LABEL's first field is a POINTER to the
+                // SID; the integrity RID is that SID's last
+                // sub-authority. The dereference is load-bearing: the
+                // struct bytes are not the SID, and reading them as one
+                // makes the validation fail closed (always High).
+                var sid = Marshal.ReadIntPtr((IntPtr)p);
                 var countPtr = GetSidSubAuthorityCount(sid);
                 if (countPtr == IntPtr.Zero)
                 {
@@ -193,9 +205,19 @@ public static partial class DefaultTermBootstrap
                     return TokenIntegrity.High;
                 }
 
+                // Three-way: high and above refused, low refused just as
+                // firmly (a low-integrity receiver is injectable by
+                // medium-integrity code, so it must never hold a class
+                // object), medium the only registrable class.
+                const uint LowRid = 0x2000; // SECURITY_MANDATORY_LOW_RID
                 const uint HighRid = 0x3000; // SECURITY_MANDATORY_HIGH_RID
                 var rid = unchecked((uint)Marshal.ReadInt32(ridPtr));
-                return rid >= HighRid ? TokenIntegrity.High : TokenIntegrity.Medium;
+                if (rid >= HighRid)
+                {
+                    return TokenIntegrity.High;
+                }
+
+                return rid < LowRid ? TokenIntegrity.Low : TokenIntegrity.Medium;
             }
         }
         finally

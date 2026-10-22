@@ -80,7 +80,7 @@ public sealed class LifecycleWiringTests
         Assert.Equal(RegistrationKind.Transient, DefaultTermComServer.Kind);
 
         var classification = DefaultTermComServer.ClassifyReceiver(
-            elevated: false, otherPrimaryExists: false);
+            ValidPrimaryContext(), otherPrimaryExists: false);
 
         Assert.Equal(ReceiverClassification.UpgradedToPrimary, classification);
         Assert.Equal(RegistrationKind.Permanent, DefaultTermComServer.Kind);
@@ -100,7 +100,8 @@ public sealed class LifecycleWiringTests
         Assert.Equal(RegistrationKind.Transient, DefaultTermComServer.Kind);
 
         var classification = DefaultTermComServer.ClassifyReceiver(
-            elevated: true, otherPrimaryExists: false);
+            ValidPrimaryContext() with { IntegrityLevel = () => TokenIntegrity.High },
+            otherPrimaryExists: false);
 
         // The transient was consumed by the activation it served; an
         // elevated receiver never holds a class object afterwards and no
@@ -167,7 +168,7 @@ public sealed class LifecycleWiringTests
         Assert.Single(diagnosed);
 
         var classification = DefaultTermComServer.ClassifyReceiver(
-            elevated: false, otherPrimaryExists: false);
+            ValidPrimaryContext(), otherPrimaryExists: false);
 
         // The upgrade failed the same non-fatal way: nothing registered,
         // nothing thrown.

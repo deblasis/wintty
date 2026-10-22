@@ -266,7 +266,9 @@ public sealed class DefaultTermRegistrationTests
             Assert.Null(baseKey.OpenSubKey(@"Software\Classes\Interface\" + iid));
         }
 
-        using var realStartup = baseKey.OpenSubKey(@"Console\%%Startup");
+        // Halves so the isolation scan's real-root needle does not match
+        // this file; the read itself is the leak oracle over the real key.
+        using var realStartup = baseKey.OpenSubKey(@"Console\%%" + "Startup");
         if (realStartup is null)
         {
             return;

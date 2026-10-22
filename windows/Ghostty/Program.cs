@@ -1723,8 +1723,14 @@ public static partial class Program
             // re-registration, explicit against CO_E_OBJISREG.
             if (IsDeftermEmbeddingLaunch)
             {
+                // The real context, with the actual election outcome: the
+                // classify path re-runs the full registration predicate,
+                // so a disabled install or a nil-identity build revokes
+                // its transient and exposes nothing.
                 DefaultTermComServer.ClassifyReceiver(
-                    elevated: DefaultTermBootstrap.IsElevatedProcess,
+                    DefaultTermBootstrap.BuildContext(
+                        _singleInstance.Role,
+                        DefaultTermBootstrap.IsFeatureEnabled()),
                     otherPrimaryExists:
                         _singleInstance.Role == SingleInstanceRole.Secondary);
             }
@@ -1749,7 +1755,7 @@ public static partial class Program
                         DefaultTermBootstrap.CreateEngine(),
                         DefaultTermBootstrap.PassesBoundPathCheck(),
                         ReadSingleInstanceSetting()));
-                if (report.Notice is not null)
+                if (!string.IsNullOrEmpty(report.Notice))
                 {
                     WriteStderr($"{AppIdentity.LogTag} {report.Notice}");
                 }

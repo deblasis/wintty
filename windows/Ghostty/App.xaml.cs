@@ -1181,6 +1181,12 @@ public partial class App : Application
             () => AllWindows);
         SessionManager = _sessionManager;
 
+        // The default-terminal embedding lifetime asks the app side
+        // whether any live window exists: a windowless COM-launched
+        // receiver exits instead of holding a registration forever.
+        Ghostty.Core.DefaultTerm.DefaultTermComServer.AnyWindowExists =
+            () => AllWindows.Any();
+
         // Jump-list argv on cold start (app not running) and on a
         // secondary forward failure both land here. Session restore must
         // not win over an explicit task/profile click.

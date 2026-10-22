@@ -67,6 +67,9 @@ public sealed partial class TerminalHandoffService
 
     private readonly List<IntPtr> _liveHandles = new();
 
+    /// <summary>Serializes calls on this one object; see HandleCall.</summary>
+    private readonly object _callGate = new();
+
     public TerminalHandoffService(
         TimeSpan adoptionBudget,
         int sessionCap,
@@ -145,6 +148,19 @@ public sealed partial class TerminalHandoffService
 
         CurrentArgs = args;
 
+        // One call at a time per object: every observable on this
+        // instance is per-call state, and a hostile parallel caller
+        // would otherwise receive another call's out-pipes. The cost is
+        // latency for that pathological caller only; normal activation
+        // creates one object per call.
+        lock (_callGate)
+        {
+            return HandleCallSerialized(args);
+        }
+    }
+
+    private int HandleCallSerialized(HandoffArgs args)
+    {
         // Validation before any effect.
         if (args.Signal == IntPtr.Zero
             || args.Reference == IntPtr.Zero
@@ -154,7 +170,15 @@ public sealed partial class TerminalHandoffService
             return unchecked((int)0x80070057); // E_INVALIDARG
         }
 
-        if (GetProcessId(args.Client) == 0)
+        // The [in] pipe/file handles must be real pipe or file handles
+        // (GetFileType; an invalid handle classifies as unknown), and
+        // both process handles must belong to live processes.
+        if (GetFileType(args.Signal) == 0 || GetFileType(args.Reference) == 0)
+        {
+            return unchecked((int)0x80070057); // E_INVALIDARG
+        }
+
+        if (GetProcessId(args.Server) == 0 || GetProcessId(args.Client) == 0)
         {
             return unchecked((int)0x80070057); // E_INVALIDARG
         }
@@ -387,6 +411,9 @@ public sealed partial class TerminalHandoffService
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial int GetProcessId(IntPtr handle);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint GetFileType(IntPtr handle);
 
     [LibraryImport("kernel32.dll")]
     private static partial IntPtr GetCurrentProcess();

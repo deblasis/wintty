@@ -3,11 +3,17 @@ using System.Text.Json.Serialization;
 
 namespace Ghostty.Core.DefaultTerm;
 
-/// <summary>One shared-group value captured before an enable rewrote it.</summary>
+/// <summary>
+/// One shared-group value captured before an enable rewrote the tree it
+/// lives in: the full subkey path (so a capture can carry whole
+/// subtrees, not only one subkey's values), the value name, the value as
+/// text, and the registry kind it must be restored with.
+/// </summary>
 public sealed record CapturedSharedValue(
     string Subkey,
     string? Name,
-    string Value);
+    string Value,
+    Microsoft.Win32.RegistryValueKind Kind);
 
 /// <summary>
 /// The registry state an enable found before it took over: the prior
@@ -63,7 +69,11 @@ public sealed class DefaultTermCaptureStore
             }
 
             var shared = state.Shared?
-                .Select(s => new CapturedSharedValue(s.Subkey ?? string.Empty, s.Name, s.Value ?? string.Empty))
+                .Select(s => new CapturedSharedValue(
+                    s.Subkey ?? string.Empty,
+                    s.Name,
+                    s.Value ?? string.Empty,
+                    s.Kind))
                 .ToArray()
                 ?? Array.Empty<CapturedSharedValue>();
             var hasSelectionPrior =
@@ -97,7 +107,13 @@ public sealed class DefaultTermCaptureStore
             PriorConsoleBinary = state.PriorConsoleBinary,
             CapturedAtUtc = state.CapturedAtUtc,
             Shared = state.SharedGroupValues
-                .Select(v => new CapturedSharedValueDto { Subkey = v.Subkey, Name = v.Name, Value = v.Value })
+                .Select(v => new CapturedSharedValueDto
+                {
+                    Subkey = v.Subkey,
+                    Name = v.Name,
+                    Value = v.Value,
+                    Kind = v.Kind,
+                })
                 .ToArray(),
         };
         File.WriteAllText(Path, JsonSerializer.Serialize(dto, Options));
@@ -139,5 +155,9 @@ public sealed class DefaultTermCaptureStore
         public string? Name { get; set; }
 
         public string? Value { get; set; }
+
+        // Older stores carry no kind; those entries are strings.
+        public Microsoft.Win32.RegistryValueKind Kind { get; set; } =
+            Microsoft.Win32.RegistryValueKind.String;
     }
 }

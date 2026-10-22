@@ -121,6 +121,7 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
     private readonly string _proxyDllPath;
     private readonly string[] _handoffIids;
     private readonly DefaultTermCaptureStore? _store;
+    private readonly string? _storePath;
 
     /// <summary>
     /// A nil terminal or console CLSID means this build never received
@@ -184,6 +185,7 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
         // The view's array is exposed; the engine keeps its own copy and
         // never mutates or aliases the caller's.
         _handoffIids = (string[])identity.HandoffIids.Clone();
+        _storePath = storePath;
         _store = storePath is null ? null : new DefaultTermCaptureStore(storePath);
     }
 
@@ -228,8 +230,50 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
         }
 
         using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        // The store write belongs to the enable transaction: a capture
+        // saved here and then left behind by a failed write would make a
+        // LATER disable restore a prior that never actually existed,
+        // possibly re-selecting the edition being disabled. The
+        // previous store content goes back on failure.
+        byte[]? previousStore = null;
+        var hadStore = false;
+        if (_store is not null && File.Exists(_storePath))
+        {
+            try
+            {
+                previousStore = File.ReadAllBytes(_storePath);
+                hadStore = true;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Unreadable previous store: proceed; the compensation
+                // below then just deletes whatever this enable wrote.
+            }
+        }
+
         _store?.Save(CapturePrior(baseKey));
-        return WriteRegistration(baseKey);
+        var result = WriteRegistration(baseKey);
+        if (result.Status == EnableStatus.Failed && _store is not null)
+        {
+            try
+            {
+                if (hadStore && previousStore is not null)
+                {
+                    File.WriteAllBytes(_storePath, previousStore);
+                }
+                else
+                {
+                    File.Delete(_storePath);
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Best effort: a stale store is the nil-store degradation
+                // at worst, never a wrong selection.
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -447,23 +491,41 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
         var (priorConsole, priorTerminal) = ReadSelection(baseKey);
         var hasSelectionPrior = priorConsole is not null || priorTerminal is not null;
 
-        string? priorBinary = null;
+        // Whole subtrees, not one value-set per root: the sweep deletes
+        // these trees whole, so a capture narrower than the sweep
+        // "restores" a mutilated prior. Every string, dword and qword
+        // value in each tree is captured with its kind.
         var shared = new List<CapturedSharedValue>();
-        shared.AddRange(CaptureSharedValues(
-            baseKey, _paths.ClsidSubkeyOf(_identity.ConsoleClsid) + "\\" + LocalServer32Subkey));
-        foreach (var entry in shared.Where(v =>
-                     v.Subkey == _paths.ClsidSubkeyOf(_identity.ConsoleClsid) + "\\" + LocalServer32Subkey
-                     && string.IsNullOrEmpty(v.Name)))
+        var roots = new List<string>
         {
-            priorBinary = Unquote(entry.Value);
+            _paths.ClsidSubkeyOf(_identity.ConsoleClsid),
+            _paths.ClsidSubkeyOf(_identity.ProxyClsid),
+        };
+        roots.AddRange(_handoffIids.Select(_paths.InterfaceSubkeyOf));
+        foreach (var root in roots)
+        {
+            foreach (var entry in SnapshotTree(baseKey, root))
+            {
+                var text = CaptureValueString(entry.Value, entry.Kind);
+                if (text is null)
+                {
+                    continue;
+                }
+
+                var subkey = entry.RelativePath.Length == 0
+                    ? root
+                    : root + "\\" + entry.RelativePath;
+                shared.Add(new CapturedSharedValue(subkey, entry.Name, text, entry.Kind));
+            }
         }
 
-        shared.AddRange(CaptureSharedValues(
-            baseKey, _paths.ClsidSubkeyOf(_identity.ProxyClsid) + "\\" + InprocServer32Subkey));
-        foreach (var iid in _handoffIids)
+        var consoleLocalServer = _paths.ClsidSubkeyOf(_identity.ConsoleClsid)
+            + "\\" + LocalServer32Subkey;
+        string? priorBinary = null;
+        foreach (var entry in shared.Where(v =>
+                     v.Subkey == consoleLocalServer && string.IsNullOrEmpty(v.Name)))
         {
-            shared.AddRange(CaptureSharedValues(
-                baseKey, _paths.InterfaceSubkeyOf(iid) + "\\" + ProxyStubClsid32Subkey));
+            priorBinary = Unquote(entry.Value);
         }
 
         return new CapturedState(
@@ -475,25 +537,22 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
             DateTimeOffset.UtcNow);
     }
 
-    private static List<CapturedSharedValue> CaptureSharedValues(RegistryKey baseKey, string subkey)
+    private static string? CaptureValueString(object? value, RegistryValueKind kind) => kind switch
     {
-        var captured = new List<CapturedSharedValue>();
-        using var key = baseKey.OpenSubKey(subkey);
-        if (key is null)
-        {
-            return captured;
-        }
+        RegistryValueKind.String or RegistryValueKind.ExpandString => value as string,
+        RegistryValueKind.DWord when value is int i => i.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        RegistryValueKind.QWord when value is long l => l.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        // Binary and multi-string kinds are not carried: the sweep still
+        // removes them, the restore cannot rebuild them.
+        _ => null,
+    };
 
-        foreach (var name in key.GetValueNames())
-        {
-            if (key.GetValue(name) is string value)
-            {
-                captured.Add(new CapturedSharedValue(subkey, name, value));
-            }
-        }
-
-        return captured;
-    }
+    private static object ParseCapturedValue(string value, RegistryValueKind kind) => kind switch
+    {
+        RegistryValueKind.DWord => int.Parse(value, System.Globalization.CultureInfo.InvariantCulture),
+        RegistryValueKind.QWord => long.Parse(value, System.Globalization.CultureInfo.InvariantCulture),
+        _ => value,
+    };
 
     private (string? Console, string? Terminal) ReadSelection(RegistryKey baseKey)
     {
@@ -518,28 +577,89 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
         }
 
         return string.Equals(
-            Unquote(command),
-            _openConsoleExePath,
+            NormalizeCommand(command),
+            NormalizeCommand(_openConsoleExePath),
             StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// One normalization for every command-path comparison: quotes
+    /// stripped and environment strings expanded, so a foreign-format
+    /// value naming the same binary classifies the same everywhere.
+    /// </summary>
+    private static string NormalizeCommand(string value) =>
+        Environment.ExpandEnvironmentVariables(Unquote(value));
 
     private static bool CorrespondsToPrior(CapturedState prior, string? selectionTerminal) =>
         prior.HasSelectionPrior
         && selectionTerminal is not null
         && string.Equals(selectionTerminal, prior.PriorTerminalValue, StringComparison.OrdinalIgnoreCase);
 
-    private static bool PriorBinaryLive(CapturedState prior) =>
-        prior.PriorConsoleBinary is null
-        || File.Exists(prior.PriorConsoleBinary);
+    /// <summary>
+    /// A restored prior applies only when it still names binaries that
+    /// exist: the console half by its captured path, the terminal half
+    /// by resolving the prior terminal CLSID's registration at restore
+    /// time. A dead half falls back to the nil pair rather than
+    /// restoring a selection that degrades every launch.
+    /// </summary>
+    private bool PriorBinaryLive(CapturedState prior)
+    {
+        if (prior.PriorConsoleBinary is not null && !File.Exists(prior.PriorConsoleBinary))
+        {
+            return false;
+        }
+
+        if (prior.PriorTerminalValue is null)
+        {
+            return true;
+        }
+
+        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        using var server = baseKey.OpenSubKey(
+            _paths.ClsidSubkeyOf(prior.PriorTerminalValue) + "\\" + LocalServer32Subkey);
+        return server?.GetValue(null) is string command
+            && File.Exists(NormalizeCommand(command));
+    }
 
     private void RemoveGroup(RegistryKey baseKey)
     {
+        // The console CLSID key is this edition's own. The proxy CLSID
+        // key and the three Interface keys are edition-invariant real
+        // estate every classic defterm implementation registers too, so
+        // each is removed only while its current value still names OUR
+        // proxy: a foreign owner's registration survives our disable.
         baseKey.DeleteSubKeyTree(_paths.ClsidSubkeyOf(_identity.ConsoleClsid), throwOnMissingSubKey: false);
-        baseKey.DeleteSubKeyTree(_paths.ClsidSubkeyOf(_identity.ProxyClsid), throwOnMissingSubKey: false);
+        if (ProxyKeyIsOurs(baseKey))
+        {
+            baseKey.DeleteSubKeyTree(_paths.ClsidSubkeyOf(_identity.ProxyClsid), throwOnMissingSubKey: false);
+        }
+
         foreach (var iid in _handoffIids)
         {
-            baseKey.DeleteSubKeyTree(_paths.InterfaceSubkeyOf(iid), throwOnMissingSubKey: false);
+            if (InterfaceKeyIsOurs(baseKey, iid))
+            {
+                baseKey.DeleteSubKeyTree(_paths.InterfaceSubkeyOf(iid), throwOnMissingSubKey: false);
+            }
         }
+    }
+
+    private bool ProxyKeyIsOurs(RegistryKey baseKey)
+    {
+        using var key = baseKey.OpenSubKey(
+            _paths.ClsidSubkeyOf(_identity.ProxyClsid) + "\\" + InprocServer32Subkey);
+        return key?.GetValue(null) is string dll
+            && string.Equals(
+                NormalizeCommand(dll),
+                NormalizeCommand(_proxyDllPath),
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool InterfaceKeyIsOurs(RegistryKey baseKey, string iid)
+    {
+        using var key = baseKey.OpenSubKey(
+            _paths.InterfaceSubkeyOf(iid) + "\\" + ProxyStubClsid32Subkey);
+        return key?.GetValue(null) is string clsid
+            && string.Equals(clsid.Trim(), _identity.ProxyClsid, StringComparison.OrdinalIgnoreCase);
     }
 
     private void RestoreGroup(RegistryKey baseKey, CapturedState prior)
@@ -547,7 +667,7 @@ public sealed class DefaultTermRegistration : IDefaultTermEngine
         foreach (var value in prior.SharedGroupValues)
         {
             using var key = baseKey.CreateSubKey(value.Subkey);
-            key.SetValue(value.Name, value.Value, RegistryValueKind.String);
+            key.SetValue(value.Name, ParseCapturedValue(value.Value, value.Kind), value.Kind);
         }
     }
 

@@ -42,6 +42,19 @@ public sealed class DeftermCanary
             {
                 var left = a.Keys.TryGetValue(key, out var l) ? l : Array.Empty<(string, string?)>();
                 var right = b.Keys.TryGetValue(key, out var r) ? r : Array.Empty<(string, string?)>();
+                // Subkey appearance or disappearance is itself a delta:
+                // the engine creates and deletes whole subkeys, and a
+                // comparator blind to empty-key presence is blind to
+                // half the write classes. The key line rides ALONGSIDE
+                // the value lines for the same key, not instead of them.
+                if (!a.Keys.ContainsKey(key))
+                {
+                    lines.Add($"{key}: +key");
+                }
+                else if (!b.Keys.ContainsKey(key))
+                {
+                    lines.Add($"{key}: -key");
+                }
                 var leftMap = left.ToDictionary(x => x.Item1, x => x.Item2, StringComparer.Ordinal);
                 var rightMap = right.ToDictionary(x => x.Item1, x => x.Item2, StringComparer.Ordinal);
                 foreach (var added in rightMap.Keys.Except(leftMap.Keys, StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal))
@@ -137,8 +150,9 @@ public sealed class DeftermCanary
             Microsoft.Win32.RegistryView.Default);
         using var key = baseKey.OpenSubKey(_paths.StartupSubkey, writable: true);
         key?.DeleteValue(name, throwOnMissingValue: false);
-        using var sub = key?.OpenSubKey("KillProbeSub", writable: true);
-        sub?.DeleteValue(name, throwOnMissingValue: false);
+        // The probe subkey goes whole: an empty leftover would be real
+        // state the canary itself left behind while claiming to restore.
+        key?.DeleteSubKeyTree("KillProbeSub", throwOnMissingSubKey: false);
     }
 
     private string[] WatchedKeys()

@@ -26,6 +26,8 @@ public sealed class PlaceholderGateTests : IDisposable
             Microsoft.Win32.RegistryHive.CurrentUser,
             Microsoft.Win32.RegistryView.Default);
         baseKey.DeleteSubKeyTree(_root, throwOnMissingSubKey: false);
+        baseKey.DeleteSubKey(
+            @"Software\WinttyDeftermPlaceholderGate", throwOnMissingSubKey: false);
     }
 
     [Fact]
@@ -53,6 +55,18 @@ public sealed class PlaceholderGateTests : IDisposable
         Assert.Null(rootKey);
 
         Assert.Equal(DisableResult.NotRegistered, engine.Disable());
+    }
+
+    [Fact]
+    public void ReadIntegrityLevel_OfOwnMediumProcess_ReportsMedium()
+    {
+        // The real token query, not a stub: the test host runs at
+        // medium integrity, and a gate that reads the label struct
+        // instead of dereferencing its SID pointer fails closed to High
+        // here, silently killing every registration decision.
+        Assert.Equal(
+            TokenIntegrity.Medium,
+            DefaultTermBootstrap.ReadIntegrityLevel());
     }
 
     [Fact]

@@ -139,22 +139,27 @@ public static partial class DefaultTermComServer
 
     /// <summary>
     /// Classify after serving the activation this instance was launched
-    /// for. Elevated receivers never hold a class object afterwards;
-    /// medium receivers either upgrade to the permanent registration
-    /// (revoking the consumed transient first, explicit against
-    /// CO_E_OBJISREG) or stay secondary.
+    /// for. Elevated or low-integrity receivers never hold a class
+    /// object afterwards; a medium receiver upgrades to the permanent
+    /// registration only when EVERY registration condition holds — the
+    /// same predicate as the election-time registration, re-run with the
+    /// actual election outcome — so a disabled install, a nil-identity
+    /// build or an unbound exe never exposes a class object it should
+    /// not have. The upgrade revokes the consumed transient first,
+    /// explicit against CO_E_OBJISREG.
     /// </summary>
     public static ReceiverClassification ClassifyReceiver(
-        bool elevated,
+        BootstrapContext ctx,
         bool otherPrimaryExists)
     {
+        var elevated = ctx.IntegrityLevel() != TokenIntegrity.Medium;
         if (elevated)
         {
             RevokeAll();
             return ReceiverClassification.ElevatedSession;
         }
 
-        if (otherPrimaryExists)
+        if (otherPrimaryExists || !DefaultTermBootstrap.ShouldRegister(ctx))
         {
             RevokeAll();
             return ReceiverClassification.Secondary;
@@ -222,6 +227,16 @@ public static partial class DefaultTermComServer
 
     private static Thread? _embeddingThread;
     private static readonly ManualResetEventSlim _embeddingShutdown = new(false);
+    private static readonly ManualResetEventSlim _activationArrived = new(false);
+
+    /// <summary>
+    /// The app side answers whether any live window exists: the
+    /// embedding lifetime rules below need it.
+    /// </summary>
+    public static Func<bool>? AnyWindowExists;
+
+    private static readonly TimeSpan ActivationWait = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan WindowGrace = TimeSpan.FromSeconds(15);
 
     /// <summary>
     /// Start the dedicated MTA thread hosting the embedding launch's
@@ -260,12 +275,51 @@ public static partial class DefaultTermComServer
                 RegisterTransient(Parse(DefaultTermIdentity.TerminalClsid));
             }
 
+            // A windowless receiver must not outlive its purpose: the
+            // SCM launched this process BECAUSE an activation was
+            // pending, so it arrives within milliseconds when it comes
+            // at all. None within the wait: idle embedding, exit with
+            // the taxonomy code. One arrived: give a window a grace
+            // period to appear (an adopted session opens one); if the
+            // launch degraded and nothing parked remains, exit cleanly
+            // instead of holding a registered class object forever.
+            if (_activationArrived.Wait(ActivationWait))
+            {
+                WaitForWindowOrSettle();
+            }
+            else if (HandoffCount == 0)
+            {
+                Environment.Exit(IdleEmbeddingExitCode);
+            }
+
             _embeddingShutdown.Wait();
             RevokeAll();
         }
         finally
         {
             CoUninitialize();
+        }
+    }
+
+    private static void WaitForWindowOrSettle()
+    {
+        var deadline = Environment.TickCount64 + WindowGrace.TotalMilliseconds;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (AnyWindowExists?.Invoke() == true)
+            {
+                return;
+            }
+
+            if (PlacementQueue.Pending == 0)
+            {
+                // The activation was served (or degraded) and nothing is
+                // parked: with no window, this receiver has nothing left
+                // to do.
+                Environment.Exit(0);
+            }
+
+            Thread.Sleep(500);
         }
     }
 
@@ -292,6 +346,7 @@ public static partial class DefaultTermComServer
     internal static void RaiseHandoffReceived(HandoffPlacementRequest request)
     {
         HandoffCount++;
+        _activationArrived.Set();
         HandoffReceived?.Invoke(request);
     }
 

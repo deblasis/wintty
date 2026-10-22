@@ -279,10 +279,13 @@ public sealed class RegistrationOwnershipTests
             var a = MintedIdentity();
             var paths = DefaultTermRegistryPaths.UnderTestRoot(root);
 
-            // A pre-existing selection with a live console binary: the
-            // enable captures it, and the owner-disable restores it. This
-            // is the test a never-restore mutant fails: the restored
-            // values are asserted to equal the captured prior exactly.
+            // A pre-existing selection with a live console binary AND a
+            // live terminal registration: the enable captures it, and
+            // the owner-disable restores it. Both halves must be live —
+            // restore refuses a prior whose terminal half has no
+            // registration left. This is the test a never-restore mutant
+            // fails: the restored values are asserted to equal the
+            // captured prior exactly.
             var priorConsole = MintedGuid();
             var priorTerminal = MintedGuid();
             var liveBinary = Environment.SystemDirectory + @"\cmd.exe";
@@ -293,6 +296,9 @@ public sealed class RegistrationOwnershipTests
                 startup.SetValue(DefaultTermRegistration.DelegationTerminalValue, priorTerminal);
                 using var console = hkcu.CreateSubKey(paths.ClsidSubkeyOf(a.ConsoleClsid) + @"\LocalServer32");
                 console.SetValue(null, Quote(liveBinary));
+                using var priorTerminalServer = hkcu.CreateSubKey(
+                    paths.ClsidSubkeyOf(priorTerminal) + @"\LocalServer32");
+                priorTerminalServer.SetValue(null, Quote(liveBinary));
             }
 
             var engine = NewEngine(paths, a, OpenConsoleExe, path);
@@ -352,6 +358,102 @@ public sealed class RegistrationOwnershipTests
             : new DefaultTermRegistration(paths, identity, WinttyExe, openConsoleExe, ProxyDll, storePath);
 
     private static string Quote(string path) => "\"" + path + "\"";
+    [Fact]
+    public void ForeignSharedValues_SurviveOurDisable()
+    {
+        // Two vendors share the proxy CLSID key and the Interface keys:
+        // they are edition-invariant real estate every classic defterm
+        // implementation registers. We are enabled, the other vendor
+        // takes over the shared keys and the selection; our disable must
+        // remove OUR console key and leave THEIR shared values alone.
+        var root = MintedRoot();
+        try
+        {
+            var a = MintedIdentity();
+            var paths = DefaultTermRegistryPaths.UnderTestRoot(root);
+            var engine = NewEngine(paths, a, OpenConsoleExe);
+            Assert.Equal(EnableResult.Registered, engine.Enable());
+
+            const string vendorProxyDll = @"C:\VendorT\bin\proxy.dll";
+            var vendorProxyClsid = MintedGuid();
+            var otherConsole = MintedGuid();
+            using (var hkcu = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default))
+            {
+                using var proxy = hkcu.CreateSubKey(
+                    paths.ClsidSubkeyOf(a.ProxyClsid) + @"\InprocServer32");
+                proxy.SetValue(null, vendorProxyDll);
+                foreach (var iid in a.HandoffIids)
+                {
+                    using var iface = hkcu.CreateSubKey(
+                        paths.InterfaceSubkeyOf(iid) + @"\ProxyStubClsid32");
+                    iface.SetValue(null, vendorProxyClsid);
+                }
+
+                using var startup = hkcu.CreateSubKey(paths.StartupSubkey);
+                startup.SetValue(DefaultTermRegistration.DelegationConsoleValue, otherConsole);
+                startup.SetValue(DefaultTermRegistration.DelegationTerminalValue, MintedGuid());
+            }
+
+            engine.Disable();
+
+            using var check = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+            using var proxyAfter = check.OpenSubKey(
+                paths.ClsidSubkeyOf(a.ProxyClsid) + @"\InprocServer32");
+            Assert.Equal(vendorProxyDll, (string?)proxyAfter?.GetValue(null));
+            foreach (var iid in a.HandoffIids)
+            {
+                using var ifaceAfter = check.OpenSubKey(
+                    paths.InterfaceSubkeyOf(iid) + @"\ProxyStubClsid32");
+                Assert.Equal(
+                    vendorProxyClsid,
+                    (string?)ifaceAfter?.GetValue(null));
+            }
+
+            // Our own console key is gone.
+            Assert.Null(check.OpenSubKey(paths.ClsidSubkeyOf(a.ConsoleClsid)));
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FailedEnable_LeavesStoreUntouched()
+    {
+        // The store write is part of the enable transaction: a capture
+        // saved just before a failed write would make a later disable
+        // "restore" a prior that never took effect. A failed enable
+        // restores the previous store byte for byte.
+        var root = MintedRoot();
+        var path = Path.Combine(Path.GetTempPath(), "WinttyDefTermTests", MintedGuid() + ".json");
+        try
+        {
+            var a = MintedIdentity();
+            var paths = DefaultTermRegistryPaths.UnderTestRoot(root);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var store = new DefaultTermCaptureStore(path);
+            store.Save(CapturedState.Nil with { CapturedAtUtc = DateTimeOffset.UtcNow });
+            var previousBytes = File.ReadAllBytes(path);
+
+            var engine = NewEngine(paths, a, OpenConsoleExe, path);
+            engine.ValueWriteFault = (_, _) => new IOException("simulated mid-write failure");
+            var result = engine.Enable();
+
+            Assert.Equal(EnableStatus.Failed, result.Status);
+            Assert.Equal(previousBytes, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            DeleteTestRoot(root);
+        }
+    }
 
     private static void SetLocalServer(RegistryKey baseKey, string clsidSubkey, string command)
     {

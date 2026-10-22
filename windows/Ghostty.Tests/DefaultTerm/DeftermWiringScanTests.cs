@@ -36,6 +36,14 @@ public sealed class DeftermWiringScanTests
         // The permanent registration attempt itself stays wired after
         // the election.
         Assert.Contains("TryRegisterPermanent(", program);
+
+        // The embedding server start (the cold-activation entry), the
+        // window oracle the embedding lifetime asks, and the shutdown
+        // revoke-drain are all load-bearing call sites.
+        Assert.Contains("StartEmbeddingServer(", program);
+        Assert.Contains("Shutdown()", program);
+        Assert.Contains("AnyWindowExists", File.ReadAllText(
+            Path.Combine(root, "windows", "Ghostty", "App.xaml.cs")));
     }
 
     private static string RepoRoot()

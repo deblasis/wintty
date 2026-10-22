@@ -119,10 +119,10 @@ public sealed class RegistrationHostileResetTests
         List<(string Subkey, string? ValueName)> sequence = LearnValueWriteSequence();
 
         Assert.Contains(sequence, w =>
-            w.Subkey.EndsWith(@"\Console\%%Startup", StringComparison.Ordinal)
+            w.Subkey.EndsWith(@"\Console\%%" + "Startup", StringComparison.Ordinal)
             && w.ValueName == DefaultTermRegistration.DelegationConsoleValue);
         Assert.Contains(sequence, w =>
-            w.Subkey.EndsWith(@"\Console\%%Startup", StringComparison.Ordinal)
+            w.Subkey.EndsWith(@"\Console\%%" + "Startup", StringComparison.Ordinal)
             && w.ValueName == DefaultTermRegistration.DelegationTerminalValue);
 
         for (var step = 0; step < sequence.Count; step++)

@@ -18,12 +18,16 @@ public sealed class DeftermCanaryTests : IDisposable
 
     public DeftermCanaryTests()
     {
-        _root = @"HKEY_CURRENT_USER\Software\WinttyDeftermCanaryTests\"
+        // Registry-relative root, never hive-prefixed: a prefixed root
+        // handed to UnderTestRoot makes every path resolve under a bogus
+        // hive-named key directly under the real HKCU root, which the
+        // dispose below would then never remove.
+        _root = @"Software\WinttyDeftermCanaryTests\"
             + Guid.NewGuid().ToString("N");
         using (Microsoft.Win32.RegistryKey.OpenBaseKey(
                    Microsoft.Win32.RegistryHive.CurrentUser,
                    Microsoft.Win32.RegistryView.Default)
-               .CreateSubKey(_root.Substring("HKEY_CURRENT_USER\\".Length)))
+               .CreateSubKey(_root))
         {
         }
 
@@ -37,8 +41,11 @@ public sealed class DeftermCanaryTests : IDisposable
         using var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(
             Microsoft.Win32.RegistryHive.CurrentUser,
             Microsoft.Win32.RegistryView.Default);
-        baseKey.DeleteSubKeyTree(
-            _root.Substring("HKEY_CURRENT_USER\\".Length), throwOnMissingSubKey: false);
+        baseKey.DeleteSubKeyTree(_root, throwOnMissingSubKey: false);
+        // The minted root's parent is ours too; leaving it would make
+        // every run drop one more empty key inside real Software.
+        baseKey.DeleteSubKey(
+            @"Software\WinttyDeftermCanaryTests", throwOnMissingSubKey: false);
     }
 
     [Fact]
@@ -50,13 +57,14 @@ public sealed class DeftermCanaryTests : IDisposable
         _canary.WriteStartupProbe("test-probe", "1");
         var withProbe = _canary.Snapshot();
         var delta = DeftermCanary.Diff(before, withProbe);
-        // Both write classes must show: the direct value and the value
-        // inside a subkey, because the engine's dangerous writes
-        // (LocalServer32, InprocServer32, ProxyStubClsid32) are subkey
-        // writes.
+        // All three deltas must show: the direct value, the value inside
+        // a subkey, and the subkey's own appearance, because the engine
+        // creates and deletes whole subkeys and a comparator blind to
+        // key presence is blind to half the write classes.
         Assert.Contains(delta, l => l.EndsWith("+test-probe") && !l.Contains("KillProbeSub"));
         Assert.Contains(delta, l => l.EndsWith("+test-probe") && l.Contains("KillProbeSub"));
-        Assert.Equal(2, delta.Count);
+        Assert.Contains(delta, l => l.EndsWith("+key") && l.Contains("KillProbeSub"));
+        Assert.Equal(3, delta.Count);
 
         _canary.DeleteStartupProbe("test-probe");
         Assert.Empty(DeftermCanary.Diff(before, _canary.Snapshot()));
@@ -90,12 +98,18 @@ public sealed class DeftermCanaryTests : IDisposable
         // The needles are built from halves so this scan's own source
         // does not carry the banned literals.
         var productionNeedle = "DefaultTermRegistryPaths" + ".Production";
+        // The engine factory and the real startup-key path are the two
+        // other escapes into real state; neither belongs in a test.
+        var engineFactoryNeedle = "CreateEngine" + "(";
+        var startupKeyNeedle = "%%" + "Startup";
         var previewConsoleClsid = "06EC847C" + "-C0A5-46B8-92CB-7C92F6E35CD5";
         var stableConsoleClsid = "2EACA947" + "-7F5F-4CFA-BA87-8F7FBEEFBE69";
         foreach (var file in testSources)
         {
             var text = File.ReadAllText(file);
             Assert.DoesNotContain(productionNeedle, text);
+            Assert.DoesNotContain(engineFactoryNeedle, text);
+            Assert.DoesNotContain(startupKeyNeedle, text);
             Assert.DoesNotContain(previewConsoleClsid, text);
             Assert.DoesNotContain(stableConsoleClsid, text);
         }
