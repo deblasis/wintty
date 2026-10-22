@@ -176,6 +176,38 @@ public sealed class LifecycleWiringTests
         Assert.Equal(RegistrationKind.None, DefaultTermComServer.Kind);
     }
 
+    [Fact]
+    public void Classify_FailingContexts_NeverRegister()
+    {
+        // Every failing condition of the registration predicate must
+        // revoke and expose nothing on the classify path: unbound exe,
+        // low integrity, feature off, nil identity.
+        foreach (var ctx in new[]
+                 {
+                     ValidPrimaryContext() with { BoundPathCheck = () => false },
+                     ValidPrimaryContext() with { IntegrityLevel = () => TokenIntegrity.Low },
+                     ValidPrimaryContext() with { FeatureEnabled = false },
+                     ValidPrimaryContext() with { CanRegister = false },
+                 })
+        {
+            DefaultTermComServer.Reset();
+            DefaultTermComServer.RegisterOverride = (_, _) => 1;
+
+            var classification = DefaultTermComServer.ClassifyReceiver(
+                ctx, otherPrimaryExists: false);
+
+            // Low integrity classifies elevated-session-style (revoke,
+            // never register); every other failing condition stays
+            // secondary. Both outcomes expose nothing.
+            Assert.Contains(classification, new[]
+            {
+                ReceiverClassification.Secondary,
+                ReceiverClassification.ElevatedSession,
+            });
+            Assert.Equal(RegistrationKind.None, DefaultTermComServer.Kind);
+        }
+    }
+
     /// <summary>
     /// A context that satisfies every permanent-registration condition:
     /// election won, enabled, registrable edition, bound path, medium

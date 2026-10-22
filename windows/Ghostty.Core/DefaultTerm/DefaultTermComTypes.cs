@@ -101,7 +101,19 @@ public sealed class TerminalHandoffObject :
     {
         _service = service;
         _createServiced = createServiced;
+        // The far ends arrive through the in-lock completion callback so
+        // this object never reads the service's per-call fields after
+        // HandleCall returns (a second call on the same object could be
+        // mid-flight by then and have reset them).
+        service.OnCallSucceeded = (inPipe, outPipe) =>
+        {
+            _lastInPipe = inPipe;
+            _lastOutPipe = outPipe;
+        };
     }
+
+    private IntPtr _lastInPipe;
+    private IntPtr _lastOutPipe;
 
     int ITerminalHandoff3.EstablishPtyHandoff(
         out IntPtr inPipe,
@@ -127,10 +139,11 @@ public sealed class TerminalHandoffObject :
             startupInfo));
         if (hr == 0)
         {
-            // The console side's far ends: the caller owns them from
-            // here, exactly as the [out] contract says.
-            inPipe = _service.LastConsoleInRead;
-            outPipe = _service.LastConsoleOutWrite;
+            // The console side's far ends, captured inside the call's
+            // gate: the caller owns them from here, exactly as the
+            // [out] contract says.
+            inPipe = _lastInPipe;
+            outPipe = _lastOutPipe;
         }
         else
         {

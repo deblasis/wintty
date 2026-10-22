@@ -94,6 +94,13 @@ public sealed partial class TerminalHandoffService
     public FaultPoint Fault { get; set; }
 
     /// <summary>
+    /// Receives the console-side far ends on a successful call, inside
+    /// the call gate immediately before return: the caller keeps no
+    /// reference to this instance's per-call fields afterwards.
+    /// </summary>
+    public Action<IntPtr, IntPtr>? OnCallSucceeded { get; set; }
+
+    /// <summary>
     /// The handles of the call in flight, populated right before the
     /// adoption scheduler runs: the carrier the placement request takes
     /// to the surface.
@@ -146,8 +153,6 @@ public sealed partial class TerminalHandoffService
         LastIconPath = null;
         LastClientDuplicate = IntPtr.Zero;
 
-        CurrentArgs = args;
-
         // One call at a time per object: every observable on this
         // instance is per-call state, and a hostile parallel caller
         // would otherwise receive another call's out-pipes. The cost is
@@ -155,6 +160,7 @@ public sealed partial class TerminalHandoffService
         // creates one object per call.
         lock (_callGate)
         {
+            CurrentArgs = args;
             return HandleCallSerialized(args);
         }
     }
@@ -283,6 +289,7 @@ public sealed partial class TerminalHandoffService
             _liveHandles.Remove(referenceDup);
             _liveHandles.Remove(serverDup);
             _liveHandles.Remove(clientDup);
+            OnCallSucceeded?.Invoke(LastConsoleInRead, LastConsoleOutWrite);
             return 0;
         }
         catch (InjectedFaultException)

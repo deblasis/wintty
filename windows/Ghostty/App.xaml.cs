@@ -1185,7 +1185,7 @@ public partial class App : Application
         // whether any live window exists: a windowless COM-launched
         // receiver exits instead of holding a registration forever.
         Ghostty.Core.DefaultTerm.DefaultTermComServer.AnyWindowExists =
-            () => AllWindows.Any();
+            () => AnyLiveWindow;
 
         // Jump-list argv on cold start (app not running) and on a
         // secondary forward failure both land here. Session restore must
@@ -1240,7 +1240,7 @@ public partial class App : Application
                     workingDirectory: Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(
                         coldCommand, Program.LaunchWorkingDirectory),
                     initialCommand: initialCommand));
-            window.Closed += OnAnyWindowClosedInternal;
+            window.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
             _sessionManager.Track(window);
             window.Activate();
         }
@@ -1263,7 +1263,7 @@ public partial class App : Application
             _quakeWindow = new MainWindow(
                 _configService, _bootstrapHost, _lifetimeSupervisor, factory,
                 isQuickTerminal: true);
-            _quakeWindow.Closed += OnAnyWindowClosedInternal;
+            _quakeWindow.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
             _quakeWindow.Activate();          // creates the HWND
             _quakeWindow.AppWindow.Hide();    // immediately hide
         }
@@ -1960,7 +1960,7 @@ public partial class App : Application
                 _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, ws,
                 showLaunchIcon: isFirstWindow);
             isFirstWindow = false;
-            restored.Closed += OnAnyWindowClosedInternal;
+            restored.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
             _sessionManager?.Track(restored);
             restored.Activate();
         }
@@ -2030,7 +2030,7 @@ public partial class App : Application
 
         var window = MainWindow.CreateForNewTab(
             _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, snapshot);
-        window.Closed += OnAnyWindowClosedInternal;
+        window.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
         _sessionManager?.Track(window);
         _sessionManager?.RequestPersist();
         window.Activate();
@@ -2088,7 +2088,7 @@ public partial class App : Application
 
         var restored = new MainWindow(
             _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, windowSession);
-        restored.Closed += OnAnyWindowClosedInternal;
+        restored.Closed += OnAnyWindowClosedInternal; Interlocked.Increment(ref _liveWindows);
         // Track + persist so the reopened window is in the on-disk session
         // snapshot immediately, matching the new-window (OpenInNewWindow) path.
         _sessionManager?.Track(restored);
@@ -2522,9 +2522,16 @@ public partial class App : Application
     /// Visibility is <c>internal</c> so <c>MainWindow.DetachTabToNewWindow</c>
     /// can subscribe freshly-built windows to the same handler.
     /// </summary>
+    // Live-window count for cross-thread readers (the default-terminal
+    // embedding lifetime asks from its MTA thread): a counter, never a
+    // collection enumeration, because the collections are UI-thread-only.
+    private static int _liveWindows;
+
+    internal static bool AnyLiveWindow => Volatile.Read(ref _liveWindows) > 0;
+
     internal void OnAnyWindowClosedInternal(object sender, WindowEventArgs args)
     {
-        // Use the XamlRoot captured at registration time (stored on the
+        Interlocked.Decrement(ref _liveWindows);        // Use the XamlRoot captured at registration time (stored on the
         // MainWindow instance) rather than re-reading w.Content.XamlRoot
         // here. By the time Window.Closed fires in WinUI 3, Content may
         // already have a null XamlRoot, so re-reading would silently

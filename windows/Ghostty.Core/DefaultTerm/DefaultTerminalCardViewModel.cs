@@ -45,17 +45,20 @@ public sealed class DefaultTerminalCardViewModel
     private readonly Func<bool> _singleInstanceEnabled;
     private readonly Func<int> _osBuild;
     private readonly Func<bool> _canRegister;
+    private readonly Func<bool> _sidecarsPresent;
 
     public DefaultTerminalCardViewModel(
         IDefaultTermEngine engine,
         Func<bool> singleInstanceEnabled,
         Func<int> osBuild,
-        Func<bool>? canRegister = null)
+        Func<bool>? canRegister = null,
+        Func<bool>? sidecarsPresent = null)
     {
         _engine = engine;
         _singleInstanceEnabled = singleInstanceEnabled;
         _osBuild = osBuild;
         _canRegister = canRegister ?? (() => DefaultTermIdentity.CanRegister);
+        _sidecarsPresent = sidecarsPresent ?? DefaultTerminalSidecarsPresent;
         ToggleCommand = new CardToggleCommand(this);
         Refresh();
     }
@@ -119,6 +122,16 @@ public sealed class DefaultTerminalCardViewModel
 
     public EnableResult Enable()
     {
+        if (!_sidecarsPresent())
+        {
+            BlockedReason =
+                "OpenConsole.exe or OpenConsoleProxy.dll is missing next to " +
+                "this exe; a registration naming absent binaries would break " +
+                "every console launch";
+            return EnableResult.Failed(
+                EnableFailureKind.None, "sidecar binaries missing");
+        }
+
         if (!_singleInstanceEnabled())
         {
             BlockedReason =
@@ -146,6 +159,10 @@ public sealed class DefaultTerminalCardViewModel
         Refresh();
         return result;
     }
+
+    private static bool DefaultTerminalSidecarsPresent() =>
+        File.Exists(Path.Combine(AppContext.BaseDirectory, "OpenConsole.exe"))
+        && File.Exists(Path.Combine(AppContext.BaseDirectory, "OpenConsoleProxy.dll"));
 
     private sealed class CardToggleCommand : ICommand
     {

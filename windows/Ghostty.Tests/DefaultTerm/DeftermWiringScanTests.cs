@@ -41,6 +41,7 @@ public sealed class DeftermWiringScanTests
         // window oracle the embedding lifetime asks, and the shutdown
         // revoke-drain are all load-bearing call sites.
         Assert.Contains("StartEmbeddingServer(", program);
+        Assert.Contains("RunDeftermStatus(", program);
         Assert.Contains("Shutdown()", program);
         Assert.Contains("AnyWindowExists", File.ReadAllText(
             Path.Combine(root, "windows", "Ghostty", "App.xaml.cs")));

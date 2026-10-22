@@ -54,8 +54,10 @@ public sealed record HandoffPlacementRequest(
 /// <summary>
 /// The class-object lifecycle: register, receive, classify, revoke. All
 /// machine effects go through overridable steps so a test drives the
-/// whole state machine against recorders; the production steps call
-/// CoRegisterClassObject on the dedicated MTA thread and nothing else.
+/// whole state machine against recorders. The production embedding
+/// registrations run on the dedicated MTA thread; the election-time
+/// permanent registration runs on the main thread (the objects are
+/// agile CCWs, so activations are not apartment-bound either way).
 /// </summary>
 public static partial class DefaultTermComServer
 {
@@ -287,7 +289,9 @@ public static partial class DefaultTermComServer
             {
                 WaitForWindowOrSettle();
             }
-            else if (HandoffCount == 0)
+            else if (HandoffCount == 0
+                     && AnyWindowExists?.Invoke() != true
+                     && !_embeddingShutdown.IsSet)
             {
                 Environment.Exit(IdleEmbeddingExitCode);
             }
@@ -306,6 +310,13 @@ public static partial class DefaultTermComServer
         var deadline = Environment.TickCount64 + WindowGrace.TotalMilliseconds;
         while (Environment.TickCount64 < deadline)
         {
+            // Shutdown in progress: never exit from here, the main path
+            // owns the process end from this point.
+            if (_embeddingShutdown.IsSet)
+            {
+                return;
+            }
+
             if (AnyWindowExists?.Invoke() == true)
             {
                 return;
