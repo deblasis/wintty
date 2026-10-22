@@ -443,8 +443,17 @@ def csproj_out_of_tree(csproj_rel, text):
     up = csproj_rel.count("/")
     lead = "..\\" * up
     embeds, refused = [], []
-    for inc in re.findall(r'Include="([^"]+)"', text):
-        abs_root = inc[1:2] == ":" or inc.startswith("\\")
+    # XML permits the attribute value in single quotes and whitespace
+    # around the `=`; MSBuild accepts both, so the scan must too or the
+    # include is invisible to every rule below.
+    for inc in re.findall(r'Include\s*=\s*["\']([^"\']+)["\']', text):
+        # An unexpanded property is an unknown: its value (possibly
+        # defined outside the scanned text) can carry the dot-dots, so
+        # it is refused wherever it appears, dots or not.
+        if "$" in inc:
+            refused.append(inc)
+            continue
+        abs_root = inc[1:2] == ":" or inc.startswith(("/", "\\"))
         if not abs_root and ".." not in inc:
             # Plain relative path or glob inside the project tree.
             continue
@@ -455,8 +464,11 @@ def csproj_out_of_tree(csproj_rel, text):
             if any(c in inc for c in "*/$;") or "/" in inc or ".." in rest:
                 refused.append(inc)
                 continue
+            while rest.startswith(".\\"):
+                rest = rest[2:]
+            rest = rest.replace("\\.\\", "\\")
             rel = rest.replace("\\", "/")
-            if rel.startswith(("windows/", "zig-out/")):
+            if rel.lower().startswith(("windows/", "zig-out/")):
                 continue
             embeds.append(rel)
             continue
@@ -1158,14 +1170,25 @@ def self_test():
             '  <EmbeddedResource Include="C:\\abs\\x.zig" />\n'
             '  <EmbeddedResource Include="..\\Ghostty\\**\\*.cs" />\n'
             '  <Compile Include="Local\\Plain.cs" />\n'
-            '</Project>\n')
-        report(esc_embeds == ["src/fine.zig"]
+            '</Project>\n'
+            '<PropertyGroup><RR>..\\..\\</RR></PropertyGroup>\n'
+            '<ItemGroup>\n'
+            '  <EmbeddedResource Include="$(RR)src\\via-prop.zig" />\n'
+            "  <EmbeddedResource Include='..\\..\\src\\single-quoted.zig' />\n"
+            '  <EmbeddedResource Include = "..\\..\\src\\spaced.zig" />\n'
+            '</ItemGroup>\n')
+        report(sorted(esc_embeds) == sorted([
+                   "src/fine.zig",
+                   "src/single-quoted.zig",
+                   "src/spaced.zig",
+               ])
                and sorted(esc_refused) == sorted([
                    "..\\..\\..\\src\\deep.zig",
                    "..\\..\\src\\ok\\..\\..\\src\\interior.zig",
                    "../../src/forward.zig",
                    "$(MSBuildThisFileDirectory)..\\..\\src\\prop.zig",
                    "C:\\abs\\x.zig",
+                   "$(RR)src\\via-prop.zig",
                ]),
                "csproj-escape-spellings-refused",
                f"embeds={esc_embeds} refused={sorted(esc_refused)}")
