@@ -74,6 +74,30 @@ public sealed class DefaultTerminalCardTests
     }
 
     [Fact]
+    public void SidecarsMissing_EnableRefusedBeforeAnythingElse()
+    {
+        // The refusal branch has to be seen red: dropping or inverting
+        // the precheck must fail this test, not pass it silently.
+        var engine = new FakeEngine();
+        var vm = new DefaultTerminalCardViewModel(
+            engine,
+            singleInstanceEnabled: () => false,
+            osBuild: () => 22621,
+            canRegister: () => true,
+            sidecarsPresent: () => false);
+
+        var result = vm.Enable();
+
+        Assert.Equal(EnableStatus.Failed, result.Status);
+        Assert.Equal("sidecar binaries missing", result.FailedKey);
+        Assert.Equal(0, engine.EnableCalls);
+        Assert.Equal(DefaultTerminalCardState.NotDefault, vm.State);
+        Assert.NotNull(vm.BlockedReason);
+        Assert.Contains("OpenConsole.exe", vm.BlockedReason);
+        Assert.Contains("OpenConsoleProxy.dll", vm.BlockedReason);
+    }
+
+    [Fact]
     public void StateReflectsIsRegistered()
     {
         var engine = new FakeEngine { Registered = true };

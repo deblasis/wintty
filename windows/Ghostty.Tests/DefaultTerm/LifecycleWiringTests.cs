@@ -182,30 +182,40 @@ public sealed class LifecycleWiringTests
         // Every failing condition of the registration predicate must
         // revoke and expose nothing on the classify path: unbound exe,
         // low integrity, feature off, nil identity.
-        foreach (var ctx in new[]
+        var registerCalls = 0;
+        foreach (var (ctx, expected) in new[]
                  {
-                     ValidPrimaryContext() with { BoundPathCheck = () => false },
-                     ValidPrimaryContext() with { IntegrityLevel = () => TokenIntegrity.Low },
-                     ValidPrimaryContext() with { FeatureEnabled = false },
-                     ValidPrimaryContext() with { CanRegister = false },
+                     (ValidPrimaryContext() with { BoundPathCheck = () => false },
+                      ReceiverClassification.Secondary),
+                     (ValidPrimaryContext() with { IntegrityLevel = () => TokenIntegrity.Low },
+                      ReceiverClassification.ElevatedSession),
+                     (ValidPrimaryContext() with { FeatureEnabled = false },
+                      ReceiverClassification.Secondary),
+                     (ValidPrimaryContext() with { CanRegister = false },
+                      ReceiverClassification.Secondary),
                  })
         {
             DefaultTermComServer.Reset();
-            DefaultTermComServer.RegisterOverride = (_, _) => 1;
+            DefaultTermComServer.RegisterOverride = (_, _) =>
+            {
+                registerCalls++;
+                return 1;
+            };
 
             var classification = DefaultTermComServer.ClassifyReceiver(
                 ctx, otherPrimaryExists: false);
 
-            // Low integrity classifies elevated-session-style (revoke,
-            // never register); every other failing condition stays
-            // secondary. Both outcomes expose nothing.
-            Assert.Contains(classification, new[]
-            {
-                ReceiverClassification.Secondary,
-                ReceiverClassification.ElevatedSession,
-            });
+            // The exact outcome per row: low integrity classifies
+            // elevated-session-style; every other failing condition stays
+            // secondary. A disjunction here would let a revoke/abstain
+            // swap ship green.
+            Assert.Equal(expected, classification);
             Assert.Equal(RegistrationKind.None, DefaultTermComServer.Kind);
         }
+
+        // No failing context ever attempted a registration: revoke or
+        // abstain, never register-anyway.
+        Assert.Equal(0, registerCalls);
     }
 
     /// <summary>
