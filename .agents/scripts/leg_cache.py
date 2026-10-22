@@ -445,12 +445,18 @@ def csproj_out_of_tree(csproj_rel, text):
     embeds, refused = [], []
     # XML permits the attribute value in single quotes and whitespace
     # around the `=`; MSBuild accepts both, so the scan must too or the
-    # include is invisible to every rule below.
-    for inc in re.findall(r'Include\s*=\s*["\']([^"\']+)["\']', text):
-        # An unexpanded property is an unknown: its value (possibly
-        # defined outside the scanned text) can carry the dot-dots, so
-        # it is refused wherever it appears, dots or not.
-        if "$" in inc:
+    # include is invisible to every rule below. The delimiters are
+    # PAIRED: an apostrophe inside a double-quoted value is data, not a
+    # terminator, and a class that accepted either quote would truncate
+    # the value at it and wave the rest past every rule.
+    for inc in re.findall(
+            r'Include\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', text):
+        inc = inc[0] or inc[1]
+        # An unexpanded property or character reference is an unknown:
+        # its evaluated value (possibly defined outside the scanned
+        # text, possibly entity-encoded) can carry the dot-dots, so it
+        # is refused wherever it appears, dots or not.
+        if "$" in inc or "&" in inc:
             refused.append(inc)
             continue
         abs_root = inc[1:2] == ":" or inc.startswith(("/", "\\"))
@@ -1176,6 +1182,8 @@ def self_test():
             '  <EmbeddedResource Include="$(RR)src\\via-prop.zig" />\n'
             "  <EmbeddedResource Include='..\\..\\src\\single-quoted.zig' />\n"
             '  <EmbeddedResource Include = "..\\..\\src\\spaced.zig" />\n'
+            '  <EmbeddedResource Include="data\'$(RR)src\\apostrophe.zig" />\n'
+            '  <EmbeddedResource Include="&#36;(RR)src\\entity.zig" />\n'
             '</ItemGroup>\n')
         report(sorted(esc_embeds) == sorted([
                    "src/fine.zig",
@@ -1189,6 +1197,8 @@ def self_test():
                    "$(MSBuildThisFileDirectory)..\\..\\src\\prop.zig",
                    "C:\\abs\\x.zig",
                    "$(RR)src\\via-prop.zig",
+                   "data'$(RR)src\\apostrophe.zig",
+                   "&#36;(RR)src\\entity.zig",
                ]),
                "csproj-escape-spellings-refused",
                f"embeds={esc_embeds} refused={sorted(esc_refused)}")
