@@ -6628,7 +6628,18 @@ test "ReadThread windows: a blocked real read is interrupted and decoded" {
     try testing.expect(!cancel.acked());
 
     const thread = try std.Thread.spawn(.{}, Ops.threadMain, .{&ops});
-    while (!ops.in_read.load(.acquire)) std.Thread.yield() catch {};
+
+    // The reader issues its first read as its first act, so this parks
+    // for microseconds in a healthy run. The deadline only bounds a
+    // regression where the thread never gets there (stuck earlier, or
+    // gone): past it the test proceeds, the cancel cannot be acked, the
+    // EOF escape below releases the join, and the acked assertion names
+    // what never happened instead of the suite hanging here.
+    const read_from: std.Io.Timestamp = .now(global.io(), .awake);
+    while (!ops.in_read.load(.acquire)) {
+        if (read_from.durationTo(.now(global.io(), .awake)).toMilliseconds() > 10 * std.time.ms_per_s) break;
+        std.Thread.yield() catch {};
+    }
 
     quit.request();
     const acked = ReadThread.cancelUntilAcked(
