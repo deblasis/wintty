@@ -1731,8 +1731,13 @@ test "deinit refuses to run while the thread is running" {
     const src = @embedFile("Thread.zig");
     const gate = "builtin.mode == .Debug and self.lifecycle" ++ ".load(.seq_cst) == .running";
     const refusal = "deinit while the thread is running: join the " ++ "OS ";
+    const entry = "cmpxchgStrong(.never_" ++ "started, .running";
     try std.testing.expect(std.mem.indexOf(u8, src, gate) != null);
     try std.testing.expect(std.mem.indexOf(u8, src, refusal) != null);
+    // Without the entry transition the refusal can never fire: the
+    // lifecycle stays never_started and deinit sails through. Pin the
+    // arming side too, not just the gate.
+    try std.testing.expect(std.mem.indexOf(u8, src, entry) != null);
 }
 
 // The safety net exists to bound a lost wakeup notify (#1036), and its
