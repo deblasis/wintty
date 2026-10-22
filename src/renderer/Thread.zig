@@ -26,8 +26,16 @@ const CURSOR_BLINK_INTERVAL = 600;
 /// the future if we want it configurable.
 pub const Mailbox = BlockingQueue(rendererpkg.Message, 64);
 
+/// Lifecycle of the OS thread running `threadMain`, so `deinit` can
+/// refuse (in Debug) to free state a running thread still reads.
+const Lifecycle = enum(u8) { never_started, running, exited };
+
 /// Allocator used for some state
 alloc: std.mem.Allocator,
+
+/// Where the OS thread running `threadMain` is in its lifecycle. The
+/// thread must be joined before `deinit`.
+lifecycle: std.atomic.Value(Lifecycle) = .init(.never_started),
 
 /// The main event loop for the application. The user data of this loop
 /// is always the allocator used to create the loop. This is a convenience
@@ -242,6 +250,8 @@ pub fn init(
 /// Clean up the thread. This is only safe to call once the thread
 /// completes executing; the caller must join prior to this.
 pub fn deinit(self: *Thread) void {
+    if (builtin.mode == .Debug and self.lifecycle.load(.seq_cst) == .running) @panic("Thread.deinit while the thread is running: join the OS " ++
+        "thread first (teardown order is notify, join, deinit)");
     self.stop.deinit();
     self.wakeup.deinit();
     self.render_h.deinit();
@@ -260,6 +270,9 @@ pub fn deinit(self: *Thread) void {
 
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread) void {
+    if (self.lifecycle.cmpxchgStrong(.never_started, .running, .seq_cst, .seq_cst) != null) @panic("renderer thread started twice");
+    defer _ = self.lifecycle.cmpxchgStrong(.running, .exited, .seq_cst, .seq_cst);
+
     // Call child function so we can use errors...
     self.threadMain_() catch |err| {
         // In the future, we should expose this on the thread struct.
@@ -1361,11 +1374,19 @@ test "renderer mailbox push wakes the thread when it cannot land" {
     // producer that parks in the queue instead withholds it, and the
     // hang is permanent while the surface is visible: the safety-net
     // drain only runs while it is hidden.
+    //
+    // The wake is posted before the producer joins, so delivery is
+    // guaranteed by happens-before and lands in the first no-wait tick
+    // that runs; a healthy pass needs microseconds. The bound below is a
+    // hang guard, not a budget: it only trips if this loop goes
+    // unscheduled for a full minute, which machine load cannot do to a
+    // spinning thread. Worst case is 60 s and then a clean failure
+    // naming the lost wake.
     const start: std.Io.Timestamp = .now(io, .awake);
     while (woken == 0) {
         try loop.run(.no_wait);
         const now: std.Io.Timestamp = .now(io, .awake);
-        if (start.durationTo(now).toMilliseconds() > 2000) break;
+        if (start.durationTo(now).toMilliseconds() > 60 * std.time.ms_per_s) break;
         std.Thread.yield() catch {};
     }
     try testing.expect(woken > 0);

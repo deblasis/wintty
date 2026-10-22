@@ -845,6 +845,17 @@ pub fn init(
     );
     self.renderer_thr.setName(global.io(), "renderer") catch {};
 
+    // The renderer thread is running from here on. The only fallible step
+    // left is the io thread spawn below; if it fails, the unwind must stop
+    // and join the renderer before the earlier errdefers free the state it
+    // reads (deinit is only valid post-join). Errdefers run in reverse
+    // order, so this one runs first.
+    errdefer {
+        self.renderer_thread.stop.notify() catch |err|
+            log.err("error notifying renderer thread to stop, may stall err={}", .{err});
+        self.renderer_thr.join();
+    }
+
     // Start our IO thread
     self.io_thr = try std.Thread.spawn(
         .{},
@@ -871,9 +882,9 @@ pub fn init(
     // reading. Failing to set a title shouldn't stop the terminal working,
     // same reasoning as the initial size above.
     //
-    // The io thread spawn above is the one remaining exception. Handling it
-    // needs a stop-notify and a join rather than a plain errdefer, which is
-    // a larger change than this.
+    // The io thread spawn failure no longer escapes that rule: the errdefer
+    // above stops and joins the renderer thread before the earlier errdefers
+    // free anything it reads.
     if (config.title) |title| {
         setInitialTitle(self, title);
     } else if ((comptime builtin.os.tag == .linux) and
