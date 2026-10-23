@@ -83,7 +83,12 @@
         PointerMoved="OnPointerMoved"
         PointerReleased="OnPointerReleased"
         PointerWheelChanged="OnPointerWheelChanged"
-        ContextRequested="OnContextRequested">
+        ContextRequested="OnContextRequested"
+        AllowDrop="True"
+        DragEnter="OnDragEnter"
+        DragOver="OnDragOver"
+        DragLeave="OnDragLeave"
+        Drop="OnDrop">
         <SwapChainPanel
             x:Name="Panel"
             IsTabStop="False"
