@@ -238,33 +238,59 @@ def parse_justfile(text):
     return {k: ("\n".join(v[0]), v[1]) for k, v in recipes.items()}, "\n".join(preamble)
 
 
+# Flags whose value arrives as the next token (when not glued with =).
+_VALUE_FLAGS = {
+    "--project", "--blame-hang-timeout", "-c", "--configuration",
+    "--logger", "--filter", "--settings", "--results-directory",
+    "--diag", "--collect", "-e", "-l", "-s", "-r",
+}
+
+
 def win_test_csprojs(recipe_text):
-    """The .csproj paths a windows test recipe builds: the project
-    argument of every `dotnet test` invocation in its body, positional
-    or via --project. The scanned-project list is only complete while
-    it equals this set, so a project added to the recipe in any
-    spelling fails the check until the scan follows it."""
+    """The .csproj paths a windows test recipe builds, or poisoned
+    entries naming tokens it could not classify. The project argument
+    of every `dotnet test` invocation contributes either its literal
+    .csproj path or a poison entry: a token that is neither a flag, a
+    known flag's value, nor a literal .csproj path is an unrecognized
+    way of naming a project (a directory, a solution, a variable, a
+    response file, a case-slipped or wrong-kind project, a glued
+    command chain), and it must fail the equality check loudly rather
+    than pass as nothing."""
     out = set()
+
+    def offer(val):
+        # A project argument must be a literal, exact-case .csproj
+        # path; MSBuild resolves case-insensitively and directories,
+        # but the scan can only stand behind what it can name.
+        if val.endswith(".csproj"):
+            out.add(val.replace("\\", "/"))
+        else:
+            out.add(f"<unrecognized dotnet test project: {val}>")
+
     # One invocation per line: a token run that could cross newlines
     # would swallow the next command's arguments (the restore lines
     # later in the recipe carry .csproj tokens of their own).
     for line in recipe_text.splitlines():
         for m in re.finditer(r"dotnet\s+test\b((?:[ \t]+(?:\"[^\"]*\"|'[^']*'|\S+))*[ \t]*)", line):
             args = m.group(1).split()
-            for i, tok in enumerate(args):
-                tok = tok.strip("\"'")
-                if tok.startswith("--project="):
-                    val = tok.split("=", 1)[1]
+            i = 0
+            while i < len(args):
+                tok = args[i].strip("\"'")
+                low = tok.lower()
+                if low.startswith("--project="):
+                    offer(tok.split("=", 1)[1].strip("\"'"))
                 elif tok == "--project" and i + 1 < len(args):
-                    val = args[i + 1].strip("\"'")
+                    offer(args[i + 1].strip("\"'"))
+                    i += 1
+                elif low in _VALUE_FLAGS:
+                    if "=" not in tok and i + 1 < len(args) \
+                            and not args[i + 1].startswith(("-", "/")):
+                        i += 1  # the flag's value travels as this token
+                elif tok.startswith(("-", "/")):
+                    pass  # self-contained flag or property
                 else:
-                    continue
-                if val.endswith(".csproj"):
-                    out.add(val.replace("\\", "/"))
-            for tok in args:
-                tok = tok.strip("\"'")
-                if tok.endswith(".csproj") and not tok.startswith("--"):
-                    out.add(tok.replace("\\", "/"))
+                    offer(tok)
+                i += 1
     return out
 
 
@@ -1245,6 +1271,23 @@ def self_test():
         report(win_test_csprojs(ctx0.recipes["test-win"][0]) == set(TESTS_CSPROJS),
                "scanned-projects-match-the-windows-recipes",
                str(sorted(win_test_csprojs(ctx0.recipes["test-win"][0]))))
+        # Unknown project spellings must poison the derivation rather
+        # than pass as nothing, and the quoted =-form must parse clean.
+        poison = win_test_csprojs("\n".join([
+            "    dotnet test windows/NewTests",
+            "    dotnet test $env:PROJ",
+            "    dotnet test --project X.fsproj",
+            "    dotnet test a.CSPROJ",
+            "    dotnet test A.csproj; echo done",
+            "    dotnet test all.sln",
+            "    dotnet test @tests.rsp",
+        ]))
+        report(all(t.startswith("<unrecognized") for t in poison) and len(poison) == 9,
+               "win-recipe-unknown-spellings-poison", str(sorted(poison)))
+        clean = win_test_csprojs(
+            '    dotnet test --project="windows/Q.Tests/Q.Tests.csproj" --blame-hang-timeout 5m\n')
+        report(clean == {"windows/Q.Tests/Q.Tests.csproj"},
+               "win-recipe-quoted-project-form", str(clean))
         # The refusal net must catch the spellings a leading-segment
         # count misses: forward slashes, property prefixes, absolutes,
         # interior dot-dots, over-escapes. Each reaches past the project
