@@ -168,10 +168,14 @@ EXACT_RULES = {
     # The compiled-result half of the shipping gate. It is #if !DEBUG, so
     # editing it proves nothing until a Release run executes it.
     "windows/Ghostty.Tests/Demo/ShippingBuildGateTests.cs": (LEG_WIN, LEG_RELEASE_GATE),
-    # The gates leg holds the src/ entries above equal to what this project
-    # embeds, so the edit that adds an embed must run that check, not only
-    # the Windows legs the windows/ rules would give it.
+    # The gates leg holds the src/ entries above equal to what the test
+    # projects embed, so the edit that adds an embed to any of them must
+    # run that check, not only the Windows legs the prefix rules would
+    # give it (#1375: the scan covers all four, so all four must route).
     "windows/Ghostty.Tests/Ghostty.Tests.csproj": (LEG_WIN, LEG_RELEASE_GATE, LEG_GATES),
+    "windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj": (LEG_WIN, LEG_RELEASE_GATE, LEG_GATES),
+    "dist/windows/IconGen.Tests/IconGen.Tests.csproj": (LEG_WIN, LEG_GATES),
+    "dist/windows/SplashGen.Tests/SplashGen.Tests.csproj": (LEG_WIN, LEG_GATES),
     # The gates leg runs this script's selftest, which needs no build.
     # Editing it must also run the check itself, and that needs the Zig
     # toolchain, so it rides the Zig leg through `just test`.
