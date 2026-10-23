@@ -6628,7 +6628,21 @@ test "ReadThread windows: a blocked real read is interrupted and decoded" {
     try testing.expect(!cancel.acked());
 
     const thread = try std.Thread.spawn(.{}, Ops.threadMain, .{&ops});
-    while (!ops.in_read.load(.acquire)) std.Thread.yield() catch {};
+
+    // The reader issues its first read as its first act, so this parks
+    // for microseconds in a healthy run. The deadline bounds two
+    // regressions: the thread gone before reading (past it the cancel
+    // cannot be acked, the join is free, and the assertions below name
+    // what never happened), and the thread never arriving at all. It
+    // does NOT bound a thread wedged alive before its first read: the
+    // EOF escape below can only release a reader that reaches ReadFile,
+    // so that shape still hangs in the join, exactly as it did before
+    // this guard existed.
+    const read_from: std.Io.Timestamp = .now(global.io(), .awake);
+    while (!ops.in_read.load(.acquire)) {
+        if (read_from.durationTo(.now(global.io(), .awake)).toMilliseconds() > 10 * std.time.ms_per_s) break;
+        std.Thread.yield() catch {};
+    }
 
     quit.request();
     const acked = ReadThread.cancelUntilAcked(

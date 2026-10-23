@@ -472,12 +472,19 @@ test "BlockingQueue push forever retries when woken with no free slot" {
     var pusher: Pusher = .{ .q = q };
     const thread = try std.Thread.spawn(.{}, Pusher.run, .{ &pusher, io });
 
-    // Wait until the pusher is parked on the condition.
+    // Wait until the pusher is parked on the condition. A pusher against
+    // a full queue parks in microseconds; the deadline only bounds a
+    // regression that stops it parking at all (a drop, or a push that
+    // returns instead of waiting). Past it the test proceeds and the
+    // still-parked assertion below names what never happened, instead of
+    // the suite hanging here with no verdict.
+    const parked_from: std.Io.Timestamp = .now(io, .awake);
     while (true) {
         q.mutex.lockUncancelable(io);
         const parked = q.not_full_waiters > 0;
         q.mutex.unlock(io);
         if (parked) break;
+        if (parked_from.durationTo(.now(io, .awake)).toMilliseconds() > 10 * std.time.ms_per_s) break;
         std.Thread.yield() catch {};
     }
 
