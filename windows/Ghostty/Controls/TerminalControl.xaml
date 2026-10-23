@@ -34,10 +34,8 @@
     Loaded="OnLoaded"
     Unloaded="OnUnloaded"
     GotFocus="OnGotFocus"
-    LostFocus="OnLostFocus"
-    KeyDown="OnKeyDown"
-    KeyUp="OnKeyUp"
-    CharacterReceived="OnCharacterReceived">
+    LostFocus="OnLostFocus">
+    <!-- KeyDown, KeyUp and CharacterReceived: see the constructor. -->
 
     <!--
         Overlay layout: the SwapChainPanel fills the cell; the ScrollBar
@@ -208,16 +206,19 @@
             IME sink. WinUI surfaces composition only on TextBox /
             RichEditBox, not on UserControl. Zero-size and non-interactive;
             OnGotFocus routes keyboard input here so SurfacePreedit can
-            drive the block cursor while committed text still reaches
-            libghostty via TextChanged / CharacterReceived.
+            drive the block cursor. IsTabStop must stay True: a control
+            with IsTabStop="False" cannot take focus, and the pane then
+            has no IME at all.
         -->
         <TextBox
             x:Name="ImeSink"
             Width="1"
             Height="1"
             Opacity="0"
-            IsTabStop="False"
+            IsTabStop="True"
             IsHitTestVisible="False"
+            IsSpellCheckEnabled="False"
+            IsTextPredictionEnabled="False"
             BorderThickness="0"
             TextCompositionStarted="OnImeCompositionStarted"
             TextCompositionChanged="OnImeCompositionChanged"
