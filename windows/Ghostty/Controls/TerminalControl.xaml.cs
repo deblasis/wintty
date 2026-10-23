@@ -181,10 +181,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // supplementary-plane scalars as two events; see WmCharUtf8.
     private char _pendingWmCharHigh;
 
-    // True while WinUI is driving an IME composition session. Preedit
-    // updates go through SurfacePreedit; committed text still arrives
-    // via CharacterReceived after TextCompositionEnded.
+    // True while ImeSink holds composed text not yet forwarded.
     private bool _imeComposing;
+
+    // How much of ImeSink.Text has been forwarded to the surface.
+    private int _imeForwarded;
+
+    // Redraws the preedit while composing: WinUI does not raise
+    // TextCompositionChanged for every update.
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _imePreeditTimer;
+
+    // Modifiers pressed mid-composition, withheld from libghostty along
+    // with their releases.
+    private readonly HashSet<VirtualKey> _imeHeldModifiers = new();
 
     // Set while RaiseScrollbarChanged is writing into VerticalScrollBar.
     // Prevents the resulting Scroll event from round-tripping back into
@@ -1017,6 +1026,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     public TerminalControl()
     {
         InitializeComponent();
+
+        // handledEventsToo: the focused ImeSink TextBox marks editing keys
+        // (Backspace, arrows, Ctrl+V) handled, and the terminal needs them.
+        AddHandler(KeyDownEvent, new KeyEventHandler(OnKeyDown), handledEventsToo: true);
+        AddHandler(KeyUpEvent, new KeyEventHandler(OnKeyUp), handledEventsToo: true);
+        AddHandler(
+            CharacterReceivedEvent,
+            new Windows.Foundation.TypedEventHandler<UIElement, CharacterReceivedRoutedEventArgs>(OnCharacterReceived),
+            handledEventsToo: true);
 
         // Hold the terminal surface off the pane's edges so the chrome
         // PaneHost overlays there does not paint over live cells -- see
@@ -2050,15 +2068,37 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         SetFocusState(true);
         AcknowledgeBell();
         // Route IME to the hidden TextBox sink (see TerminalControl.xaml).
-        if (!SearchBar.ContainsFocus)
+        // Not when GotFocus bubbles up from the sink itself: focusing again
+        // from there steals keyboard focus from other windows (the hidden
+        // quick terminal), and two panes doing that loop forever.
+        if (ReferenceEquals(e.OriginalSource, this) && !SearchBar.ContainsFocus)
             ImeSink.Focus(FocusState.Programmatic);
     }
 
     private void OnLostFocus(object sender, RoutedEventArgs e)
     {
-        ClearImeComposition();
+        // The handoff to ImeSink in OnGotFocus is not a focus loss. Check
+        // the source too: when another window takes focus, the sink loses
+        // it while GetFocusedElement still names the sink.
+        if (ReferenceEquals(e.OriginalSource, this)
+            && XamlRoot is { } root
+            && ReferenceEquals(FocusManager.GetFocusedElement(root), ImeSink))
+            return;
+        CommitImeText();
+        _imeHeldModifiers.Clear();
         SetFocusState(false);
     }
+
+    /// <summary>IME mode keys and VK_PROCESSKEY; none is terminal input.</summary>
+    private static bool IsImeKey(VirtualKey key)
+        => (int)key is 0x15 /* VK_KANA */ or 0x16 /* VK_IME_ON */
+            or 0x19 /* VK_KANJI */ or 0x1A /* VK_IME_OFF */ or 0xE5 /* VK_PROCESSKEY */;
+
+    private static bool IsModifierKey(VirtualKey key) => key is
+        VirtualKey.Shift or VirtualKey.LeftShift or VirtualKey.RightShift or
+        VirtualKey.Control or VirtualKey.LeftControl or VirtualKey.RightControl or
+        VirtualKey.Menu or VirtualKey.LeftMenu or VirtualKey.RightMenu or
+        VirtualKey.LeftWindows or VirtualKey.RightWindows or VirtualKey.CapitalLock;
 
     private void SetFocusState(bool focused)
     {
@@ -2478,6 +2518,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // thing that decides that character's fate.
         RetireStaleCharacterSuppress();
 
+        if (IsImeKey(e.Key)) return;
+
+        // Keys the IME composes with never reach KeyDown, so a key that does
+        // means the composition is final. Modifiers can be part of one.
+        if (!IsModifierKey(e.Key))
+            CommitImeText();
+
+        // A modifier mid-composition stays out of libghostty: the apprt
+        // pairs a text-less press with the next SurfaceText, so it would
+        // swallow the commit that follows.
+        if (_imeComposing)
+        {
+            _imeHeldModifiers.Add(e.Key);
+            return;
+        }
+
         if (CommandPaletteIsOpen) return;
 
         // Suppress forwarding while the in-pane search bar owns keyboard
@@ -2564,6 +2620,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // focus reaching its search box, releases still land here, and a
         // release for a press the gate dropped hands libghostty half a pair.
         if (CommandPaletteIsOpen) return;
+
+        // Releases of presses OnKeyDown did not forward.
+        if (IsImeKey(e.Key)) return;
+        if (_imeHeldModifiers.Remove(e.Key)) return;
 
         // Mirror OnKeyDown: while the search bar owns focus, swallow the
         // key-up too so libghostty never sees a release for a press it
@@ -2744,10 +2804,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // libghostty as terminal text. See the matching guard in OnKeyDown.
         if (SearchBar.ContainsFocus) return;
 
-        // During IME composition, partial code units arrive as
-        // CharacterReceived on some layouts. Preedit is driven by
-        // TextCompositionChanged; drop stray chars until commit.
-        if (_imeComposing) return;
+        // Non-ASCII text is taken from ImeSink, which also holds it, so
+        // taking it here too would type it twice.
+        if (e.Character >= (char)0x80)
+        {
+            if (!_imeComposing) DispatcherQueue.TryEnqueue(CommitImeText);
+            return;
+        }
+
+        // Anything composed before this character goes first.
+        CommitImeText();
 
         HandleCharacter(e.Character);
     }
@@ -2822,29 +2888,103 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // composition starts belongs to a keystroke that went elsewhere.
         RetireStaleCharacterSuppress();
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+
+        // Text before a new composition is final.
+        var text = ImeSink.Text;
+        if (e.StartIndex >= 0 && e.StartIndex <= text.Length)
+            ForwardImeRange(text, e.StartIndex);
+
         _imeComposing = true;
+        UpdatePreeditFromSink();
+        StartImePreeditTimer();
     }
 
     private void OnImeCompositionChanged(object sender, TextCompositionChangedEventArgs e)
     {
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
-        var text = ImeSink.Text;
-        if (e.StartIndex >= 0 && e.Length > 0 && e.StartIndex + e.Length <= text.Length)
-            UpdateSurfacePreedit(text.Substring(e.StartIndex, e.Length));
-        else
-            UpdateSurfacePreedit(text);
+        _imeComposing = true;
+        UpdatePreeditFromSink();
+        StartImePreeditTimer();
     }
 
     private void OnImeCompositionEnded(object sender, TextCompositionEndedEventArgs e)
     {
-        if (_surface.Handle == IntPtr.Zero) return;
-        ClearImeComposition();
+        // Commits nothing: when one composition ends and the next starts in
+        // the same keystroke, Ended arrives after Started and carries the
+        // new composition's range. OnImeCompositionStarted and CommitImeText
+        // are the commit points.
     }
+
+    /// <summary>Forwards the rest of ImeSink, then empties it.</summary>
+    private void CommitImeText()
+    {
+        StopImePreeditTimer();
+        if (_surface.Handle == IntPtr.Zero) return;
+        var text = ImeSink.Text;
+        if (text.Length > 0 && !SearchBar.ContainsFocus)
+            ForwardImeRange(text, text.Length);
+        if (_imeComposing) UpdateSurfacePreedit(null);
+        _imeComposing = false;
+        _imeForwarded = 0;
+        if (text.Length > 0) ImeSink.Text = string.Empty;
+    }
+
+    /// <summary>
+    /// Forwards <paramref name="text"/> from <see cref="_imeForwarded"/> to
+    /// <paramref name="end"/>, skipping ASCII, which CharacterReceived sent.
+    /// </summary>
+    private void ForwardImeRange(string text, int end)
+    {
+        var from = Math.Min(_imeForwarded, text.Length);
+        end = Math.Min(end, text.Length);
+        if (end <= from) return;
+        var sb = new StringBuilder(end - from);
+        for (var i = from; i < end; i++)
+        {
+            if (text[i] >= (char)0x80) sb.Append(text[i]);
+        }
+        _imeForwarded = end;
+        if (sb.Length > 0) ForwardImeText(sb.ToString());
+    }
+
+    /// <summary>The not-yet-forwarded tail of the sink is the preedit.</summary>
+    private void UpdatePreeditFromSink()
+    {
+        var text = ImeSink.Text;
+        var from = Math.Min(_imeForwarded, text.Length);
+        var sb = new StringBuilder();
+        for (var i = from; i < text.Length; i++)
+        {
+            if (text[i] >= (char)0x80) sb.Append(text[i]);
+        }
+        UpdateSurfacePreedit(sb.Length > 0 ? sb.ToString() : null);
+    }
+
+    private void StartImePreeditTimer()
+    {
+        if (_imePreeditTimer is null)
+        {
+            _imePreeditTimer = DispatcherQueue.CreateTimer();
+            _imePreeditTimer.Interval = TimeSpan.FromMilliseconds(33);
+            _imePreeditTimer.IsRepeating = true;
+            _imePreeditTimer.Tick += (_, _) =>
+            {
+                if (!_imeComposing || _surface.Handle == IntPtr.Zero) { StopImePreeditTimer(); return; }
+                UpdatePreeditFromSink();
+            };
+        }
+        if (!_imePreeditTimer.IsRunning) _imePreeditTimer.Start();
+    }
+
+    private void StopImePreeditTimer() => _imePreeditTimer?.Stop();
 
     /// <summary>Clears WinUI IME state and the libghostty preedit overlay.</summary>
     private void ClearImeComposition()
     {
+        StopImePreeditTimer();
+        _imeHeldModifiers.Clear();
         _imeComposing = false;
+        _imeForwarded = 0;
         if (_surface.Handle == IntPtr.Zero) return;
         UpdateSurfacePreedit(null);
         ImeSink.Text = string.Empty;
@@ -2852,10 +2992,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnImeSinkTextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_imeComposing || _surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
-        var text = ImeSink.Text;
-        if (string.IsNullOrEmpty(text)) return;
+        if (_imeComposing) UpdatePreeditFromSink();
+    }
 
+    /// <summary>Sends committed IME text to the surface or preview sink.</summary>
+    private void ForwardImeText(string text)
+    {
         // A preview surface's keyboard belongs to its fake session, so
         // committed IME text goes through the sink like any other
         // printable (same filtering as OnCharacterReceived), never to
@@ -2870,7 +3012,6 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                         sink.Character(ch);
                 }
             }
-            ImeSink.Text = string.Empty;
             return;
         }
 
@@ -2885,8 +3026,6 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                     NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)len);
             }
         }
-
-        ImeSink.Text = string.Empty;
     }
 
     private void UpdateSurfacePreedit(string? text)
