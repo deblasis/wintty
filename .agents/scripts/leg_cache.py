@@ -239,14 +239,32 @@ def parse_justfile(text):
 
 
 def win_test_csprojs(recipe_text):
-    """The .csproj paths a windows test recipe builds: every `dotnet
-    test <path>` argument in its body. The scanned-project list is only
-    complete while it equals this set, so a project added to the recipe
-    without being added to the scan fails the check instead of running
-    unscanned."""
+    """The .csproj paths a windows test recipe builds: the project
+    argument of every `dotnet test` invocation in its body, positional
+    or via --project. The scanned-project list is only complete while
+    it equals this set, so a project added to the recipe in any
+    spelling fails the check until the scan follows it."""
     out = set()
-    for m in re.finditer(r"dotnet\s+test\s+(\S+\.csproj)", recipe_text):
-        out.add(m.group(1).replace("\\", "/"))
+    # One invocation per line: a token run that could cross newlines
+    # would swallow the next command's arguments (the restore lines
+    # later in the recipe carry .csproj tokens of their own).
+    for line in recipe_text.splitlines():
+        for m in re.finditer(r"dotnet\s+test\b((?:[ \t]+(?:\"[^\"]*\"|'[^']*'|\S+))*[ \t]*)", line):
+            args = m.group(1).split()
+            for i, tok in enumerate(args):
+                tok = tok.strip("\"'")
+                if tok.startswith("--project="):
+                    val = tok.split("=", 1)[1]
+                elif tok == "--project" and i + 1 < len(args):
+                    val = args[i + 1].strip("\"'")
+                else:
+                    continue
+                if val.endswith(".csproj"):
+                    out.add(val.replace("\\", "/"))
+            for tok in args:
+                tok = tok.strip("\"'")
+                if tok.endswith(".csproj") and not tok.startswith("--"):
+                    out.add(tok.replace("\\", "/"))
     return out
 
 
@@ -478,15 +496,20 @@ def csproj_out_of_tree(csproj_rel, text):
     # the value at it and wave the rest past every rule.
     refs = []
     for m in re.finditer(r'Include\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', text):
-        refs.append(("include", m.group(1) or m.group(2)))
+        refs.append(("include", m.group(1) or m.group(2) or ""))
+    # The run from the element marker to the attribute may cross other
+    # attribute VALUES, and a quoted value may legally contain `>`
+    # (MSBuild conditions compare with it), so the interlude skips
+    # quoted spans as units instead of stopping at the first `>`.
+    quoted_interlude = r'(?:[^>"\']|"[^"]*"|\'[^\']*\')*?'
     for m in re.finditer(
-            r'<Import\b[^>]*?\bProject\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
-            text, re.S):
-        refs.append(("Import Project", m.group(1) or m.group(2)))
+            r'<Import\b' + quoted_interlude + r'\bProject\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
+            text):
+        refs.append(("Import Project", m.group(1) or m.group(2) or ""))
     for m in re.finditer(
-            r'<UsingTask\b[^>]*?\bAssemblyFile\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
-            text, re.S):
-        refs.append(("UsingTask AssemblyFile", m.group(1) or m.group(2)))
+            r'<UsingTask\b' + quoted_interlude + r'\bAssemblyFile\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
+            text):
+        refs.append(("UsingTask AssemblyFile", m.group(1) or m.group(2) or ""))
     for kind, inc in refs:
         # MSBuild trims surrounding whitespace from the value before
         # evaluating it as a path; classify what it evaluates.
@@ -1094,7 +1117,7 @@ def self_test():
         "    dotnet build windows/Ghostty.sln /p:Platform=x64",
         "    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj",
         "    dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj",
-        "    dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj",
+        "    dotnet test --project dist/windows/IconGen.Tests/IconGen.Tests.csproj",
         "    dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj",
         "",
         "build-win:",
@@ -1253,12 +1276,14 @@ def self_test():
             # kind named.
             '<Import Project="..\\..\\src\\build\\common.props" />\n'
             '<Import Project="$(SolutionDir)src\\wide.props" />\n'
+            '<Import Condition="\'$(Num)\' > \'1\'" Project="..\\..\\src\\cond\\leak.props" />\n'
             '<UsingTask AssemblyFile="..\\..\\src\\native\\task.dll" />\n')
         report(sorted(esc_embeds) == sorted([
                    "src/fine.zig",
                    "src/single-quoted.zig",
                    "src/spaced.zig",
                    "src/build/common.props",
+                   "src/cond/leak.props",
                    "src/native/task.dll",
                ])
                and sorted(esc_refused) == sorted([
@@ -1321,6 +1346,26 @@ def self_test():
             cur, _ = digests(root)
             report(moved(prev, cur) == expect, f"moves[{rel}]", f"{moved(prev, cur)}")
             prev = cur
+
+        # 2b. The absent-at-HEAD guard on the planning side: a tracked
+        # reference to a path that was never committed must surface as
+        # a named problem, because its hash would read "absent" and the
+        # real file's edits would move nothing. Restore the original
+        # csproj afterwards so later rows keep their baseline.
+        absent_csproj = ('<Project>\n'
+                         '  <EmbeddedResource Include="..\\..\\src\\absent_probe.zig" />\n'
+                         '  <Import Project="..\\..\\src\\build\\common.props" />\n'
+                         '</Project>\n')
+        write(root, TESTS_CSPROJS[1].replace("/", os.sep), absent_csproj)
+        commit(root, "absent probe")
+        _, ctx_abs = digests(root)
+        report("tracked path absent at HEAD: src/absent_probe.zig" in ctx_abs.problems,
+               "ctx-absent-tracked-path-is-a-problem", str(ctx_abs.problems))
+        write(root, TESTS_CSPROJS[1].replace("/", os.sep),
+              '<Project>\n  <EmbeddedResource Include="..\\..\\src\\extra2.zig" />\n'
+              '  <Import Project="..\\..\\src\\build\\common.props" />\n</Project>\n')
+        commit(root, "restore windows test csproj")
+        prev, _ = digests(root)
 
         # 3. Justfile edits: a recipe body moves its legs only; a comment
         #    moves nothing; a shebang is not a comment; the preamble moves
@@ -1568,7 +1613,10 @@ def self_test():
     # recipes actually build, or a new test project runs unscanned.
     all_embeds = sorted({rel for rel in embeds_cache})
     live_hashes = head_hashes(REPO_ROOT, all_embeds) if all_embeds else {}
-    absent = [p for p in all_embeds if live_hashes.get(p) is None]
+    # UNRESOLVED (git stalled) fails the row like absence does: a hash
+    # nobody obtained must not read as proof the path exists.
+    absent = [p for p in all_embeds
+              if live_hashes.get(p) in (None, UNRESOLVED)]
     report(not absent,
            "csproj-tracked-paths-exist-at-head", f"absent={absent}")
     derived = win_test_csprojs(recipes.get("test-win", ("", []))[0])
