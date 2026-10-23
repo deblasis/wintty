@@ -426,6 +426,12 @@ def csproj_out_of_tree(csproj_rel, text):
     includes from outside the tree its own routing already covers, and
     the include spellings refused by name.
 
+    The scanner reads the Include attributes this one file carries.
+    Other file references MSBuild evaluates from a project file --
+    Import/@Project, UsingTask/@AssemblyFile -- are outside its view
+    and must be covered by their own tracking; a file that cannot be
+    read as text at all is refused whole, never scanned as empty.
+
     An include is classified on its whole shape, because MSBuild
     accepts spellings that reach past the project directory without
     starting with `..\\`: forward slashes (`../../src/x.zig`),
@@ -443,6 +449,13 @@ def csproj_out_of_tree(csproj_rel, text):
     up = csproj_rel.count("/")
     lead = "..\\" * up
     embeds, refused = [], []
+    # A UTF-16/UTF-32 save (any "Unicode" option in an editor) decodes
+    # to NUL-interleaved garbage with zero attribute matches: without
+    # this guard the scan reports an empty, satisfied file while
+    # MSBuild happily evaluates the real contents. Refuse the whole
+    # file instead of silently scanning nothing.
+    if "\x00" in text:
+        return [], [f"{csproj_rel}: unreadable text encoding (NUL bytes)"]
     # XML permits the attribute value in single quotes and whitespace
     # around the `=`; MSBuild accepts both, so the scan must too or the
     # include is invisible to every rule below. The delimiters are
@@ -1202,6 +1215,15 @@ def self_test():
                ]),
                "csproj-escape-spellings-refused",
                f"embeds={esc_embeds} refused={sorted(esc_refused)}")
+        # A non-UTF-8 save (UTF-16 with its BOM decodes to NUL-
+        # interleaved text) must fail the scan whole, not satisfy it
+        # with zero matches.
+        nul_embeds, nul_refused = csproj_out_of_tree(
+            TESTS_CSPROJS[0], '<Project>\x00 \n  <EmbeddedResource Include="..\\..\\src\\x.zig" />\n</Project>\x00\n')
+        report(nul_embeds == [] and len(nul_refused) == 1
+               and "unreadable text encoding" in nul_refused[0],
+               "csproj-undecodable-refused-whole",
+               f"embeds={nul_embeds} refused={nul_refused}")
         recipes_hc, _ = parse_justfile("x: a b # not a dep\n    echo\n")
         report(recipes_hc["x"][1] == ["a", "b"], "header-comment-is-not-a-dependency",
                str(recipes_hc["x"][1]))
@@ -1463,7 +1485,10 @@ def self_test():
         try:
             with open(os.path.join(REPO_ROOT, *p.split("/")), encoding="utf-8") as f:
                 text = f.read()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A file that cannot be read as UTF-8 text fails the row
+            # by name; it must never crash the selftest, and never
+            # count as an empty, satisfied scan either.
             unrouted.append(f"{p} unreadable")
             continue
         embeds, refused = csproj_out_of_tree(p, text)
