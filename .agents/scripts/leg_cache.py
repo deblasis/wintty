@@ -238,6 +238,18 @@ def parse_justfile(text):
     return {k: ("\n".join(v[0]), v[1]) for k, v in recipes.items()}, "\n".join(preamble)
 
 
+def win_test_csprojs(recipe_text):
+    """The .csproj paths a windows test recipe builds: every `dotnet
+    test <path>` argument in its body. The scanned-project list is only
+    complete while it equals this set, so a project added to the recipe
+    without being added to the scan fails the check instead of running
+    unscanned."""
+    out = set()
+    for m in re.finditer(r"dotnet\s+test\s+(\S+\.csproj)", recipe_text):
+        out.add(m.group(1).replace("\\", "/"))
+    return out
+
+
 def leg_recipes(leg, recipes):
     """The recipe names a leg runs through, closed over dependencies.
     Unknown names are returned separately so the caller can fail closed."""
@@ -422,17 +434,19 @@ def env_var_values():
 
 
 def csproj_out_of_tree(csproj_rel, text):
-    """(embeds, refused) for one test project: the repo-relative paths it
-    includes from outside the tree its own routing already covers, and
-    the include spellings refused by name.
+    """(embeds, refused) for one test project: the repo-relative file
+    references it pulls from outside the tree its own routing already
+    covers, and the spellings refused by name.
 
-    The scanner reads the Include attributes this one file carries.
-    Other file references MSBuild evaluates from a project file --
-    Import/@Project, UsingTask/@AssemblyFile -- are outside its view
-    and must be covered by their own tracking; a file that cannot be
-    read as text at all is refused whole, never scanned as empty.
+    The scanner reads every attribute of this one file that MSBuild
+    evaluates as a file reference: item Include, Import/@Project,
+    UsingTask/@AssemblyFile. A tracked import becomes a digest input
+    the day it lands, so editing the imported file moves the digest;
+    its own contents are covered by that hash and are not scanned
+    recursively. A file that cannot be read as text at all is refused
+    whole, never scanned as empty.
 
-    An include is classified on its whole shape, because MSBuild
+    A reference is classified on its whole shape, because MSBuild
     accepts spellings that reach past the project directory without
     starting with `..\\`: forward slashes (`../../src/x.zig`),
     property prefixes (`$(MSBuildThisFileDirectory)..\\..\\src`),
@@ -440,12 +454,12 @@ def csproj_out_of_tree(csproj_rel, text):
     tree while a leading-segment count calls them in-tree. So there are
     exactly three classes: a plain relative path (globs included) that
     stays inside the project tree names no repo file and is left to the
-    prefix rules; an include that begins with exactly `up` leading
+    prefix rules; a reference that begins with exactly `up` leading
     `..\\` segments followed by a `..`-free literal rest names a repo
     file and is tracked; everything else -- every spelling that could
     still leave the project directory -- is refused. Refused, not
-    skipped: a new spelling must not slip past the check as "not an
-    include"."""
+    skipped: a new spelling must not slip past the check as "not a
+    reference"."""
     up = csproj_rel.count("/")
     lead = "..\\" * up
     embeds, refused = [], []
@@ -458,19 +472,31 @@ def csproj_out_of_tree(csproj_rel, text):
         return [], [f"{csproj_rel}: unreadable text encoding (NUL bytes)"]
     # XML permits the attribute value in single quotes and whitespace
     # around the `=`; MSBuild accepts both, so the scan must too or the
-    # include is invisible to every rule below. The delimiters are
+    # reference is invisible to every rule below. The delimiters are
     # PAIRED: an apostrophe inside a double-quoted value is data, not a
     # terminator, and a class that accepted either quote would truncate
     # the value at it and wave the rest past every rule.
-    for inc in re.findall(
-            r'Include\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', text):
-        inc = inc[0] or inc[1]
+    refs = []
+    for m in re.finditer(r'Include\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', text):
+        refs.append(("include", m.group(1) or m.group(2)))
+    for m in re.finditer(
+            r'<Import\b[^>]*?\bProject\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
+            text, re.S):
+        refs.append(("Import Project", m.group(1) or m.group(2)))
+    for m in re.finditer(
+            r'<UsingTask\b[^>]*?\bAssemblyFile\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
+            text, re.S):
+        refs.append(("UsingTask AssemblyFile", m.group(1) or m.group(2)))
+    for kind, inc in refs:
+        # MSBuild trims surrounding whitespace from the value before
+        # evaluating it as a path; classify what it evaluates.
+        inc = inc.strip()
         # An unexpanded property or character reference is an unknown:
         # its evaluated value (possibly defined outside the scanned
         # text, possibly entity-encoded) can carry the dot-dots, so it
         # is refused wherever it appears, dots or not.
         if "$" in inc or "&" in inc:
-            refused.append(inc)
+            refused.append(f'{kind} "{inc}"')
             continue
         abs_root = inc[1:2] == ":" or inc.startswith(("/", "\\"))
         if not abs_root and ".." not in inc:
@@ -481,7 +507,7 @@ def csproj_out_of_tree(csproj_rel, text):
             # name a repo file, and only as a clean literal path.
             rest = inc[len(lead):]
             if any(c in inc for c in "*/$;") or "/" in inc or ".." in rest:
-                refused.append(inc)
+                refused.append(f'{kind} "{inc}"')
                 continue
             while rest.startswith(".\\"):
                 rest = rest[2:]
@@ -500,7 +526,7 @@ def csproj_out_of_tree(csproj_rel, text):
                 and ".." not in inc[after:]
                 and not any(c in inc for c in "$;")):
             continue
-        refused.append(inc)
+        refused.append(f'{kind} "{inc}"')
     return sorted(set(embeds)), refused
 
 
@@ -538,11 +564,18 @@ class Context:
                 continue
             embeds, refused = csproj_out_of_tree(p, csproj.stdout)
             self.embeds.extend(embeds)
-            self.problems.extend(f"{p} refuses include {r}" for r in refused)
+            self.problems.extend(f"{p} refuses {r}" for r in refused)
         wanted = {"justfile"} | set(self.root_legs) | set(self.embeds)
         for leg in gate_scope.ALL_LEGS:
             wanted.update(leg_paths(leg))
         self.hashes = head_hashes(root, sorted(wanted))
+        # A tracked path that does not exist exactly as spelled (a case
+        # slip, a typo) hashes as absent: the digest would treat the
+        # real file's edits as no-ops. Refuse it by name instead.
+        self.problems.extend(
+            f"tracked path absent at HEAD: {p}"
+            for p in sorted(set(self.embeds))
+            if self.hashes.get(p) is None)
         self.env = dict(env) if env is not None else PROBE(root, env_names(self.legs))
         self.env_vars = dict(env_vars) if env_vars is not None else env_var_values()
 
@@ -1060,6 +1093,9 @@ def self_test():
         "test-win:",
         "    dotnet build windows/Ghostty.sln /p:Platform=x64",
         "    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj",
+        "    dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj",
+        "    dotnet test dist/windows/IconGen.Tests/IconGen.Tests.csproj",
+        "    dotnet test dist/windows/SplashGen.Tests/SplashGen.Tests.csproj",
         "",
         "build-win:",
         "    dotnet build windows/Ghostty.sln",
@@ -1128,8 +1164,14 @@ def self_test():
         # embeds at their own depth: two-up for windows/, three-up for
         # dist/windows/. Each must land in the WIN digest on its own.
         write(root, TESTS_CSPROJS[1].replace("/", os.sep),
-              '<Project>\n  <EmbeddedResource Include="..\\..\\src\\extra2.zig" />\n</Project>\n')
+              '<Project>\n  <EmbeddedResource Include="..\\..\\src\\extra2.zig" />\n'
+              '  <Import Project="..\\..\\src\\build\\common.props" />\n</Project>\n')
         write(root, "src/extra2.zig", "// embedded by the windows test project\n")
+        # Targets of the tracked Import and UsingTask references the
+        # escape-spellings fixture carries; their edits must move the
+        # windows digest like any embed's.
+        write(root, "src/build/common.props", "<Project />\n")
+        write(root, "src/native/task.dll", "dll\n")
         write(root, TESTS_CSPROJS[2].replace("/", os.sep),
               '<Project>\n  <EmbeddedResource Include="..\\..\\..\\src\\extra3.zig" />\n</Project>\n')
         write(root, "src/extra3.zig", "// embedded by the icon test project\n")
@@ -1170,9 +1212,16 @@ def self_test():
         inputs_win, _ = leg_inputs(WIN, ctx0)
         report("path/helper.zig" not in inputs_win and "var/GHOSTTY_FUZZ_ITERATIONS" in inputs_win
                and "path/src/extra.zig" in inputs_win
-               and ctx0.embeds == ["src/extra.zig", "src/extra2.zig",
-                                   "src/extra3.zig", "images/splash_extra.png"],
+               and ctx0.embeds == ["src/extra.zig", "src/build/common.props",
+                                   "src/extra2.zig", "src/extra3.zig",
+                                   "images/splash_extra.png"],
                "win-leg-inputs", str(ctx0.embeds))
+        # The scanned-project list must equal what the windows recipes
+        # build, so a project added to the recipe fails the check until
+        # the scan follows it.
+        report(win_test_csprojs(ctx0.recipes["test-win"][0]) == set(TESTS_CSPROJS),
+               "scanned-projects-match-the-windows-recipes",
+               str(sorted(win_test_csprojs(ctx0.recipes["test-win"][0]))))
         # The refusal net must catch the spellings a leading-segment
         # count misses: forward slashes, property prefixes, absolutes,
         # interior dot-dots, over-escapes. Each reaches past the project
@@ -1197,21 +1246,31 @@ def self_test():
             '  <EmbeddedResource Include = "..\\..\\src\\spaced.zig" />\n'
             '  <EmbeddedResource Include="data\'$(RR)src\\apostrophe.zig" />\n'
             '  <EmbeddedResource Include="&#36;(RR)src\\entity.zig" />\n'
-            '</ItemGroup>\n')
+            '</ItemGroup>\n'
+            # File references outside Include attributes: an exactly-up
+            # Import is tracked like any embed (its edits must move the
+            # digest), and every other spelling is refused with its
+            # kind named.
+            '<Import Project="..\\..\\src\\build\\common.props" />\n'
+            '<Import Project="$(SolutionDir)src\\wide.props" />\n'
+            '<UsingTask AssemblyFile="..\\..\\src\\native\\task.dll" />\n')
         report(sorted(esc_embeds) == sorted([
                    "src/fine.zig",
                    "src/single-quoted.zig",
                    "src/spaced.zig",
+                   "src/build/common.props",
+                   "src/native/task.dll",
                ])
                and sorted(esc_refused) == sorted([
-                   "..\\..\\..\\src\\deep.zig",
-                   "..\\..\\src\\ok\\..\\..\\src\\interior.zig",
-                   "../../src/forward.zig",
-                   "$(MSBuildThisFileDirectory)..\\..\\src\\prop.zig",
-                   "C:\\abs\\x.zig",
-                   "$(RR)src\\via-prop.zig",
-                   "data'$(RR)src\\apostrophe.zig",
-                   "&#36;(RR)src\\entity.zig",
+                   'include "..\\..\\..\\src\\deep.zig"',
+                   'include "..\\..\\src\\ok\\..\\..\\src\\interior.zig"',
+                   'include "../../src/forward.zig"',
+                   'include "$(MSBuildThisFileDirectory)..\\..\\src\\prop.zig"',
+                   'include "C:\\abs\\x.zig"',
+                   'include "$(RR)src\\via-prop.zig"',
+                   'include "data\'$(RR)src\\apostrophe.zig"',
+                   'include "&#36;(RR)src\\entity.zig"',
+                   'Import Project "$(SolutionDir)src\\wide.props"',
                ]),
                "csproj-escape-spellings-refused",
                f"embeds={esc_embeds} refused={sorted(esc_refused)}")
@@ -1236,6 +1295,7 @@ def self_test():
             ("src/extra2.zig", "// embedded by the windows test project, edited\n", sorted([FMT, ZIG, WIN])),
             ("src/extra3.zig", "// embedded by the icon test project, edited\n", sorted([FMT, ZIG, WIN])),
             ("images/splash_extra.png", "png2\n", [WIN]),
+            ("src/build/common.props", "<Project S=\"x\" />\n", sorted([FMT, ZIG, WIN])),
             (TESTS_CSPROJ, '<Project>\n  <EmbeddedResource Include="..\\..\\src\\extra.zig" />\n'
                            '</Project>\n', sorted([GATES, REL, WIN])),
             (TESTS_CSPROJS[1], '<Project>\n  <EmbeddedResource Include="..\\..\\src\\extra2.zig" />\n'
@@ -1480,7 +1540,7 @@ def self_test():
     # (#1375): an out-of-tree include anywhere must route to the
     # windows-tests leg, and a refused spelling fails rather than
     # slipping past as "not an include".
-    includes_total, unrouted = 0, []
+    includes_total, unrouted, embeds_cache = 0, [], []
     for p in TESTS_CSPROJS:
         try:
             with open(os.path.join(REPO_ROOT, *p.split("/")), encoding="utf-8") as f:
@@ -1493,6 +1553,7 @@ def self_test():
             continue
         embeds, refused = csproj_out_of_tree(p, text)
         includes_total += len(embeds) + len(refused)
+        embeds_cache.extend(embeds)
         unrouted.extend(f"{p} refuses {r}" for r in refused)
         for rel in embeds:
             legs = gate_scope.legs_for_path(rel)
@@ -1501,6 +1562,19 @@ def self_test():
     report(includes_total > 0 and not unrouted,
            "csproj-out-of-tree-includes-route-to-windows-tests",
            f"unrouted={unrouted}")
+    # A tracked path must exist exactly as spelled at HEAD (a case slip
+    # or typo would hash as absent and treat the real file's edits as
+    # no-ops), and the scanned-project list must equal what the windows
+    # recipes actually build, or a new test project runs unscanned.
+    all_embeds = sorted({rel for rel in embeds_cache})
+    live_hashes = head_hashes(REPO_ROOT, all_embeds) if all_embeds else {}
+    absent = [p for p in all_embeds if live_hashes.get(p) is None]
+    report(not absent,
+           "csproj-tracked-paths-exist-at-head", f"absent={absent}")
+    derived = win_test_csprojs(recipes.get("test-win", ("", []))[0])
+    report(derived == set(TESTS_CSPROJS),
+           "scanned-projects-match-the-windows-recipes",
+           f"derived={sorted(derived)} scanned={sorted(TESTS_CSPROJS)}")
     unrouted_csproj = [p for p in TESTS_CSPROJS
                        if gate_scope.LEG_GATES not in (gate_scope.legs_for_path(p) or ())]
     report(not unrouted_csproj,
