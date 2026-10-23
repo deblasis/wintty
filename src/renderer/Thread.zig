@@ -1740,6 +1740,137 @@ test "deinit refuses to run while the thread is running" {
     try std.testing.expect(std.mem.indexOf(u8, src, entry) != null);
 }
 
+// The census above pins the refusal's text; this observes it firing. A
+// panic cannot be caught in-process, so the observation runs out of
+// process: the test below builds this suite with a filter that runs
+// only this probe and checks the process dies with the refusal message.
+test "deinit refusal probe" {
+    if (!probeEnvSet()) return error.SkipZigTest;
+
+    var t: Thread = undefined;
+    t.lifecycle = .init(.running);
+    t.deinit();
+}
+
+fn probeEnvSet() bool {
+    var probe_env = global.environMap() catch return false;
+    defer probe_env.deinit();
+    return probe_env.get("WINTTY_TRIPWIRE_PROBE") != null;
+}
+
+test "deinit refusal fires in a real run" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = global.io();
+
+    // This test spawns the probe build; the probe env is the child's
+    // marker. If it is set here, this IS the child (or a manual probe
+    // run): skip, so a future test whose name contains the child's
+    // filter cannot recurse into another nested build. Unset the
+    // variable after any manual probe use; a leaked copy turns every
+    // later suite run red at the probe.
+    if (probeEnvSet()) return error.SkipZigTest;
+
+    // The probe build needs a repo tree: build.zig must sit in the
+    // test's cwd, which `zig build test` guarantees. From any other
+    // launch context skip: there is nothing to build.
+    {
+        var probe = std.Io.Dir.cwd().openFile(io, "build.zig", .{}) catch
+            return error.SkipZigTest;
+        probe.close(io);
+    }
+
+    var env = try global.environMap();
+    defer env.deinit();
+    try env.put("WINTTY_TRIPWIRE_PROBE", "1");
+
+    // A private prefix keeps the child's install from touching this
+    // binary's own zig-out while it is running.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const prefix = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    defer alloc.free(prefix);
+
+    // The child run can cost a minute on a cold cache (it builds this
+    // suite with a filter that selects only the probe test above); the
+    // panic itself is the expected outcome, so failure looks like a
+    // clean nonzero exit carrying the refusal message.
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            "zig",                                "build",
+            "test",                               "-Dapp-runtime=none",
+            "-Dtest-filter=deinit refusal probe", "--prefix",
+            prefix,                               "--summary",
+            "none",
+        },
+        .environ_map = &env,
+        .stderr = .pipe,
+        .stdout = .ignore,
+    });
+    const stderr_file = child.stderr orelse return error.SkipZigTest;
+
+    // Bound the whole observation. A wedged child (a compiler hang) must
+    // fail this test with the command in the verdict, not hang the
+    // suite: the same rule the park-wait guards in this suite hold. The
+    // deadline is sized for a cold-cache nested build; a healthy run
+    // never approaches it. The watchdog polls a done flag instead of
+    // sleeping blind, so joining it below is prompt and it never
+    // outlives this frame; and when it does kill, the `killed` flag
+    // tells this frame to skip `wait` (kill's cleanup reaps the child;
+    // waiting again would trip Child.wait's live-id assert), while the
+    // kill's pipe cleanup is what releases the reader above.
+    var child_done = std.atomic.Value(bool).init(false);
+    var child_killed = std.atomic.Value(bool).init(false);
+    const Watchdog = struct {
+        child: *std.process.Child,
+        done: *std.atomic.Value(bool),
+        killed: *std.atomic.Value(bool),
+        io: std.Io,
+
+        fn run(self: *@This()) void {
+            var waited_ms: u64 = 0;
+            while (waited_ms < 600 * std.time.ms_per_s) {
+                if (self.done.load(.acquire)) return;
+                std.Io.sleep(self.io, .fromMilliseconds(250), .awake) catch {};
+                waited_ms += 250;
+            }
+            if (self.done.load(.acquire)) return;
+            self.killed.store(true, .release);
+            self.child.kill(self.io);
+        }
+    };
+    var watchdog_state = Watchdog{
+        .child = &child,
+        .done = &child_done,
+        .killed = &child_killed,
+        .io = io,
+    };
+    const watchdog = try std.Thread.spawn(.{}, Watchdog.run, .{&watchdog_state});
+    defer {
+        child_done.store(true, .release);
+        watchdog.join();
+    }
+
+    var read_buf: [64 * 1024]u8 = undefined;
+    var rd = stderr_file.reader(io, &read_buf);
+    var stderr_data: std.ArrayList(u8) = .empty;
+    defer stderr_data.deinit(alloc);
+    try rd.interface.appendRemaining(alloc, &stderr_data, .unlimited);
+    const term: std.process.Child.Term = if (child_killed.load(.acquire))
+        .{ .unknown = 0 }
+    else
+        try child.wait(io);
+
+    switch (term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => {},
+    }
+    if (std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") == null) {
+        std.log.err("probe child never refused: term={any} cmd='zig build test -Dtest-filter=deinit refusal probe'", .{term});
+        return error.TestUnexpectedResult;
+    }
+}
+
 // The safety net exists to bound a lost wakeup notify (#1036), and its
 // drain alone only bounds it for HIDDEN surfaces. Output never touches
 // the mailbox: the pty thread marks the terminal dirty and notifies
