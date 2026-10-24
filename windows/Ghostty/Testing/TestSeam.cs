@@ -1639,6 +1639,51 @@ internal static class TestSeam
                 return ConsumedCloseArmsJson(window, manager, op, paletteRecovered);
             }
 
+            case "ime-set-text":
+            case "ime-started":
+            case "ime-changed":
+            case "ime-ended":
+            case "ime-commit":
+            case "ime-cancel":
+            case "ime-char":
+            case "ime-state":
+            {
+                if (LeafTerminal(manager, args) is not { } imeTerminal)
+                    return Error(op, "no such tab or leaf");
+                if ((op is "ime-ended" or "ime-commit" or "ime-char") && !_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                switch (op)
+                {
+                    case "ime-set-text":
+                        imeTerminal.TestSeamImeSetText(ArgString(args, "text") ?? "");
+                        break;
+                    case "ime-started":
+                        imeTerminal.TestSeamImeStarted(ArgInt(args, "start", 0));
+                        break;
+                    case "ime-changed":
+                        imeTerminal.TestSeamImeChanged();
+                        break;
+                    case "ime-ended":
+                        imeTerminal.TestSeamImeEnded();
+                        break;
+                    case "ime-commit":
+                        imeTerminal.TestSeamImeCommit();
+                        break;
+                    case "ime-cancel":
+                        imeTerminal.TestSeamImeCancel();
+                        break;
+                    case "ime-char":
+                    {
+                        var text = ArgString(args, "char");
+                        if (string.IsNullOrEmpty(text))
+                            return Error(op, "ime-char needs char");
+                        imeTerminal.TestSeamImeChar(text[0]);
+                        break;
+                    }
+                }
+                return ImeStateJson(imeTerminal, op);
+            }
+
             case "terminal-character":
             {
                 // One character through a pane's real post-guard character
@@ -2822,6 +2867,19 @@ internal static class TestSeam
         });
 
     /// <summary>The one response builder: AOT-safe, reflection-free.</summary>
+    private static string ImeStateJson(Ghostty.Controls.TerminalControl terminal, string op) => Json(json =>
+    {
+        json.WriteStartObject();
+        json.WriteBoolean("ok", true);
+        json.WriteString("op", op);
+        json.WriteBoolean("composing", terminal.TestSeamImeComposing);
+        json.WriteString("sink", terminal.TestSeamImeSink);
+        if (terminal.TestSeamImePreedit is { } preedit) json.WriteString("preedit", preedit);
+        else json.WriteNull("preedit");
+        json.WriteNumber("forwarded", terminal.TestSeamImeForwarded);
+        json.WriteEndObject();
+    });
+
     private static string Json(Action<Utf8JsonWriter> write)
     {
         using var stream = new MemoryStream();

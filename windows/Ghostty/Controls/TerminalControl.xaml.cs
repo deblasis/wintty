@@ -181,15 +181,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // supplementary-plane scalars as two events; see WmCharUtf8.
     private char _pendingWmCharHigh;
 
-    // True while ImeSink holds composed text not yet forwarded.
-    private bool _imeComposing;
+    // The IME commit state machine. It owns the composition lifecycle, the
+    // forwarded watermark and the ASCII provenance credit; this control
+    // supplies the sink text and performs the native forwarding.
+    private readonly ImeForwarder _imeForwarder = new();
 
-    // How much of ImeSink.Text has been forwarded to the surface.
-    private int _imeForwarded;
-
-    // Redraws the preedit while composing: WinUI does not raise
-    // TextCompositionChanged for every update.
-    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _imePreeditTimer;
+    // One deferred commit for text TSF/UIA inserted outside a composition.
+    private bool _imeTextChangedCommitQueued;
 
     // Modifiers pressed mid-composition, withheld from libghostty along
     // with their releases.
@@ -727,6 +725,48 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     internal Windows.Foundation.Size TestSeamPanelSize =>
         new(Panel.ActualWidth, Panel.ActualHeight);
+
+    // IME state-machine seam. The routed event args cannot be constructed
+    // in-process, so these drive the same forwarder/character decision one
+    // call below them. The app-level harness is the oracle for the wiring.
+    internal void TestSeamImeSetText(string text) => ImeSink.Text = text;
+
+    internal void TestSeamImeStarted(int startIndex)
+    {
+        SyncImeSinkIn();
+        _imeForwarder.OnCompositionStarted(startIndex);
+        SyncImeSinkOut();
+    }
+
+    internal void TestSeamImeChanged()
+    {
+        SyncImeSinkIn();
+        _imeForwarder.OnCompositionChanged();
+        SyncImeSinkOut();
+    }
+
+    internal void TestSeamImeEnded()
+    {
+        SyncImeSinkIn();
+        _imeForwarder.OnCompositionEnded();
+        SyncImeSinkOut();
+        if (!_imeForwarder.Composing) _imeHeldModifiers.Clear();
+    }
+
+    internal void TestSeamImeCommit() => CommitImeText();
+
+    internal void TestSeamImeCancel() => ClearImeComposition();
+
+    internal void TestSeamImeChar(char ch)
+    {
+        if (_surface.Handle == IntPtr.Zero) return;
+        HandleCharacterReceived(ch);
+    }
+
+    internal bool TestSeamImeComposing => _imeForwarder.Composing;
+    internal string TestSeamImeSink => _imeForwarder.SinkText;
+    internal string? TestSeamImePreedit => _imeForwarder.Preedit;
+    internal int TestSeamImeForwarded => _imeForwarder.Forwarded;
 #endif
 
     /// <summary>
@@ -1035,6 +1075,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             CharacterReceivedEvent,
             new Windows.Foundation.TypedEventHandler<UIElement, CharacterReceivedRoutedEventArgs>(OnCharacterReceived),
             handledEventsToo: true);
+
+        // The forwarder's outputs are the only commit/preedit signals.
+        _imeForwarder.ForwardedText += ForwardImeText;
+        _imeForwarder.PreeditChanged += UpdateSurfacePreedit;
 
         // Hold the terminal surface off the pane's edges so the chrome
         // PaneHost overlays there does not paint over live cells -- see
@@ -1779,7 +1823,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
         if (_surface.Handle != IntPtr.Zero)
         {
-            _imeComposing = false;
+            _imeForwarder.Cancel();
+            if (ImeSink.Text.Length > 0) ImeSink.Text = string.Empty;
+            _imeHeldModifiers.Clear();
+            _imeTextChangedCommitQueued = false;
             UpdateSurfacePreedit(null);
             Host?.Unregister(_surface);
             NativeMethods.SurfaceFree(_surface);
@@ -2084,7 +2131,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             && XamlRoot is { } root
             && ReferenceEquals(FocusManager.GetFocusedElement(root), ImeSink))
             return;
-        CommitImeText();
+        SyncImeSinkIn();
+        if (_imeForwarder.Composing) _imeForwarder.Cancel();
+        else _imeForwarder.Commit();
+        SyncImeSinkOut();
         _imeHeldModifiers.Clear();
         SetFocusState(false);
     }
@@ -2520,16 +2570,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
         if (IsImeKey(e.Key)) return;
 
-        // Keys the IME composes with never reach KeyDown, so a key that does
-        // means the composition is final. Modifiers can be part of one.
+        // A key that is not a modifier asks the forwarder to commit only
+        // final text. A live preedit is the IME's and is not sent.
         if (!IsModifierKey(e.Key))
-            CommitImeText();
-
-        // A modifier mid-composition stays out of libghostty: the apprt
-        // pairs a text-less press with the next SurfaceText, so it would
-        // swallow the commit that follows.
-        if (_imeComposing)
         {
+            SyncImeSinkIn();
+            _imeForwarder.OnKeyDown();
+            SyncImeSinkOut();
+
+            // Never hand libghostty a text-less key while a composition is
+            // live: the apprt buffers it and the next SurfaceText attaches to
+            // it, so the commit would be swallowed. Space/Enter are delivered
+            // by the character path, which commits first.
+            if (_imeForwarder.Composing) return;
+        }
+        else if (_imeForwarder.Composing)
+        {
+            // A modifier mid-composition stays out of libghostty for the same
+            // pairing reason; its release is swallowed in OnKeyUp.
             _imeHeldModifiers.Add(e.Key);
             return;
         }
@@ -2616,14 +2674,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
+        // Releases of presses OnKeyDown did not forward. This bookkeeping runs
+        // before any gate: a modifier held across a palette open must still
+        // consume its release, or the next real release is swallowed.
+        if (IsImeKey(e.Key)) return;
+        if (_imeHeldModifiers.Remove(e.Key)) return;
+
         // Mirror OnKeyDown's palette gate: between the popup opening and
         // focus reaching its search box, releases still land here, and a
         // release for a press the gate dropped hands libghostty half a pair.
         if (CommandPaletteIsOpen) return;
-
-        // Releases of presses OnKeyDown did not forward.
-        if (IsImeKey(e.Key)) return;
-        if (_imeHeldModifiers.Remove(e.Key)) return;
 
         // Mirror OnKeyDown: while the search bar owns focus, swallow the
         // key-up too so libghostty never sees a release for a press it
@@ -2762,7 +2822,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             Keycode = scancode,
             Text = IntPtr.Zero,
             UnshiftedCodepoint = 0,
-            Composing = (byte)(_imeComposing ? 1 : 0),
+            Composing = (byte)(_imeForwarder.Composing ? 1 : 0),
         };
         return NativeMethods.SurfaceKey(_surface, key);
     }
@@ -2804,18 +2864,53 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // libghostty as terminal text. See the matching guard in OnKeyDown.
         if (SearchBar.ContainsFocus) return;
 
+        HandleCharacterReceived(e.Character);
+    }
+
+    /// <summary>
+    /// The character decision below the routed guards, shared with the test
+    /// seam (CharacterReceivedRoutedEventArgs cannot be constructed).
+    /// </summary>
+    private void HandleCharacterReceived(char ch)
+    {
         // Non-ASCII text is taken from ImeSink, which also holds it, so
         // taking it here too would type it twice.
-        if (e.Character >= (char)0x80)
+        if (ch >= (char)0x80)
         {
-            if (!_imeComposing) DispatcherQueue.TryEnqueue(CommitImeText);
+            if (!_imeForwarder.Composing)
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (!_imeForwarder.Composing) CommitImeText();
+                });
             return;
         }
 
-        // Anything composed before this character goes first.
-        CommitImeText();
+        var composing = _imeForwarder.Composing;
+        if (composing)
+        {
+            // Space and Enter finalise the composition. Commit the word
+            // first, then send the finaliser: sending it here before the
+            // commit would put the Space before the word, and committing the
+            // sink with the finaliser still in it would send it twice.
+            if (ch is not (' ' or '\r' or '\n')) return;
+            SyncImeSinkIn();
+            var text = _imeForwarder.SinkText;
+            if (text.Length > 0 && text[^1] == ch)
+                _imeForwarder.SetSinkText(text[..^1]);
+            _imeForwarder.Commit();
+            SyncImeSinkOut();
+            _imeHeldModifiers.Clear();
+        }
+        else
+        {
+            // The focused TextBox has already inserted this character into
+            // the sink. Credit it before the commit, or the commit forwards
+            // it and HandleCharacter sends it again.
+            _imeForwarder.NoteAsciiDelivered();
+            CommitImeText();
+        }
 
-        HandleCharacter(e.Character);
+        HandleCharacter(ch);
     }
 
     /// <summary>
@@ -2889,115 +2984,90 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         RetireStaleCharacterSuppress();
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
 
-        // Text before a new composition is final.
-        var text = ImeSink.Text;
-        if (e.StartIndex >= 0 && e.StartIndex <= text.Length)
-            ForwardImeRange(text, e.StartIndex);
-
-        _imeComposing = true;
-        UpdatePreeditFromSink();
-        StartImePreeditTimer();
+        SyncImeSinkIn();
+        _imeForwarder.OnCompositionStarted(e.StartIndex);
+        SyncImeSinkOut();
     }
 
     private void OnImeCompositionChanged(object sender, TextCompositionChangedEventArgs e)
     {
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
-        _imeComposing = true;
-        UpdatePreeditFromSink();
-        StartImePreeditTimer();
+        SyncImeSinkIn();
+        _imeForwarder.OnCompositionChanged();
+        SyncImeSinkOut();
     }
 
     private void OnImeCompositionEnded(object sender, TextCompositionEndedEventArgs e)
     {
-        // Commits nothing: when one composition ends and the next starts in
-        // the same keystroke, Ended arrives after Started and carries the
-        // new composition's range. OnImeCompositionStarted and CommitImeText
-        // are the commit points.
+        if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+        SyncImeSinkIn();
+        _imeForwarder.OnCompositionEnded();
+        SyncImeSinkOut();
+        if (!_imeForwarder.Composing) _imeHeldModifiers.Clear();
     }
 
     /// <summary>Forwards the rest of ImeSink, then empties it.</summary>
     private void CommitImeText()
     {
-        StopImePreeditTimer();
-        if (_surface.Handle == IntPtr.Zero) return;
-        var text = ImeSink.Text;
-        if (text.Length > 0 && !SearchBar.ContainsFocus)
-            ForwardImeRange(text, text.Length);
-        if (_imeComposing) UpdateSurfacePreedit(null);
-        _imeComposing = false;
-        _imeForwarded = 0;
-        if (text.Length > 0) ImeSink.Text = string.Empty;
+        SyncImeSinkIn();
+        _imeForwarder.Commit();
+        SyncImeSinkOut();
+        _imeHeldModifiers.Clear();
     }
 
-    /// <summary>
-    /// Forwards <paramref name="text"/> from <see cref="_imeForwarded"/> to
-    /// <paramref name="end"/>, skipping ASCII, which CharacterReceived sent.
-    /// </summary>
-    private void ForwardImeRange(string text, int end)
-    {
-        var from = Math.Min(_imeForwarded, text.Length);
-        end = Math.Min(end, text.Length);
-        if (end <= from) return;
-        var sb = new StringBuilder(end - from);
-        for (var i = from; i < end; i++)
-        {
-            if (text[i] >= (char)0x80) sb.Append(text[i]);
-        }
-        _imeForwarded = end;
-        if (sb.Length > 0) ForwardImeText(sb.ToString());
-    }
-
-    /// <summary>The not-yet-forwarded tail of the sink is the preedit.</summary>
-    private void UpdatePreeditFromSink()
-    {
-        var text = ImeSink.Text;
-        var from = Math.Min(_imeForwarded, text.Length);
-        var sb = new StringBuilder();
-        for (var i = from; i < text.Length; i++)
-        {
-            if (text[i] >= (char)0x80) sb.Append(text[i]);
-        }
-        UpdateSurfacePreedit(sb.Length > 0 ? sb.ToString() : null);
-    }
-
-    private void StartImePreeditTimer()
-    {
-        if (_imePreeditTimer is null)
-        {
-            _imePreeditTimer = DispatcherQueue.CreateTimer();
-            _imePreeditTimer.Interval = TimeSpan.FromMilliseconds(33);
-            _imePreeditTimer.IsRepeating = true;
-            _imePreeditTimer.Tick += (_, _) =>
-            {
-                if (!_imeComposing || _surface.Handle == IntPtr.Zero) { StopImePreeditTimer(); return; }
-                UpdatePreeditFromSink();
-            };
-        }
-        if (!_imePreeditTimer.IsRunning) _imePreeditTimer.Start();
-    }
-
-    private void StopImePreeditTimer() => _imePreeditTimer?.Stop();
-
-    /// <summary>Clears WinUI IME state and the libghostty preedit overlay.</summary>
+    /// <summary>Drops WinUI IME state without sending the live preedit.</summary>
     private void ClearImeComposition()
     {
-        StopImePreeditTimer();
+        SyncImeSinkIn();
+        _imeForwarder.Cancel();
+        SyncImeSinkOut();
         _imeHeldModifiers.Clear();
-        _imeComposing = false;
-        _imeForwarded = 0;
-        if (_surface.Handle == IntPtr.Zero) return;
-        UpdateSurfacePreedit(null);
-        ImeSink.Text = string.Empty;
     }
 
     private void OnImeSinkTextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_imeComposing) UpdatePreeditFromSink();
+        if (_imeForwarder.Composing)
+        {
+            SyncImeSinkIn();
+            _imeForwarder.OnCompositionChanged();
+            SyncImeSinkOut();
+            return;
+        }
+
+        // Text TSF/UIA inserted outside a composition (emoji panel,
+        // dictation, automation). Ordinary ASCII typing already went through
+        // CharacterReceived, so only a non-ASCII tail is worth committing,
+        // one dispatcher turn later when the TextBox has applied it.
+        if (ImeSink.Text.Length == 0 || !HasNonAscii(ImeSink.Text) || _imeTextChangedCommitQueued)
+            return;
+        _imeTextChangedCommitQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _imeTextChangedCommitQueued = false;
+            if (!_imeForwarder.Composing) CommitImeText();
+        });
+    }
+
+    private static bool HasNonAscii(string text)
+    {
+        foreach (var ch in text)
+            if (ch >= (char)0x80) return true;
+        return false;
+    }
+
+    private void SyncImeSinkIn() => _imeForwarder.SetSinkText(ImeSink.Text);
+
+    private void SyncImeSinkOut()
+    {
+        if (!string.Equals(ImeSink.Text, _imeForwarder.SinkText, StringComparison.Ordinal))
+            ImeSink.Text = _imeForwarder.SinkText;
     }
 
     /// <summary>Sends committed IME text to the surface or preview sink.</summary>
     private void ForwardImeText(string text)
     {
+        if (_surface.Handle == IntPtr.Zero && !_isPreviewSurface) return;
+
         // A preview surface's keyboard belongs to its fake session, so
         // committed IME text goes through the sink like any other
         // printable (same filtering as OnCharacterReceived), never to

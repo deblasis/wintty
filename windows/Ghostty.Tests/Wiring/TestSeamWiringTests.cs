@@ -296,13 +296,16 @@ public class TestSeamWiringTests
             .OfType<BlockSyntax>().SelectMany(b => b.Statements).First());
         Assert.Equal("!_inputAllowed", livenessFirst.Condition.ToString());
 
+        // The IME commit group (ime-ended / ime-commit / ime-char) is the
+        // fifth gated read: committed text and the finalizer reach a shell
+        // through the same character path.
         // And nothing else in the seam consults it, so the gate is exactly
-        // those four ops wide and cannot have quietly become the gate for
+        // those five reads wide and cannot have quietly become the gate for
         // everything.
         var mentions = source.Root.DescendantNodes()
             .OfType<IdentifierNameSyntax>()
             .Count(i => i.Identifier.ValueText == "_inputAllowed");
-        Assert.Equal(5, mentions); // the one write, the four reads
+        Assert.Equal(6, mentions); // the one write, the five reads
     }
 
     /// <summary>

@@ -100,7 +100,9 @@ public class ConsumedCloseKeyWiringTests
     {
         var source = Terminal();
         var routed = source.Method("OnCharacterReceived");
-        Assert.Single(CallsTo(routed, "HandleCharacter"));
+        Assert.Single(CallsTo(routed, "HandleCharacterReceived"));
+        var received = source.Method("HandleCharacterReceived");
+        Assert.Single(CallsTo(received, "HandleCharacter"));
 
         // One decision for both one-shot drops, first, then a return before
         // anything forwards. The chord suppress is spent there and nowhere

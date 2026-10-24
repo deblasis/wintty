@@ -15,10 +15,16 @@ public class ImeCompositionWiringTests
         Assert.Contains("OnImeCompositionStarted", code);
         Assert.Contains("OnImeCompositionChanged", code);
         Assert.Contains("OnImeCompositionEnded", code);
-        Assert.Contains("_imeComposing", code);
+        Assert.Contains("ImeForwarder", code);
+        Assert.Contains("_imeForwarder", code);
+        Assert.Contains("_imeForwarder.OnCompositionEnded", code);
+        Assert.Contains("_imeForwarder.OnKeyDown", code);
+        Assert.Contains("_imeForwarder.ForwardedText", code);
+        Assert.Contains("Composing = (byte)(_imeForwarder.Composing ? 1 : 0)", code);
+        Assert.DoesNotContain("_imeComposing", code);
+        Assert.DoesNotContain("_imePreeditTimer", code);
         Assert.Contains("UpdateSurfacePreedit", code);
         Assert.Contains("SurfacePreedit", code);
-        Assert.Contains("Composing = (byte)(_imeComposing ? 1 : 0)", code);
         Assert.Contains("ImeSink.Focus", code);
         Assert.DoesNotContain("TextCompositionStarted +=", code);
 
