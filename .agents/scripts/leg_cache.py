@@ -246,6 +246,44 @@ _VALUE_FLAGS = {
 }
 
 
+# MSBuild auto-imports these by NAME, walking up from every project it
+# evaluates: a file with one of these names reaches the build with no
+# textual reference anywhere the scanner reads. Instances at routed
+# paths are ordinary build inputs; an instance anywhere else is a
+# build input nobody wired into any digest, and the check stops until
+# it is deleted or its path is routed. The names are matched
+# case-insensitively because the filesystem MSBuild resolves them on
+# is: directory.build.props is honored exactly like the canonical
+# spelling.
+AUTODISCOVERY_NAMES = frozenset(n.lower() for n in (
+    "Directory.Build.props",
+    "Directory.Build.targets",
+    "Directory.Packages.props",
+    "Directory.Build.rsp",
+    "MSBuild.rsp",
+    # Solution-level twins (MSBuild 17.4+): auto-imported beside any
+    # .sln the recipes build, same zero-reference class.
+    "Directory.Solution.props",
+    "Directory.Solution.targets",
+))
+_AUTODISCOVERY_SKIP_DIRS = frozenset({
+    ".git", ".zig-cache", "zig-out", "zig-pkg", "node_modules",
+})
+
+
+def autodiscovery_files(root):
+    """The auto-discovered build files present under `root`, as
+    repo-relative paths. Empty is the only green state."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _AUTODISCOVERY_SKIP_DIRS]
+        for name in filenames:
+            if name.lower() in AUTODISCOVERY_NAMES:
+                rel = os.path.relpath(os.path.join(dirpath, name), root)
+                found.append(rel.replace(os.sep, "/"))
+    return sorted(found)
+
+
 def win_test_csprojs(recipe_text):
     """The .csproj paths a windows test recipe builds, or poisoned
     entries naming tokens it could not classify. The project argument
@@ -279,7 +317,7 @@ def win_test_csprojs(recipe_text):
                 low = tok.lower()
                 if low.startswith("--project="):
                     offer(tok.split("=", 1)[1].strip("\"'"))
-                elif tok == "--project" and i + 1 < len(args):
+                elif low == "--project" and i + 1 < len(args):
                     offer(args[i + 1].strip("\"'"))
                     i += 1
                 elif low in _VALUE_FLAGS:
@@ -1288,6 +1326,29 @@ def self_test():
             '    dotnet test --project="windows/Q.Tests/Q.Tests.csproj" --blame-hang-timeout 5m\n')
         report(clean == {"windows/Q.Tests/Q.Tests.csproj"},
                "win-recipe-quoted-project-form", str(clean))
+        case_form = win_test_csprojs(
+            "    dotnet test --PROJECT windows/Q.Tests/Q.Tests.csproj\n")
+        report(case_form == {"windows/Q.Tests/Q.Tests.csproj"},
+               "win-recipe-project-flag-is-case-insensitive", str(case_form))
+        # The auto-discovery tripwire must see a planted file by name
+        # wherever it sits and in whatever case the filesystem stored
+        # it, ignore ordinary names, and never descend into the
+        # skipped build-output directories.
+        tripwire_dir = os.path.join(root, "tripwire-probe")
+        os.makedirs(os.path.join(tripwire_dir, "windows", "Ghostty.Tests"), exist_ok=True)
+        os.makedirs(os.path.join(tripwire_dir, "zig-out"), exist_ok=True)
+        write(root, "tripwire-probe/Directory.Build.props", "<Project />\n")
+        write(root, "tripwire-probe/directory.solution.props", "<Project />\n")
+        write(root, "tripwire-probe/windows/Ghostty.Tests/MSBuild.rsp", "-m:1\n")
+        write(root, "tripwire-probe/zig-out/MSBuild.rsp", "-m:1\n")
+        write(root, "tripwire-probe/ordinary.props", "<Project />\n")
+        seen_auto = autodiscovery_files(tripwire_dir)
+        report(seen_auto == ["Directory.Build.props",
+                             "directory.solution.props",
+                             "windows/Ghostty.Tests/MSBuild.rsp"],
+               "autodiscovery-tripwire-finds-by-name-anywhere",
+               str(seen_auto))
+        shutil.rmtree(tripwire_dir, ignore_errors=True)
         # The refusal net must catch the spellings a leading-segment
         # count misses: forward slashes, property prefixes, absolutes,
         # interior dot-dots, over-escapes. Each reaches past the project
@@ -1666,6 +1727,17 @@ def self_test():
     report(derived == set(TESTS_CSPROJS),
            "scanned-projects-match-the-windows-recipes",
            f"derived={sorted(derived)} scanned={sorted(TESTS_CSPROJS)}")
+    # Auto-discovered build inputs: MSBuild imports these by name from
+    # anywhere up the project tree, so no scan of project text ever
+    # references them. Where they exist today they are ordinary routed
+    # files (edits move the windows digest through path rules); the
+    # tripwire is an instance whose path does NOT route, because then
+    # its edits reach the build while moving no digest at all.
+    unrouted_auto = [p for p in autodiscovery_files(REPO_ROOT)
+                     if gate_scope.LEG_WIN not in (gate_scope.legs_for_path(p) or ())]
+    report(not unrouted_auto,
+           "msbuild-autodiscovery-files-route-to-windows-tests",
+           f"unrouted={unrouted_auto}")
     unrouted_csproj = [p for p in TESTS_CSPROJS
                        if gate_scope.LEG_GATES not in (gate_scope.legs_for_path(p) or ())]
     report(not unrouted_csproj,
