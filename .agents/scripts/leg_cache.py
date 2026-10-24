@@ -251,14 +251,21 @@ _VALUE_FLAGS = {
 # textual reference anywhere the scanner reads. Instances at routed
 # paths are ordinary build inputs; an instance anywhere else is a
 # build input nobody wired into any digest, and the check stops until
-# it is deleted or its path is routed.
-AUTODISCOVERY_NAMES = frozenset({
+# it is deleted or its path is routed. The names are matched
+# case-insensitively because the filesystem MSBuild resolves them on
+# is: directory.build.props is honored exactly like the canonical
+# spelling.
+AUTODISCOVERY_NAMES = frozenset(n.lower() for n in (
     "Directory.Build.props",
     "Directory.Build.targets",
     "Directory.Packages.props",
     "Directory.Build.rsp",
     "MSBuild.rsp",
-})
+    # Solution-level twins (MSBuild 17.4+): auto-imported beside any
+    # .sln the recipes build, same zero-reference class.
+    "Directory.Solution.props",
+    "Directory.Solution.targets",
+))
 _AUTODISCOVERY_SKIP_DIRS = frozenset({
     ".git", ".zig-cache", "zig-out", "zig-pkg", "node_modules",
 })
@@ -271,7 +278,7 @@ def autodiscovery_files(root):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _AUTODISCOVERY_SKIP_DIRS]
         for name in filenames:
-            if name in AUTODISCOVERY_NAMES:
+            if name.lower() in AUTODISCOVERY_NAMES:
                 rel = os.path.relpath(os.path.join(dirpath, name), root)
                 found.append(rel.replace(os.sep, "/"))
     return sorted(found)
@@ -1324,15 +1331,21 @@ def self_test():
         report(case_form == {"windows/Q.Tests/Q.Tests.csproj"},
                "win-recipe-project-flag-is-case-insensitive", str(case_form))
         # The auto-discovery tripwire must see a planted file by name
-        # wherever it sits, including the repo root, and ignore
-        # everything else.
-        tripwire_dir = os.path.join(root, ".zig-cache", "tripwire-probe")
+        # wherever it sits and in whatever case the filesystem stored
+        # it, ignore ordinary names, and never descend into the
+        # skipped build-output directories.
+        tripwire_dir = os.path.join(root, "tripwire-probe")
         os.makedirs(os.path.join(tripwire_dir, "windows", "Ghostty.Tests"), exist_ok=True)
-        write(root, ".zig-cache/tripwire-probe/Directory.Build.props", "<Project />\n")
-        write(root, ".zig-cache/tripwire-probe/windows/Ghostty.Tests/MSBuild.rsp", "-m:1\n")
-        write(root, ".zig-cache/tripwire-probe/ordinary.props", "<Project />\n")
+        os.makedirs(os.path.join(tripwire_dir, "zig-out"), exist_ok=True)
+        write(root, "tripwire-probe/Directory.Build.props", "<Project />\n")
+        write(root, "tripwire-probe/directory.solution.props", "<Project />\n")
+        write(root, "tripwire-probe/windows/Ghostty.Tests/MSBuild.rsp", "-m:1\n")
+        write(root, "tripwire-probe/zig-out/MSBuild.rsp", "-m:1\n")
+        write(root, "tripwire-probe/ordinary.props", "<Project />\n")
         seen_auto = autodiscovery_files(tripwire_dir)
-        report(seen_auto == ["Directory.Build.props", "windows/Ghostty.Tests/MSBuild.rsp"],
+        report(seen_auto == ["Directory.Build.props",
+                             "directory.solution.props",
+                             "windows/Ghostty.Tests/MSBuild.rsp"],
                "autodiscovery-tripwire-finds-by-name-anywhere",
                str(seen_auto))
         shutil.rmtree(tripwire_dir, ignore_errors=True)
