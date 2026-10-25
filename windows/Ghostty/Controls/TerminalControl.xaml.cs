@@ -731,12 +731,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // call below them. The app-level harness is the oracle for the wiring.
     internal void TestSeamImeSetText(string text) => ImeSink.Text = text;
 
-    internal void TestSeamImeStarted(int startIndex)
-    {
-        SyncImeSinkIn();
-        _imeForwarder.OnCompositionStarted(startIndex);
-        SyncImeSinkOut();
-    }
+    internal void TestSeamImeStarted(int startIndex) => BeginImeComposition(startIndex);
 
     internal void TestSeamImeChanged()
     {
@@ -2975,11 +2970,21 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // retire for them. Unconditional: an arm standing when any
         // composition starts belongs to a keystroke that went elsewhere.
         RetireStaleCharacterSuppress();
+        BeginImeComposition(e.StartIndex);
+    }
+
+    /// <summary>
+    /// The one composition-start path. The real TSF event and the test seam
+    /// both land here, so a seam run measures the same sink placement that
+    /// production uses.
+    /// </summary>
+    private void BeginImeComposition(int startIndex)
+    {
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
 
         UpdateImeSinkPosition();
         SyncImeSinkIn();
-        _imeForwarder.OnCompositionStarted(e.StartIndex);
+        _imeForwarder.OnCompositionStarted(startIndex);
         SyncImeSinkOut();
     }
 
