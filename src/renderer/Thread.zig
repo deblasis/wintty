@@ -792,8 +792,8 @@ fn renderCallback(
 /// How often the safety net ticks. Slow on purpose: it exists to
 /// bound a lost-notify stall (#1036), not to do work -- anything real
 /// still arrives through the wakeup async, and the cost of a false
-/// alarm is one mailbox drain of an empty queue plus, while visible,
-/// a cheap dirty peek.
+/// alarm is one mailbox drain of an empty queue, a device-removal poll,
+/// and, while visible, a cheap dirty peek.
 const safety_net_interval_ms: u64 = 2_000;
 
 /// Arm the safety net (idempotent): a repeating timer whose callback
@@ -853,9 +853,12 @@ fn safetyNetCallback(
     t.drainMailbox() catch |err|
         log.err("error draining mailbox (safety net) err={}", .{err});
 
-    // While hidden this is the whole tick: output-driven wakes are
-    // gated off, the mailbox is the only channel, and the drain
-    // unblocks it.
+    // A hidden surface still owns device references. Release a removed
+    // device without drawing it, so it cannot block its visible siblings.
+    const recovery_pending = t.renderer.pollDeviceRecovery();
+
+    // While hidden the drain above is the whole tick: output-driven wakes
+    // are gated off, and the mailbox is the only channel.
     //
     // While visible the mailbox is not where output strands: the pty
     // thread marks the terminal dirty and notifies `wakeup` directly
@@ -865,7 +868,7 @@ fn safetyNetCallback(
     // blink timer and every other wake is a one-shot that already
     // fired. Ask the terminal whether a frame is owed and draw it;
     // on a clean terminal the ask is a cheap peek, not a frame.
-    if (t.flags.visible and t.renderer.hasPendingFrame(t.state)) {
+    if (t.flags.visible and (recovery_pending or t.renderer.hasPendingFrame(t.state))) {
         _ = renderCallback(t, undefined, undefined, {});
     }
 
@@ -1895,11 +1898,21 @@ test "safety net draws pending frames on visible surfaces" {
         return error.BodyNotClosed);
     const body = src[start..end];
 
-    // The visible-side draw, gated by the pending-frame peek.
-    try std.testing.expect(std.mem.indexOf(u8, body, "t.flags.visible and t.renderer.hasPendingFrame(t.state)") != null);
+    // The visible-side draw, gated by the pending-frame peek or a device
+    // recovery that needs a rebuild.
+    try std.testing.expect(std.mem.indexOf(u8, body, "t.flags.visible and (recovery_pending or t.renderer.hasPendingFrame(t.state))") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "renderCallback(t, undefined, undefined, {})") != null);
-    // The mailbox drain stays: hidden surfaces rely on it alone.
+    // The mailbox drain stays: hidden surfaces rely on it, and the device
+    // poll below releases a removed device they still hold.
     try std.testing.expect(std.mem.indexOf(u8, body, "drainMailbox") != null);
+    const poll = std.mem.indexOf(u8, body, "pollDeviceRecovery") orelse
+        return error.DevicePollMissing;
+    const visible_gate = std.mem.indexOf(
+        u8,
+        body,
+        "t.flags.visible and (recovery_pending or t.renderer.hasPendingFrame(t.state))",
+    ) orelse return error.VisibleGateMissing;
+    try std.testing.expect(poll < visible_gate);
 
     // Armed at thread start, and no cancel path anywhere: canceling on
     // the `.visible = true` transition is the exact revert that left

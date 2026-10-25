@@ -1721,6 +1721,89 @@ fn removeDevice(dev: *d3d12.ID3D12Device) !void {
     if (!com.FAILED(dev.GetDeviceRemovedReason())) return error.DeviceNotRemoved;
 }
 
+test "DirectX12: poll and release a removed device without rebuilding" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+
+    const old_device = api.dev.?.device;
+    // Park a warm reference, the way app startup does. A release that
+    // forgets dropWarmDevice leaves the removed singleton AddRef'd, and
+    // the next D3D12CreateDevice hands it back.
+    Device.warmup();
+    defer Device.dropWarmDevice();
+
+    try removeDevice(old_device);
+    try std.testing.expect(api.pollDeviceLost());
+    try std.testing.expect(api.dev != null);
+
+    try api.releaseDeviceForRecovery();
+    try std.testing.expect(api.dev == null);
+
+    var fresh = Device.init(.{ .shared_texture = .{
+        .width = 64,
+        .height = 64,
+    } }, .{}) catch return error.SkipZigTest;
+    defer fresh.deinit();
+    // The address may be recycled; the observable that matters is that the
+    // fresh device is not the removed singleton.
+    try std.testing.expect(!com.FAILED(fresh.device.GetDeviceRemovedReason()));
+}
+
+test "Renderer: pollDeviceRecovery releases a hidden surface's removed device" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const DirectX12 = @import("../DirectX12.zig");
+    const R = @import("../generic.zig").Renderer(DirectX12);
+
+    const r = try alloc.create(R);
+    defer alloc.destroy(r);
+    r.* = undefined;
+    r.alloc = alloc;
+    r.api = .{ .allocator = alloc };
+    r.api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer r.api.deinit();
+    r.draw_mutex = .init;
+    // Already unhealthy, so reportHealth takes its no-op path and the
+    // mailbox never needs to exist in this partial renderer.
+    r.health = .init(.unhealthy);
+    r.config.image_upload_budget_bytes = 0;
+    r.has_custom_shaders = false;
+    r.swap_chain = null;
+    r.shaders = .empty;
+    r.images = .empty;
+    r.bg_image = null;
+    r.atlas_max_size_synced = false;
+    r.device_recovery_pending = false;
+    r.device_recovery_abandoned = false;
+    r.device_recovery_retry_at = null;
+    r.recovery_budget = .{};
+    r.device_up_since = null;
+
+    const old_device = r.api.dev.?.device;
+    Device.warmup();
+    defer Device.dropWarmDevice();
+    try removeDevice(old_device);
+
+    // The safety net's path: hidden, no draw, still releases the device.
+    try std.testing.expect(r.pollDeviceRecovery());
+    try std.testing.expect(r.api.dev == null);
+    try std.testing.expect(r.device_recovery_pending);
+    try std.testing.expect(!r.device_recovery_abandoned);
+
+    var fresh = Device.init(.{ .shared_texture = .{
+        .width = 64,
+        .height = 64,
+    } }, .{}) catch return error.SkipZigTest;
+    defer fresh.deinit();
+    try std.testing.expect(!com.FAILED(fresh.device.GetDeviceRemovedReason()));
+}
+
 test "Device: SwapChainPanel surface handle outlives the device that presented into it" {
     // The WinUI shell binds the DirectComposition surface handle to its
     // SwapChainPanel exactly once. A device recreated after a TDR must
@@ -3738,4 +3821,258 @@ test "DirectX12: textures built during init keep no command list past it" {
         if (tex.command_list) |held| std.debug.print("texture {d} holds command list 0x{x}\n", .{ i, @intFromPtr(held) });
         try std.testing.expect(tex.command_list == null);
     }
+}
+
+/// Read a mapped upload buffer while an earlier submission is parked on a
+/// gate fence. The caller either acquires the production frame-data slot
+/// before overwriting (true) or overwrites immediately (false, the negative
+/// control). The readback returns the value the GPU copied.
+fn frameUploadReadback(acquire: bool) !u32 {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const DirectX12 = @import("../DirectX12.zig");
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.dev = Device.init(.{ .shared_texture = .{
+        .width = 64,
+        .height = 64,
+    } }, .{}) catch return error.SkipZigTest;
+    defer api.dev.?.deinit();
+    const dev = &api.dev.?;
+
+    var buf = try Buffer(u32).init(api.bufferOptions(), 4);
+    defer buf.deinit();
+    try buf.sync(&.{ 17, 17, 17, 17 });
+    const source = buf.resource orelse return error.BufferResourceMissing;
+
+    // READBACK destination the GPU copies the four values into.
+    var sink: ?*d3d12.ID3D12Resource = null;
+    {
+        const heap = d3d12.D3D12_HEAP_PROPERTIES{
+            .Type = .READBACK,
+            .CPUPageProperty = 0,
+            .MemoryPoolPreference = 0,
+            .CreationNodeMask = 0,
+            .VisibleNodeMask = 0,
+        };
+        const desc = d3d12.D3D12_RESOURCE_DESC{
+            .Dimension = .BUFFER,
+            .Alignment = 0,
+            .Width = 4 * @sizeOf(u32),
+            .Height = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = .UNKNOWN,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Layout = .ROW_MAJOR,
+            .Flags = .NONE,
+        };
+        const hr = dev.device.CreateCommittedResource(
+            &heap,
+            0,
+            &desc,
+            .COPY_DEST,
+            null,
+            &d3d12.ID3D12Resource.IID,
+            @ptrCast(&sink),
+        );
+        if (com.FAILED(hr) or sink == null) return error.SinkCreationFailed;
+    }
+    defer _ = sink.?.Release();
+
+    var allocator: ?*d3d12.ID3D12CommandAllocator = null;
+    {
+        const hr = dev.device.CreateCommandAllocator(
+            .DIRECT,
+            &d3d12.ID3D12CommandAllocator.IID,
+            @ptrCast(&allocator),
+        );
+        if (com.FAILED(hr) or allocator == null) return error.CommandAllocatorCreationFailed;
+    }
+    defer _ = allocator.?.Release();
+
+    var list: ?*d3d12.ID3D12GraphicsCommandList = null;
+    {
+        const hr = dev.device.CreateCommandList(
+            0,
+            .DIRECT,
+            allocator.?,
+            null,
+            &d3d12.ID3D12GraphicsCommandList.IID,
+            @ptrCast(&list),
+        );
+        if (com.FAILED(hr) or list == null) return error.CommandListCreationFailed;
+    }
+    defer _ = list.?.Release();
+
+    // The gate parks the queue until the CPU signals it. This makes "still
+    // in flight" a fact rather than a race.
+    var gate: ?*d3d12.ID3D12Fence = null;
+    {
+        const hr = dev.device.CreateFence(
+            0,
+            .NONE,
+            &d3d12.ID3D12Fence.IID,
+            @ptrCast(&gate),
+        );
+        if (com.FAILED(hr) or gate == null) return error.FenceCreationFailed;
+    }
+    defer _ = gate.?.Release();
+
+    list.?.CopyBufferRegion(sink.?, 0, source, 0, 4 * @sizeOf(u32));
+    if (com.FAILED(list.?.Close())) return error.CommandListCloseFailed;
+
+    if (com.FAILED(dev.command_queue.Wait(gate.?, 1))) return error.QueueWaitFailed;
+    errdefer {
+        _ = gate.?.Signal(1);
+        dev.waitForGpu() catch {};
+    }
+    const lists = [_]*d3d12.ID3D12GraphicsCommandList{list.?};
+    dev.command_queue.ExecuteCommandLists(1, &lists);
+
+    const work_value = dev.fence_value.fetchAdd(1, .release) + 1;
+    if (com.FAILED(dev.command_queue.Signal(dev.fence, work_value)))
+        return error.FenceSignalFailed;
+    dev.retirement.seal(work_value);
+    try std.testing.expect(dev.fence.GetCompletedValue() < work_value);
+
+    // The production frame-data ring owns slot 1 for this command list.
+    if (comptime @hasField(DirectX12, "data_fence_values"))
+        api.data_fence_values[1] = work_value;
+
+    const Opener = struct {
+        fn run(fence: *d3d12.ID3D12Fence) void {
+            const kernel32 = struct {
+                extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
+            };
+            kernel32.Sleep(200);
+            _ = fence.Signal(1);
+        }
+    };
+    if (acquire) {
+        const opener = try std.Thread.spawn(.{}, Opener.run, .{gate.?});
+        defer opener.join();
+        if (comptime @hasDecl(DirectX12, "prepareFrame")) {
+            try api.prepareFrame(1);
+        }
+        try buf.sync(&.{ 29, 29, 29, 29 });
+    } else {
+        // Negative control: overwrite while the queue is provably parked,
+        // then let the copy read the changed memory.
+        try buf.sync(&.{ 29, 29, 29, 29 });
+        _ = gate.?.Signal(1);
+    }
+    try dev.waitForGpu();
+
+    var mapped: ?*anyopaque = null;
+    const range = d3d12.D3D12_RANGE{ .Begin = 0, .End = 16 };
+    if (com.FAILED(sink.?.Map(0, &range, &mapped)) or mapped == null)
+        return error.ReadbackFailed;
+    defer sink.?.Unmap(0, null);
+    const values: [*]const u32 = @ptrCast(@alignCast(mapped.?));
+    return values[0];
+}
+
+test "DirectX12: only prepareFrame selects the frame-data slot" {
+    // The data ring is independent of the DXGI back-buffer index. If a
+    // second writer overwrites `pending_data_index` with a DXGI index, the
+    // recording half and the waiting half use different slots and the
+    // fence is defeated. Pin the single writer structurally.
+    const src = @embedFile("../DirectX12.zig");
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, src, "pending_data_index = "),
+    );
+
+    const start = std.mem.indexOf(u8, src, "pub fn prepareFrame(") orelse
+        return error.PrepareFrameMissing;
+    const end = start + (std.mem.indexOf(u8, src[start..], "\n}\n") orelse
+        return error.PrepareFrameNotClosed);
+    try std.testing.expect(
+        std.mem.indexOf(u8, src[start..end], "pending_data_index = ") != null,
+    );
+}
+
+test "DirectX12: prepareFrame bounds an unreachable data fence" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+
+    // No submission can ever reach this value. The wait must fail closed
+    // instead of parking the render thread forever.
+    api.data_fence_values[0] = api.dev.?.fence_value.load(.acquire) + 1000;
+    const started: std.Io.Timestamp = .now(global.io(), .awake);
+    try std.testing.expectError(error.FrameSyncFailed, api.prepareFrame(0));
+    try std.testing.expect(!api.deviceLost());
+    const elapsed_ms = started.untilNow(global.io(), .awake).toMilliseconds();
+    try std.testing.expect(elapsed_ms < 5000);
+    try std.testing.expectError(
+        error.InvalidBackBufferIndex,
+        api.prepareFrame(api.data_fence_values.len),
+    );
+}
+
+test "DirectX12: drawFrameEnd records the selected data slot" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+
+    const frame = &api.gpu_frames[1].?;
+    try frame.reset();
+    // drawFrameEnd executes a closed list; beginFrame normally closes it
+    // through the render pass.
+    try std.testing.expect(!com.FAILED(frame.command_list.?.Close()));
+    api.pending_command_list = frame.command_list.?;
+    api.pending_frame_index = 1;
+    api.pending_data_index = 1;
+    api.drawFrameEnd();
+
+    try std.testing.expect(api.data_fence_values[1] > 0);
+    try std.testing.expectEqual(@as(u64, 0), api.data_fence_values[0]);
+    try api.dev.?.waitForGpu();
+}
+
+test "Renderer: abandon releases a rebuilt device before giving up" {
+    const src = @embedFile("../generic.zig");
+    const start = std.mem.indexOf(u8, src, "fn recoverDevice(") orelse
+        return error.RecoverDeviceMissing;
+    const end = start + (std.mem.indexOf(u8, src[start..], "\n        }\n") orelse
+        return error.RecoverDeviceNotClosed);
+    const body = src[start..end];
+    const release = std.mem.indexOf(u8, body, "releaseDeviceForRecovery") orelse
+        return error.BackendReleaseMissing;
+    const abandon = std.mem.indexOf(u8, body, "abandonRecovery(.rebuild_failed)") orelse
+        return error.RebuildAbandonMissing;
+    try std.testing.expect(release < abandon);
+}
+
+test "Renderer: release the backend device before spending the loss budget" {
+    const src = @embedFile("../generic.zig");
+    const start = std.mem.indexOf(u8, src, "fn prepareDeviceRecovery(") orelse
+        return error.PrepareDeviceRecoveryMissing;
+    const end = start + (std.mem.indexOf(u8, src[start..], "\n        }\n") orelse
+        return error.PrepareDeviceRecoveryNotClosed);
+    const body = src[start..end];
+
+    const release = std.mem.indexOf(u8, body, "releaseDeviceForRecovery") orelse
+        return error.BackendReleaseMissing;
+    const budget = std.mem.indexOf(u8, body, "recordLoss") orelse
+        return error.BudgetSpendMissing;
+    try std.testing.expect(release < budget);
+}
+
+test "Renderer: acquire the frame-data slot before overwriting mapped uploads" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The negative control proves the GPU really reads the changed memory
+    // when the producer does not wait, independent of normal GPU speed.
+    try std.testing.expectEqual(@as(u32, 29), try frameUploadReadback(false));
+    try std.testing.expectEqual(@as(u32, 17), try frameUploadReadback(true));
 }
