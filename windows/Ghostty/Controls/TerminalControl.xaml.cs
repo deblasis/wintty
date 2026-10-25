@@ -729,7 +729,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // IME state-machine seam. The routed event args cannot be constructed
     // in-process, so these drive the same forwarder/character decision one
     // call below them. The app-level harness is the oracle for the wiring.
-    internal void TestSeamImeSetText(string text) => ImeSink.Text = text;
+    internal void TestSeamImeSetText(string text)
+    {
+        TraceIme($"seam-text '{text}'");
+        _imeSeamText = text;
+        _imeForwarder.SetSinkText(text);
+    }
 
     internal void TestSeamImeStarted(int startIndex) => BeginImeComposition(startIndex);
 
@@ -740,13 +745,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         SyncImeSinkOut();
     }
 
-    internal void TestSeamImeEnded()
-    {
-        SyncImeSinkIn();
-        _imeForwarder.OnCompositionEnded();
-        SyncImeSinkOut();
-        if (!_imeForwarder.Composing) _imeHeldModifiers.Clear();
-    }
+    internal void TestSeamImeEnded() => EndImeComposition();
 
     internal void TestSeamImeCommit() => CommitImeText();
 
@@ -764,7 +763,32 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal int TestSeamImeForwarded => _imeForwarder.Forwarded;
     internal double TestSeamImeSinkX => ImeSink.Margin.Left;
     internal double TestSeamImeSinkY => ImeSink.Margin.Top;
+    internal bool TestSeamImeSinkFocused => ImeSink.FocusState != FocusState.Unfocused;
+    internal bool TestSeamImeSinkHasKeyboardFocus =>
+        XamlRoot is { } root && ReferenceEquals(FocusManager.GetFocusedElement(root), ImeSink);
+
+    private readonly System.Collections.Generic.List<string> _imeTrace = new();
+
+    // The seam's simulated sink text; null when the real TextBox is the
+    // source (every shipping run and every live harness run).
+    private string? _imeSeamText;
+
+    internal string[] TestSeamImeTraceSnapshot() => _imeTrace.ToArray();
+    internal void TestSeamImeTraceReset() => _imeTrace.Clear();
 #endif
+
+    /// <summary>
+    /// Test-only IME event trace, so a live run can see the order in which
+    /// TSF changes the sink text and raises the composition events instead
+    /// of inferring it. No-op in shipping builds.
+    /// </summary>
+    private void TraceIme(string what)
+    {
+#if TESTSEAM
+        if (_imeTrace.Count >= 200) _imeTrace.RemoveAt(0);
+        _imeTrace.Add($"{DateTime.Now:HH:mm:ss.fff} {what}");
+#endif
+    }
 
     /// <summary>
     /// Notify the UIA automation peer that the terminal selection changed so
@@ -2568,6 +2592,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // an arm left over from a consumed close elsewhere must not be the
         // thing that decides that character's fate.
         RetireStaleCharacterSuppress();
+        TraceIme($"key {e.Key} composing={_imeForwarder.Composing}");
+
+        // TSF cancels a composition on Escape without raising Ended (live
+        // trace): the IME drops its own composition and the box text, but no
+        // TextCompositionEnded arrives. Left alone, the forwarder stays
+        // composing forever and every later key is withheld. Reset here;
+        // Escape is never shell input while a composition is live.
+        if (_imeForwarder.Composing && e.Key == Windows.System.VirtualKey.Escape)
+        {
+            TraceIme("escape-cancel");
+            ClearImeComposition();
+            return;
+        }
 
         if (IsImeKey(e.Key)) return;
 
@@ -2891,6 +2928,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // text is committed by OnImeCompositionEnded; a terminal finalizer
         // only applies after the composition has ended. Pre-committing the
         // raw preedit here would bypass the candidate selection.
+        TraceIme($"char '{ch}' composing={_imeForwarder.Composing}");
         if (_imeForwarder.Composing) return;
 
         // The focused TextBox has already inserted this character into the
@@ -2980,6 +3018,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     private void BeginImeComposition(int startIndex)
     {
+        TraceIme($"started {startIndex} sink='{ImeSink.Text}'");
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
 
         UpdateImeSinkPosition();
@@ -3011,6 +3050,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnImeCompositionChanged(object sender, TextCompositionChangedEventArgs e)
     {
+        TraceIme($"changed sink='{ImeSink.Text}' composing={_imeForwarder.Composing}");
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
         SyncImeSinkIn();
         _imeForwarder.OnCompositionChanged();
@@ -3019,10 +3059,33 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnImeCompositionEnded(object sender, TextCompositionEndedEventArgs e)
     {
+        TraceIme($"ended sink='{ImeSink.Text}' composing={_imeForwarder.Composing}");
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+        EndImeComposition();
+    }
+
+    /// <summary>
+    /// The one composition-end path, shared with the test seam. TSF raises
+    /// Ended before it writes the selected text into the box (live trace:
+    /// Ended arrives with the reading, the candidate lands ~5 ms later and
+    /// raises no change event). Closing synchronously here forwards the
+    /// reading and clearing the box discards the candidate, so close now and
+    /// commit whatever TSF left on the next turn.
+    /// </summary>
+    private void EndImeComposition()
+    {
         SyncImeSinkIn();
+        var wasComposing = _imeForwarder.Composing;
         _imeForwarder.OnCompositionEnded();
-        SyncImeSinkOut();
+        if (wasComposing)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_imeForwarder.Composing) return;
+                TraceIme($"ended-next sink='{ImeSink.Text}'");
+                CommitImeText();
+            });
+        }
         if (!_imeForwarder.Composing) _imeHeldModifiers.Clear();
     }
 
@@ -3030,6 +3093,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private void CommitImeText()
     {
         SyncImeSinkIn();
+        TraceIme($"commit '{_imeForwarder.SinkText}'");
         _imeForwarder.Commit();
         SyncImeSinkOut();
         _imeHeldModifiers.Clear();
@@ -3046,6 +3110,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnImeSinkTextChanged(object sender, TextChangedEventArgs e)
     {
+        TraceIme($"text sink='{ImeSink.Text}' composing={_imeForwarder.Composing}");
         if (_imeForwarder.Composing)
         {
             SyncImeSinkIn();
@@ -3075,10 +3140,31 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return false;
     }
 
-    private void SyncImeSinkIn() => _imeForwarder.SetSinkText(ImeSink.Text);
+    private void SyncImeSinkIn()
+    {
+#if TESTSEAM
+        // A live TSF composition owns the focused TextBox and reverts text
+        // assigned from managed code, so the seam cannot inject a simulated
+        // composition through ImeSink.Text. Its text lives here instead; the
+        // control's Begin/End/commit decisions still run for real.
+        if (_imeSeamText is { } seam)
+        {
+            _imeForwarder.SetSinkText(seam);
+            return;
+        }
+#endif
+        _imeForwarder.SetSinkText(ImeSink.Text);
+    }
 
     private void SyncImeSinkOut()
     {
+#if TESTSEAM
+        if (_imeSeamText is not null)
+        {
+            _imeSeamText = _imeForwarder.SinkText;
+            return;
+        }
+#endif
         if (!string.Equals(ImeSink.Text, _imeForwarder.SinkText, StringComparison.Ordinal))
             ImeSink.Text = _imeForwarder.SinkText;
     }

@@ -59,15 +59,20 @@ public sealed class ImeForwarder
     public void OnCompositionChanged() => UpdatePreedit();
 
     /// <summary>
-    /// A composition ended. The count keeps a Started for the next composition
-    /// from committing that next composition when both arrive in one keystroke;
-    /// only the last End closes the session.
+    /// A composition ended: close the session without forwarding anything.
+    /// TSF raises Ended while the sink still holds the reading and writes the
+    /// selected text afterwards (live trace), so the reading is provisional;
+    /// the caller commits the text that landed on the next turn. The count
+    /// keeps a Started for the next composition from closing that next
+    /// composition when both arrive in one keystroke; only the last End closes
+    /// the session.
     /// </summary>
     public void OnCompositionEnded()
     {
         if (_compositions > 0) _compositions--;
         if (_compositions > 0) return;
-        CommitCore();
+        Preedit = null;
+        PreeditChanged?.Invoke(null);
     }
 
     /// <summary>

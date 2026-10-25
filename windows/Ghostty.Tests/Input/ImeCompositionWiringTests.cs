@@ -21,6 +21,8 @@ public class ImeCompositionWiringTests
         Assert.Contains("_imeForwarder.OnKeyDown", code);
         Assert.Contains("BeginImeComposition(e.StartIndex)", code);
         Assert.Contains("TestSeamImeStarted(int startIndex) => BeginImeComposition(startIndex)", code);
+        Assert.Contains("internal void TestSeamImeEnded() => EndImeComposition();", code);
+        Assert.Contains("EndImeComposition();", code);
         Assert.Contains("UpdateImeSinkPosition();", code);
         Assert.Contains("ImeSink.Margin = new Thickness", code);
         Assert.Contains("_imeForwarder.ForwardedText", code);

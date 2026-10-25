@@ -1639,6 +1639,29 @@ internal static class TestSeam
                 return ConsumedCloseArmsJson(window, manager, op, paletteRecovered);
             }
 
+            case "ime-trace":
+            case "ime-trace-clear":
+            {
+                // Test-only ordering trace: what TSF actually did, in order,
+                // with the sink text at each step. A live run needs this to
+                // tell "the IME committed the preedit" from "we committed it
+                // before the IME's result landed".
+                if (LeafTerminal(manager, args) is not { } traceTerminal)
+                    return Error(op, "no such tab or leaf");
+                if (op == "ime-trace-clear") traceTerminal.TestSeamImeTraceReset();
+                var events = traceTerminal.TestSeamImeTraceSnapshot();
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteStartArray("events");
+                    foreach (var ev in events) json.WriteStringValue(ev);
+                    json.WriteEndArray();
+                    json.WriteEndObject();
+                });
+            }
+
             case "ime-set-text":
             case "ime-started":
             case "ime-changed":
@@ -2879,6 +2902,11 @@ internal static class TestSeam
         json.WriteNumber("forwarded", terminal.TestSeamImeForwarded);
         json.WriteNumber("sinkX", terminal.TestSeamImeSinkX);
         json.WriteNumber("sinkY", terminal.TestSeamImeSinkY);
+        // A positioned sink is only useful if TSF has it as the focused
+        // element; expose both the element's own state and the tree's
+        // authoritative keyboard-focus answer.
+        json.WriteBoolean("sinkFocused", terminal.TestSeamImeSinkFocused);
+        json.WriteBoolean("sinkHasKeyboardFocus", terminal.TestSeamImeSinkHasKeyboardFocus);
         json.WriteEndObject();
     });
 
