@@ -176,9 +176,10 @@ build-dll:
 
 # Build libghostty DLL optimized. Much slower to compile; the only build
 # worth drawing timing conclusions from, since a Debug DLL is several times
-# slower at runtime.
+# slower at runtime. Distributed DLLs must not inherit the build host CPU
+# (for example AVX-512).
 build-dll-release:
-    zig build -Dapp-runtime=none -Doptimize=ReleaseFast
+    zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
 
 # === WinUI 3 app shell ===
 
@@ -199,8 +200,14 @@ build-win:
 
 # Build the WinUI 3 app shell in Release. Locked restore, as build-win.
 [windows]
-build-win-release:
+build-win-release: build-dll-release
     dotnet build windows/Ghostty.sln /p:Platform=x64 /p:Configuration=Release /p:RestoreLockedMode=true
+
+# Prove the release DLL only carries runtime-dispatched MSVC CRT AVX-512,
+# never a ghostty-owned unconditional path. Requires LLVM tools.
+[windows]
+check-dll-portable:
+    pwsh -NoProfile -File windows/scripts/check-baseline-isa.ps1 -Dll zig-out/lib/ghostty.dll -Pdb zig-out/lib/ghostty.pdb
 
 # Build the DLL and the shell under the build lane, then launch it. The
 # launch itself is outside any lane on purpose: pwsh returns as soon as a

@@ -183,15 +183,10 @@ const HarfBuzzC = struct {
         try flag_builder.appendSlice(self.builder.allocator, &.{
             "-DHAVE_STDBOOL_H",
         });
-        // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
-        // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
-        // the static archive is consumed by an external linker.
-        if (self.options.target.result.abi == .msvc) {
-            try flag_builder.appendSlice(self.builder.allocator, &.{
-                "-fno-sanitize=undefined",
-                "-fno-sanitize-trap=undefined",
-            });
-        }
+        // UBSan is disabled through the module switch below. Passing the
+        // Clang-only sanitizer flags to translate-c's Aro frontend makes the
+        // generated hb_c import fail, and the runtime cannot be bundled for
+        // an MSVC static archive anyway.
         if (self.options.target.result.os.tag != .windows) {
             try flag_builder.appendSlice(self.builder.allocator, &.{
                 "-DHAVE_UNISTD_H",
@@ -255,6 +250,11 @@ const HarfBuzzC = struct {
             }),
             .linkage = .static,
         });
+
+        // Keep the UBSan runtime out of the static archive consumed by
+        // MSVC's linker; the per-source Clang flags also broke translate-c.
+        // This is the module-level equivalent.
+        if (target.result.abi == .msvc) lib.root_module.sanitize_c = .off;
 
         // Freetype
         if (self.options.freetype) |ft| {
