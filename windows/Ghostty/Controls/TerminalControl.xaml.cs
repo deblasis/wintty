@@ -767,27 +767,26 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal bool TestSeamImeSinkHasKeyboardFocus =>
         XamlRoot is { } root && ReferenceEquals(FocusManager.GetFocusedElement(root), ImeSink);
 
-    private readonly System.Collections.Generic.List<string> _imeTrace = new();
-
-    // The seam's simulated sink text; null when the real TextBox is the
-    // source (every shipping run and every live harness run).
-    private string? _imeSeamText;
-
     internal string[] TestSeamImeTraceSnapshot() => _imeTrace.ToArray();
     internal void TestSeamImeTraceReset() => _imeTrace.Clear();
 #endif
 
+    // The IME trace ring, and the seam's simulated sink text (null whenever
+    // the real TextBox is the source, i.e. every shipping and live run).
+    // Outside the seam region because TraceIme is a [Conditional] method.
+    private readonly System.Collections.Generic.List<string> _imeTrace = new();
+    private string? _imeSeamText;
+
     /// <summary>
     /// Test-only IME event trace, so a live run can see the order in which
     /// TSF changes the sink text and raises the composition events instead
-    /// of inferring it. No-op in shipping builds.
+    /// of inferring it. The attribute removes every call from shipping builds.
     /// </summary>
+    [System.Diagnostics.Conditional("TESTSEAM")]
     private void TraceIme(string what)
     {
-#if TESTSEAM
         if (_imeTrace.Count >= 200) _imeTrace.RemoveAt(0);
         _imeTrace.Add($"{DateTime.Now:HH:mm:ss.fff} {what}");
-#endif
     }
 
     /// <summary>
@@ -3142,29 +3141,26 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void SyncImeSinkIn()
     {
-#if TESTSEAM
         // A live TSF composition owns the focused TextBox and reverts text
         // assigned from managed code, so the seam cannot inject a simulated
-        // composition through ImeSink.Text. Its text lives here instead; the
-        // control's Begin/End/commit decisions still run for real.
+        // composition through ImeSink.Text. Its text lives in _imeSeamText
+        // instead; the control's Begin/End/commit decisions still run for
+        // real. Null in every shipping and live run.
         if (_imeSeamText is { } seam)
         {
             _imeForwarder.SetSinkText(seam);
             return;
         }
-#endif
         _imeForwarder.SetSinkText(ImeSink.Text);
     }
 
     private void SyncImeSinkOut()
     {
-#if TESTSEAM
         if (_imeSeamText is not null)
         {
             _imeSeamText = _imeForwarder.SinkText;
             return;
         }
-#endif
         if (!string.Equals(ImeSink.Text, _imeForwarder.SinkText, StringComparison.Ordinal))
             ImeSink.Text = _imeForwarder.SinkText;
     }
