@@ -215,6 +215,8 @@
             Width="1"
             Height="1"
             Opacity="0"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Top"
             IsTabStop="True"
             IsHitTestVisible="False"
             AutomationProperties.Name="Terminal input"

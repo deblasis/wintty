@@ -767,6 +767,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal string TestSeamImeSink => _imeForwarder.SinkText;
     internal string? TestSeamImePreedit => _imeForwarder.Preedit;
     internal int TestSeamImeForwarded => _imeForwarder.Forwarded;
+    internal double TestSeamImeSinkX => ImeSink.Margin.Left;
+    internal double TestSeamImeSinkY => ImeSink.Margin.Top;
 #endif
 
     /// <summary>
@@ -2119,7 +2121,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // from there steals keyboard focus from other windows (the hidden
         // quick terminal), and two panes doing that loop forever.
         if (ReferenceEquals(e.OriginalSource, this) && !SearchBar.ContainsFocus)
+        {
+            UpdateImeSinkPosition();
             ImeSink.Focus(FocusState.Programmatic);
+        }
     }
 
     private void OnLostFocus(object sender, RoutedEventArgs e)
@@ -2251,6 +2256,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // current focus state to avoid generating a Lost+Got pair when
         // we already have focus.
         if (!_focused) this.Focus(FocusState.Pointer);
+        UpdateImeSinkPosition();
 
         // Ctrl+LeftClick on an OSC 8 hyperlink: open the URL in the
         // default browser and consume the event so libghostty doesn't
@@ -2885,31 +2891,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             return;
         }
 
-        var composing = _imeForwarder.Composing;
-        if (composing)
-        {
-            // Space and Enter finalise the composition. Commit the word
-            // first, then send the finaliser: sending it here before the
-            // commit would put the Space before the word, and committing the
-            // sink with the finaliser still in it would send it twice.
-            if (ch is not (' ' or '\r' or '\n')) return;
-            SyncImeSinkIn();
-            var text = _imeForwarder.SinkText;
-            if (text.Length > 0 && text[^1] == ch)
-                _imeForwarder.SetSinkText(text[..^1]);
-            _imeForwarder.Commit();
-            SyncImeSinkOut();
-            _imeHeldModifiers.Clear();
-        }
-        else
-        {
-            // The focused TextBox has already inserted this character into
-            // the sink. Credit it before the commit, or the commit forwards
-            // it and HandleCharacter sends it again.
-            _imeForwarder.NoteAsciiDelivered();
-            CommitImeText();
-        }
+        // While a composition is live the IME owns every key, including
+        // Space and Enter, which select/commit the candidate. The selected
+        // text is committed by OnImeCompositionEnded; a terminal finalizer
+        // only applies after the composition has ended. Pre-committing the
+        // raw preedit here would bypass the candidate selection.
+        if (_imeForwarder.Composing) return;
 
+        // The focused TextBox has already inserted this character into the
+        // sink. Credit it before the commit, or the commit forwards it and
+        // HandleCharacter sends it again.
+        _imeForwarder.NoteAsciiDelivered();
+        CommitImeText();
         HandleCharacter(ch);
     }
 
@@ -2984,9 +2977,31 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         RetireStaleCharacterSuppress();
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
 
+        UpdateImeSinkPosition();
         SyncImeSinkIn();
         _imeForwarder.OnCompositionStarted(e.StartIndex);
         SyncImeSinkOut();
+    }
+
+    /// <summary>
+    /// Anchor the hidden IME sink to the terminal cursor cell. TSF places the
+    /// candidate/composition window at the focused TextBox, so leaving the
+    /// sink at the grid origin puts the popup there instead of at the caret.
+    /// Grid cell sizes are physical pixels; the sink's parent is in DIPs.
+    /// </summary>
+    private void UpdateImeSinkPosition()
+    {
+        if (_surface.Handle == IntPtr.Zero) return;
+        if (NativeMethods.SurfaceReadCells(_surface) is not { } cells) return;
+        if (!cells.CursorInViewport) return;
+        var size = NativeMethods.SurfaceSize(_surface);
+        if (size.CellWidthPx == 0 || size.CellHeightPx == 0) return;
+        var scaleX = Panel.CompositionScaleX;
+        var scaleY = Panel.CompositionScaleY;
+        if (scaleX <= 0 || scaleY <= 0) return;
+        var x = cells.CursorCol * size.CellWidthPx / scaleX;
+        var y = cells.CursorRow * size.CellHeightPx / scaleY;
+        ImeSink.Margin = new Thickness(x, y, 0, 0);
     }
 
     private void OnImeCompositionChanged(object sender, TextCompositionChangedEventArgs e)

@@ -19,6 +19,8 @@ public class ImeCompositionWiringTests
         Assert.Contains("_imeForwarder", code);
         Assert.Contains("_imeForwarder.OnCompositionEnded", code);
         Assert.Contains("_imeForwarder.OnKeyDown", code);
+        Assert.Contains("UpdateImeSinkPosition();", code);
+        Assert.Contains("ImeSink.Margin = new Thickness", code);
         Assert.Contains("_imeForwarder.ForwardedText", code);
         Assert.Contains("Composing = (byte)(_imeForwarder.Composing ? 1 : 0)", code);
         Assert.DoesNotContain("_imeComposing", code);

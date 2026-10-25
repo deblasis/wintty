@@ -2877,6 +2877,8 @@ internal static class TestSeam
         if (terminal.TestSeamImePreedit is { } preedit) json.WriteString("preedit", preedit);
         else json.WriteNull("preedit");
         json.WriteNumber("forwarded", terminal.TestSeamImeForwarded);
+        json.WriteNumber("sinkX", terminal.TestSeamImeSinkX);
+        json.WriteNumber("sinkY", terminal.TestSeamImeSinkY);
         json.WriteEndObject();
     });
 
