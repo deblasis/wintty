@@ -3073,6 +3073,14 @@ test "win32 input: modifiers, repeat, release and keypad enter" {
             .expected = "\x1b[13;28;0;0;0;1_",
         },
         .{
+            .event = .{
+                .key = .enter,
+                .action = .release,
+                .mods = .{ .ctrl = true },
+            },
+            .expected = "\x1b[13;28;0;0;8;1_",
+        },
+        .{
             .event = .{ .key = .enter },
             .expected = "\x1b[13;28;13;1;0;1_",
         },
@@ -3089,6 +3097,18 @@ test "win32 input: modifiers, repeat, release and keypad enter" {
         .{
             .event = .{ .key = .numpad_enter, .mods = .{ .shift = true } },
             .expected = "\x1b[13;28;13;1;272;1_",
+        },
+        .{
+            .event = .{ .key = .numpad_enter, .action = .release },
+            .expected = "\x1b[13;28;0;0;256;1_",
+        },
+        .{
+            .event = .{
+                .key = .numpad_enter,
+                .action = .release,
+                .mods = .{ .shift = true },
+            },
+            .expected = "\x1b[13;28;0;0;272;1_",
         },
         .{
             .event = .{
@@ -3161,6 +3181,17 @@ test "win32 input: unnegotiated, Kitty and text keep existing encodings" {
             .event = .{ .key = .enter, .mods = .{ .shift = true }, .utf8 = "A" },
             .options = .{ .win32_input = true },
             .expected = "A",
+        },
+        // A composing Enter emits nothing, including with control text.
+        .{
+            .event = .{
+                .key = .enter,
+                .mods = .{ .shift = true },
+                .composing = true,
+                .utf8 = "\r",
+            },
+            .options = .{ .win32_input = true },
+            .expected = "",
         },
         // Other keys keep their existing encoding.
         .{
