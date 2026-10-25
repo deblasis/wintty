@@ -31,12 +31,23 @@ pub const ModeState = struct {
     /// Reset the modes to their default values. This also clears the
     /// saved state.
     pub fn reset(self: *ModeState) void {
+        // ConPTY requests Win32 input mode once at pty startup and never
+        // re-asks. RIS resets terminal modes, but the transport request
+        // belongs to the pty, so keep the negotiated bit across the reset.
+        const win32_input = self.values.win32_input;
         self.values = self.default;
         self.saved = .{};
+        self.values.win32_input = win32_input;
     }
 
     /// Set a mode to a value.
     pub fn set(self: *ModeState, mode: Mode, value: bool) void {
+        if (mode == .win32_input and self.get(mode) != value) {
+            std.log.scoped(.terminal).debug(
+                "win32 input mode {s}",
+                .{if (value) "enabled" else "disabled"},
+            );
+        }
         setPacked(&self.values, mode, value);
     }
 
@@ -443,6 +454,9 @@ const entries: []const ModeEntry = &.{
         // Kitty clipboard read that a paste event grants.
         .disabled = build_options.artifact != .lib and builtin.os.tag != .macos,
     },
+    // ConPTY requests Win32 input records to preserve modified console keys.
+    // Append modes here: the order is the snapshot wire registry.
+    .{ .name = "win32_input", .value = 9001, .default_configurable = false, .disabled = builtin.os.tag != .windows },
 };
 
 test {
@@ -494,6 +508,18 @@ test ModeState {
     try testing.expect(!state.get(.cursor_keys));
     try testing.expect(state.restore(.cursor_keys));
     try testing.expect(state.get(.cursor_keys));
+}
+
+test "ModeState reset preserves negotiated Win32 input" {
+    var state: ModeState = .{};
+    state.set(.cursor_keys, true);
+    state.set(.win32_input, true);
+
+    state.reset();
+
+    // RIS clears ordinary terminal modes but not the pty's transport mode.
+    try testing.expect(!state.get(.cursor_keys));
+    try testing.expect(state.get(.win32_input));
 }
 
 test "ModeState set default updates current and reset value" {

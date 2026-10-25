@@ -123,7 +123,7 @@ const PayloadDecodeError = std.Io.Reader.Error ||
     Header.CapacityError ||
     grid.DecodeError ||
     error{
-        /// The hyperlink kind is not defined by snapshot version 1.
+        /// The hyperlink kind is not defined by snapshot versions 1 or 2.
         InvalidKind,
 
         /// Native page backing memory could not be allocated.

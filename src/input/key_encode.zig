@@ -37,6 +37,11 @@ pub const Options = struct {
     /// Kitty keyboard protocol flags.
     kitty_flags: KittyFlags = .disabled,
 
+    /// ConPTY's DEC private mode 9001. When set, Enter and keypad Enter are
+    /// encoded as Win32 console input records so their modifiers survive
+    /// ConPTY instead of being consumed as an xterm modified-Enter sequence.
+    win32_input: bool = false,
+
     /// Determines whether the "option" key on macOS is treated
     /// as "alt" or not. See the Ghostty `macos_option-as-alt` config
     /// docs for a more detailed description of why this is needed.
@@ -65,6 +70,10 @@ pub const Options = struct {
             .ignore_keypad_with_numlock = t.modes.get(.ignore_keypad_with_numlock),
             .modify_other_keys_state_2 = t.flags.modify_other_keys_2,
             .kitty_flags = t.screens.active.kitty_keyboard.current(),
+            // The mode is Windows-only. A v2 snapshot can carry the bit on
+            // another platform, so gate the live encoder here rather than
+            // trusting the restored mode alone.
+            .win32_input = builtin.os.tag == .windows and t.modes.get(.win32_input),
 
             // These can't be known from the terminal state.
             .macos_option_as_alt = .false,
@@ -85,6 +94,20 @@ pub fn encode(
     opts: Options,
 ) std.Io.Writer.Error!void {
     //std.log.warn("KEYENCODER event={} opts={}", .{ event, opts });
+
+    // ConPTY discards xterm's modified Enter (CSI 27;2;13~). A Win32 record
+    // preserves Shift and the other modifiers for native console readers.
+    // Mode 9001 is only settable on Windows, so a false option reproduces
+    // the existing behavior everywhere else. Keep negotiated Kitty input
+    // unchanged for applications using that protocol.
+    if (opts.win32_input and opts.kitty_flags.int() == 0 and
+        !event.composing and
+        (event.utf8.len == 0 or isControlUtf8(event.utf8)) and
+        (event.key == .enter or event.key == .numpad_enter))
+    {
+        return win32Enter(writer, event);
+    }
+
     return if (opts.kitty_flags.int() != 0) try kitty(
         writer,
         event,
@@ -94,6 +117,43 @@ pub fn encode(
         event,
         opts,
     );
+}
+
+/// Encode Enter or keypad Enter as the Win32 console input record that
+/// ConPTY's private mode 9001 requests.
+///
+/// The record is `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`: virtual key, scan code,
+/// UTF-16 code unit, key-down, control state, repeat count. Enter is
+/// VK_RETURN (13) with scan code 28; its code unit is LF when Ctrl is down
+/// and CR otherwise. Control state carries the modifier sides, lock keys and
+/// ENHANCED_KEY for keypad Enter.
+fn win32Enter(
+    writer: *std.Io.Writer,
+    event: key.KeyEvent,
+) std.Io.Writer.Error!void {
+    var control_state: u16 = if (event.mods.shift) 0x0010 else 0;
+    if (event.mods.ctrl) {
+        control_state |= if (event.mods.sides.ctrl == .right) 0x0004 else 0x0008;
+    }
+    if (event.mods.alt) {
+        control_state |= if (event.mods.sides.alt == .right) 0x0001 else 0x0002;
+    }
+    if (event.mods.num_lock) control_state |= 0x0020;
+    // SCROLLLOCK_ON (0x0040) is not representable: input.Mods tracks only
+    // Caps Lock and Num Lock.
+    if (event.mods.caps_lock) control_state |= 0x0080;
+    if (event.key == .numpad_enter) control_state |= 0x0100;
+
+    return writer.print("\x1b[13;28;{d};{d};{d};1_", .{
+        @as(u8, if (event.action == .release)
+            0
+        else if (event.mods.ctrl)
+            10
+        else
+            13),
+        @as(u8, if (event.action == .release) 0 else 1),
+        control_state,
+    });
 }
 
 /// Perform Kitty keyboard protocol encoding of the key event.
@@ -2950,4 +3010,170 @@ test "ctrlseq: right ctrl c" {
 test "ctrlseq: ctrl c with no text uses logical key" {
     const seq = ctrlSeq(.key_c, "", 'c', .{ .ctrl = true });
     try testing.expectEqual(@as(u8, 0x03), seq.?);
+}
+
+test "win32 input mode: fromTerminal enables the record on Windows only" {
+    var t = try Terminal.init(testing.io, testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer t.deinit(testing.allocator);
+
+    // ConPTY asks for Win32 input records in its startup preamble. The mode
+    // is Windows-only, so the parser ignores it here; set the state the
+    // parser produces on Windows and exercise the encoder integration.
+    t.modes.set(.win32_input, true);
+    const opts = Options.fromTerminal(&t);
+
+    if (comptime builtin.os.tag != .windows) {
+        // A v2 snapshot can carry the bit to another platform. The live
+        // encoder must not start emitting Win32 records there.
+        try testing.expect(!opts.win32_input);
+        return;
+    }
+
+    try testing.expect(opts.win32_input);
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try encode(&writer, .{
+        .key = .enter,
+        .mods = .{ .shift = true },
+    }, opts);
+    try testing.expectEqualStrings("\x1b[13;28;13;1;16;1_", writer.buffered());
+}
+
+test "win32 input: modifiers, repeat, release and keypad enter" {
+    const Case = struct {
+        event: key.KeyEvent,
+        expected: []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .event = .{ .key = .enter, .mods = .{ .shift = true } },
+            .expected = "\x1b[13;28;13;1;16;1_",
+        },
+        .{
+            .event = .{
+                .key = .enter,
+                .action = .repeat,
+                .mods = .{ .shift = true },
+            },
+            .expected = "\x1b[13;28;13;1;16;1_",
+        },
+        .{
+            .event = .{
+                .key = .enter,
+                .action = .release,
+                .mods = .{ .shift = true },
+            },
+            .expected = "\x1b[13;28;0;0;16;1_",
+        },
+        .{
+            .event = .{ .key = .enter, .action = .release },
+            .expected = "\x1b[13;28;0;0;0;1_",
+        },
+        .{
+            .event = .{ .key = .enter },
+            .expected = "\x1b[13;28;13;1;0;1_",
+        },
+        // Some hosts attach Return's control character as text. It is still
+        // a key event, not composed input.
+        .{
+            .event = .{
+                .key = .enter,
+                .mods = .{ .shift = true },
+                .utf8 = "\r",
+            },
+            .expected = "\x1b[13;28;13;1;16;1_",
+        },
+        .{
+            .event = .{ .key = .numpad_enter, .mods = .{ .shift = true } },
+            .expected = "\x1b[13;28;13;1;272;1_",
+        },
+        .{
+            .event = .{
+                .key = .enter,
+                .mods = .{
+                    .shift = true,
+                    .ctrl = true,
+                    .alt = true,
+                    .caps_lock = true,
+                    .num_lock = true,
+                    .sides = .{ .ctrl = .right, .alt = .right },
+                },
+            },
+            .expected = "\x1b[13;28;10;1;181;1_",
+        },
+    };
+
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, case.event, .{ .win32_input = true });
+        try testing.expectEqualStrings(case.expected, writer.buffered());
+    }
+}
+
+test "win32 input: mode 9001 negotiates on Windows and is ignored elsewhere" {
+    var t = try Terminal.init(testing.io, testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // The registry disables the mode off Windows, so the same DECSET must
+    // leave the mode clear there. The assertion runs on every host.
+    const supported = builtin.os.tag == .windows;
+    try testing.expect(!t.modes.get(.win32_input));
+    s.nextSlice("\x1b[?9001h");
+    try testing.expectEqual(supported, t.modes.get(.win32_input));
+    s.nextSlice("\x1b[?9001l");
+    try testing.expect(!t.modes.get(.win32_input));
+}
+
+test "win32 input: unnegotiated, Kitty and text keep existing encodings" {
+    const Case = struct {
+        event: key.KeyEvent,
+        options: Options,
+        expected: []const u8,
+    };
+    const cases = [_]Case{
+        // No negotiated mode: the legacy modified-Enter sequence is still
+        // what a host without 9001 receives.
+        .{
+            .event = .{ .key = .enter, .mods = .{ .shift = true } },
+            .options = .{},
+            .expected = "\x1b[27;2;13~",
+        },
+        // Kitty has its own protocol and wins over the Win32 mode.
+        .{
+            .event = .{ .key = .enter, .mods = .{ .shift = true } },
+            .options = .{
+                .win32_input = true,
+                .kitty_flags = .{ .disambiguate = true },
+            },
+            .expected = "\x1b[13;2u",
+        },
+        // Composed text is not a console key record.
+        .{
+            .event = .{ .key = .enter, .mods = .{ .shift = true }, .utf8 = "A" },
+            .options = .{ .win32_input = true },
+            .expected = "A",
+        },
+        // Other keys keep their existing encoding.
+        .{
+            .event = .{ .key = .key_a, .utf8 = "a" },
+            .options = .{ .win32_input = true },
+            .expected = "a",
+        },
+    };
+
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, case.event, case.options);
+        try testing.expectEqualStrings(case.expected, writer.buffered());
+    }
 }

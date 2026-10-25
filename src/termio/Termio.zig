@@ -814,11 +814,11 @@ pub fn deepIdleTrim(self: *Termio) void {
 /// mutex on the IO thread, which is the lock every other terminal
 /// reader takes, so no reader can observe the half-torn-down window.
 ///
-/// What snapshot v1 cannot carry is refused rather than silently lost:
-/// kitty image state, glyph glossary registrations, and kitty drag and
-/// drop state are all user-visible, and a dormant wake that dropped
-/// them would read as corruption. The viewport's scroll offset is the
-/// one accepted loss (v1 wakes at the active position).
+/// What the snapshot format cannot carry is refused rather than silently
+/// lost: kitty image state, glyph glossary registrations, and kitty drag and
+/// drop state are all user-visible, and a dormant wake that dropped them
+/// would read as corruption. The viewport's scroll offset is the one accepted
+/// loss (the snapshot wakes at the active position).
 pub fn goDormant(self: *Termio) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());

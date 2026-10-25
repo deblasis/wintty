@@ -109,8 +109,10 @@ extern "C" {
  * CRC32C, like every other record. Declared record counts, tags, and strict
  * decoding enforce the stream's ordering and completeness.
  *
- * Snapshot format version 1 is a work in progress and does not yet carry a
- * binary-compatibility guarantee.
+ * Writers emit snapshot format version 2. Readers accept versions 1 and 2.
+ * Version 2 adds the Win32 input mode at mode bit 43 without moving older
+ * modes. A version this library does not support is reported as
+ * GHOSTTY_INVALID_VALUE; version 1 snapshots remain readable.
  *
  * @see <a href="https://github.com/ghostty-org/ghostty/blob/main/src/terminal/snapshot/main.zig">Snapshot format and Zig codec documentation</a>
  *

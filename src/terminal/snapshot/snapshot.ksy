@@ -5,7 +5,7 @@ meta:
   license: MIT
   endian: le
 doc: |
-  Ghostty terminal snapshot format version 1.
+  Ghostty terminal snapshot formats 1 and 2.
 
   A complete snapshot contains an envelope, terminal-wide state, one or two
   renderable screen sequences, one raw standard-Stream CONTINUATION, a READY
@@ -22,7 +22,7 @@ seq:
   - id: envelope
     type: envelope
   - id: terminal
-    type: terminal_record
+    type: terminal_record(envelope.version)
   - id: screens
     type: screen_sequence
     repeat: expr
@@ -156,7 +156,8 @@ types:
         contents: [0x47, 0x48, 0x4f, 0x53, 0x54, 0x53, 0x4e, 0x50]
       - id: version
         type: u2
-        valid: 1
+        valid:
+          any-of: [1, 2]
 
   record_header:
     doc: |
@@ -175,11 +176,14 @@ types:
         type: u4
 
   terminal_record:
+    params:
+      - id: version
+        type: u2
     seq:
       - id: header
         type: record_header(1)
       - id: payload
-        type: terminal_payload
+        type: terminal_payload(version)
         size: header.payload_length
 
   screen_record:
@@ -250,9 +254,12 @@ types:
         repeat-expr: history.payload.page_count
 
   terminal_payload:
+    params:
+      - id: version
+        type: u2
     seq:
       - id: header
-        type: terminal_header
+        type: terminal_header(version)
       - id: tab_stops
         type: tab_stops(header.columns)
       - id: original_palette
@@ -279,6 +286,9 @@ types:
           expr: _.size == 0
 
   terminal_header:
+    params:
+      - id: version
+        type: u2
     seq:
       - id: columns
         type: u2
@@ -368,11 +378,11 @@ types:
         valid:
           max: 1
       - id: current_modes
-        type: mode_set
+        type: mode_set(version)
       - id: saved_modes
-        type: mode_set
+        type: mode_set(version)
       - id: default_modes
-        type: mode_set
+        type: mode_set(version)
       - id: background
         type: dynamic_rgb
       - id: foreground
@@ -385,18 +395,22 @@ types:
         type: u8
 
   mode_set:
+    params:
+      - id: version
+        type: u2
     doc: |
       The stable packed registry shared by current, saved, and default modes.
       Each named instance exposes one bit from the little-endian integer.
       Arithmetic division is used instead of bitwise operations because the
       JavaScript target implements those operations with signed 32-bit values.
-      All values remain exact because the registry occupies only 43 bits,
-      within JavaScript's 53-bit safe integer range.
+      All values remain exact because raw is capped at 44 bits, within
+      JavaScript's 53-bit safe integer range. Bits 44 and above are
+      reserved and rejected by the codec; bit 43 is reserved in version 1.
     seq:
       - id: raw
         type: u8
         valid:
-          max: 8796093022207
+          max: 17592186044415
     instances:
       disable_keyboard:
         value: (raw / 1) % 2 != 0
@@ -484,6 +498,12 @@ types:
         value: (raw / 2199023255552) % 2 != 0
       kitty_paste_events:
         value: (raw / 4398046511104) % 2 != 0
+      win32_input:
+        doc: |
+          Win32 console input mode. Reserved in version 1 and ignored there;
+          the version arrives as a param so a standalone terminal_header does
+          not depend on the envelope.
+        value: version >= 2 and (raw / 8796093022208) % 2 != 0
 
   tab_stops:
     params:

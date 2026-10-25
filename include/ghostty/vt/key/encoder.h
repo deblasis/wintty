@@ -174,6 +174,14 @@ GHOSTTY_API void ghostty_key_encoder_setopt(GhosttyKeyEncoder encoder, GhosttyKe
  * alt escape prefix, modifyOtherKeys state, and Kitty keyboard protocol
  * flags from the terminal state.
  *
+ * It also carries ConPTY's Win32 input mode (DEC private mode 9001) when
+ * the terminal negotiated it. That mode has no standalone encoder option:
+ * it is transport state negotiated by the pty, not an application setting.
+ * The carry is compiled to false on non-Windows builds. A restored value is
+ * the pty's negotiated state, so an embedder that attaches a restored
+ * terminal to a different pty should clear mode 9001 until that pty
+ * negotiates it.
+ *
  * Note that the `macos_option_as_alt` option cannot be determined from
  * terminal state and is reset to `GHOSTTY_OPTION_AS_ALT_FALSE` by this
  * call. Use ghostty_key_encoder_setopt() to set it afterward if needed.

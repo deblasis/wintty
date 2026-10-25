@@ -349,7 +349,11 @@ def main() -> int:
         fixture_path, output_path = args.write_binary
         fixture = load_fixture(fixture_path)
         output_path.write_bytes(fixture.data)
-        print(f"wrote {len(fixture.data)} bytes to {output_path}")
+        params = " ".join(str(value) for value in fixture.params)
+        print(
+            f"wrote {len(fixture.data)} bytes to {output_path}; "
+            f"Kaitai type {fixture.type_name} params: {params or '(none)'}"
+        )
         return 0
 
     with tempfile.TemporaryDirectory(prefix="ghostty-kaitai-") as temp:
@@ -389,6 +393,50 @@ def main() -> int:
                 if record_end != len(fixture.data):
                     raise ValueError(
                         f"{fixture_label}: record has trailing data"
+                    )
+
+            # The header fixtures are the only checked-in mode words that
+            # exercise bit 43. Read the value instance rather than trusting
+            # the structural parse: a wrong divisor in mode_set would still
+            # parse, but it would not set this bit.
+            if fixture_label.name == "terminal-header-v1.hex":
+                if parsed.current_modes.win32_input:
+                    raise ValueError(
+                        f"{fixture_label}: version 1 exposed win32_input"
+                    )
+            elif fixture_label.name == "terminal-header-v2.hex":
+                if not parsed.current_modes.win32_input:
+                    raise ValueError(
+                        f"{fixture_label}: version 2 did not expose win32_input"
+                    )
+                if not parsed.saved_modes.win32_input:
+                    raise ValueError(
+                        f"{fixture_label}: saved modes lost win32_input"
+                    )
+                if not parsed.default_modes.win32_input:
+                    raise ValueError(
+                        f"{fixture_label}: default modes lost win32_input"
+                    )
+
+                # Read the same bytes as version 1. Bit 43 was reserved
+                # there, so the schema must not expose it as a mode. This
+                # is the one check that makes the version param load-bearing.
+                v1_view = parse_type(
+                    parser_type,
+                    fixture.data[fixture.offset:],
+                    1,
+                )
+                if v1_view.current_modes.win32_input:
+                    raise ValueError(
+                        f"{fixture_label}: version 1 exposed current win32_input"
+                    )
+                if v1_view.saved_modes.win32_input:
+                    raise ValueError(
+                        f"{fixture_label}: version 1 exposed saved win32_input"
+                    )
+                if v1_view.default_modes.win32_input:
+                    raise ValueError(
+                        f"{fixture_label}: version 1 exposed default win32_input"
                     )
             print(f"ok {fixture_label}")
 

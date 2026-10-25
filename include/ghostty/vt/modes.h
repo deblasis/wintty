@@ -95,6 +95,7 @@ extern "C" {
 #define GHOSTTY_MODE_VISIBILITY_REPORT (ghostty_mode_new(2033, false)) /**< Report terminal visibility */
 #define GHOSTTY_MODE_IN_BAND_RESIZE   (ghostty_mode_new(2048, false)) /**< In-band size reports */
 #define GHOSTTY_MODE_PASTE_EVENTS     (ghostty_mode_new(5522, false)) /**< Kitty clipboard protocol paste events */
+#define GHOSTTY_MODE_WIN32_INPUT      (ghostty_mode_new(9001, false)) /**< Win32 console input records (Windows only) */
 /** @} */
 
 /**
