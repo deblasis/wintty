@@ -452,8 +452,11 @@ const WindowsPty = struct {
     ///
     /// Falling back to the OS in-box conhost is a degraded mode: it
     /// strips the Kitty graphics (APC) and Sixel (DCS) sequences that
-    /// only the bundled conpty.dll forwards. The fallback paths log at
-    /// `warn` so this loss of capability is visible in diagnostics.
+    /// only the bundled conpty.dll forwards. An in-box conhost older than
+    /// the unconditional Win32 input request also leaves modified Enter on
+    /// the legacy path; the bundled conpty requests mode 9001. The fallback
+    /// paths log at `warn` so this loss of capability is visible in
+    /// diagnostics.
     fn resolvePseudoConsoleApi() void {
         const fallback: PseudoConsoleApi = .{
             .create = windows.exp.kernel32.CreatePseudoConsole,

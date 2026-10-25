@@ -289,6 +289,9 @@ types:
     params:
       - id: version
         type: u2
+        doc: |
+          Envelope version. A standalone terminal_header parse must supply it;
+          checked-in fixtures declare it in their Kaitai params metadata.
     seq:
       - id: columns
         type: u2

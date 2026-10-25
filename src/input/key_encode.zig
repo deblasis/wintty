@@ -124,9 +124,9 @@ pub fn encode(
 ///
 /// The record is `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`: virtual key, scan code,
 /// UTF-16 code unit, key-down, control state, repeat count. Enter is
-/// VK_RETURN (13) with scan code 28; its code unit is LF when Ctrl is down
-/// and CR otherwise. Control state carries the modifier sides, lock keys and
-/// ENHANCED_KEY for keypad Enter.
+/// VK_RETURN (13) with scan code 28; its code unit is LF when Ctrl is down,
+/// CR otherwise, and zero on release. Control state carries the modifier
+/// sides, lock keys and ENHANCED_KEY for keypad Enter.
 fn win32Enter(
     writer: *std.Io.Writer,
     event: key.KeyEvent,
