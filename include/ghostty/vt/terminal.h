@@ -1546,7 +1546,8 @@ typedef void (*GhosttyTerminalSemanticPromptFn)(
  *
  * Called when the running program performs a full reset (RIS, `ESC c`).
  * A full reset clears the screen and scrollback, returns modes to their
- * defaults, and clears the title and working directory. Use this callback
+ * defaults except the transport-owned Win32 input mode, and clears the
+ * title and working directory. Use this callback
  * to reset any state your application keeps about what's running in the
  * terminal, such as the current command.
  *
@@ -2309,7 +2310,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Set the reset default for a terminal mode.
    *
    * This unconditionally updates both the current value and the value restored
-   * by a terminal reset. RIS restores every mode, and DECSTR only a subset.
+   * by a terminal reset. RIS restores every mode except the transport-owned
+   * Win32 input mode; DECSTR restores only a subset.
    *
    * Some recognized modes represent transitions or mirror additional terminal
    * state and cannot safely be configured as reset defaults. Those modes return
