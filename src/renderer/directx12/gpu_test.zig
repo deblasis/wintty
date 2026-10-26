@@ -4015,6 +4015,123 @@ test "DirectX12: prepareFrame bounds an unreachable data fence" {
     );
 }
 
+test "DirectX12: a stale fence-event signal does not satisfy waitForGpu" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+    const dev = &api.dev.?;
+
+    // Arm the shared fence event the way an abandoned bounded wait does when
+    // its value completes with no waiter: register a value that is already
+    // complete, which D3D12 signals immediately. Nobody consumes the signal,
+    // so the auto-reset event stays armed.
+    try dev.waitForGpu();
+    const armed_value = dev.fence_value.load(.acquire);
+    if (com.FAILED(dev.fence.SetEventOnCompletion(armed_value, dev.fence_event)))
+        return error.FenceSetEventFailed;
+
+    // Park the queue so the value waitForGpu is about to signal cannot
+    // complete until the opener releases the gate. A gated queue makes
+    // "still in flight" a fact rather than a race.
+    var gate: ?*d3d12.ID3D12Fence = null;
+    {
+        const hr = dev.device.CreateFence(
+            0,
+            .NONE,
+            &d3d12.ID3D12Fence.IID,
+            @ptrCast(&gate),
+        );
+        if (com.FAILED(hr) or gate == null) return error.FenceCreationFailed;
+    }
+    defer _ = gate.?.Release();
+    if (com.FAILED(dev.command_queue.Wait(gate.?, 1))) return error.QueueWaitFailed;
+    errdefer {
+        _ = gate.?.Signal(1);
+        dev.waitForGpu() catch {};
+    }
+
+    var opened = std.atomic.Value(bool).init(false);
+    const Opener = struct {
+        fn run(fence: *d3d12.ID3D12Fence, flag: *std.atomic.Value(bool)) void {
+            const kernel32 = struct {
+                extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
+            };
+            kernel32.Sleep(1000);
+            _ = fence.Signal(1);
+            flag.store(true, .release);
+        }
+    };
+    const opener = try std.Thread.spawn(.{}, Opener.run, .{ gate.?, &opened });
+    defer opener.join();
+
+    const wait_value = dev.fence_value.load(.acquire) + 1;
+    try dev.waitForGpu();
+
+    // The gate opening is the only route to wait_value completing: if the
+    // armed signal satisfied the wait, waitForGpu returned while the queue
+    // was still parked and the flagged opener had not run yet.
+    try std.testing.expect(opened.load(.acquire));
+    try std.testing.expect(dev.fence.GetCompletedValue() >= wait_value);
+}
+
+test "DirectX12: a prepareFrame timeout cannot arm the shared fence-event" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+    const dev = &api.dev.?;
+
+    // Slot 0 waits on a value the test completes only after the bound inside
+    // prepareFrame has expired on a live device. Sequencing is by handshake,
+    // not by wall clock: a saturated machine stretches the 100 ms wait
+    // slices, and a timed completion would race the bound.
+    const late_value = dev.fence_value.fetchAdd(1, .release) + 1;
+    api.data_fence_values[0] = late_value;
+
+    var timed_out = std.atomic.Value(bool).init(false);
+    const Completer = struct {
+        fn run(
+            queue: *d3d12.ID3D12CommandQueue,
+            fence: *d3d12.ID3D12Fence,
+            value: u64,
+            flag: *std.atomic.Value(bool),
+        ) void {
+            const kernel32 = struct {
+                extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
+            };
+            while (!flag.load(.acquire)) kernel32.Sleep(10);
+            _ = queue.Signal(fence, value);
+        }
+    };
+    const completer = try std.Thread.spawn(.{}, Completer.run, .{ dev.command_queue, dev.fence, late_value, &timed_out });
+    try std.testing.expectError(error.FrameSyncFailed, api.prepareFrame(0));
+    timed_out.store(true, .release);
+    completer.join();
+
+    // The late value has now completed. A timed-out registration on the
+    // shared event would leave it armed with no waiter, and the next
+    // beginFrame or waitForGpu would consume a signal that proves nothing.
+    try std.testing.expect(d3d12.WaitForSingleObject(dev.fence_event, 500) != 0);
+
+    // The completion still has to wake a waiter: the dedicated data event
+    // carries it, and only that event.
+    if (comptime @hasField(Device, "data_fence_event")) {
+        try std.testing.expectEqual(
+            @as(u32, 0),
+            d3d12.WaitForSingleObject(dev.data_fence_event, 500),
+        );
+    }
+
+    try dev.waitForGpu();
+}
+
 test "DirectX12: drawFrameEnd records the selected data slot" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const DirectX12 = @import("../DirectX12.zig");

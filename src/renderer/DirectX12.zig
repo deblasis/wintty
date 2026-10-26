@@ -1400,7 +1400,11 @@ pub fn prepareFrame(self: *DirectX12, data_index: usize) !void {
 
     const value = self.data_fence_values[data_index];
     if (dev.fence.GetCompletedValue() < value) {
-        if (com.FAILED(dev.fence.SetEventOnCompletion(value, dev.fence_event)))
+        // The bounded wait below can expire while its registration is still
+        // live, so it owns its own event: an abandoned registration on the
+        // shared fence event would arm it, and the unbounded waits in
+        // waitForGpu and beginFrame trust the first signal.
+        if (com.FAILED(dev.fence.SetEventOnCompletion(value, dev.data_fence_event)))
             return error.FrameSyncFailed;
 
         // A fence value can be unreachable: the signal that would have
@@ -1410,7 +1414,7 @@ pub fn prepareFrame(self: *DirectX12, data_index: usize) !void {
         // must not add another unbounded stall to the hidden-surface poll.
         var remaining_ms: u32 = 2000;
         while (remaining_ms > 0) {
-            if (d3d12.WaitForSingleObject(dev.fence_event, 100) == 0) break;
+            if (d3d12.WaitForSingleObject(dev.data_fence_event, 100) == 0) break;
             if (dev.removed()) {
                 self.markDeviceLost(.wait);
                 return error.DeviceLost;
@@ -1573,9 +1577,15 @@ pub inline fn beginFrame(
     const wait_value = frame.fence_value;
     if (dev_ptr.fence.GetCompletedValue() < wait_value) {
         const wait_start: std.Io.Timestamp = .now(global.io(), .awake);
-        const hr = dev_ptr.fence.SetEventOnCompletion(wait_value, dev_ptr.fence_event);
-        if (com.FAILED(hr)) return error.FrameSyncFailed;
-        _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
+        // A signal on the shared event is not proof the fence value
+        // completed: a registration abandoned by a bounded wait arms the
+        // event when its value completes. Revalidate and register again
+        // rather than reuse a back buffer the GPU may still be reading.
+        while (dev_ptr.fence.GetCompletedValue() < wait_value) {
+            const hr = dev_ptr.fence.SetEventOnCompletion(wait_value, dev_ptr.fence_event);
+            if (com.FAILED(hr)) return error.FrameSyncFailed;
+            _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
+        }
         if (api.init_started) |started| {
             api.frame_wait_count += 1;
             const dur_ms = wait_start.durationTo(.now(global.io(), .awake)).toMilliseconds();
