@@ -136,13 +136,13 @@ function Invoke-LaunchSmoke {
 }
 
 try {
-    Write-Host '== build-dll-release (ReleaseFast libghostty) =='
-    just build-dll-release
-    if ($LASTEXITCODE -ne 0) { throw "build-dll-release failed exit=$LASTEXITCODE" }
-
-    Write-Host '== build-win-release =='
+    Write-Host '== build-win-release (ReleaseFast libghostty + shell) =='
     just build-win-release
     if ($LASTEXITCODE -ne 0) { throw "build-win-release failed exit=$LASTEXITCODE" }
+
+    Write-Host '== check release DLL portability =='
+    just check-dll-portable
+    if ($LASTEXITCODE -ne 0) { throw "check-dll-portable failed exit=$LASTEXITCODE" }
 
     if (-not (Test-Path $releaseExe)) { throw "missing $releaseExe" }
     $script:SmokeAumId = Get-WinttyBuildAumid $releaseExe
