@@ -18,10 +18,13 @@ namespace Ghostty.Bench.Transports;
 //   our copies immediately after CreatePseudoConsole returns,
 //   otherwise the child's stdout pipe never gets EOF on exit and
 //   the reader hangs forever.
-// Audited against microsoft/terminal/samples/ConPTY/MiniTerm on 2026-04-17.
+// Audited against microsoft/terminal ConptyConnection::_LaunchAttachedClient
+// and samples/ConPTY/MiniTerm on 2026-04-17.
 [SupportedOSPlatform("windows")]
 public sealed class ConPtyTransport : ITransport
 {
+    private const int STARTF_USESTDHANDLES = 0x00000100;
+    private const uint STILL_ACTIVE = 259;
     private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     private static readonly IntPtr PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = (IntPtr)0x00020016;
 
@@ -32,6 +35,7 @@ public sealed class ConPtyTransport : ITransport
     private readonly IntPtr _hpcon;
     private readonly IntPtr _attrList;
     private readonly IntPtr _procHandle;
+    private readonly string _statusPath;
     private int _disposed;
 
     public ConPtyTransport(string childExePath, short cols = 80, short rows = 24)
@@ -67,6 +71,9 @@ public sealed class ConPtyTransport : ITransport
 
         _inputWrite = inputWrite;
         _outputRead = outputRead;
+        _statusPath = Path.Combine(
+            Path.GetTempPath(),
+            $"ghostty-conpty-status-{Guid.NewGuid():N}.txt");
 
         IntPtr lpSize = IntPtr.Zero;
         InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref lpSize); // first call returns required size
@@ -101,9 +108,14 @@ public sealed class ConPtyTransport : ITransport
 
         var si = new STARTUPINFOEX();
         si.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
+        // Ask ConPTY for the child's default console handles explicitly. This
+        // matches microsoft/terminal's
+        // ConptyConnection::_LaunchAttachedClient and the #1301 fix in this
+        // repo, and keeps the host's own redirected handles out of the child.
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         si.lpAttributeList = _attrList;
 
-        string cmdLine = $"\"{childExePath}\"";
+        string cmdLine = $"\"{childExePath}\" --status-path \"{_statusPath}\"";
 
         if (!CreateProcess(
                 null,
@@ -164,6 +176,7 @@ public sealed class ConPtyTransport : ITransport
 
         try { _inputStream.Dispose(); } catch { }
         try { _outputStream.Dispose(); } catch { }
+        try { File.Delete(_statusPath); } catch { }
 
         if (_attrList != IntPtr.Zero)
         {
@@ -172,46 +185,114 @@ public sealed class ConPtyTransport : ITransport
         }
     }
 
-    // Drains conhost's output pipe until the "RDY" sentinel emitted by
+    // Drains conhost's output pipe until the "RDY=111" sentinel emitted by
     // Ghostty.Bench.EchoChild is seen, then returns. Everything up to and
-    // including "RDY" is discarded; subsequent Read calls on Output start
-    // clean. Throws TransportException on timeout or pipe EOF.
+    // including the sentinel is discarded; subsequent Read calls on Output
+    // start clean. Throws TransportException on timeout, child exit, or EOF.
     //
     // Implementation note: we rely on conhost emitting the child's printable
     // ASCII bytes literally in its VT output stream (true for any sequence
     // of non-control characters at known cursor positions). See the spec for
-    // why "RDY" is safe and "0x01" (the pre-8762af4ed sentinel) was not.
+    // why printable ASCII is safe and "0x01" (the pre-8762af4ed sentinel) was not.
     public void WaitReady(TimeSpan timeout)
     {
-        ReadOnlySpan<byte> ready = "RDY"u8;
+        ReadOnlySpan<byte> ready = "RDY=111"u8;
         long deadline = Stopwatch.GetTimestamp()
                         + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
 
-        // Window holds the accumulated drain bytes. Conhost's preamble is
-        // small (< 64 bytes in practice) plus the 3-byte RDY, so a List<byte>
-        // with modest reserve is fine; this is not a hot path.
         var window = new List<byte>(256);
-        Span<byte> buf = stackalloc byte[256];
+        var buf = new byte[256];
+        Task<int>? read = null;
 
-        while (Stopwatch.GetTimestamp() < deadline)
+        while (true)
         {
-            int n = _outputStream.Read(buf);
-            if (n <= 0)
+            CheckStatusFile();
+
+            long remaining = deadline - Stopwatch.GetTimestamp();
+            if (remaining <= 0)
+            {
+                uint exitCode = 0;
+                _ = GetExitCodeProcess(_procHandle, out exitCode);
+                string state = exitCode == STILL_ACTIVE
+                    ? "child still running"
+                    : $"child exit {exitCode} (0x{exitCode:X8})";
+                throw new TransportException(
+                    $"ConPty child did not emit ready sentinel within {timeout.TotalSeconds:F1}s ({state})");
+            }
+
+            uint childExit = 0;
+            if (GetExitCodeProcess(_procHandle, out childExit) &&
+                childExit != STILL_ACTIVE)
             {
                 throw new TransportException(
-                    "ConPty output stream EOF before ready sentinel");
+                    $"ConPty child exited {childExit} (0x{childExit:X8}) without a ready sentinel");
             }
 
-            window.AddRange(buf[..n]);
-
-            if (CollectionsMarshal.AsSpan(window).IndexOf(ready) >= 0)
+            read ??= _outputStream.ReadAsync(buf, 0, buf.Length);
+            int waitMs = (int)Math.Min(
+                100,
+                Math.Max(1, remaining * 1000 / Stopwatch.Frequency));
+            bool completed;
+            try
             {
-                return;
+                completed = read.Wait(waitMs);
             }
+            catch (AggregateException ex)
+            {
+                throw new TransportException(
+                    "ConPty output read failed",
+                    ex.InnerException ?? ex);
+            }
+            if (!completed) continue;
+
+            int n;
+            try
+            {
+                n = read.GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                throw new TransportException(
+                    "ConPty output read failed", ex);
+            }
+            read = null;
+
+            if (n <= 0)
+            {
+                uint exitCode = 0;
+                _ = GetExitCodeProcess(_procHandle, out exitCode);
+                throw new TransportException(
+                    $"ConPty output EOF before ready sentinel (child exit {exitCode})");
+            }
+
+            window.AddRange(buf.AsSpan(0, n));
+            if (CollectionsMarshal.AsSpan(window).IndexOf(ready) >= 0) return;
+        }
+    }
+
+    private void CheckStatusFile()
+    {
+        string status;
+        try
+        {
+            if (!File.Exists(_statusPath)) return;
+            status = File.ReadAllText(_statusPath);
+        }
+        catch
+        {
+            return;
         }
 
-        throw new TransportException(
-            $"ConPty child did not emit ready sentinel within {timeout.TotalSeconds:F1}s");
+        if (status.StartsWith("NOCON", StringComparison.Ordinal))
+        {
+            throw new TransportException(
+                $"ConPty child has no console ({status.Trim()})");
+        }
+        if (status.StartsWith("ERR", StringComparison.Ordinal))
+        {
+            throw new TransportException(
+                $"ConPty child reported a startup error ({status.Trim()})");
+        }
     }
 
     // --- Win32 types and imports ---
@@ -310,6 +391,10 @@ public sealed class ConPtyTransport : ITransport
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);

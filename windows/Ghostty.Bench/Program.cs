@@ -126,9 +126,9 @@ public static class Program
         using ITransport t = new ConPtyTransport(childExe);
 
         // Drain the conhost VT preamble before the probe starts timing
-        // iterations. 2s is ~10x a warm-machine conhost startup; longer
-        // means a broken spawn, which deserves a fast distinct error.
-        t.WaitReady(TimeSpan.FromSeconds(2));
+        // iterations. 15s leaves room for a cold conhost under load; a dead
+        // child is reported by the transport's process/exit-code check.
+        t.WaitReady(TimeSpan.FromSeconds(15));
 
         return probeName switch
         {
@@ -261,7 +261,7 @@ public static class Program
     {
         string childExe = ResolveChildExe();
         using ITransport t = new ConPtyTransport(childExe);
-        t.WaitReady(TimeSpan.FromSeconds(2));
+        t.WaitReady(TimeSpan.FromSeconds(15));
 
         Console.Out.WriteLine("conpty-roundtrip-verify: 5 iterations with unique-per-iteration payloads");
         Console.Out.WriteLine("Payload shape: '!' '~' <letter>, where <letter> increments A..E per iteration.");
@@ -346,7 +346,7 @@ public static class Program
     {
         string childExe = ResolveChildExe();
         using ITransport t = new ConPtyTransport(childExe);
-        t.WaitReady(TimeSpan.FromSeconds(2));
+        t.WaitReady(TimeSpan.FromSeconds(15));
 
         string nonce = Guid.NewGuid().ToString("N").Substring(0, 16);
         byte[] terminator = System.Text.Encoding.ASCII.GetBytes(

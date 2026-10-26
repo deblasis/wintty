@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using Ghostty.Bench.Transports;
 using Xunit;
@@ -6,14 +7,13 @@ namespace Ghostty.Tests.Bench;
 
 public class ConPtyTransportTests
 {
-    // No byte-for-byte stdin assertion: conhost line-buffers input, VT-
-    // translates keys, and renders output as a screen, so echo symmetry
-    // is not the right contract for a ConPTY regression guard.
+    // The echo probe checks a short marker, not byte-for-byte terminal semantics:
+    // conhost line-buffers input, VT-translates keys, and renders output as
+    // a screen. It exists to prove the measured direction still works.
     // The bounds are hang guards and nothing more: on a loaded machine the
-    // conhost spawn and the first scheduled read can both take seconds, and
-    // a budget tight enough to measure that is one that flakes on a busy
-    // box. 60s still fails fast against the marshalling regression this
-    // test exists for, which produces no output at all.
+    // conhost spawn and the first scheduled read can both take seconds.
+    // A dead child is detected by the process poll and exit code; the 15 s
+    // budget is for a child that stays alive but never becomes ready.
     // The round-trip harness's per-iteration deadline is only exercisable
     // against real ConPTY: it is evaluated between synchronous reads, and
     // FakeTransport's scripted responder answers once per input READ, so
@@ -26,31 +26,46 @@ public class ConPtyTransportTests
     // becomes possible and should be added then.
     [SupportedOSPlatform("windows")]
     [Fact(Timeout = 90_000)]
-    public async Task Transport_DeliversConhostOutputWithinSeconds()
+    public async Task Transport_ReachesReadyAndEchoesBytes()
     {
         string childPath = Path.Combine(AppContext.BaseDirectory, "Ghostty.Bench.EchoChild.exe");
         Assert.True(File.Exists(childPath), $"EchoChild not copied: {childPath}");
 
         using var transport = new ConPtyTransport(childPath);
 
-        // Read up to 256 bytes. Any n > 0 proves conhost is routing output.
-        var readTask = Task.Run(() =>
+        // Conhost preamble bytes are not proof the child started. The child
+        // emits RDY=111 only after all three standard handles are consoles;
+        // a partial handle contract never writes it.
+        await Task.Run(() => transport.WaitReady(TimeSpan.FromSeconds(15)))
+            .WaitAsync(TimeSpan.FromSeconds(30));
+
+        // The child's copy loop is the direction the benchmark measures.
+        var echo = Task.Run(() =>
         {
             var buf = new byte[256];
-            return transport.Output.Read(buf, 0, buf.Length);
+            var window = new List<byte>();
+            while (true)
+            {
+                int n = transport.Output.Read(buf, 0, buf.Length);
+                if (n <= 0) return false;
+                window.AddRange(buf.AsSpan(0, n));
+                if (CollectionsMarshal.AsSpan(window).IndexOf("!~A"u8) >= 0) return true;
+            }
         });
 
-        int bytesRead;
+        ReadOnlySpan<byte> probe = "!~A"u8;
+        transport.Input.Write(probe);
+        transport.Input.Flush();
+        bool echoed;
         try
         {
-            bytesRead = await readTask.WaitAsync(TimeSpan.FromSeconds(60));
+            echoed = await echo.WaitAsync(TimeSpan.FromSeconds(10));
         }
         catch (TimeoutException)
         {
-            Assert.Fail("ConPtyTransport produced no output within 60s -- regression of UpdateProcThreadAttribute lpValue marshalling");
-            throw; // unreachable: Assert.Fail throws, but satisfies definite-assignment.
+            Assert.Fail("ConPty child did not echo a probe byte through the pty");
+            return;
         }
-
-        Assert.True(bytesRead > 0, "ConPtyTransport output pipe EOF'd before conhost sent its VT preamble");
+        Assert.True(echoed, "ConPty child did not echo a probe byte through the pty");
     }
 }
