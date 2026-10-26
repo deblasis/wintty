@@ -151,6 +151,53 @@ public class ImeForwarderTests
     }
 
     [Fact]
+    public void UntrackedBackspace_OnUnsentText_IsSpentThere()
+    {
+        // Live trace of "ㅁㄴㅇㄹ" then Backspace twice: the IME takes the
+        // first, the box applies the second before KeyDown. Only 'ㅇ' may
+        // go; sending the key as well deleted 'ㄴ' too.
+        var (f, forwarded, _) = New();
+        f.SetSinkText("ㅁ");
+        f.OnCompositionStarted(0);
+        f.OnCompositionChanged();
+        foreach (var sink in new[] { "ㅁㄴ", "ㅁㄴㅇ", "ㅁㄴㅇㄹ" })
+        {
+            f.SetSinkText(sink);
+            f.OnCompositionStarted(0);
+            f.OnCompositionEnded();
+        }
+        f.SetSinkText("ㅁㄴㅇ");
+        f.RefreshPreedit();
+
+        f.SetSinkText("ㅁㄴ");
+        Assert.True(f.OnKeyDown());
+
+        Assert.True(f.KeyConsumed);
+        Assert.Equal("ㅁㄴ", string.Concat(forwarded));
+        Assert.False(f.Composing);
+    }
+
+    [Fact]
+    public void UntrackedBackspace_OnSentText_IsNotResent()
+    {
+        var (f, forwarded, _) = New();
+        f.SetSinkText("안");
+        f.OnCompositionStarted(0);
+        f.OnCompositionChanged();
+        f.SetSinkText("안ㄴ");
+        f.OnCompositionStarted(1);
+        f.OnCompositionEnded();
+        f.SetSinkText("안");
+        f.RefreshPreedit();
+
+        f.SetSinkText("");
+        Assert.True(f.OnKeyDown());
+
+        Assert.False(f.KeyConsumed);
+        Assert.Equal("안", string.Concat(forwarded));
+    }
+
+    [Fact]
     public void NestedComposition_StaysTracked_WhileItRaisesChanged()
     {
         var (f, forwarded, _) = New();

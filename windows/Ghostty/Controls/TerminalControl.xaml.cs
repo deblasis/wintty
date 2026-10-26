@@ -2618,6 +2618,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             _imeForwarder.OnKeyDown();
             SyncImeSinkOut();
 
+            // The box already deleted unsent text for this key; the surface
+            // must not delete again. Its trailing character goes too.
+            if (_imeForwarder.KeyConsumed)
+            {
+                _suppressNextCharacter = true;
+                e.Handled = true;
+                return;
+            }
+
             // Never hand libghostty a text-less key while a composition is
             // live: the apprt buffers it and the next SurfaceText attaches to
             // it, so the commit would be swallowed. Space/Enter are delivered

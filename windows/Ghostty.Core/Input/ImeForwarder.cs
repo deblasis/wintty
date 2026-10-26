@@ -23,6 +23,7 @@ public sealed class ImeForwarder
 {
     private int _compositions;
     private int _asciiCredited;
+    private int _previousSinkLength;
 
     /// <summary>The text the IME sink currently holds. The caller keeps it in sync.</summary>
     public string SinkText { get; private set; } = string.Empty;
@@ -39,6 +40,13 @@ public sealed class ImeForwarder
     /// </summary>
     public bool Untracked { get; private set; }
 
+    /// <summary>
+    /// True when the last <see cref="OnKeyDown"/> was spent on unsent text:
+    /// the box deleted it before the key reached the caller, so the key must
+    /// not also go to the surface.
+    /// </summary>
+    public bool KeyConsumed { get; private set; }
+
     /// <summary>How much of <see cref="SinkText"/> has been forwarded.</summary>
     public int Forwarded { get; private set; }
 
@@ -52,7 +60,11 @@ public sealed class ImeForwarder
     public event Action<string?>? PreeditChanged;
 
     /// <summary>Supplies the sink text the caller read before an event.</summary>
-    public void SetSinkText(string text) => SinkText = text ?? string.Empty;
+    public void SetSinkText(string text)
+    {
+        _previousSinkLength = SinkText.Length;
+        SinkText = text ?? string.Empty;
+    }
 
     /// <summary>A composition started at <paramref name="startIndex"/>.</summary>
     public void OnCompositionStarted(int startIndex)
@@ -110,7 +122,17 @@ public sealed class ImeForwarder
     /// </summary>
     public bool OnKeyDown()
     {
+        KeyConsumed = false;
         if (Composing && !Untracked) return false;
+        // No IME stands in front of an untracked composition, so the box has
+        // already applied an editing key. A deletion past the watermark took
+        // unsent text and spends the key; one before it took sent text, which
+        // must not be sent again.
+        if (Untracked && SinkText.Length < _previousSinkLength)
+        {
+            if (SinkText.Length >= Forwarded) KeyConsumed = true;
+            else SinkText = string.Empty;
+        }
         CommitCore();
         return true;
     }
