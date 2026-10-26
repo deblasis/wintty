@@ -4061,8 +4061,12 @@ test "DirectX12: a stale fence-event signal does not satisfy waitForGpu" {
                 extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
             };
             kernel32.Sleep(1000);
-            _ = fence.Signal(1);
+            // Record the open before the signal. A wait that rechecks the
+            // fence value cannot return before the signal lands, so a
+            // preempted opener cannot fail it; a wait that trusts the first
+            // signal still returns while the gate is shut.
             flag.store(true, .release);
+            _ = fence.Signal(1);
         }
     };
     const opener = try std.Thread.spawn(.{}, Opener.run, .{ gate.?, &opened });
@@ -4073,7 +4077,7 @@ test "DirectX12: a stale fence-event signal does not satisfy waitForGpu" {
 
     // The gate opening is the only route to wait_value completing: if the
     // armed signal satisfied the wait, waitForGpu returned while the queue
-    // was still parked and the flagged opener had not run yet.
+    // was still parked, before the opener recorded the open.
     try std.testing.expect(opened.load(.acquire));
     try std.testing.expect(dev.fence.GetCompletedValue() >= wait_value);
 }
@@ -4111,23 +4115,52 @@ test "DirectX12: a prepareFrame timeout cannot arm the shared fence-event" {
         }
     };
     const completer = try std.Thread.spawn(.{}, Completer.run, .{ dev.command_queue, dev.fence, late_value, &timed_out });
-    try std.testing.expectError(error.FrameSyncFailed, api.prepareFrame(0));
-    timed_out.store(true, .release);
-    completer.join();
-
-    // The late value has now completed. A timed-out registration on the
-    // shared event would leave it armed with no waiter, and the next
-    // beginFrame or waitForGpu would consume a signal that proves nothing.
-    try std.testing.expect(d3d12.WaitForSingleObject(dev.fence_event, 500) != 0);
-
-    // The completion still has to wake a waiter: the dedicated data event
-    // carries it, and only that event.
-    if (comptime @hasField(Device, "data_fence_event")) {
-        try std.testing.expectEqual(
-            @as(u32, 0),
-            d3d12.WaitForSingleObject(dev.data_fence_event, 500),
-        );
+    // Stop and join on every return path, so a failed prepareFrame or a
+    // failed assertion cannot leave the thread reading this stack frame
+    // after the device is released.
+    defer {
+        timed_out.store(true, .release);
+        completer.join();
     }
+    try std.testing.expectError(error.FrameSyncFailed, api.prepareFrame(0));
+
+    // Release the completer so its Signal is submitted; the deferred
+    // stop-and-join above still joins it exactly once.
+    timed_out.store(true, .release);
+
+    // The completer's Signal may not have been submitted yet, and the GPU
+    // may still be behind it. Poll the fence value, bounded, until
+    // late_value completes, so the event assertions below run against a
+    // completed value instead of a wall-clock guess.
+    const wait_start: std.Io.Timestamp = .now(global.io(), .awake);
+    while (dev.fence.GetCompletedValue() < late_value) {
+        if (wait_start.untilNow(global.io(), .awake).toMilliseconds() >= 10_000) {
+            std.debug.print(
+                "fence value {d} did not complete within 10000 ms (completed {d})\n",
+                .{ late_value, dev.fence.GetCompletedValue() },
+            );
+            return error.FenceValueNeverCompleted;
+        }
+        std.Io.sleep(global.io(), .fromMilliseconds(5), .awake) catch {};
+    }
+
+    // The dedicated data event carries the notification for the late value.
+    // Wait for it before probing the shared event, so that probe observes
+    // the state after the completion notification has been delivered.
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        d3d12.WaitForSingleObject(dev.data_fence_event, 10_000),
+    );
+
+    // A timed-out registration on the shared event would leave it armed with
+    // no waiter, and the next beginFrame or waitForGpu would consume a
+    // signal that proves nothing. WAIT_TIMEOUT is the expected result; a
+    // signaled event or a failed wait fails this check.
+    const wait_timeout: u32 = 0x00000102;
+    try std.testing.expectEqual(
+        wait_timeout,
+        d3d12.WaitForSingleObject(dev.fence_event, 2_000),
+    );
 
     try dev.waitForGpu();
 }
