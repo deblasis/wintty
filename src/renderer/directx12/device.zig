@@ -185,10 +185,12 @@ fence_value: std.atomic.Value(u64),
 fence_event: std.os.windows.HANDLE,
 
 /// Event for the bounded frame-data wait. That wait can expire while its
-/// registration is still live, and when the value later completes the
-/// auto-reset event stays signaled with no waiter. fence_event is shared
-/// with waits that trust the first signal, so an abandoned registration
-/// there would wake them early. Only a bounded wait owns this event.
+/// registration is still live, and the completion then arms the auto-reset
+/// event with no waiter. The shared fence_event belongs to the waits in
+/// waitForGpu and beginFrame, which revalidate GetCompletedValue in a loop
+/// and register again after every wake; keeping a timed-out registration
+/// off it means they wake only for the value they registered for. Only a
+/// bounded wait owns this event.
 data_fence_event: std.os.windows.HANDLE,
 
 /// Resources whose owners are done with them but which the GPU may still
@@ -1373,6 +1375,7 @@ test "Device struct fields" {
     try std.testing.expect(@hasField(Device, "fence"));
     try std.testing.expect(@hasField(Device, "fence_value"));
     try std.testing.expect(@hasField(Device, "fence_event"));
+    try std.testing.expect(@hasField(Device, "data_fence_event"));
     try std.testing.expect(@hasField(Device, "swap_chain"));
     try std.testing.expect(@hasField(Device, "swap_chain_flags"));
     try std.testing.expect(@hasField(Device, "swap_chain2"));

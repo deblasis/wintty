@@ -1401,9 +1401,11 @@ pub fn prepareFrame(self: *DirectX12, data_index: usize) !void {
     const value = self.data_fence_values[data_index];
     if (dev.fence.GetCompletedValue() < value) {
         // The bounded wait below can expire while its registration is still
-        // live, so it owns its own event: an abandoned registration on the
-        // shared fence event would arm it, and the unbounded waits in
-        // waitForGpu and beginFrame trust the first signal.
+        // live, so it owns its own event: a timeout leaves no registration
+        // on the shared fence event. The waits in waitForGpu and beginFrame
+        // revalidate GetCompletedValue in a loop, so a stale signal there
+        // does not return them early; it would only make them wake for a
+        // value they did not ask about, then register again for their own.
         if (com.FAILED(dev.fence.SetEventOnCompletion(value, dev.data_fence_event)))
             return error.FrameSyncFailed;
 
