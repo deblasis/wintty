@@ -2467,6 +2467,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             errdefer if (frame_owed) swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{swap_chain.frame_index});
 
+            // The frame semaphore is posted at submission, not completion.
+            // Acquire this data slot before overwriting any mapped upload
+            // buffer for the frame.
+            if (comptime @hasDecl(GraphicsAPI, "prepareFrame"))
+                try self.api.prepareFrame(swap_chain.frame_index);
+
             // `nextFrame` has waited on frame_sema, so this frame slot's
             // state is ours again and last frame's image vertex buffers
             // can be dropped before any new draw calls append fresh ones.
@@ -2893,6 +2899,86 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
+        /// Release a removed device even on hidden or idle surfaces. Called
+        /// on the render thread by its existing safety-net timer; this never
+        /// rebuilds or draws an offscreen surface.
+        pub fn pollDeviceRecovery(self: *Self) bool {
+            if (comptime !@hasDecl(GraphicsAPI, "pollDeviceLost")) return false;
+            self.draw_mutex.lockUncancelable(global.io());
+            defer self.draw_mutex.unlock(global.io());
+            if (self.api.pollDeviceLost()) {
+                self.prepareDeviceRecovery() catch |err|
+                    log.warn("device recovery preparation failed: {}", .{err});
+            }
+            return self.device_recovery_pending and !self.device_recovery_abandoned;
+        }
+
+        /// Release everything built on the dead device, including the
+        /// backend's own device. Runs once per loss; the rebuild half is
+        /// `recoverDevice`. Releasing the backend before the loss budget
+        /// can abandon this surface is what keeps a hidden or abandoned
+        /// surface from pinning the removed adapter singleton.
+        fn prepareDeviceRecovery(self: *Self) !void {
+            if (self.device_recovery_pending) return;
+            self.device_recovery_pending = true;
+            log.warn("GPU device lost; releasing device-bound renderer state", .{});
+            self.reportHealth(.unhealthy);
+
+            // Everything below was created on the dead device. The
+            // order matters only in that the backend's device goes
+            // last, inside `releaseDeviceForRecovery`: these objects retire
+            // into a queue the device owns. Each field is left in a
+            // state that is safe to deinit again, because a tab can
+            // close while the rebuild is still failing.
+            //
+            // The drain is a no-op on a removed device. It is here for
+            // a backend that flagged the device lost while it was
+            // still executing: shaders are not retired, only released.
+            self.api.waitGpu();
+            if (self.swap_chain) |*sc| sc.deinit();
+            self.swap_chain = null;
+            self.shaders.deinit(self.alloc);
+            self.shaders = .empty;
+            // Kitty and overlay textures alike. The overlay needs no
+            // flag: updateFrame rebuilds it from `self.overlay` on
+            // every pass, and markDirty below forces that pass.
+            self.images.deinit(self.alloc);
+            self.images = .empty;
+            self.images.upload_budget_bytes = self.config.image_upload_budget_bytes;
+            self.images_lost = true;
+            if (self.bg_image) |img| img.deinit(self.alloc);
+            self.bg_image = null;
+            // The atlas ceiling came from the device that has just
+            // gone, so the replacement gets asked for its own. Here
+            // rather than after the rebuild because this is the block
+            // that runs exactly once per loss, however many attempts
+            // the rebuild takes.
+            self.atlas_max_size_synced = false;
+
+            // Release the backend device before the loss budget can
+            // abandon this surface. A hidden or abandoned sibling must not
+            // pin the adapter's removed singleton for all visible renderers.
+            if (comptime @hasDecl(GraphicsAPI, "releaseDeviceForRecovery")) {
+                self.api.releaseDeviceForRecovery() catch |err| {
+                    self.abandonRecovery(.unrecoverable_surface);
+                    return err;
+                };
+            }
+
+            // Spend the loss last, so everything above is released even by
+            // a surface that has run out of budget.
+            const now: std.Io.Timestamp = .now(global.io(), recovery_clock);
+            const uptime: ?std.Io.Duration = if (self.device_up_since) |up|
+                up.durationTo(now)
+            else
+                null;
+            self.device_up_since = null;
+            if (!self.recovery_budget.recordLoss(uptime)) {
+                self.abandonRecovery(.lost_repeatedly);
+                return error.DeviceRecoveryPending;
+            }
+        }
+
         /// Rebuild everything on a replacement GPU device after the old
         /// one was lost. Caller holds the draw mutex.
         ///
@@ -2921,70 +3007,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (now.durationTo(at).nanoseconds > 0) return error.DeviceRecoveryPending;
             }
 
-            if (!self.device_recovery_pending) {
-                self.device_recovery_pending = true;
-                log.warn("GPU device lost; rebuilding renderer state", .{});
-                self.reportHealth(.unhealthy);
-
-                // Everything below was created on the dead device. The
-                // order matters only in that the backend's device goes
-                // last, inside `api.recoverDevice`: these objects retire
-                // into a queue the device owns. Each field is left in a
-                // state that is safe to deinit again, because a tab can
-                // close while the rebuild is still failing.
-                //
-                // The drain is a no-op on a removed device. It is here for
-                // a backend that flagged the device lost while it was
-                // still executing: shaders are not retired, only released.
-                self.api.waitGpu();
-                if (self.swap_chain) |*sc| sc.deinit();
-                self.swap_chain = null;
-                self.shaders.deinit(self.alloc);
-                self.shaders = .empty;
-                // Kitty and overlay textures alike. The overlay needs no
-                // flag: updateFrame rebuilds it from `self.overlay` on
-                // every pass, and markDirty below forces that pass.
-                self.images.deinit(self.alloc);
-                self.images = .empty;
-                self.images.upload_budget_bytes = self.config.image_upload_budget_bytes;
-                self.images_lost = true;
-                if (self.bg_image) |img| img.deinit(self.alloc);
-                self.bg_image = null;
-                // The atlas ceiling came from the device that has just
-                // gone, so the replacement gets asked for its own. Here
-                // rather than after the rebuild because this is the block
-                // that runs exactly once per loss, however many attempts
-                // the rebuild takes.
-                //
-                // Latent on DirectX12, the only backend that recovers at
-                // all: its limit is a feature-level constant, so the
-                // answer cannot change. It stops being latent the moment
-                // that becomes a real device query.
-                //
-                // Above the loss spend below, which can return early on the
-                // abandon path: this belongs with the other releases of
-                // state the dead device owned.
-                self.atlas_max_size_synced = false;
-
-                // Spend the loss last, so everything above is released
-                // even by a surface that has run out of budget. What that
-                // does not cover is the backend's own device: it is
-                // released inside `api.recoverDevice`, which the abandon
-                // below returns before reaching, so a removed device and
-                // the objects it owns stay allocated until the tab closes.
-                // The driver has already reclaimed the VRAM behind them,
-                // and `deinit` sweeps the rest.
-                const now: std.Io.Timestamp = .now(global.io(), recovery_clock);
-                const uptime: ?std.Io.Duration = if (self.device_up_since) |up|
-                    up.durationTo(now)
-                else
-                    null;
-                self.device_up_since = null;
-                if (!self.recovery_budget.recordLoss(uptime)) {
-                    self.abandonRecovery(.lost_repeatedly);
-                    return error.DeviceRecoveryPending;
-                }
-            }
+            self.prepareDeviceRecovery() catch |err| {
+                if (self.device_recovery_abandoned) return error.DeviceRecoveryPending;
+                return err;
+            };
+            if (self.device_recovery_abandoned) return error.DeviceRecoveryPending;
 
             // Measured from the end of the attempt: creating a device on
             // an adapter mid driver-install can itself take seconds. Only
@@ -2996,6 +3023,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         recovery_clock,
                     ).addDuration(self.recovery_budget.retryDelay());
                 } else {
+                    // A rebuild may have created a healthy replacement
+                    // device before shader or swap-chain setup failed. An
+                    // abandoned surface keeps no draw path, so release that
+                    // device now rather than pinning it until the tab closes.
+                    if (comptime @hasDecl(GraphicsAPI, "releaseDeviceForRecovery")) {
+                        self.api.releaseDeviceForRecovery() catch {};
+                    }
                     self.abandonRecovery(.rebuild_failed);
                 }
             }

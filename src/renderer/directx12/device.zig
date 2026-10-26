@@ -184,6 +184,13 @@ fence: *d3d12.ID3D12Fence,
 fence_value: std.atomic.Value(u64),
 fence_event: std.os.windows.HANDLE,
 
+/// Event for the bounded frame-data wait. That wait can expire while its
+/// registration is still live, and when the value later completes the
+/// auto-reset event stays signaled with no waiter. fence_event is shared
+/// with waits that trust the first signal, so an abandoned registration
+/// there would wake them early. Only a bounded wait owns this event.
+data_fence_event: std.os.windows.HANDLE,
+
 /// Resources whose owners are done with them but which the GPU may still
 /// be reading. D3D12 does not retain what a submitted command list
 /// references, so a buffer or texture cannot be released the moment its
@@ -492,6 +499,12 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     };
     errdefer _ = d3d12.CloseHandle(fence_event);
 
+    const data_fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse {
+        log.err("CreateEventW failed for frame-data fence event", .{});
+        return error.FenceEventCreationFailed;
+    };
+    errdefer _ = d3d12.CloseHandle(data_fence_event);
+
     // -- Swap chain + composition (surface-dependent) --
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
     var swap_chain_flags: u32 = 0;
@@ -676,6 +689,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         .retirement = retirement,
         .fence_value = std.atomic.Value(u64).init(0),
         .fence_event = fence_event,
+        .data_fence_event = data_fence_event,
         .swap_chain = swap_chain,
         .swap_chain_flags = swap_chain_flags,
         .swap_chain2 = swap_chain2,
@@ -734,6 +748,7 @@ pub fn deinit(self: *Device) void {
     std.heap.c_allocator.destroy(self.retirement);
 
     _ = d3d12.CloseHandle(self.fence_event);
+    _ = d3d12.CloseHandle(self.data_fence_event);
     _ = self.fence.Release();
     _ = self.command_queue.Release();
 
@@ -779,7 +794,11 @@ pub fn waitForGpu(self: *Device) !void {
     if (FAILED(hr)) return error.FenceSignalFailed;
     self.retirement.seal(signal_value);
 
-    if (self.fence.GetCompletedValue() < signal_value) {
+    // A signal on the shared event is not proof: a registration abandoned
+    // by a bounded wait arms the event when its value completes. Revalidate
+    // the fence value and register again rather than return early on a
+    // signal that proves nothing.
+    while (self.fence.GetCompletedValue() < signal_value) {
         hr = self.fence.SetEventOnCompletion(signal_value, self.fence_event);
         if (FAILED(hr)) return error.FenceSetEventFailed;
         _ = d3d12.WaitForSingleObject(self.fence_event, d3d12.INFINITE);

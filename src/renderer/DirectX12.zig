@@ -224,6 +224,17 @@ pending_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// Must be saved here because GetCurrentBackBufferIndex advances after Present.
 pending_frame_index: u32 = 0,
 
+/// Fence value of the last submission that used each frame-data slot.
+/// GenericRenderer's upload buffers rotate with `swap_chain.frame_index`,
+/// independently of DXGI's back-buffer index. A slot may still be read by
+/// the GPU after the frame semaphore is posted at submission, so
+/// `prepareFrame` must wait on this value before the CPU overwrites the
+/// mapped buffer.
+data_fence_values: [swap_chain_count]u64 = @splat(0),
+
+/// Data slot acquired for the current frame, written by `prepareFrame`.
+pending_data_index: usize = 0,
+
 /// Counts Present calls, for the surface_init timing marks in
 /// drawFrameEnd (first 8 presents, or any that run long).
 present_count: u32 = 0,
@@ -618,6 +629,7 @@ pub fn initGpu(self: *DirectX12, surface: Surface, width: u32, height: u32) !voi
         };
     }
 
+    self.data_fence_values = @splat(0);
     self.applied_width = width;
     self.applied_height = height;
 
@@ -766,6 +778,33 @@ pub fn deviceLost(self: *const DirectX12) bool {
     return self.device_lost;
 }
 
+/// Poll without drawing so a hidden surface also notices a removed device.
+pub fn pollDeviceLost(self: *DirectX12) bool {
+    if (!self.device_lost) {
+        if (self.dev) |*dev_ptr| {
+            if (dev_ptr.removed()) self.markDeviceLost(.poll);
+        }
+    }
+    return self.device_lost;
+}
+
+/// Release the backend's device after the generic renderer has released
+/// everything built on it. Used both by a rebuild and by a hidden or
+/// abandoned surface that will not rebuild: a removed device left here
+/// pins the adapter singleton and blocks its visible siblings.
+pub fn releaseDeviceForRecovery(self: *DirectX12) !void {
+    const surface = self.surface orelse return error.NoSurface;
+
+    // Composition mode hands the embedder a raw swap-chain pointer. Keep it
+    // alive until that ABI has a replacement notification.
+    if (surface == .composition) return error.DeviceUnrecoverable;
+
+    // A warm reference still parked from warmup() would pin the removed
+    // singleton and make initGpu's D3D12CreateDevice return it again.
+    device.dropWarmDevice();
+    self.deinitGpu(.keep_surface_handle);
+}
+
 /// Replace a lost device with a new one built for the same surface.
 ///
 /// Everything the generic renderer created on the old device (shaders,
@@ -803,13 +842,7 @@ pub fn recoverDevice(self: *DirectX12) !void {
         surface.shared_texture = .{ .width = width, .height = height };
     }
 
-    // A warm reference still parked from warmup() would pin the removed
-    // singleton and make initGpu's D3D12CreateDevice return it again.
-    device.dropWarmDevice();
-
-    // Unconditional: with no device this sweeps whatever a failed
-    // attempt built before it stopped.
-    self.deinitGpu(.keep_surface_handle);
+    try self.releaseDeviceForRecovery();
 
     try self.initGpu(surface, width, height);
     self.device_lost = false;
@@ -955,6 +988,10 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     }
     const signal_hr = dev_ptr.command_queue.Signal(dev_ptr.fence, new_fence_value);
     if (!com.FAILED(signal_hr)) {
+        // Record the ring value only after the signal succeeds. A failed
+        // signal leaves a value no submission can reach; storing it would
+        // poison the slot for every later prepareFrame.
+        self.data_fence_values[self.pending_data_index] = new_fence_value;
         // Bind every resource retired since the last submission to this
         // frame's fence value. Anything retired before this signal can
         // only have been referenced by work submitted at or before it, so
@@ -964,16 +1001,11 @@ pub fn drawFrameEnd(self: *DirectX12) void {
         dev_ptr.retirement.seal(new_fence_value);
     } else {
         log.err("fence Signal failed: 0x{x}", .{@as(u32, @bitCast(signal_hr))});
-        // A TDR between Present and Signal leaves the fence unsignaled.
-        // Without this check the next beginFrame would deadlock waiting
-        // on a fence that will never advance.
-        if (signal_hr == com.DXGI_ERROR_DEVICE_REMOVED or
-            signal_hr == com.DXGI_ERROR_DEVICE_HUNG or
-            signal_hr == com.DXGI_ERROR_DEVICE_RESET)
-        {
-            self.handleDeviceRemoved();
-            return;
-        }
+        // A submission may have executed even though its Signal failed. Do
+        // not leave that work untracked and overwrite its upload buffers:
+        // recover the device instead of reusing the slot without a fence.
+        self.markDeviceLost(.signal_failed);
+        return;
     }
 
     // Shared-texture mode has no Present call to detect device-removed.
@@ -1304,6 +1336,7 @@ fn resizeSwapChain(self: *DirectX12, width: u32, height: u32) !void {
     for (&self.gpu_frames) |*gf| {
         if (gf.*) |*f| f.fence_value = 0;
     }
+    self.data_fence_values = @splat(0);
 
     // Record what we just applied so beginFrame doesn't loop on the same
     // resize. Stored on the renderer thread; only the renderer thread reads
@@ -1350,6 +1383,67 @@ pub fn initTarget(self: *const DirectX12, width: usize, height: usize) !Target {
     // Target resource and RTV handle are set in beginFrame when we know
     // which back buffer is current. Start with the dimensions only.
     return .{ .width = width, .height = height };
+}
+
+/// Acquire the upload-buffer data slot before GenericRenderer writes any
+/// mapped memory. The frame semaphore only proves CPU recording has
+/// finished; the DXGI back-buffer index does not identify this independent
+/// data ring.
+pub fn prepareFrame(self: *DirectX12, data_index: usize) !void {
+    if (data_index >= self.data_fence_values.len) return error.InvalidBackBufferIndex;
+    if (self.device_lost) return error.DeviceLost;
+    const dev = &(self.dev orelse return error.NoDevice);
+    if (dev.removed()) {
+        self.handleDeviceRemoved();
+        return error.DeviceLost;
+    }
+
+    const value = self.data_fence_values[data_index];
+    if (dev.fence.GetCompletedValue() < value) {
+        // The bounded wait below can expire while its registration is still
+        // live, so it owns its own event: an abandoned registration on the
+        // shared fence event would arm it, and the unbounded waits in
+        // waitForGpu and beginFrame trust the first signal.
+        if (com.FAILED(dev.fence.SetEventOnCompletion(value, dev.data_fence_event)))
+            return error.FrameSyncFailed;
+
+        // A fence value can be unreachable: the signal that would have
+        // reached it may have failed, or the device may be removed between
+        // the check above and the wait. Bound this wait and re-check the
+        // device. Teardown and frame paging have their own waits; this one
+        // must not add another unbounded stall to the hidden-surface poll.
+        var remaining_ms: u32 = 2000;
+        while (remaining_ms > 0) {
+            if (d3d12.WaitForSingleObject(dev.data_fence_event, 100) == 0) break;
+            if (dev.removed()) {
+                self.markDeviceLost(.wait);
+                return error.DeviceLost;
+            }
+            remaining_ms -= 100;
+        }
+        if (remaining_ms == 0) {
+            if (dev.removed()) {
+                self.markDeviceLost(.wait);
+                return error.DeviceLost;
+            }
+            log.warn("frame data fence {d} did not complete within 2000 ms on a live device; dropping the frame", .{value});
+            return error.FrameSyncFailed;
+        }
+
+        // A timed-out SetEventOnCompletion can leave the auto-reset event
+        // signaled. The event is not proof by itself; the fence value is.
+        if (dev.fence.GetCompletedValue() < value) {
+            log.warn("frame data fence {d} reported a stale signal; dropping the frame", .{value});
+            return error.FrameSyncFailed;
+        }
+    }
+
+    if (dev.removed()) {
+        self.markDeviceLost(.wait);
+        return error.DeviceLost;
+    }
+
+    self.pending_data_index = data_index;
 }
 
 pub inline fn beginFrame(
@@ -1445,6 +1539,7 @@ pub inline fn beginFrame(
             for (&api.gpu_frames) |*gf| {
                 if (gf.*) |*f| f.fence_value = 0;
             }
+            api.data_fence_values = @splat(0);
             api.applied_width = want.width;
             api.applied_height = want.height;
         }
@@ -1482,9 +1577,15 @@ pub inline fn beginFrame(
     const wait_value = frame.fence_value;
     if (dev_ptr.fence.GetCompletedValue() < wait_value) {
         const wait_start: std.Io.Timestamp = .now(global.io(), .awake);
-        const hr = dev_ptr.fence.SetEventOnCompletion(wait_value, dev_ptr.fence_event);
-        if (com.FAILED(hr)) return error.FrameSyncFailed;
-        _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
+        // A signal on the shared event is not proof the fence value
+        // completed: a registration abandoned by a bounded wait arms the
+        // event when its value completes. Revalidate and register again
+        // rather than reuse a back buffer the GPU may still be reading.
+        while (dev_ptr.fence.GetCompletedValue() < wait_value) {
+            const hr = dev_ptr.fence.SetEventOnCompletion(wait_value, dev_ptr.fence_event);
+            if (com.FAILED(hr)) return error.FrameSyncFailed;
+            _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
+        }
         if (api.init_started) |started| {
             api.frame_wait_count += 1;
             const dur_ms = wait_start.durationTo(.now(global.io(), .awake)).toMilliseconds();
@@ -1518,21 +1619,53 @@ pub inline fn beginFrame(
     // from the optional, not a reference).
     api.gpu_frames[frame_idx] = frame;
 
-    // Save state for drawFrameEnd to execute and signal.
+    // Save state for drawFrameEnd to execute and signal. The data-slot
+    // index is not this DXGI back-buffer index: it is the generic
+    // renderer's independent frame ring, recorded by prepareFrame.
     api.pending_command_list = frame.command_list;
     api.pending_frame_index = frame_idx;
 
     return frame;
 }
 
-fn handleDeviceRemoved(self: *DirectX12) void {
+const DeviceLostOrigin = enum { draw, poll, wait, signal_failed };
+
+/// One writer for the device-lost latch. The draw path logs at error; the
+/// poll and fence-wait paths log at warning so a test or a hidden surface
+/// can report the expected transition without turning the run red.
+fn markDeviceLost(self: *DirectX12, origin: DeviceLostOrigin) void {
     self.device_lost = true;
-    if (self.dev) |*dev_ptr| {
-        const reason = dev_ptr.device.GetDeviceRemovedReason();
-        log.err("GPU device removed, reason: 0x{x}", .{@as(u32, @bitCast(reason))});
-    } else {
-        log.err("GPU device removed, no device available for reason query", .{});
+
+    if (origin == .signal_failed) {
+        log.warn("fence Signal failed; treating the device as lost", .{});
+        return;
     }
+
+    const reason: ?u32 = if (self.dev) |*dev_ptr|
+        @bitCast(dev_ptr.device.GetDeviceRemovedReason())
+    else
+        null;
+
+    if (origin == .draw) {
+        if (reason) |value|
+            log.err("GPU device removed, reason: 0x{x}", .{value})
+        else
+            log.err("GPU device removed, no device available for reason query", .{});
+    } else {
+        if (reason) |value|
+            log.warn("GPU device removed while {s}, reason: 0x{x}", .{
+                @tagName(origin),
+                value,
+            })
+        else
+            log.warn("GPU device removed while {s}, no device for reason query", .{
+                @tagName(origin),
+            });
+    }
+}
+
+fn handleDeviceRemoved(self: *DirectX12) void {
+    self.markDeviceLost(.draw);
 }
 
 pub inline fn bufferOptions(self: DirectX12) bufferpkg.Options {
