@@ -287,7 +287,7 @@ class Env:
                  lock_path=None, pid_probe=None):
         self.gh = gh or gh_run
         self.git = git or git_run
-        self.incoda = incoda
+        self.incoda = incoda or incoda_run
         self.incoda_status = incoda_status or incoda_status_run
         self.find_incoda = find_incoda or locate_incoda
         self.now = now or default_now
@@ -1336,6 +1336,16 @@ def self_test():
 
     tmp = tempfile.mkdtemp(prefix="resignoff-bot-selftest-")
     try:
+        # --- the production environment: every runner defaults to the real
+        # one. Every flow test below injects its own fakes, so a default left
+        # unset is invisible to them and only fails on the first live run.
+        real = Env()
+        report(real.gh is gh_run and real.git is git_run and real.incoda is incoda_run
+               and real.incoda_status is incoda_status_run
+               and real.find_incoda is locate_incoda,
+               "env-defaults-are-real-runners",
+               f"incoda={getattr(real.incoda, '__name__', real.incoda)!r}")
+
         # --- parsing: the guard template, the hand-filed shape, the rejects.
         fgit = FakeGit(tmp, resolve={"900e44bb4": squash_h})
         w, why = parse_window(GUARD_BODY.format(pr=700, signed=signed, squash=squash_g,
