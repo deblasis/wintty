@@ -30,6 +30,15 @@ public sealed class ImeForwarder
     /// <summary>True while at least one composition is live.</summary>
     public bool Composing => _compositions > 0;
 
+    /// <summary>
+    /// True when the live composition started inside the previous one and
+    /// that one's End arrived after it. An IME that ends one composition and
+    /// starts the next in the same keystroke gets no Changed or Ended for the
+    /// new one (live trace), so a key the IME lets through is the only sign
+    /// that it is over.
+    /// </summary>
+    public bool Untracked { get; private set; }
+
     /// <summary>How much of <see cref="SinkText"/> has been forwarded.</summary>
     public int Forwarded { get; private set; }
 
@@ -56,7 +65,22 @@ public sealed class ImeForwarder
     }
 
     /// <summary>The live composition changed; the tail is the preedit.</summary>
-    public void OnCompositionChanged() => UpdatePreedit();
+    public void OnCompositionChanged()
+    {
+        Untracked = false;
+        UpdatePreedit();
+    }
+
+    /// <summary>Re-reads the preedit from the sink without an event.</summary>
+    public void RefreshPreedit()
+    {
+        var old = Preedit;
+        var text = SinkText;
+        var from = Math.Min(Forwarded, text.Length);
+        var tail = from < text.Length ? text.Substring(from) : null;
+        if (string.Equals(old, tail, StringComparison.Ordinal)) return;
+        UpdatePreedit();
+    }
 
     /// <summary>
     /// A composition ended: close the session without forwarding anything.
@@ -70,7 +94,11 @@ public sealed class ImeForwarder
     public void OnCompositionEnded()
     {
         if (_compositions > 0) _compositions--;
-        if (_compositions > 0) return;
+        if (_compositions > 0)
+        {
+            Untracked = true;
+            return;
+        }
         Preedit = null;
         PreeditChanged?.Invoke(null);
     }
@@ -78,10 +106,11 @@ public sealed class ImeForwarder
     /// <summary>
     /// The commit decision a key press takes. Returns false while a
     /// composition is live: the preedit is the IME's, not final input.
+    /// An untracked composition is over once a key reaches the caller.
     /// </summary>
     public bool OnKeyDown()
     {
-        if (Composing) return false;
+        if (Composing && !Untracked) return false;
         CommitCore();
         return true;
     }
@@ -99,6 +128,7 @@ public sealed class ImeForwarder
         Forwarded = 0;
         _asciiCredited = 0;
         _compositions = 0;
+        Untracked = false;
         Preedit = null;
         PreeditChanged?.Invoke(null);
     }
@@ -110,6 +140,7 @@ public sealed class ImeForwarder
         Forwarded = 0;
         _asciiCredited = 0;
         _compositions = 0;
+        Untracked = false;
         Preedit = null;
         PreeditChanged?.Invoke(null);
     }

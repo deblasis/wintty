@@ -188,6 +188,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     // One deferred commit for text TSF/UIA inserted outside a composition.
     private bool _imeTextChangedCommitQueued;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _imeUntrackedTimer;
 
     // Modifiers pressed mid-composition, withheld from libghostty along
     // with their releases.
@@ -1843,6 +1844,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
         if (_surface.Handle != IntPtr.Zero)
         {
+            _imeUntrackedTimer?.Stop();
             _imeForwarder.Cancel();
             if (ImeSink.Text.Length > 0) ImeSink.Text = string.Empty;
             _imeHeldModifiers.Clear();
@@ -2155,7 +2157,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             && ReferenceEquals(FocusManager.GetFocusedElement(root), ImeSink))
             return;
         SyncImeSinkIn();
-        if (_imeForwarder.Composing) _imeForwarder.Cancel();
+        if (_imeForwarder.Composing && !_imeForwarder.Untracked) _imeForwarder.Cancel();
         else _imeForwarder.Commit();
         SyncImeSinkOut();
         _imeHeldModifiers.Clear();
@@ -2598,7 +2600,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // TextCompositionEnded arrives. Left alone, the forwarder stays
         // composing forever and every later key is withheld. Reset here;
         // Escape is never shell input while a composition is live.
-        if (_imeForwarder.Composing && e.Key == Windows.System.VirtualKey.Escape)
+        if (_imeForwarder.Composing && !_imeForwarder.Untracked
+            && e.Key == Windows.System.VirtualKey.Escape)
         {
             TraceIme("escape-cancel");
             ClearImeComposition();
@@ -2928,7 +2931,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // only applies after the composition has ended. Pre-committing the
         // raw preedit here would bypass the candidate selection.
         TraceIme($"char '{ch}' composing={_imeForwarder.Composing}");
-        if (_imeForwarder.Composing) return;
+        if (_imeForwarder.Composing && !_imeForwarder.Untracked) return;
 
         // The focused TextBox has already inserted this character into the
         // sink. Credit it before the commit, or the commit forwards it and
@@ -3086,6 +3089,31 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             });
         }
         if (!_imeForwarder.Composing) _imeHeldModifiers.Clear();
+        if (_imeForwarder.Untracked) StartImeUntrackedTimer();
+    }
+
+    /// <summary>
+    /// An untracked composition raises no Changed, so poll the sink to keep
+    /// the preedit current until a key or commit ends it.
+    /// </summary>
+    private void StartImeUntrackedTimer()
+    {
+        if (_imeUntrackedTimer is null)
+        {
+            _imeUntrackedTimer = DispatcherQueue.CreateTimer();
+            _imeUntrackedTimer.Interval = TimeSpan.FromMilliseconds(33);
+            _imeUntrackedTimer.Tick += (t, _) =>
+            {
+                if (!_imeForwarder.Untracked || _surface.Handle == IntPtr.Zero)
+                {
+                    t.Stop();
+                    return;
+                }
+                SyncImeSinkIn();
+                _imeForwarder.RefreshPreedit();
+            };
+        }
+        _imeUntrackedTimer.Start();
     }
 
     /// <summary>Forwards the rest of ImeSink, then empties it.</summary>
@@ -3112,9 +3140,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         TraceIme($"text sink='{ImeSink.Text}' composing={_imeForwarder.Composing}");
         if (_imeForwarder.Composing)
         {
+            // Not a composition event, so it must not re-track an untracked
+            // composition.
             SyncImeSinkIn();
-            _imeForwarder.OnCompositionChanged();
-            SyncImeSinkOut();
+            _imeForwarder.RefreshPreedit();
             return;
         }
 

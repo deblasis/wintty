@@ -123,6 +123,50 @@ public class ImeForwarderTests
     }
 
     [Fact]
+    public void UntrackedComposition_IsCommittedByTheNextKey()
+    {
+        // Live trace of "안녕" then Space: the second syllable's Started
+        // arrives before the first one's Ended, and the second syllable
+        // never raises Changed or Ended.
+        var (f, forwarded, _) = New();
+        f.SetSinkText("ㅇ");
+        f.OnCompositionStarted(0);
+        f.SetSinkText("안");
+        f.OnCompositionChanged();
+        f.SetSinkText("안ㄴ");
+        f.OnCompositionStarted(1);
+        f.OnCompositionEnded();
+
+        Assert.Equal("안", string.Concat(forwarded));
+        Assert.True(f.Untracked);
+
+        f.SetSinkText("안녕");
+        f.RefreshPreedit();
+        Assert.Equal("녕", f.Preedit);
+
+        Assert.True(f.OnKeyDown());
+        Assert.Equal("안녕", string.Concat(forwarded));
+        Assert.False(f.Composing);
+        Assert.False(f.Untracked);
+    }
+
+    [Fact]
+    public void NestedComposition_StaysTracked_WhileItRaisesChanged()
+    {
+        var (f, forwarded, _) = New();
+        f.SetSinkText("a");
+        f.OnCompositionStarted(0);
+        f.OnCompositionStarted(1);
+        f.OnCompositionEnded();
+        f.SetSinkText("ab");
+        f.OnCompositionChanged();
+
+        Assert.False(f.Untracked);
+        Assert.False(f.OnKeyDown());
+        Assert.Equal("a", string.Concat(forwarded));
+    }
+
+    [Fact]
     public void Cancel_DropsTheLivePreeditWithoutForwarding()
     {
         var (f, forwarded, _) = New();
