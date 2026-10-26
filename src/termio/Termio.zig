@@ -46,7 +46,7 @@ const DormantSnapshot = struct {
     compressed: []u8,
     plain_len: usize,
 
-    /// Presentation flags the v1 snapshot does not carry (they are
+    /// Presentation flags the snapshot format does not carry (they are
     /// caller-supplied by design). Captured at teardown so the wake can
     /// put them back: without this, a surface that went dormant hidden
     /// rebuilds with the default (visible), and every later dormancy is
@@ -814,11 +814,11 @@ pub fn deepIdleTrim(self: *Termio) void {
 /// mutex on the IO thread, which is the lock every other terminal
 /// reader takes, so no reader can observe the half-torn-down window.
 ///
-/// What snapshot v1 cannot carry is refused rather than silently lost:
-/// kitty image state, glyph glossary registrations, and kitty drag and
-/// drop state are all user-visible, and a dormant wake that dropped
-/// them would read as corruption. The viewport's scroll offset is the
-/// one accepted loss (v1 wakes at the active position).
+/// What the snapshot format cannot carry is refused rather than silently
+/// lost: kitty image state, glyph glossary registrations, and kitty drag and
+/// drop state are all user-visible, and a dormant wake that dropped them
+/// would read as corruption. The viewport's scroll offset is the one accepted
+/// loss (the snapshot wakes at the active position).
 pub fn goDormant(self: *Termio) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
@@ -932,9 +932,9 @@ fn dormantBlocker(self: *Termio) ?[]const u8 {
     if (self.terminal.glyph_glossary.entries.count() > 0)
         return "glyph glossary registrations present";
     if (self.terminal.kitty_dnd != null) return "kitty dnd state present";
-    // v1 restores neither selections nor the viewport offset; a tab
-    // whose selection silently evaporated on wake reads as corruption
-    // for the same reason a dropped kitty image would.
+    // The snapshot format restores neither selections nor the viewport
+    // offset; a tab whose selection silently evaporated on wake reads as
+    // corruption for the same reason a dropped kitty image would.
     for ([_]terminalpkg.ScreenSet.Key{ .primary, .alternate }) |key| {
         const screen = self.terminal.screens.get(key) orelse continue;
         if (screen.selection != null) return "selection active";

@@ -1546,7 +1546,8 @@ typedef void (*GhosttyTerminalSemanticPromptFn)(
  *
  * Called when the running program performs a full reset (RIS, `ESC c`).
  * A full reset clears the screen and scrollback, returns modes to their
- * defaults, and clears the title and working directory. Use this callback
+ * defaults except the transport-owned Win32 input mode, and clears the
+ * title and working directory. Use this callback
  * to reset any state your application keeps about what's running in the
  * terminal, such as the current command.
  *
@@ -2309,7 +2310,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Set the reset default for a terminal mode.
    *
    * This unconditionally updates both the current value and the value restored
-   * by a terminal reset. RIS restores every mode, and DECSTR only a subset.
+   * by a terminal reset. RIS restores every mode except the transport-owned
+   * Win32 input mode; DECSTR restores only a subset.
    *
    * Some recognized modes represent transitions or mirror additional terminal
    * state and cannot safely be configured as reset defaults. Those modes return
@@ -2324,7 +2326,9 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Set the current value of a terminal mode.
    *
    * This does not change the value restored by a reset (RIS or DECSTR).
-   * A NULL value pointer or unknown mode returns GHOSTTY_INVALID_VALUE.
+   * The transport-owned Win32 input mode is the one exception: a reset
+   * preserves its current value. A NULL value pointer or unknown mode
+   * returns GHOSTTY_INVALID_VALUE.
    *
    * Input type: GhosttyTerminalModeConfig*
    */
@@ -3005,7 +3009,8 @@ GHOSTTY_API void ghostty_terminal_free(GhosttyTerminal terminal);
  *
  * Resets all terminal state back to its initial configuration, including
  * modes, scrollback, scrolling region, and screen contents. The terminal
- * dimensions are preserved.
+ * dimensions are preserved. The Win32 input mode negotiated by ConPTY is
+ * transport state and survives the reset.
  *
  * If synchronized output was enabled, the GHOSTTY_TERMINAL_OPT_RENDER_HOLD
  * callback is invoked to report that the hold ended.

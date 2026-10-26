@@ -24,19 +24,32 @@ pub const ModeState = struct {
     /// a real-world issue but we need to be aware of a DoS vector.
     saved: ModePacked = .{},
 
-    /// The default values for the modes. This is used to reset
-    /// the modes to their default values during reset.
+    /// The default values for the modes. This is used to reset the modes to
+    /// their default values during reset, except for the transport-owned
+    /// Win32 input mode, which preserves its current value.
     default: ModePacked = .{},
 
-    /// Reset the modes to their default values. This also clears the
-    /// saved state.
+    /// Reset the modes to their default values. This also clears the saved
+    /// state. The negotiated Win32 input mode survives because the pty does
+    /// not re-request it after a reset.
     pub fn reset(self: *ModeState) void {
+        // ConPTY requests Win32 input mode once at pty startup and never
+        // re-asks. RIS resets terminal modes, but the transport request
+        // belongs to the pty, so keep the negotiated bit across the reset.
+        const win32_input = self.values.win32_input;
         self.values = self.default;
         self.saved = .{};
+        self.values.win32_input = win32_input;
     }
 
     /// Set a mode to a value.
     pub fn set(self: *ModeState, mode: Mode, value: bool) void {
+        if (mode == .win32_input and self.get(mode) != value) {
+            std.log.scoped(.terminal).debug(
+                "win32 input mode {s}",
+                .{if (value) "enabled" else "disabled"},
+            );
+        }
         setPacked(&self.values, mode, value);
     }
 
@@ -69,8 +82,10 @@ pub const ModeState = struct {
         }
     }
 
-    /// See save. This will return the restored value.
+    /// See save. This will return the restored value. The transport-owned
+    /// Win32 input mode is not restored; it keeps its current value.
     pub fn restore(self: *ModeState, mode: Mode) bool {
+        if (mode == .win32_input) return self.get(mode);
         switch (mode) {
             inline else => |mode_comptime| {
                 const entry = comptime entryForMode(mode_comptime);
@@ -443,6 +458,9 @@ const entries: []const ModeEntry = &.{
         // Kitty clipboard read that a paste event grants.
         .disabled = build_options.artifact != .lib and builtin.os.tag != .macos,
     },
+    // ConPTY requests Win32 input records to preserve modified console keys.
+    // Append modes here: the order is the snapshot wire registry.
+    .{ .name = "win32_input", .value = 9001, .default_configurable = false, .disabled = builtin.os.tag != .windows },
 };
 
 test {
@@ -494,6 +512,26 @@ test ModeState {
     try testing.expect(!state.get(.cursor_keys));
     try testing.expect(state.restore(.cursor_keys));
     try testing.expect(state.get(.cursor_keys));
+}
+
+test "ModeState reset and restore preserve negotiated Win32 input" {
+    var state: ModeState = .{};
+    state.set(.cursor_keys, true);
+    state.set(.win32_input, true);
+
+    state.reset();
+
+    // RIS clears ordinary terminal modes but not the pty's transport mode.
+    try testing.expect(!state.get(.cursor_keys));
+    try testing.expect(state.get(.win32_input));
+
+    // XTRESTORE must not write an older saved value over the transport mode.
+    // A fresh state has a false saved slot; restoring it must not clear the
+    // live negotiated bit.
+    var fresh: ModeState = .{};
+    fresh.set(.win32_input, true);
+    try testing.expect(fresh.restore(.win32_input));
+    try testing.expect(fresh.get(.win32_input));
 }
 
 test "ModeState set default updates current and reset value" {

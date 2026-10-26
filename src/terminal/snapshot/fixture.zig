@@ -362,7 +362,7 @@ fn formatPage(
     bytes: []const u8,
     writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
-    // PAGE version 1 has a twenty-byte fixed header. The remainder is
+    // PAGE has a twenty-byte fixed header. The remainder is
     // self-describing through the counts and dimensions in that header.
     const header_end = @min(bytes.len, 20);
     try writeSection("PAGE header", bytes, 0, header_end, writer);

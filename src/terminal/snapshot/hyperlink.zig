@@ -61,13 +61,13 @@ pub const EncodeError = std.Io.Writer.Error || error{
     /// A native explicit hyperlink ID must contain at least one byte.
     InvalidExplicitId,
 
-    /// A string does not fit the version 1 length field.
+    /// A string does not fit the length field.
     StringTooLong,
 };
 
 /// Errors possible while decoding one allocator-owned hyperlink entry.
 pub const DecodeError = std.Io.Reader.Error || Allocator.Error || error{
-    /// The hyperlink kind is not defined by snapshot version 1.
+    /// The hyperlink kind is not defined by snapshot versions 1 or 2.
     InvalidKind,
 
     /// A native hyperlink URI must contain at least one byte.
@@ -79,7 +79,7 @@ pub const DecodeError = std.Io.Reader.Error || Allocator.Error || error{
 
 /// Errors possible while decoding directly into a native page.
 pub const DecodePageError = std.Io.Reader.Error || error{
-    /// The hyperlink kind is not defined by snapshot version 1.
+    /// The hyperlink kind is not defined by snapshot versions 1 or 2.
     InvalidKind,
 };
 
