@@ -393,6 +393,9 @@ def parse_all(issues, git):
         if w is None:
             skipped.append((issue.get("number", "?"), (issue.get("title") or "")[:60], why))
             continue
+        # The body names the PR; every comment, close and label goes to the
+        # issue, and the two never share a number on GitHub.
+        w["pr"], w["number"] = w["number"], issue.get("number")
         w["created"] = issue.get("createdAt") or ""
         w["title"] = issue.get("title") or ""
         w["duplicates"] = []
@@ -1451,6 +1454,29 @@ def self_test():
                and "incoda" in gh.events
                and gh.events.index("comment:703") < gh.events.index("incoda"),
                "claim-marker-before-run", f"marker={marker!r}, events={gh.events}")
+
+        # --- the issue is the window, not the PR it names. On GitHub an issue
+        # and a PR never share a number, so the marker and the close must go
+        # to the filing's own number; the PR number is only carried along.
+        apart = {"number": 1403, "title": "window apart", "createdAt": "2026-09-03T00:00:00Z",
+                 "body": GUARD_BODY.format(pr=1396, signed=signed, squash=s4,
+                                           path=merge_guard.display_path(signed))}
+        windows, _ = parse_all([apart], FakeGit(tmp))
+        report(len(windows) == 1 and windows[0]["number"] == 1403
+               and windows[0]["pr"] == 1396,
+               "parse-issue-number-not-pr",
+               f"windows={[(x['number'], x.get('pr')) for x in windows]}")
+        td, env, gh, git, incoda = wire([apart])
+        try:
+            rc, _ = run_capture(bot_flow, 1, False, env)
+            err = ""
+        except Exception as e:  # a call aimed at the PR number has no fake issue
+            rc, err = None, repr(e)
+        targets = sorted({m[1] for m in gh.mutations})
+        report(rc == 0 and targets == [1403] and len(gh.by_kind("comment")) == 1
+               and len(gh.by_kind("close")) == 1,
+               "mutations-target-issue-not-pr",
+               f"rc={rc}, targets={targets}{', ' + err if err else ''}")
 
         # --- bisect: a red newest window over a four-sha chain isolates the
         # culprit window in two runs, labels its issue and leaves it open.
