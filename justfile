@@ -285,6 +285,12 @@ test-win:
     # the files back byte-for-byte as committed.
     git diff --quiet HEAD -- ':(glob)**/packages.lock.json'; $drift = ($LASTEXITCODE -ne 0); $untracked = @(git ls-files --others --exclude-standard -- ':(glob)**/packages.lock.json'); if ($drift -or $untracked.Count -gt 0) { git --no-pager diff HEAD -- ':(glob)**/packages.lock.json' | Write-Host; if ($untracked) { ('UNTRACKED: ' + ($untracked -join ', ')) | Write-Host }; Write-Error 'packages.lock.json drift: a fresh restore would change a committed lock file. Regenerate with the restores at the top of this recipe (the solution plus the three helper projects), review, and commit the lock with the change that caused it (#1085).'; exit 1 }
     git checkout -- ':(glob)**/packages.lock.json'
+    # The solution build needs the libghostty DLL, and a fresh checkout has
+    # none (a new clone, the resignoff bot's reset worktree, a CI runner):
+    # the Ghostty.csproj guard stops the build and says to run zig by hand,
+    # which is an out-of-band step a leg must not depend on. Build it only
+    # when missing; an existing DLL is left alone so warm trees stay fast.
+    if (-not (Test-Path zig-out/lib/ghostty.dll)) { zig build -Dapp-runtime=none }
     dotnet build windows/Ghostty.sln /p:Platform=x64 /p:RestoreLockedMode=true
     dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
     dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 /p:RestoreLockedMode=true --blame-hang --blame-hang-timeout 5m
