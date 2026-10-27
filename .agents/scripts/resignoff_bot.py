@@ -590,7 +590,8 @@ def prepare_worktree(git, wt, sha):
             return False, f"worktree add failed: {(add.stderr or add.stdout).strip()}"
     co = git(["-C", wt, "checkout", "--detach", sha])
     rs = git(["-C", wt, "reset", "--hard", sha])
-    cl = git(["-C", wt, "clean", "-fdx", "-e", ".zig-cache", "-e", "zig-out"])
+    cl = git(["-C", wt, "clean", "-fdx", "-e", ".zig-cache", "-e", "zig-out",
+              "-e", "zig-pkg"])
     if co.returncode != 0 or rs.returncode != 0 or cl.returncode != 0:
         return False, (f"worktree prepare failed: checkout rc={co.returncode}, "
                        f"reset rc={rs.returncode}, clean rc={cl.returncode}")
@@ -623,6 +624,7 @@ def run_ladder(env, incoda_path, issue_number, sha, budget_line):
     print(f"resignoff-bot: #{issue_number}: {budget_line}")
     out = env.incoda(incoda_path,
                      ["run", "--queue", "wintty-build", "--reason", f"resignoff {sha[:SHA7]}",
+                      "--wait", "90m",
                       "--", "just", "signoff"],
                      cwd=env.worktree_dir)
     if out.returncode not in (0, 1):
@@ -1464,6 +1466,25 @@ def self_test():
                and "incoda" in gh.events
                and gh.events.index("comment:703") < gh.events.index("incoda"),
                "claim-marker-before-run", f"marker={marker!r}, events={gh.events}")
+
+        # --- prep and lane contract: the clean keeps the fetched-package
+        # cache too (git clean cannot delete the trailing-dot AppleDouble
+        # names some packages unpack on Windows, and a clean rc=1 there
+        # stops the whole group), and the lane run waits long enough for a
+        # busy build queue: the default 30-minute wait turns a queued
+        # ladder into a no-op that spends nothing and closes nothing.
+        td, env, gh, git, incoda = wire([issue_for(s4, 703, 3)])
+        rc, _ = run_capture(bot_flow, 1, False, env)
+
+        def _wait90(c):
+            return "--wait" in c and c[c.index("--wait") + 1] == "90m"
+
+        cleans = [c for c in git.calls if "clean" in c]
+        report(rc == 0 and bool(cleans) and all("zig-pkg" in c for c in cleans)
+               and bool(incoda.calls) and all(_wait90(c) for c, _ in incoda.calls),
+               "prep-and-lane-contract",
+               f"rc={rc}, cleans={cleans}, "
+               f"first_incoda={incoda.calls[0][0] if incoda.calls else None}")
 
         # --- the issue is the window, not the PR it names. On GitHub an issue
         # and a PR never share a number, so the marker and the close must go
