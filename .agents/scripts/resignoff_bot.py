@@ -595,6 +595,16 @@ def prepare_worktree(git, wt, sha):
     if co.returncode != 0 or rs.returncode != 0 or cl.returncode != 0:
         return False, (f"worktree prepare failed: checkout rc={co.returncode}, "
                        f"reset rc={rs.returncode}, clean rc={cl.returncode}")
+    # The clean keeps zig-out for the compile cache, and test-win builds the
+    # libghostty DLL only when it is missing: a DLL left by an earlier window
+    # would silently stand in for the one this window's Windows tests link,
+    # so drop it and let the leg rebuild it against this squash.
+    dll = os.path.join(wt, "zig-out", "lib", "ghostty.dll")
+    if os.path.exists(dll):
+        try:
+            os.remove(dll)
+        except OSError as e:
+            return False, f"could not remove the previous window's DLL at {dll}: {e}"
     return True, ""
 
 
@@ -1485,6 +1495,21 @@ def self_test():
                "prep-and-lane-contract",
                f"rc={rc}, cleans={cleans}, "
                f"first_incoda={incoda.calls[0][0] if incoda.calls else None}")
+
+        # --- prep drops a DLL left by an earlier window: the clean keeps
+        # zig-out, test-win builds the DLL only when it is missing, and a
+        # DLL built at the previous squash would silently stand in for the
+        # one this window's Windows tests must link.
+        wt = os.path.join(tmp, "wt", "resignoff")
+        dll = os.path.join(wt, "zig-out", "lib", "ghostty.dll")
+        os.makedirs(os.path.dirname(dll), exist_ok=True)
+        open(dll, "w").close()
+        # a checkout, not a stray: prepare must take the reuse path, where
+        # nothing but the clean runs and only this fix can drop the DLL.
+        open(os.path.join(wt, ".git"), "w").close()
+        ok, note = prepare_worktree(FakeGit(tmp), wt, s4)
+        report(ok and not os.path.exists(dll), "prep-drops-stale-dll",
+               f"ok={ok}, note={note!r}, dll_still_there={os.path.exists(dll)}")
 
         # --- the issue is the window, not the PR it names. On GitHub an issue
         # and a PR never share a number, so the marker and the close must go
